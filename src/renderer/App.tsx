@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
+import { Sidebar } from './components/Sidebar.js'
 import { TabBar } from './components/TabBar.js'
 import { TerminalPane } from './components/TerminalPane.js'
-import { WorkspacePanel } from './components/WorkspacePanel.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -21,6 +21,11 @@ const EMPTY_STATE: DesktopState = {
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
   const [loading, setLoading] = useState(true)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
+  const requestTabRename = (tabId: string, currentTitle: string): void => {
+    const title = window.prompt('Session title', currentTitle)
+    if (title !== null) void window.copilotDesktop.renameTab(tabId, title)
+  }
 
   useEffect(() => {
     let disposed = false
@@ -78,26 +83,48 @@ export function App(): JSX.Element {
   }
 
   return (
-    <div className="app-shell">
-      <WorkspacePanel
+    <div className={`app-shell${sidebarCollapsed ? ' app-shell-sidebar-collapsed' : ''}`}>
+      <Sidebar
         profiles={state.profiles}
+        tabs={state.tabs}
         activeProfileId={state.activeProfileId}
+        activeTabId={state.activeTabId}
+        canOpenTab={state.tabs.length < state.maxSessionTabs}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => {
+          setSidebarCollapsed((collapsed) => {
+            const next = !collapsed
+            localStorage.setItem('sidebar-collapsed', String(next))
+            return next
+          })
+        }}
         onSelectWorkspace={() => void window.copilotDesktop.selectWorkspace()}
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
+        onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
+        onRenameTab={requestTabRename}
+        onCreateTab={() => void window.copilotDesktop.createTab()}
+        onCreateTabWithAttachments={() => void window.copilotDesktop.createTabWithAttachments()}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => void window.copilotDesktop.createTab('picker')}
       />
-      {state.activeProfileId === null ? (
-        <div className="empty-state">
-          <p>Choose a workspace folder to start a Copilot CLI session.</p>
-        </div>
-      ) : (
-        <>
+      <main className="main-content">
+        {state.activeProfileId === null ? (
+          <div className="empty-state welcome-state">
+            <div className="welcome-mark" aria-hidden="true">C</div>
+            <h1>Start with a workspace</h1>
+            <p>Choose a project folder to open GitHub Copilot CLI.</p>
+            <button type="button" className="primary-button" onClick={() => void window.copilotDesktop.selectWorkspace()}>
+              Choose workspace
+            </button>
+          </div>
+        ) : (
+          <>
           <TabBar
             tabs={state.tabs}
             activeTabId={state.activeTabId}
             canOpenTab={state.tabs.length < state.maxSessionTabs}
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
+            onRename={requestTabRename}
             onClose={(tabId) => void window.copilotDesktop.closeTab(tabId)}
             onCreate={() => void window.copilotDesktop.createTab()}
           />
@@ -131,8 +158,9 @@ export function App(): JSX.Element {
               )
             })()}
           </div>
-        </>
-      )}
+          </>
+        )}
+      </main>
     </div>
   )
 }

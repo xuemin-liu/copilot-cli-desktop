@@ -17,6 +17,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron'
 import electronUpdater from 'electron-updater'
+import { readAccessStatus } from './access-status.js'
 import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
@@ -29,7 +30,13 @@ import {
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { spawnNodePty } from './node-pty-backend.js'
-import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from './permission-presets.js'
+import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, type PermissionPreset } from './permission-presets.js'
+import {
+  isCopilotProviderType,
+  providerEnvironment,
+  validateProviderConfig,
+  type CopilotProviderConfig,
+} from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { resolveCopilotBinary } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -39,9 +46,11 @@ import {
   activateTab,
   closeTab,
   createTab,
+  renameTab,
   setTabProcessId,
   setTabSessionId,
   setTabStatus,
+  touchTab,
   type TabsState,
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
@@ -74,6 +83,16 @@ interface ManagedTab {
 
 let tabsState: TabsState = EMPTY_TABS_STATE
 const managedTabs = new Map<string, ManagedTab>()
+const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+
+function scheduleActivityBroadcast(tabId: string): void {
+  if (activityBroadcastTimers.has(tabId)) return
+  activityBroadcastTimers.set(tabId, setTimeout(() => {
+    activityBroadcastTimers.delete(tabId)
+    syncTabState()
+    broadcastState()
+  }, 1_000))
+}
 
 const state: DesktopState = {
   desktopVersion: 'unknown',
@@ -281,6 +300,11 @@ function trayStatusLabel(): string {
   return `${running}/${tabsState.tabs.length} session(s) active`
 }
 
+function activeAccessLabel(): string {
+  const preset = activeWorkspaceProfile(desktopConfig)?.permissionPreset ?? 'default'
+  return PERMISSION_PRESET_INFO[preset].label
+}
+
 /**
  * Rebuilds both the tray menu and the application menu. The two menus share
  * enabled/disabled state derived from `installInProgress`, the active
@@ -298,11 +322,22 @@ function rebuildTrayMenu(): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Copilot CLI Desktop', click: restoreMainWindow },
     { label: trayStatusLabel(), enabled: false },
+    { label: `Access: ${activeAccessLabel()}`, enabled: false },
     { type: 'separator' },
     {
       label: 'New Session Tab',
       enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
       click: () => void createSessionTab().catch((error) => void writeAppLog(String(error))),
+    },
+    {
+      label: 'Restart Active Session',
+      enabled: !installInProgress && tabsState.activeTabId !== null,
+      click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
+    },
+    {
+      label: 'Show Active Session Log',
+      enabled: tabsState.activeTabId !== null,
+      click: () => tabsState.activeTabId && void showSessionLog(tabsState.activeTabId),
     },
     { label: 'Desktop Settings…', click: () => void showSettingsWindow() },
     { type: 'separator' },
@@ -334,6 +369,25 @@ async function showSessionLog(tabId: string): Promise<void> {
   shell.showItemInFolder(filename)
 }
 
+async function showApplicationLog(): Promise<void> {
+  const filename = appLogPath()
+  await mkdir(dirname(filename), { recursive: true })
+  await appendFile(filename, '', 'utf8')
+  shell.showItemInFolder(filename)
+}
+
+function copyDiagnosticsToClipboard(): void {
+  const snap = snapshot()
+  clipboard.writeText(formatDesktopDiagnostics({
+    desktopVersion: snap.desktopVersion,
+    resolution: snap.resolution,
+    activeWorkspace: activeWorkspaceProfile(desktopConfig)?.path ?? null,
+    tabs: snap.tabs,
+    recentLogs: snap.recentLogs,
+    error: snap.error,
+  }))
+}
+
 function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const title = tab?.title ?? 'Copilot session'
@@ -361,6 +415,7 @@ async function createSessionTab(
   profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
   resumeModeOverride: ResumeMode | null = null,
   restoreLastSessionId: string | null = null,
+  attachmentPaths: string[] = [],
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (!state.resolution || state.resolution.version === null) {
@@ -372,10 +427,13 @@ async function createSessionTab(
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const resolution = state.resolution
-  const environment = credentialStore ? await credentialStore.resolveEnvironment() : {}
+  const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
+  const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
+  const environment = { ...configuredEnvironment, ...vaultEnvironment }
   const args = [
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
+    ...attachmentPaths.flatMap((path) => ['--attachment', path]),
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
     // PtySession merges process.env into this session's environment (see
     // pty-session.ts), so secretEnvArgs must see that same merged view to
@@ -408,6 +466,8 @@ async function createSessionTab(
     broadcastState()
   })
   session.on('log', (chunk: string) => {
+    tabsState = touchTab(tabsState, id)
+    scheduleActivityBroadcast(id)
     void writeSessionLog(id, chunk)
     const window = mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk })
@@ -437,6 +497,17 @@ async function createSessionTab(
   return snapshot()
 }
 
+async function createSessionWithAttachments(): Promise<DesktopState> {
+  if (!mainWindow) return snapshot()
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: 'Attach files to a new Copilot session',
+    properties: ['openFile', 'multiSelections'],
+    defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
+  })
+  if (selection.canceled || selection.filePaths.length === 0) return snapshot()
+  return createSessionTab(undefined, 'new', null, selection.filePaths.slice(0, 20))
+}
+
 function activateSessionTab(tabId: string): DesktopState {
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
@@ -446,7 +517,19 @@ function activateSessionTab(tabId: string): DesktopState {
   return snapshot()
 }
 
+function renameSessionTab(tabId: string, title: string): DesktopState {
+  tabsState = renameTab(tabsState, tabId, title)
+  syncTabState()
+  persistProfileTabs()
+  broadcastState()
+  refreshMenus()
+  return snapshot()
+}
+
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
+  const activityTimer = activityBroadcastTimers.get(tabId)
+  if (activityTimer) clearTimeout(activityTimer)
+  activityBroadcastTimers.delete(tabId)
   const managed = managedTabs.get(tabId)
   if (managed) {
     await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
@@ -579,6 +662,22 @@ function installApplicationMenu(): void {
           enabled: tabsState.activeTabId !== null,
           click: () => tabsState.activeTabId && void closeSessionTab(tabsState.activeTabId),
         },
+        {
+          label: 'Resume Session…',
+          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+          click: () => void createSessionTab(undefined, 'picker').catch((error) => void writeAppLog(String(error))),
+        },
+        {
+          label: 'New Session with Attachments…',
+          enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
+          click: () => void createSessionWithAttachments().catch((error) => void writeAppLog(String(error))),
+        },
+        {
+          label: 'Restart Active Session',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          enabled: !installInProgress && tabsState.activeTabId !== null,
+          click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId),
+        },
         { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => void showSettingsWindow() },
         { type: 'separator' },
         { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() },
@@ -593,6 +692,21 @@ function installApplicationMenu(): void {
         { role: 'resetZoom' },
         { role: 'zoomIn' },
         { role: 'zoomOut' },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Show Active Session Log',
+          enabled: tabsState.activeTabId !== null,
+          click: () => tabsState.activeTabId && void showSessionLog(tabsState.activeTabId),
+        },
+        { label: 'Show Application Log', click: () => void showApplicationLog() },
+        { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },
+        { type: 'separator' },
+        { label: 'Open Releases', click: () => void shell.openExternal(RELEASES_URL) },
+        { role: 'about' },
       ],
     },
   ])
@@ -688,9 +802,13 @@ interface DesktopSettingsSnapshot {
   profiles: WorkspaceProfile[]
   activeProfileId: string | null
   rollbackVersion: string | null
+  access: Awaited<ReturnType<typeof readAccessStatus>>
+  provider: CopilotProviderConfig
+  cliVersion: string | null
 }
 
 async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
+  const activeProfile = activeWorkspaceProfile(desktopConfig)
   return {
     closeToTray: desktopConfig.closeToTray,
     trayEnabled: desktopConfig.trayEnabled,
@@ -705,6 +823,9 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     profiles: desktopConfig.profiles.map((profile) => ({ ...profile })),
     activeProfileId: desktopConfig.activeProfileId,
     rollbackVersion: desktopConfig.rollbackVersion,
+    access: await readAccessStatus(activeProfile?.permissionPreset ?? 'default'),
+    provider: { ...desktopConfig.provider },
+    cliVersion: state.resolution?.version ?? null,
     update: updateController?.snapshot ?? {
       status: 'unavailable',
       currentVersion: app.getVersion(),
@@ -765,10 +886,19 @@ ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown) => {
   const override = isResumeMode(resumeMode) ? resumeMode : null
   return createSessionTab(undefined, override)
 })
+ipcMain.handle('desktop:create-tab-with-attachments', (event) => {
+  assertTrustedIpcSender(event)
+  return createSessionWithAttachments()
+})
 ipcMain.handle('desktop:activate-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return activateSessionTab(tabId)
+})
+ipcMain.handle('desktop:rename-tab', (event, tabId: unknown, title: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || typeof title !== 'string') throw new Error('Invalid session title')
+  return renameSessionTab(tabId, title)
 })
 ipcMain.handle('desktop:close-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
@@ -808,15 +938,7 @@ ipcMain.handle('desktop:show-session-log', (event, tabId: unknown) => {
 })
 ipcMain.handle('desktop:copy-diagnostics', (event) => {
   assertTrustedIpcSender(event)
-  const snap = snapshot()
-  clipboard.writeText(formatDesktopDiagnostics({
-    desktopVersion: snap.desktopVersion,
-    resolution: snap.resolution,
-    activeWorkspace: activeWorkspaceProfile(desktopConfig)?.path ?? null,
-    tabs: snap.tabs,
-    recentLogs: snap.recentLogs,
-    error: snap.error,
-  }))
+  copyDiagnosticsToClipboard()
 })
 ipcMain.handle('desktop:retry-resolution', (event) => {
   assertTrustedIpcSender(event)
@@ -879,6 +1001,31 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
   await updateWorkspaceProfile(profileId, name, permissionPreset as PermissionPreset, defaultResumeMode as ResumeMode)
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:update-provider', async (event, provider: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (!provider || typeof provider !== 'object' || Array.isArray(provider)) {
+    throw new Error('Invalid Copilot provider configuration')
+  }
+  const value = provider as Record<string, unknown>
+  if (
+    !isCopilotProviderType(value.type)
+    || typeof value.baseUrl !== 'string'
+    || typeof value.model !== 'string'
+    || typeof value.offline !== 'boolean'
+  ) {
+    throw new Error('Invalid Copilot provider configuration')
+  }
+  const next: CopilotProviderConfig = {
+    type: value.type,
+    baseUrl: value.baseUrl.trim().slice(0, 2_048),
+    model: value.model.trim().slice(0, 200),
+    offline: value.offline,
+  }
+  validateProviderConfig(next)
+  desktopConfig.provider = next
+  await persistConfig()
+  return settingsSnapshot()
+})
 ipcMain.handle('desktop-settings:check-for-updates', async (event) => {
   assertTrustedSettingsSender(event)
   await updateController?.check()
@@ -913,6 +1060,12 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
 ipcMain.handle('desktop-settings:open-releases', async (event) => {
   assertTrustedSettingsSender(event)
   await shell.openExternal(RELEASES_URL)
+})
+ipcMain.handle('desktop-settings:open-rollback-release', async (event) => {
+  assertTrustedSettingsSender(event)
+  const version = desktopConfig.rollbackVersion
+  if (!version || !/^[0-9A-Za-z.+-]{1,50}$/.test(version)) throw new Error('No previous desktop release is recorded')
+  await shell.openExternal(`${RELEASES_URL}/tag/v${encodeURIComponent(version)}`)
 })
 ipcMain.handle('desktop-settings:save-credential', async (event, name: unknown, secret: unknown) => {
   assertTrustedSettingsSender(event)

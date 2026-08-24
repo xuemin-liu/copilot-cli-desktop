@@ -21,8 +21,8 @@
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
-    "pack:win": "npm run build && electron-builder --dir",
-    "dist:win": "npm run build && electron-builder --win"
+    "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js",
+    "dist:win": "npm run build && electron-builder --win && node dist/scripts/audit-package.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

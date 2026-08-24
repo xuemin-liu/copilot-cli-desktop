@@ -3,17 +3,24 @@ import { dirname } from 'node:path'
 
 /**
  * GitHub Copilot CLI's bring-your-own-key (BYOK) support reads
- * `COPILOT_PROVIDER_BASE_URL` and `COPILOT_PROVIDER_API_KEY` from the process
- * environment to override GitHub auth for model requests. `GH_TOKEN` is an
- * optional override for the `gh`/`copilot` GitHub authentication token. These
- * are the only three variables this vault manages.
+ * provider and GitHub authentication variables from the process environment.
+ * The vault covers every credential-bearing variable in the official CLI
+ * precedence chain while provider type, endpoint, model, and offline mode are
+ * stored as non-secret desktop settings.
  */
-export type CredentialName = 'COPILOT_PROVIDER_BASE_URL' | 'COPILOT_PROVIDER_API_KEY' | 'GH_TOKEN'
+export type CredentialName =
+  | 'COPILOT_PROVIDER_BASE_URL'
+  | 'COPILOT_PROVIDER_API_KEY'
+  | 'COPILOT_GITHUB_TOKEN'
+  | 'GH_TOKEN'
+  | 'GITHUB_TOKEN'
 
 export const CREDENTIAL_NAMES: readonly CredentialName[] = [
   'COPILOT_PROVIDER_BASE_URL',
   'COPILOT_PROVIDER_API_KEY',
+  'COPILOT_GITHUB_TOKEN',
   'GH_TOKEN',
+  'GITHUB_TOKEN',
 ]
 
 export function isCredentialName(value: unknown): value is CredentialName {

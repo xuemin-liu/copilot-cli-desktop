@@ -14,6 +14,7 @@ export interface NewTabInput {
   title: string
   workspaceProfileId: string
   lastSessionId?: string | null
+  lastActivityAt?: number
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
@@ -30,6 +31,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     lastSessionId: input.lastSessionId ?? null,
     status: 'starting',
     processId: null,
+    lastActivityAt: input.lastActivityAt ?? Date.now(),
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
@@ -51,13 +53,17 @@ export function activateTab(state: TabsState, tabId: string): TabsState {
   if (!state.tabs.some((tab) => tab.id === tabId)) {
     throw new Error(`Session tab ${tabId} does not exist`)
   }
-  return { ...state, activeTabId: tabId }
+  return {
+    ...state,
+    activeTabId: tabId,
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, lastActivityAt: Date.now() } : tab)),
+  }
 }
 
 export function setTabStatus(state: TabsState, tabId: string, status: SessionLifecycleStatus): TabsState {
   return {
     ...state,
-    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, status } : tab)),
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, status, lastActivityAt: Date.now() } : tab)),
   }
 }
 
@@ -71,7 +77,7 @@ export function setTabProcessId(state: TabsState, tabId: string, processId: numb
 export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: string | null): TabsState {
   return {
     ...state,
-    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, lastSessionId } : tab)),
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, lastSessionId, lastActivityAt: Date.now() } : tab)),
   }
 }
 
@@ -79,7 +85,14 @@ export function renameTab(state: TabsState, tabId: string, title: string): TabsS
   const normalized = title.trim().slice(0, 120) || 'Copilot'
   return {
     ...state,
-    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, title: normalized } : tab)),
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, title: normalized, lastActivityAt: Date.now() } : tab)),
+  }
+}
+
+export function touchTab(state: TabsState, tabId: string, at = Date.now()): TabsState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, lastActivityAt: at } : tab)),
   }
 }
 

@@ -2,6 +2,8 @@ import type { DesktopState } from '../main/types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { CredentialName } from '../main/secure-credentials.js'
+import type { AccessStatus } from '../main/access-status.js'
+import type { CopilotProviderConfig } from '../main/provider-config.js'
 
 export interface TabOutputPayload {
   tabId: string
@@ -18,7 +20,9 @@ export interface CopilotDesktopBridge {
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
   createTab(resumeMode?: ResumeMode | null): Promise<DesktopState>
+  createTabWithAttachments(): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
+  renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
@@ -61,6 +65,9 @@ export interface DesktopSettingsSnapshot {
   profiles: DesktopState['profiles']
   activeProfileId: string | null
   rollbackVersion: string | null
+  access: AccessStatus
+  provider: CopilotProviderConfig
+  cliVersion: string | null
 }
 
 export interface CopilotDesktopSettingsBridge {
@@ -79,10 +86,12 @@ export interface CopilotDesktopSettingsBridge {
     permissionPreset: PermissionPreset,
     defaultResumeMode: ResumeMode,
   ): Promise<DesktopSettingsSnapshot>
+  updateProvider(provider: CopilotProviderConfig): Promise<DesktopSettingsSnapshot>
   checkForUpdates(): Promise<DesktopSettingsSnapshot>
   downloadUpdate(): Promise<DesktopSettingsSnapshot>
   installUpdate(): Promise<void>
   openReleases(): Promise<void>
+  openRollbackRelease(): Promise<void>
   saveCredential(name: CredentialName, secret: string): Promise<DesktopSettingsSnapshot>
   deleteCredential(name: CredentialName): Promise<DesktopSettingsSnapshot>
   onUpdateStateChanged(listener: (state: DesktopSettingsSnapshot['update']) => void): () => void

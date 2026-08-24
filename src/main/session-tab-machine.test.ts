@@ -16,7 +16,7 @@ import {
 } from './session-tab-machine.js'
 
 test('createTab adds a starting tab and makes it active', () => {
-  const state = createTab(EMPTY_TABS_STATE, { id: 'tab-1', title: 'Copilot', workspaceProfileId: 'ws-1' })
+  const state = createTab(EMPTY_TABS_STATE, { id: 'tab-1', title: 'Copilot', workspaceProfileId: 'ws-1', lastActivityAt: 123 })
   assert.equal(state.tabs.length, 1)
   assert.equal(state.activeTabId, 'tab-1')
   assert.deepEqual(state.tabs[0], {
@@ -26,6 +26,7 @@ test('createTab adds a starting tab and makes it active', () => {
     lastSessionId: null,
     status: 'starting',
     processId: null,
+    lastActivityAt: 123,
   })
 })
 

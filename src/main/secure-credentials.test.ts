@@ -28,7 +28,7 @@ test('status reports every credential as not configured on a fresh vault', async
     const status = await store.status()
     assert.equal(status.available, true)
     assert.equal(status.storeError, false)
-    assert.deepEqual(status.entries.map((entry) => entry.configured), [false, false, false])
+    assert.deepEqual(status.entries.map((entry) => entry.configured), [false, false, false, false, false])
   })
 })
 
@@ -105,8 +105,8 @@ test('writing an empty document removes the file entirely', async () => {
 
 test('secretEnvArgs marks every configured credential variable present in the environment', () => {
   assert.deepEqual(
-    secretEnvArgs({ GH_TOKEN: 'gho_test', COPILOT_PROVIDER_API_KEY: 'sk-test' }),
-    ['--secret-env-vars=COPILOT_PROVIDER_API_KEY', '--secret-env-vars=GH_TOKEN'],
+    secretEnvArgs({ GH_TOKEN: 'gho_test', COPILOT_PROVIDER_API_KEY: 'sk-test', COPILOT_GITHUB_TOKEN: 'github_pat_test' }),
+    ['--secret-env-vars=COPILOT_PROVIDER_API_KEY', '--secret-env-vars=COPILOT_GITHUB_TOKEN', '--secret-env-vars=GH_TOKEN'],
   )
 })
 

@@ -1,0 +1,33 @@
+name: Latest Copilot CLI compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 14 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  latest-cli:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install desktop dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Install the latest official Copilot CLI
+        run: npm install --global @github/copilot@latest
+      - name: Report the candidate CLI
+        run: copilot --version
+      - name: Verify the desktop against the candidate CLI
+        run: |
+          corepack pnpm typecheck
+          corepack pnpm test
+          corepack pnpm smoke
+          corepack pnpm cli:smoke

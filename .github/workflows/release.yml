@@ -62,7 +62,7 @@ jobs:
               }
             }
           } else {
-            Write-Warning 'WINDOWS_CSC_LINK is not set; publishing an unsigned release.'
+            throw 'WINDOWS_CSC_LINK is required; public unsigned releases are not permitted.'
           }
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3

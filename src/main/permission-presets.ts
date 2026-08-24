@@ -6,9 +6,15 @@
  * workspace profile can pick a coarse-grained default without hand-editing
  * flags every time a session starts.
  */
-export type PermissionPreset = 'default' | 'trusted-directory' | 'full-auto'
+export type PermissionPreset = 'default' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
 
-export const PERMISSION_PRESETS: readonly PermissionPreset[] = ['default', 'trusted-directory', 'full-auto']
+export const PERMISSION_PRESETS: readonly PermissionPreset[] = [
+  'default',
+  'read-only',
+  'trusted-directory',
+  'full-auto',
+  'full-access',
+]
 
 export interface PermissionPresetInfo {
   id: PermissionPreset
@@ -24,6 +30,12 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
       'Read-only actions run automatically. Copilot CLI prompts for approval before every mutating '
       + 'action: shell commands, file edits, URL fetches, and MCP tool calls.',
   },
+  'read-only': {
+    id: 'read-only',
+    label: 'Read only',
+    description:
+      'Shell execution and file-writing tools are denied at startup. Read, search, and analysis remain available.',
+  },
   'trusted-directory': {
     id: 'trusted-directory',
     label: 'Trusted directory',
@@ -37,6 +49,12 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
     description:
       'All tool calls, including shell commands and file edits, are approved automatically ("/yolo"). '
       + 'Use only for workspaces you fully trust.',
+  },
+  'full-access': {
+    id: 'full-access',
+    label: 'Full computer access (--allow-all)',
+    description:
+      'Tool, path, and URL verification are disabled. Copilot can act with the full rights of this Windows account.',
   },
 }
 
@@ -53,10 +71,14 @@ export function buildPermissionArgs(preset: PermissionPreset, workspacePath: str
   switch (preset) {
     case 'default':
       return []
+    case 'read-only':
+      return ['--deny-tool=write', '--deny-tool=shell']
     case 'trusted-directory':
       return ['--add-dir', workspacePath]
     case 'full-auto':
       return ['--allow-all-tools']
+    case 'full-access':
+      return ['--allow-all']
     default: {
       const exhaustive: never = preset
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)

@@ -22,7 +22,11 @@ async function main(): Promise<void> {
 
   const session = new PtySession({
     file: resolution.command,
-    args: [...resolution.prefixArgs, '--version'],
+    // Launch the real interactive surface, rather than the very short-lived
+    // `--version` command. On Windows ConPTY, an immediately exiting child can
+    // race node-pty's console-list helper and produce a misleading
+    // `AttachConsole failed` diagnostic even though spawning succeeded.
+    args: [...resolution.prefixArgs],
     cwd: process.cwd(),
     spawnPty: spawnNodePty,
   })
@@ -33,7 +37,10 @@ async function main(): Promise<void> {
   console.log(session.recentOutput.join('\n'))
 }
 
-main().catch((error: unknown) => {
-  console.error('[smoke] failed:', error)
-  process.exitCode = 1
-})
+main().then(
+  () => process.exit(0),
+  (error: unknown) => {
+    console.error('[smoke] failed:', error)
+    process.exit(1)
+  },
+)

@@ -4,11 +4,15 @@ import type { CredentialName } from '../../main/secure-credentials.js'
 import type { PermissionPreset } from '../../main/permission-presets.js'
 import type { ResumeMode } from '../../main/resume-args.js'
 import type { DesktopSettingsSnapshot } from '../global.js'
+import type { CopilotProviderConfig } from '../../main/provider-config.js'
+import type { WorkspaceProfile } from '../../main/types.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = [
   { value: 'default', label: 'Default (prompt every time)' },
+  { value: 'read-only', label: 'Read only (deny shell and writes)' },
   { value: 'trusted-directory', label: 'Trusted directory' },
   { value: 'full-auto', label: 'Full auto (--allow-all-tools)' },
+  { value: 'full-access', label: 'Full computer access (--allow-all)' },
 ]
 
 const RESUME_OPTIONS: Array<{ value: ResumeMode; label: string }> = [
@@ -18,9 +22,125 @@ const RESUME_OPTIONS: Array<{ value: ResumeMode; label: string }> = [
 ]
 
 const CREDENTIAL_LABELS: Record<CredentialName, string> = {
-  COPILOT_PROVIDER_BASE_URL: 'COPILOT_PROVIDER_BASE_URL (BYOK base URL)',
+  COPILOT_PROVIDER_BASE_URL: 'COPILOT_PROVIDER_BASE_URL (legacy protected endpoint)',
   COPILOT_PROVIDER_API_KEY: 'COPILOT_PROVIDER_API_KEY (BYOK API key)',
+  COPILOT_GITHUB_TOKEN: 'COPILOT_GITHUB_TOKEN (preferred GitHub token)',
   GH_TOKEN: 'GH_TOKEN (GitHub auth override)',
+  GITHUB_TOKEN: 'GITHUB_TOKEN (GitHub auth fallback)',
+}
+
+function WorkspaceProfileEditor({
+  profile,
+  active,
+  onSaved,
+}: {
+  profile: WorkspaceProfile
+  active: boolean
+  onSaved: (snapshot: DesktopSettingsSnapshot) => void
+}): JSX.Element {
+  const [name, setName] = useState(profile.name)
+  const [permissionPreset, setPermissionPreset] = useState(profile.permissionPreset)
+  const [defaultResumeMode, setDefaultResumeMode] = useState(profile.defaultResumeMode)
+
+  return (
+    <div className="settings-card">
+      <div className="settings-card-heading">
+        <strong>{profile.name}</strong>
+        <span>{active ? 'Active' : 'Recent'}</span>
+      </div>
+      <div className="profile-path">{profile.path}</div>
+      <div className="settings-form-grid">
+        <label>
+          Profile name
+          <input type="text" maxLength={100} value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label>
+          Startup permission
+          <select value={permissionPreset} onChange={(event) => setPermissionPreset(event.target.value as PermissionPreset)}>
+            {PERMISSION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <label>
+          Session restoration
+          <select value={defaultResumeMode} onChange={(event) => setDefaultResumeMode(event.target.value as ResumeMode)}>
+            {RESUME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <button
+        type="button"
+        onClick={() => void window.copilotDesktopSettings
+          .updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode)
+          .then(onSaved)}
+      >
+        Save profile
+      </button>
+    </div>
+  )
+}
+
+function ProviderSettings({
+  provider,
+  onSaved,
+}: {
+  provider: CopilotProviderConfig
+  onSaved: (snapshot: DesktopSettingsSnapshot) => void
+}): JSX.Element {
+  const [draft, setDraft] = useState(provider)
+  const custom = draft.type !== 'github'
+  return (
+    <section>
+      <h2>Model provider</h2>
+      <p>Use GitHub-hosted models or configure an official Copilot CLI BYOK provider.</p>
+      <div className="settings-form-grid">
+        <label>
+          Provider
+          <select
+            value={draft.type}
+            onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value as CopilotProviderConfig['type'] }))}
+          >
+            <option value="github">GitHub Copilot</option>
+            <option value="openai">OpenAI-compatible</option>
+            <option value="azure">Azure OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </label>
+        <label>
+          Model
+          <input
+            type="text"
+            disabled={!custom}
+            value={draft.model}
+            placeholder="Model or deployment identifier"
+            onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
+          />
+        </label>
+        <label className="settings-grid-wide">
+          Provider base URL
+          <input
+            type="url"
+            disabled={!custom}
+            value={draft.baseUrl}
+            placeholder="https://api.example.com/v1"
+            onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+          />
+        </label>
+      </div>
+      <label className="settings-row">
+        <input
+          type="checkbox"
+          disabled={!custom}
+          checked={draft.offline}
+          onChange={(event) => setDraft((current) => ({ ...current, offline: event.target.checked }))}
+        />
+        Offline mode (prevent GitHub network access; the configured provider may still be remote)
+      </label>
+      <button type="button" onClick={() => void window.copilotDesktopSettings.updateProvider(draft).then(onSaved)}>
+        Save provider
+      </button>
+      <p className="settings-disclaimer">Provider changes apply to new Copilot sessions.</p>
+    </section>
+  )
 }
 
 export function SettingsApp(): JSX.Element | null {
@@ -126,35 +246,26 @@ export function SettingsApp(): JSX.Element | null {
         <h2>Workspace profiles</h2>
         {snapshot.profiles.length === 0 && <p>No workspaces yet. Choose one from the main window.</p>}
         {snapshot.profiles.map((profile) => (
-          <div key={profile.id} className="profile-row">
-            <div className="profile-path">{profile.path}</div>
-            <select
-              value={profile.permissionPreset}
-              onChange={(event) =>
-                void window.copilotDesktopSettings
-                  .updateWorkspaceProfile(profile.id, profile.name, event.target.value as PermissionPreset, profile.defaultResumeMode)
-                  .then(refresh)
-              }
-            >
-              {PERMISSION_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-            <select
-              value={profile.defaultResumeMode}
-              onChange={(event) =>
-                void window.copilotDesktopSettings
-                  .updateWorkspaceProfile(profile.id, profile.name, profile.permissionPreset, event.target.value as ResumeMode)
-                  .then(refresh)
-              }
-            >
-              {RESUME_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </div>
+          <WorkspaceProfileEditor
+            key={profile.id}
+            profile={profile}
+            active={profile.id === snapshot.activeProfileId}
+            onSaved={refresh}
+          />
         ))}
       </section>
+
+      <section>
+        <h2>Access status</h2>
+        <dl className="settings-definition-list">
+          <div><dt>Copilot permission</dt><dd>{snapshot.access.permissionLabel} ({snapshot.access.permissionSource})</dd></div>
+          <div><dt>Windows process</dt><dd>{snapshot.access.elevation === 'administrator' ? 'Administrator' : snapshot.access.elevation === 'standard-user' ? 'Standard user' : 'Unknown'}</dd></div>
+        </dl>
+        {snapshot.access.warning && <p className="settings-warning">{snapshot.access.warning}</p>}
+        <p className="settings-disclaimer">Permissions control Copilot CLI launch flags; they cannot remove rights already held by this Windows account.</p>
+      </section>
+
+      <ProviderSettings provider={snapshot.provider} onSaved={refresh} />
 
       <section>
         <h2>Protected credential vault</h2>
@@ -202,7 +313,9 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>Updates</h2>
+        <p>Desktop {snapshot.update.currentVersion} · Copilot CLI {snapshot.cliVersion ?? 'not detected'}{snapshot.update.availableVersion ? ` · Available ${snapshot.update.availableVersion}` : ''}</p>
         <p>{snapshot.update.message}</p>
+        {snapshot.update.downloadPercent !== null && <progress max={100} value={snapshot.update.downloadPercent} />}
         <div className="settings-actions">
           <button
             type="button"
@@ -228,6 +341,11 @@ export function SettingsApp(): JSX.Element | null {
           <button type="button" onClick={() => void window.copilotDesktopSettings.openReleases()}>
             View releases
           </button>
+          {snapshot.rollbackVersion && (
+            <button type="button" onClick={() => void window.copilotDesktopSettings.openRollbackRelease()}>
+              Open rollback v{snapshot.rollbackVersion}
+            </button>
+          )}
         </div>
         {snapshot.rollbackVersion && <p>Previous version: {snapshot.rollbackVersion}</p>}
       </section>

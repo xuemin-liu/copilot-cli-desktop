@@ -15,11 +15,12 @@ export interface TabBarProps {
   activeTabId: string | null
   canOpenTab: boolean
   onActivate: (tabId: string) => void
+  onRename: (tabId: string, currentTitle: string) => void
   onClose: (tabId: string) => void
   onCreate: () => void
 }
 
-export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onClose, onCreate }: TabBarProps): JSX.Element {
+export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onRename, onClose, onCreate }: TabBarProps): JSX.Element {
   return (
     <div className="tab-bar" role="tablist">
       {tabs.map((tab) => (
@@ -29,6 +30,7 @@ export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onClose, onC
           aria-selected={tab.id === activeTabId}
           className={`tab${tab.id === activeTabId ? ' tab-active' : ''}`}
           onClick={() => onActivate(tab.id)}
+          onDoubleClick={() => onRename(tab.id, tab.title)}
         >
           <span className={`tab-status-dot tab-status-${tab.status}`} title={STATUS_LABEL[tab.status]} />
           <span className="tab-title">{tab.title}</span>

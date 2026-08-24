@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { basename, dirname, resolve } from 'node:path'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
+import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
 import type { RestoredTab, WorkspaceProfile } from './types.js'
 
 export interface DesktopConfig {
@@ -16,6 +17,7 @@ export interface DesktopConfig {
   automaticUpdateChecks: boolean
   globalShortcutEnabled: boolean
   launchAtLogin: boolean
+  provider: CopilotProviderConfig
 }
 
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
@@ -29,6 +31,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   automaticUpdateChecks: true,
   globalShortcutEnabled: false,
   launchAtLogin: false,
+  provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
 const MAX_PROFILES = 20
@@ -152,6 +155,7 @@ export async function readDesktopConfig(filename: string): Promise<DesktopConfig
     automaticUpdateChecks: typeof value.automaticUpdateChecks === 'boolean' ? value.automaticUpdateChecks : true,
     globalShortcutEnabled: typeof value.globalShortcutEnabled === 'boolean' ? value.globalShortcutEnabled : false,
     launchAtLogin: typeof value.launchAtLogin === 'boolean' ? value.launchAtLogin : false,
+    provider: normalizeProviderConfig(value.provider),
   }
 }
 

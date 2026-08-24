@@ -15,7 +15,7 @@ function fakeExecFile(handlers: Record<string, { stdout: string } | Error>): Exe
 test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
-  }))
+  }), 'linux')
   assert.equal(resolution.kind, 'direct')
   assert.equal(resolution.command, 'copilot')
   assert.deepEqual(resolution.prefixArgs, [])
@@ -23,11 +23,23 @@ test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
   assert.equal(resolution.error, null)
 })
 
+test('resolveCopilotBinary returns the absolute copilot executable path on Windows', async () => {
+  const copilotPath = 'C:\\Users\\tester\\AppData\\Local\\Microsoft\\WinGet\\Links\\copilot.exe'
+  const resolution = await resolveCopilotBinary({}, fakeExecFile({
+    'copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
+    'where.exe copilot': { stdout: `${copilotPath}\r\n` },
+  }), 'win32')
+  assert.equal(resolution.kind, 'direct')
+  assert.equal(resolution.command, copilotPath)
+  assert.equal(resolution.resolvedPath, copilotPath)
+  assert.equal(resolution.version, '0.9.1')
+})
+
 test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': new Error('ENOENT'),
     'gh copilot -- --version': { stdout: '0.9.1\n' },
-  }))
+  }), 'linux')
   assert.equal(resolution.kind, 'gh-wrapped')
   assert.equal(resolution.command, 'gh')
   assert.deepEqual(resolution.prefixArgs, ['copilot', '--'])
@@ -38,7 +50,7 @@ test('resolveCopilotBinary reports a diagnostic error when nothing resolves', as
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': new Error('ENOENT'),
     'gh copilot -- --version': new Error('ENOENT'),
-  }))
+  }), 'linux')
   assert.equal(resolution.version, null)
   assert.match(resolution.error ?? '', /was not found/i)
   assert.match(resolution.error ?? '', /copilot --version/)

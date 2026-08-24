@@ -19,8 +19,10 @@ handle, only input/output/resize events.
 - Resolves the `copilot` binary (PATH, then the location `gh` downloads it to,
   then `gh copilot --`), and shows a recovery dashboard with a retry action
   and a copyable diagnostic summary when it cannot be found.
-- Workspace folder picker with named recent-workspace profiles, each with its
-  own permission preset and restored session tabs.
+- A standard collapsible AI-tool sidebar with workspace/session search,
+  grouped or flat session views, manual/last-activity ordering, named recent
+  workspace profiles, manual session naming, attachment-aware session
+  creation, and restored session tabs.
 - Session resume: each tab remembers a best-effort captured session id and
   auto-resumes with `--resume <id>` (or `--continue`) when reopened, plus a
   manual "Resume session…" action that opens `copilot --resume`'s own
@@ -39,29 +41,37 @@ handle, only input/output/resize events.
   GitHub Releases.
 - Optional launch-at-login and an optional global show/hide shortcut
   (Ctrl+Alt+H), both opt-in via Settings.
-- A secure credential vault (Windows DPAPI via Electron `safeStorage`) for the
-  three environment variables `copilot` reads: `COPILOT_PROVIDER_BASE_URL`
-  and `COPILOT_PROVIDER_API_KEY` (bring-your-own-key), and an optional
-  `GH_TOKEN` override. If protected storage is unavailable, saving is refused
+- Provider settings for GitHub Copilot, OpenAI, Azure OpenAI, and Anthropic,
+  including base URL, model, and offline mode. A secure credential vault
+  (Windows DPAPI via Electron `safeStorage`) protects
+  `COPILOT_PROVIDER_API_KEY`, the legacy `COPILOT_PROVIDER_BASE_URL`, and the
+  supported GitHub token overrides `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and
+  `GITHUB_TOKEN`. If protected storage is unavailable, saving is refused
   instead of silently falling back to plaintext.
+- Visible Windows elevation and permission-access status, with warnings for
+  high-trust modes and elevated launches.
 - Stops the full process tree for every running session on app quit.
 - A background CLI (`copilot-desktop`) with a token-protected, loopback-only
   HTTP control server: `start` / `status` / `restart` / `logs` / `stop`.
-- Windows packaging via `electron-builder` (NSIS) and a Windows GitHub Actions
-  CI workflow plus a tag-triggered release workflow.
+- Windows packaging via `electron-builder` (NSIS), post-package runtime
+  auditing, Windows CI, scheduled compatibility checks against the latest
+  Copilot CLI, and signed tag-triggered releases with unsigned publication
+  blocked.
 
 ## Permission presets
 
 `copilot` has no single named permission-mode enum. It exposes flags instead:
 `--allow-tool`, `--deny-tool`, `--allow-all-tools` (`/yolo`), `--allow-url`,
-and `--add-dir` (trust a directory permanently). This app maps three presets
+and `--add-dir` (trust a directory permanently). This app maps five presets
 onto that flag surface, set per workspace profile in Settings:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
 | Default | (none) | Read-only actions run automatically; every mutating action (shell, edits, URL fetches, MCP tools) prompts. |
+| Read only | `--deny-tool=write --deny-tool=shell` | Explicitly denies Copilot's write and shell tools. Other tool integrations still follow Copilot's own permission model. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
+| Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
 
 See `src/main/permission-presets.ts`.
 
@@ -83,9 +93,8 @@ See `src/main/resume-args.ts`.
 
 ## Heuristics — read before relying on them
 
-**`copilot` was not installed in the environment this project was built in**,
-so two behaviors are best-effort regex heuristics over raw pty output, not a
-structured protocol:
+Copilot CLI exposes a terminal stream rather than structured session events,
+so two behaviors remain best-effort regex heuristics over raw pty output:
 
 - **Approval-prompt detection** (`src/main/approval-heuristic.ts`,
   `detectApprovalPrompt`) badges a tab "needs approval" and raises a
@@ -97,9 +106,9 @@ structured protocol:
   real banner text doesn't match, auto-resume silently falls back to a new
   session instead of resuming.
 
-If you have `copilot` installed, please verify these against its actual
-output and adjust the patterns — that is the single highest-value follow-up
-for this project.
+The resolver and real pty launch path are exercised against Copilot CLI in
+local smoke testing. These two heuristics still require maintenance if the
+CLI's human-readable output changes.
 
 ## Requirements
 
@@ -135,8 +144,8 @@ short-lived pty session end to end.
 ## First run and the credential vault
 
 Choose a workspace folder from the main window, then open **File → Desktop
-Settings** to configure a workspace's permission preset and resume mode, and
-to save protected credentials. Paste only the value (for example
+Settings** to rename a profile, configure its permission preset and resume
+mode, select a provider, and save protected credentials. Paste only the value (for example
 `sk-...`), not a `NAME=value` assignment. The desktop app encrypts each value
 with Windows DPAPI (`safeStorage`) and decrypts it only into the environment
 of the pty process it spawns — it is never sent back to any renderer. An
@@ -199,9 +208,11 @@ pnpm pack:win   # unpacked application
 pnpm dist:win   # NSIS installer
 ```
 
-Artifacts are written to `release/`. Local installers are unsigned; configure
-the GitHub Actions secrets `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`
-for the release workflow to produce a signed installer.
+Artifacts are written to `release/`. Local installers are unsigned. Public
+tagged releases require the GitHub Actions secrets `WINDOWS_CSC_LINK` and
+`WINDOWS_CSC_KEY_PASSWORD`; the release workflow refuses to publish when
+signing is unavailable. Packaging also audits the unpacked runtime for the
+application archive, native `node-pty` addon, and required executable files.
 
 ## Continuous integration and releases
 
@@ -211,17 +222,19 @@ Pushing a tag such as `v0.1.0` runs the same checks, builds the NSIS
 installer, and publishes it plus `latest.yml` (required by the in-app
 updater) to a GitHub release.
 
-## What was NOT verified live
+The scheduled compatibility workflow (`.github/workflows/cli-compatibility.yml`)
+installs the latest Copilot CLI each week and reruns the type, unit, smoke, and
+CLI lifecycle checks. The detailed DeepSeek Harness comparison and every
+applicability decision are recorded in [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
 
-`copilot` is not installed in the environment this project was built in.
-Everything above involving the real CLI's actual output, prompts, or resume
-semantics — approval-prompt text, session-id banner format, `--resume` /
-`--continue` exact behavior, and BYOK environment variable names — was
-implemented from the publicly documented behavior and needs verification
-against the real binary. Pure logic (permission-preset → flag mapping,
-session-tab state machine, resume-argument builder, credential vault
-serialization, and the pty-session lifecycle with a mocked pty backend) is
-covered by unit tests (`pnpm test`) and does not depend on the real binary.
+## Live-verification boundary
+
+Copilot CLI resolution and real pty startup are verified locally. Approval
+prompt wording, session-id banner parsing, every upstream provider account,
+and every possible resume history remain dependent on Copilot CLI and account
+state. Pure logic (permission-preset mapping, tab state, resume arguments,
+provider environment, encrypted-vault serialization, and pty lifecycle) is
+covered by unit tests and does not depend on a live account.
 
 ## License
 

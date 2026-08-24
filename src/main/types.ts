@@ -31,6 +31,8 @@ export interface DesktopSessionTab {
   lastSessionId: string | null
   status: SessionLifecycleStatus
   processId: number | null
+  /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */
+  lastActivityAt: number
 }
 
 export type CopilotResolutionKind = 'direct' | 'gh-wrapped'
