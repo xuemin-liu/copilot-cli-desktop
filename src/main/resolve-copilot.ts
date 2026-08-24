@@ -58,9 +58,14 @@ async function resolveWindowsCommand(
 
 function windowsLaunch(path: string, env: NodeJS.ProcessEnv): Pick<CopilotResolution, 'command' | 'prefixArgs' | 'resolvedPath'> {
   if (path.toLowerCase().endsWith('.exe')) return { command: path, prefixArgs: [], resolvedPath: path }
+  // Use cmd.exe's CALL command for .cmd/.bat shims. Passing a quoted shim as
+  // the command immediately after `/c` interacts badly with cmd.exe's `/s`
+  // quote stripping (the quotes can become literal characters). CALL accepts
+  // the shim as a normal, separately quoted argument and forwards everything
+  // after it, including paths such as C:\Program Files\nodejs\copilot.cmd.
   return {
     command: env.ComSpec ?? env.COMSPEC ?? 'cmd.exe',
-    prefixArgs: ['/d', '/s', '/c', path],
+    prefixArgs: ['/d', '/s', '/c', 'call', path],
     resolvedPath: path,
   }
 }

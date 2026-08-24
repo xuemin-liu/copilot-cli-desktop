@@ -36,15 +36,15 @@ test('resolveCopilotBinary returns the absolute copilot executable path on Windo
 })
 
 test('resolveCopilotBinary launches an npm-installed Windows command shim through cmd.exe', async () => {
-  const copilotPath = 'C:\\Users\\tester\\AppData\\Roaming\\npm\\copilot.cmd'
+  const copilotPath = 'C:\\Program Files\\nodejs\\copilot.cmd'
   const commandShell = 'C:\\Windows\\System32\\cmd.exe'
   const resolution = await resolveCopilotBinary({ ComSpec: commandShell }, fakeExecFile({
     'where.exe copilot': { stdout: `${copilotPath}\r\n` },
-    [`${commandShell} /d /s /c ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
+    [`${commandShell} /d /s /c call ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
   }), 'win32')
   assert.equal(resolution.kind, 'direct')
   assert.equal(resolution.command, commandShell)
-  assert.deepEqual(resolution.prefixArgs, ['/d', '/s', '/c', copilotPath])
+  assert.deepEqual(resolution.prefixArgs, ['/d', '/s', '/c', 'call', copilotPath])
   assert.equal(resolution.resolvedPath, copilotPath)
   assert.equal(resolution.version, '1.0.80')
 })
