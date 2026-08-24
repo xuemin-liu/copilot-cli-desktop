@@ -46,28 +46,56 @@ export async function ensureCliDirectories(paths: CliPaths): Promise<void> {
   await mkdir(paths.root, { recursive: true })
 }
 
-export async function readDaemonState(paths: CliPaths): Promise<DaemonState | null> {
+/**
+ * Every CLI command (status/logs/restart/stop/start) reads this file first,
+ * so a truncated or otherwise corrupt write must not throw and brick the
+ * whole CLI until a human manually deletes it. Move the bad file aside
+ * (best effort) and treat it the same as "no state" rather than crashing.
+ */
+async function quarantineCorruptState(paths: CliPaths): Promise<void> {
   try {
-    const raw = await readFile(paths.statePath, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-    const state = parsed as Partial<DaemonState>
-    if (
-      state.version !== 1
-      || typeof state.pid !== 'number' || !Number.isInteger(state.pid) || state.pid < 1
-      || typeof state.controlPort !== 'number' || !Number.isInteger(state.controlPort) || state.controlPort < 1 || state.controlPort > 65_535
-      || typeof state.token !== 'string' || state.token.length === 0
-      || typeof state.workspace !== 'string'
-      || typeof state.status !== 'string' || !DAEMON_STATUSES.includes(state.status)
-      || typeof state.startedAt !== 'string'
-      || (state.processId !== null && typeof state.processId !== 'number')
-      || (state.error !== null && typeof state.error !== 'string')
-    ) return null
-    return state as DaemonState
+    await rename(paths.statePath, `${paths.statePath}.corrupt-${Date.now()}`)
+  } catch {
+    // Best effort: if even the rename fails, callers still get `null` back
+    // instead of a thrown parse error.
+  }
+}
+
+export async function readDaemonState(paths: CliPaths): Promise<DaemonState | null> {
+  let raw: string
+  try {
+    raw = await readFile(paths.statePath, 'utf8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    await quarantineCorruptState(paths)
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    await quarantineCorruptState(paths)
+    return null
+  }
+  const state = parsed as Partial<DaemonState>
+  if (
+    state.version !== 1
+    || typeof state.pid !== 'number' || !Number.isInteger(state.pid) || state.pid < 1
+    || typeof state.controlPort !== 'number' || !Number.isInteger(state.controlPort) || state.controlPort < 1 || state.controlPort > 65_535
+    || typeof state.token !== 'string' || state.token.length === 0
+    || typeof state.workspace !== 'string'
+    || typeof state.status !== 'string' || !DAEMON_STATUSES.includes(state.status)
+    || typeof state.startedAt !== 'string'
+    || (state.processId !== null && typeof state.processId !== 'number')
+    || (state.error !== null && typeof state.error !== 'string')
+  ) {
+    await quarantineCorruptState(paths)
+    return null
+  }
+  return state as DaemonState
 }
 
 export async function writeDaemonState(paths: CliPaths, state: DaemonState): Promise<void> {

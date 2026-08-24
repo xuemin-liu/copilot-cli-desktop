@@ -7,6 +7,11 @@ import type { SessionLifecycleStatus } from './types.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_LINES = 500
+// Bounds on top of the line count: a single newline-free burst (or one very
+// long line) could otherwise grow `pendingLine`/`outputLines` without limit
+// regardless of MAX_OUTPUT_LINES.
+const MAX_LINE_CHARS = 8_000
+const MAX_PENDING_CHARS = 64_000
 
 export interface PtySessionOptions {
   file: string
@@ -63,6 +68,18 @@ export class PtySession extends EventEmitter {
     return this.outputLines
   }
 
+  /**
+   * Best-effort reconstruction of the retained output as one string, for a
+   * renderer that subscribes to live output after the session has already
+   * produced some (e.g. a terminal pane mounting after the pty's startup
+   * banner or an approval prompt already streamed). Approximate: lines are
+   * rejoined with '\n', which does not perfectly reproduce the original raw
+   * chunk boundaries, but is faithful enough for terminal replay.
+   */
+  get recentOutputText(): string {
+    return this.outputLines.map((line) => `${line}\n`).join('') + this.pendingLine
+  }
+
   get lastSessionId(): string | null {
     return this.lastKnownSessionId
   }
@@ -73,13 +90,24 @@ export class PtySession extends EventEmitter {
     this.emit('status', status)
   }
 
+  private pushOutputLine(line: string): void {
+    this.outputLines.push(
+      line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…[truncated]` : line,
+    )
+    if (this.outputLines.length > MAX_OUTPUT_LINES) this.outputLines.shift()
+  }
+
   private recordOutput(text: string): void {
     this.pendingLine += text
     const parts = this.pendingLine.split(/\r?\n/)
     this.pendingLine = parts.pop() ?? ''
-    for (const line of parts) {
-      this.outputLines.push(line)
-      if (this.outputLines.length > MAX_OUTPUT_LINES) this.outputLines.shift()
+    for (const line of parts) this.pushOutputLine(line)
+    // No newline arrived and the pending fragment kept growing (e.g.
+    // newline-free or attacker-influenced tool output) — flush it into the
+    // bounded line buffer instead of letting it accumulate without limit.
+    while (this.pendingLine.length > MAX_PENDING_CHARS) {
+      this.pushOutputLine(this.pendingLine.slice(0, MAX_LINE_CHARS))
+      this.pendingLine = this.pendingLine.slice(MAX_LINE_CHARS)
     }
     this.emit('log', text)
   }
@@ -102,7 +130,12 @@ export class PtySession extends EventEmitter {
       if (detectApprovalPrompt(data)) {
         this.setStatus('approval-needed')
         this.emit('desktop-event', { type: 'approval-needed' })
-      } else if (this.statusValue !== 'running') {
+      } else if (this.statusValue !== 'running' && this.statusValue !== 'approval-needed') {
+        // Only transition out of a non-running starting state on ordinary
+        // output. An approval-needed badge must stay up until write() (the
+        // user actually responded), exit, or another explicit transition —
+        // not just because the next output chunk (e.g. a cursor escape code
+        // or a split prompt) happened not to match the approval heuristic.
         this.setStatus('running')
       }
     })

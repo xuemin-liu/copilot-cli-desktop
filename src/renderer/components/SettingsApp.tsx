@@ -43,6 +43,33 @@ export function SettingsApp(): JSX.Element | null {
     setMessage(text)
     setTimeout(() => setMessage(null), 3_000)
   }
+  // Toggling two checkboxes in quick succession — before the first
+  // updatePreferences() IPC round-trip resolves — must not let the second
+  // call build its payload from the pre-toggle snapshot and revert the
+  // first change. Reading `previous` from React's functional-update form
+  // guarantees each call sees the latest (optimistically applied) state,
+  // even when several fire before any IPC response lands.
+  const updatePreference = (
+    patch: Partial<Pick<
+      DesktopSettingsSnapshot,
+      'closeToTray' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+    >>,
+  ): void => {
+    setSnapshot((previous) => {
+      if (!previous) return previous
+      const next = { ...previous, ...patch }
+      void window.copilotDesktopSettings
+        .updatePreferences({
+          closeToTray: next.closeToTray,
+          trayEnabled: next.trayEnabled,
+          notifications: next.notifications,
+          automaticUpdateChecks: next.automaticUpdateChecks,
+          globalShortcutEnabled: next.globalShortcutEnabled,
+        })
+        .then(refresh)
+      return next
+    })
+  }
 
   return (
     <div className="settings-app">
@@ -54,11 +81,7 @@ export function SettingsApp(): JSX.Element | null {
           <input
             type="checkbox"
             checked={snapshot.closeToTray}
-            onChange={(event) =>
-              void window.copilotDesktopSettings
-                .updatePreferences({ ...snapshot, closeToTray: event.target.checked })
-                .then(refresh)
-            }
+            onChange={(event) => updatePreference({ closeToTray: event.target.checked })}
           />
           Keep sessions running in the background when the window is closed
         </label>
@@ -66,11 +89,7 @@ export function SettingsApp(): JSX.Element | null {
           <input
             type="checkbox"
             checked={snapshot.trayEnabled}
-            onChange={(event) =>
-              void window.copilotDesktopSettings
-                .updatePreferences({ ...snapshot, trayEnabled: event.target.checked })
-                .then(refresh)
-            }
+            onChange={(event) => updatePreference({ trayEnabled: event.target.checked })}
           />
           Show a tray icon
         </label>
@@ -78,11 +97,7 @@ export function SettingsApp(): JSX.Element | null {
           <input
             type="checkbox"
             checked={snapshot.notifications}
-            onChange={(event) =>
-              void window.copilotDesktopSettings
-                .updatePreferences({ ...snapshot, notifications: event.target.checked })
-                .then(refresh)
-            }
+            onChange={(event) => updatePreference({ notifications: event.target.checked })}
           />
           Show native notifications (approval needed, session finished/crashed)
         </label>
@@ -90,11 +105,7 @@ export function SettingsApp(): JSX.Element | null {
           <input
             type="checkbox"
             checked={snapshot.globalShortcutEnabled}
-            onChange={(event) =>
-              void window.copilotDesktopSettings
-                .updatePreferences({ ...snapshot, globalShortcutEnabled: event.target.checked })
-                .then(refresh)
-            }
+            onChange={(event) => updatePreference({ globalShortcutEnabled: event.target.checked })}
           />
           Register {snapshot.globalShortcutAccelerator} to show/hide the window
         </label>

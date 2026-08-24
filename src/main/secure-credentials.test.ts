@@ -103,13 +103,41 @@ test('writing an empty document removes the file entirely', async () => {
   })
 })
 
-test('secretEnvArgs marks every injected vault variable as a Copilot secret env var', () => {
+test('secretEnvArgs marks every configured credential variable present in the environment', () => {
   assert.deepEqual(
     secretEnvArgs({ GH_TOKEN: 'gho_test', COPILOT_PROVIDER_API_KEY: 'sk-test' }),
-    ['--secret-env-vars=GH_TOKEN', '--secret-env-vars=COPILOT_PROVIDER_API_KEY'],
+    ['--secret-env-vars=COPILOT_PROVIDER_API_KEY', '--secret-env-vars=GH_TOKEN'],
   )
 })
 
-test('secretEnvArgs produces no flags when nothing was injected', () => {
+test('secretEnvArgs produces no flags when nothing is present', () => {
   assert.deepEqual(secretEnvArgs({}), [])
+})
+
+test('secretEnvArgs protects a credential that is only ambient (not vault-injected)', () => {
+  // Simulates PtySession's merged `{ ...process.env, ...vaultEnvironment }`: a
+  // variable already present in the parent process's own environment must be
+  // protected exactly like one the vault decrypted, since Copilot receives
+  // both the same way.
+  assert.deepEqual(
+    secretEnvArgs({ GH_TOKEN: 'gho_ambient', UNRELATED_VAR: 'x' } as NodeJS.ProcessEnv),
+    ['--secret-env-vars=GH_TOKEN'],
+  )
+})
+
+test('secretEnvArgs ignores an empty-string value', () => {
+  assert.deepEqual(secretEnvArgs({ GH_TOKEN: '' }), [])
+})
+
+test('concurrent saveCredential calls for different variables do not clobber each other', async () => {
+  await withTempFile(async (filename) => {
+    const store = new SecureCredentialStore(filename, fakeEncryption())
+    await Promise.all([
+      store.saveCredential('GH_TOKEN', 'gho_a'),
+      store.saveCredential('COPILOT_PROVIDER_API_KEY', 'sk_b'),
+    ])
+    const environment = await store.resolveEnvironment()
+    assert.equal(environment.GH_TOKEN, 'gho_a')
+    assert.equal(environment.COPILOT_PROVIDER_API_KEY, 'sk_b')
+  })
 })

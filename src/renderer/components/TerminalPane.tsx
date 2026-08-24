@@ -39,8 +39,27 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       void window.copilotDesktop.writeTab(tabId, data)
     })
 
+    // A pty can emit its startup banner or an approval prompt before this
+    // component mounts and subscribes (e.g. a background tab created while
+    // another tab is active). Subscribe first — buffering any output that
+    // arrives while the backlog request is in flight — then fetch and
+    // replay the backlog, then flush anything buffered in the meantime, so
+    // no output is silently dropped regardless of timing.
+    let backlogApplied = false
+    const bufferedLive: string[] = []
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
-      if (payload.tabId === tabId) terminal.write(payload.data)
+      if (payload.tabId !== tabId) return
+      if (!backlogApplied) {
+        bufferedLive.push(payload.data)
+        return
+      }
+      terminal.write(payload.data)
+    })
+    void window.copilotDesktop.getTabBacklog(tabId).then((backlog) => {
+      if (backlog) terminal.write(backlog)
+      for (const chunk of bufferedLive) terminal.write(chunk)
+      bufferedLive.length = 0
+      backlogApplied = true
     })
 
     const resizeObserver = new ResizeObserver(() => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -130,8 +131,14 @@ function protectedCredentialPath(): string {
   return join(app.getPath('userData'), 'protected-credentials.json')
 }
 
+// Tab ids (`tab-1`, `tab-2`, …) reset to 1 every launch, so scoping session
+// logs under a per-launch directory keeps a later launch from silently
+// appending to — and exposing — a previous launch's transcript at the same
+// filename.
+const launchId = randomUUID()
+
 function sessionLogPath(tabId: string): string {
-  return join(app.getPath('userData'), 'logs', 'sessions', `${tabId}.log`)
+  return join(app.getPath('userData'), 'logs', 'sessions', launchId, `${tabId}.log`)
 }
 
 function appLogPath(): string {
@@ -143,10 +150,23 @@ async function writeAppLog(line: string): Promise<void> {
   await appendFile(appLogPath(), `${new Date().toISOString()} ${line}\n`, 'utf8').catch(() => {})
 }
 
+const MAX_SESSION_LOG_BYTES = 5 * 1024 * 1024
+const sessionLogBytesWritten = new Map<string, number>()
+
 async function writeSessionLog(tabId: string, chunk: string): Promise<void> {
+  const written = sessionLogBytesWritten.get(tabId) ?? 0
+  if (written >= MAX_SESSION_LOG_BYTES) return
   const filename = sessionLogPath(tabId)
   await mkdir(dirname(filename), { recursive: true })
-  await appendFile(filename, chunk, 'utf8').catch(() => {})
+  const chunkBytes = Buffer.byteLength(chunk, 'utf8')
+  if (written + chunkBytes <= MAX_SESSION_LOG_BYTES) {
+    await appendFile(filename, chunk, 'utf8').catch(() => {})
+    sessionLogBytesWritten.set(tabId, written + chunkBytes)
+    return
+  }
+  const truncated = Buffer.from(chunk, 'utf8').subarray(0, MAX_SESSION_LOG_BYTES - written).toString('utf8')
+  await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, 'utf8').catch(() => {})
+  sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
 }
 
 function snapshot(): DesktopState {
@@ -182,12 +202,21 @@ async function persistConfig(): Promise<void> {
   await operation
 }
 
-function persistActiveProfileTabs(): void {
-  const profile = activeWorkspaceProfile(desktopConfig)
-  if (!profile) return
-  profile.tabs = tabsState.tabs
-    .filter((tab) => tab.workspaceProfileId === profile.id)
-    .map((tab) => ({ title: tab.title, lastSessionId: tab.lastSessionId }))
+/**
+ * Tabs from an inactive profile keep running in the background (switching
+ * profiles does not stop them), so a tab whose state just changed may not
+ * belong to the currently active profile. Re-derive every profile's
+ * persisted tab list from the live tab state rather than only touching
+ * `activeWorkspaceProfile()`, so a change to a background tab is not lost —
+ * and does not get papered over by whichever profile happens to be active
+ * when this runs.
+ */
+function persistProfileTabs(): void {
+  for (const profile of desktopConfig.profiles) {
+    profile.tabs = tabsState.tabs
+      .filter((tab) => tab.workspaceProfileId === profile.id)
+      .map((tab) => ({ title: tab.title, lastSessionId: tab.lastSessionId }))
+  }
   void persistConfig().catch((error) => void writeAppLog(`Failed to save session tabs: ${String(error)}`))
 }
 
@@ -237,11 +266,31 @@ function showNotification(title: string, body: string, onClick = restoreMainWind
   notification.show()
 }
 
+// `state.resolution?.version !== null` is true both when resolution
+// succeeded AND while it hasn't run yet (resolution is null, so the
+// optional-chain short-circuits to `undefined`, and `undefined !== null`).
+// Callers that mean "copilot was found" must check both explicitly.
+function isCopilotResolved(): boolean {
+  return state.resolution !== null && state.resolution.version !== null
+}
+
 function trayStatusLabel(): string {
   const running = tabsState.tabs.filter((tab) => tab.status === 'running' || tab.status === 'approval-needed').length
   if (state.resolution?.version === null) return 'copilot CLI not found'
   if (tabsState.tabs.length === 0) return 'No sessions running'
   return `${running}/${tabsState.tabs.length} session(s) active`
+}
+
+/**
+ * Rebuilds both the tray menu and the application menu. The two menus share
+ * enabled/disabled state derived from `installInProgress`, the active
+ * profile, and the tab list — call this (not `rebuildTrayMenu` alone)
+ * whenever any of those change, or the application menu's "New/Close Session
+ * Tab" items go stale (e.g. staying disabled after a workspace is selected).
+ */
+function refreshMenus(): void {
+  rebuildTrayMenu()
+  if (Menu.getApplicationMenu()) installApplicationMenu()
 }
 
 function rebuildTrayMenu(): void {
@@ -318,6 +367,7 @@ async function createSessionTab(
     throw new Error('The copilot CLI is not available. Resolve it from the diagnostics screen first.')
   }
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  if (installInProgress) throw new Error('An update is installing; new sessions cannot be started right now')
 
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
@@ -327,7 +377,10 @@ async function createSessionTab(
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
-    ...secretEnvArgs(environment),
+    // PtySession merges process.env into this session's environment (see
+    // pty-session.ts), so secretEnvArgs must see that same merged view to
+    // also protect a credential that was only ever ambient, not vault-saved.
+    ...secretEnvArgs({ ...process.env, ...environment }),
   ]
   const session = new PtySession({
     file: resolution.command,
@@ -345,12 +398,13 @@ async function createSessionTab(
   })
   syncTabState()
   broadcastState()
+  refreshMenus()
 
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
     syncTabState()
-    rebuildTrayMenu()
+    refreshMenus()
     broadcastState()
   })
   session.on('log', (chunk: string) => {
@@ -364,7 +418,7 @@ async function createSessionTab(
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
     }
     syncTabState()
-    persistActiveProfileTabs()
+    persistProfileTabs()
     broadcastState()
     const window = mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-exit', { tabId: id, exit })
@@ -379,7 +433,7 @@ async function createSessionTab(
     broadcastState()
     throw error
   }
-  persistActiveProfileTabs()
+  persistProfileTabs()
   return snapshot()
 }
 
@@ -388,7 +442,7 @@ function activateSessionTab(tabId: string): DesktopState {
   syncTabState()
   restoreMainWindow()
   broadcastState()
-  rebuildTrayMenu()
+  refreshMenus()
   return snapshot()
 }
 
@@ -401,9 +455,10 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
   }
   tabsState = closeTab(tabsState, tabId)
   syncTabState()
-  persistActiveProfileTabs()
+  persistProfileTabs()
+  sessionLogBytesWritten.delete(tabId)
   broadcastState()
-  rebuildTrayMenu()
+  refreshMenus()
   return snapshot()
 }
 
@@ -446,7 +501,8 @@ async function selectWorkspace(): Promise<DesktopState> {
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
-  if (state.resolution?.version !== null) await createSessionTab(profile, 'new')
+  refreshMenus()
+  if (isCopilotResolved()) await createSessionTab(profile, 'new')
   return snapshot()
 }
 
@@ -457,8 +513,22 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
-  const existingTabs = tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id)
-  if (!existingTabs && state.resolution?.version !== null) await restoreTabsForActiveProfile()
+  // Tabs from an inactive profile keep running rather than closing, so
+  // switching TO a profile that already has tabs must switch the active tab
+  // to one of them — otherwise activeProfileId and activeTabId/terminal
+  // input can end up pointing at two different profiles.
+  const activeTabBelongsToProfile = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId === profile.id
+  if (!activeTabBelongsToProfile) {
+    const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id)
+    if (firstProfileTab) {
+      tabsState = activateTab(tabsState, firstProfileTab.id)
+      syncTabState()
+      broadcastState()
+      refreshMenus()
+    } else if (isCopilotResolved()) {
+      await restoreTabsForActiveProfile()
+    }
+  }
   return snapshot()
 }
 
@@ -722,6 +792,11 @@ ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows
   }
   managedTabs.get(tabId)?.session.resize(Math.max(1, Math.round(cols)), Math.max(1, Math.round(rows)))
 })
+ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string') throw new Error('Invalid session tab')
+  return managedTabs.get(tabId)?.session.recentOutputText ?? ''
+})
 ipcMain.handle('desktop:open-settings', (event) => {
   assertTrustedIpcSender(event)
   return showSettingsWindow()
@@ -819,6 +894,7 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   if (installInProgress) throw new Error('An update installation is already in progress')
   if (!updateController?.snapshot.canInstall) throw new Error('No downloaded update is ready to install')
   installInProgress = true
+  refreshMenus()
   try {
     await stopAllSessions()
     explicitQuitRequested = true
@@ -830,6 +906,7 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
     }
   } catch (error) {
     installInProgress = false
+    refreshMenus()
     throw error
   }
 })
@@ -873,6 +950,7 @@ if (!app.requestSingleInstanceLock()) {
       if (installInProgress && update.status === 'error') {
         installInProgress = false
         explicitQuitRequested = false
+        refreshMenus()
       }
       broadcastUpdateState(update)
       if (update.status === 'available') {
@@ -909,7 +987,14 @@ app.on('before-quit', (event) => {
   if (quittingAllSessions || managedTabs.size === 0) return
   event.preventDefault()
   quittingAllSessions = true
-  void stopAllSessions().finally(() => app.quit())
+  // Each stopped session's 'exit' handler persists its final resume id via
+  // persistProfileTabs()/persistConfig() without awaiting the write —
+  // reading configWriteQueue here (after those synchronous handlers have
+  // already re-chained it) and awaiting it ensures Electron does not exit
+  // before that last write actually lands on disk.
+  void stopAllSessions()
+    .then(() => configWriteQueue)
+    .finally(() => app.quit())
 })
 
 app.on('will-quit', () => {

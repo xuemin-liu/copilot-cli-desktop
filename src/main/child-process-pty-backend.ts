@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { constants } from 'node:os'
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
 
 /**
@@ -37,7 +38,16 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     },
     onExit: (listener) => {
       child.once('exit', (code, signal) => {
-        listener({ exitCode: code ?? 0, signal: signal ? 1 : undefined })
+        // Node reports `code === null` precisely when the process was
+        // terminated by a signal rather than exiting normally. Treating
+        // that as exitCode 0 (as a naive `code ?? 0` would) reports an
+        // unexpected kill — e.g. an OOM killer or an external `kill -9` — as
+        // a clean, successful completion instead of a crash. Preserve a
+        // conventional nonzero (128+signal) sentinel and the real signal
+        // number so PtySession's exitCode === 0 check still works correctly.
+        const signalNumber = signal ? constants.signals[signal] : undefined
+        const exitCode = code ?? (signalNumber !== undefined ? 128 + signalNumber : 1)
+        listener({ exitCode, signal: signalNumber })
       })
     },
     write: (data) => {

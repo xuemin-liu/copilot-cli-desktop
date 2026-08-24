@@ -70,6 +70,53 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
+test('approval-needed stays up across ordinary output until an explicit transition', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+
+  pty.emit('data', 'Allow copilot to run `git push`?')
+  assert.equal(session.status, 'approval-needed')
+
+  // A cursor-blink escape code or a split prompt fragment — anything that
+  // does not itself match the approval heuristic — must not silently clear
+  // the badge while Copilot is still actually waiting on the user.
+  pty.emit('data', '\u001b[?25h')
+  assert.equal(session.status, 'approval-needed')
+  pty.emit('data', 'some unrelated streamed output\n')
+  assert.equal(session.status, 'approval-needed')
+
+  session.write('y\n')
+  assert.equal(session.status, 'running')
+})
+
+test('output history is bounded by bytes, not just line count', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+
+  // A single very long line gets truncated rather than retained whole.
+  pty.emit('data', `${'a'.repeat(20_000)}\n`)
+  const firstLine = session.recentOutput[0]
+  assert.ok(firstLine !== undefined)
+  assert.ok(firstLine.length < 20_000)
+  assert.match(firstLine, /truncated/)
+
+  // Newline-free output that never terminates still gets chunked into the
+  // bounded line buffer (capped at MAX_OUTPUT_LINES) instead of growing a
+  // single pendingLine string without limit.
+  for (let i = 0; i < 600; i += 1) pty.emit('data', 'b'.repeat(8_000))
+  assert.ok(session.recentOutput.length <= 500)
+})
+
+test('recentOutputText reconstructs retained lines plus any unterminated fragment', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  pty.emit('data', 'line one\nline two\npartial')
+  assert.equal(session.recentOutputText, 'line one\nline two\npartial')
+})
+
 test('unexpected exit with a nonzero code marks the session crashed and emits a desktop-event', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })

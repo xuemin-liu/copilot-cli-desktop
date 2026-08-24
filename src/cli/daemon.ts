@@ -8,6 +8,7 @@ import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from '
 import { PtySession, type PtySessionExit } from '../main/pty-session.js'
 import { resolveCopilotBinary } from '../main/resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from '../main/resume-args.js'
+import { secretEnvArgs } from '../main/secure-credentials.js'
 import {
   ensureCliDirectories,
   claimControllerLock,
@@ -89,6 +90,12 @@ async function createSession(): Promise<PtySession> {
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId }),
     ...buildPermissionArgs(preset, workspace),
+    // The daemon has no vault of its own — it inherits process.env from
+    // whatever launched `copilot-desktop` — but PtySession still merges
+    // that env into the Copilot session, so any ambient GH_TOKEN/provider
+    // credential needs the same tool-descendant isolation the desktop app
+    // applies for vault-sourced ones.
+    ...secretEnvArgs(process.env),
   ]
   const instance = new PtySession({
     file: resolution.command,

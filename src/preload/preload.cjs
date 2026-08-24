@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   restartTab: (tabId) => ipcRenderer.invoke('desktop:restart-tab', tabId),
   writeTab: (tabId, data) => ipcRenderer.invoke('desktop:write-tab', tabId, data),
   resizeTab: (tabId, cols, rows) => ipcRenderer.invoke('desktop:resize-tab', tabId, cols, rows),
+  getTabBacklog: (tabId) => ipcRenderer.invoke('desktop:get-tab-backlog', tabId),
   openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
   showSessionLog: (tabId) => ipcRenderer.invoke('desktop:show-session-log', tabId),
   copyDiagnostics: () => ipcRenderer.invoke('desktop:copy-diagnostics'),

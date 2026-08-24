@@ -113,15 +113,23 @@ export function App(): JSX.Element {
             {state.tabs.map((tab) => (
               <TerminalPane key={tab.id} tabId={tab.id} active={tab.id === state.activeTabId} />
             ))}
-            {state.tabs.some((tab) => tab.status === 'crashed') && state.activeTabId && (
-              <button
-                type="button"
-                className="restart-button"
-                onClick={() => state.activeTabId && void window.copilotDesktop.restartTab(state.activeTabId)}
-              >
-                Restart this session
-              </button>
-            )}
+            {(() => {
+              // Restart the tab that actually crashed, not just whichever
+              // tab happens to be active — otherwise this button can kill
+              // and restart a healthy active session while an unrelated
+              // background tab is the one that crashed.
+              const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId)
+              if (activeTab?.status !== 'crashed') return null
+              return (
+                <button
+                  type="button"
+                  className="restart-button"
+                  onClick={() => void window.copilotDesktop.restartTab(activeTab.id)}
+                >
+                  Restart this session
+                </button>
+              )
+            })()}
           </div>
         </>
       )}

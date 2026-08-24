@@ -23,6 +23,7 @@ export interface CopilotDesktopBridge {
   restartTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
+  getTabBacklog(tabId: string): Promise<string>
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>
   copyDiagnostics(): Promise<void>

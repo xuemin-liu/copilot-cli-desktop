@@ -68,6 +68,8 @@ async function writeAtomic(filename: string, contents: string): Promise<void> {
  * refused outright rather than silently falling back to plaintext.
  */
 export class SecureCredentialStore {
+  private mutationQueue: Promise<unknown> = Promise.resolve()
+
   constructor(
     private readonly filename: string,
     private readonly encryption: EncryptionProvider,
@@ -75,6 +77,20 @@ export class SecureCredentialStore {
 
   isAvailable(): boolean {
     return this.encryption.isEncryptionAvailable()
+  }
+
+  /**
+   * saveCredential/deleteCredential each do read-modify-write against the
+   * same file. Two concurrent calls (e.g. saving two different variables in
+   * quick succession from the settings UI) can otherwise both read the same
+   * starting document, apply their own change, and write it back — the
+   * second write silently discards the first credential's update. Queue the
+   * whole transaction per store instance so writes are serialized.
+   */
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.then(operation)
+    this.mutationQueue = result.then(() => undefined, () => undefined)
+    return result
   }
 
   private async readDocument(): Promise<CredentialDocument> {
@@ -151,30 +167,34 @@ export class SecureCredentialStore {
     if (!this.isAvailable()) {
       throw new Error('Windows protected storage is unavailable; the credential was not saved')
     }
-    let document: CredentialDocument
-    try {
-      document = await this.readDocument()
-    } catch {
-      const backup = `${this.filename}.corrupt-${Date.now()}`
-      await rename(this.filename, backup)
-      document = { ...EMPTY_DOCUMENT }
-    }
-    const record: CredentialRecord = {
-      name,
-      encryptedValue: this.encryption.encryptString(normalizedSecret).toString('base64'),
-    }
-    document.credentials = [
-      ...document.credentials.filter((candidate) => candidate.name !== name),
-      record,
-    ].sort((left, right) => left.name.localeCompare(right.name))
-    await this.writeDocument(document)
+    await this.enqueueMutation(async () => {
+      let document: CredentialDocument
+      try {
+        document = await this.readDocument()
+      } catch {
+        const backup = `${this.filename}.corrupt-${Date.now()}`
+        await rename(this.filename, backup)
+        document = { ...EMPTY_DOCUMENT }
+      }
+      const record: CredentialRecord = {
+        name,
+        encryptedValue: this.encryption.encryptString(normalizedSecret).toString('base64'),
+      }
+      document.credentials = [
+        ...document.credentials.filter((candidate) => candidate.name !== name),
+        record,
+      ].sort((left, right) => left.name.localeCompare(right.name))
+      await this.writeDocument(document)
+    })
   }
 
   async deleteCredential(name: CredentialName): Promise<void> {
     if (!isCredentialName(name)) throw new Error('Unsupported credential variable')
-    const document = await this.readDocument()
-    document.credentials = document.credentials.filter((record) => record.name !== name)
-    await this.writeDocument(document)
+    await this.enqueueMutation(async () => {
+      const document = await this.readDocument()
+      document.credentials = document.credentials.filter((record) => record.name !== name)
+      await this.writeDocument(document)
+    })
   }
 
   /**
@@ -201,11 +221,20 @@ export class SecureCredentialStore {
  * Copilot CLI's `--secret-env-vars=<NAME>` flag keeps a named environment
  * variable available to the top-level `copilot` process (so it can still
  * authenticate) while withholding it from shell commands and MCP servers the
- * agent spawns. Every vault-decrypted value injected into a session's
- * environment must be marked this way — otherwise a malicious repository
- * instruction or tool invocation running inside that session could read the
- * credential straight out of its own process environment.
+ * agent spawns.
+ *
+ * This takes the FULL environment a session is about to receive — not just
+ * the subset resolved from the vault — because `PtySession` always merges
+ * `process.env` into that environment (see pty-session.ts). A credential
+ * that was already present ambiently (inherited from whatever launched the
+ * desktop or the background daemon) reaches Copilot exactly the same way a
+ * vault-decrypted one does, so it needs the same protection. Keying
+ * protection off "did the vault inject this" instead of "is this credential
+ * name present at all" would leave ambient credentials exposed to tool
+ * descendants.
  */
-export function secretEnvArgs(environment: Partial<Record<CredentialName, string>>): string[] {
-  return Object.keys(environment).map((name) => `--secret-env-vars=${name}`)
+export function secretEnvArgs(mergedEnvironment: NodeJS.ProcessEnv): string[] {
+  return CREDENTIAL_NAMES
+    .filter((name) => typeof mergedEnvironment[name] === 'string' && mergedEnvironment[name]!.length > 0)
+    .map((name) => `--secret-env-vars=${name}`)
 }
