@@ -1,0 +1,74 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $packageVersion = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$packageVersion") {
+            throw "Release tag $env:RELEASE_TAG does not match package version $packageVersion"
+          }
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Verify source
+        run: |
+          corepack pnpm typecheck
+          corepack pnpm test
+          corepack pnpm smoke
+          corepack pnpm cli:smoke
+      - name: Build Windows installer
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: corepack pnpm dist:win
+      - name: Verify update metadata and optional signature
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+        run: |
+          if (-not (Test-Path release/latest.yml)) {
+            throw 'electron-builder did not generate release/latest.yml'
+          }
+          if (-not (Get-ChildItem release -Filter '*.blockmap')) {
+            throw 'electron-builder did not generate an installer blockmap'
+          }
+          if ($env:CSC_LINK) {
+            $installers = @(Get-ChildItem release -Filter '*.exe')
+            if ($installers.Count -eq 0) {
+              throw 'electron-builder did not generate a Windows installer'
+            }
+            foreach ($installer in $installers) {
+              $signature = Get-AuthenticodeSignature $installer.FullName
+              if ($signature.Status -ne 'Valid') {
+                throw "Installer $($installer.Name) signature is $($signature.Status), not Valid"
+              }
+            }
+          } else {
+            Write-Warning 'WINDOWS_CSC_LINK is not set; publishing an unsigned release.'
+          }
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml

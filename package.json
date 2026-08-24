@@ -1,0 +1,84 @@
+{
+  "name": "copilot-cli-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "author": "copilot-cli-desktop contributors",
+  "description": "An unofficial Windows-first Electron desktop shell for the GitHub Copilot CLI",
+  "type": "module",
+  "packageManager": "pnpm@11.5.3",
+  "main": "dist/src/main/main.js",
+  "bin": {
+    "copilot-desktop": "dist/src/cli/cli.js"
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && npm run icon && tsc -p tsconfig.build.json && node scripts/build-renderer.mjs && node scripts/copy-static.mjs",
+    "icon": "node scripts/generate-icon.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron .",
+    "dev": "npm run start",
+    "test": "npm run build && node --test \"dist/src/**/*.test.js\"",
+    "smoke": "npm run build && node dist/scripts/smoke.js",
+    "cli": "npm run build && node dist/src/cli/cli.js",
+    "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
+    "pack:win": "npm run build && electron-builder --dir",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "electron-updater": "6.8.9",
+    "node-pty": "1.1.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@xterm/xterm": "6.0.0",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "build": {
+    "appId": "dev.copilot-cli-desktop.app",
+    "productName": "Copilot CLI Desktop",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "xuemin-liu",
+        "repo": "copilot-cli-desktop"
+      }
+    ],
+    "files": [
+      "dist/**/*",
+      "build/icon.png",
+      "package.json",
+      "README.md",
+      "LICENSE"
+    ],
+    "asarUnpack": [
+      "**/node-pty/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "Copilot-CLI-Desktop-Setup-${version}.${ext}"
+    }
+  }
+}
