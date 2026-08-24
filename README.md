@@ -1,9 +1,241 @@
 # Copilot CLI Desktop
 
-A Windows-first Electron desktop shell for the [GitHub Copilot CLI](https://github.com/github/copilot-cli)
-(`copilot`). This is an unofficial, community-built wrapper; it is not affiliated
-with, endorsed by, or supported by GitHub or Microsoft. GitHub Copilot is a
-trademark of GitHub, Inc.
+A Windows-first Electron desktop shell and background CLI for the
+[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`).
 
-Full feature documentation is on the way — see the `feature/initial-scaffold`
-pull request for the initial implementation.
+> **This is an unofficial, community-built wrapper around the public `copilot`
+> CLI.** It is not affiliated with, endorsed by, or supported by GitHub or
+> Microsoft. GitHub Copilot is a trademark of GitHub, Inc.
+
+Unlike a CLI with a bundled local web server, `copilot` is a terminal/TUI
+program. This app spawns it with [`node-pty`](https://github.com/microsoft/node-pty)
+and renders each session's real terminal in the desktop window using
+[`xterm.js`](https://xtermjs.org/), streamed over IPC from the sandboxed
+renderer's preload bridge — the renderer never gets a raw child-process or pty
+handle, only input/output/resize events.
+
+## Features
+
+- Resolves the `copilot` binary (PATH, then the location `gh` downloads it to,
+  then `gh copilot --`), and shows a recovery dashboard with a retry action
+  and a copyable diagnostic summary when it cannot be found.
+- A standard collapsible AI-tool sidebar with workspace/session search,
+  grouped or flat session views, manual/last-activity ordering, named recent
+  workspace profiles, manual session naming, attachment-aware session
+  creation, and restored session tabs.
+- Session resume: each tab remembers a best-effort captured session id and
+  auto-resumes with `--resume <id>` (or `--continue`) when reopened, plus a
+  manual "Resume session…" action that opens `copilot --resume`'s own
+  interactive picker directly inside the terminal pane.
+- Per-session pty process supervision: crash detection, a restart action, and
+  per-session log capture to disk under the app's user-data directory.
+- Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
+  each, with lifecycle badges (starting / running / needs-approval / stopping
+  / completed / crashed) restored per workspace profile.
+- A tray icon: closing the window hides it and keeps sessions running; the
+  tray menu can reopen the window, start a new tab, open settings, or quit.
+  Toggleable in Settings.
+- Native OS notifications on approval-needed, session-completed, and
+  session-crashed; clicking one focuses the window and the relevant tab.
+- An update center backed by `electron-updater`, pointed at this repository's
+  GitHub Releases.
+- Optional launch-at-login and an optional global show/hide shortcut
+  (Ctrl+Alt+H), both opt-in via Settings.
+- Provider settings for GitHub Copilot, OpenAI, Azure OpenAI, and Anthropic,
+  including base URL, model, and offline mode. A secure credential vault
+  (Windows DPAPI via Electron `safeStorage`) protects
+  `COPILOT_PROVIDER_API_KEY`, the legacy `COPILOT_PROVIDER_BASE_URL`, and the
+  supported GitHub token overrides `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and
+  `GITHUB_TOKEN`. If protected storage is unavailable, saving is refused
+  instead of silently falling back to plaintext.
+- Visible Windows elevation and permission-access status, with warnings for
+  high-trust modes and elevated launches.
+- Stops the full process tree for every running session on app quit.
+- A background CLI (`copilot-desktop`) with a token-protected, loopback-only
+  HTTP control server: `start` / `status` / `restart` / `logs` / `stop`.
+- Windows packaging via `electron-builder` (NSIS), post-package runtime
+  auditing, Windows CI, scheduled compatibility checks against the latest
+  Copilot CLI, and signed tag-triggered releases with unsigned publication
+  blocked.
+
+## Permission presets
+
+`copilot` has no single named permission-mode enum. It exposes flags instead:
+`--allow-tool`, `--deny-tool`, `--allow-all-tools` (`/yolo`), `--allow-url`,
+and `--add-dir` (trust a directory permanently). This app maps five presets
+onto that flag surface, set per workspace profile in Settings:
+
+| Preset | Flags applied | Behavior |
+| --- | --- | --- |
+| Default | (none) | Read-only actions run automatically; every mutating action (shell, edits, URL fetches, MCP tools) prompts. |
+| Restricted | `--deny-tool=write --deny-tool=shell` | Best-effort restriction for Copilot's current built-in shell and write tools. The CLI has no deny-by-default allowlist, so this is not a categorical read-only guarantee for future or third-party tools. |
+| Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
+| Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
+| Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
+
+See `src/main/permission-presets.ts`.
+
+## Session resume
+
+Each tab tracks a resume mode (per workspace profile, overridable per tab):
+
+- **New** — always starts a fresh session.
+- **Auto-resume** — uses `--resume <id>` with a session id best-effort
+  captured from prior pty output (see the heuristic caveat below); falls back
+  to a new session if no id is known yet.
+- **Continue** — always uses `--continue` (resumes the most recent session,
+  preferring the current working directory).
+- **Picker** — used by the "Resume session…" button; runs `copilot --resume`
+  with no id, so Copilot CLI's own interactive session picker renders
+  directly inside the xterm pane.
+
+See `src/main/resume-args.ts`.
+
+## Heuristics — read before relying on them
+
+Copilot CLI exposes a terminal stream rather than structured session events,
+so two behaviors remain best-effort regex heuristics over raw pty output:
+
+- **Approval-prompt detection** (`src/main/approval-heuristic.ts`,
+  `detectApprovalPrompt`) badges a tab "needs approval" and raises a
+  notification when recent output resembles a prompt (`"Allow ... ?"`,
+  `[y/n]`, "Do you want to proceed?", etc.). It will both miss real prompts
+  and misfire on unrelated text that merely resembles one.
+- **Session id capture** (`extractSessionId` in the same file) scans for
+  patterns like `Session ID: <id>` to populate auto-resume. If `copilot`'s
+  real banner text doesn't match, auto-resume silently falls back to a new
+  session instead of resuming.
+
+The resolver and real pty launch path are exercised against Copilot CLI in
+local smoke testing. These two heuristics still require maintenance if the
+CLI's human-readable output changes.
+
+## Requirements
+
+- Windows 10 or later for the packaged desktop application.
+- Node.js 24 and pnpm 11.5.3 for source development and the CLI.
+- The [`copilot` CLI](https://github.com/github/copilot-cli) itself, or the
+  [GitHub CLI](https://cli.github.com/) with the Copilot extension
+  (`gh extension install github/gh-copilot`), on PATH to actually spawn
+  sessions. Neither is required to build, typecheck, or run the unit tests.
+
+`node-pty` 1.x's native addon is built on `node-addon-api` (N-API), which is
+ABI-stable across Node.js and Electron — no `@electron/rebuild` or other
+native-rebuild step is required. This was verified in this repository's setup
+by loading the package's prebuilt Windows binary both under plain Node and
+under Electron (`ELECTRON_RUN_AS_NODE=1`) with no rebuild.
+
+## Development
+
+```powershell
+corepack enable
+corepack pnpm install
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm smoke
+corepack pnpm start
+```
+
+`pnpm smoke` and `pnpm cli:smoke` are best-effort: without a real `copilot`
+binary on PATH they log that and exit successfully rather than failing CI.
+With `copilot` installed locally, `pnpm smoke` resolves it and spawns a real,
+short-lived pty session end to end.
+
+## First run and the credential vault
+
+Choose a workspace folder from the main window, then open **File → Desktop
+Settings** to rename a profile, configure its permission preset and resume
+mode, select a provider, and save protected credentials. Paste only the value (for example
+`sk-...`), not a `NAME=value` assignment. The desktop app encrypts each value
+with Windows DPAPI (`safeStorage`) and decrypts it only into the environment
+of the pty process it spawns — it is never sent back to any renderer. An
+environment variable already set on the machine always takes precedence over
+a saved vault entry.
+
+The vault is global to the desktop app: a saved credential applies to every
+workspace profile's spawned sessions, since these are process environment
+variables, not per-project configuration.
+
+## Tray, notifications, and workspace profiles
+
+Closing the main window hides it while every session tab keeps running,
+unless disabled in Settings. Use the tray icon to reopen the window, start a
+new session tab, open Settings, or quit. Native notifications fire on
+approval-needed, session-completed, and session-crashed (also toggleable);
+clicking one focuses the window and the relevant tab.
+
+Workspace profiles are keyed by normalized folder path and remember a name,
+permission preset, default resume mode, and the last set of open tabs (title
++ best-effort captured session id) to restore next time that profile is
+activated.
+
+## Background CLI
+
+Run from the repository with `pnpm cli -- <command>`, or use
+`copilot-desktop` after installing/linking the package as a CLI.
+
+```powershell
+copilot-desktop start .                          # start copilot for the current directory
+copilot-desktop start D:\work\my-project --preset trusted-directory --resume-mode continue
+copilot-desktop status
+copilot-desktop status --json
+copilot-desktop restart
+copilot-desktop logs --tail 100
+copilot-desktop stop
+```
+
+The controller state and log live under
+`%APPDATA%\copilot-cli-desktop\cli`. Its private HTTP control server uses a
+random bearer token and listens only on `127.0.0.1`. Only one controller is
+supported per Windows user; set `COPILOT_DESKTOP_CLI_HOME` to isolate state
+for automation.
+
+**The background CLI spawns `copilot` as a plain piped child process, not a
+real pty** (`src/main/child-process-pty-backend.ts`) — there is no terminal
+UI attached to a detached background process to render into. `copilot`'s
+actual behavior without a real tty attached is unverified here; for full
+interactive TUI behavior, use the desktop app's session tabs instead. This is
+a deliberate, documented simplification, not an oversight.
+
+`pnpm cli:smoke` verifies the parts of the start/status/restart/logs/stop
+lifecycle that do not require a real `copilot` binary, and otherwise logs
+that a full run needs one installed locally.
+
+## Windows packaging
+
+```powershell
+pnpm pack:win   # unpacked application
+pnpm dist:win   # NSIS installer
+```
+
+Artifacts are written to `release/`. Local installers are unsigned. Public
+tagged releases require the GitHub Actions secrets `WINDOWS_CSC_LINK` and
+`WINDOWS_CSC_KEY_PASSWORD`; the release workflow refuses to publish when
+signing is unavailable. Packaging also audits the unpacked runtime for the
+application archive, native `node-pty` addon, and required executable files.
+
+## Continuous integration and releases
+
+The Windows CI workflow (`.github/workflows/ci.yml`) type-checks, runs unit
+tests, runs the best-effort smoke tests, and builds an unpacked application.
+Pushing a tag such as `v0.1.0` runs the same checks, builds the NSIS
+installer, and publishes it plus `latest.yml` (required by the in-app
+updater) to a GitHub release.
+
+The scheduled compatibility workflow (`.github/workflows/cli-compatibility.yml`)
+installs the latest Copilot CLI each week and reruns the type, unit, smoke, and
+CLI lifecycle checks. The detailed DeepSeek Harness comparison and every
+applicability decision are recorded in [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
+
+## Live-verification boundary
+
+Copilot CLI resolution and real pty startup are verified locally. Approval
+prompt wording, session-id banner parsing, every upstream provider account,
+and every possible resume history remain dependent on Copilot CLI and account
+state. Pure logic (permission-preset mapping, tab state, resume arguments,
+provider environment, encrypted-vault serialization, and pty lifecycle) is
+covered by unit tests and does not depend on a live account.
+
+## License
+
+This project is MIT licensed. See `LICENSE`.

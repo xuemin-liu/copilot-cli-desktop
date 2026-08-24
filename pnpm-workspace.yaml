@@ -1,0 +1,7 @@
+minimumReleaseAgeExclude:
+  - '@types/react-dom@19.2.5'
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  node-pty: true

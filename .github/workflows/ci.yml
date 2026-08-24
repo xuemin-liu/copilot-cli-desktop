@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Type-check
+        run: corepack pnpm typecheck
+      - name: Unit tests
+        run: corepack pnpm test
+      - name: Best-effort live copilot smoke test
+        run: corepack pnpm smoke
+      - name: Best-effort background CLI smoke test
+        run: corepack pnpm cli:smoke
+      - name: Build unpacked Windows application
+        run: corepack pnpm pack:win
+      - name: Upload unpacked application
+        uses: actions/upload-artifact@v7
+        with:
+          name: copilot-cli-desktop-windows-unpacked
+          path: release/win-unpacked/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
