@@ -12,6 +12,7 @@ const MAX_OUTPUT_LINES = 500
 // regardless of MAX_OUTPUT_LINES.
 const MAX_LINE_CHARS = 8_000
 const MAX_PENDING_CHARS = 64_000
+const MAX_HEURISTIC_CHARS = 16_000
 
 export interface PtySessionOptions {
   file: string
@@ -44,6 +45,7 @@ export class PtySession extends EventEmitter {
   private stopping = false
   private readonly outputLines: string[] = []
   private pendingLine = ''
+  private heuristicBuffer = ''
   private lastKnownSessionId: string | null = null
 
   constructor(options: PtySessionOptions) {
@@ -125,9 +127,13 @@ export class PtySession extends EventEmitter {
 
     pty.onData((data: string) => {
       this.recordOutput(data)
-      const sessionId = extractSessionId(data)
+      // PTY reads can split a prompt or session-id banner at any byte boundary.
+      // Scan a bounded rolling stream so the heuristics see text spanning
+      // adjacent reads rather than treating transport chunks as message lines.
+      this.heuristicBuffer = `${this.heuristicBuffer}${data}`.slice(-MAX_HEURISTIC_CHARS)
+      const sessionId = extractSessionId(this.heuristicBuffer)
       if (sessionId) this.lastKnownSessionId = sessionId
-      if (detectApprovalPrompt(data)) {
+      if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {
         this.setStatus('approval-needed')
         this.emit('desktop-event', { type: 'approval-needed' })
       } else if (this.statusValue !== 'running' && this.statusValue !== 'approval-needed') {
@@ -163,8 +169,9 @@ export class PtySession extends EventEmitter {
 
   /** Send raw keystrokes/input to the pty. Also clears an approval-needed badge. */
   write(data: string): void {
-    if (!this.pty) throw new Error('This session is not running')
+    if (!this.pty) return
     if (this.statusValue === 'approval-needed') this.setStatus('running')
+    this.heuristicBuffer = ''
     this.pty.write(data)
   }
 
@@ -212,6 +219,7 @@ export class PtySession extends EventEmitter {
     this.stopping = false
     this.outputLines.length = 0
     this.pendingLine = ''
+    this.heuristicBuffer = ''
     await this.start()
   }
 }

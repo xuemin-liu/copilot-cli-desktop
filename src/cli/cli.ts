@@ -16,6 +16,7 @@ import {
   type DaemonState,
   type PublicDaemonState,
 } from './runtime-state.js'
+import { findWorkspaceArgument } from './start-arguments.js'
 
 const paths = getCliPaths()
 const daemonEntry = fileURLToPath(new URL('./daemon.js', import.meta.url))
@@ -220,7 +221,7 @@ async function main(): Promise<void> {
   switch (command) {
     case 'start': {
       const rest = args.slice(1)
-      const workspace = rest.find((argument, index) => !argument.startsWith('--') && rest[index - 1] !== '--preset' && rest[index - 1] !== '--resume-mode' && rest[index - 1] !== '--session-id')
+      const workspace = findWorkspaceArgument(rest)
       await start(workspace, rest)
       break
     }

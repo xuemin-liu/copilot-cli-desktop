@@ -14,6 +14,7 @@ test('a clean exit reports exitCode 0 and no signal', async () => {
   })
   assert.equal(exit.exitCode, 0)
   assert.equal(exit.signal, undefined)
+  assert.doesNotThrow(() => pty.write('late input'))
 })
 
 test('termination by signal is preserved as a failure with the real signal number, not exitCode 0', async () => {

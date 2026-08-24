@@ -36,7 +36,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | DeepSeek Harness capability | Copilot CLI Desktop equivalent | Status |
 | --- | --- | --- |
 | Named recent workspace profiles | Named profiles keyed by normalized folder path | Equivalent |
-| Read-only permission | Denies Copilot `write` and `shell` tools at launch | Equivalent within Copilot’s permission model |
+| Read-only permission | Restricted preset denies Copilot’s current built-in `write` and `shell` tools | Best available mapping; Copilot exposes no deny-by-default allowlist, so the UI explicitly avoids claiming a categorical read-only guarantee |
 | Workspace/default permission | Default prompt mode and trusted-directory mode | Equivalent |
 | Full computer access | Official Copilot `--allow-all` mode | Equivalent |
 | Permission shown in Settings/tray | Settings access card, sidebar badge, and tray label | Equivalent |

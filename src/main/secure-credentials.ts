@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { readFile, rm } from 'node:fs/promises'
+import { quarantineCorruptFile, writeFileAtomic } from './atomic-file.js'
 
 /**
  * GitHub Copilot CLI's bring-your-own-key (BYOK) support reads
@@ -56,17 +56,6 @@ export interface CredentialStatus {
   available: boolean
   entries: CredentialStatusEntry[]
   storeError: boolean
-}
-
-async function writeAtomic(filename: string, contents: string): Promise<void> {
-  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
-  const temporary = `${filename}.${process.pid}.${Date.now()}.tmp`
-  try {
-    await writeFile(temporary, contents, { encoding: 'utf8', mode: 0o600 })
-    await rename(temporary, filename)
-  } finally {
-    await rm(temporary, { force: true }).catch(() => {})
-  }
 }
 
 /**
@@ -141,7 +130,7 @@ export class SecureCredentialStore {
       await rm(this.filename, { force: true })
       return
     }
-    await writeAtomic(this.filename, `${JSON.stringify(document, null, 2)}\n`)
+    await writeFileAtomic(this.filename, `${JSON.stringify(document, null, 2)}\n`)
   }
 
   async status(): Promise<CredentialStatus> {
@@ -179,8 +168,7 @@ export class SecureCredentialStore {
       try {
         document = await this.readDocument()
       } catch {
-        const backup = `${this.filename}.corrupt-${Date.now()}`
-        await rename(this.filename, backup)
+        await quarantineCorruptFile(this.filename)
         document = { ...EMPTY_DOCUMENT }
       }
       const record: CredentialRecord = {

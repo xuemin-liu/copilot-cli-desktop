@@ -68,7 +68,7 @@ onto that flag surface, set per workspace profile in Settings:
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
 | Default | (none) | Read-only actions run automatically; every mutating action (shell, edits, URL fetches, MCP tools) prompts. |
-| Read only | `--deny-tool=write --deny-tool=shell` | Explicitly denies Copilot's write and shell tools. Other tool integrations still follow Copilot's own permission model. |
+| Restricted | `--deny-tool=write --deny-tool=shell` | Best-effort restriction for Copilot's current built-in shell and write tools. The CLI has no deny-by-default allowlist, so this is not a categorical read-only guarantee for future or third-party tools. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
 | Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |

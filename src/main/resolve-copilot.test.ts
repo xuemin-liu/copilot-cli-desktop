@@ -26,13 +26,27 @@ test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
 test('resolveCopilotBinary returns the absolute copilot executable path on Windows', async () => {
   const copilotPath = 'C:\\Users\\tester\\AppData\\Local\\Microsoft\\WinGet\\Links\\copilot.exe'
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
-    'copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
     'where.exe copilot': { stdout: `${copilotPath}\r\n` },
+    [`${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 0.9.1\n' },
   }), 'win32')
   assert.equal(resolution.kind, 'direct')
   assert.equal(resolution.command, copilotPath)
   assert.equal(resolution.resolvedPath, copilotPath)
   assert.equal(resolution.version, '0.9.1')
+})
+
+test('resolveCopilotBinary launches an npm-installed Windows command shim through cmd.exe', async () => {
+  const copilotPath = 'C:\\Users\\tester\\AppData\\Roaming\\npm\\copilot.cmd'
+  const commandShell = 'C:\\Windows\\System32\\cmd.exe'
+  const resolution = await resolveCopilotBinary({ ComSpec: commandShell }, fakeExecFile({
+    'where.exe copilot': { stdout: `${copilotPath}\r\n` },
+    [`${commandShell} /d /s /c ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
+  }), 'win32')
+  assert.equal(resolution.kind, 'direct')
+  assert.equal(resolution.command, commandShell)
+  assert.deepEqual(resolution.prefixArgs, ['/d', '/s', '/c', copilotPath])
+  assert.equal(resolution.resolvedPath, copilotPath)
+  assert.equal(resolution.version, '1.0.80')
 })
 
 test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH', async () => {

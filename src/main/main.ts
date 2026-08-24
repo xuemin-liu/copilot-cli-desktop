@@ -55,6 +55,7 @@ import {
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
+import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
 const BACKGROUND_START_ARGUMENT = '--background'
@@ -183,7 +184,7 @@ async function writeSessionLog(tabId: string, chunk: string): Promise<void> {
     sessionLogBytesWritten.set(tabId, written + chunkBytes)
     return
   }
-  const truncated = Buffer.from(chunk, 'utf8').subarray(0, MAX_SESSION_LOG_BYTES - written).toString('utf8')
+  const truncated = truncateUtf8(chunk, MAX_SESSION_LOG_BYTES - written)
   await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, 'utf8').catch(() => {})
   sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
 }
@@ -580,7 +581,21 @@ async function selectWorkspace(): Promise<DesktopState> {
   })
   const workspace = selection.filePaths[0]
   if (selection.canceled || !workspace) return snapshot()
-  const profile = activateWorkspaceProfile(desktopConfig, workspace)
+  let profile: WorkspaceProfile
+  try {
+    profile = activateWorkspaceProfile(
+      desktopConfig,
+      workspace,
+      new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId)),
+    )
+  } catch (error) {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Workspace limit reached',
+      message: error instanceof Error ? error.message : String(error),
+    })
+    return snapshot()
+  }
   syncWorkspaceState()
   await persistConfig()
   broadcastState()

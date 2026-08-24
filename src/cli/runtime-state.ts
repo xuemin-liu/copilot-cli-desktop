@@ -1,7 +1,8 @@
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises'
+import { quarantineCorruptFile, writeFileAtomic } from '../main/atomic-file.js'
 
 export type DaemonStatus = 'starting' | 'running' | 'restarting' | 'crashed' | 'stopping'
 
@@ -53,12 +54,7 @@ export async function ensureCliDirectories(paths: CliPaths): Promise<void> {
  * (best effort) and treat it the same as "no state" rather than crashing.
  */
 async function quarantineCorruptState(paths: CliPaths): Promise<void> {
-  try {
-    await rename(paths.statePath, `${paths.statePath}.corrupt-${Date.now()}`)
-  } catch {
-    // Best effort: if even the rename fails, callers still get `null` back
-    // instead of a thrown parse error.
-  }
+  await quarantineCorruptFile(paths.statePath)
 }
 
 export async function readDaemonState(paths: CliPaths): Promise<DaemonState | null> {
@@ -99,22 +95,7 @@ export async function readDaemonState(paths: CliPaths): Promise<DaemonState | nu
 }
 
 export async function writeDaemonState(paths: CliPaths, state: DaemonState): Promise<void> {
-  await mkdir(dirname(paths.statePath), { recursive: true })
-  const temporaryPath = `${paths.statePath}.${process.pid}.${randomUUID()}.tmp`
-  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(temporaryPath, paths.statePath)
-      return
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (!['EACCES', 'EBUSY', 'EPERM'].includes(code ?? '') || attempt >= 4) {
-        await rm(temporaryPath, { force: true })
-        throw error
-      }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25 * (attempt + 1)))
-    }
-  }
+  await writeFileAtomic(paths.statePath, `${JSON.stringify(state, null, 2)}\n`)
 }
 
 interface ControllerLock {

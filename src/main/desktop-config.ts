@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { basename, dirname, resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
+import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
@@ -34,7 +35,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
-const MAX_PROFILES = 20
+export const MAX_PROFILES = 20
 const MAX_RESTORED_TABS = 20
 
 export function workspaceProfileId(path: string): string {
@@ -57,12 +58,26 @@ export function createWorkspaceProfile(
   }
 }
 
-export function activateWorkspaceProfile(config: DesktopConfig, path: string): WorkspaceProfile {
+export function activateWorkspaceProfile(
+  config: DesktopConfig,
+  path: string,
+  protectedProfileIds: ReadonlySet<string> = new Set(),
+): WorkspaceProfile {
   const normalized = resolve(path)
   const id = workspaceProfileId(normalized)
   const existing = config.profiles.find((profile) => profile.id === id)
   const profile = existing ?? createWorkspaceProfile(normalized)
-  config.profiles = [profile, ...config.profiles.filter((candidate) => candidate.id !== id)].slice(0, MAX_PROFILES)
+  const ordered = [profile, ...config.profiles.filter((candidate) => candidate.id !== id)]
+  if (ordered.length > MAX_PROFILES) {
+    const evictionIndex = ordered.findLastIndex(
+      (candidate, index) => index > 0 && !protectedProfileIds.has(candidate.id),
+    )
+    if (evictionIndex < 0) {
+      throw new Error(`Close a workspace session before adding more than ${MAX_PROFILES} workspace profiles`)
+    }
+    ordered.splice(evictionIndex, 1)
+  }
+  config.profiles = ordered
   config.activeProfileId = profile.id
   return profile
 }
@@ -160,12 +175,5 @@ export async function readDesktopConfig(filename: string): Promise<DesktopConfig
 }
 
 export async function writeDesktopConfig(filename: string, config: DesktopConfig): Promise<void> {
-  await mkdir(dirname(filename), { recursive: true })
-  const temporary = `${filename}.${process.pid}.${Date.now()}.tmp`
-  try {
-    await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    await rename(temporary, filename)
-  } finally {
-    await rm(temporary, { force: true }).catch(() => {})
-  }
+  await writeFileAtomic(filename, `${JSON.stringify(config, null, 2)}\n`)
 }

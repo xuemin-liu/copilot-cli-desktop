@@ -70,6 +70,19 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
+test('approval and session-id heuristics reassemble text split across pty chunks', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+
+  pty.emit('data', 'Do you want to pro')
+  assert.equal(session.status, 'running')
+  pty.emit('data', 'ceed with this edit?\nSession ID: work-')
+  assert.equal(session.status, 'approval-needed')
+  pty.emit('data', 'session-9\n')
+  assert.equal(session.lastSessionId, 'work-session-9')
+})
+
 test('approval-needed stays up across ordinary output until an explicit transition', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
@@ -165,4 +178,14 @@ test('resize() forwards to the underlying pty', async () => {
   await session.start()
   session.resize(120, 40)
   assert.deepEqual(pty.resized, [[120, 40]])
+})
+
+test('write() and resize() safely ignore a session that has already exited', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  pty.emit('exit', { exitCode: 1, signal: undefined })
+  assert.doesNotThrow(() => session.write('late input'))
+  assert.doesNotThrow(() => session.resize(80, 24))
+  assert.deepEqual(pty.written, [])
 })

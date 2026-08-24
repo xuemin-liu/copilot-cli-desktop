@@ -38,20 +38,30 @@ async function tryVersion(
   }
 }
 
-async function resolveWindowsExecutable(
+async function resolveWindowsCommand(
   command: string,
   env: NodeJS.ProcessEnv,
   execFileFn: ExecFileFn,
 ): Promise<{ path: string | null; error: unknown | null }> {
   try {
     const { stdout } = await execFileFn('where.exe', [command], { env, timeout: 8_000, windowsHide: true })
-    const path = stdout
+    const candidates = stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .find((line) => win32.isAbsolute(line) && line.toLowerCase().endsWith('.exe'))
-    return { path: path ?? null, error: path ? null : new Error('no absolute .exe path was returned') }
+      .filter((line) => win32.isAbsolute(line) && /\.(exe|cmd|bat)$/i.test(line))
+    const path = candidates.find((line) => line.toLowerCase().endsWith('.exe')) ?? candidates[0]
+    return { path: path ?? null, error: path ? null : new Error('no absolute executable or command shim was returned') }
   } catch (error) {
     return { path: null, error }
+  }
+}
+
+function windowsLaunch(path: string, env: NodeJS.ProcessEnv): Pick<CopilotResolution, 'command' | 'prefixArgs' | 'resolvedPath'> {
+  if (path.toLowerCase().endsWith('.exe')) return { command: path, prefixArgs: [], resolvedPath: path }
+  return {
+    command: env.ComSpec ?? env.COMSPEC ?? 'cmd.exe',
+    prefixArgs: ['/d', '/s', '/c', path],
+    resolvedPath: path,
   }
 }
 
@@ -71,25 +81,25 @@ export async function resolveCopilotBinary(
 ): Promise<CopilotResolution> {
   const attempts: string[] = []
 
-  const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
-  if (direct.ok) {
-    if (platform !== 'win32') {
-      return { kind: 'direct', command: 'copilot', prefixArgs: [], resolvedPath: null, version: direct.version, error: null }
-    }
-    const located = await resolveWindowsExecutable('copilot', env, execFileFn)
+  if (platform === 'win32') {
+    const located = await resolveWindowsCommand('copilot', env, execFileFn)
     if (located.path) {
-      return {
-        kind: 'direct',
-        command: located.path,
-        prefixArgs: [],
-        resolvedPath: located.path,
-        version: direct.version,
-        error: null,
+      const launch = windowsLaunch(located.path, env)
+      const direct = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], env, execFileFn)
+      if (direct.ok) {
+        return { kind: 'direct', ...launch, version: direct.version, error: null }
       }
+      attempts.push(`${located.path} --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
+    } else {
+      attempts.push(`where.exe copilot: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
     }
-    attempts.push(`where.exe copilot: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
   } else {
-    attempts.push(`copilot --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
+    const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
+    if (direct.ok) {
+      return { kind: 'direct', command: 'copilot', prefixArgs: [], resolvedPath: null, version: direct.version, error: null }
+    } else {
+      attempts.push(`copilot --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
+    }
   }
 
   const localAppData = env.LOCALAPPDATA
@@ -104,25 +114,31 @@ export async function resolveCopilotBinary(
     }
   }
 
-  const wrapped = await tryVersion('gh', ['copilot', '--', '--version'], env, execFileFn)
-  if (wrapped.ok) {
-    if (platform !== 'win32') {
-      return { kind: 'gh-wrapped', command: 'gh', prefixArgs: ['copilot', '--'], resolvedPath: null, version: wrapped.version, error: null }
-    }
-    const located = await resolveWindowsExecutable('gh', env, execFileFn)
+  if (platform === 'win32') {
+    const located = await resolveWindowsCommand('gh', env, execFileFn)
     if (located.path) {
-      return {
-        kind: 'gh-wrapped',
-        command: located.path,
-        prefixArgs: ['copilot', '--'],
-        resolvedPath: located.path,
-        version: wrapped.version,
-        error: null,
+      const launch = windowsLaunch(located.path, env)
+      const wrapped = await tryVersion(launch.command, [...launch.prefixArgs, 'copilot', '--', '--version'], env, execFileFn)
+      if (wrapped.ok) {
+        return {
+          kind: 'gh-wrapped',
+          ...launch,
+          prefixArgs: [...launch.prefixArgs, 'copilot', '--'],
+          version: wrapped.version,
+          error: null,
+        }
       }
+      attempts.push(`${located.path} copilot -- --version: ${wrapped.error instanceof Error ? wrapped.error.message : String(wrapped.error)}`)
+    } else {
+      attempts.push(`where.exe gh: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
     }
-    attempts.push(`where.exe gh: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
   } else {
-    attempts.push(`gh copilot -- --version: ${wrapped.error instanceof Error ? wrapped.error.message : String(wrapped.error)}`)
+    const wrapped = await tryVersion('gh', ['copilot', '--', '--version'], env, execFileFn)
+    if (wrapped.ok) {
+      return { kind: 'gh-wrapped', command: 'gh', prefixArgs: ['copilot', '--'], resolvedPath: null, version: wrapped.version, error: null }
+    } else {
+      attempts.push(`gh copilot -- --version: ${wrapped.error instanceof Error ? wrapped.error.message : String(wrapped.error)}`)
+    }
   }
 
   return {

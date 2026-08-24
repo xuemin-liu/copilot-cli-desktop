@@ -29,6 +29,10 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
+  // A child can exit between PtySession's liveness check and a stdin write.
+  // Writable streams emit an unhandled `error` in that race unless a listener
+  // is present, which would otherwise terminate the background daemon.
+  child.stdin?.on('error', () => undefined)
 
   return {
     pid: child.pid,
@@ -51,7 +55,12 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
       })
     },
     write: (data) => {
-      child.stdin?.write(data)
+      if (!child.stdin || child.stdin.destroyed || !child.stdin.writable) return
+      try {
+        child.stdin.write(data)
+      } catch {
+        // The exit event will update the owning session; late input is dropped.
+      }
     },
     // A plain piped child process has no pty to resize; COLUMNS/LINES were
     // already fixed at spawn time via the environment.

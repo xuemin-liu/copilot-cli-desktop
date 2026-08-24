@@ -9,7 +9,7 @@ import type { WorkspaceProfile } from '../../main/types.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = [
   { value: 'default', label: 'Default (prompt every time)' },
-  { value: 'read-only', label: 'Read only (deny shell and writes)' },
+  { value: 'read-only', label: 'Restricted (deny current shell/write tools)' },
   { value: 'trusted-directory', label: 'Trusted directory' },
   { value: 'full-auto', label: 'Full auto (--allow-all-tools)' },
   { value: 'full-access', label: 'Full computer access (--allow-all)' },

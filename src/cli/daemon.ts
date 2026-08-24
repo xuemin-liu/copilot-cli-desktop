@@ -9,6 +9,7 @@ import { PtySession, type PtySessionExit } from '../main/pty-session.js'
 import { resolveCopilotBinary } from '../main/resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from '../main/resume-args.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
+import type { CopilotResolution } from '../main/types.js'
 import {
   ensureCliDirectories,
   claimControllerLock,
@@ -19,19 +20,16 @@ import {
   writeDaemonState,
   type DaemonState,
 } from './runtime-state.js'
+import { START_OPTION_FLAGS, flagValue } from './start-arguments.js'
 
 const paths = getCliPaths()
 const workspace = resolve(process.argv[2] ?? process.cwd())
 const rawArgs = process.argv.slice(3)
-function flagValue(name: string): string | undefined {
-  const index = rawArgs.indexOf(name)
-  return index >= 0 ? rawArgs[index + 1] : undefined
-}
-const presetArgument = flagValue('--preset')
+const presetArgument = flagValue(rawArgs, START_OPTION_FLAGS.preset)
 const preset: PermissionPreset = isPermissionPreset(presetArgument) ? presetArgument : 'default'
-const resumeModeArgument = flagValue('--resume-mode')
+const resumeModeArgument = flagValue(rawArgs, START_OPTION_FLAGS.resumeMode)
 const resumeMode: ResumeMode = isResumeMode(resumeModeArgument) ? resumeModeArgument : 'new'
-const lastSessionId = flagValue('--session-id') ?? null
+const lastSessionId = flagValue(rawArgs, START_OPTION_FLAGS.sessionId) ?? null
 
 const lockToken: string = process.env.COPILOT_DESKTOP_LOCK_TOKEN ?? ''
 if (!lockToken) throw new Error('The controller startup lock token is missing')
@@ -44,6 +42,7 @@ let stoppingRequested = false
 let controllerLockClaimed = false
 let stateWriteQueue = Promise.resolve()
 let mutationQueue = Promise.resolve()
+let copilotResolution: CopilotResolution | null = null
 
 async function log(message: string): Promise<void> {
   await appendFile(paths.logPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
@@ -81,11 +80,9 @@ function authorized(request: IncomingMessage): boolean {
   return request.headers.authorization === `Bearer ${token}`
 }
 
-async function createSession(): Promise<PtySession> {
-  const resolution = await resolveCopilotBinary()
-  if (resolution.version === null) {
-    throw new Error(resolution.error ?? 'The copilot CLI could not be resolved')
-  }
+function createSession(): PtySession {
+  const resolution = copilotResolution
+  if (!resolution || resolution.version === null) throw new Error('The copilot CLI has not been resolved')
   const args = [
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId }),
@@ -139,7 +136,7 @@ async function restartSession(): Promise<void> {
     await previous.stop()
     previous.removeAllListeners()
     if (stoppingRequested) return
-    const replacement = await createSession()
+    const replacement = createSession()
     session = replacement
     await startSession('restarting', replacement)
   } catch (error) {
@@ -311,7 +308,10 @@ async function initialize(): Promise<void> {
   }
   await writeDaemonState(paths, state)
   await log(`Controller started (PID ${process.pid}) for ${workspace}`)
-  const instance = await createSession()
+  const resolution = await resolveCopilotBinary()
+  if (resolution.version === null) throw new Error(resolution.error ?? 'The copilot CLI could not be resolved')
+  copilotResolution = resolution
+  const instance = createSession()
   session = instance
   await enqueueMutation(() => startSession('starting', instance))
 }

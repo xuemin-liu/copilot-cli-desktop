@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 import {
   DEFAULT_DESKTOP_CONFIG,
+  MAX_PROFILES,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
   readDesktopConfig,
@@ -44,6 +45,33 @@ test('activateWorkspaceProfile creates a profile on first use and reuses it afte
   const reactivatedFirst = activateWorkspaceProfile(config, 'C:\\work\\project-a')
   assert.equal(reactivatedFirst.id, first.id)
   assert.equal(config.profiles.length, 2, 'reactivating an existing profile does not duplicate it')
+})
+
+test('activateWorkspaceProfile never evicts a profile with open session tabs', () => {
+  const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
+  for (let index = 0; index < MAX_PROFILES; index += 1) {
+    activateWorkspaceProfile(config, `C:\\work\\project-${index}`)
+  }
+  const protectedId = config.profiles.at(-1)?.id
+  assert.ok(protectedId)
+  const evictableId = config.profiles.at(-2)?.id
+  activateWorkspaceProfile(config, 'C:\\work\\new-project', new Set([protectedId]))
+  assert.equal(config.profiles.length, MAX_PROFILES)
+  assert.ok(config.profiles.some((profile) => profile.id === protectedId))
+  assert.ok(!config.profiles.some((profile) => profile.id === evictableId))
+})
+
+test('activateWorkspaceProfile refuses a new profile when every retained profile has open tabs', () => {
+  const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
+  for (let index = 0; index < MAX_PROFILES; index += 1) {
+    activateWorkspaceProfile(config, `C:\\work\\project-${index}`)
+  }
+  const protectedIds = new Set(config.profiles.map((profile) => profile.id))
+  assert.throws(
+    () => activateWorkspaceProfile(config, 'C:\\work\\overflow', protectedIds),
+    /Close a workspace session/,
+  )
+  assert.equal(config.profiles.length, MAX_PROFILES)
 })
 
 test('workspaceProfileId is stable across path casing on the same normalized path', () => {

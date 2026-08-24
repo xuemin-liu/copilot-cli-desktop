@@ -32,9 +32,10 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
   },
   'read-only': {
     id: 'read-only',
-    label: 'Read only',
+    label: 'Restricted (deny shell/write)',
     description:
-      'Shell execution and file-writing tools are denied at startup. Read, search, and analysis remain available.',
+      'Best-effort restriction using Copilot CLI\'s current denylist: built-in shell and write tools are blocked. '
+      + 'Copilot has no deny-by-default allowlist, so future or third-party tool categories are not categorically read-only.',
   },
   'trusted-directory': {
     id: 'trusted-directory',
