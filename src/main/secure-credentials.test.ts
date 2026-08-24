@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { SecureCredentialStore, type EncryptionProvider } from './secure-credentials.js'
+import { SecureCredentialStore, secretEnvArgs, type EncryptionProvider } from './secure-credentials.js'
 
 function fakeEncryption(available = true): EncryptionProvider {
   return {
@@ -101,4 +101,15 @@ test('writing an empty document removes the file entirely', async () => {
     await store.deleteCredential('GH_TOKEN')
     await assert.rejects(() => readFile(filename, 'utf8'), /ENOENT/)
   })
+})
+
+test('secretEnvArgs marks every injected vault variable as a Copilot secret env var', () => {
+  assert.deepEqual(
+    secretEnvArgs({ GH_TOKEN: 'gho_test', COPILOT_PROVIDER_API_KEY: 'sk-test' }),
+    ['--secret-env-vars=GH_TOKEN', '--secret-env-vars=COPILOT_PROVIDER_API_KEY'],
+  )
+})
+
+test('secretEnvArgs produces no flags when nothing was injected', () => {
+  assert.deepEqual(secretEnvArgs({}), [])
 })

@@ -32,3 +32,8 @@ test('extractSessionId reads an id referenced inside a --resume hint', () => {
 test('extractSessionId returns null when no id-shaped text is present', () => {
   assert.equal(extractSessionId('Copilot is ready. Type a message to begin.'), null)
 })
+
+test('extractSessionId rejects an option-looking captured value instead of treating it as an id', () => {
+  assert.equal(extractSessionId('session id: --allow-all-tools'), null)
+  assert.equal(extractSessionId('session_id=-abcd'), null)
+})

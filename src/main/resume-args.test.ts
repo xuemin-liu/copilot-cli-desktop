@@ -17,15 +17,26 @@ test('buildResumeArgs: picker opens the interactive --resume session picker with
   assert.deepEqual(buildResumeArgs({ mode: 'picker', lastSessionId: 'abc123' }), ['--resume'])
 })
 
-test('buildResumeArgs: auto-resume targets a known session id', () => {
+test('buildResumeArgs: auto-resume targets a known session id as a single argv token', () => {
   assert.deepEqual(
     buildResumeArgs({ mode: 'auto-resume', lastSessionId: 'abc123' }),
-    ['--resume', 'abc123'],
+    ['--resume=abc123'],
   )
 })
 
 test('buildResumeArgs: auto-resume falls back to a new session with no known id', () => {
   assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: null }), [])
+})
+
+test('buildResumeArgs: auto-resume rejects an option-looking session id instead of injecting a flag', () => {
+  assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: '--allow-all-tools' }), [])
+  assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: '-x' }), [])
+})
+
+test('buildResumeArgs: auto-resume rejects ids outside the safe identifier grammar', () => {
+  assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: 'has a space' }), [])
+  assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: '' }), [])
+  assert.deepEqual(buildResumeArgs({ mode: 'auto-resume', lastSessionId: 'a'.repeat(65) }), [])
 })
 
 test('isResumeMode narrows valid modes and rejects everything else', () => {

@@ -196,3 +196,16 @@ export class SecureCredentialStore {
     return environment
   }
 }
+
+/**
+ * Copilot CLI's `--secret-env-vars=<NAME>` flag keeps a named environment
+ * variable available to the top-level `copilot` process (so it can still
+ * authenticate) while withholding it from shell commands and MCP servers the
+ * agent spawns. Every vault-decrypted value injected into a session's
+ * environment must be marked this way — otherwise a malicious repository
+ * instruction or tool invocation running inside that session could read the
+ * credential straight out of its own process environment.
+ */
+export function secretEnvArgs(environment: Partial<Record<CredentialName, string>>): string[] {
+  return Object.keys(environment).map((name) => `--secret-env-vars=${name}`)
+}

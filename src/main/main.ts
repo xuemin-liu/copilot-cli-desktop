@@ -32,7 +32,7 @@ import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from '
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { resolveCopilotBinary } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
-import { SecureCredentialStore, isCredentialName, type CredentialName } from './secure-credentials.js'
+import { SecureCredentialStore, isCredentialName, secretEnvArgs, type CredentialName } from './secure-credentials.js'
 import {
   EMPTY_TABS_STATE,
   activateTab,
@@ -322,12 +322,13 @@ async function createSessionTab(
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const resolution = state.resolution
+  const environment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const args = [
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
+    ...secretEnvArgs(environment),
   ]
-  const environment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const session = new PtySession({
     file: resolution.command,
     args,
