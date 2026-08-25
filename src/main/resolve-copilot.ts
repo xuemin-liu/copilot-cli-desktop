@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import type { CopilotResolution } from './types.js'
 
 const execFileAsync = promisify(execFile)
+const COPILOT_PROBE_TIMEOUT_MS = 8_000
 
 export type ExecFileFn = (
   file: string,
@@ -31,7 +32,7 @@ async function tryVersion(
   execFileFn: ExecFileFn,
 ): Promise<{ ok: true; version: string | null } | { ok: false; error: unknown }> {
   try {
-    const { stdout, stderr } = await execFileFn(command, args, { env, timeout: 8_000, windowsHide: true })
+    const { stdout, stderr } = await execFileFn(command, args, { env, timeout: COPILOT_PROBE_TIMEOUT_MS, windowsHide: true })
     return { ok: true, version: parseVersion(stdout || stderr) }
   } catch (error) {
     return { ok: false, error }
@@ -44,7 +45,7 @@ async function resolveWindowsCommand(
   execFileFn: ExecFileFn,
 ): Promise<{ path: string | null; error: unknown | null }> {
   try {
-    const { stdout } = await execFileFn('where.exe', [command], { env, timeout: 8_000, windowsHide: true })
+    const { stdout } = await execFileFn('where.exe', [command], { env, timeout: COPILOT_PROBE_TIMEOUT_MS, windowsHide: true })
     const candidates = stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
