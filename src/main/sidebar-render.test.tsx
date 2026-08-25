@@ -47,7 +47,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
         lastSessionId: null,
         status: 'running',
         processId: 42,
-        permissionPreset: 'default',
+        launchedPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
@@ -96,7 +96,7 @@ test('Sidebar shows current session access and marks changed access as applying 
         lastSessionId: null,
         status: 'running',
         processId: 42,
-        permissionPreset: 'default',
+        launchedPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
@@ -129,7 +129,7 @@ test('Sidebar uses the active tab workspace and surfaces legacy restriction warn
   ]
   const markup = renderAccess(profiles, {
     id: 'tab-2', title: 'Two', workspaceProfileId: 'workspace-2', lastSessionId: null,
-    status: 'running', processId: 42, permissionPreset: 'read-only',
+    status: 'running', processId: 42, launchedPermissionPreset: 'read-only',
     permissionWarning: 'Only shell and write tools are denied.', remote: false, lastActivityAt: 123,
   })
 
@@ -145,12 +145,12 @@ test('Sidebar does not claim effective access for remote or stopped sessions', (
   }]
   const remoteMarkup = renderAccess(profiles, {
     id: 'remote', title: 'Remote', workspaceProfileId: 'workspace-1', lastSessionId: null,
-    status: 'running', processId: 42, permissionPreset: null, permissionWarning: null,
+    status: 'running', processId: 42, launchedPermissionPreset: null, permissionWarning: null,
     remote: true, lastActivityAt: 123,
   })
   const stoppedMarkup = renderAccess(profiles, {
     id: 'stopped', title: 'Stopped', workspaceProfileId: 'workspace-1', lastSessionId: null,
-    status: 'completed', processId: null, permissionPreset: 'full-access', permissionWarning: null,
+    status: 'completed', processId: null, launchedPermissionPreset: 'full-access', permissionWarning: null,
     remote: false, lastActivityAt: 123,
   })
 

@@ -16,8 +16,8 @@ import {
   type TabsState,
 } from './session-tab-machine.js'
 
-function createTab(state: TabsState, input: Omit<NewTabInput, 'permissionPreset' | 'permissionWarning' | 'remote'>): TabsState {
-  return createTabState(state, { ...input, permissionPreset: 'default', permissionWarning: null, remote: false })
+function createTab(state: TabsState, input: Omit<NewTabInput, 'launchedPermissionPreset' | 'permissionWarning' | 'remote'>): TabsState {
+  return createTabState(state, { ...input, launchedPermissionPreset: 'default', permissionWarning: null, remote: false })
 }
 
 test('createTab adds a starting tab and makes it active', () => {
@@ -31,7 +31,7 @@ test('createTab adds a starting tab and makes it active', () => {
     lastSessionId: null,
     status: 'starting',
     processId: null,
-    permissionPreset: 'default',
+    launchedPermissionPreset: 'default',
     permissionWarning: null,
     remote: false,
     lastActivityAt: 123,

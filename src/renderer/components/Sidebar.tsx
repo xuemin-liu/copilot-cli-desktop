@@ -79,7 +79,7 @@ export function Sidebar({
   const sessionIsLive = activeTab
     ? activeTab.status === 'starting' || activeTab.status === 'running' || activeTab.status === 'approval-needed'
     : false
-  const displayedPreset = sessionIsLive ? activeTab?.permissionPreset ?? null : null
+  const displayedPreset = sessionIsLive ? activeTab?.launchedPermissionPreset ?? null : null
   const configuredPreset = activeTabProfile?.permissionPreset ?? null
   const pendingPreset = configuredPreset && displayedPreset && configuredPreset !== displayedPreset
     ? configuredPreset

@@ -34,7 +34,7 @@ export interface DesktopSessionTab {
   status: SessionLifecycleStatus
   processId: number | null
   /** Permission preset captured when this local Copilot process was launched; unknown for remote connections. */
-  permissionPreset: PermissionPreset | null
+  launchedPermissionPreset: PermissionPreset | null
   permissionWarning: string | null
   remote: boolean
   /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */

@@ -49,9 +49,11 @@ export async function readAccessStatus(
   profilePreset: PermissionPreset,
   capabilities: { toolAllowlist: boolean },
 ): Promise<AccessStatus> {
-  const environmentAllowsAll = /^(1|true|yes)$/i.test(process.env.COPILOT_ALLOW_ALL ?? '')
-  const permissionPreset: PermissionPreset = environmentAllowsAll ? 'full-access' : profilePreset
-  const permissionSource: AccessStatus['permissionSource'] = environmentAllowsAll ? 'environment' : 'profile'
+  // This surface reports the workspace's configured startup preset. Ambient
+  // environment variables can alter individual Copilot permission dimensions,
+  // but must not be reinterpreted here as the broader --allow-all preset.
+  const permissionPreset = profilePreset
+  const permissionSource: AccessStatus['permissionSource'] = 'profile'
   const elevation = await cachedElevation()
   const warnings: string[] = []
   const compatibilityWarning = permissionCompatibilityWarning(permissionPreset, capabilities)
