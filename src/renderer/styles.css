@@ -583,6 +583,70 @@ button:disabled {
   right: 16px;
 }
 
+.dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(4 6 10 / 72%);
+}
+
+.input-dialog {
+  width: min(430px, 100%);
+  padding: 20px;
+  border: 1px solid #3a404c;
+  border-radius: 12px;
+  background: #171b23;
+  box-shadow: 0 20px 70px rgb(0 0 0 / 55%);
+}
+
+.input-dialog h2 {
+  margin: 0 0 18px;
+  font-size: 18px;
+}
+
+.input-dialog label {
+  display: block;
+  margin-bottom: 7px;
+  color: #b8c0cc;
+}
+
+.input-dialog input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #414957;
+  border-radius: 7px;
+  outline: none;
+  background: #0d1118;
+  color: #f2f5fa;
+  font: inherit;
+}
+
+.input-dialog input:focus {
+  border-color: #537de8;
+  box-shadow: 0 0 0 2px rgb(83 125 232 / 18%);
+}
+
+.input-dialog-error {
+  margin: 9px 0 0;
+  color: #ff858d;
+}
+
+.input-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.input-dialog-actions button {
+  min-height: 36px;
+  padding: 0 14px;
+}
+
 .diagnostics-view {
   max-width: 640px;
   margin: 40px auto;
@@ -632,6 +696,7 @@ button:disabled {
 
 .settings-app select,
 .settings-app input[type="text"],
+.settings-app input[type="number"],
 .settings-app input[type="url"],
 .settings-app input[type="password"] {
   min-height: 34px;
@@ -640,6 +705,25 @@ button:disabled {
   border-radius: 7px;
   background: #22252d;
   color: #eef2f8;
+}
+
+.resource-output {
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #2d323d;
+  border-radius: 8px;
+  background: #090d14;
+  color: #cbd5e1;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-field-action {
+  display: flex;
+  align-items: end;
+  gap: 8px;
 }
 
 .settings-app input:disabled,

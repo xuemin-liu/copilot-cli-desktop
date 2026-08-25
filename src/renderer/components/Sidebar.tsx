@@ -43,6 +43,7 @@ export interface SidebarProps {
   onCreateTab: () => void
   onCreateTabWithAttachments: () => void
   onResumePicker: () => void
+  onConnectRemote: () => void
   onOpenSettings: () => void
 }
 
@@ -61,6 +62,7 @@ export function Sidebar({
   onCreateTab,
   onCreateTabWithAttachments,
   onResumePicker,
+  onConnectRemote,
   onOpenSettings,
 }: SidebarProps): JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false)
@@ -154,6 +156,16 @@ export function Sidebar({
             onClick={onResumePicker}
           >
             ↻
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            title="Connect to a remote Copilot session"
+            aria-label="Connect to a remote Copilot session"
+            disabled={activeProfileId === null || !canOpenTab}
+            onClick={onConnectRemote}
+          >
+            ⇄
           </button>
           <button
             type="button"

@@ -39,3 +39,21 @@ test('readDaemonState quarantines and returns null for a structurally invalid do
     await assert.rejects(() => readFile(paths.statePath, 'utf8'), /ENOENT/)
   })
 })
+
+test('readDaemonState upgrades legacy state files without a warning field', async () => {
+  await withTempCliHome(async (paths) => {
+    await writeFile(paths.statePath, JSON.stringify({
+      version: 1,
+      pid: 123,
+      controlPort: 3210,
+      token: 'test-token',
+      workspace: 'D:\\work\\project',
+      processId: null,
+      status: 'running',
+      startedAt: '2026-08-25T00:00:00.000Z',
+      error: null,
+    }), 'utf8')
+    const state = await readDaemonState(paths)
+    assert.equal(state?.warning, null)
+  })
+})

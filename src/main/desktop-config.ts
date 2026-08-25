@@ -5,6 +5,7 @@ import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
+import { DEFAULT_SESSION_LAUNCH_CONFIG, normalizeSessionLaunchConfig } from './session-launch.js'
 import type { RestoredTab, WorkspaceProfile } from './types.js'
 
 export interface DesktopConfig {
@@ -54,6 +55,7 @@ export function createWorkspaceProfile(
     path: normalized,
     permissionPreset,
     defaultResumeMode,
+    launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG },
     tabs: [],
   }
 }
@@ -148,6 +150,7 @@ export async function readDesktopConfig(filename: string): Promise<DesktopConfig
         path: normalized,
         permissionPreset,
         defaultResumeMode,
+        launch: normalizeSessionLaunchConfig(profile.launch),
         tabs: readRestoredTabs(profile.tabs),
       })
       if (profiles.length >= MAX_PROFILES) break

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { JSX } from 'react'
+import type { FormEvent, JSX } from 'react'
 import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
@@ -18,13 +18,40 @@ const EMPTY_STATE: DesktopState = {
   error: null,
 }
 
+type InputDialog =
+  | { kind: 'rename'; tabId: string; value: string; pending: boolean; error: string | null }
+  | { kind: 'remote'; value: string; pending: boolean; error: string | null }
+
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
   const [loading, setLoading] = useState(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
+  const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const requestTabRename = (tabId: string, currentTitle: string): void => {
-    const title = window.prompt('Session title', currentTitle)
-    if (title !== null) void window.copilotDesktop.renameTab(tabId, title)
+    setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
+  }
+
+  const submitInputDialog = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault()
+    if (!inputDialog || inputDialog.pending) return
+    const value = inputDialog.value.trim()
+    if (!value) {
+      setInputDialog({ ...inputDialog, error: inputDialog.kind === 'remote' ? 'Enter a session or task ID.' : 'Enter a session title.' })
+      return
+    }
+    setInputDialog({ ...inputDialog, pending: true, error: null })
+    const request = inputDialog.kind === 'remote'
+      ? window.copilotDesktop.connectRemoteSession(value)
+      : window.copilotDesktop.renameTab(inputDialog.tabId, value)
+    void request
+      .then(() => setInputDialog(null))
+      .catch((error: unknown) => {
+        setInputDialog((current) => current ? {
+          ...current,
+          pending: false,
+          error: error instanceof Error ? error.message : String(error),
+        } : current)
+      })
   }
 
   useEffect(() => {
@@ -77,6 +104,10 @@ export function App(): JSX.Element {
           const next = await window.copilotDesktop.retryResolution()
           setState(next)
         }}
+        onInstall={async () => {
+          const next = await window.copilotDesktop.installCopilot()
+          setState(next)
+        }}
         onCopyDiagnostics={() => window.copilotDesktop.copyDiagnostics()}
       />
     )
@@ -106,6 +137,7 @@ export function App(): JSX.Element {
         onCreateTabWithAttachments={() => void window.copilotDesktop.createTabWithAttachments()}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => void window.copilotDesktop.createTab('picker')}
+        onConnectRemote={() => setInputDialog({ kind: 'remote', value: '', pending: false, error: null })}
       />
       <main className="main-content">
         {state.activeProfileId === null ? (
@@ -161,6 +193,34 @@ export function App(): JSX.Element {
           </>
         )}
       </main>
+      {inputDialog && (
+        <div className="dialog-backdrop" role="presentation">
+          <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}>
+            <h2 id="input-dialog-title">
+              {inputDialog.kind === 'remote' ? 'Connect to remote session' : 'Rename session'}
+            </h2>
+            <label htmlFor="input-dialog-value">
+              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : 'Session title'}
+            </label>
+            <input
+              id="input-dialog-value"
+              type="text"
+              autoFocus
+              maxLength={inputDialog.kind === 'remote' ? 128 : 120}
+              value={inputDialog.value}
+              disabled={inputDialog.pending}
+              onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
+            />
+            {inputDialog.error && <p className="input-dialog-error" role="alert">{inputDialog.error}</p>}
+            <div className="input-dialog-actions">
+              <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
+              <button type="submit" className="primary-button" disabled={inputDialog.pending}>
+                {inputDialog.pending ? 'Working…' : inputDialog.kind === 'remote' ? 'Connect' : 'Rename'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   )
 }

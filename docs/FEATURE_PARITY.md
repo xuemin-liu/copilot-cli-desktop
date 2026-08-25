@@ -14,7 +14,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Group/order view options | Workspace vs one-list grouping and manual vs last-activity ordering | Equivalent |
 | Add workspace | Native directory picker | Equivalent |
 | Session list and native tabs | Sidebar session rows plus top tabs, lifecycle indicators, close/activate shortcuts | Equivalent |
-| Generated session titles | Session titles can be renamed by double-clicking a tab or sidebar row | Equivalent within CLI limits; Copilot exposes no structured title event |
+| Generated session titles | Fresh sessions receive `--name`; desktop titles can also be renamed locally | Equivalent at creation; later local renames do not interrupt an active prompt to inject `/rename` |
 | Settings anchored in sidebar | Persistent Settings action | Equivalent |
 | Multiple Harness windows sharing one web server | Not enabled for PTY sessions | Not safely applicable: a ConPTY has one authoritative viewport; independently resized terminal renderers would corrupt layout and input ownership |
 
@@ -23,20 +23,20 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | DeepSeek Harness capability | Copilot CLI Desktop equivalent | Status |
 | --- | --- | --- |
 | Rich Chat view | Real Copilot terminal/TUI rendered by xterm.js | Equivalent upstream UI |
-| Trajectory/tool-call view | Copilot CLI renders its own tool execution and approval UI in the terminal | Structurally different; no supported structured event stream is available |
+| Trajectory/tool-call view | Copilot CLI renders its own tool execution and approval UI in the terminal | Equivalent upstream TUI; ACP now offers a public-preview structured stream for a future hybrid frontend |
 | Message composer | Copilot CLI interactive prompt | Equivalent upstream UI |
 | File attachments | “New Session with Attachments…” passes official `--attachment` arguments | Equivalent |
-| Model selector | GitHub-hosted selection remains in Copilot; Desktop Settings configures official OpenAI-compatible, Azure, and Anthropic BYOK providers | Equivalent |
-| Plan/execute modes | Copilot CLI’s native Shift+Tab mode switching | Equivalent upstream UI |
-| Session history/resume | New, auto-resume, continue, and interactive picker modes | Equivalent |
-| Token/tool metrics | Copilot CLI’s own status and usage rendering | Upstream-owned; no structured desktop API |
+| Model selector | Per-workspace initial model/reasoning/context settings plus Copilot's native `/model` picker | Equivalent |
+| Plan/execute modes | Per-workspace interactive, plan, autopilot, and plan-then-autopilot defaults plus native Shift+Tab switching | Equivalent |
+| Session history/resume | Deterministic UUIDs, Copilot names, auto-resume, continue, interactive picker, and remote connect | Equivalent |
+| Token/tool metrics | Copilot CLI status/usage rendering and upstream OpenTelemetry export | Equivalent upstream; a native metrics dashboard is optional rather than required for parity |
 
 ## Workspaces, permissions, and process access
 
 | DeepSeek Harness capability | Copilot CLI Desktop equivalent | Status |
 | --- | --- | --- |
 | Named recent workspace profiles | Named profiles keyed by normalized folder path | Equivalent |
-| Read-only permission | Restricted preset denies Copilot’s current built-in `write` and `shell` tools | Best available mapping; Copilot exposes no deny-by-default allowlist, so the UI explicitly avoids claiming a categorical read-only guarantee |
+| Read-only permission | Restricted preset uses `--available-tools=view,glob,grep,ask_user` | Explicit allowlist; mutating, network, extension, memory, and delegated-agent tools are unavailable to the model |
 | Workspace/default permission | Default prompt mode and trusted-directory mode | Equivalent |
 | Full computer access | Official Copilot `--allow-all` mode | Equivalent |
 | Permission shown in Settings/tray | Settings access card, sidebar badge, and tray label | Equivalent |
@@ -78,8 +78,14 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Packaged dependency audit | Verifies ASAR, executable, and unpacked native node-pty addon | Equivalent to Copilot’s runtime shape |
 | Runtime compatibility schedule | Weekly job installs latest official `@github/copilot` and runs tests/smokes | Equivalent |
 | Dependency update automation | Dependabot for npm and GitHub Actions | Equivalent |
-| Background control CLI | Token-protected loopback start/status/restart/logs/stop controller | Equivalent |
+| Copilot CLI install/update | Native install, repair, update, version, and capability status | Equivalent plus recovery workflow |
+| Extension management | Native plugin/skill/MCP discovery and management backed by official Copilot commands | Equivalent |
+| Background control CLI | Token-protected controller plus official programmatic `run --prompt` workflow | Equivalent |
 
 ## Architectural boundary
 
-DeepSeek Harness publishes a complete Web UI and a local HTTP server, so its desktop wrapper embeds structured routes, sessions, messages, and trajectories. GitHub Copilot CLI publishes a terminal UI plus command-line and Agent Client Protocol modes. This project deliberately uses the supported interactive terminal surface. Recreating the terminal as an independently parsed HTML chat frontend would be a forked, fragile UI rather than feature parity.
+DeepSeek Harness publishes a complete Web UI and a local HTTP server, so its desktop wrapper embeds structured routes, sessions, messages, and trajectories. GitHub Copilot CLI publishes three applicable supported surfaces: its terminal UI, programmatic prompt mode, and the public-preview Agent Client Protocol (ACP) server.
+
+The production desktop continues to use the full upstream TUI because terminal-only dialogs such as diff, resume, tasks, login, and settings are not all available through ACP. ACP does provide streamed agent messages, permission requests, session IDs, and authoritative command discovery, so a future rich chat/tool-card view should use ACP with a TUI fallback. Parsing terminal escape sequences into an HTML chat view remains explicitly out of scope.
+
+Copilot's OpenTelemetry export is the supported structured source for token, cost, latency, tool-call, and code-change metrics. The app does not claim that these metrics are unavailable simply because they are not duplicated in the desktop renderer.

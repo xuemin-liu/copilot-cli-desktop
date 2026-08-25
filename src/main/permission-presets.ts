@@ -32,10 +32,10 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
   },
   'read-only': {
     id: 'read-only',
-    label: 'Restricted (deny shell/write)',
+    label: 'Restricted (explicit read/search allowlist)',
     description:
-      'Best-effort restriction using Copilot CLI\'s current denylist: built-in shell and write tools are blocked. '
-      + 'Copilot has no deny-by-default allowlist, so future or third-party tool categories are not categorically read-only.',
+      'Only Copilot\'s explicit file-view and search tools are exposed to the model. Shell, write, web, MCP, skill, '
+      + 'memory, and delegated-agent tools are unavailable.',
   },
   'trusted-directory': {
     id: 'trusted-directory',
@@ -63,17 +63,27 @@ export function isPermissionPreset(value: unknown): value is PermissionPreset {
   return typeof value === 'string' && (PERMISSION_PRESETS as readonly string[]).includes(value)
 }
 
+export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
+  return preset === 'read-only'
+}
+
 /**
  * Build the `copilot` CLI launch flags for a permission preset. `workspacePath`
  * must be an absolute, already-resolved path — this function does not resolve
  * or validate it.
  */
-export function buildPermissionArgs(preset: PermissionPreset, workspacePath: string): string[] {
+export function buildPermissionArgs(
+  preset: PermissionPreset,
+  workspacePath: string,
+  capabilities: { toolAllowlist: boolean },
+): string[] {
   switch (preset) {
     case 'default':
       return []
     case 'read-only':
-      return ['--deny-tool=write', '--deny-tool=shell']
+      return capabilities.toolAllowlist
+        ? ['--available-tools=view,glob,grep,ask_user']
+        : ['--deny-tool=write', '--deny-tool=shell']
     case 'trusted-directory':
       return ['--add-dir', workspacePath]
     case 'full-auto':
@@ -85,4 +95,14 @@ export function buildPermissionArgs(preset: PermissionPreset, workspacePath: str
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)
     }
   }
+}
+
+export function permissionCompatibilityWarning(
+  preset: PermissionPreset,
+  capabilities: { toolAllowlist: boolean },
+): string | null {
+  if (preset !== 'read-only' || capabilities.toolAllowlist) return null
+  return 'Restricted mode is using legacy compatibility flags because this Copilot CLI does not support tool allowlists. '
+    + 'Only shell and write tools are denied; web, MCP, skills, memory, and delegated-agent tools may remain available. '
+    + 'Update Copilot CLI for the full read/search-only restriction.'
 }
