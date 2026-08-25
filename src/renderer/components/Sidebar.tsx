@@ -73,13 +73,18 @@ export function Sidebar({
   const normalizedQuery = query.trim().toLowerCase()
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
-  const activeSessionPreset = activeTab && activeTab.workspaceProfileId === activeProfile?.id
-    ? activeTab.permissionPreset
+  const activeTabProfile = activeTab
+    ? profiles.find((profile) => profile.id === activeTab.workspaceProfileId) ?? null
+    : activeProfile
+  const sessionIsLive = activeTab
+    ? activeTab.status === 'starting' || activeTab.status === 'running' || activeTab.status === 'approval-needed'
+    : false
+  const displayedPreset = sessionIsLive ? activeTab?.permissionPreset ?? null : null
+  const configuredPreset = activeTabProfile?.permissionPreset ?? null
+  const pendingPreset = configuredPreset && displayedPreset && configuredPreset !== displayedPreset
+    ? configuredPreset
     : null
-  const displayedPreset = activeSessionPreset ?? activeProfile?.permissionPreset ?? null
-  const pendingPreset = activeProfile && activeSessionPreset && activeProfile.permissionPreset !== activeSessionPreset
-    ? activeProfile.permissionPreset
-    : null
+  const configuredOnly = !sessionIsLive && configuredPreset
   const startSession = (): void => {
     if (activeProfileId === null) onSelectWorkspace()
     else onCreateTab()
@@ -280,20 +285,29 @@ export function Sidebar({
         })}
       </div>
 
-      {activeProfile && displayedPreset && (
+      {activeTab?.remote && sessionIsLive ? (
+        <div className="sidebar-access" title="The desktop cannot determine permissions configured by the remote session host.">
+          <span className="sidebar-access-dot" aria-hidden="true" />
+          <span>Remote session access unknown</span>
+        </div>
+      ) : displayedPreset ? (
         <div
           className={`sidebar-access sidebar-access-${displayedPreset}`}
-          title={pendingPreset
-            ? `${PERMISSION_PRESET_INFO[displayedPreset].description} ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to new sessions.`
-            : PERMISSION_PRESET_INFO[displayedPreset].description}
+          title={[PERMISSION_PRESET_INFO[displayedPreset].description, activeTab?.permissionWarning].filter(Boolean).join(' ')}
         >
           <span className="sidebar-access-dot" aria-hidden="true" />
           <span>
             {PERMISSION_PRESET_INFO[displayedPreset].label}
-            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to new sessions`}
+            {activeTab?.permissionWarning && ' · Legacy restricted mode'}
+            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to newly created sessions (Restart keeps current access)`}
           </span>
         </div>
-      )}
+      ) : configuredOnly ? (
+        <div className={`sidebar-access sidebar-access-${configuredOnly}`} title="No session is currently running with this setting.">
+          <span className="sidebar-access-dot" aria-hidden="true" />
+          <span>{PERMISSION_PRESET_INFO[configuredOnly].label} applies to newly created sessions</span>
+        </div>
+      ) : null}
       <button type="button" className="sidebar-settings" onClick={onOpenSettings}>
         <span aria-hidden="true">⚙</span>
         <span>Settings</span>

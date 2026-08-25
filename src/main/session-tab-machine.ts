@@ -14,7 +14,9 @@ export interface NewTabInput {
   id: string
   title: string
   workspaceProfileId: string
-  permissionPreset?: PermissionPreset
+  permissionPreset: PermissionPreset | null
+  permissionWarning: string | null
+  remote: boolean
   lastSessionId?: string | null
   lastActivityAt?: number
 }
@@ -33,7 +35,9 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     lastSessionId: input.lastSessionId ?? null,
     status: 'starting',
     processId: null,
-    permissionPreset: input.permissionPreset ?? 'default',
+    permissionPreset: input.permissionPreset,
+    permissionWarning: input.permissionWarning,
+    remote: input.remote,
     lastActivityAt: input.lastActivityAt ?? Date.now(),
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }

@@ -52,7 +52,7 @@ import {
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { spawnNodePty } from './node-pty-backend.js'
-import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, type PermissionPreset } from './permission-presets.js'
+import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import {
   isCopilotProviderType,
   providerEnvironment,
@@ -359,7 +359,7 @@ function rebuildTrayMenu(): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Copilot CLI Desktop', click: restoreMainWindow },
     { label: trayStatusLabel(), enabled: false },
-    { label: `Access: ${activeAccessLabel()}`, enabled: false },
+    { label: `Configured startup access: ${activeAccessLabel()}`, enabled: false },
     { type: 'separator' },
     {
       label: 'New Session Tab',
@@ -523,7 +523,9 @@ async function createSessionTab(
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
     workspaceProfileId: profile.id,
-    permissionPreset: profile.permissionPreset,
+    permissionPreset: connectSessionId ? null : profile.permissionPreset,
+    permissionWarning: connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+    remote: connectSessionId !== null,
     lastSessionId: deterministicSessionId,
   })
   syncTabState()
