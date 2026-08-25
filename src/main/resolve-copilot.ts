@@ -83,9 +83,9 @@ export function withCopilotPathAdditions(
 /**
  * Resolve how to launch the GitHub Copilot CLI:
  *  1. `copilot` directly on PATH.
- *  2. The location `gh` downloads it to when missing: `%LOCALAPPDATA%\GitHub
- *     CLI\copilot\copilot.exe`.
- *  3. `gh copilot -- <args>`, which downloads the binary on first use.
+ *  2. The legacy GitHub CLI-managed location:
+ *     `%LOCALAPPDATA%\GitHub CLI\copilot\copilot.exe`.
+ *  3. A compatible `gh copilot -- <args>` installation, when present.
  * Diagnostics from every attempt are preserved on `error` for a recovery
  * dashboard when nothing resolves.
  */
@@ -189,7 +189,7 @@ export async function resolveCopilotBinary(
     version: null,
     error: [
       'The copilot CLI was not found on PATH, at the expected GitHub CLI install location, or via `gh copilot`.',
-      'Install it from https://github.com/github/copilot-cli, or install the GitHub CLI (`gh`) and run `gh extension install github/gh-copilot`.',
+      'Install it with `winget install GitHub.Copilot` or `npm install -g @github/copilot`, or use the Install action in this app.',
       ...attempts,
     ].join('\n'),
   }
