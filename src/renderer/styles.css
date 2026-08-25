@@ -632,6 +632,7 @@ button:disabled {
 
 .settings-app select,
 .settings-app input[type="text"],
+.settings-app input[type="number"],
 .settings-app input[type="url"],
 .settings-app input[type="password"] {
   min-height: 34px;
@@ -640,6 +641,25 @@ button:disabled {
   border-radius: 7px;
   background: #22252d;
   color: #eef2f8;
+}
+
+.resource-output {
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #2d323d;
+  border-radius: 8px;
+  background: #090d14;
+  color: #cbd5e1;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.settings-field-action {
+  display: flex;
+  align-items: end;
+  gap: 8px;
 }
 
 .settings-app input:disabled,

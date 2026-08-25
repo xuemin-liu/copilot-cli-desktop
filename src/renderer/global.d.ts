@@ -4,6 +4,10 @@ import type { ResumeMode } from '../main/resume-args.js'
 import type { CredentialName } from '../main/secure-credentials.js'
 import type { AccessStatus } from '../main/access-status.js'
 import type { CopilotProviderConfig } from '../main/provider-config.js'
+import type { SessionLaunchConfig } from '../main/session-launch.js'
+import type { CopilotCapabilities } from '../main/copilot-command.js'
+import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
+import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 
 export interface TabOutputPayload {
   tabId: string
@@ -21,6 +25,7 @@ export interface CopilotDesktopBridge {
   activateProfile(profileId: string): Promise<DesktopState>
   createTab(resumeMode?: ResumeMode | null): Promise<DesktopState>
   createTabWithAttachments(): Promise<DesktopState>
+  connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
   renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
@@ -35,6 +40,7 @@ export interface CopilotDesktopBridge {
   showTerminalContextMenu(text: string): Promise<void>
   copyDiagnostics(): Promise<void>
   retryResolution(): Promise<DesktopState>
+  installCopilot(): Promise<DesktopState>
   onStateChanged(listener: (state: DesktopState) => void): () => void
   onTabOutput(listener: (payload: TabOutputPayload) => void): () => void
   onTabExit(listener: (payload: TabExitPayload) => void): () => void
@@ -71,6 +77,9 @@ export interface DesktopSettingsSnapshot {
   access: AccessStatus
   provider: CopilotProviderConfig
   cliVersion: string | null
+  cliCapabilities: CopilotCapabilities
+  cliMaintenance: CopilotMaintenanceState
+  resources: CopilotResourcesState
 }
 
 export interface CopilotDesktopSettingsBridge {
@@ -88,6 +97,7 @@ export interface CopilotDesktopSettingsBridge {
     name: string,
     permissionPreset: PermissionPreset,
     defaultResumeMode: ResumeMode,
+    launch: SessionLaunchConfig,
   ): Promise<DesktopSettingsSnapshot>
   updateProvider(provider: CopilotProviderConfig): Promise<DesktopSettingsSnapshot>
   checkForUpdates(): Promise<DesktopSettingsSnapshot>
@@ -97,6 +107,14 @@ export interface CopilotDesktopSettingsBridge {
   openRollbackRelease(): Promise<void>
   saveCredential(name: CredentialName, secret: string): Promise<DesktopSettingsSnapshot>
   deleteCredential(name: CredentialName): Promise<DesktopSettingsSnapshot>
+  installCopilot(): Promise<DesktopSettingsSnapshot>
+  updateCopilot(): Promise<DesktopSettingsSnapshot>
+  refreshCopilotResources(): Promise<DesktopSettingsSnapshot>
+  mutateCopilotResource(action: CopilotResourceAction, kind: CopilotResourceKind, name: string): Promise<DesktopSettingsSnapshot>
+  installCopilotPlugin(source: string): Promise<DesktopSettingsSnapshot>
+  installCopilotSkill(source: string, project: boolean): Promise<DesktopSettingsSnapshot>
+  addCopilotMcp(name: string, url: string, transport: 'http' | 'sse'): Promise<DesktopSettingsSnapshot>
+  openCopilotConfig(): Promise<void>
   onUpdateStateChanged(listener: (state: DesktopSettingsSnapshot['update']) => void): () => void
 }
 

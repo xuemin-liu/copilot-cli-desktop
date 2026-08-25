@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   createTab: (resumeMode) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null),
   createTabWithAttachments: () => ipcRenderer.invoke('desktop:create-tab-with-attachments'),
+  connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
   renameTab: (tabId, title) => ipcRenderer.invoke('desktop:rename-tab', tabId, title),
   closeTab: (tabId) => ipcRenderer.invoke('desktop:close-tab', tabId),
@@ -20,6 +21,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   showTerminalContextMenu: (text) => ipcRenderer.invoke('desktop:show-terminal-context-menu', text),
   copyDiagnostics: () => ipcRenderer.invoke('desktop:copy-diagnostics'),
   retryResolution: () => ipcRenderer.invoke('desktop:retry-resolution'),
+  installCopilot: () => ipcRenderer.invoke('desktop:install-copilot'),
   onStateChanged: (listener) => {
     const handler = (_event, state) => listener(state)
     ipcRenderer.on('desktop:state-changed', handler)

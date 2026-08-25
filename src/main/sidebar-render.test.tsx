@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 import { Sidebar } from '../renderer/components/Sidebar.js'
 
 test('Sidebar groups live sessions under their workspace and exposes primary actions', () => {
@@ -12,6 +13,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
         path: 'D:\\work\\copilot-cli-desktop',
         permissionPreset: 'default',
         defaultResumeMode: 'new',
+        launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG },
         tabs: [],
       }]}
       tabs={[{
@@ -35,6 +37,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
       onCreateTab={() => undefined}
       onCreateTabWithAttachments={() => undefined}
       onResumePicker={() => undefined}
+      onConnectRemote={() => undefined}
       onOpenSettings={() => undefined}
     />,
   )

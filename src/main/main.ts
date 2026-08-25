@@ -28,6 +28,28 @@ import {
   type DesktopConfig,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
+import {
+  EMPTY_COPILOT_CAPABILITIES,
+  discoverCopilotCapabilities,
+  runCopilotCommand,
+  type CopilotCapabilities,
+} from './copilot-command.js'
+import {
+  DEFAULT_COPILOT_MAINTENANCE_STATE,
+  installCopilotCli,
+  updateCopilotCli,
+  type CopilotMaintenanceState,
+} from './copilot-maintenance.js'
+import {
+  DEFAULT_COPILOT_RESOURCES_STATE,
+  buildPluginInstallArgs,
+  buildRemoteMcpAddArgs,
+  buildResourceMutationArgs,
+  buildSkillInstallArgs,
+  isCopilotResourceAction,
+  isCopilotResourceKind,
+  type CopilotResourcesState,
+} from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, type PermissionPreset } from './permission-presets.js'
@@ -40,6 +62,11 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
+import {
+  buildSessionLaunchArgs,
+  normalizeSessionLaunchConfig,
+  type SessionLaunchConfig,
+} from './session-launch.js'
 import { SecureCredentialStore, isCredentialName, secretEnvArgs, type CredentialName } from './secure-credentials.js'
 import {
   EMPTY_TABS_STATE,
@@ -77,6 +104,9 @@ let trayHintShown = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
+let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
+let copilotMaintenance: CopilotMaintenanceState = { ...DEFAULT_COPILOT_MAINTENANCE_STATE }
+let copilotResources: CopilotResourcesState = { ...DEFAULT_COPILOT_RESOURCES_STATE }
 
 interface ManagedTab {
   session: PtySession
@@ -417,6 +447,8 @@ async function createSessionTab(
   resumeModeOverride: ResumeMode | null = null,
   restoreLastSessionId: string | null = null,
   attachmentPaths: string[] = [],
+  connectSessionId: string | null = null,
+  titleOverride: string | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (!state.resolution || state.resolution.version === null) {
@@ -427,6 +459,29 @@ async function createSessionTab(
 
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
+  const freshSession = !connectSessionId && resumeMode === 'new'
+  if (connectSessionId && !copilotCapabilities.remoteSessions) {
+    throw new Error('This Copilot CLI version does not support remote sessions; update it from Settings')
+  }
+  if (profile.permissionPreset === 'read-only' && !copilotCapabilities.toolAllowlist) {
+    throw new Error('Restricted mode requires a Copilot CLI version with --available-tools support')
+  }
+  const launchArgs = buildSessionLaunchArgs(
+    connectSessionId
+      ? { ...profile.launch, remoteControl: 'inherit', remoteExport: 'inherit' }
+      : profile.launch,
+    freshSession,
+  )
+  const unsupportedLaunchOptions = launchArgs.filter((argument) => (
+    argument.startsWith('--') && !copilotCapabilities.supportedOptions.includes(argument)
+  ))
+  if (unsupportedLaunchOptions.length > 0) {
+    throw new Error(
+      `This Copilot CLI version does not support ${[...new Set(unsupportedLaunchOptions)].join(', ')}; update it or change the workspace launch profile`,
+    )
+  }
+  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity ? randomUUID() : restoreLastSessionId
+  const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
@@ -440,8 +495,13 @@ async function createSessionTab(
     // mouse mode handles the selection itself and shells out to clip.exe,
     // which fails when hosted through this node-pty desktop terminal.
     '--no-mouse',
-    ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
+    ...(connectSessionId
+      ? [`--connect=${connectSessionId}`]
+      : freshSession && deterministicSessionId
+        ? ['--session-id', deterministicSessionId!, '--name', sessionTitle]
+        : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })),
     ...attachmentPaths.flatMap((path) => ['--attachment', path]),
+    ...launchArgs,
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
     // PtySession merges process.env into this session's environment (see
     // pty-session.ts), so secretEnvArgs must see that same merged view to
@@ -458,9 +518,9 @@ async function createSessionTab(
   managedTabs.set(id, { session })
   tabsState = createTab(tabsState, {
     id,
-    title: profile.name,
+    title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
     workspaceProfileId: profile.id,
-    lastSessionId: restoreLastSessionId,
+    lastSessionId: deterministicSessionId,
   })
   syncTabState()
   broadcastState()
@@ -570,7 +630,7 @@ async function restoreTabsForActiveProfile(): Promise<void> {
   for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
     const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
     try {
-      await createSessionTab(profile, mode, candidate.lastSessionId)
+      await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title)
     } catch (error) {
       await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
     }
@@ -642,6 +702,7 @@ async function updateWorkspaceProfile(
   name: string,
   permissionPreset: PermissionPreset,
   defaultResumeMode: ResumeMode,
+  launch: SessionLaunchConfig,
 ): Promise<void> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
@@ -652,6 +713,7 @@ async function updateWorkspaceProfile(
   profile.name = normalizedName
   profile.permissionPreset = permissionPreset
   profile.defaultResumeMode = defaultResumeMode
+  profile.launch = normalizeSessionLaunchConfig(launch)
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
@@ -659,11 +721,94 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(): Promise<DesktopState> {
   state.resolution = await resolveCopilotBinary()
+  copilotCapabilities = state.resolution.version === null
+    ? { ...EMPTY_COPILOT_CAPABILITIES }
+    : await discoverCopilotCapabilities(state.resolution)
   broadcastState()
   if (state.resolution.version !== null && desktopConfig.activeProfileId && tabsState.tabs.length === 0) {
     await restoreTabsForActiveProfile()
   }
   return snapshot()
+}
+
+async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void> {
+  if (copilotMaintenance.status === 'running') throw new Error('A Copilot CLI maintenance operation is already running')
+  if (managedTabs.size > 0) throw new Error('Close all running Copilot sessions before installing or updating the CLI')
+  const current = state.resolution
+  if (operation === 'update' && (!current || current.version === null)) {
+    throw new Error('Copilot CLI is not installed; use Install first')
+  }
+  copilotMaintenance = {
+    status: 'running',
+    operation,
+    message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
+  }
+  try {
+    const output = operation === 'install'
+      ? await installCopilotCli()
+      : await updateCopilotCli(current!)
+    await retryResolution()
+    if (!state.resolution || state.resolution.version === null) {
+      throw new Error('The command completed, but Copilot CLI still could not be resolved')
+    }
+    copilotMaintenance = {
+      status: 'succeeded',
+      operation,
+      message: `${operation === 'install' ? 'Installed' : 'Updated'} Copilot CLI ${state.resolution.version}.${output ? ` ${output.slice(-500)}` : ''}`,
+    }
+  } catch (error) {
+    copilotMaintenance = {
+      status: 'failed',
+      operation,
+      message: error instanceof Error ? error.message : String(error),
+    }
+    throw error
+  }
+}
+
+function resolvedCopilot(): CopilotResolution {
+  const resolution = state.resolution
+  if (!resolution || resolution.version === null) throw new Error('Install Copilot CLI before managing Copilot resources')
+  return resolution
+}
+
+async function managedCopilotEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
+  const provider = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
+  return { ...process.env, ...provider, ...vaultEnvironment }
+}
+
+async function refreshCopilotResources(): Promise<void> {
+  if (!copilotCapabilities.plugins) throw new Error('This Copilot CLI version does not expose plugin management; update it first')
+  copilotResources = { status: 'loading', output: copilotResources.output, message: 'Loading Copilot resources…' }
+  try {
+    const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], {
+      cwd: activeWorkspaceProfile(desktopConfig)?.path,
+      env: await managedCopilotEnvironment(),
+    })
+    const output = (result.stdout || result.stderr).trim().slice(0, 500_000)
+    copilotResources = {
+      status: 'ready',
+      output,
+      message: output ? 'Resources discovered for the active workspace.' : 'No Copilot resources were reported.',
+    }
+  } catch (error) {
+    copilotResources = {
+      status: 'error',
+      output: '',
+      message: error instanceof Error ? error.message : String(error),
+    }
+    throw error
+  }
+}
+
+async function runCopilotResourceMutation(args: string[]): Promise<void> {
+  await runCopilotCommand(resolvedCopilot(), args, {
+    cwd: activeWorkspaceProfile(desktopConfig)?.path,
+    timeout: 2 * 60_000,
+    env: await managedCopilotEnvironment(),
+  })
+  await refreshCopilotResources()
 }
 
 function installApplicationMenu(): void {
@@ -827,6 +972,9 @@ interface DesktopSettingsSnapshot {
   access: Awaited<ReturnType<typeof readAccessStatus>>
   provider: CopilotProviderConfig
   cliVersion: string | null
+  cliCapabilities: CopilotCapabilities
+  cliMaintenance: CopilotMaintenanceState
+  resources: CopilotResourcesState
 }
 
 async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
@@ -848,6 +996,9 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     access: await readAccessStatus(activeProfile?.permissionPreset ?? 'default'),
     provider: { ...desktopConfig.provider },
     cliVersion: state.resolution?.version ?? null,
+    cliCapabilities: { ...copilotCapabilities },
+    cliMaintenance: { ...copilotMaintenance },
+    resources: { ...copilotResources },
     update: updateController?.snapshot ?? {
       status: 'unavailable',
       currentVersion: app.getVersion(),
@@ -988,6 +1139,18 @@ ipcMain.handle('desktop:retry-resolution', (event) => {
   assertTrustedIpcSender(event)
   return retryResolution()
 })
+ipcMain.handle('desktop:install-copilot', async (event) => {
+  assertTrustedIpcSender(event)
+  await maintainCopilotCli('install')
+  return snapshot()
+})
+ipcMain.handle('desktop:connect-remote-session', (event, sessionId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof sessionId !== 'string' || !/^[0-9A-Za-z-]{6,128}$/.test(sessionId)) {
+    throw new Error('Enter a valid remote session or task ID')
+  }
+  return createSessionTab(undefined, 'new', null, [], sessionId)
+})
 
 // --- IPC: settings window ----------------------------------------------
 ipcMain.handle('desktop-settings:get', (event) => {
@@ -1032,6 +1195,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
   name: unknown,
   permissionPreset: unknown,
   defaultResumeMode: unknown,
+  launch: unknown,
 ) => {
   assertTrustedSettingsSender(event)
   if (
@@ -1039,10 +1203,19 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     || typeof name !== 'string'
     || typeof permissionPreset !== 'string'
     || typeof defaultResumeMode !== 'string'
+    || !launch
+    || typeof launch !== 'object'
+    || Array.isArray(launch)
   ) {
     throw new Error('Invalid workspace profile')
   }
-  await updateWorkspaceProfile(profileId, name, permissionPreset as PermissionPreset, defaultResumeMode as ResumeMode)
+  await updateWorkspaceProfile(
+    profileId,
+    name,
+    permissionPreset as PermissionPreset,
+    defaultResumeMode as ResumeMode,
+    launch as SessionLaunchConfig,
+  )
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:update-provider', async (event, provider: unknown) => {
@@ -1125,6 +1298,66 @@ ipcMain.handle('desktop-settings:delete-credential', async (event, name: unknown
   await credentialStore.deleteCredential(name as CredentialName)
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:install-copilot', async (event) => {
+  assertTrustedSettingsSender(event)
+  await maintainCopilotCli('install')
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:update-copilot', async (event) => {
+  assertTrustedSettingsSender(event)
+  await maintainCopilotCli('update')
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:refresh-copilot-resources', async (event) => {
+  assertTrustedSettingsSender(event)
+  await refreshCopilotResources()
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:mutate-copilot-resource', async (
+  event,
+  action: unknown,
+  kind: unknown,
+  name: unknown,
+) => {
+  assertTrustedSettingsSender(event)
+  if (!isCopilotResourceAction(action) || !isCopilotResourceKind(kind) || typeof name !== 'string') {
+    throw new Error('Invalid Copilot resource operation')
+  }
+  await runCopilotResourceMutation(buildResourceMutationArgs(action, kind, name))
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:install-copilot-plugin', async (event, source: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof source !== 'string') throw new Error('Invalid plugin source')
+  await runCopilotResourceMutation(buildPluginInstallArgs(source))
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:install-copilot-skill', async (event, source: unknown, project: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof source !== 'string' || typeof project !== 'boolean') throw new Error('Invalid skill source')
+  await runCopilotResourceMutation(buildSkillInstallArgs(source, project))
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:add-copilot-mcp', async (
+  event,
+  name: unknown,
+  url: unknown,
+  transport: unknown,
+) => {
+  assertTrustedSettingsSender(event)
+  if (typeof name !== 'string' || typeof url !== 'string' || (transport !== 'http' && transport !== 'sse')) {
+    throw new Error('Invalid MCP server configuration')
+  }
+  await runCopilotResourceMutation(buildRemoteMcpAddArgs(name, url, transport))
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:open-copilot-config', async (event) => {
+  assertTrustedSettingsSender(event)
+  const configDirectory = process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot')
+  await mkdir(configDirectory, { recursive: true })
+  const error = await shell.openPath(configDirectory)
+  if (error) throw new Error(error)
+})
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -1167,11 +1400,7 @@ if (!app.requestSingleInstanceLock()) {
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
 
-    state.resolution = await resolveCopilotBinary()
-    broadcastState()
-    if (state.resolution.version !== null && desktopConfig.activeProfileId) {
-      await restoreTabsForActiveProfile()
-    }
+    await retryResolution()
     scheduleAutomaticUpdateCheck()
   }).catch((error) => {
     dialog.showErrorBox('Copilot CLI Desktop failed to start', String(error))

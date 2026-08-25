@@ -17,6 +17,9 @@ import {
   type PublicDaemonState,
 } from './runtime-state.js'
 import { findWorkspaceArgument } from './start-arguments.js'
+import { buildProgrammaticCopilotArgs, parseProgrammaticRunArguments } from './run-arguments.js'
+import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
+import { secretEnvArgs } from '../main/secure-credentials.js'
 
 const paths = getCliPaths()
 const daemonEntry = fileURLToPath(new URL('./daemon.js', import.meta.url))
@@ -194,14 +197,44 @@ async function remoteLogs(tail: number): Promise<void> {
   }
 }
 
+async function runProgrammatic(rawArgs: string[]): Promise<void> {
+  const options = parseProgrammaticRunArguments(rawArgs)
+  const workspace = resolve(options.workspace ?? process.cwd())
+  const resolution = await resolveCopilotBinary()
+  if (resolution.version === null) throw new Error(resolution.error ?? 'Copilot CLI is not installed')
+  const environment = withCopilotPathAdditions(process.env, resolution.pathAdditions)
+  const args = [
+    ...resolution.prefixArgs,
+    ...buildProgrammaticCopilotArgs(options, workspace),
+    ...secretEnvArgs(environment),
+  ]
+  await new Promise<void>((resolveRun, reject) => {
+    const child = spawn(resolution.command, args, {
+      cwd: workspace,
+      env: environment,
+      stdio: 'inherit',
+      windowsHide: false,
+    })
+    child.once('error', reject)
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolveRun()
+      else reject(new Error(`copilot run failed (code ${String(code)}, signal ${String(signal ?? 'none')})`))
+    })
+  })
+}
+
 function help(): void {
   console.log(`copilot-cli-desktop background CLI
 
 Usage:
-  copilot-desktop start [workspace] [--preset default|trusted-directory|full-auto]
+  copilot-desktop start [workspace] [--preset default|read-only|trusted-directory|full-auto|full-access]
                                      [--resume-mode new|auto-resume|continue|picker]
                                      [--session-id ID]
   copilot-desktop status [--json]
+  copilot-desktop run [workspace] --prompt TEXT [--preset PRESET]
+                      [--model MODEL] [--agent AGENT]
+                      [--output-format text|json] [--silent]
+                      [--autopilot] [--max-ai-credits N] [--share PATH]
   copilot-desktop restart
   copilot-desktop logs [--tail N]
   copilot-desktop stop
@@ -226,6 +259,7 @@ async function main(): Promise<void> {
       break
     }
     case 'status': await status(args.includes('--json')); break
+    case 'run': await runProgrammatic(args.slice(1)); break
     case 'stop': await stop(); break
     case 'restart': await restart(); break
     case 'logs': {

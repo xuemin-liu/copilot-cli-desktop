@@ -36,6 +36,7 @@ test('activateWorkspaceProfile creates a profile on first use and reuses it afte
   const first = activateWorkspaceProfile(config, 'C:\\work\\project-a')
   assert.equal(first.permissionPreset, 'default')
   assert.equal(first.defaultResumeMode, 'auto-resume')
+  assert.equal(first.launch.mode, 'interactive')
   assert.equal(config.activeProfileId, first.id)
 
   const second = activateWorkspaceProfile(config, 'C:\\work\\project-b')

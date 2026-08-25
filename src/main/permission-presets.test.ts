@@ -13,8 +13,11 @@ test('buildPermissionArgs: trusted-directory adds --add-dir with the workspace p
   )
 })
 
-test('buildPermissionArgs: read-only denies shell and file-writing tools', () => {
-  assert.deepEqual(buildPermissionArgs('read-only', 'C:\\work\\project'), ['--deny-tool=write', '--deny-tool=shell'])
+test('buildPermissionArgs: read-only exposes only explicit read and interaction tools', () => {
+  assert.deepEqual(
+    buildPermissionArgs('read-only', 'C:\\work\\project'),
+    ['--available-tools=view,glob,grep,ask_user'],
+  )
 })
 
 test('buildPermissionArgs: full-auto adds --allow-all-tools', () => {

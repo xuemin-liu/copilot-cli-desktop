@@ -34,8 +34,8 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
     id: 'read-only',
     label: 'Restricted (deny shell/write)',
     description:
-      'Best-effort restriction using Copilot CLI\'s current denylist: built-in shell and write tools are blocked. '
-      + 'Copilot has no deny-by-default allowlist, so future or third-party tool categories are not categorically read-only.',
+      'Only Copilot\'s explicit file-view and search tools are exposed to the model. Shell, write, web, MCP, skill, '
+      + 'memory, and delegated-agent tools are unavailable.',
   },
   'trusted-directory': {
     id: 'trusted-directory',
@@ -73,7 +73,7 @@ export function buildPermissionArgs(preset: PermissionPreset, workspacePath: str
     case 'default':
       return []
     case 'read-only':
-      return ['--deny-tool=write', '--deny-tool=shell']
+      return ['--available-tools=view,glob,grep,ask_user']
     case 'trusted-directory':
       return ['--add-dir', workspacePath]
     case 'full-auto':

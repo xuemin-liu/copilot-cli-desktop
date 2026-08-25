@@ -16,15 +16,16 @@ handle, only input/output/resize events.
 
 ## Features
 
-- Resolves the `copilot` binary (PATH, then the location `gh` downloads it to,
-  then `gh copilot --`), and shows a recovery dashboard with a retry action
+- Resolves the `copilot` binary (PATH, legacy GitHub CLI-managed location,
+  then a compatible `gh copilot --` installation), and shows a recovery dashboard with install/retry actions
   and a copyable diagnostic summary when it cannot be found.
 - A standard collapsible AI-tool sidebar with workspace/session search,
   grouped or flat session views, manual/last-activity ordering, named recent
   workspace profiles, manual session naming, attachment-aware session
   creation, and restored session tabs.
-- Session resume: each tab remembers a best-effort captured session id and
-  auto-resumes with `--resume <id>` (or `--continue`) when reopened, plus a
+- Session identity and resume: each fresh tab gets a desktop-generated UUID
+  through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
+  `--resume <id>` (or `--continue`) when reopened, plus a
   manual "Resume session…" action that opens `copilot --resume`'s own
   interactive picker directly inside the terminal pane.
 - Per-session pty process supervision: crash detection, a restart action, and
@@ -48,11 +49,22 @@ handle, only input/output/resize events.
   supported GitHub token overrides `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and
   `GITHUB_TOKEN`. If protected storage is unavailable, saving is refused
   instead of silently falling back to plaintext.
+- Per-workspace Copilot launch profiles for model, reasoning effort, context
+  tier, custom agent, interactive/plan/autopilot/plan-then-autopilot mode,
+  AI-credit and continuation limits, worktrees, screen readers, remote control,
+  and session-export privacy.
+- A Copilot management center that can install, repair, and update the official
+  CLI; detects supported integration capabilities; and manages plugins, remote
+  MCP servers, and skills without requiring users to memorize commands.
+- Remote-session connection from the sidebar using an existing Copilot session
+  or task ID.
 - Visible Windows elevation and permission-access status, with warnings for
   high-trust modes and elevated launches.
 - Stops the full process tree for every running session on app quit.
 - A background CLI (`copilot-desktop`) with a token-protected, loopback-only
-  HTTP control server: `start` / `status` / `restart` / `logs` / `stop`.
+  HTTP control server (`start` / `status` / `restart` / `logs` / `stop`) and a
+  first-class `run --prompt` command for official non-interactive Copilot
+  execution, JSONL output, custom agents, models, and transcript export.
 - Windows packaging via `electron-builder` (NSIS), post-package runtime
   auditing, Windows CI, scheduled compatibility checks against the latest
   Copilot CLI, and signed tag-triggered releases with unsigned publication
@@ -61,14 +73,15 @@ handle, only input/output/resize events.
 ## Permission presets
 
 `copilot` has no single named permission-mode enum. It exposes flags instead:
-`--allow-tool`, `--deny-tool`, `--allow-all-tools` (`/yolo`), `--allow-url`,
-and `--add-dir` (trust a directory permanently). This app maps five presets
+`--available-tools`, `--excluded-tools`, `--allow-tool`, `--deny-tool`,
+`--allow-all-tools` (`/yolo`), `--allow-url`, and `--add-dir` (trust a
+directory permanently). This app maps five presets
 onto that flag surface, set per workspace profile in Settings:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
 | Default | (none) | Read-only actions run automatically; every mutating action (shell, edits, URL fetches, MCP tools) prompts. |
-| Restricted | `--deny-tool=write --deny-tool=shell` | Best-effort restriction for Copilot's current built-in shell and write tools. The CLI has no deny-by-default allowlist, so this is not a categorical read-only guarantee for future or third-party tools. |
+| Restricted | `--available-tools=view,glob,grep,ask_user` | Only explicit read/search/interaction tools are visible to the model. Shell, write, web, MCP, skill, memory, and delegated-agent tools are excluded. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
 | Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
@@ -79,10 +92,11 @@ See `src/main/permission-presets.ts`.
 
 Each tab tracks a resume mode (per workspace profile, overridable per tab):
 
-- **New** — always starts a fresh session.
-- **Auto-resume** — uses `--resume <id>` with a session id best-effort
-  captured from prior pty output (see the heuristic caveat below); falls back
-  to a new session if no id is known yet.
+- **New** — starts a fresh session with a generated UUID and Copilot-visible
+  name when the installed CLI exposes `--session-id` and `--name`.
+- **Auto-resume** — uses `--resume <id>` with the UUID assigned when the tab
+  was created; older CLI versions fall back to output capture and start a new
+  session if no id is known.
 - **Continue** — always uses `--continue` (resumes the most recent session,
   preferring the current working directory).
 - **Picker** — used by the "Resume session…" button; runs `copilot --resume`
@@ -93,31 +107,31 @@ See `src/main/resume-args.ts`.
 
 ## Heuristics — read before relying on them
 
-Copilot CLI exposes a terminal stream rather than structured session events,
-so two behaviors remain best-effort regex heuristics over raw pty output:
+The interactive TUI exposes a terminal stream rather than structured lifecycle
+events, so approval detection remains a best-effort regex heuristic:
 
 - **Approval-prompt detection** (`src/main/approval-heuristic.ts`,
   `detectApprovalPrompt`) badges a tab "needs approval" and raises a
   notification when recent output resembles a prompt (`"Allow ... ?"`,
   `[y/n]`, "Do you want to proceed?", etc.). It will both miss real prompts
   and misfire on unrelated text that merely resembles one.
-- **Session id capture** (`extractSessionId` in the same file) scans for
-  patterns like `Session ID: <id>` to populate auto-resume. If `copilot`'s
-  real banner text doesn't match, auto-resume silently falls back to a new
-  session instead of resuming.
+
+Output-based session-id capture remains only as a compatibility fallback for
+older Copilot releases. Current releases receive a UUID before launch, so
+normal auto-resume no longer depends on banner wording.
 
 The resolver and real pty launch path are exercised against Copilot CLI in
-local smoke testing. These two heuristics still require maintenance if the
+local smoke testing. Approval detection still requires maintenance if the
 CLI's human-readable output changes.
 
 ## Requirements
 
 - Windows 10 or later for the packaged desktop application.
 - Node.js 24 and pnpm 11.5.3 for source development and the CLI.
-- The [`copilot` CLI](https://github.com/github/copilot-cli) itself, or the
-  [GitHub CLI](https://cli.github.com/) with the Copilot extension
-  (`gh extension install github/gh-copilot`), on PATH to actually spawn
-  sessions. Neither is required to build, typecheck, or run the unit tests.
+- The [`copilot` CLI](https://github.com/github/copilot-cli) itself on PATH to
+  actually spawn sessions. It can also be installed or repaired from Desktop Settings using
+  the official Windows WinGet package, with npm as a fallback.
+  Neither is required to build, typecheck, or run the unit tests.
 
 `node-pty` 1.x's native addon is built on `node-addon-api` (N-API), which is
 ABI-stable across Node.js and Electron — no `@electron/rebuild` or other
@@ -165,9 +179,9 @@ approval-needed, session-completed, and session-crashed (also toggleable);
 clicking one focuses the window and the relevant tab.
 
 Workspace profiles are keyed by normalized folder path and remember a name,
-permission preset, default resume mode, and the last set of open tabs (title
-+ best-effort captured session id) to restore next time that profile is
-activated.
+permission preset, default resume mode, launch profile, and the last set of
+open tabs (title + deterministic session id on current Copilot versions) to
+restore next time that profile is activated.
 
 ## Background CLI
 
@@ -179,6 +193,8 @@ copilot-desktop start .                          # start copilot for the current
 copilot-desktop start D:\work\my-project --preset trusted-directory --resume-mode continue
 copilot-desktop status
 copilot-desktop status --json
+copilot-desktop run . --prompt "Review this repository" --agent code-review --output-format json
+copilot-desktop run D:\work\my-project --prompt "Fix the tests" --autopilot --max-ai-credits 5
 copilot-desktop restart
 copilot-desktop logs --tail 100
 copilot-desktop stop
@@ -190,7 +206,11 @@ random bearer token and listens only on `127.0.0.1`. Only one controller is
 supported per Windows user; set `COPILOT_DESKTOP_CLI_HOME` to isolate state
 for automation.
 
-**The background CLI spawns `copilot` as a plain piped child process, not a
+The `run` command uses Copilot's official programmatic `--prompt` mode and
+inherits stdout/stderr so it can be composed with scripts and CI. It also
+protects configured token variables with `--secret-env-vars`.
+
+**The long-running background controller spawns `copilot` as a plain piped child process, not a
 real pty** (`src/main/child-process-pty-backend.ts`) — there is no terminal
 UI attached to a detached background process to render into. `copilot`'s
 actual behavior without a real tty attached is unverified here; for full
@@ -230,7 +250,7 @@ applicability decision are recorded in [`docs/FEATURE_PARITY.md`](docs/FEATURE_P
 ## Live-verification boundary
 
 Copilot CLI resolution and real pty startup are verified locally. Approval
-prompt wording, session-id banner parsing, every upstream provider account,
+prompt wording, older-version session-id banner parsing, every upstream provider account,
 and every possible resume history remain dependent on Copilot CLI and account
 state. Pure logic (permission-preset mapping, tab state, resume arguments,
 provider environment, encrypted-vault serialization, and pty lifecycle) is

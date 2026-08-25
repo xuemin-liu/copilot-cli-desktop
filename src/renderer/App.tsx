@@ -77,6 +77,10 @@ export function App(): JSX.Element {
           const next = await window.copilotDesktop.retryResolution()
           setState(next)
         }}
+        onInstall={async () => {
+          const next = await window.copilotDesktop.installCopilot()
+          setState(next)
+        }}
         onCopyDiagnostics={() => window.copilotDesktop.copyDiagnostics()}
       />
     )
@@ -106,6 +110,10 @@ export function App(): JSX.Element {
         onCreateTabWithAttachments={() => void window.copilotDesktop.createTabWithAttachments()}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => void window.copilotDesktop.createTab('picker')}
+        onConnectRemote={() => {
+          const sessionId = window.prompt('Remote Copilot session or task ID')?.trim()
+          if (sessionId) void window.copilotDesktop.connectRemoteSession(sessionId)
+        }}
       />
       <main className="main-content">
         {state.activeProfileId === null ? (

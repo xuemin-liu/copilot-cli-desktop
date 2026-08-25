@@ -1,5 +1,6 @@
 import type { PermissionPreset } from './permission-presets.js'
 import type { ResumeMode } from './resume-args.js'
+import type { SessionLaunchConfig } from './session-launch.js'
 
 /** Lifecycle status of one spawned `copilot` pty session. */
 export type SessionLifecycleStatus =
@@ -21,6 +22,7 @@ export interface WorkspaceProfile {
   path: string
   permissionPreset: PermissionPreset
   defaultResumeMode: ResumeMode
+  launch: SessionLaunchConfig
   tabs: RestoredTab[]
 }
 
