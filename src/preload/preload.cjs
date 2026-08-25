@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   getTabBacklog: (tabId) => ipcRenderer.invoke('desktop:get-tab-backlog', tabId),
   openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
   showSessionLog: (tabId) => ipcRenderer.invoke('desktop:show-session-log', tabId),
+  copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
+  readClipboardText: () => ipcRenderer.invoke('desktop:read-clipboard-text'),
+  showTerminalContextMenu: (text) => ipcRenderer.invoke('desktop:show-terminal-context-menu', text),
   copyDiagnostics: () => ipcRenderer.invoke('desktop:copy-diagnostics'),
   retryResolution: () => ipcRenderer.invoke('desktop:retry-resolution'),
   onStateChanged: (listener) => {

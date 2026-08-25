@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resolveCopilotBinary, type ExecFileFn } from './resolve-copilot.js'
+import { resolveCopilotBinary, withCopilotPathAdditions, type ExecFileFn } from './resolve-copilot.js'
 
 function fakeExecFile(handlers: Record<string, { stdout: string } | Error>): ExecFileFn {
   return async (file, args) => {
@@ -47,6 +47,30 @@ test('resolveCopilotBinary launches an npm-installed Windows command shim throug
   assert.deepEqual(resolution.prefixArgs, ['/d', '/s', '/c', 'call', copilotPath])
   assert.equal(resolution.resolvedPath, copilotPath)
   assert.equal(resolution.version, '1.0.80')
+})
+
+test('resolveCopilotBinary finds the standard Node.js shim when Electron PATH is incomplete', async () => {
+  const copilotPath = 'C:\\Program Files\\nodejs\\copilot.cmd'
+  const commandShell = 'C:\\Windows\\System32\\cmd.exe'
+  const resolution = await resolveCopilotBinary({
+    ProgramFiles: 'C:\\Program Files',
+    ComSpec: commandShell,
+  }, fakeExecFile({
+    'where.exe copilot': new Error('not found on PATH'),
+    [`${commandShell} /d /s /c call ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
+  }), 'win32', (path) => path === copilotPath || path === 'C:\\Program Files\\nodejs\\node.exe')
+  assert.equal(resolution.kind, 'direct')
+  assert.equal(resolution.resolvedPath, copilotPath)
+  assert.equal(resolution.version, '1.0.80')
+  assert.deepEqual(resolution.pathAdditions, ['C:\\Program Files\\nodejs'])
+})
+
+test('withCopilotPathAdditions augments launcher environments without mutating the source', () => {
+  const source = { Path: 'C:\\Windows\\System32', TOKEN: 'preserved' }
+  const result = withCopilotPathAdditions(source, ['C:\\Program Files\\nodejs'])
+  assert.equal(result.Path, 'C:\\Program Files\\nodejs;C:\\Windows\\System32')
+  assert.equal(result.TOKEN, 'preserved')
+  assert.equal(source.Path, 'C:\\Windows\\System32')
 })
 
 test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH', async () => {

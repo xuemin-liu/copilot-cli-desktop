@@ -44,6 +44,8 @@ export interface CopilotResolution {
   resolvedPath: string | null
   version: string | null
   error: string | null
+  /** Directories that must be prepended to PATH when launching this command. */
+  pathAdditions?: string[]
 }
 
 export interface DesktopState {

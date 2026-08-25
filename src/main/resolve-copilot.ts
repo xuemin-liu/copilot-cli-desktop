@@ -70,6 +70,16 @@ function windowsLaunch(path: string, env: NodeJS.ProcessEnv): Pick<CopilotResolu
   }
 }
 
+export function withCopilotPathAdditions(
+  env: NodeJS.ProcessEnv,
+  additions: readonly string[] | undefined = [],
+): NodeJS.ProcessEnv {
+  if (!additions || additions.length === 0) return env
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'Path'
+  const currentPath = env[pathKey] ?? ''
+  return { ...env, [pathKey]: [...additions, currentPath].filter(Boolean).join(';') }
+}
+
 /**
  * Resolve how to launch the GitHub Copilot CLI:
  *  1. `copilot` directly on PATH.
@@ -83,6 +93,7 @@ export async function resolveCopilotBinary(
   env: NodeJS.ProcessEnv = process.env,
   execFileFn: ExecFileFn = defaultExecFile,
   platform: NodeJS.Platform = process.platform,
+  pathExists: (path: string) => boolean = existsSync,
 ): Promise<CopilotResolution> {
   const attempts: string[] = []
 
@@ -98,6 +109,30 @@ export async function resolveCopilotBinary(
     } else {
       attempts.push(`where.exe copilot: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
     }
+
+    // Electron can inherit a reduced PATH when launched from another desktop
+    // application. npm commonly installs its Windows command shim in one of
+    // these locations, so check them explicitly before reporting it missing.
+    const shimCandidates = [
+      env.ProgramFiles && join(env.ProgramFiles, 'nodejs', 'copilot.cmd'),
+      env.ProgramW6432 && join(env.ProgramW6432, 'nodejs', 'copilot.cmd'),
+      env.APPDATA && join(env.APPDATA, 'npm', 'copilot.cmd'),
+    ].filter((candidate): candidate is string => Boolean(candidate))
+    const nodeDirectories = [...new Set([
+      env.ProgramFiles && join(env.ProgramFiles, 'nodejs'),
+      env.ProgramW6432 && join(env.ProgramW6432, 'nodejs'),
+    ].filter((directory): directory is string => Boolean(directory)))]
+      .filter((directory) => pathExists(join(directory, 'node.exe')))
+    const shimEnvironment = withCopilotPathAdditions(env, nodeDirectories)
+    for (const candidate of [...new Set(shimCandidates)]) {
+      if (!pathExists(candidate)) continue
+      const launch = windowsLaunch(candidate, shimEnvironment)
+      const direct = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], shimEnvironment, execFileFn)
+      if (direct.ok) {
+        return { kind: 'direct', ...launch, version: direct.version, error: null, pathAdditions: nodeDirectories }
+      }
+      attempts.push(`${candidate} --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
+    }
   } else {
     const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
     if (direct.ok) {
@@ -110,7 +145,7 @@ export async function resolveCopilotBinary(
   const localAppData = env.LOCALAPPDATA
   if (localAppData) {
     const candidate = join(localAppData, 'GitHub CLI', 'copilot', 'copilot.exe')
-    if (existsSync(candidate)) {
+    if (pathExists(candidate)) {
       const result = await tryVersion(candidate, ['--version'], env, execFileFn)
       if (result.ok) {
         return { kind: 'direct', command: candidate, prefixArgs: [], resolvedPath: candidate, version: result.version, error: null }
