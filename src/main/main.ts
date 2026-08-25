@@ -436,10 +436,10 @@ async function createSessionTab(
   )
   const args = [
     ...resolution.prefixArgs,
-    // Let xterm own text selection and clipboard gestures. Copilot's native
-    // mouse mode handles the selection itself and shells out to clip.exe,
-    // which fails when hosted through this node-pty desktop terminal.
-    '--no-mouse',
+    // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
+    // mouse-driven. Enable its terminal mouse protocol explicitly so clicks
+    // continue to work even if the CLI's default or saved setting is off.
+    '--mouse=on',
     ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
     ...attachmentPaths.flatMap((path) => ['--attachment', path]),
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
