@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { spawnChildProcessPty } from '../main/child-process-pty-backend.js'
 import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from '../main/permission-presets.js'
 import { PtySession, type PtySessionExit } from '../main/pty-session.js'
-import { resolveCopilotBinary } from '../main/resolve-copilot.js'
+import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from '../main/resume-args.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
 import type { CopilotResolution } from '../main/types.js'
@@ -98,6 +98,7 @@ function createSession(): PtySession {
     file: resolution.command,
     args,
     cwd: workspace,
+    env: withCopilotPathAdditions(process.env, resolution.pathAdditions),
     spawnPty: spawnChildProcessPty,
   })
   instance.on('log', (line: string) => void log(line).catch(() => undefined))

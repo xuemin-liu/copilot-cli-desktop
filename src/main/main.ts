@@ -38,7 +38,7 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { resolveCopilotBinary } from './resolve-copilot.js'
+import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
 import { SecureCredentialStore, isCredentialName, secretEnvArgs, type CredentialName } from './secure-credentials.js'
 import {
@@ -430,14 +430,10 @@ async function createSessionTab(
   const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
-  const environment: NodeJS.ProcessEnv = { ...configuredEnvironment, ...vaultEnvironment }
-  if (resolution.pathAdditions?.length) {
-    const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') ?? 'Path'
-    environment[pathKey] = [
-      ...resolution.pathAdditions,
-      environment[pathKey],
-    ].filter(Boolean).join(';')
-  }
+  const environment = withCopilotPathAdditions(
+    { ...configuredEnvironment, ...vaultEnvironment },
+    resolution.pathAdditions,
+  )
   const args = [
     ...resolution.prefixArgs,
     // Let xterm own text selection and clipboard gestures. Copilot's native

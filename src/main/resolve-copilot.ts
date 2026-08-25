@@ -70,8 +70,11 @@ function windowsLaunch(path: string, env: NodeJS.ProcessEnv): Pick<CopilotResolu
   }
 }
 
-function withPathAdditions(env: NodeJS.ProcessEnv, additions: readonly string[]): NodeJS.ProcessEnv {
-  if (additions.length === 0) return env
+export function withCopilotPathAdditions(
+  env: NodeJS.ProcessEnv,
+  additions: readonly string[] | undefined = [],
+): NodeJS.ProcessEnv {
+  if (!additions || additions.length === 0) return env
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'Path'
   const currentPath = env[pathKey] ?? ''
   return { ...env, [pathKey]: [...additions, currentPath].filter(Boolean).join(';') }
@@ -120,7 +123,7 @@ export async function resolveCopilotBinary(
       env.ProgramW6432 && join(env.ProgramW6432, 'nodejs'),
     ].filter((directory): directory is string => Boolean(directory)))]
       .filter((directory) => pathExists(join(directory, 'node.exe')))
-    const shimEnvironment = withPathAdditions(env, nodeDirectories)
+    const shimEnvironment = withCopilotPathAdditions(env, nodeDirectories)
     for (const candidate of [...new Set(shimCandidates)]) {
       if (!pathExists(candidate)) continue
       const launch = windowsLaunch(candidate, shimEnvironment)
