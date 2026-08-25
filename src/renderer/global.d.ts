@@ -30,6 +30,9 @@ export interface CopilotDesktopBridge {
   getTabBacklog(tabId: string): Promise<string>
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>
+  copyText(text: string): Promise<void>
+  readClipboardText(): Promise<string>
+  showTerminalContextMenu(text: string): Promise<void>
   copyDiagnostics(): Promise<void>
   retryResolution(): Promise<DesktopState>
   onStateChanged(listener: (state: DesktopState) => void): () => void

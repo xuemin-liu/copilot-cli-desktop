@@ -83,6 +83,7 @@ export async function resolveCopilotBinary(
   env: NodeJS.ProcessEnv = process.env,
   execFileFn: ExecFileFn = defaultExecFile,
   platform: NodeJS.Platform = process.platform,
+  pathExists: (path: string) => boolean = existsSync,
 ): Promise<CopilotResolution> {
   const attempts: string[] = []
 
@@ -98,6 +99,22 @@ export async function resolveCopilotBinary(
     } else {
       attempts.push(`where.exe copilot: ${located.error instanceof Error ? located.error.message : String(located.error)}`)
     }
+
+    // Electron can inherit a reduced PATH when launched from another desktop
+    // application. npm commonly installs its Windows command shim in one of
+    // these locations, so check them explicitly before reporting it missing.
+    const shimCandidates = [
+      env.ProgramFiles && join(env.ProgramFiles, 'nodejs', 'copilot.cmd'),
+      env.ProgramW6432 && join(env.ProgramW6432, 'nodejs', 'copilot.cmd'),
+      env.APPDATA && join(env.APPDATA, 'npm', 'copilot.cmd'),
+    ].filter((candidate): candidate is string => Boolean(candidate))
+    for (const candidate of [...new Set(shimCandidates)]) {
+      if (!pathExists(candidate)) continue
+      const launch = windowsLaunch(candidate, env)
+      const direct = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], env, execFileFn)
+      if (direct.ok) return { kind: 'direct', ...launch, version: direct.version, error: null }
+      attempts.push(`${candidate} --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
+    }
   } else {
     const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
     if (direct.ok) {
@@ -110,7 +127,7 @@ export async function resolveCopilotBinary(
   const localAppData = env.LOCALAPPDATA
   if (localAppData) {
     const candidate = join(localAppData, 'GitHub CLI', 'copilot', 'copilot.exe')
-    if (existsSync(candidate)) {
+    if (pathExists(candidate)) {
       const result = await tryVersion(candidate, ['--version'], env, execFileFn)
       if (result.ok) {
         return { kind: 'direct', command: candidate, prefixArgs: [], resolvedPath: candidate, version: result.version, error: null }

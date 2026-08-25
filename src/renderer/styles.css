@@ -523,11 +523,18 @@ button:disabled {
   position: absolute;
   inset: 0;
   display: none;
-  padding: 10px 10px 7px;
+  overflow: hidden;
 }
 
 .terminal-pane-active {
   display: block;
+}
+
+/* FitAddon subtracts padding from the xterm element, not its parent. Keeping
+   terminal spacing here prevents it from allocating a row beneath the visible
+   pane and clipping that row in normal-size windows. */
+.terminal-pane > .xterm {
+  padding: 10px;
 }
 
 .empty-state {

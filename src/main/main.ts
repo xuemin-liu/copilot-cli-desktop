@@ -433,6 +433,10 @@ async function createSessionTab(
   const environment = { ...configuredEnvironment, ...vaultEnvironment }
   const args = [
     ...resolution.prefixArgs,
+    // Let xterm own text selection and clipboard gestures. Copilot's native
+    // mouse mode handles the selection itself and shells out to clip.exe,
+    // which fails when hosted through this node-pty desktop terminal.
+    '--no-mouse',
     ...buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }),
     ...attachmentPaths.flatMap((path) => ['--attachment', path]),
     ...buildPermissionArgs(profile.permissionPreset, profile.path),
@@ -954,6 +958,28 @@ ipcMain.handle('desktop:show-session-log', (event, tabId: unknown) => {
 ipcMain.handle('desktop:copy-diagnostics', (event) => {
   assertTrustedIpcSender(event)
   copyDiagnosticsToClipboard()
+})
+ipcMain.handle('desktop:copy-text', (event, text: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof text !== 'string') throw new Error('Invalid clipboard text')
+  // Keep an accidentally huge terminal selection from blocking Electron's
+  // main process while still allowing comfortably large command output.
+  if (text.length > 1_000_000) throw new Error('Clipboard text is too large')
+  clipboard.writeText(text)
+})
+ipcMain.handle('desktop:read-clipboard-text', (event) => {
+  assertTrustedIpcSender(event)
+  // Bound clipboard input before forwarding it to the terminal process.
+  return clipboard.readText().slice(0, 1_000_000)
+})
+ipcMain.handle('desktop:show-terminal-context-menu', (event, text: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof text !== 'string' || text.length === 0) throw new Error('Invalid clipboard text')
+  if (text.length > 1_000_000) throw new Error('Clipboard text is too large')
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  Menu.buildFromTemplate([
+    { label: 'Copy', click: () => clipboard.writeText(text) },
+  ]).popup(owner ? { window: owner } : {})
 })
 ipcMain.handle('desktop:retry-resolution', (event) => {
   assertTrustedIpcSender(event)

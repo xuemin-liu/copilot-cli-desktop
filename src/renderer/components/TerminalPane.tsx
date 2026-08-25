@@ -35,6 +35,57 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     terminalRef.current = terminal
     fitRef.current = fitAddon
 
+    const copySelection = (): boolean => {
+      if (!terminal.hasSelection()) return false
+      void window.copilotDesktop.copyText(terminal.getSelection())
+      return true
+    }
+
+    // In a terminal Ctrl+C normally sends an interrupt. Match native terminal
+    // behavior by copying only when text is selected; with no selection the
+    // key continues through onData to Copilot as usual.
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
+        return !copySelection()
+      }
+      return true
+    })
+
+    const handlePasteKey = (event: KeyboardEvent): void => {
+      if (!event.ctrlKey || event.altKey || event.key.toLowerCase() !== 'v') return
+      event.preventDefault()
+      event.stopPropagation()
+      void window.copilotDesktop.readClipboardText().then((text) => {
+        if (text) void window.copilotDesktop.writeTab(tabId, text)
+      })
+    }
+    container.addEventListener('keydown', handlePasteKey, true)
+
+    const handleRightMouse = (event: MouseEvent): void => {
+      if (event.button !== 2 || !terminal.hasSelection()) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    const handleContextMenu = (event: MouseEvent): void => {
+      if (!terminal.hasSelection()) return
+      event.preventDefault()
+      event.stopPropagation()
+      void window.copilotDesktop.showTerminalContextMenu(terminal.getSelection())
+    }
+    const handleSelectionMouseUp = (event: MouseEvent): void => {
+      if (event.button !== 0) return
+      // xterm finalizes its selection during mouseup. Run after that handler
+      // and copy automatically so clipboard behavior does not depend on a
+      // second gesture being interpreted consistently by the terminal TUI.
+      requestAnimationFrame(copySelection)
+    }
+    // Copilot enables terminal mouse reporting. Consume the full right-click
+    // sequence in the capture phase so xterm cannot forward it to the CLI.
+    container.addEventListener('mousedown', handleRightMouse, true)
+    container.addEventListener('mouseup', handleRightMouse, true)
+    container.addEventListener('mouseup', handleSelectionMouseUp)
+    container.addEventListener('contextmenu', handleContextMenu, true)
+
     terminal.onData((data) => {
       void window.copilotDesktop.writeTab(tabId, data)
     })
@@ -62,15 +113,29 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       backlogApplied = true
     })
 
-    const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit()
-      void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
-    })
+    let fitFrame = 0
+    const fitTerminal = (): void => {
+      cancelAnimationFrame(fitFrame)
+      // Window restore/maximize can report an intermediate container size.
+      // Fit on the next painted layout so xterm never keeps a fractional last
+      // row calculated from the previous window dimensions.
+      fitFrame = requestAnimationFrame(() => {
+        fitAddon.fit()
+        void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
+      })
+    }
+    const resizeObserver = new ResizeObserver(fitTerminal)
     resizeObserver.observe(container)
 
     return () => {
       unsubscribe()
+      cancelAnimationFrame(fitFrame)
       resizeObserver.disconnect()
+      container.removeEventListener('keydown', handlePasteKey, true)
+      container.removeEventListener('mousedown', handleRightMouse, true)
+      container.removeEventListener('mouseup', handleRightMouse, true)
+      container.removeEventListener('mouseup', handleSelectionMouseUp)
+      container.removeEventListener('contextmenu', handleContextMenu, true)
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
