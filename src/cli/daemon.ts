@@ -4,7 +4,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
 import { spawnChildProcessPty } from '../main/child-process-pty-backend.js'
-import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from '../main/permission-presets.js'
+import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from '../main/copilot-command.js'
+import {
+  buildPermissionArgs,
+  isPermissionPreset,
+  permissionCompatibilityWarning,
+  type PermissionPreset,
+} from '../main/permission-presets.js'
 import { PtySession, type PtySessionExit } from '../main/pty-session.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from '../main/resume-args.js'
@@ -43,6 +49,7 @@ let controllerLockClaimed = false
 let stateWriteQueue = Promise.resolve()
 let mutationQueue = Promise.resolve()
 let copilotResolution: CopilotResolution | null = null
+let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
 
 async function log(message: string): Promise<void> {
   await appendFile(paths.logPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
@@ -86,7 +93,7 @@ function createSession(): PtySession {
   const args = [
     ...resolution.prefixArgs,
     ...buildResumeArgs({ mode: resumeMode, lastSessionId }),
-    ...buildPermissionArgs(preset, workspace),
+    ...buildPermissionArgs(preset, workspace, copilotCapabilities),
     // The daemon has no vault of its own — it inherits process.env from
     // whatever launched `copilot-desktop` — but PtySession still merges
     // that env into the Copilot session, so any ambient GH_TOKEN/provider
@@ -306,12 +313,19 @@ async function initialize(): Promise<void> {
     status: 'starting',
     startedAt: new Date().toISOString(),
     error: null,
+    warning: null,
   }
   await writeDaemonState(paths, state)
   await log(`Controller started (PID ${process.pid}) for ${workspace}`)
   const resolution = await resolveCopilotBinary()
   if (resolution.version === null) throw new Error(resolution.error ?? 'The copilot CLI could not be resolved')
   copilotResolution = resolution
+  copilotCapabilities = await discoverCopilotCapabilities(resolution)
+  const compatibilityWarning = permissionCompatibilityWarning(preset, copilotCapabilities)
+  if (compatibilityWarning) {
+    await updateState({ warning: compatibilityWarning })
+    await log(`Warning: ${compatibilityWarning}`)
+  }
   const instance = createSession()
   session = instance
   await enqueueMutation(() => startSession('starting', instance))

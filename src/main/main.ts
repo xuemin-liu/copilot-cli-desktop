@@ -105,6 +105,12 @@ let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
+let capabilityProbeGeneration = 0
+let capabilityProbe: {
+  resolution: CopilotResolution
+  generation: number
+  promise: Promise<CopilotCapabilities>
+} | null = null
 let copilotMaintenance: CopilotMaintenanceState = { ...DEFAULT_COPILOT_MAINTENANCE_STATE }
 let copilotResources: CopilotResourcesState = { ...DEFAULT_COPILOT_RESOURCES_STATE }
 
@@ -727,9 +733,28 @@ async function retryResolution(): Promise<DesktopState> {
 }
 
 async function recheckCopilotCapabilities(): Promise<void> {
-  copilotCapabilities = !state.resolution || state.resolution.version === null
-    ? { ...EMPTY_COPILOT_CAPABILITIES }
-    : await discoverCopilotCapabilities(state.resolution)
+  const resolution = state.resolution
+  if (!resolution || resolution.version === null) {
+    capabilityProbeGeneration += 1
+    copilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
+    return
+  }
+  if (capabilityProbe?.resolution === resolution) {
+    await capabilityProbe.promise
+    return
+  }
+
+  const generation = ++capabilityProbeGeneration
+  const promise = discoverCopilotCapabilities(resolution)
+  capabilityProbe = { resolution, generation, promise }
+  try {
+    const discovered = await promise
+    if (capabilityProbeGeneration === generation && state.resolution === resolution) {
+      copilotCapabilities = discovered
+    }
+  } finally {
+    if (capabilityProbe?.generation === generation) capabilityProbe = null
+  }
 }
 
 async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void> {
@@ -994,7 +1019,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
   const activeProfile = activeWorkspaceProfile(desktopConfig)
   const [credentials, access] = await Promise.all([
     credentialStore ? credentialStore.status() : Promise.resolve(null),
-    readAccessStatus(activeProfile?.permissionPreset ?? 'default'),
+    readAccessStatus(activeProfile?.permissionPreset ?? 'default', copilotCapabilities),
   ])
   return {
     closeToTray: desktopConfig.closeToTray,

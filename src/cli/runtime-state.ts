@@ -18,6 +18,7 @@ export interface DaemonState {
   status: DaemonStatus
   startedAt: string
   error: string | null
+  warning: string | null
 }
 
 export type PublicDaemonState = Omit<DaemonState, 'token' | 'controlPort'>
@@ -87,11 +88,12 @@ export async function readDaemonState(paths: CliPaths): Promise<DaemonState | nu
     || typeof state.startedAt !== 'string'
     || (state.processId !== null && typeof state.processId !== 'number')
     || (state.error !== null && typeof state.error !== 'string')
+    || (state.warning !== undefined && state.warning !== null && typeof state.warning !== 'string')
   ) {
     await quarantineCorruptState(paths)
     return null
   }
-  return state as DaemonState
+  return { ...state, warning: state.warning ?? null } as DaemonState
 }
 
 export async function writeDaemonState(paths: CliPaths, state: DaemonState): Promise<void> {

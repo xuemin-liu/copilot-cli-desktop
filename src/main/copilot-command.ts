@@ -4,6 +4,12 @@ import type { CopilotResolution } from './types.js'
 import { withCopilotPathAdditions } from './resolve-copilot.js'
 
 const execFileAsync = promisify(execFile)
+const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
+const CAPABILITY_RETRY_DELAY_MS = 1_000
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
+}
 
 export interface CopilotCommandResult {
   stdout: string
@@ -68,11 +74,13 @@ export function parseCopilotCapabilities(helpText: string): CopilotCapabilities 
 export async function discoverCopilotCapabilities(resolution: CopilotResolution): Promise<CopilotCapabilities> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const result = await runCopilotCommand(resolution, ['help'])
+      const result = await runCopilotCommand(resolution, ['help'], { timeout: CAPABILITY_PROBE_TIMEOUT_MS })
       return parseCopilotCapabilities(`${result.stdout}\n${result.stderr}`)
     } catch {
       // A just-installed CLI or an antivirus scan can make the first probe
-      // transiently fail. Retry once before reporting no discovered features.
+      // transiently fail. Pause before one bounded retry so the condition has
+      // time to clear without leaving startup or Settings blocked for a minute.
+      if (attempt === 0) await delay(CAPABILITY_RETRY_DELAY_MS)
     }
   }
   return { ...EMPTY_COPILOT_CAPABILITIES }

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { PERMISSION_PRESET_INFO, type PermissionPreset } from './permission-presets.js'
+import { PERMISSION_PRESET_INFO, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -39,15 +39,23 @@ let elevationPromise: Promise<ElevationStatus> | null = null
 
 function cachedElevation(): Promise<ElevationStatus> {
   elevationPromise ??= detectElevation()
+  void elevationPromise.then((elevation) => {
+    if (elevation === 'unknown') elevationPromise = null
+  })
   return elevationPromise
 }
 
-export async function readAccessStatus(profilePreset: PermissionPreset): Promise<AccessStatus> {
+export async function readAccessStatus(
+  profilePreset: PermissionPreset,
+  capabilities: { toolAllowlist: boolean },
+): Promise<AccessStatus> {
   const environmentAllowsAll = /^(1|true|yes)$/i.test(process.env.COPILOT_ALLOW_ALL ?? '')
   const permissionPreset: PermissionPreset = environmentAllowsAll ? 'full-access' : profilePreset
   const permissionSource: AccessStatus['permissionSource'] = environmentAllowsAll ? 'environment' : 'profile'
   const elevation = await cachedElevation()
   const warnings: string[] = []
+  const compatibilityWarning = permissionCompatibilityWarning(permissionPreset, capabilities)
+  if (compatibilityWarning) warnings.push(compatibilityWarning)
   if (permissionPreset === 'full-auto') {
     warnings.push('Copilot tools run without individual approval, but path and URL verification still apply.')
   } else if (permissionPreset === 'full-access') {

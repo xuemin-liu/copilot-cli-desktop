@@ -1,38 +1,47 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildPermissionArgs, isPermissionPreset } from './permission-presets.js'
+import { buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning } from './permission-presets.js'
+
+const MODERN_CAPABILITIES = { toolAllowlist: true }
+const LEGACY_CAPABILITIES = { toolAllowlist: false }
 
 test('buildPermissionArgs: default prompts for everything and adds no flags', () => {
-  assert.deepEqual(buildPermissionArgs('default', 'C:\\work\\project'), [])
+  assert.deepEqual(buildPermissionArgs('default', 'C:\\work\\project', MODERN_CAPABILITIES), [])
 })
 
 test('buildPermissionArgs: trusted-directory adds --add-dir with the workspace path', () => {
   assert.deepEqual(
-    buildPermissionArgs('trusted-directory', 'C:\\work\\project'),
+    buildPermissionArgs('trusted-directory', 'C:\\work\\project', MODERN_CAPABILITIES),
     ['--add-dir', 'C:\\work\\project'],
   )
 })
 
 test('buildPermissionArgs: read-only exposes only explicit read and interaction tools', () => {
   assert.deepEqual(
-    buildPermissionArgs('read-only', 'C:\\work\\project'),
+    buildPermissionArgs('read-only', 'C:\\work\\project', MODERN_CAPABILITIES),
     ['--available-tools=view,glob,grep,ask_user'],
   )
 })
 
 test('buildPermissionArgs: read-only falls back to legacy deny flags without allowlist support', () => {
   assert.deepEqual(
-    buildPermissionArgs('read-only', 'C:\\work\\project', { toolAllowlist: false }),
+    buildPermissionArgs('read-only', 'C:\\work\\project', LEGACY_CAPABILITIES),
     ['--deny-tool=write', '--deny-tool=shell'],
   )
 })
 
 test('buildPermissionArgs: full-auto adds --allow-all-tools', () => {
-  assert.deepEqual(buildPermissionArgs('full-auto', 'C:\\work\\project'), ['--allow-all-tools'])
+  assert.deepEqual(buildPermissionArgs('full-auto', 'C:\\work\\project', MODERN_CAPABILITIES), ['--allow-all-tools'])
 })
 
 test('buildPermissionArgs: full-access disables tool, path, and URL verification', () => {
-  assert.deepEqual(buildPermissionArgs('full-access', 'C:\\work\\project'), ['--allow-all'])
+  assert.deepEqual(buildPermissionArgs('full-access', 'C:\\work\\project', MODERN_CAPABILITIES), ['--allow-all'])
+})
+
+test('legacy restricted mode explains its weaker compatibility guarantee', () => {
+  assert.match(permissionCompatibilityWarning('read-only', LEGACY_CAPABILITIES) ?? '', /Only shell and write tools are denied/)
+  assert.equal(permissionCompatibilityWarning('read-only', MODERN_CAPABILITIES), null)
+  assert.equal(permissionCompatibilityWarning('default', LEGACY_CAPABILITIES), null)
 })
 
 test('isPermissionPreset narrows valid preset strings and rejects everything else', () => {

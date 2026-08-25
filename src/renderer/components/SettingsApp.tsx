@@ -431,6 +431,7 @@ export function SettingsApp(): JSX.Element | null {
   const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({})
   const [message, setMessage] = useState<string | null>(null)
   const [cliMaintenancePending, setCliMaintenancePending] = useState(false)
+  const [capabilityCheckPending, setCapabilityCheckPending] = useState(false)
 
   useEffect(() => {
     void window.copilotDesktopSettings.get().then(setSnapshot)
@@ -625,22 +626,23 @@ export function SettingsApp(): JSX.Element | null {
         <div className="settings-actions">
           <button
             type="button"
-            disabled={cliMaintenancePending || snapshot.cliMaintenance.status === 'running'}
+            disabled={cliMaintenancePending || capabilityCheckPending || snapshot.cliMaintenance.status === 'running'}
             onClick={() => maintainCli('install')}
           >
             {snapshot.cliVersion ? 'Repair installation' : 'Install Copilot CLI'}
           </button>
           <button
             type="button"
-            disabled={!snapshot.cliVersion || cliMaintenancePending || snapshot.cliMaintenance.status === 'running'}
+            disabled={!snapshot.cliVersion || cliMaintenancePending || capabilityCheckPending || snapshot.cliMaintenance.status === 'running'}
             onClick={() => maintainCli('update')}
           >
             Update Copilot CLI
           </button>
           <button
             type="button"
-            disabled={!snapshot.cliVersion || cliMaintenancePending || snapshot.cliMaintenance.status === 'running'}
+            disabled={!snapshot.cliVersion || cliMaintenancePending || capabilityCheckPending || snapshot.cliMaintenance.status === 'running'}
             onClick={() => {
+              setCapabilityCheckPending(true)
               showMessage('Rechecking Copilot CLI capabilities…')
               void window.copilotDesktopSettings.recheckCopilotCapabilities()
                 .then((next) => {
@@ -648,9 +650,10 @@ export function SettingsApp(): JSX.Element | null {
                   showMessage('Copilot CLI capabilities rechecked.')
                 })
                 .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
+                .finally(() => setCapabilityCheckPending(false))
             }}
           >
-            Recheck capabilities
+            {capabilityCheckPending ? 'Rechecking capabilities…' : 'Recheck capabilities'}
           </button>
         </div>
         <p className="settings-disclaimer">Close active sessions before installing or updating the CLI.</p>

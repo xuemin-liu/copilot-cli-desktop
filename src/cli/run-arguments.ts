@@ -1,4 +1,5 @@
 import { buildPermissionArgs, isPermissionPreset, type PermissionPreset } from '../main/permission-presets.js'
+import type { CopilotCapabilities } from '../main/copilot-command.js'
 
 export interface ProgrammaticRunOptions {
   workspace: string | undefined
@@ -70,7 +71,11 @@ export function parseProgrammaticRunArguments(args: readonly string[]): Programm
   return { workspace, prompt, preset, model, agent, outputFormat, silent, share, autopilot, maxAiCredits }
 }
 
-export function buildProgrammaticCopilotArgs(options: ProgrammaticRunOptions, workspace: string): string[] {
+export function buildProgrammaticCopilotArgs(
+  options: ProgrammaticRunOptions,
+  workspace: string,
+  capabilities: Pick<CopilotCapabilities, 'toolAllowlist'>,
+): string[] {
   return [
     '--prompt', options.prompt,
     '--output-format', options.outputFormat,
@@ -80,6 +85,6 @@ export function buildProgrammaticCopilotArgs(options: ProgrammaticRunOptions, wo
     ...(options.share ? ['--share', options.share] : []),
     ...(options.autopilot ? ['--autopilot'] : []),
     ...(options.maxAiCredits !== null ? ['--max-ai-credits', String(options.maxAiCredits)] : []),
-    ...buildPermissionArgs(options.preset, workspace),
+    ...buildPermissionArgs(options.preset, workspace, capabilities),
   ]
 }

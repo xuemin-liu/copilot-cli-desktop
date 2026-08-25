@@ -11,11 +11,15 @@ test('programmatic run arguments parse a complete request', () => {
   assert.equal(parsed.prompt, 'Review this repo')
   assert.equal(parsed.outputFormat, 'json')
   assert.equal(parsed.maxAiCredits, 5)
-  assert.deepEqual(buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project'), [
+  assert.deepEqual(buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project', { toolAllowlist: true }), [
     '--prompt', 'Review this repo', '--output-format', 'json', '--model', 'gpt-5.3-codex',
     '--agent', 'code-review', '--share', 'review.md', '--autopilot', '--max-ai-credits', '5',
     '--available-tools=view,glob,grep,ask_user',
   ])
+  assert.deepEqual(
+    buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project', { toolAllowlist: false }).slice(-2),
+    ['--deny-tool=write', '--deny-tool=shell'],
+  )
 })
 
 test('programmatic run requires a prompt and rejects unknown options', () => {

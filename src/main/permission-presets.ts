@@ -71,7 +71,7 @@ export function isPermissionPreset(value: unknown): value is PermissionPreset {
 export function buildPermissionArgs(
   preset: PermissionPreset,
   workspacePath: string,
-  capabilities: { toolAllowlist: boolean } = { toolAllowlist: true },
+  capabilities: { toolAllowlist: boolean },
 ): string[] {
   switch (preset) {
     case 'default':
@@ -91,4 +91,14 @@ export function buildPermissionArgs(
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)
     }
   }
+}
+
+export function permissionCompatibilityWarning(
+  preset: PermissionPreset,
+  capabilities: { toolAllowlist: boolean },
+): string | null {
+  if (preset !== 'read-only' || capabilities.toolAllowlist) return null
+  return 'Restricted mode is using legacy compatibility flags because this Copilot CLI does not support tool allowlists. '
+    + 'Only shell and write tools are denied; web, MCP, skills, memory, and delegated-agent tools may remain available. '
+    + 'Update Copilot CLI for the full read/search-only restriction.'
 }
