@@ -40,6 +40,8 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // an explicit copy command should modify the clipboard.
     let retainedSelection = ''
     let retainedSelectionRange: { column: number; row: number; length: number } | null = null
+    let selectionRenderFrame = 0
+    let selectionMetrics: { left: number; top: number; cellWidth: number; cellHeight: number } | null = null
     const selectionOverlay = document.createElement('div')
     selectionOverlay.className = 'terminal-retained-selection-overlay'
     Object.assign(selectionOverlay.style, {
@@ -51,18 +53,27 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // Keep this outside xterm's managed DOM. Its renderer may replace screen
     // layers during a TUI repaint, which would otherwise remove the overlay.
     container.appendChild(selectionOverlay)
+    const updateSelectionMetrics = (): void => {
+      const screen = container.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen || terminal.cols < 1 || terminal.rows < 1) {
+        selectionMetrics = null
+        return
+      }
+      const screenBounds = screen.getBoundingClientRect()
+      const containerBounds = container.getBoundingClientRect()
+      selectionMetrics = {
+        left: screenBounds.left - containerBounds.left,
+        top: screenBounds.top - containerBounds.top,
+        cellWidth: screenBounds.width / terminal.cols,
+        cellHeight: screenBounds.height / terminal.rows,
+      }
+    }
     const renderRetainedSelection = (): void => {
       selectionOverlay.replaceChildren()
       const range = retainedSelectionRange
-      const screen = container.querySelector<HTMLElement>('.xterm-screen')
-      if (!range || !screen || terminal.cols < 1 || terminal.rows < 1) return
+      const metrics = selectionMetrics
+      if (!range || !metrics || terminal.cols < 1 || terminal.rows < 1) return
 
-      const screenBounds = screen.getBoundingClientRect()
-      const containerBounds = container.getBoundingClientRect()
-      const screenLeft = screenBounds.left - containerBounds.left
-      const screenTop = screenBounds.top - containerBounds.top
-      const cellWidth = screenBounds.width / terminal.cols
-      const cellHeight = screenBounds.height / terminal.rows
       const viewportStart = terminal.buffer.active.viewportY
       const viewportEnd = viewportStart + terminal.rows - 1
       const startOffset = range.row * terminal.cols + range.column
@@ -75,15 +86,23 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         const highlight = document.createElement('div')
         Object.assign(highlight.style, {
           position: 'absolute',
-          left: `${screenLeft + firstColumn * cellWidth}px`,
-          top: `${screenTop + (row - viewportStart) * cellHeight}px`,
-          width: `${Math.max(1, lastColumn - firstColumn) * cellWidth}px`,
-          height: `${cellHeight}px`,
+          left: `${metrics.left + firstColumn * metrics.cellWidth}px`,
+          top: `${metrics.top + (row - viewportStart) * metrics.cellHeight}px`,
+          width: `${Math.max(1, lastColumn - firstColumn) * metrics.cellWidth}px`,
+          height: `${metrics.cellHeight}px`,
           background: 'rgba(88, 166, 255, 0.42)',
         })
         selectionOverlay.appendChild(highlight)
       }
     }
+    const scheduleRetainedSelectionRender = (): void => {
+      if (selectionRenderFrame) return
+      selectionRenderFrame = requestAnimationFrame(() => {
+        selectionRenderFrame = 0
+        renderRetainedSelection()
+      })
+    }
+    updateSelectionMetrics()
     const activeSelection = (): string => retainedSelection || (terminal.hasSelection() ? terminal.getSelection() : '')
     const retainCurrentSelection = (): void => {
       const position = terminal.getSelectionPosition()
@@ -105,23 +124,36 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // Paint immediately, then capture the text on the following frame.
       captureText()
       requestAnimationFrame(captureText)
-      renderRetainedSelection()
+      scheduleRetainedSelectionRender()
     }
     const clearRetainedSelection = (): void => {
       retainedSelection = ''
       retainedSelectionRange = null
       terminal.clearSelection()
-      renderRetainedSelection()
+      scheduleRetainedSelectionRender()
     }
     const restoreRetainedSelection = (): void => {
       const range = retainedSelectionRange
       if (!range) return
+      const viewportStart = terminal.buffer.active.viewportY
+      const viewportEnd = viewportStart + terminal.rows - 1
+      const startOffset = range.row * terminal.cols + range.column
+      const endOffset = startOffset + range.length
+      const firstRow = Math.floor(startOffset / terminal.cols)
+      const lastRow = Math.floor((endOffset - 1) / terminal.cols)
+      if (lastRow < viewportStart || firstRow > viewportEnd) {
+        clearRetainedSelection()
+        return
+      }
       const applySelection = (): void => {
         if (retainedSelectionRange !== range) return
         terminal.select(range.column, range.row, range.length)
+        // A TUI repaint can replace the cells under a retained range. Keep the
+        // copied value synchronized with the text currently highlighted.
+        retainedSelection = terminal.getSelection()
+        scheduleRetainedSelectionRender()
       }
       applySelection()
-      renderRetainedSelection()
       // xterm applies mouse-mode and TUI render updates after the originating
       // event. Reapply on the following paint so that late work cannot erase
       // the visual highlight while the retained selection still exists.
@@ -131,6 +163,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       const selection = activeSelection()
       if (!selection) return false
       void window.copilotDesktop.copyText(selection)
+      // Match native terminals: copying consumes the selection, so a second
+      // Ctrl+C reaches the PTY instead of repeatedly copying stale text.
+      clearRetainedSelection()
       return true
     }
 
@@ -155,9 +190,6 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       event.preventDefault()
       event.stopImmediatePropagation()
       terminal.focus()
-
-      const target = event.target
-      if (!target) return
 
       const startX = event.clientX
       const startY = event.clientY
@@ -269,8 +301,13 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
           }
           return
         }
-        replayMouseEvent(target, 'mousedown', downInit)
-        replayMouseEvent(target, 'mouseup', {
+        // xterm may replace row elements while a gesture is pending. Resolve a
+        // live target at replay time rather than dispatching to a detached node.
+        const replayTarget = document.elementFromPoint(upEvent.clientX, upEvent.clientY)
+          ?? terminal.element
+          ?? container
+        replayMouseEvent(replayTarget, 'mousedown', downInit)
+        replayMouseEvent(replayTarget, 'mouseup', {
           ...downInit,
           detail: upEvent.detail,
           screenX: upEvent.screenX,
@@ -311,22 +348,22 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     }
     container.addEventListener('keydown', handlePasteKey, true)
 
-    const handleRightMouse = (event: MouseEvent): void => {
-      if (event.button !== 2 || !activeSelection()) return
+    const handleNonPrimaryMouse = (event: MouseEvent): void => {
+      if (event.button !== 1 && event.button !== 2) return
       event.preventDefault()
-      event.stopPropagation()
+      event.stopImmediatePropagation()
     }
     const handleContextMenu = (event: MouseEvent): void => {
       const selection = activeSelection()
-      if (!selection) return
       event.preventDefault()
-      event.stopPropagation()
-      void window.copilotDesktop.showTerminalContextMenu(selection)
+      event.stopImmediatePropagation()
+      if (selection) void window.copilotDesktop.showTerminalContextMenu(selection)
     }
-    // Copilot enables terminal mouse reporting. Consume the full right-click
-    // sequence in the capture phase so xterm cannot forward it to the CLI.
-    container.addEventListener('mousedown', handleRightMouse, true)
-    container.addEventListener('mouseup', handleRightMouse, true)
+    // Copilot enables terminal mouse reporting. Consume right- and middle-click
+    // sequences in the capture phase so xterm cannot forward them to the CLI.
+    container.addEventListener('mousedown', handleNonPrimaryMouse, true)
+    container.addEventListener('mouseup', handleNonPrimaryMouse, true)
+    container.addEventListener('auxclick', handleNonPrimaryMouse, true)
     container.addEventListener('contextmenu', handleContextMenu, true)
 
     terminal.onData((data) => {
@@ -364,23 +401,26 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // row calculated from the previous window dimensions.
       fitFrame = requestAnimationFrame(() => {
         fitAddon.fit()
+        updateSelectionMetrics()
         restoreRetainedSelection()
         void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
       })
     }
     const resizeObserver = new ResizeObserver(fitTerminal)
     resizeObserver.observe(container)
-    terminal.onScroll(renderRetainedSelection)
+    terminal.onScroll(restoreRetainedSelection)
 
     return () => {
       unsubscribe()
       cancelAnimationFrame(fitFrame)
+      cancelAnimationFrame(selectionRenderFrame)
       resizeObserver.disconnect()
       cancelPendingLeftGesture?.()
       container.removeEventListener('mousedown', handleLeftMouseDown, true)
       container.removeEventListener('keydown', handlePasteKey, true)
-      container.removeEventListener('mousedown', handleRightMouse, true)
-      container.removeEventListener('mouseup', handleRightMouse, true)
+      container.removeEventListener('mousedown', handleNonPrimaryMouse, true)
+      container.removeEventListener('mouseup', handleNonPrimaryMouse, true)
+      container.removeEventListener('auxclick', handleNonPrimaryMouse, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       selectionOverlay.remove()
       terminal.dispose()

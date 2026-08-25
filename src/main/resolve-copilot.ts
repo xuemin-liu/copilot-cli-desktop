@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import type { CopilotResolution } from './types.js'
 
 const execFileAsync = promisify(execFile)
-const COPILOT_PROBE_TIMEOUT_MS = 20_000
+const COPILOT_PROBE_TIMEOUT_MS = 8_000
 
 export type ExecFileFn = (
   file: string,
