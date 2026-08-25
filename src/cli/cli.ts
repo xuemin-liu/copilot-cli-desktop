@@ -20,8 +20,8 @@ import { findWorkspaceArgument } from './start-arguments.js'
 import { buildProgrammaticCopilotArgs, parseProgrammaticRunArguments } from './run-arguments.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
-import { discoverCopilotCapabilities } from '../main/copilot-command.js'
-import { permissionCompatibilityWarning } from '../main/permission-presets.js'
+import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES } from '../main/copilot-command.js'
+import { needsToolAllowlistProbe, permissionCompatibilityWarning } from '../main/permission-presets.js'
 
 const paths = getCliPaths()
 const daemonEntry = fileURLToPath(new URL('./daemon.js', import.meta.url))
@@ -205,7 +205,9 @@ async function runProgrammatic(rawArgs: string[]): Promise<void> {
   const workspace = resolve(options.workspace ?? process.cwd())
   const resolution = await resolveCopilotBinary()
   if (resolution.version === null) throw new Error(resolution.error ?? 'Copilot CLI is not installed')
-  const capabilities = await discoverCopilotCapabilities(resolution)
+  const capabilities = needsToolAllowlistProbe(options.preset)
+    ? await discoverCopilotCapabilities(resolution)
+    : EMPTY_COPILOT_CAPABILITIES
   const compatibilityWarning = permissionCompatibilityWarning(options.preset, capabilities)
   if (compatibilityWarning) console.warn(`Warning: ${compatibilityWarning}`)
   const environment = withCopilotPathAdditions(process.env, resolution.pathAdditions)

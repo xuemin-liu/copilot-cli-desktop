@@ -63,6 +63,10 @@ export function isPermissionPreset(value: unknown): value is PermissionPreset {
   return typeof value === 'string' && (PERMISSION_PRESETS as readonly string[]).includes(value)
 }
 
+export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
+  return preset === 'read-only'
+}
+
 /**
  * Build the `copilot` CLI launch flags for a permission preset. `workspacePath`
  * must be an absolute, already-resolved path — this function does not resolve

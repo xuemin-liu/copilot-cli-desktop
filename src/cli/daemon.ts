@@ -8,6 +8,7 @@ import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES, type CopilotCa
 import {
   buildPermissionArgs,
   isPermissionPreset,
+  needsToolAllowlistProbe,
   permissionCompatibilityWarning,
   type PermissionPreset,
 } from '../main/permission-presets.js'
@@ -320,7 +321,9 @@ async function initialize(): Promise<void> {
   const resolution = await resolveCopilotBinary()
   if (resolution.version === null) throw new Error(resolution.error ?? 'The copilot CLI could not be resolved')
   copilotResolution = resolution
-  copilotCapabilities = await discoverCopilotCapabilities(resolution)
+  copilotCapabilities = needsToolAllowlistProbe(preset)
+    ? await discoverCopilotCapabilities(resolution)
+    : { ...EMPTY_COPILOT_CAPABILITIES }
   const compatibilityWarning = permissionCompatibilityWarning(preset, copilotCapabilities)
   if (compatibilityWarning) {
     await updateState({ warning: compatibilityWarning })

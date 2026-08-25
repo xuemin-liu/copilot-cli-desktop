@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning } from './permission-presets.js'
+import {
+  buildPermissionArgs,
+  isPermissionPreset,
+  needsToolAllowlistProbe,
+  permissionCompatibilityWarning,
+} from './permission-presets.js'
 
 const MODERN_CAPABILITIES = { toolAllowlist: true }
 const LEGACY_CAPABILITIES = { toolAllowlist: false }
@@ -42,6 +47,13 @@ test('legacy restricted mode explains its weaker compatibility guarantee', () =>
   assert.match(permissionCompatibilityWarning('read-only', LEGACY_CAPABILITIES) ?? '', /Only shell and write tools are denied/)
   assert.equal(permissionCompatibilityWarning('read-only', MODERN_CAPABILITIES), null)
   assert.equal(permissionCompatibilityWarning('default', LEGACY_CAPABILITIES), null)
+})
+
+test('only restricted mode needs a tool-allowlist capability probe', () => {
+  assert.equal(needsToolAllowlistProbe('read-only'), true)
+  for (const preset of ['default', 'trusted-directory', 'full-auto', 'full-access'] as const) {
+    assert.equal(needsToolAllowlistProbe(preset), false)
+  }
 })
 
 test('isPermissionPreset narrows valid preset strings and rejects everything else', () => {
