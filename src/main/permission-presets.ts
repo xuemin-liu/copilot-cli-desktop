@@ -32,7 +32,7 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
   },
   'read-only': {
     id: 'read-only',
-    label: 'Restricted (deny shell/write)',
+    label: 'Restricted (explicit read/search allowlist)',
     description:
       'Only Copilot\'s explicit file-view and search tools are exposed to the model. Shell, write, web, MCP, skill, '
       + 'memory, and delegated-agent tools are unavailable.',
@@ -68,12 +68,18 @@ export function isPermissionPreset(value: unknown): value is PermissionPreset {
  * must be an absolute, already-resolved path — this function does not resolve
  * or validate it.
  */
-export function buildPermissionArgs(preset: PermissionPreset, workspacePath: string): string[] {
+export function buildPermissionArgs(
+  preset: PermissionPreset,
+  workspacePath: string,
+  capabilities: { toolAllowlist: boolean } = { toolAllowlist: true },
+): string[] {
   switch (preset) {
     case 'default':
       return []
     case 'read-only':
-      return ['--available-tools=view,glob,grep,ask_user']
+      return capabilities.toolAllowlist
+        ? ['--available-tools=view,glob,grep,ask_user']
+        : ['--deny-tool=write', '--deny-tool=shell']
     case 'trusted-directory':
       return ['--add-dir', workspacePath]
     case 'full-auto':

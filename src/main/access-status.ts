@@ -35,11 +35,18 @@ async function detectElevation(): Promise<ElevationStatus> {
   }
 }
 
+let elevationPromise: Promise<ElevationStatus> | null = null
+
+function cachedElevation(): Promise<ElevationStatus> {
+  elevationPromise ??= detectElevation()
+  return elevationPromise
+}
+
 export async function readAccessStatus(profilePreset: PermissionPreset): Promise<AccessStatus> {
   const environmentAllowsAll = /^(1|true|yes)$/i.test(process.env.COPILOT_ALLOW_ALL ?? '')
   const permissionPreset: PermissionPreset = environmentAllowsAll ? 'full-access' : profilePreset
   const permissionSource: AccessStatus['permissionSource'] = environmentAllowsAll ? 'environment' : 'profile'
-  const elevation = await detectElevation()
+  const elevation = await cachedElevation()
   const warnings: string[] = []
   if (permissionPreset === 'full-auto') {
     warnings.push('Copilot tools run without individual approval, but path and URL verification still apply.')

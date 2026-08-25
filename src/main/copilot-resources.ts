@@ -39,7 +39,7 @@ export function buildResourceMutationArgs(
 }
 
 export function buildPluginInstallArgs(source: string): string[] {
-  return ['plugin', 'install', normalizedValue(source, 'Plugin source')]
+  return ['plugins', 'install', normalizedValue(source, 'Plugin source')]
 }
 
 export function buildSkillInstallArgs(source: string, project: boolean): string[] {

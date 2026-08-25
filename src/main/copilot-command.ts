@@ -53,22 +53,27 @@ export const EMPTY_COPILOT_CAPABILITIES: CopilotCapabilities = {
 
 export function parseCopilotCapabilities(helpText: string): CopilotCapabilities {
   const supportedOptions = [...new Set([...helpText.matchAll(/--[a-z][a-z0-9-]*/g)].map((match) => match[0]!))].sort()
+  const hasOption = (option: string): boolean => supportedOptions.includes(option)
   return {
-    sessionIdentity: helpText.includes('--session-id') && helpText.includes('--name'),
-    toolAllowlist: helpText.includes('--available-tools'),
-    launchProfiles: helpText.includes('--model') && helpText.includes('--mode') && helpText.includes('--effort'),
-    remoteSessions: helpText.includes('--remote') && helpText.includes('--connect'),
+    sessionIdentity: hasOption('--session-id') && hasOption('--name'),
+    toolAllowlist: hasOption('--available-tools'),
+    launchProfiles: hasOption('--model') && hasOption('--mode') && hasOption('--effort'),
+    remoteSessions: hasOption('--remote') && hasOption('--connect'),
     plugins: /\bcopilot plugins?\b|--plugin-dir|\/plugins/.test(helpText),
-    acp: helpText.includes('--acp'),
+    acp: hasOption('--acp'),
     supportedOptions,
   }
 }
 
 export async function discoverCopilotCapabilities(resolution: CopilotResolution): Promise<CopilotCapabilities> {
-  try {
-    const result = await runCopilotCommand(resolution, ['help'])
-    return parseCopilotCapabilities(`${result.stdout}\n${result.stderr}`)
-  } catch {
-    return { ...EMPTY_COPILOT_CAPABILITIES }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await runCopilotCommand(resolution, ['help'])
+      return parseCopilotCapabilities(`${result.stdout}\n${result.stderr}`)
+    } catch {
+      // A just-installed CLI or an antivirus scan can make the first probe
+      // transiently fail. Retry once before reporting no discovered features.
+    }
   }
+  return { ...EMPTY_COPILOT_CAPABILITIES }
 }

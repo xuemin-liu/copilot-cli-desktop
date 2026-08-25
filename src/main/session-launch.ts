@@ -37,7 +37,9 @@ const SESSION_MODES: readonly SessionMode[] = ['interactive', 'plan', 'autopilot
 const REMOTE_PREFERENCES: readonly RemotePreference[] = ['inherit', 'enable', 'disable']
 
 function boundedText(value: unknown, maxLength: number): string {
-  return typeof value === 'string' ? value.trim().replaceAll('\0', '').slice(0, maxLength) : ''
+  if (typeof value !== 'string') return ''
+  const normalized = value.trim().replaceAll('\0', '').slice(0, maxLength)
+  return normalized.startsWith('-') ? '' : normalized
 }
 
 function optionalInteger(value: unknown, minimum: number, maximum: number): number | null {

@@ -8,7 +8,7 @@ test('resource mutation commands use explicit kind flags', () => {
 })
 
 test('install commands preserve each argv value without a shell', () => {
-  assert.deepEqual(buildPluginInstallArgs('owner/repo'), ['plugin', 'install', 'owner/repo'])
+  assert.deepEqual(buildPluginInstallArgs('owner/repo'), ['plugins', 'install', 'owner/repo'])
   assert.deepEqual(buildSkillInstallArgs('https://example.test/skill', true), [
     'plugins', 'install', '--skill', '--project', 'https://example.test/skill',
   ])

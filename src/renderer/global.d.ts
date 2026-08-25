@@ -109,6 +109,7 @@ export interface CopilotDesktopSettingsBridge {
   deleteCredential(name: CredentialName): Promise<DesktopSettingsSnapshot>
   installCopilot(): Promise<DesktopSettingsSnapshot>
   updateCopilot(): Promise<DesktopSettingsSnapshot>
+  recheckCopilotCapabilities(): Promise<DesktopSettingsSnapshot>
   refreshCopilotResources(): Promise<DesktopSettingsSnapshot>
   mutateCopilotResource(action: CopilotResourceAction, kind: CopilotResourceKind, name: string): Promise<DesktopSettingsSnapshot>
   installCopilotPlugin(source: string): Promise<DesktopSettingsSnapshot>

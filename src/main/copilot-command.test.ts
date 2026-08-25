@@ -21,3 +21,7 @@ test('parseCopilotCapabilities detects supported integration surfaces', () => {
   })
   assert.deepEqual(parseCopilotCapabilities('old copilot help'), EMPTY_COPILOT_CAPABILITIES)
 })
+
+test('parseCopilotCapabilities does not mistake --model for --mode', () => {
+  assert.equal(parseCopilotCapabilities('--model MODEL --effort LEVEL').launchProfiles, false)
+})

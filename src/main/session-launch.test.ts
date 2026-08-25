@@ -37,3 +37,14 @@ test('buildSessionLaunchArgs maps a complete launch profile to supported Copilot
 test('worktree launch is omitted for resume and remote-connect sessions', () => {
   assert.deepEqual(buildSessionLaunchArgs({ ...DEFAULT_SESSION_LAUNCH_CONFIG, worktree: true }, false), [])
 })
+
+test('model and agent values that look like option flags are discarded', () => {
+  const normalized = normalizeSessionLaunchConfig({
+    ...DEFAULT_SESSION_LAUNCH_CONFIG,
+    model: '-allow-all-tools',
+    agent: '--dangerous-option',
+  })
+  assert.equal(normalized.model, '')
+  assert.equal(normalized.agent, '')
+  assert.deepEqual(buildSessionLaunchArgs(normalized, true), [])
+})

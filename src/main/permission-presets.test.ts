@@ -20,6 +20,13 @@ test('buildPermissionArgs: read-only exposes only explicit read and interaction 
   )
 })
 
+test('buildPermissionArgs: read-only falls back to legacy deny flags without allowlist support', () => {
+  assert.deepEqual(
+    buildPermissionArgs('read-only', 'C:\\work\\project', { toolAllowlist: false }),
+    ['--deny-tool=write', '--deny-tool=shell'],
+  )
+})
+
 test('buildPermissionArgs: full-auto adds --allow-all-tools', () => {
   assert.deepEqual(buildPermissionArgs('full-auto', 'C:\\work\\project'), ['--allow-all-tools'])
 })

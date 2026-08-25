@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
   deleteCredential: (name) => ipcRenderer.invoke('desktop-settings:delete-credential', name),
   installCopilot: () => ipcRenderer.invoke('desktop-settings:install-copilot'),
   updateCopilot: () => ipcRenderer.invoke('desktop-settings:update-copilot'),
+  recheckCopilotCapabilities: () => ipcRenderer.invoke('desktop-settings:recheck-copilot-capabilities'),
   refreshCopilotResources: () => ipcRenderer.invoke('desktop-settings:refresh-copilot-resources'),
   mutateCopilotResource: (action, kind, name) =>
     ipcRenderer.invoke('desktop-settings:mutate-copilot-resource', action, kind, name),

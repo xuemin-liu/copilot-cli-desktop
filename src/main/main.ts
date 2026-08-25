@@ -463,9 +463,6 @@ async function createSessionTab(
   if (connectSessionId && !copilotCapabilities.remoteSessions) {
     throw new Error('This Copilot CLI version does not support remote sessions; update it from Settings')
   }
-  if (profile.permissionPreset === 'read-only' && !copilotCapabilities.toolAllowlist) {
-    throw new Error('Restricted mode requires a Copilot CLI version with --available-tools support')
-  }
   const launchArgs = buildSessionLaunchArgs(
     connectSessionId
       ? { ...profile.launch, remoteControl: 'inherit', remoteExport: 'inherit' }
@@ -502,7 +499,7 @@ async function createSessionTab(
         : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })),
     ...attachmentPaths.flatMap((path) => ['--attachment', path]),
     ...launchArgs,
-    ...buildPermissionArgs(profile.permissionPreset, profile.path),
+    ...buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
     // PtySession merges process.env into this session's environment (see
     // pty-session.ts), so secretEnvArgs must see that same merged view to
     // also protect a credential that was only ever ambient, not vault-saved.
@@ -721,14 +718,18 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(): Promise<DesktopState> {
   state.resolution = await resolveCopilotBinary()
-  copilotCapabilities = state.resolution.version === null
-    ? { ...EMPTY_COPILOT_CAPABILITIES }
-    : await discoverCopilotCapabilities(state.resolution)
+  await recheckCopilotCapabilities()
   broadcastState()
   if (state.resolution.version !== null && desktopConfig.activeProfileId && tabsState.tabs.length === 0) {
     await restoreTabsForActiveProfile()
   }
   return snapshot()
+}
+
+async function recheckCopilotCapabilities(): Promise<void> {
+  copilotCapabilities = !state.resolution || state.resolution.version === null
+    ? { ...EMPTY_COPILOT_CAPABILITIES }
+    : await discoverCopilotCapabilities(state.resolution)
 }
 
 async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void> {
@@ -778,13 +779,14 @@ async function managedCopilotEnvironment(): Promise<NodeJS.ProcessEnv> {
   return { ...process.env, ...provider, ...vaultEnvironment }
 }
 
-async function refreshCopilotResources(): Promise<void> {
+async function refreshCopilotResources(environment?: NodeJS.ProcessEnv): Promise<void> {
   if (!copilotCapabilities.plugins) throw new Error('This Copilot CLI version does not expose plugin management; update it first')
+  const previousOutput = copilotResources.output
   copilotResources = { status: 'loading', output: copilotResources.output, message: 'Loading Copilot resources…' }
   try {
     const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], {
       cwd: activeWorkspaceProfile(desktopConfig)?.path,
-      env: await managedCopilotEnvironment(),
+      env: environment ?? await managedCopilotEnvironment(),
     })
     const output = (result.stdout || result.stderr).trim().slice(0, 500_000)
     copilotResources = {
@@ -795,7 +797,7 @@ async function refreshCopilotResources(): Promise<void> {
   } catch (error) {
     copilotResources = {
       status: 'error',
-      output: '',
+      output: previousOutput,
       message: error instanceof Error ? error.message : String(error),
     }
     throw error
@@ -803,12 +805,23 @@ async function refreshCopilotResources(): Promise<void> {
 }
 
 async function runCopilotResourceMutation(args: string[]): Promise<void> {
+  const environment = await managedCopilotEnvironment()
   await runCopilotCommand(resolvedCopilot(), args, {
     cwd: activeWorkspaceProfile(desktopConfig)?.path,
     timeout: 2 * 60_000,
-    env: await managedCopilotEnvironment(),
+    env: environment,
   })
-  await refreshCopilotResources()
+  try {
+    await refreshCopilotResources(environment)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    copilotResources = {
+      ...copilotResources,
+      status: 'error',
+      message: `The change succeeded, but resources could not be refreshed: ${message}`,
+    }
+    void writeAppLog(`Copilot resource mutation succeeded but refresh failed: ${message}`).catch(() => {})
+  }
 }
 
 function installApplicationMenu(): void {
@@ -979,6 +992,10 @@ interface DesktopSettingsSnapshot {
 
 async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
   const activeProfile = activeWorkspaceProfile(desktopConfig)
+  const [credentials, access] = await Promise.all([
+    credentialStore ? credentialStore.status() : Promise.resolve(null),
+    readAccessStatus(activeProfile?.permissionPreset ?? 'default'),
+  ])
   return {
     closeToTray: desktopConfig.closeToTray,
     trayEnabled: desktopConfig.trayEnabled,
@@ -989,11 +1006,11 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
     globalShortcutRegistered: globalShortcut.isRegistered(GLOBAL_TOGGLE_SHORTCUT),
     globalShortcutAccelerator: GLOBAL_TOGGLE_SHORTCUT_LABEL,
-    credentials: credentialStore ? await credentialStore.status() : null,
+    credentials,
     profiles: desktopConfig.profiles.map((profile) => ({ ...profile })),
     activeProfileId: desktopConfig.activeProfileId,
     rollbackVersion: desktopConfig.rollbackVersion,
-    access: await readAccessStatus(activeProfile?.permissionPreset ?? 'default'),
+    access,
     provider: { ...desktopConfig.provider },
     cliVersion: state.resolution?.version ?? null,
     cliCapabilities: { ...copilotCapabilities },
@@ -1306,6 +1323,11 @@ ipcMain.handle('desktop-settings:install-copilot', async (event) => {
 ipcMain.handle('desktop-settings:update-copilot', async (event) => {
   assertTrustedSettingsSender(event)
   await maintainCopilotCli('update')
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:recheck-copilot-capabilities', async (event) => {
+  assertTrustedSettingsSender(event)
+  await recheckCopilotCapabilities()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:refresh-copilot-resources', async (event) => {

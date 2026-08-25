@@ -583,6 +583,70 @@ button:disabled {
   right: 16px;
 }
 
+.dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(4 6 10 / 72%);
+}
+
+.input-dialog {
+  width: min(430px, 100%);
+  padding: 20px;
+  border: 1px solid #3a404c;
+  border-radius: 12px;
+  background: #171b23;
+  box-shadow: 0 20px 70px rgb(0 0 0 / 55%);
+}
+
+.input-dialog h2 {
+  margin: 0 0 18px;
+  font-size: 18px;
+}
+
+.input-dialog label {
+  display: block;
+  margin-bottom: 7px;
+  color: #b8c0cc;
+}
+
+.input-dialog input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #414957;
+  border-radius: 7px;
+  outline: none;
+  background: #0d1118;
+  color: #f2f5fa;
+  font: inherit;
+}
+
+.input-dialog input:focus {
+  border-color: #537de8;
+  box-shadow: 0 0 0 2px rgb(83 125 232 / 18%);
+}
+
+.input-dialog-error {
+  margin: 9px 0 0;
+  color: #ff858d;
+}
+
+.input-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.input-dialog-actions button {
+  min-height: 36px;
+  padding: 0 14px;
+}
+
 .diagnostics-view {
   max-width: 640px;
   margin: 40px auto;

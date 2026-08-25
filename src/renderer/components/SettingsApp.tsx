@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import type { CredentialName } from '../../main/secure-credentials.js'
-import type { PermissionPreset } from '../../main/permission-presets.js'
+import { PERMISSION_PRESET_INFO, PERMISSION_PRESETS, type PermissionPreset } from '../../main/permission-presets.js'
 import type { ResumeMode } from '../../main/resume-args.js'
 import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
@@ -9,13 +9,10 @@ import type { WorkspaceProfile } from '../../main/types.js'
 import type { SessionLaunchConfig } from '../../main/session-launch.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 
-const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = [
-  { value: 'default', label: 'Default (prompt every time)' },
-  { value: 'read-only', label: 'Restricted (explicit read/search allowlist)' },
-  { value: 'trusted-directory', label: 'Trusted directory' },
-  { value: 'full-auto', label: 'Full auto (--allow-all-tools)' },
-  { value: 'full-access', label: 'Full computer access (--allow-all)' },
-]
+const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
+  value,
+  label: PERMISSION_PRESET_INFO[value].label,
+}))
 
 const RESUME_OPTIONS: Array<{ value: ResumeMode; label: string }> = [
   { value: 'new', label: 'Always start a new session' },
@@ -187,7 +184,7 @@ function WorkspaceProfileEditor({
           >
             <option value="inherit">Use Copilot setting</option>
             <option value="enable">Enable export</option>
-            <option value="disable">Disable export and remote control</option>
+            <option value="disable">Disable export</option>
           </select>
         </label>
       </div>
@@ -639,6 +636,21 @@ export function SettingsApp(): JSX.Element | null {
             onClick={() => maintainCli('update')}
           >
             Update Copilot CLI
+          </button>
+          <button
+            type="button"
+            disabled={!snapshot.cliVersion || cliMaintenancePending || snapshot.cliMaintenance.status === 'running'}
+            onClick={() => {
+              showMessage('Rechecking Copilot CLI capabilities…')
+              void window.copilotDesktopSettings.recheckCopilotCapabilities()
+                .then((next) => {
+                  refresh(next)
+                  showMessage('Copilot CLI capabilities rechecked.')
+                })
+                .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
+            }}
+          >
+            Recheck capabilities
           </button>
         </div>
         <p className="settings-disclaimer">Close active sessions before installing or updating the CLI.</p>
