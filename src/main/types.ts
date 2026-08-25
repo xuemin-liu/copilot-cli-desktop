@@ -33,6 +33,8 @@ export interface DesktopSessionTab {
   lastSessionId: string | null
   status: SessionLifecycleStatus
   processId: number | null
+  /** Permission preset captured when this Copilot process was launched. */
+  permissionPreset: PermissionPreset
   /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */
   lastActivityAt: number
 }

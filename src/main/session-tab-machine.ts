@@ -1,3 +1,4 @@
+import type { PermissionPreset } from './permission-presets.js'
 import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
 
 export const MAX_SESSION_TABS = 20
@@ -13,6 +14,7 @@ export interface NewTabInput {
   id: string
   title: string
   workspaceProfileId: string
+  permissionPreset?: PermissionPreset
   lastSessionId?: string | null
   lastActivityAt?: number
 }
@@ -31,6 +33,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     lastSessionId: input.lastSessionId ?? null,
     status: 'starting',
     processId: null,
+    permissionPreset: input.permissionPreset ?? 'default',
     lastActivityAt: input.lastActivityAt ?? Date.now(),
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }

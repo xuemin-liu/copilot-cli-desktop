@@ -26,6 +26,7 @@ test('createTab adds a starting tab and makes it active', () => {
     lastSessionId: null,
     status: 'starting',
     processId: null,
+    permissionPreset: 'default',
     lastActivityAt: 123,
   })
 })

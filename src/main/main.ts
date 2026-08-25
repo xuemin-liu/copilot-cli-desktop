@@ -523,6 +523,7 @@ async function createSessionTab(
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
     workspaceProfileId: profile.id,
+    permissionPreset: profile.permissionPreset,
     lastSessionId: deterministicSessionId,
   })
   syncTabState()

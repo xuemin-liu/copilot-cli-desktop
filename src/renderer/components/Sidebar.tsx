@@ -72,6 +72,14 @@ export function Sidebar({
   const [orderMode, setOrderMode] = useState<'manual' | 'last-updated'>(() => readSidebarPreference('sidebar-order-mode') === 'last-updated' ? 'last-updated' : 'manual')
   const normalizedQuery = query.trim().toLowerCase()
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
+  const activeSessionPreset = activeTab && activeTab.workspaceProfileId === activeProfile?.id
+    ? activeTab.permissionPreset
+    : null
+  const displayedPreset = activeSessionPreset ?? activeProfile?.permissionPreset ?? null
+  const pendingPreset = activeProfile && activeSessionPreset && activeProfile.permissionPreset !== activeSessionPreset
+    ? activeProfile.permissionPreset
+    : null
   const startSession = (): void => {
     if (activeProfileId === null) onSelectWorkspace()
     else onCreateTab()
@@ -272,10 +280,18 @@ export function Sidebar({
         })}
       </div>
 
-      {activeProfile && (
-        <div className={`sidebar-access sidebar-access-${activeProfile.permissionPreset}`} title={PERMISSION_PRESET_INFO[activeProfile.permissionPreset].description}>
+      {activeProfile && displayedPreset && (
+        <div
+          className={`sidebar-access sidebar-access-${displayedPreset}`}
+          title={pendingPreset
+            ? `${PERMISSION_PRESET_INFO[displayedPreset].description} ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to new sessions.`
+            : PERMISSION_PRESET_INFO[displayedPreset].description}
+        >
           <span className="sidebar-access-dot" aria-hidden="true" />
-          <span>{PERMISSION_PRESET_INFO[activeProfile.permissionPreset].label}</span>
+          <span>
+            {PERMISSION_PRESET_INFO[displayedPreset].label}
+            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to new sessions`}
+          </span>
         </div>
       )}
       <button type="button" className="sidebar-settings" onClick={onOpenSettings}>
