@@ -70,6 +70,13 @@ function windowsLaunch(path: string, env: NodeJS.ProcessEnv): Pick<CopilotResolu
   }
 }
 
+function withPathAdditions(env: NodeJS.ProcessEnv, additions: readonly string[]): NodeJS.ProcessEnv {
+  if (additions.length === 0) return env
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'Path'
+  const currentPath = env[pathKey] ?? ''
+  return { ...env, [pathKey]: [...additions, currentPath].filter(Boolean).join(';') }
+}
+
 /**
  * Resolve how to launch the GitHub Copilot CLI:
  *  1. `copilot` directly on PATH.
@@ -108,11 +115,19 @@ export async function resolveCopilotBinary(
       env.ProgramW6432 && join(env.ProgramW6432, 'nodejs', 'copilot.cmd'),
       env.APPDATA && join(env.APPDATA, 'npm', 'copilot.cmd'),
     ].filter((candidate): candidate is string => Boolean(candidate))
+    const nodeDirectories = [...new Set([
+      env.ProgramFiles && join(env.ProgramFiles, 'nodejs'),
+      env.ProgramW6432 && join(env.ProgramW6432, 'nodejs'),
+    ].filter((directory): directory is string => Boolean(directory)))]
+      .filter((directory) => pathExists(join(directory, 'node.exe')))
+    const shimEnvironment = withPathAdditions(env, nodeDirectories)
     for (const candidate of [...new Set(shimCandidates)]) {
       if (!pathExists(candidate)) continue
-      const launch = windowsLaunch(candidate, env)
-      const direct = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], env, execFileFn)
-      if (direct.ok) return { kind: 'direct', ...launch, version: direct.version, error: null }
+      const launch = windowsLaunch(candidate, shimEnvironment)
+      const direct = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], shimEnvironment, execFileFn)
+      if (direct.ok) {
+        return { kind: 'direct', ...launch, version: direct.version, error: null, pathAdditions: nodeDirectories }
+      }
       attempts.push(`${candidate} --version: ${direct.error instanceof Error ? direct.error.message : String(direct.error)}`)
     }
   } else {

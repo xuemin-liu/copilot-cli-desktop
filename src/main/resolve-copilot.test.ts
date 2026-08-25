@@ -58,10 +58,11 @@ test('resolveCopilotBinary finds the standard Node.js shim when Electron PATH is
   }, fakeExecFile({
     'where.exe copilot': new Error('not found on PATH'),
     [`${commandShell} /d /s /c call ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
-  }), 'win32', (path) => path === copilotPath)
+  }), 'win32', (path) => path === copilotPath || path === 'C:\\Program Files\\nodejs\\node.exe')
   assert.equal(resolution.kind, 'direct')
   assert.equal(resolution.resolvedPath, copilotPath)
   assert.equal(resolution.version, '1.0.80')
+  assert.deepEqual(resolution.pathAdditions, ['C:\\Program Files\\nodejs'])
 })
 
 test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH', async () => {

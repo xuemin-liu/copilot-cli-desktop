@@ -56,7 +56,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       event.preventDefault()
       event.stopPropagation()
       void window.copilotDesktop.readClipboardText().then((text) => {
-        if (text) void window.copilotDesktop.writeTab(tabId, text)
+        if (text) terminal.paste(text)
       })
     }
     container.addEventListener('keydown', handlePasteKey, true)

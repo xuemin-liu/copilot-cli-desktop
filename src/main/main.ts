@@ -430,7 +430,14 @@ async function createSessionTab(
   const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
-  const environment = { ...configuredEnvironment, ...vaultEnvironment }
+  const environment: NodeJS.ProcessEnv = { ...configuredEnvironment, ...vaultEnvironment }
+  if (resolution.pathAdditions?.length) {
+    const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') ?? 'Path'
+    environment[pathKey] = [
+      ...resolution.pathAdditions,
+      environment[pathKey],
+    ].filter(Boolean).join(';')
+  }
   const args = [
     ...resolution.prefixArgs,
     // Let xterm own text selection and clipboard gestures. Copilot's native
