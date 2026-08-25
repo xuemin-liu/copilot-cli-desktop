@@ -554,11 +554,11 @@ export function SettingsApp(): JSX.Element | null {
       <section>
         <h2>Access status</h2>
         <dl className="settings-definition-list">
-          <div><dt>Copilot permission</dt><dd>{snapshot.access.permissionLabel} ({snapshot.access.permissionSource})</dd></div>
+          <div><dt>Configured startup permission</dt><dd>{snapshot.access.permissionLabel} ({snapshot.access.permissionSource})</dd></div>
           <div><dt>Windows process</dt><dd>{snapshot.access.elevation === 'administrator' ? 'Administrator' : snapshot.access.elevation === 'standard-user' ? 'Standard user' : 'Unknown'}</dd></div>
         </dl>
         {snapshot.access.warning && <p className="settings-warning">{snapshot.access.warning}</p>}
-        <p className="settings-disclaimer">Permissions control Copilot CLI launch flags; they cannot remove rights already held by this Windows account.</p>
+        <p className="settings-disclaimer">This setting applies when a new session is created. Existing sessions, including Restart, keep their launch permissions. Permissions cannot remove rights already held by this Windows account.</p>
       </section>
 
       <ProviderSettings provider={snapshot.provider} onSaved={refresh} />

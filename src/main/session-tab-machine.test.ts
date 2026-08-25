@@ -6,14 +6,19 @@ import {
   activateTab,
   canOpenAnotherTab,
   closeTab,
-  createTab,
+  createTab as createTabState,
   renameTab,
   setTabProcessId,
   setTabSessionId,
   setTabStatus,
   tabsForWorkspace,
+  type NewTabInput,
   type TabsState,
 } from './session-tab-machine.js'
+
+function createTab(state: TabsState, input: Omit<NewTabInput, 'launchedPermissionPreset' | 'permissionWarning' | 'remote'>): TabsState {
+  return createTabState(state, { ...input, launchedPermissionPreset: 'default', permissionWarning: null, remote: false })
+}
 
 test('createTab adds a starting tab and makes it active', () => {
   const state = createTab(EMPTY_TABS_STATE, { id: 'tab-1', title: 'Copilot', workspaceProfileId: 'ws-1', lastActivityAt: 123 })
@@ -26,6 +31,9 @@ test('createTab adds a starting tab and makes it active', () => {
     lastSessionId: null,
     status: 'starting',
     processId: null,
+    launchedPermissionPreset: 'default',
+    permissionWarning: null,
+    remote: false,
     lastActivityAt: 123,
   })
 })
