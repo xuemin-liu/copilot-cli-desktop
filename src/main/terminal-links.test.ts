@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   buildLogicalLine,
   cellIndexAt,
+  findTextRow,
   isWithinScreenBounds,
   linkAtColumn,
   scanLineForLinks,
@@ -162,6 +163,37 @@ test('a wide character inside a link is fully clickable and covered with no gap'
   const continuationIndex = cellIndexAt(logical.cells, 0, 4)
   assert.notEqual(continuationIndex, -1)
   assert.equal(linkAtColumn(logical.text, continuationIndex)?.text, String.raw`C:\界\file.txt`)
+})
+
+test('findTextRow relocates text that scrolled to a different row within the viewport', () => {
+  const rows = ['header', 'first line of interest', 'other content', 'irrelevant']
+  const getLineText = (row: number): string => rows[row] ?? ''
+  const match = findTextRow(getLineText, 'line of interest', 1, 0, 4)
+  assert.deepEqual(match, { row: 1, column: 6 })
+})
+
+test('findTextRow prefers the closest matching row when the text appears more than once', () => {
+  const rows = ['target text here', 'noise', 'target text here', 'noise', 'target text here']
+  const getLineText = (row: number): string => rows[row] ?? ''
+  const match = findTextRow(getLineText, 'target text here', 3, 0, 5)
+  assert.equal(match?.row, 2)
+})
+
+test('findTextRow returns null when the text is not visible anywhere in the viewport', () => {
+  const rows = ['nothing', 'matches', 'here']
+  const getLineText = (row: number): string => rows[row] ?? ''
+  assert.equal(findTextRow(getLineText, 'missing text', 0, 0, 3), null)
+})
+
+test('findTextRow only searches rows within the given viewport window', () => {
+  const rows = ['target', 'noise', 'noise']
+  const getLineText = (row: number): string => rows[row] ?? ''
+  assert.equal(findTextRow(getLineText, 'target', 1, 1, 2), null)
+})
+
+test('findTextRow refuses a multi-row (embedded newline) selection', () => {
+  const getLineText = (): string => 'target'
+  assert.equal(findTextRow(getLineText, 'line one\nline two', 0, 0, 5), null)
 })
 
 test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {

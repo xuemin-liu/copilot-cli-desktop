@@ -205,3 +205,41 @@ export function segmentsForLink(cells: LineCellRef[], link: DetectedLink): LinkS
   }
   return segments
 }
+
+export interface RowTextMatch {
+  row: number
+  column: number
+}
+
+/**
+ * A TUI that scrolls its own content (e.g. a diff/log panel) typically
+ * redraws the same text at a different row rather than making it vanish —
+ * xterm has no "moved" signal for this, but the text is usually still
+ * visible somewhere in the viewport. Search for it there before giving up
+ * on a retained selection, so scrolling by a modest amount keeps the
+ * highlight following the text instead of dropping it. Only handles a
+ * single-row (no embedded newline) selection; a multi-row block is left to
+ * the caller's own fallback, since relocating a whole block reliably is a
+ * different, harder problem than relocating one line of text.
+ */
+export function findTextRow(
+  getLineText: (row: number) => string,
+  targetText: string,
+  preferredRow: number,
+  viewportStart: number,
+  viewportRows: number,
+): RowTextMatch | null {
+  if (targetText.length === 0 || targetText.includes('\n')) return null
+  let best: RowTextMatch | null = null
+  let bestDistance = Infinity
+  for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
+    const column = getLineText(row).indexOf(targetText)
+    if (column === -1) continue
+    const distance = Math.abs(row - preferredRow)
+    if (distance < bestDistance) {
+      best = { row, column }
+      bestDistance = distance
+    }
+  }
+  return best
+}

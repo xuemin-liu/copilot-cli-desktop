@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import {
   buildLogicalLine,
   cellIndexAt,
+  findTextRow,
   isWithinScreenBounds,
   linkAtColumn,
   segmentsForLink,
@@ -156,12 +157,14 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // `range` is an absolute buffer position. Copilot's TUI runs in the
     // alternate screen buffer and scrolls its own content internally by
     // redrawing different text at that same position — xterm has no signal
-    // that a "scroll" happened, only that the cells changed. If we kept
-    // re-syncing retainedSelection to whatever is now there, the highlight
-    // would silently latch onto unrelated text instead of following the
-    // text the user actually selected (which may now be off-screen, or
-    // gone) — so a genuine, settled mismatch should drop the selection
-    // instead of mislabeling it.
+    // that a "scroll" happened, only that the cells changed.
+    //
+    // When a panel scrolls by a modest amount, the selected text is usually
+    // still visible somewhere else in the viewport — search for it there
+    // before giving up, so the highlight follows a normal scroll instead of
+    // just vanishing. Only fall back to dropping the selection once the text
+    // genuinely isn't visible anywhere on screen (scrolled fully out of
+    // view, or actually replaced).
     //
     // A PTY write can land at any byte boundary, so a single TUI repaint can
     // arrive as many chunks (erase, then cursor/style movement, then the
@@ -171,7 +174,8 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // only ever re-apply the selection and request a check; only this
     // function — reachable at most once per animation frame no matter how
     // many chunks landed in it — ever advances mismatchStreak or clears,
-    // and it requires the mismatch to hold on two separate rendered frames.
+    // and (once relocation has also failed) it requires the mismatch to
+    // hold on two separate rendered frames.
     const checkRetainedSelectionMismatch = (): void => {
       mismatchCheckFrame = 0
       const range = retainedSelectionRange
@@ -182,6 +186,21 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       terminal.select(range.column, range.row, range.length)
       if (terminal.getSelection() === retainedSelection) {
         mismatchStreak = 0
+        scheduleRetainedSelectionRender()
+        return
+      }
+      const viewportStart = terminal.buffer.active.viewportY
+      const relocated = findTextRow(
+        (row) => terminal.buffer.active.getLine(row)?.translateToString(false) ?? '',
+        retainedSelection,
+        range.row,
+        viewportStart,
+        terminal.rows,
+      )
+      if (relocated) {
+        retainedSelectionRange = { column: relocated.column, row: relocated.row, length: retainedSelection.length }
+        mismatchStreak = 0
+        terminal.select(relocated.column, relocated.row, retainedSelection.length)
         scheduleRetainedSelectionRender()
         return
       }
