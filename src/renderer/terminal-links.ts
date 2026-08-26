@@ -253,14 +253,18 @@ function cellSpanWidth(cells: LineCellRef[], start: number, end: number): number
  * `buildLogicalLine` reconstructs the *whole* line regardless of which of
  * its physical rows are actually on screen (it walks back to the start of
  * the wrap group, which can be above the viewport) — so every occurrence is
- * checked and only ones that land within the given viewport are eligible,
- * rather than trusting whichever occurrence happens to be found first.
+ * checked. An occurrence is eligible as long as *any* of the rows it spans
+ * is in the given viewport — `renderRetainedSelection` already clips a
+ * range to the visible rows, so a wrapped match starting just above the
+ * viewport but continuing into it is still worth relocating to, not just
+ * one that starts on an in-viewport row.
  */
 export function findTextRow(
   getLine: (row: number) => BufferLineLike | undefined,
   cols: number,
   targetText: string,
   preferredRow: number,
+  preferredColumn: number,
   viewportStart: number,
   viewportRows: number,
 ): RowTextMatch | null {
@@ -268,6 +272,7 @@ export function findTextRow(
   const viewportEnd = viewportStart + viewportRows - 1
   let best: RowTextMatch | null = null
   let bestDistance = Infinity
+  let bestColumnDistance = Infinity
   for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
     const logical = buildLogicalLine(getLine, cols, row)
     for (let from = 0; ; ) {
@@ -275,10 +280,18 @@ export function findTextRow(
       if (index === -1) break
       from = index + 1
       const startCell = logical.cells[index]
-      if (!startCell) continue
-      if (startCell.row < viewportStart || startCell.row > viewportEnd) continue
+      const endCell = logical.cells[index + targetText.length - 1]
+      if (!startCell || !endCell) continue
+      if (endCell.row < viewportStart || startCell.row > viewportEnd) continue
       const distance = Math.abs(startCell.row - preferredRow)
-      const improves = !best || distance < bestDistance || (distance === bestDistance && startCell.column < best.column)
+      // Two occurrences on the same (relocated) row are equally near
+      // preferredRow — prefer whichever is closer to where the selection
+      // actually was, not just the leftmost one, so a scroll doesn't jump
+      // the highlight to an unrelated same-text occurrence on that row.
+      const columnDistance = Math.abs(startCell.column - preferredColumn)
+      const improves = !best
+        || distance < bestDistance
+        || (distance === bestDistance && columnDistance < bestColumnDistance)
       if (improves) {
         best = {
           row: startCell.row,
@@ -286,6 +299,7 @@ export function findTextRow(
           length: cellSpanWidth(logical.cells, index, index + targetText.length),
         }
         bestDistance = distance
+        bestColumnDistance = columnDistance
       }
     }
   }

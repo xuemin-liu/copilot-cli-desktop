@@ -210,6 +210,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         terminal.cols,
         retainedSelection,
         range.row,
+        range.column,
         viewportStart,
         terminal.rows,
       )
