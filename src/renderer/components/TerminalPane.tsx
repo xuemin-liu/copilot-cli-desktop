@@ -157,9 +157,19 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       const applySelection = (): void => {
         if (retainedSelectionRange !== range) return
         terminal.select(range.column, range.row, range.length)
-        // A TUI repaint can replace the cells under a retained range. Keep the
-        // copied value synchronized with the text currently highlighted.
-        retainedSelection = terminal.getSelection()
+        const current = terminal.getSelection()
+        // `range` is an absolute buffer position. Copilot's TUI runs in the
+        // alternate screen buffer and scrolls its own content internally by
+        // redrawing different text at that same position — xterm has no
+        // signal that a "scroll" happened, only that the cells changed. If
+        // we kept re-syncing to whatever is now there, the highlight would
+        // silently latch onto unrelated text instead of following the text
+        // the user actually selected (which may now be off-screen, or gone).
+        // Drop the retained selection instead of mislabeling it.
+        if (current !== retainedSelection) {
+          clearRetainedSelection()
+          return
+        }
         scheduleRetainedSelectionRender()
       }
       applySelection()
