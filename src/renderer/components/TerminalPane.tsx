@@ -2,7 +2,14 @@ import { useEffect, useRef } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { linkAtColumn, type DetectedLink } from '../terminal-links.js'
+import {
+  buildLogicalLine,
+  cellIndexAt,
+  linkAtColumn,
+  segmentsForLink,
+  type DetectedLink,
+  type LinkSegment,
+} from '../terminal-links.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -187,10 +194,21 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         row: terminal.buffer.active.viewportY + viewportRow,
       }
     }
+    // `point.column` is a display-cell coordinate; `DetectedLink` ranges are
+    // string indices into the reassembled logical line (which may span
+    // multiple wrapped rows and account for wide characters) — resolve one
+    // into the other via the buffer's actual cells rather than assuming a
+    // 1:1 column-to-character mapping.
+    const linkAtBufferPoint = (point: { row: number; column: number }): { link: DetectedLink; segments: LinkSegment[] } | null => {
+      const logical = buildLogicalLine((row) => terminal.buffer.active.getLine(row), terminal.cols, point.row)
+      const index = cellIndexAt(logical.cells, point.row, point.column)
+      if (index === -1) return null
+      const link = linkAtColumn(logical.text, index)
+      if (!link) return null
+      return { link, segments: segmentsForLink(logical.cells, link) }
+    }
     const linkAtClientPoint = (clientX: number, clientY: number): DetectedLink | null => {
-      const point = bufferPoint(clientX, clientY)
-      const text = terminal.buffer.active.getLine(point.row)?.translateToString(false) ?? ''
-      return linkAtColumn(text, point.column)
+      return linkAtBufferPoint(bufferPoint(clientX, clientY))?.link ?? null
     }
     const openLink = (link: DetectedLink): void => {
       if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
@@ -209,41 +227,44 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       zIndex: '11',
     })
     container.appendChild(linkOverlay)
-    let hoveredLink: DetectedLink | null = null
-    let hoveredRow = -1
+    let hoveredSegments: LinkSegment[] = []
     const renderLinkHover = (): void => {
       linkOverlay.replaceChildren()
-      container.style.cursor = hoveredLink ? 'pointer' : ''
-      if (!hoveredLink || !selectionMetrics) return
+      container.style.cursor = hoveredSegments.length > 0 ? 'pointer' : ''
+      if (!selectionMetrics) return
       const viewportStart = terminal.buffer.active.viewportY
-      const viewportRow = hoveredRow - viewportStart
-      if (viewportRow < 0 || viewportRow >= terminal.rows) return
-      const underline = document.createElement('div')
-      Object.assign(underline.style, {
-        position: 'absolute',
-        left: `${selectionMetrics.left + hoveredLink.start * selectionMetrics.cellWidth}px`,
-        top: `${selectionMetrics.top + (viewportRow + 1) * selectionMetrics.cellHeight - 2}px`,
-        width: `${(hoveredLink.end - hoveredLink.start) * selectionMetrics.cellWidth}px`,
-        height: '1px',
-        background: '#e6edf3',
-      })
-      linkOverlay.appendChild(underline)
+      for (const segment of hoveredSegments) {
+        const viewportRow = segment.row - viewportStart
+        if (viewportRow < 0 || viewportRow >= terminal.rows) continue
+        const underline = document.createElement('div')
+        Object.assign(underline.style, {
+          position: 'absolute',
+          left: `${selectionMetrics.left + segment.startColumn * selectionMetrics.cellWidth}px`,
+          top: `${selectionMetrics.top + (viewportRow + 1) * selectionMetrics.cellHeight - 2}px`,
+          width: `${(segment.endColumn - segment.startColumn) * selectionMetrics.cellWidth}px`,
+          height: '1px',
+          background: '#e6edf3',
+        })
+        linkOverlay.appendChild(underline)
+      }
     }
+    const segmentsEqual = (left: LinkSegment[], right: LinkSegment[]): boolean => left.length === right.length
+      && left.every((segment, index) => {
+        const other = right[index]
+        return other !== undefined && segment.row === other.row && segment.startColumn === other.startColumn && segment.endColumn === other.endColumn
+      })
     const handleHoverMove = (moveEvent: MouseEvent): void => {
       // A pending click/drag gesture already owns cursor/coordinate semantics.
       if (cancelPendingLeftGesture) return
       const point = bufferPoint(moveEvent.clientX, moveEvent.clientY)
-      const text = terminal.buffer.active.getLine(point.row)?.translateToString(false) ?? ''
-      const link = linkAtColumn(text, point.column)
-      if (link === hoveredLink || (link && hoveredLink && link.start === hoveredLink.start && link.end === hoveredLink.end && point.row === hoveredRow)) return
-      hoveredLink = link
-      hoveredRow = point.row
+      const segments = linkAtBufferPoint(point)?.segments ?? []
+      if (segmentsEqual(segments, hoveredSegments)) return
+      hoveredSegments = segments
       renderLinkHover()
     }
     const clearLinkHover = (): void => {
-      if (!hoveredLink) return
-      hoveredLink = null
-      hoveredRow = -1
+      if (hoveredSegments.length === 0) return
+      hoveredSegments = []
       renderLinkHover()
     }
     container.addEventListener('mousemove', handleHoverMove)

@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { appendFile, mkdir } from 'node:fs/promises'
+import { access, appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -1212,7 +1211,22 @@ ipcMain.handle('desktop:open-external-url', async (event, url: unknown) => {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Only http and https links can be opened')
   await shell.openExternal(parsed.href)
 })
-ipcMain.handle('desktop:reveal-path', (event, tabId: unknown, candidate: unknown) => {
+async function pathExists(candidate: string, timeoutMs = 3_000): Promise<boolean> {
+  // A path a session prints can name a UNC/network location; a disconnected
+  // or slow share can leave `access` pending for a long time. Fail closed on
+  // a timeout rather than blocking this handler (and, if it were ever done
+  // synchronously, the whole main-process event loop) indefinitely.
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      access(candidate).then(() => true, () => false),
+      new Promise<boolean>((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), timeoutMs) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 4_096) {
     throw new Error('Invalid file path')
@@ -1224,7 +1238,7 @@ ipcMain.handle('desktop:reveal-path', (event, tabId: unknown, candidate: unknown
   // The text a session prints is not guaranteed to name a real file (it may
   // be prose that merely looks path-shaped). Silently do nothing rather than
   // opening Explorer to a location that doesn't exist.
-  if (!existsSync(resolved)) return
+  if (!(await pathExists(resolved))) return
   shell.showItemInFolder(resolved)
 })
 
