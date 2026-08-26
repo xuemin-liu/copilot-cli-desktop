@@ -228,6 +228,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     })
     container.appendChild(linkOverlay)
     let hoveredSegments: LinkSegment[] = []
+    let lastHoverPoint: { clientX: number; clientY: number } | null = null
     const renderLinkHover = (): void => {
       linkOverlay.replaceChildren()
       container.style.cursor = hoveredSegments.length > 0 ? 'pointer' : ''
@@ -253,19 +254,28 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         const other = right[index]
         return other !== undefined && segment.row === other.row && segment.startColumn === other.startColumn && segment.endColumn === other.endColumn
       })
-    const handleHoverMove = (moveEvent: MouseEvent): void => {
-      // A pending click/drag gesture already owns cursor/coordinate semantics.
-      if (cancelPendingLeftGesture) return
-      const point = bufferPoint(moveEvent.clientX, moveEvent.clientY)
-      const segments = linkAtBufferPoint(point)?.segments ?? []
+    const applyHoverSegments = (segments: LinkSegment[]): void => {
       if (segmentsEqual(segments, hoveredSegments)) return
       hoveredSegments = segments
       renderLinkHover()
     }
+    const handleHoverMove = (moveEvent: MouseEvent): void => {
+      // A pending click/drag gesture already owns cursor/coordinate semantics.
+      if (cancelPendingLeftGesture) return
+      lastHoverPoint = { clientX: moveEvent.clientX, clientY: moveEvent.clientY }
+      applyHoverSegments(linkAtBufferPoint(bufferPoint(moveEvent.clientX, moveEvent.clientY))?.segments ?? [])
+    }
+    // A TUI redraw or a wrap reflow can change which link (if any) sits under
+    // a *stationary* pointer, but produces no mousemove of its own — recompute
+    // from the last known pointer position rather than only clearing, or the
+    // underline would flicker away and never return while output streams in.
+    const recomputeLinkHover = (): void => {
+      if (!lastHoverPoint || cancelPendingLeftGesture) return
+      applyHoverSegments(linkAtBufferPoint(bufferPoint(lastHoverPoint.clientX, lastHoverPoint.clientY))?.segments ?? [])
+    }
     const clearLinkHover = (): void => {
-      if (hoveredSegments.length === 0) return
-      hoveredSegments = []
-      renderLinkHover()
+      lastHoverPoint = null
+      applyHoverSegments([])
     }
     container.addEventListener('mousemove', handleHoverMove)
     container.addEventListener('mouseleave', clearLinkHover)
@@ -501,15 +511,19 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     resizeObserver.observe(container)
     terminal.onScroll(() => {
       restoreRetainedSelection()
-      // The row under the pointer changes on scroll without a mousemove; drop
-      // the stale hover rather than leave an underline over the wrong text.
-      clearLinkHover()
+      // The row under the pointer changes on scroll without a mousemove;
+      // recompute rather than just drop the hover, so it reappears correctly
+      // once scrolling settles instead of requiring the pointer to move.
+      recomputeLinkHover()
     })
     // A TUI redraw (onRender) or a reflow of wrapped rows (onResize, e.g. via
     // fitAddon.fit()) can also change the text under a stationary pointer
-    // with no mousemove event of its own — same staleness risk as scrolling.
-    terminal.onRender(clearLinkHover)
-    terminal.onResize(clearLinkHover)
+    // with no mousemove event of its own. onRender fires on every streamed
+    // output frame, so recompute (keep the hover if the link is unchanged)
+    // rather than clear — clearing here would make the underline flicker
+    // away and never return while the mouse stays still during output.
+    terminal.onRender(recomputeLinkHover)
+    terminal.onResize(recomputeLinkHover)
 
     return () => {
       unsubscribe()
