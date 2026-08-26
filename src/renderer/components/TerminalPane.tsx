@@ -505,6 +505,11 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // the stale hover rather than leave an underline over the wrong text.
       clearLinkHover()
     })
+    // A TUI redraw (onRender) or a reflow of wrapped rows (onResize, e.g. via
+    // fitAddon.fit()) can also change the text under a stationary pointer
+    // with no mousemove event of its own — same staleness risk as scrolling.
+    terminal.onRender(clearLinkHover)
+    terminal.onResize(clearLinkHover)
 
     return () => {
       unsubscribe()
