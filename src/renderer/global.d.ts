@@ -38,6 +38,8 @@ export interface CopilotDesktopBridge {
   copyText(text: string): Promise<void>
   readClipboardText(): Promise<string>
   showTerminalContextMenu(text: string): Promise<void>
+  openExternalUrl(url: string): Promise<void>
+  revealPath(tabId: string, path: string): Promise<void>
   copyDiagnostics(): Promise<void>
   retryResolution(): Promise<DesktopState>
   installCopilot(): Promise<DesktopState>

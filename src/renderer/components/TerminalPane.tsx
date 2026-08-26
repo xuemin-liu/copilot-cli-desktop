@@ -2,6 +2,15 @@ import { useEffect, useRef } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import {
+  buildLogicalLine,
+  cellIndexAt,
+  isWithinScreenBounds,
+  linkAtColumn,
+  segmentsForLink,
+  type DetectedLink,
+  type LinkSegment,
+} from '../terminal-links.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -169,6 +178,125 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       return true
     }
 
+    const bufferPoint = (clientX: number, clientY: number): { column: number; row: number } => {
+      const screen = container.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen) return { column: 0, row: terminal.buffer.active.viewportY }
+      const bounds = screen.getBoundingClientRect()
+      const viewportColumn = Math.max(0, Math.min(
+        terminal.cols - 1,
+        Math.floor((clientX - bounds.left) / (bounds.width / terminal.cols)),
+      ))
+      const viewportRow = Math.max(0, Math.min(
+        terminal.rows - 1,
+        Math.floor((clientY - bounds.top) / (bounds.height / terminal.rows)),
+      ))
+      return {
+        column: viewportColumn,
+        row: terminal.buffer.active.viewportY + viewportRow,
+      }
+    }
+    // `bufferPoint` clamps to the nearest valid cell, which is what a drag
+    // selection wants when the pointer strays outside the terminal. Link
+    // hit-testing wants the opposite: the container includes the `.xterm`
+    // padding and scrollbar gutter around the actual character grid, and a
+    // pointer there should resolve to no link at all rather than being
+    // snapped onto whatever text sits at the nearest edge cell.
+    const screenBufferPoint = (clientX: number, clientY: number): { column: number; row: number } | null => {
+      const screen = container.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen) return null
+      if (!isWithinScreenBounds(clientX, clientY, screen.getBoundingClientRect())) return null
+      return bufferPoint(clientX, clientY)
+    }
+    // `point.column` is a display-cell coordinate; `DetectedLink` ranges are
+    // string indices into the reassembled logical line (which may span
+    // multiple wrapped rows and account for wide characters) — resolve one
+    // into the other via the buffer's actual cells rather than assuming a
+    // 1:1 column-to-character mapping.
+    const linkAtBufferPoint = (point: { row: number; column: number }): { link: DetectedLink; segments: LinkSegment[] } | null => {
+      const logical = buildLogicalLine((row) => terminal.buffer.active.getLine(row), terminal.cols, point.row)
+      const index = cellIndexAt(logical.cells, point.row, point.column)
+      if (index === -1) return null
+      const link = linkAtColumn(logical.text, index)
+      if (!link) return null
+      return { link, segments: segmentsForLink(logical.cells, link) }
+    }
+    const linkAtClientCoordinates = (clientX: number, clientY: number): { link: DetectedLink; segments: LinkSegment[] } | null => {
+      const point = screenBufferPoint(clientX, clientY)
+      return point ? linkAtBufferPoint(point) : null
+    }
+    const linkAtClientPoint = (clientX: number, clientY: number): DetectedLink | null => {
+      return linkAtClientCoordinates(clientX, clientY)?.link ?? null
+    }
+    const openLink = (link: DetectedLink): void => {
+      if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
+      else void window.copilotDesktop.revealPath(tabId, link.text)
+    }
+
+    // Underlines the link under the cursor so file paths and URLs the CLI
+    // prints read as clickable, without touching xterm's own DOM (a redraw
+    // could remove a decoration attached there).
+    const linkOverlay = document.createElement('div')
+    linkOverlay.className = 'terminal-link-hover-overlay'
+    Object.assign(linkOverlay.style, {
+      position: 'absolute',
+      inset: '0',
+      pointerEvents: 'none',
+      zIndex: '11',
+    })
+    container.appendChild(linkOverlay)
+    let hoveredSegments: LinkSegment[] = []
+    let lastHoverPoint: { clientX: number; clientY: number } | null = null
+    const renderLinkHover = (): void => {
+      linkOverlay.replaceChildren()
+      container.style.cursor = hoveredSegments.length > 0 ? 'pointer' : ''
+      if (!selectionMetrics) return
+      const viewportStart = terminal.buffer.active.viewportY
+      for (const segment of hoveredSegments) {
+        const viewportRow = segment.row - viewportStart
+        if (viewportRow < 0 || viewportRow >= terminal.rows) continue
+        const underline = document.createElement('div')
+        Object.assign(underline.style, {
+          position: 'absolute',
+          left: `${selectionMetrics.left + segment.startColumn * selectionMetrics.cellWidth}px`,
+          top: `${selectionMetrics.top + (viewportRow + 1) * selectionMetrics.cellHeight - 2}px`,
+          width: `${(segment.endColumn - segment.startColumn) * selectionMetrics.cellWidth}px`,
+          height: '1px',
+          background: '#e6edf3',
+        })
+        linkOverlay.appendChild(underline)
+      }
+    }
+    const segmentsEqual = (left: LinkSegment[], right: LinkSegment[]): boolean => left.length === right.length
+      && left.every((segment, index) => {
+        const other = right[index]
+        return other !== undefined && segment.row === other.row && segment.startColumn === other.startColumn && segment.endColumn === other.endColumn
+      })
+    const applyHoverSegments = (segments: LinkSegment[]): void => {
+      if (segmentsEqual(segments, hoveredSegments)) return
+      hoveredSegments = segments
+      renderLinkHover()
+    }
+    const handleHoverMove = (moveEvent: MouseEvent): void => {
+      // A pending click/drag gesture already owns cursor/coordinate semantics.
+      if (cancelPendingLeftGesture) return
+      lastHoverPoint = { clientX: moveEvent.clientX, clientY: moveEvent.clientY }
+      applyHoverSegments(linkAtClientCoordinates(moveEvent.clientX, moveEvent.clientY)?.segments ?? [])
+    }
+    // A TUI redraw or a wrap reflow can change which link (if any) sits under
+    // a *stationary* pointer, but produces no mousemove of its own — recompute
+    // from the last known pointer position rather than only clearing, or the
+    // underline would flicker away and never return while output streams in.
+    const recomputeLinkHover = (): void => {
+      if (!lastHoverPoint || cancelPendingLeftGesture) return
+      applyHoverSegments(linkAtClientCoordinates(lastHoverPoint.clientX, lastHoverPoint.clientY)?.segments ?? [])
+    }
+    const clearLinkHover = (): void => {
+      lastHoverPoint = null
+      applyHoverSegments([])
+    }
+    container.addEventListener('mousemove', handleHoverMove)
+    container.addEventListener('mouseleave', clearLinkHover)
+
     // Copilot needs terminal mouse reporting for clickable TUI controls such
     // as Sessions, while xterm normally reserves an unmodified left drag for
     // the application whenever that mode is active. Delay forwarding the
@@ -187,6 +315,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (event.button !== 0 || replayedMouseEvents.has(event)) return
 
       cancelPendingLeftGesture?.()
+      clearLinkHover()
       event.preventDefault()
       event.stopImmediatePropagation()
       terminal.focus()
@@ -210,24 +339,6 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         buttons: 1,
       }
       let dragging = false
-
-      const bufferPoint = (clientX: number, clientY: number): { column: number; row: number } => {
-        const screen = container.querySelector<HTMLElement>('.xterm-screen')
-        if (!screen) return { column: 0, row: terminal.buffer.active.viewportY }
-        const bounds = screen.getBoundingClientRect()
-        const viewportColumn = Math.max(0, Math.min(
-          terminal.cols - 1,
-          Math.floor((clientX - bounds.left) / (bounds.width / terminal.cols)),
-        ))
-        const viewportRow = Math.max(0, Math.min(
-          terminal.rows - 1,
-          Math.floor((clientY - bounds.top) / (bounds.height / terminal.rows)),
-        ))
-        return {
-          column: viewportColumn,
-          row: terminal.buffer.active.viewportY + viewportRow,
-        }
-      }
       const selectionStart = bufferPoint(startX, startY)
       const updateSelection = (clientX: number, clientY: number): void => {
         const selectionEnd = bufferPoint(clientX, clientY)
@@ -299,6 +410,13 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
           } else {
             selectWord(upEvent.clientX, upEvent.clientY)
           }
+          return
+        }
+        // A plain click on a file path or URL the CLI printed opens it locally
+        // instead of forwarding the click to Copilot's TUI as a button press.
+        const clickedLink = linkAtClientPoint(upEvent.clientX, upEvent.clientY)
+        if (clickedLink) {
+          openLink(clickedLink)
           return
         }
         // xterm may replace row elements while a gesture is pending. Resolve a
@@ -408,7 +526,21 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     }
     const resizeObserver = new ResizeObserver(fitTerminal)
     resizeObserver.observe(container)
-    terminal.onScroll(restoreRetainedSelection)
+    terminal.onScroll(() => {
+      restoreRetainedSelection()
+      // The row under the pointer changes on scroll without a mousemove;
+      // recompute rather than just drop the hover, so it reappears correctly
+      // once scrolling settles instead of requiring the pointer to move.
+      recomputeLinkHover()
+    })
+    // A TUI redraw (onRender) or a reflow of wrapped rows (onResize, e.g. via
+    // fitAddon.fit()) can also change the text under a stationary pointer
+    // with no mousemove event of its own. onRender fires on every streamed
+    // output frame, so recompute (keep the hover if the link is unchanged)
+    // rather than clear — clearing here would make the underline flicker
+    // away and never return while the mouse stays still during output.
+    terminal.onRender(recomputeLinkHover)
+    terminal.onResize(recomputeLinkHover)
 
     return () => {
       unsubscribe()
@@ -422,7 +554,10 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       container.removeEventListener('mouseup', handleNonPrimaryMouse, true)
       container.removeEventListener('auxclick', handleNonPrimaryMouse, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
+      container.removeEventListener('mousemove', handleHoverMove)
+      container.removeEventListener('mouseleave', clearLinkHover)
       selectionOverlay.remove()
+      linkOverlay.remove()
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
