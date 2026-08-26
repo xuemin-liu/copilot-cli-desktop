@@ -130,3 +130,35 @@ test('buildLogicalLine reassembles a URL that wraps across the terminal edge', (
     { row: 1, startColumn: 0, endColumn: 17 },
   ])
 })
+
+test('a wide character inside a link is fully clickable and covered with no gap', () => {
+  const cells = [
+    { chars: 'C', width: 1 },
+    { chars: ':', width: 1 },
+    { chars: '\\', width: 1 },
+    { chars: '界', width: 2 },
+    { chars: '', width: 0 },
+    { chars: '\\', width: 1 },
+    ...'file.txt'.split('').map((char) => ({ chars: char, width: 1 })),
+  ]
+  const line: BufferLineLike = {
+    isWrapped: false,
+    getCell: (column) => cells[column] ? { getChars: () => cells[column]!.chars, getWidth: () => cells[column]!.width } : undefined,
+  }
+  const logical = buildLogicalLine((row) => (row === 0 ? line : undefined), 20, 0)
+  assert.equal(logical.text, String.raw`C:\界\file.txt`)
+
+  const link = linkAtColumn(logical.text, 0)
+  assert.equal(link?.text, String.raw`C:\界\file.txt`)
+
+  // The underline/hit-test range must span both display columns of "界"
+  // (3 and 4) as one continuous run, not stop one column short.
+  const segments = segmentsForLink(logical.cells, link!)
+  assert.deepEqual(segments, [{ row: 0, startColumn: 0, endColumn: 14 }])
+
+  // Clicking the wide character's continuation cell (column 4, the second
+  // half of "界") must resolve to the same link as clicking its start (3).
+  const continuationIndex = cellIndexAt(logical.cells, 0, 4)
+  assert.notEqual(continuationIndex, -1)
+  assert.equal(linkAtColumn(logical.text, continuationIndex)?.text, String.raw`C:\界\file.txt`)
+})

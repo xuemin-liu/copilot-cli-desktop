@@ -98,6 +98,8 @@ export interface BufferLineLike {
 export interface LineCellRef {
   row: number
   column: number
+  /** Display columns this cell occupies (2 for a wide/CJK character, 1 otherwise). */
+  width: number
 }
 
 /**
@@ -126,8 +128,12 @@ export function buildLogicalLine(
       const cell = line.getCell(column)
       // A width-0 cell is the second half of the previous (wide) cell.
       if (!cell || cell.getWidth() === 0) continue
+      const width = cell.getWidth()
       const chars = cell.getChars() || ' '
-      for (let index = 0; index < chars.length; index++) cells.push({ row, column })
+      // A cell can hold more than one UTF-16 unit (a combining-mark grapheme);
+      // every unit still occupies the same on-screen cell, so each shares
+      // this entry's column/width for range math to stay correct either way.
+      for (let index = 0; index < chars.length; index++) cells.push({ row, column, width })
       text += chars
     }
     const next = getLine(row + 1)
@@ -143,11 +149,13 @@ export function buildLogicalLine(
 /** Cell coordinates are display columns; `DetectedLink` ranges are string
  * indices into the reassembled logical line. This converts a click's
  * (row, column) into the matching string index, respecting wide characters
- * and soft-wrapped rows. */
+ * and soft-wrapped rows. A click anywhere within a wide cell's span
+ * (its start column or its width-2 continuation column) resolves to the
+ * same string index, since both name the same underlying character. */
 export function cellIndexAt(cells: LineCellRef[], row: number, column: number): number {
   for (let index = 0; index < cells.length; index++) {
     const cell = cells[index]
-    if (cell && cell.row === row && cell.column === column) return index
+    if (cell && cell.row === row && column >= cell.column && column < cell.column + cell.width) return index
   }
   return -1
 }
@@ -166,9 +174,15 @@ export function segmentsForLink(cells: LineCellRef[], link: DetectedLink): LinkS
   for (let index = link.start; index < link.end; index++) {
     const cell = cells[index]
     if (!cell) continue
+    const endColumn = cell.column + cell.width
     const last = segments[segments.length - 1]
-    if (last && last.row === cell.row && last.endColumn === cell.column) last.endColumn = cell.column + 1
-    else segments.push({ row: cell.row, startColumn: cell.column, endColumn: cell.column + 1 })
+    if (last && last.row === cell.row && cell.column >= last.startColumn && cell.column < last.endColumn) {
+      // Another UTF-16 unit of the same on-screen cell (a combining-mark
+      // grapheme) — already covered, not a second, overlapping segment.
+      continue
+    }
+    if (last && last.row === cell.row && last.endColumn === cell.column) last.endColumn = endColumn
+    else segments.push({ row: cell.row, startColumn: cell.column, endColumn })
   }
   return segments
 }
