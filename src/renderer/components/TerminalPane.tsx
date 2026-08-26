@@ -50,9 +50,11 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     type RetainedSelectionRange = { column: number; row: number; length: number } | null
     let retainedSelection = ''
     let retainedSelectionRange: RetainedSelectionRange = null
-    // A content mismatch at the retained position that hasn't yet been seen
-    // on a second, later check — see applySelection() below.
-    let pendingMismatchRange: RetainedSelectionRange = null
+    // Consecutive *rendered frames* (not write chunks — see
+    // scheduleMismatchCheck below) on which the content at the retained
+    // position hasn't matched retainedSelection.
+    let mismatchStreak = 0
+    let mismatchCheckFrame = 0
     let selectionRenderFrame = 0
     let selectionMetrics: { left: number; top: number; cellWidth: number; cellHeight: number } | null = null
     const selectionOverlay = document.createElement('div')
@@ -128,6 +130,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         length: Math.max(1, endOffset - startOffset),
       }
       retainedSelectionRange = range
+      mismatchStreak = 0
       const captureText = (): void => {
         if (retainedSelectionRange !== range) return
         const selection = terminal.getSelection()
@@ -142,9 +145,55 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     const clearRetainedSelection = (): void => {
       retainedSelection = ''
       retainedSelectionRange = null
-      pendingMismatchRange = null
+      mismatchStreak = 0
+      if (mismatchCheckFrame) {
+        cancelAnimationFrame(mismatchCheckFrame)
+        mismatchCheckFrame = 0
+      }
       terminal.clearSelection()
       scheduleRetainedSelectionRender()
+    }
+    // `range` is an absolute buffer position. Copilot's TUI runs in the
+    // alternate screen buffer and scrolls its own content internally by
+    // redrawing different text at that same position — xterm has no signal
+    // that a "scroll" happened, only that the cells changed. If we kept
+    // re-syncing retainedSelection to whatever is now there, the highlight
+    // would silently latch onto unrelated text instead of following the
+    // text the user actually selected (which may now be off-screen, or
+    // gone) — so a genuine, settled mismatch should drop the selection
+    // instead of mislabeling it.
+    //
+    // A PTY write can land at any byte boundary, so a single TUI repaint can
+    // arrive as many chunks (erase, then cursor/style movement, then the
+    // final redraw), each independently calling restoreRetainedSelection.
+    // Deciding to clear from that write-triggered path would count each
+    // chunk as its own "check", clearing mid-repaint. So write chunks below
+    // only ever re-apply the selection and request a check; only this
+    // function — reachable at most once per animation frame no matter how
+    // many chunks landed in it — ever advances mismatchStreak or clears,
+    // and it requires the mismatch to hold on two separate rendered frames.
+    const checkRetainedSelectionMismatch = (): void => {
+      mismatchCheckFrame = 0
+      const range = retainedSelectionRange
+      if (!range) {
+        mismatchStreak = 0
+        return
+      }
+      terminal.select(range.column, range.row, range.length)
+      if (terminal.getSelection() === retainedSelection) {
+        mismatchStreak = 0
+        scheduleRetainedSelectionRender()
+        return
+      }
+      mismatchStreak += 1
+      if (mismatchStreak >= 2) {
+        clearRetainedSelection()
+        return
+      }
+      mismatchCheckFrame = requestAnimationFrame(checkRetainedSelectionMismatch)
+    }
+    const scheduleMismatchCheck = (): void => {
+      if (!mismatchCheckFrame) mismatchCheckFrame = requestAnimationFrame(checkRetainedSelectionMismatch)
     }
     const restoreRetainedSelection = (): void => {
       const range = retainedSelectionRange
@@ -159,41 +208,14 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         clearRetainedSelection()
         return
       }
-      const applySelection = (): void => {
-        if (retainedSelectionRange !== range) return
-        terminal.select(range.column, range.row, range.length)
-        const current = terminal.getSelection()
-        // `range` is an absolute buffer position. Copilot's TUI runs in the
-        // alternate screen buffer and scrolls its own content internally by
-        // redrawing different text at that same position — xterm has no
-        // signal that a "scroll" happened, only that the cells changed. If
-        // we kept re-syncing to whatever is now there, the highlight would
-        // silently latch onto unrelated text instead of following the text
-        // the user actually selected (which may now be off-screen, or gone).
-        // Drop the retained selection instead of mislabeling it — but a PTY
-        // write can land at any byte boundary, so an erase-then-redraw
-        // repaint can legitimately split across chunks, each of which calls
-        // restoreRetainedSelection (and so this check) separately. Only
-        // clear once the mismatch is still there on a second, later check
-        // (the requestAnimationFrame call below, or the next write chunk's
-        // own call, whichever comes first — both share this closure's
-        // pendingMismatchRange), so a chunk boundary landing mid-repaint
-        // doesn't drop a selection the completed repaint would have kept.
-        if (current !== retainedSelection) {
-          if (pendingMismatchRange === range) clearRetainedSelection()
-          else pendingMismatchRange = range
-          return
-        }
-        pendingMismatchRange = null
-        scheduleRetainedSelectionRender()
-      }
-      applySelection()
-      // xterm applies mouse-mode and TUI render updates after the originating
-      // event. Reapply on the following paint so that late work cannot erase
-      // the visual highlight while the retained selection still exists — and
-      // so a same-frame mismatch above gets its required second look even if
-      // no further write chunk arrives to trigger one.
-      requestAnimationFrame(applySelection)
+      // Keep the highlight visually in sync with every write immediately —
+      // only the *decision to drop it* is deferred to the coalesced check,
+      // which re-applies and re-verifies again on the next rendered frame
+      // regardless (this also serves as the old "reapply once more after
+      // xterm's own post-write updates settle" safety net).
+      terminal.select(range.column, range.row, range.length)
+      scheduleRetainedSelectionRender()
+      scheduleMismatchCheck()
     }
     const copySelection = (): boolean => {
       const selection = activeSelection()
@@ -573,6 +595,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       cancelAnimationFrame(selectionRenderFrame)
+      cancelAnimationFrame(mismatchCheckFrame)
       resizeObserver.disconnect()
       cancelPendingLeftGesture?.()
       container.removeEventListener('mousedown', handleLeftMouseDown, true)
