@@ -209,6 +209,27 @@ export function segmentsForLink(cells: LineCellRef[], link: DetectedLink): LinkS
 export interface RowTextMatch {
   row: number
   column: number
+  /** Display columns the match spans — not `targetText.length` (a UTF-16
+   * count), since a wide/CJK character in the match counts double and a
+   * combining-mark grapheme counts once despite being multiple code units. */
+  length: number
+}
+
+/** Sums the on-screen width of `cells[start, end)`, counting each distinct
+ * buffer cell once — consecutive entries can share one cell when a grapheme
+ * spans multiple UTF-16 units (see `buildLogicalLine`), and double-counting
+ * those would overstate the selection's display-cell span. */
+function cellSpanWidth(cells: LineCellRef[], start: number, end: number): number {
+  let width = 0
+  let lastCell: LineCellRef | undefined
+  for (let index = start; index < end; index++) {
+    const cell = cells[index]
+    if (!cell) break
+    if (lastCell && lastCell.row === cell.row && lastCell.column === cell.column) continue
+    width += cell.width
+    lastCell = cell
+  }
+  return width
 }
 
 /**
@@ -221,9 +242,16 @@ export interface RowTextMatch {
  * single-row (no embedded newline) selection; a multi-row block is left to
  * the caller's own fallback, since relocating a whole block reliably is a
  * different, harder problem than relocating one line of text.
+ *
+ * "Single-row" means the selected text itself has no line break — it can
+ * still have been captured across a soft wrap (xterm joins wrapped rows with
+ * no separator in `getSelection()`), so this reassembles each candidate row
+ * into its full logical line via `buildLogicalLine` rather than searching
+ * physical rows in isolation, or a wrapped match could never be found.
  */
 export function findTextRow(
-  getLineText: (row: number) => string,
+  getLine: (row: number) => BufferLineLike | undefined,
+  cols: number,
   targetText: string,
   preferredRow: number,
   viewportStart: number,
@@ -233,11 +261,18 @@ export function findTextRow(
   let best: RowTextMatch | null = null
   let bestDistance = Infinity
   for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
-    const column = getLineText(row).indexOf(targetText)
-    if (column === -1) continue
-    const distance = Math.abs(row - preferredRow)
+    const logical = buildLogicalLine(getLine, cols, row)
+    const index = logical.text.indexOf(targetText)
+    if (index === -1) continue
+    const startCell = logical.cells[index]
+    if (!startCell) continue
+    const distance = Math.abs(startCell.row - preferredRow)
     if (distance < bestDistance) {
-      best = { row, column }
+      best = {
+        row: startCell.row,
+        column: startCell.column,
+        length: cellSpanWidth(logical.cells, index, index + targetText.length),
+      }
       bestDistance = distance
     }
   }

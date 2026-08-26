@@ -206,16 +206,17 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // position every time.
       const viewportStart = terminal.buffer.active.viewportY
       const relocated = findTextRow(
-        (row) => terminal.buffer.active.getLine(row)?.translateToString(false) ?? '',
+        (row) => terminal.buffer.active.getLine(row),
+        terminal.cols,
         retainedSelection,
         range.row,
         viewportStart,
         terminal.rows,
       )
       if (relocated) {
-        retainedSelectionRange = { column: relocated.column, row: relocated.row, length: retainedSelection.length }
+        retainedSelectionRange = { column: relocated.column, row: relocated.row, length: relocated.length }
         retainedSelectionVisible = true
-        terminal.select(relocated.column, relocated.row, retainedSelection.length)
+        terminal.select(relocated.column, relocated.row, relocated.length)
         scheduleRetainedSelectionRender()
         return
       }

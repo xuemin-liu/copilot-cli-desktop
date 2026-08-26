@@ -165,35 +165,78 @@ test('a wide character inside a link is fully clickable and covered with no gap'
   assert.equal(linkAtColumn(logical.text, continuationIndex)?.text, String.raw`C:\界\file.txt`)
 })
 
+function textRows(rows: string[]): (row: number) => BufferLineLike | undefined {
+  return (row) => (rows[row] === undefined ? undefined : asciiLine(rows[row]!))
+}
+
 test('findTextRow relocates text that scrolled to a different row within the viewport', () => {
-  const rows = ['header', 'first line of interest', 'other content', 'irrelevant']
-  const getLineText = (row: number): string => rows[row] ?? ''
-  const match = findTextRow(getLineText, 'line of interest', 1, 0, 4)
-  assert.deepEqual(match, { row: 1, column: 6 })
+  const getLine = textRows(['header', 'first line of interest', 'other content', 'irrelevant'])
+  const match = findTextRow(getLine, 40, 'line of interest', 1, 0, 4)
+  assert.deepEqual(match, { row: 1, column: 6, length: 16 })
 })
 
 test('findTextRow prefers the closest matching row when the text appears more than once', () => {
-  const rows = ['target text here', 'noise', 'target text here', 'noise', 'target text here']
-  const getLineText = (row: number): string => rows[row] ?? ''
-  const match = findTextRow(getLineText, 'target text here', 3, 0, 5)
+  const getLine = textRows(['target text here', 'noise', 'target text here', 'noise', 'target text here'])
+  const match = findTextRow(getLine, 40, 'target text here', 3, 0, 5)
   assert.equal(match?.row, 2)
 })
 
 test('findTextRow returns null when the text is not visible anywhere in the viewport', () => {
-  const rows = ['nothing', 'matches', 'here']
-  const getLineText = (row: number): string => rows[row] ?? ''
-  assert.equal(findTextRow(getLineText, 'missing text', 0, 0, 3), null)
+  const getLine = textRows(['nothing', 'matches', 'here'])
+  assert.equal(findTextRow(getLine, 40, 'missing text', 0, 0, 3), null)
 })
 
 test('findTextRow only searches rows within the given viewport window', () => {
-  const rows = ['target', 'noise', 'noise']
-  const getLineText = (row: number): string => rows[row] ?? ''
-  assert.equal(findTextRow(getLineText, 'target', 1, 1, 2), null)
+  const getLine = textRows(['target', 'noise', 'noise'])
+  assert.equal(findTextRow(getLine, 40, 'target', 1, 1, 2), null)
 })
 
 test('findTextRow refuses a multi-row (embedded newline) selection', () => {
-  const getLineText = (): string => 'target'
-  assert.equal(findTextRow(getLineText, 'line one\nline two', 0, 0, 5), null)
+  const getLine = textRows(['target'])
+  assert.equal(findTextRow(getLine, 40, 'line one\nline two', 0, 0, 5), null)
+})
+
+test('findTextRow accounts for a wide character before the match when locating it', () => {
+  // "界" occupies two display columns (0 and 1), so "target" starts at
+  // buffer column 2 — one past where a plain UTF-16 string index (1, since
+  // "界" is a single code unit) would place it.
+  const cells = [
+    { chars: '界', width: 2 },
+    { chars: '', width: 0 },
+    ...'target'.split('').map((char) => ({ chars: char, width: 1 })),
+  ]
+  const line: BufferLineLike = {
+    isWrapped: false,
+    getCell: (column) => cells[column] ? { getChars: () => cells[column]!.chars, getWidth: () => cells[column]!.width } : undefined,
+  }
+  const match = findTextRow((row) => (row === 0 ? line : undefined), 20, 'target', 0, 0, 1)
+  assert.deepEqual(match, { row: 0, column: 2, length: 6 })
+})
+
+test('findTextRow reports a wide character inside the match as two display columns', () => {
+  const cells = [
+    ...'see '.split('').map((char) => ({ chars: char, width: 1 })),
+    { chars: '界', width: 2 },
+    { chars: '', width: 0 },
+    ...'!'.split('').map((char) => ({ chars: char, width: 1 })),
+  ]
+  const line: BufferLineLike = {
+    isWrapped: false,
+    getCell: (column) => cells[column] ? { getChars: () => cells[column]!.chars, getWidth: () => cells[column]!.width } : undefined,
+  }
+  // The string "界!" has length 2, but spans 3 display columns (2 + 1).
+  const match = findTextRow((row) => (row === 0 ? line : undefined), 20, '界!', 0, 0, 1)
+  assert.deepEqual(match, { row: 0, column: 4, length: 3 })
+})
+
+test('findTextRow finds a match that only exists once physical rows are joined across a soft wrap', () => {
+  const rowOne = asciiLine('please see the ', false)
+  const rowTwo = asciiLine('interesting result below', true)
+  const getLine = (row: number): BufferLineLike | undefined => (row === 0 ? rowOne : row === 1 ? rowTwo : undefined)
+  // Neither physical row alone contains "the interesting" — it only exists
+  // in the reassembled logical line spanning the wrap boundary.
+  const match = findTextRow(getLine, 15, 'the interesting', 0, 0, 2)
+  assert.deepEqual(match, { row: 0, column: 11, length: 15 })
 })
 
 test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {
