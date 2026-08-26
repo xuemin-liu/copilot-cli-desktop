@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { appendFile, mkdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -1195,6 +1196,36 @@ ipcMain.handle('desktop:connect-remote-session', (event, sessionId: unknown) => 
     throw new Error('Enter a valid remote session or task ID')
   }
   return createSessionTab(undefined, 'new', null, [], sessionId)
+})
+ipcMain.handle('desktop:open-external-url', async (event, url: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof url !== 'string' || url.length === 0 || url.length > 8_192) throw new Error('Invalid URL')
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('Invalid URL')
+  }
+  // Only ever hand the OS browser a link the terminal itself printed, and
+  // only when it is a web URL — never a scheme that could launch another
+  // local program (file:, mailto:, a custom app protocol, etc.).
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Only http and https links can be opened')
+  await shell.openExternal(parsed.href)
+})
+ipcMain.handle('desktop:reveal-path', (event, tabId: unknown, candidate: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 4_096) {
+    throw new Error('Invalid file path')
+  }
+  const tab = tabsState.tabs.find((item) => item.id === tabId)
+  const owningProfile = tab ? desktopConfig.profiles.find((profile) => profile.id === tab.workspaceProfileId) : null
+  const baseDirectory = owningProfile?.path ?? activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home')
+  const resolved = resolve(baseDirectory, candidate)
+  // The text a session prints is not guaranteed to name a real file (it may
+  // be prose that merely looks path-shaped). Silently do nothing rather than
+  // opening Explorer to a location that doesn't exist.
+  if (!existsSync(resolved)) return
+  shell.showItemInFolder(resolved)
 })
 
 // --- IPC: settings window ----------------------------------------------

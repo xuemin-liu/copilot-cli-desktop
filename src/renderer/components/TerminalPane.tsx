@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { linkAtColumn, type DetectedLink } from '../terminal-links.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -169,6 +170,85 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       return true
     }
 
+    const bufferPoint = (clientX: number, clientY: number): { column: number; row: number } => {
+      const screen = container.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen) return { column: 0, row: terminal.buffer.active.viewportY }
+      const bounds = screen.getBoundingClientRect()
+      const viewportColumn = Math.max(0, Math.min(
+        terminal.cols - 1,
+        Math.floor((clientX - bounds.left) / (bounds.width / terminal.cols)),
+      ))
+      const viewportRow = Math.max(0, Math.min(
+        terminal.rows - 1,
+        Math.floor((clientY - bounds.top) / (bounds.height / terminal.rows)),
+      ))
+      return {
+        column: viewportColumn,
+        row: terminal.buffer.active.viewportY + viewportRow,
+      }
+    }
+    const linkAtClientPoint = (clientX: number, clientY: number): DetectedLink | null => {
+      const point = bufferPoint(clientX, clientY)
+      const text = terminal.buffer.active.getLine(point.row)?.translateToString(false) ?? ''
+      return linkAtColumn(text, point.column)
+    }
+    const openLink = (link: DetectedLink): void => {
+      if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
+      else void window.copilotDesktop.revealPath(tabId, link.text)
+    }
+
+    // Underlines the link under the cursor so file paths and URLs the CLI
+    // prints read as clickable, without touching xterm's own DOM (a redraw
+    // could remove a decoration attached there).
+    const linkOverlay = document.createElement('div')
+    linkOverlay.className = 'terminal-link-hover-overlay'
+    Object.assign(linkOverlay.style, {
+      position: 'absolute',
+      inset: '0',
+      pointerEvents: 'none',
+      zIndex: '11',
+    })
+    container.appendChild(linkOverlay)
+    let hoveredLink: DetectedLink | null = null
+    let hoveredRow = -1
+    const renderLinkHover = (): void => {
+      linkOverlay.replaceChildren()
+      container.style.cursor = hoveredLink ? 'pointer' : ''
+      if (!hoveredLink || !selectionMetrics) return
+      const viewportStart = terminal.buffer.active.viewportY
+      const viewportRow = hoveredRow - viewportStart
+      if (viewportRow < 0 || viewportRow >= terminal.rows) return
+      const underline = document.createElement('div')
+      Object.assign(underline.style, {
+        position: 'absolute',
+        left: `${selectionMetrics.left + hoveredLink.start * selectionMetrics.cellWidth}px`,
+        top: `${selectionMetrics.top + (viewportRow + 1) * selectionMetrics.cellHeight - 2}px`,
+        width: `${(hoveredLink.end - hoveredLink.start) * selectionMetrics.cellWidth}px`,
+        height: '1px',
+        background: '#e6edf3',
+      })
+      linkOverlay.appendChild(underline)
+    }
+    const handleHoverMove = (moveEvent: MouseEvent): void => {
+      // A pending click/drag gesture already owns cursor/coordinate semantics.
+      if (cancelPendingLeftGesture) return
+      const point = bufferPoint(moveEvent.clientX, moveEvent.clientY)
+      const text = terminal.buffer.active.getLine(point.row)?.translateToString(false) ?? ''
+      const link = linkAtColumn(text, point.column)
+      if (link === hoveredLink || (link && hoveredLink && link.start === hoveredLink.start && link.end === hoveredLink.end && point.row === hoveredRow)) return
+      hoveredLink = link
+      hoveredRow = point.row
+      renderLinkHover()
+    }
+    const clearLinkHover = (): void => {
+      if (!hoveredLink) return
+      hoveredLink = null
+      hoveredRow = -1
+      renderLinkHover()
+    }
+    container.addEventListener('mousemove', handleHoverMove)
+    container.addEventListener('mouseleave', clearLinkHover)
+
     // Copilot needs terminal mouse reporting for clickable TUI controls such
     // as Sessions, while xterm normally reserves an unmodified left drag for
     // the application whenever that mode is active. Delay forwarding the
@@ -187,6 +267,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (event.button !== 0 || replayedMouseEvents.has(event)) return
 
       cancelPendingLeftGesture?.()
+      clearLinkHover()
       event.preventDefault()
       event.stopImmediatePropagation()
       terminal.focus()
@@ -210,24 +291,6 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         buttons: 1,
       }
       let dragging = false
-
-      const bufferPoint = (clientX: number, clientY: number): { column: number; row: number } => {
-        const screen = container.querySelector<HTMLElement>('.xterm-screen')
-        if (!screen) return { column: 0, row: terminal.buffer.active.viewportY }
-        const bounds = screen.getBoundingClientRect()
-        const viewportColumn = Math.max(0, Math.min(
-          terminal.cols - 1,
-          Math.floor((clientX - bounds.left) / (bounds.width / terminal.cols)),
-        ))
-        const viewportRow = Math.max(0, Math.min(
-          terminal.rows - 1,
-          Math.floor((clientY - bounds.top) / (bounds.height / terminal.rows)),
-        ))
-        return {
-          column: viewportColumn,
-          row: terminal.buffer.active.viewportY + viewportRow,
-        }
-      }
       const selectionStart = bufferPoint(startX, startY)
       const updateSelection = (clientX: number, clientY: number): void => {
         const selectionEnd = bufferPoint(clientX, clientY)
@@ -299,6 +362,13 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
           } else {
             selectWord(upEvent.clientX, upEvent.clientY)
           }
+          return
+        }
+        // A plain click on a file path or URL the CLI printed opens it locally
+        // instead of forwarding the click to Copilot's TUI as a button press.
+        const clickedLink = linkAtClientPoint(upEvent.clientX, upEvent.clientY)
+        if (clickedLink) {
+          openLink(clickedLink)
           return
         }
         // xterm may replace row elements while a gesture is pending. Resolve a
@@ -408,7 +478,12 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     }
     const resizeObserver = new ResizeObserver(fitTerminal)
     resizeObserver.observe(container)
-    terminal.onScroll(restoreRetainedSelection)
+    terminal.onScroll(() => {
+      restoreRetainedSelection()
+      // The row under the pointer changes on scroll without a mousemove; drop
+      // the stale hover rather than leave an underline over the wrong text.
+      clearLinkHover()
+    })
 
     return () => {
       unsubscribe()
@@ -422,7 +497,10 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       container.removeEventListener('mouseup', handleNonPrimaryMouse, true)
       container.removeEventListener('auxclick', handleNonPrimaryMouse, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
+      container.removeEventListener('mousemove', handleHoverMove)
+      container.removeEventListener('mouseleave', clearLinkHover)
       selectionOverlay.remove()
+      linkOverlay.remove()
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
