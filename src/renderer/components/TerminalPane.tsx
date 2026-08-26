@@ -47,8 +47,12 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // Copilot continuously redraws its TUI. Retain both the selected text and
     // its buffer range so the highlight can be restored after a redraw; only
     // an explicit copy command should modify the clipboard.
+    type RetainedSelectionRange = { column: number; row: number; length: number } | null
     let retainedSelection = ''
-    let retainedSelectionRange: { column: number; row: number; length: number } | null = null
+    let retainedSelectionRange: RetainedSelectionRange = null
+    // A content mismatch at the retained position that hasn't yet been seen
+    // on a second, later check — see applySelection() below.
+    let pendingMismatchRange: RetainedSelectionRange = null
     let selectionRenderFrame = 0
     let selectionMetrics: { left: number; top: number; cellWidth: number; cellHeight: number } | null = null
     const selectionOverlay = document.createElement('div')
@@ -138,6 +142,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     const clearRetainedSelection = (): void => {
       retainedSelection = ''
       retainedSelectionRange = null
+      pendingMismatchRange = null
       terminal.clearSelection()
       scheduleRetainedSelectionRender()
     }
@@ -165,17 +170,29 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         // we kept re-syncing to whatever is now there, the highlight would
         // silently latch onto unrelated text instead of following the text
         // the user actually selected (which may now be off-screen, or gone).
-        // Drop the retained selection instead of mislabeling it.
+        // Drop the retained selection instead of mislabeling it — but a PTY
+        // write can land at any byte boundary, so an erase-then-redraw
+        // repaint can legitimately split across chunks, each of which calls
+        // restoreRetainedSelection (and so this check) separately. Only
+        // clear once the mismatch is still there on a second, later check
+        // (the requestAnimationFrame call below, or the next write chunk's
+        // own call, whichever comes first — both share this closure's
+        // pendingMismatchRange), so a chunk boundary landing mid-repaint
+        // doesn't drop a selection the completed repaint would have kept.
         if (current !== retainedSelection) {
-          clearRetainedSelection()
+          if (pendingMismatchRange === range) clearRetainedSelection()
+          else pendingMismatchRange = range
           return
         }
+        pendingMismatchRange = null
         scheduleRetainedSelectionRender()
       }
       applySelection()
       // xterm applies mouse-mode and TUI render updates after the originating
       // event. Reapply on the following paint so that late work cannot erase
-      // the visual highlight while the retained selection still exists.
+      // the visual highlight while the retained selection still exists — and
+      // so a same-frame mismatch above gets its required second look even if
+      // no further write chunk arrives to trigger one.
       requestAnimationFrame(applySelection)
     }
     const copySelection = (): boolean => {
