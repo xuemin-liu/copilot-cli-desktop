@@ -215,6 +215,8 @@ export interface RowTextMatch {
   length: number
 }
 
+const NON_BREAKING_SPACE_PATTERN = /\u00a0/g
+
 /** Sums the on-screen width of `cells[start, end)`, counting each distinct
  * buffer cell once — consecutive entries can share one cell when a grapheme
  * spans multiple UTF-16 units (see `buildLogicalLine`), and double-counting
@@ -259,6 +261,45 @@ function cellSpanWidth(cells: LineCellRef[], start: number, end: number): number
  * viewport but continuing into it is still worth relocating to, not just
  * one that starts on an in-viewport row.
  */
+function findTextRows(
+  getLine: (row: number) => BufferLineLike | undefined,
+  cols: number,
+  targetText: string,
+  viewportStart: number,
+  viewportRows: number,
+): RowTextMatch[] {
+  const normalizedTarget = targetText.replace(NON_BREAKING_SPACE_PATTERN, ' ')
+  if (normalizedTarget.length === 0 || normalizedTarget.includes('\n')) return []
+  const viewportEnd = viewportStart + viewportRows - 1
+  const matches = new Map<string, RowTextMatch>()
+  for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
+    const logical = buildLogicalLine(getLine, cols, row)
+    // xterm normalizes NBSP to a regular space in getSelection(). Apply the
+    // same one-code-unit normalization here so a retained selection still
+    // maps one-to-one onto logical.cells while remaining searchable.
+    const searchableText = logical.text.replace(NON_BREAKING_SPACE_PATTERN, ' ')
+    for (let from = 0; ; ) {
+      const index = searchableText.indexOf(normalizedTarget, from)
+      if (index === -1) break
+      from = index + 1
+      const startCell = logical.cells[index]
+      const endCell = logical.cells[index + normalizedTarget.length - 1]
+      if (!startCell || !endCell) continue
+      if (endCell.row < viewportStart || startCell.row > viewportEnd) continue
+      const match = {
+        row: startCell.row,
+        column: startCell.column,
+        length: cellSpanWidth(logical.cells, index, index + normalizedTarget.length),
+      }
+      // Every physical row in one soft-wrapped group reconstructs the same
+      // logical line. De-duplicate those repeated discoveries before callers
+      // decide whether a relocation is unambiguous.
+      matches.set(`${match.row}:${match.column}:${match.length}`, match)
+    }
+  }
+  return [...matches.values()]
+}
+
 export function findTextRow(
   getLine: (row: number) => BufferLineLike | undefined,
   cols: number,
@@ -268,40 +309,37 @@ export function findTextRow(
   viewportStart: number,
   viewportRows: number,
 ): RowTextMatch | null {
-  if (targetText.length === 0 || targetText.includes('\n')) return null
-  const viewportEnd = viewportStart + viewportRows - 1
+  const matches = findTextRows(getLine, cols, targetText, viewportStart, viewportRows)
   let best: RowTextMatch | null = null
   let bestDistance = Infinity
   let bestColumnDistance = Infinity
-  for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
-    const logical = buildLogicalLine(getLine, cols, row)
-    for (let from = 0; ; ) {
-      const index = logical.text.indexOf(targetText, from)
-      if (index === -1) break
-      from = index + 1
-      const startCell = logical.cells[index]
-      const endCell = logical.cells[index + targetText.length - 1]
-      if (!startCell || !endCell) continue
-      if (endCell.row < viewportStart || startCell.row > viewportEnd) continue
-      const distance = Math.abs(startCell.row - preferredRow)
-      // Two occurrences on the same (relocated) row are equally near
-      // preferredRow — prefer whichever is closer to where the selection
-      // actually was, not just the leftmost one, so a scroll doesn't jump
-      // the highlight to an unrelated same-text occurrence on that row.
-      const columnDistance = Math.abs(startCell.column - preferredColumn)
-      const improves = !best
-        || distance < bestDistance
-        || (distance === bestDistance && columnDistance < bestColumnDistance)
-      if (improves) {
-        best = {
-          row: startCell.row,
-          column: startCell.column,
-          length: cellSpanWidth(logical.cells, index, index + targetText.length),
-        }
-        bestDistance = distance
-        bestColumnDistance = columnDistance
-      }
+  for (const match of matches) {
+    const distance = Math.abs(match.row - preferredRow)
+    const columnDistance = Math.abs(match.column - preferredColumn)
+    const improves = !best
+      || distance < bestDistance
+      || (distance === bestDistance && columnDistance < bestColumnDistance)
+    if (improves) {
+      best = match
+      bestDistance = distance
+      bestColumnDistance = columnDistance
     }
   }
   return best
+}
+
+/**
+ * Returns a relocation only when the retained text has exactly one distinct
+ * visible occurrence. Text alone is not an identity: choosing among repeated
+ * matches can attach a selection to unrelated content after a TUI redraw.
+ */
+export function findUniqueTextRow(
+  getLine: (row: number) => BufferLineLike | undefined,
+  cols: number,
+  targetText: string,
+  viewportStart: number,
+  viewportRows: number,
+): RowTextMatch | null {
+  const matches = findTextRows(getLine, cols, targetText, viewportStart, viewportRows)
+  return matches.length === 1 ? matches[0]! : null
 }

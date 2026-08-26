@@ -4,6 +4,7 @@ import {
   buildLogicalLine,
   cellIndexAt,
   findTextRow,
+  findUniqueTextRow,
   isWithinScreenBounds,
   linkAtColumn,
   scanLineForLinks,
@@ -269,6 +270,30 @@ test('findTextRow prefers the occurrence nearest the original column over the le
   // relocation should stay there rather than jumping to the leftmost match.
   const match = findTextRow(getLine, 26, 'target', 0, 20, 0, 1)
   assert.deepEqual(match, { row: 0, column: 20, length: 6 })
+})
+
+test('findUniqueTextRow rejects repeated text instead of attaching to an unrelated occurrence', () => {
+  const row = asciiLine(`target${' '.repeat(14)}target`, false)
+  const getLine = (r: number): BufferLineLike | undefined => (r === 0 ? row : undefined)
+  assert.equal(findUniqueTextRow(getLine, 26, 'target', 0, 1), null)
+})
+
+test('findUniqueTextRow returns the sole visible occurrence', () => {
+  const getLine = textRows(['noise', 'the target value', 'more noise'])
+  assert.deepEqual(findUniqueTextRow(getLine, 30, 'target', 0, 3), {
+    row: 1,
+    column: 4,
+    length: 6,
+  })
+})
+
+test('findTextRow matches xterm selection text whose NBSP was normalized to a space', () => {
+  const getLine = textRows([`item\u00a0label`])
+  assert.deepEqual(findTextRow(getLine, 20, 'item label', 0, 0, 0, 1), {
+    row: 0,
+    column: 0,
+    length: 10,
+  })
 })
 
 test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {
