@@ -5,6 +5,25 @@ export interface DetectedLink {
   end: number
 }
 
+export interface ScreenBounds {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+/**
+ * The terminal's container includes the `.xterm` padding and scrollbar
+ * gutter around the actual character grid (`.xterm-screen`). A drag
+ * selection wants pointer coordinates clamped to the nearest cell even
+ * there, but a link hit-test should not: a click in that padding is not a
+ * click on any text, and clamping it onto the nearest edge cell would let it
+ * activate whatever link happens to sit at that edge.
+ */
+export function isWithinScreenBounds(clientX: number, clientY: number, bounds: ScreenBounds): boolean {
+  return clientX >= bounds.left && clientX < bounds.right && clientY >= bounds.top && clientY < bounds.bottom
+}
+
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
 const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'/g
 // Matches an absolute Windows/UNC path or an explicit relative path (./, ../),

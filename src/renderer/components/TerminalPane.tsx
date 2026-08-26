@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import {
   buildLogicalLine,
   cellIndexAt,
+  isWithinScreenBounds,
   linkAtColumn,
   segmentsForLink,
   type DetectedLink,
@@ -194,6 +195,18 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         row: terminal.buffer.active.viewportY + viewportRow,
       }
     }
+    // `bufferPoint` clamps to the nearest valid cell, which is what a drag
+    // selection wants when the pointer strays outside the terminal. Link
+    // hit-testing wants the opposite: the container includes the `.xterm`
+    // padding and scrollbar gutter around the actual character grid, and a
+    // pointer there should resolve to no link at all rather than being
+    // snapped onto whatever text sits at the nearest edge cell.
+    const screenBufferPoint = (clientX: number, clientY: number): { column: number; row: number } | null => {
+      const screen = container.querySelector<HTMLElement>('.xterm-screen')
+      if (!screen) return null
+      if (!isWithinScreenBounds(clientX, clientY, screen.getBoundingClientRect())) return null
+      return bufferPoint(clientX, clientY)
+    }
     // `point.column` is a display-cell coordinate; `DetectedLink` ranges are
     // string indices into the reassembled logical line (which may span
     // multiple wrapped rows and account for wide characters) — resolve one
@@ -207,8 +220,12 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (!link) return null
       return { link, segments: segmentsForLink(logical.cells, link) }
     }
+    const linkAtClientCoordinates = (clientX: number, clientY: number): { link: DetectedLink; segments: LinkSegment[] } | null => {
+      const point = screenBufferPoint(clientX, clientY)
+      return point ? linkAtBufferPoint(point) : null
+    }
     const linkAtClientPoint = (clientX: number, clientY: number): DetectedLink | null => {
-      return linkAtBufferPoint(bufferPoint(clientX, clientY))?.link ?? null
+      return linkAtClientCoordinates(clientX, clientY)?.link ?? null
     }
     const openLink = (link: DetectedLink): void => {
       if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
@@ -263,7 +280,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // A pending click/drag gesture already owns cursor/coordinate semantics.
       if (cancelPendingLeftGesture) return
       lastHoverPoint = { clientX: moveEvent.clientX, clientY: moveEvent.clientY }
-      applyHoverSegments(linkAtBufferPoint(bufferPoint(moveEvent.clientX, moveEvent.clientY))?.segments ?? [])
+      applyHoverSegments(linkAtClientCoordinates(moveEvent.clientX, moveEvent.clientY)?.segments ?? [])
     }
     // A TUI redraw or a wrap reflow can change which link (if any) sits under
     // a *stationary* pointer, but produces no mousemove of its own — recompute
@@ -271,7 +288,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // underline would flicker away and never return while output streams in.
     const recomputeLinkHover = (): void => {
       if (!lastHoverPoint || cancelPendingLeftGesture) return
-      applyHoverSegments(linkAtBufferPoint(bufferPoint(lastHoverPoint.clientX, lastHoverPoint.clientY))?.segments ?? [])
+      applyHoverSegments(linkAtClientCoordinates(lastHoverPoint.clientX, lastHoverPoint.clientY)?.segments ?? [])
     }
     const clearLinkHover = (): void => {
       lastHoverPoint = null

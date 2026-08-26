@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   buildLogicalLine,
   cellIndexAt,
+  isWithinScreenBounds,
   linkAtColumn,
   scanLineForLinks,
   segmentsForLink,
@@ -161,4 +162,15 @@ test('a wide character inside a link is fully clickable and covered with no gap'
   const continuationIndex = cellIndexAt(logical.cells, 0, 4)
   assert.notEqual(continuationIndex, -1)
   assert.equal(linkAtColumn(logical.text, continuationIndex)?.text, String.raw`C:\界\file.txt`)
+})
+
+test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {
+  const bounds = { left: 10, top: 10, right: 110, bottom: 210 }
+  assert.equal(isWithinScreenBounds(50, 50, bounds), true)
+  assert.equal(isWithinScreenBounds(10, 50, bounds), true, 'left edge is inclusive')
+  assert.equal(isWithinScreenBounds(109, 209, bounds), true, 'just inside the right/bottom edge')
+  assert.equal(isWithinScreenBounds(5, 50, bounds), false, 'left padding')
+  assert.equal(isWithinScreenBounds(110, 50, bounds), false, 'right edge is exclusive')
+  assert.equal(isWithinScreenBounds(50, 5, bounds), false, 'top padding')
+  assert.equal(isWithinScreenBounds(50, 210, bounds), false, 'bottom edge is exclusive')
 })
