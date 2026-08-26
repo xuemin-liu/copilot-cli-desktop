@@ -643,11 +643,15 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       // row calculated from the previous window dimensions.
       fitFrame = requestAnimationFrame(() => {
         const previousCols = terminal.cols
+        const previousRows = terminal.rows
         fitAddon.fit()
         // Stored linear cell coordinates use the column count from capture
-        // time. A reflow changes that coordinate system, so validate from a
-        // detached state instead of briefly painting the old range elsewhere.
-        if (terminal.cols !== previousCols) detachRetainedSelection('detached', null)
+        // time, and xterm itself clears selections on vertical resize because
+        // row changes can also invalidate them. Validate from a detached state
+        // instead of briefly painting an old range elsewhere.
+        if (terminal.cols !== previousCols || terminal.rows !== previousRows) {
+          detachRetainedSelection('detached', null)
+        }
         updateSelectionMetrics()
         restoreRetainedSelection()
         void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
