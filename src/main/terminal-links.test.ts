@@ -239,6 +239,17 @@ test('findTextRow finds a match that only exists once physical rows are joined a
   assert.deepEqual(match, { row: 0, column: 11, length: 15 })
 })
 
+test('findTextRow picks the occurrence within the viewport over an earlier one that scrolled above it', () => {
+  const rowOne = asciiLine('target one', false)
+  const rowTwo = asciiLine('target two', true)
+  const getLine = (row: number): BufferLineLike | undefined => (row === 0 ? rowOne : row === 1 ? rowTwo : undefined)
+  // buildLogicalLine reassembles the full two-row wrap group regardless of
+  // which physical row is passed in, so a naive first-occurrence search
+  // would return row 0's "target" even though only row 1 is on screen.
+  const match = findTextRow(getLine, 10, 'target', 1, 1, 1)
+  assert.deepEqual(match, { row: 1, column: 0, length: 6 })
+})
+
 test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {
   const bounds = { left: 10, top: 10, right: 110, bottom: 210 }
   assert.equal(isWithinScreenBounds(50, 50, bounds), true)

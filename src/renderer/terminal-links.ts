@@ -248,6 +248,13 @@ function cellSpanWidth(cells: LineCellRef[], start: number, end: number): number
  * no separator in `getSelection()`), so this reassembles each candidate row
  * into its full logical line via `buildLogicalLine` rather than searching
  * physical rows in isolation, or a wrapped match could never be found.
+ *
+ * A wrapped logical line can contain the target text more than once, and
+ * `buildLogicalLine` reconstructs the *whole* line regardless of which of
+ * its physical rows are actually on screen (it walks back to the start of
+ * the wrap group, which can be above the viewport) — so every occurrence is
+ * checked and only ones that land within the given viewport are eligible,
+ * rather than trusting whichever occurrence happens to be found first.
  */
 export function findTextRow(
   getLine: (row: number) => BufferLineLike | undefined,
@@ -258,22 +265,28 @@ export function findTextRow(
   viewportRows: number,
 ): RowTextMatch | null {
   if (targetText.length === 0 || targetText.includes('\n')) return null
+  const viewportEnd = viewportStart + viewportRows - 1
   let best: RowTextMatch | null = null
   let bestDistance = Infinity
   for (let row = viewportStart; row < viewportStart + viewportRows; row++) {
     const logical = buildLogicalLine(getLine, cols, row)
-    const index = logical.text.indexOf(targetText)
-    if (index === -1) continue
-    const startCell = logical.cells[index]
-    if (!startCell) continue
-    const distance = Math.abs(startCell.row - preferredRow)
-    if (distance < bestDistance) {
-      best = {
-        row: startCell.row,
-        column: startCell.column,
-        length: cellSpanWidth(logical.cells, index, index + targetText.length),
+    for (let from = 0; ; ) {
+      const index = logical.text.indexOf(targetText, from)
+      if (index === -1) break
+      from = index + 1
+      const startCell = logical.cells[index]
+      if (!startCell) continue
+      if (startCell.row < viewportStart || startCell.row > viewportEnd) continue
+      const distance = Math.abs(startCell.row - preferredRow)
+      const improves = !best || distance < bestDistance || (distance === bestDistance && startCell.column < best.column)
+      if (improves) {
+        best = {
+          row: startCell.row,
+          column: startCell.column,
+          length: cellSpanWidth(logical.cells, index, index + targetText.length),
+        }
+        bestDistance = distance
       }
-      bestDistance = distance
     }
   }
   return best
