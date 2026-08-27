@@ -209,21 +209,12 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (!range) return
       const phase = retainedSelectionState.phase
       const retainedText = retainedSelectionState.text
-      if (phase === 'active' || phase === 'scroll-pending') {
-        terminal.select(range.column, range.row, range.length)
-      }
+      if (phase === 'active') terminal.select(range.column, range.row, range.length)
       const originalRangeStillMatches = terminal.getSelection() === retainedText
       if (phase === 'active' && originalRangeStillMatches) {
         scheduleRetainedSelectionRender()
         return
       }
-      if (phase === 'scroll-pending' && originalRangeStillMatches) {
-        // xterm can finish this check before Copilot has processed the wheel
-        // input. Do not let pre-scroll cells reactivate the overlay.
-        terminal.clearSelection()
-        return
-      }
-      if (phase === 'scroll-pending') retainedSelectionState = detachSelection(retainedSelectionState)
       // The exact original spot no longer matches — before hiding, check
       // whether the same text simply redrew somewhere else currently on
       // screen (the common case for a modest TUI scroll), so the highlight
