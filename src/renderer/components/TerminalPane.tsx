@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { decodeOsc52ClipboardWrite } from '../osc52-clipboard.js'
-import { clipboardCopyNeedsRedraw } from '../terminal-redraw.js'
+import { clipboardCopyNeedsRedraw, isCursorHome } from '../terminal-redraw.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -71,6 +71,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
           firstClipboardRedrawPending = false
           const contentBeforeCopy = viewportContentLength()
           clipboardSnapshotPending = true
+          // ConPTY reports DEC mode 2026 unsupported to Copilot 1.0.80, and
+          // captured copy streams contain no Copilot-owned 2026 enable/reset
+          // pair, so this temporary renderer hold cannot be ended by its TUI.
           terminal.write('\u001b[?2026h')
           redrawDelay = window.setTimeout(() => {
             clipboardSnapshotPending = false
@@ -94,8 +97,8 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // Copilot clears from cursor-home after first restoring the selected text
     // to its normal style. Capture at that boundary so the fallback snapshot
     // contains neither the stale selection highlight nor the subsequent erase.
-    const cursorHomeDisposable = terminal.parser.registerCsiHandler({ final: 'H' }, () => {
-      if (clipboardSnapshotPending) {
+    const cursorHomeDisposable = terminal.parser.registerCsiHandler({ final: 'H' }, (params) => {
+      if (clipboardSnapshotPending && isCursorHome(params)) {
         clipboardSnapshotPending = false
         clipboardSnapshot = serializeAddon.serialize({ scrollback: 0, excludeModes: true })
       }
