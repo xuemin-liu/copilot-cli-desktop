@@ -5,25 +5,6 @@ export interface DetectedLink {
   end: number
 }
 
-export interface ScreenBounds {
-  left: number
-  top: number
-  right: number
-  bottom: number
-}
-
-/**
- * The terminal's container includes the `.xterm` padding and scrollbar
- * gutter around the actual character grid (`.xterm-screen`). A drag
- * selection wants pointer coordinates clamped to the nearest cell even
- * there, but a link hit-test should not: a click in that padding is not a
- * click on any text, and clamping it onto the nearest edge cell would let it
- * activate whatever link happens to sit at that edge.
- */
-export function isWithinScreenBounds(clientX: number, clientY: number, bounds: ScreenBounds): boolean {
-  return clientX >= bounds.left && clientX < bounds.right && clientY >= bounds.top && clientY < bounds.bottom
-}
-
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
 const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'/g
 // Matches an absolute Windows/UNC path or an explicit relative path (./, ../),
@@ -100,10 +81,6 @@ export function scanLineForLinks(line: string): DetectedLink[] {
   return links.sort((left, right) => left.start - right.start)
 }
 
-export function linkAtColumn(line: string, column: number): DetectedLink | null {
-  return scanLineForLinks(line).find((link) => column >= link.start && column < link.end) ?? null
-}
-
 /**
  * The subset of xterm's `IBufferLine` this module needs. Kept minimal (and
  * declared here rather than imported from `@xterm/xterm`) so the coordinate
@@ -163,45 +140,4 @@ export function buildLogicalLine(
     break
   }
   return { text, cells }
-}
-
-/** Cell coordinates are display columns; `DetectedLink` ranges are string
- * indices into the reassembled logical line. This converts a click's
- * (row, column) into the matching string index, respecting wide characters
- * and soft-wrapped rows. A click anywhere within a wide cell's span
- * (its start column or its width-2 continuation column) resolves to the
- * same string index, since both name the same underlying character. */
-export function cellIndexAt(cells: LineCellRef[], row: number, column: number): number {
-  for (let index = 0; index < cells.length; index++) {
-    const cell = cells[index]
-    if (cell && cell.row === row && column >= cell.column && column < cell.column + cell.width) return index
-  }
-  return -1
-}
-
-export interface LinkSegment {
-  row: number
-  startColumn: number
-  endColumn: number
-}
-
-/** Maps a link's string range back to one or more per-row column ranges, so
- * a link that happens to straddle a soft-wrap boundary renders (and hit-tests)
- * as two segments instead of one that's silently wrong on the second row. */
-export function segmentsForLink(cells: LineCellRef[], link: DetectedLink): LinkSegment[] {
-  const segments: LinkSegment[] = []
-  for (let index = link.start; index < link.end; index++) {
-    const cell = cells[index]
-    if (!cell) continue
-    const endColumn = cell.column + cell.width
-    const last = segments[segments.length - 1]
-    if (last && last.row === cell.row && cell.column >= last.startColumn && cell.column < last.endColumn) {
-      // Another UTF-16 unit of the same on-screen cell (a combining-mark
-      // grapheme) — already covered, not a second, overlapping segment.
-      continue
-    }
-    if (last && last.row === cell.row && last.endColumn === cell.column) last.endColumn = endColumn
-    else segments.push({ row: cell.row, startColumn: cell.column, endColumn })
-  }
-  return segments
 }

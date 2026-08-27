@@ -2,11 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildLogicalLine,
-  cellIndexAt,
-  isWithinScreenBounds,
-  linkAtColumn,
   scanLineForLinks,
-  segmentsForLink,
   type BufferLineLike,
 } from '../renderer/terminal-links.js'
 
@@ -71,14 +67,6 @@ test('scanLineForLinks does not double-count a path inside a URL', () => {
   assert.equal(links[0]?.type, 'url')
 })
 
-test('linkAtColumn only matches within the link range', () => {
-  const line = 'open https://example.test now'
-  const link = linkAtColumn(line, 6)
-  assert.equal(link?.text, 'https://example.test')
-  assert.equal(linkAtColumn(line, 0), null)
-  assert.equal(linkAtColumn(line, line.length - 1), null)
-})
-
 function asciiLine(text: string, isWrapped = false): BufferLineLike {
   return {
     isWrapped,
@@ -86,9 +74,7 @@ function asciiLine(text: string, isWrapped = false): BufferLineLike {
   }
 }
 
-test('buildLogicalLine maps a wide character to one string offset spanning two cells', () => {
-  // "界" renders as one BMP code unit occupying two terminal cells: the real
-  // cell at column 0, and a width-0 continuation cell at column 1.
+test('buildLogicalLine maps a wide character before a link to the correct cells', () => {
   const cells = [
     { chars: '界', width: 2 },
     { chars: '', width: 0 },
@@ -102,16 +88,13 @@ test('buildLogicalLine maps a wide character to one string offset spanning two c
   const logical = buildLogicalLine((row) => (row === 0 ? line : undefined), 40, 0)
   assert.equal(logical.text, '界 https://example.test')
 
-  // Column 2 is the space cell; clicking it must not resolve inside the URL.
-  const spaceIndex = cellIndexAt(logical.cells, 0, 2)
-  assert.equal(linkAtColumn(logical.text, spaceIndex), null)
-
-  // Column 3 is the URL's first character.
-  const urlStartIndex = cellIndexAt(logical.cells, 0, 3)
-  assert.equal(linkAtColumn(logical.text, urlStartIndex)?.text, 'https://example.test')
+  const link = scanLineForLinks(logical.text)[0]
+  assert.equal(link?.text, 'https://example.test')
+  assert.deepEqual(logical.cells[link!.start], { row: 0, column: 3, width: 1 })
+  assert.deepEqual(logical.cells[link!.end - 1], { row: 0, column: 22, width: 1 })
 })
 
-test('buildLogicalLine reassembles a URL that wraps across the terminal edge', () => {
+test('buildLogicalLine reassembles and maps a URL across a soft wrap', () => {
   const rowOne = asciiLine('See https://example.c', false)
   const rowTwo = asciiLine('om/very/long/path', true)
   const getLine = (row: number): BufferLineLike | undefined => (row === 0 ? rowOne : row === 1 ? rowTwo : undefined)
@@ -121,18 +104,13 @@ test('buildLogicalLine reassembles a URL that wraps across the terminal edge', (
   assert.equal(logicalFromRowOne.text, 'See https://example.com/very/long/path')
   assert.equal(logicalFromRowTwo.text, logicalFromRowOne.text)
 
-  const clickIndex = cellIndexAt(logicalFromRowTwo.cells, 1, 5)
-  const link = linkAtColumn(logicalFromRowTwo.text, clickIndex)
+  const link = scanLineForLinks(logicalFromRowTwo.text)[0]
   assert.equal(link?.text, 'https://example.com/very/long/path')
-
-  const segments = segmentsForLink(logicalFromRowTwo.cells, link!)
-  assert.deepEqual(segments, [
-    { row: 0, startColumn: 4, endColumn: 21 },
-    { row: 1, startColumn: 0, endColumn: 17 },
-  ])
+  assert.deepEqual(logicalFromRowTwo.cells[link!.start], { row: 0, column: 4, width: 1 })
+  assert.deepEqual(logicalFromRowTwo.cells[link!.end - 1], { row: 1, column: 16, width: 1 })
 })
 
-test('a wide character inside a link is fully clickable and covered with no gap', () => {
+test('buildLogicalLine maps a wide character inside a link to its full display width', () => {
   const cells = [
     { chars: 'C', width: 1 },
     { chars: ':', width: 1 },
@@ -149,28 +127,9 @@ test('a wide character inside a link is fully clickable and covered with no gap'
   const logical = buildLogicalLine((row) => (row === 0 ? line : undefined), 20, 0)
   assert.equal(logical.text, String.raw`C:\界\file.txt`)
 
-  const link = linkAtColumn(logical.text, 0)
+  const link = scanLineForLinks(logical.text)[0]
   assert.equal(link?.text, String.raw`C:\界\file.txt`)
-
-  // The underline/hit-test range must span both display columns of "界"
-  // (3 and 4) as one continuous run, not stop one column short.
-  const segments = segmentsForLink(logical.cells, link!)
-  assert.deepEqual(segments, [{ row: 0, startColumn: 0, endColumn: 14 }])
-
-  // Clicking the wide character's continuation cell (column 4, the second
-  // half of "界") must resolve to the same link as clicking its start (3).
-  const continuationIndex = cellIndexAt(logical.cells, 0, 4)
-  assert.notEqual(continuationIndex, -1)
-  assert.equal(linkAtColumn(logical.text, continuationIndex)?.text, String.raw`C:\界\file.txt`)
-})
-
-test('isWithinScreenBounds rejects a point in the terminal padding/gutter around the screen', () => {
-  const bounds = { left: 10, top: 10, right: 110, bottom: 210 }
-  assert.equal(isWithinScreenBounds(50, 50, bounds), true)
-  assert.equal(isWithinScreenBounds(10, 50, bounds), true, 'left edge is inclusive')
-  assert.equal(isWithinScreenBounds(109, 209, bounds), true, 'just inside the right/bottom edge')
-  assert.equal(isWithinScreenBounds(5, 50, bounds), false, 'left padding')
-  assert.equal(isWithinScreenBounds(110, 50, bounds), false, 'right edge is exclusive')
-  assert.equal(isWithinScreenBounds(50, 5, bounds), false, 'top padding')
-  assert.equal(isWithinScreenBounds(50, 210, bounds), false, 'bottom edge is exclusive')
+  assert.deepEqual(logical.cells[link!.start], { row: 0, column: 0, width: 1 })
+  assert.deepEqual(logical.cells[link!.end - 1], { row: 0, column: 13, width: 1 })
+  assert.deepEqual(logical.cells[3], { row: 0, column: 3, width: 2 })
 })
