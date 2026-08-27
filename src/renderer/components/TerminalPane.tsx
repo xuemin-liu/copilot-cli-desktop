@@ -5,13 +5,26 @@ import { FitAddon } from '@xterm/addon-fit'
 import {
   buildLogicalLine,
   cellIndexAt,
-  findUniqueTextRow,
+  findTextRow,
   isWithinScreenBounds,
   linkAtColumn,
   segmentsForLink,
   type DetectedLink,
   type LinkSegment,
 } from '../terminal-links.js'
+import {
+  activateSelection,
+  beginApplicationScroll,
+  captureSelectionText,
+  confirmPendingSelection,
+  detachSelection,
+  emptyRetainedSelection,
+  isCopyShortcut,
+  mouseModeForwardsWheel,
+  retainedSelectionTextForCopy,
+  retainSelection,
+  shouldClearSelectionForKey,
+} from '../retained-selection.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -66,14 +79,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // The phase separates an active/copyable selection from a hidden one that
     // was invalidated by an opaque alternate-screen scroll. That distinction
     // matters for Ctrl+C: detached cached text must not consume an interrupt.
-    type RetainedSelectionRange = { column: number; row: number; length: number } | null
-    type RetainedSelectionPhase = 'none' | 'active' | 'scroll-pending' | 'detached'
-    let retainedSelection = ''
-    let retainedSelectionRange: RetainedSelectionRange = null
-    let retainedSelectionPhase: RetainedSelectionPhase = 'none'
-    let detachedOrigin: { column: number; row: number } | null = null
-    let retainedSelectionEpoch = 0
+    let retainedSelectionState = emptyRetainedSelection()
     let mismatchCheckFrame = 0
+    let ignoredScrollTimer = 0
     let selectionRenderFrame = 0
     let selectionMetrics: { left: number; top: number; cellWidth: number; cellHeight: number } | null = null
     const selectionOverlay = document.createElement('div')
@@ -104,9 +112,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     }
     const renderRetainedSelection = (): void => {
       selectionOverlay.replaceChildren()
-      const range = retainedSelectionRange
+      const range = retainedSelectionState.range
       const metrics = selectionMetrics
-      if (!range || !metrics || retainedSelectionPhase !== 'active' || terminal.cols < 1 || terminal.rows < 1) return
+      if (!range || !metrics || retainedSelectionState.phase !== 'active' || terminal.cols < 1 || terminal.rows < 1) return
 
       const viewportStart = terminal.buffer.active.viewportY
       const viewportEnd = viewportStart + terminal.rows - 1
@@ -136,9 +144,23 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         renderRetainedSelection()
       })
     }
+    const cancelScheduledSelectionChecks = (): void => {
+      if (mismatchCheckFrame) {
+        cancelAnimationFrame(mismatchCheckFrame)
+        mismatchCheckFrame = 0
+      }
+      if (ignoredScrollTimer) {
+        window.clearTimeout(ignoredScrollTimer)
+        ignoredScrollTimer = 0
+      }
+    }
+    const removeSelectionPaint = (): void => {
+      terminal.clearSelection()
+      selectionOverlay.replaceChildren()
+    }
     updateSelectionMetrics()
     const activeSelection = (): string => {
-      if (retainedSelectionRange) return retainedSelectionPhase === 'active' ? retainedSelection : ''
+      if (retainedSelectionState.range) return retainedSelectionTextForCopy(retainedSelectionState)
       return terminal.hasSelection() ? terminal.getSelection() : ''
     }
     const retainCurrentSelection = (): void => {
@@ -151,18 +173,10 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         row: Math.floor(startOffset / terminal.cols),
         length: Math.max(1, endOffset - startOffset),
       }
-      retainedSelectionRange = range
-      retainedSelectionPhase = 'active'
-      detachedOrigin = null
-      retainedSelectionEpoch++
-      if (mismatchCheckFrame) {
-        cancelAnimationFrame(mismatchCheckFrame)
-        mismatchCheckFrame = 0
-      }
+      retainedSelectionState = retainSelection(range)
+      cancelScheduledSelectionChecks()
       const captureText = (): void => {
-        if (retainedSelectionRange !== range) return
-        const selection = terminal.getSelection()
-        if (selection) retainedSelection = selection
+        retainedSelectionState = captureSelectionText(retainedSelectionState, range, terminal.getSelection())
       }
       // xterm updates selected text after select() establishes the range.
       // Paint immediately, then capture the text on the following frame.
@@ -171,17 +185,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       scheduleRetainedSelectionRender()
     }
     const clearRetainedSelection = (): void => {
-      retainedSelection = ''
-      retainedSelectionRange = null
-      retainedSelectionPhase = 'none'
-      detachedOrigin = null
-      retainedSelectionEpoch++
-      if (mismatchCheckFrame) {
-        cancelAnimationFrame(mismatchCheckFrame)
-        mismatchCheckFrame = 0
-      }
-      terminal.clearSelection()
-      selectionOverlay.replaceChildren()
+      retainedSelectionState = emptyRetainedSelection()
+      cancelScheduledSelectionChecks()
+      removeSelectionPaint()
     }
     // `range` is an absolute buffer position captured when the selection was
     // made. Copilot's TUI redraws its own content in place (a scroll in its
@@ -193,26 +199,19 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // currently findable on screen at all, and only show the highlight when
     // it is.
     //
-    // Critically, "not findable right now" is never treated as "gone for
-    // good" — retainedSelection/retainedSelectionRange are only ever changed
-    // by retainCurrentSelection (new selection) or clearRetainedSelection
-    // (explicit click/copy/Escape). This function only toggles
-    // the retained phase, which is why a transient mismatch mid-repaint
-    // (a PTY write can split one redraw into an erase chunk, a style chunk,
-    // then the real content) is harmless: at worst the highlight blinks off
-    // for a single animation frame and comes right back once the real
-    // content lands, instead of the old design's outright losing the
-    // selection over it.
-    const syncRetainedSelectionVisibility = (epoch: number): void => {
+    // "Not findable right now" is not treated as "gone for good". The state
+    // becomes detached, preserving the text and last known range so a later
+    // completed redraw can relocate and reactivate it.
+    const syncRetainedSelectionVisibility = (): void => {
       mismatchCheckFrame = 0
-      if (epoch !== retainedSelectionEpoch) return
-      const range = retainedSelectionRange
+      const range = retainedSelectionState.range
       if (!range) return
-      const phase = retainedSelectionPhase
+      const phase = retainedSelectionState.phase
+      const retainedText = retainedSelectionState.text
       if (phase === 'active' || phase === 'scroll-pending') {
         terminal.select(range.column, range.row, range.length)
       }
-      const originalRangeStillMatches = terminal.getSelection() === retainedSelection
+      const originalRangeStillMatches = terminal.getSelection() === retainedText
       if (phase === 'active' && originalRangeStillMatches) {
         scheduleRetainedSelectionRender()
         return
@@ -223,69 +222,83 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         terminal.clearSelection()
         return
       }
-      if (phase === 'scroll-pending') retainedSelectionPhase = 'detached'
+      if (phase === 'scroll-pending') retainedSelectionState = detachSelection(retainedSelectionState)
       // The exact original spot no longer matches — before hiding, check
       // whether the same text simply redrew somewhere else currently on
       // screen (the common case for a modest TUI scroll), so the highlight
       // keeps following it rather than flickering out and back at the old
       // position every time.
       const viewportStart = terminal.buffer.active.viewportY
-      const relocated = findUniqueTextRow(
+      const relocated = findTextRow(
         (row) => terminal.buffer.active.getLine(row),
         terminal.cols,
-        retainedSelection,
+        retainedText,
+        range.row,
+        range.column,
         viewportStart,
         terminal.rows,
       )
-      const returnsToInvalidatedOrigin = relocated
-        && detachedOrigin
-        && relocated.row === detachedOrigin.row
-        && relocated.column === detachedOrigin.column
-      if (relocated && !returnsToInvalidatedOrigin) {
-        retainedSelectionRange = { column: relocated.column, row: relocated.row, length: relocated.length }
-        retainedSelectionPhase = 'active'
-        detachedOrigin = null
+      if (relocated) {
+        retainedSelectionState = activateSelection(retainedSelectionState, {
+          column: relocated.column,
+          row: relocated.row,
+          length: relocated.length,
+        })
         terminal.select(relocated.column, relocated.row, relocated.length)
         scheduleRetainedSelectionRender()
         return
       }
       // Genuinely not on screen anywhere right now (scrolled fully past the
-      // visible area, overwritten, or ambiguous) — hide the highlight so it
-      // never sits on top of unrelated text. Later writes may reattach it,
-      // but only when one unambiguous occurrence appears away from an origin
-      // invalidated by application scrolling.
-      retainedSelectionPhase = 'detached'
-      terminal.clearSelection()
-      selectionOverlay.replaceChildren()
+      // visible area or overwritten) — hide the highlight so it never sits
+      // on unrelated text. Later writes may reattach it to the nearest match.
+      retainedSelectionState = detachSelection(retainedSelectionState)
+      removeSelectionPaint()
     }
-    const detachRetainedSelection = (
-      phase: Extract<RetainedSelectionPhase, 'scroll-pending' | 'detached'>,
-      origin: { column: number; row: number } | null,
-    ): void => {
-      if (!retainedSelectionRange) return
-      retainedSelectionPhase = phase
-      detachedOrigin = origin
-      retainedSelectionEpoch++
-      if (mismatchCheckFrame) {
-        cancelAnimationFrame(mismatchCheckFrame)
-        mismatchCheckFrame = 0
-      }
-      terminal.clearSelection()
-      selectionOverlay.replaceChildren()
+    const detachRetainedSelection = (reason: 'application-scroll' | 'revalidate'): void => {
+      if (!retainedSelectionState.range) return
+      retainedSelectionState = reason === 'application-scroll'
+        ? beginApplicationScroll(retainedSelectionState)
+        : detachSelection(retainedSelectionState)
+      cancelScheduledSelectionChecks()
+      removeSelectionPaint()
     }
     const scheduleMismatchCheck = (): void => {
       if (mismatchCheckFrame) return
-      const epoch = retainedSelectionEpoch
-      mismatchCheckFrame = requestAnimationFrame(() => syncRetainedSelectionVisibility(epoch))
+      mismatchCheckFrame = requestAnimationFrame(syncRetainedSelectionVisibility)
+    }
+    const schedulePendingSelectionConfirmation = (): void => {
+      if (!retainedSelectionState.range || retainedSelectionState.phase !== 'scroll-pending') return
+      if (ignoredScrollTimer) window.clearTimeout(ignoredScrollTimer)
+      // Application mouse reporting has no acknowledgement. Confirm only
+      // after output has been quiet long enough for a redraw to settle; this
+      // also restores an ignored/boundary wheel that produces no PTY output.
+      ignoredScrollTimer = window.setTimeout(() => {
+        ignoredScrollTimer = 0
+        const state = retainedSelectionState
+        if (!state.range || state.phase !== 'scroll-pending') return
+        terminal.select(state.range.column, state.range.row, state.range.length)
+        retainedSelectionState = confirmPendingSelection(state, terminal.getSelection() === state.text)
+        if (retainedSelectionState.range && retainedSelectionState.phase === 'active') {
+          scheduleRetainedSelectionRender()
+          return
+        }
+        syncRetainedSelectionVisibility()
+      }, 180)
     }
     const restoreRetainedSelection = (): void => {
-      const range = retainedSelectionRange
+      const range = retainedSelectionState.range
       if (!range) return
+      if (retainedSelectionState.phase === 'scroll-pending') {
+        // Do not inspect a partially-applied application redraw on the next
+        // animation frame. Each output chunk restarts this quiet-period check.
+        schedulePendingSelectionConfirmation()
+        return
+      }
       // Re-apply immediately so xterm's own getSelection()/copy machinery
       // stays pointed at the retained range across every write; the
       // coalesced check above is solely responsible for deciding whether
       // that range's content currently matches and should be shown.
-      if (retainedSelectionPhase === 'active') terminal.select(range.column, range.row, range.length)
+      if (retainedSelectionState.phase === 'active') terminal.select(range.column, range.row, range.length)
       scheduleMismatchCheck()
     }
     const copySelection = (): boolean => {
@@ -566,16 +579,14 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // behavior by copying only when text is selected; with no selection the
     // key continues through onData to Copilot as usual.
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
+      if (isCopyShortcut(event)) {
         const copied = copySelection()
         // A detached snapshot is deliberately not copyable: clear it while
         // allowing Ctrl+C through to Copilot as an interrupt.
-        if (!copied && retainedSelectionRange) clearRetainedSelection()
+        if (!copied && retainedSelectionState.range) clearRetainedSelection()
         return !copied
       }
-      if (event.type === 'keydown' && !['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) {
-        clearRetainedSelection()
-      }
+      if (shouldClearSelectionForKey(event)) clearRetainedSelection()
       return true
     })
 
@@ -618,6 +629,16 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // arrives while the backlog request is in flight — then fetch and
     // replay the backlog, then flush anything buffered in the meantime, so
     // no output is silently dropped regardless of timing.
+    const writeTerminalData = (data: string): void => {
+      // Output is the application's possible wheel acknowledgement. Stop the
+      // no-output fallback until xterm has parsed this chunk; the write
+      // callback then starts a fresh quiet-period confirmation.
+      if (ignoredScrollTimer) {
+        window.clearTimeout(ignoredScrollTimer)
+        ignoredScrollTimer = 0
+      }
+      terminal.write(data, restoreRetainedSelection)
+    }
     let backlogApplied = false
     const bufferedLive: string[] = []
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
@@ -626,11 +647,11 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         bufferedLive.push(payload.data)
         return
       }
-      terminal.write(payload.data, restoreRetainedSelection)
+      writeTerminalData(payload.data)
     })
     void window.copilotDesktop.getTabBacklog(tabId).then((backlog) => {
-      if (backlog) terminal.write(backlog, restoreRetainedSelection)
-      for (const chunk of bufferedLive) terminal.write(chunk, restoreRetainedSelection)
+      if (backlog) writeTerminalData(backlog)
+      for (const chunk of bufferedLive) writeTerminalData(chunk)
       bufferedLive.length = 0
       backlogApplied = true
     })
@@ -650,7 +671,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         // row changes can also invalidate them. Validate from a detached state
         // instead of briefly painting an old range elsewhere.
         if (terminal.cols !== previousCols || terminal.rows !== previousRows) {
-          detachRetainedSelection('detached', null)
+          detachRetainedSelection('revalidate')
         }
         updateSelectionMetrics()
         restoreRetainedSelection()
@@ -673,14 +694,15 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // syncRetainedSelectionVisibility) and let the normal write-driven
     // check bring it back the moment matching content is confirmed again.
     const handleWheelDuringSelection = (event: WheelEvent): void => {
-      const range = retainedSelectionRange
+      const range = retainedSelectionState.range
       // With mouse tracking off, xterm owns normal scrollback and the absolute
       // buffer range remains valid. With tracking on, the wheel is application
       // input and Copilot can redraw arbitrary cells without moving viewportY.
-      if (!range || event.deltaY === 0 || terminal.modes.mouseTrackingMode === 'none') return
+      if (!range || event.deltaY === 0 || !mouseModeForwardsWheel(terminal.modes.mouseTrackingMode)) return
       // Remove the old rectangle synchronously. A scheduled render is one
       // frame too late during rapid wheel input and looks stuck to the screen.
-      detachRetainedSelection('scroll-pending', { column: range.column, row: range.row })
+      detachRetainedSelection('application-scroll')
+      schedulePendingSelectionConfirmation()
     }
     // xterm stops mouse-mode wheel events on its child element after sending
     // them to Copilot. Capture on the parent so this runs before that stop.
@@ -701,13 +723,16 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // away and never return while the mouse stays still during output.
     terminal.onRender(recomputeLinkHover)
     terminal.onResize(recomputeLinkHover)
-    const bufferChangeDisposable = terminal.buffer.onBufferChange(() => clearRetainedSelection())
+    const bufferChangeDisposable = terminal.buffer.onBufferChange(() => {
+      detachRetainedSelection('revalidate')
+      restoreRetainedSelection()
+    })
 
     return () => {
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       cancelAnimationFrame(selectionRenderFrame)
-      cancelAnimationFrame(mismatchCheckFrame)
+      cancelScheduledSelectionChecks()
       bufferChangeDisposable.dispose()
       resizeObserver.disconnect()
       cancelPendingLeftGesture?.()

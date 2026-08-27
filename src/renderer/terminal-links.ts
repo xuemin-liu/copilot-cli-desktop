@@ -327,19 +327,3 @@ export function findTextRow(
   }
   return best
 }
-
-/**
- * Returns a relocation only when the retained text has exactly one distinct
- * visible occurrence. Text alone is not an identity: choosing among repeated
- * matches can attach a selection to unrelated content after a TUI redraw.
- */
-export function findUniqueTextRow(
-  getLine: (row: number) => BufferLineLike | undefined,
-  cols: number,
-  targetText: string,
-  viewportStart: number,
-  viewportRows: number,
-): RowTextMatch | null {
-  const matches = findTextRows(getLine, cols, targetText, viewportStart, viewportRows)
-  return matches.length === 1 ? matches[0]! : null
-}
