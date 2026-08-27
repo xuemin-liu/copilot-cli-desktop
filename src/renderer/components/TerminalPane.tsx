@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { decodeOsc52ClipboardWrite } from '../osc52-clipboard.js'
 import { clipboardCopyNeedsRedraw } from '../terminal-redraw.js'
@@ -32,7 +33,9 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       },
     })
     const fitAddon = new FitAddon()
+    const serializeAddon = new SerializeAddon()
     terminal.loadAddon(fitAddon)
+    terminal.loadAddon(serializeAddon)
     terminal.open(container)
     fitAddon.fit()
     terminalRef.current = terminal
@@ -40,7 +43,8 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
 
     let firstClipboardRedrawPending = true
     let redrawDelay = 0
-    let restoreDelay = 0
+    let clipboardSnapshot: string | null = null
+    let clipboardSnapshotPending = false
 
     const viewportContentLength = (): number => {
       const buffer = terminal.buffer.active
@@ -60,30 +64,42 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (text !== null) {
         void window.copilotDesktop.copyText(text)
 
-        // Copilot 1.0.80 can clear its viewport after the first native copy
-        // without repainting the unchanged cells in its TUI framebuffer. A
-        // real ConPTY resize makes Copilot redraw; refreshing xterm does not.
-        // Inspect the settled viewport first so a healthy copy only displays
-        // Copilot's normal bottom status and never causes a visible resize.
+        // Hold xterm rendering across Copilot 1.0.80's first-copy update. It
+        // can erase the whole viewport without dirtying the unchanged cells
+        // in its own framebuffer, so there may be no repaint to follow.
         if (firstClipboardRedrawPending) {
           firstClipboardRedrawPending = false
           const contentBeforeCopy = viewportContentLength()
+          clipboardSnapshotPending = true
+          terminal.write('\u001b[?2026h')
           redrawDelay = window.setTimeout(() => {
-            if (
-              terminal.rows <= 2
-              || !clipboardCopyNeedsRedraw(contentBeforeCopy, viewportContentLength())
-            ) return
-            void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows - 1).then(() => {
-              restoreDelay = window.setTimeout(() => {
-                void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
-              }, 30)
-            })
+            clipboardSnapshotPending = false
+            const needsRedraw = clipboardCopyNeedsRedraw(contentBeforeCopy, viewportContentLength())
+            const restore = needsRedraw && clipboardSnapshot ? clipboardSnapshot : ''
+            const copyStatus = needsRedraw
+              ? `\u001b7\u001b[${terminal.rows};1H copied to clipboard\u001b8`
+              : ''
+            // Ending synchronized-output mode makes xterm paint the completed
+            // state once, without exposing Copilot's intermediate blank frame.
+            terminal.write(`${restore}${copyStatus}\u001b[?2026l`)
+            clipboardSnapshot = null
           }, 100)
         }
       }
       // Consume every OSC 52 command. In particular, do not answer clipboard
       // read requests from terminal output and expose desktop clipboard data.
       return true
+    })
+
+    // Copilot clears from cursor-home after first restoring the selected text
+    // to its normal style. Capture at that boundary so the fallback snapshot
+    // contains neither the stale selection highlight nor the subsequent erase.
+    const cursorHomeDisposable = terminal.parser.registerCsiHandler({ final: 'H' }, () => {
+      if (clipboardSnapshotPending) {
+        clipboardSnapshotPending = false
+        clipboardSnapshot = serializeAddon.serialize({ scrollback: 0, excludeModes: true })
+      }
+      return false
     })
 
     const openLink = (link: DetectedLink): void => {
@@ -190,12 +206,12 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       window.clearTimeout(redrawDelay)
-      window.clearTimeout(restoreDelay)
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
       osc52Disposable.dispose()
+      cursorHomeDisposable.dispose()
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
