@@ -119,6 +119,20 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       void window.copilotDesktop.writeTab(tabId, data)
     })
 
+    // Copilot's selection-copy redraw can erase the viewport and restore the
+    // same cells in one burst. xterm occasionally leaves that restored buffer
+    // unpainted until a resize invalidates the viewport. Coalesce parsed PTY
+    // output to one full invalidation per animation frame—the same recovery a
+    // resize causes, without repainting once per transport chunk.
+    let outputRefreshFrame = 0
+    const writeParsedDisposable = terminal.onWriteParsed(() => {
+      if (outputRefreshFrame) return
+      outputRefreshFrame = requestAnimationFrame(() => {
+        outputRefreshFrame = 0
+        if (terminal.rows > 0) terminal.refresh(0, terminal.rows - 1)
+      })
+    })
+
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
     let backlogApplied = false
@@ -152,11 +166,13 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     return () => {
       unsubscribe()
       cancelAnimationFrame(fitFrame)
+      cancelAnimationFrame(outputRefreshFrame)
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
       osc52Disposable.dispose()
+      writeParsedDisposable.dispose()
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
