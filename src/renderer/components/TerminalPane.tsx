@@ -37,13 +37,36 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     terminalRef.current = terminal
     fitRef.current = fitAddon
 
+    let firstClipboardRedrawPending = true
+    let redrawDelay = 0
+    let restoreDelay = 0
+
     // Copilot writes OSC 52 before trying its OS clipboard backend. On the
     // affected Windows releases its quoted cmd.exe -> clip.exe invocation
     // exits with code 1; accepting OSC 52 here gives the embedded terminal
     // the same clipboard fallback that supporting native terminals provide.
     const osc52Disposable = terminal.parser.registerOscHandler(52, (data) => {
       const text = decodeOsc52ClipboardWrite(data)
-      if (text !== null) void window.copilotDesktop.copyText(text)
+      if (text !== null) {
+        void window.copilotDesktop.copyText(text)
+
+        // Copilot 1.0.80 can clear its viewport after the first native copy
+        // without repainting the unchanged cells in its TUI framebuffer. A
+        // real ConPTY resize makes Copilot redraw; refreshing xterm does not.
+        // Nudge the PTY by one row once, after the copy output has settled,
+        // then restore its actual size. Subsequent copies redraw normally.
+        if (firstClipboardRedrawPending) {
+          firstClipboardRedrawPending = false
+          redrawDelay = window.setTimeout(() => {
+            if (terminal.rows <= 2) return
+            void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows - 1).then(() => {
+              restoreDelay = window.setTimeout(() => {
+                void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
+              }, 30)
+            })
+          }, 75)
+        }
+      }
       // Consume every OSC 52 command. In particular, do not answer clipboard
       // read requests from terminal output and expose desktop clipboard data.
       return true
@@ -119,20 +142,6 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       void window.copilotDesktop.writeTab(tabId, data)
     })
 
-    // Copilot's selection-copy redraw can erase the viewport and restore the
-    // same cells in one burst. xterm occasionally leaves that restored buffer
-    // unpainted until a resize invalidates the viewport. Coalesce parsed PTY
-    // output to one full invalidation per animation frame—the same recovery a
-    // resize causes, without repainting once per transport chunk.
-    let outputRefreshFrame = 0
-    const writeParsedDisposable = terminal.onWriteParsed(() => {
-      if (outputRefreshFrame) return
-      outputRefreshFrame = requestAnimationFrame(() => {
-        outputRefreshFrame = 0
-        if (terminal.rows > 0) terminal.refresh(0, terminal.rows - 1)
-      })
-    })
-
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
     let backlogApplied = false
@@ -166,13 +175,13 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     return () => {
       unsubscribe()
       cancelAnimationFrame(fitFrame)
-      cancelAnimationFrame(outputRefreshFrame)
+      window.clearTimeout(redrawDelay)
+      window.clearTimeout(restoreDelay)
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
       osc52Disposable.dispose()
-      writeParsedDisposable.dispose()
       terminal.dispose()
     }
     // Intentionally only re-run when the bound tab changes: this effect owns
