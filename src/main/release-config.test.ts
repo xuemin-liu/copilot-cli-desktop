@@ -20,6 +20,7 @@ test('release configuration keeps the GitHub updater feed, asset name, and packa
   assert.equal(manifest.build?.nsis?.artifactName, 'Copilot-CLI-Desktop-Setup-${version}.${ext}')
   assert.match(String(manifest.scripts?.['pack:win']), /audit-package/)
   assert.match(String(manifest.scripts?.['dist:win']), /audit-package/)
+  assert.match(String(manifest.scripts?.['dist:win']), /--publish never/)
 })
 
 test('release workflow refuses to publish an unsigned Windows installer', async () => {
