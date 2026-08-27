@@ -1,0 +1,29 @@
+const MAX_CLIPBOARD_BYTES = 1_000_000
+const MAX_BASE64_LENGTH = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4
+
+/**
+ * Decode an OSC 52 system-clipboard write (`c;<base64>`). Clipboard reads
+ * (`?`) and writes to other terminal selections are deliberately ignored.
+ */
+export function decodeOsc52ClipboardWrite(data: string): string | null {
+  const separator = data.indexOf(';')
+  if (separator === -1) return null
+
+  const selection = data.slice(0, separator)
+  const encoded = data.slice(separator + 1)
+  if ((selection !== '' && selection !== 'c') || encoded === '' || encoded === '?') return null
+  if (encoded.length > MAX_BASE64_LENGTH || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return null
+
+  const remainder = encoded.length % 4
+  if (remainder === 1) return null
+  const padded = `${encoded}${'='.repeat((4 - remainder) % 4)}`
+
+  try {
+    const binary = atob(padded)
+    if (binary.length > MAX_CLIPBOARD_BYTES) return null
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
