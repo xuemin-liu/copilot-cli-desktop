@@ -21,10 +21,10 @@ import {
   emptyRetainedSelection,
   isApplicationScrollShortcut,
   isCopyShortcut,
-  mouseModeForwardsWheel,
   retainedSelectionTextForCopy,
   retainSelection,
   shouldClearSelectionForKey,
+  wheelIsApplicationInput,
 } from '../retained-selection.js'
 
 export interface TerminalPaneProps {
@@ -692,10 +692,14 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // check bring it back the moment matching content is confirmed again.
     const handleWheelDuringSelection = (event: WheelEvent): void => {
       const range = retainedSelectionState.range
-      // With mouse tracking off, xterm owns normal scrollback and the absolute
-      // buffer range remains valid. With tracking on, the wheel is application
-      // input and Copilot can redraw arbitrary cells without moving viewportY.
-      if (!range || event.deltaY === 0 || !mouseModeForwardsWheel(terminal.modes.mouseTrackingMode)) return
+      // A normal buffer with wheel reporting off owns its scrollback and keeps
+      // absolute ranges valid. An alternate buffer has no scrollback, so xterm
+      // converts the wheel to Up/Down application input even in none/X10 mouse
+      // modes; Copilot can then redraw arbitrary cells without moving viewportY.
+      if (!range || event.deltaY === 0 || !wheelIsApplicationInput(
+        terminal.modes.mouseTrackingMode,
+        terminal.buffer.active.type,
+      )) return
       // Remove the old rectangle synchronously. A scheduled render is one
       // frame too late during rapid wheel input and looks stuck to the screen.
       detachRetainedSelection('application-scroll')

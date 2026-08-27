@@ -13,6 +13,7 @@ import {
   retainedSelectionTextForCopy,
   retainSelection,
   shouldClearSelectionForKey,
+  wheelIsApplicationInput,
   type RetainedSelectionRange,
 } from '../renderer/retained-selection.js'
 
@@ -57,6 +58,14 @@ test('only mouse protocols that encode wheel input trigger application-scroll in
   assert.equal(mouseModeForwardsWheel('vt200'), true)
   assert.equal(mouseModeForwardsWheel('drag'), true)
   assert.equal(mouseModeForwardsWheel('any'), true)
+})
+
+test('alternate-buffer wheel input reaches the application even without wheel mouse reporting', () => {
+  assert.equal(wheelIsApplicationInput('none', 'normal'), false)
+  assert.equal(wheelIsApplicationInput('x10', 'normal'), false)
+  assert.equal(wheelIsApplicationInput('vt200', 'normal'), true)
+  assert.equal(wheelIsApplicationInput('none', 'alternate'), true)
+  assert.equal(wheelIsApplicationInput('x10', 'alternate'), true)
 })
 
 test('copy and application scrolling are distinguished from other input', () => {

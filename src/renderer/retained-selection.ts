@@ -67,6 +67,16 @@ export function mouseModeForwardsWheel(mode: 'none' | 'x10' | 'vt200' | 'drag' |
   return mode === 'vt200' || mode === 'drag' || mode === 'any'
 }
 
+export function wheelIsApplicationInput(
+  mode: 'none' | 'x10' | 'vt200' | 'drag' | 'any',
+  bufferType: 'normal' | 'alternate',
+): boolean {
+  // xterm translates wheel input to Up/Down sequences whenever the active
+  // buffer has no scrollback. Its public alternate buffer is always that
+  // kind of buffer, even when mouse reporting itself is disabled or X10-only.
+  return bufferType === 'alternate' || mouseModeForwardsWheel(mode)
+}
+
 interface TerminalKeyEventLike {
   type: string
   key: string
