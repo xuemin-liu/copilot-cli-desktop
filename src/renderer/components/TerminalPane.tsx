@@ -19,6 +19,7 @@ import {
   confirmPendingSelection,
   detachSelection,
   emptyRetainedSelection,
+  isApplicationScrollShortcut,
   isCopyShortcut,
   mouseModeForwardsWheel,
   retainedSelectionTextForCopy,
@@ -579,6 +580,11 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     // behavior by copying only when text is selected; with no selection the
     // key continues through onData to Copilot as usual.
     terminal.attachCustomKeyEventHandler((event) => {
+      if (isApplicationScrollShortcut(event)) {
+        detachRetainedSelection('application-scroll')
+        schedulePendingSelectionConfirmation()
+        return true
+      }
       if (isCopyShortcut(event)) {
         const copied = copySelection()
         // A detached snapshot is deliberately not copyable: clear it while

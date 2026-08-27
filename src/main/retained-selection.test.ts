@@ -7,6 +7,7 @@ import {
   confirmPendingSelection,
   detachSelection,
   emptyRetainedSelection,
+  isApplicationScrollShortcut,
   isCopyShortcut,
   mouseModeForwardsWheel,
   retainedSelectionTextForCopy,
@@ -58,20 +59,24 @@ test('only mouse protocols that encode wheel input trigger application-scroll in
   assert.equal(mouseModeForwardsWheel('any'), true)
 })
 
-test('copy is distinguished from keyboard scrolling and other input', () => {
-  const key = (keyName: string, ctrlKey = false) => ({
+test('copy and application scrolling are distinguished from other input', () => {
+  const key = (keyName: string, ctrlKey = false, shiftKey = false) => ({
     type: 'keydown',
     key: keyName,
     ctrlKey,
     altKey: false,
+    shiftKey,
   })
 
   assert.equal(isCopyShortcut(key('c', true)), true)
   assert.equal(isCopyShortcut(key('PageUp')), false)
-  assert.equal(shouldClearSelectionForKey(key('PageUp')), true)
-  assert.equal(shouldClearSelectionForKey(key('PageDown')), true)
-  assert.equal(shouldClearSelectionForKey(key('u', true)), true)
-  assert.equal(shouldClearSelectionForKey(key('d', true)), true)
+  assert.equal(isApplicationScrollShortcut(key('PageUp')), true)
+  assert.equal(isApplicationScrollShortcut(key('PageDown')), true)
+  assert.equal(isApplicationScrollShortcut(key('u', true)), true)
+  assert.equal(isApplicationScrollShortcut(key('d', true)), true)
+  assert.equal(isApplicationScrollShortcut(key('PageUp', false, true)), false)
+  assert.equal(isApplicationScrollShortcut(key('x')), false)
+  assert.equal(shouldClearSelectionForKey(key('x')), true)
   assert.equal(shouldClearSelectionForKey(key('Control', true)), false)
 })
 

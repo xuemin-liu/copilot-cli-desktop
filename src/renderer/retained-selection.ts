@@ -72,6 +72,7 @@ interface TerminalKeyEventLike {
   key: string
   ctrlKey: boolean
   altKey: boolean
+  shiftKey?: boolean
 }
 
 export function isCopyShortcut(event: TerminalKeyEventLike): boolean {
@@ -79,6 +80,13 @@ export function isCopyShortcut(event: TerminalKeyEventLike): boolean {
     && event.ctrlKey
     && !event.altKey
     && event.key.toLowerCase() === 'c'
+}
+
+export function isApplicationScrollShortcut(event: TerminalKeyEventLike): boolean {
+  if (event.type !== 'keydown' || event.altKey || event.shiftKey) return false
+  const key = event.key.toLowerCase()
+  return (!event.ctrlKey && (key === 'pageup' || key === 'pagedown'))
+    || (event.ctrlKey && (key === 'u' || key === 'd'))
 }
 
 export function shouldClearSelectionForKey(event: TerminalKeyEventLike): boolean {
