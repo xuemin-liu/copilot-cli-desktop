@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { decodeOsc52ClipboardWrite } from '../osc52-clipboard.js'
+import { clipboardCopyNeedsRedraw } from '../terminal-redraw.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -41,6 +42,15 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     let redrawDelay = 0
     let restoreDelay = 0
 
+    const viewportContentLength = (): number => {
+      const buffer = terminal.buffer.active
+      let length = 0
+      for (let row = 0; row < terminal.rows; row += 1) {
+        length += buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim().length ?? 0
+      }
+      return length
+    }
+
     // Copilot writes OSC 52 before trying its OS clipboard backend. On the
     // affected Windows releases its quoted cmd.exe -> clip.exe invocation
     // exits with code 1; accepting OSC 52 here gives the embedded terminal
@@ -53,18 +63,22 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         // Copilot 1.0.80 can clear its viewport after the first native copy
         // without repainting the unchanged cells in its TUI framebuffer. A
         // real ConPTY resize makes Copilot redraw; refreshing xterm does not.
-        // Nudge the PTY by one row once, after the copy output has settled,
-        // then restore its actual size. Subsequent copies redraw normally.
+        // Inspect the settled viewport first so a healthy copy only displays
+        // Copilot's normal bottom status and never causes a visible resize.
         if (firstClipboardRedrawPending) {
           firstClipboardRedrawPending = false
+          const contentBeforeCopy = viewportContentLength()
           redrawDelay = window.setTimeout(() => {
-            if (terminal.rows <= 2) return
+            if (
+              terminal.rows <= 2
+              || !clipboardCopyNeedsRedraw(contentBeforeCopy, viewportContentLength())
+            ) return
             void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows - 1).then(() => {
               restoreDelay = window.setTimeout(() => {
                 void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
               }, 30)
             })
-          }, 75)
+          }, 100)
         }
       }
       // Consume every OSC 52 command. In particular, do not answer clipboard
