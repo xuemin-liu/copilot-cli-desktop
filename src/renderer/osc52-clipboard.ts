@@ -1,5 +1,15 @@
 const MAX_CLIPBOARD_BYTES = 1_000_000
 const MAX_BASE64_LENGTH = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4
+// The end-of-string branch removes an OSC 52 command whose terminator was
+// lost when PtySession truncated an oversized backlog line. Leaving that
+// opener in replay text would keep xterm's stateful parser inside OSC mode and
+// swallow every later backlog/live byte until another BEL or ST arrived.
+const OSC52_COMMAND = /\u001b\]52;[^\u0007\u001b]*(?:\u0007|\u001b\\|(?=\u001b)|$)/g
+
+/** Remove historical clipboard commands before replaying a terminal backlog. */
+export function stripOsc52Commands(text: string): string {
+  return text.replace(OSC52_COMMAND, '')
+}
 
 /**
  * Decode an OSC 52 system-clipboard write (`c;<base64>`). Clipboard reads
