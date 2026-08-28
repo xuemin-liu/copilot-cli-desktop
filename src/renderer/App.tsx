@@ -158,6 +158,7 @@ export function App(): JSX.Element {
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
             onRename={requestTabRename}
             onClose={(tabId) => void window.copilotDesktop.closeTab(tabId)}
+            onRestart={(tabId) => void window.copilotDesktop.restartTab(tabId)}
             onCreate={() => void window.copilotDesktop.createTab()}
           />
           <div className="terminal-area">

@@ -168,7 +168,7 @@ export function Sidebar({
             disabled={activeProfileId === null || !canOpenTab}
             onClick={onResumePicker}
           >
-            ↻
+            ☰
           </button>
           <button
             type="button"
@@ -299,7 +299,7 @@ export function Sidebar({
           <span>
             {PERMISSION_PRESET_INFO[displayedPreset].label}
             {activeTab?.permissionWarning && ' · Legacy restricted mode'}
-            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies to newly created sessions (Restart keeps current access)`}
+            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies on next launch or Restart`}
           </span>
         </div>
       ) : configuredOnly ? (

@@ -487,6 +487,21 @@ button:disabled {
   white-space: nowrap;
 }
 
+.tab-restart {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: #858e9e;
+  padding: 0;
+  font-size: 13px;
+}
+
+.tab-restart:hover {
+  color: #4f88ff;
+  background: transparent;
+}
+
 .tab-close {
   width: 24px;
   height: 24px;

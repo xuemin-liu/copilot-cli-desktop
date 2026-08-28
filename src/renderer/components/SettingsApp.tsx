@@ -558,7 +558,7 @@ export function SettingsApp(): JSX.Element | null {
           <div><dt>Windows process</dt><dd>{snapshot.access.elevation === 'administrator' ? 'Administrator' : snapshot.access.elevation === 'standard-user' ? 'Standard user' : 'Unknown'}</dd></div>
         </dl>
         {snapshot.access.warning && <p className="settings-warning">{snapshot.access.warning}</p>}
-        <p className="settings-disclaimer">This setting applies when a new session is created. Existing sessions, including Restart, keep their launch permissions. Permissions cannot remove rights already held by this Windows account.</p>
+        <p className="settings-disclaimer">This setting applies to new sessions immediately, and to existing sessions the next time they're Restarted. It cannot remove rights already held by this Windows account — e.g. if the desktop app itself is running elevated, its Copilot sessions inherit administrator rights regardless of this preset.</p>
       </section>
 
       <ProviderSettings provider={snapshot.provider} onSaved={refresh} />

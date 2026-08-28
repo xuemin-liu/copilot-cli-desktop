@@ -74,6 +74,7 @@ import {
   closeTab,
   createTab,
   renameTab,
+  setTabLaunchConfig,
   setTabProcessId,
   setTabSessionId,
   setTabStatus,
@@ -448,23 +449,32 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   }
 }
 
-async function createSessionTab(
-  profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
-  resumeModeOverride: ResumeMode | null = null,
-  restoreLastSessionId: string | null = null,
-  attachmentPaths: string[] = [],
-  connectSessionId: string | null = null,
-  titleOverride: string | null = null,
-): Promise<DesktopState> {
-  if (!profile) throw new Error('Select a workspace before starting a session')
+interface SessionSpawnPlan {
+  file: string
+  args: string[]
+  cwd: string
+  env: NodeJS.ProcessEnv
+  deterministicSessionId: string | null
+}
+
+/**
+ * Resolves a profile's current settings (permission preset, launch config,
+ * provider config, credentials) into the argv/env a `PtySession` spawns
+ * with. Shared by session creation and restart so a restart picks up
+ * whatever is currently saved instead of whatever was saved when the tab
+ * was first opened.
+ */
+async function buildSessionSpawnPlan(
+  profile: WorkspaceProfile,
+  resumeMode: ResumeMode,
+  restoreLastSessionId: string | null,
+  attachmentPaths: string[],
+  connectSessionId: string | null,
+  sessionTitle: string,
+): Promise<SessionSpawnPlan> {
   if (!state.resolution || state.resolution.version === null) {
     throw new Error('The copilot CLI is not available. Resolve it from the diagnostics screen first.')
   }
-  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
-  if (installInProgress) throw new Error('An update is installing; new sessions cannot be started right now')
-
-  const id = `tab-${nextTabSequence++}`
-  const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const freshSession = !connectSessionId && resumeMode === 'new'
   if (connectSessionId && !copilotCapabilities.remoteSessions) {
     throw new Error('This Copilot CLI version does not support remote sessions; update it from Settings')
@@ -484,7 +494,6 @@ async function createSessionTab(
     )
   }
   const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity ? randomUUID() : restoreLastSessionId
-  const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
@@ -511,27 +520,19 @@ async function createSessionTab(
     // also protect a credential that was only ever ambient, not vault-saved.
     ...secretEnvArgs({ ...process.env, ...environment }),
   ]
-  const session = new PtySession({
+  return {
     file: resolution.command,
     args,
     cwd: profile.path,
     env: environment as NodeJS.ProcessEnv,
-    spawnPty: spawnNodePty,
-  })
-  managedTabs.set(id, { session })
-  tabsState = createTab(tabsState, {
-    id,
-    title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
-    workspaceProfileId: profile.id,
-    launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
-    permissionWarning: connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
-    remote: connectSessionId !== null,
-    lastSessionId: deterministicSessionId,
-  })
-  syncTabState()
-  broadcastState()
-  refreshMenus()
+    deterministicSessionId,
+  }
+}
 
+/** Wires a session's lifecycle events to tab state for the given tab id.
+ * Shared by session creation and restart, since a restarted tab keeps its
+ * id but is backed by a brand-new `PtySession` instance. */
+function wireSessionEvents(id: string, session: PtySession): void {
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
@@ -557,6 +558,46 @@ async function createSessionTab(
     const window = mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-exit', { tabId: id, exit })
   })
+}
+
+async function createSessionTab(
+  profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
+  resumeModeOverride: ResumeMode | null = null,
+  restoreLastSessionId: string | null = null,
+  attachmentPaths: string[] = [],
+  connectSessionId: string | null = null,
+  titleOverride: string | null = null,
+): Promise<DesktopState> {
+  if (!profile) throw new Error('Select a workspace before starting a session')
+  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  if (installInProgress) throw new Error('An update is installing; new sessions cannot be started right now')
+
+  const id = `tab-${nextTabSequence++}`
+  const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
+  const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
+  const plan = await buildSessionSpawnPlan(profile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+
+  const session = new PtySession({
+    file: plan.file,
+    args: plan.args,
+    cwd: plan.cwd,
+    env: plan.env,
+    spawnPty: spawnNodePty,
+  })
+  managedTabs.set(id, { session })
+  tabsState = createTab(tabsState, {
+    id,
+    title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
+    workspaceProfileId: profile.id,
+    launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
+    permissionWarning: connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+    remote: connectSessionId !== null,
+    lastSessionId: plan.deterministicSessionId,
+  })
+  syncTabState()
+  broadcastState()
+  refreshMenus()
+  wireSessionEvents(id, session)
 
   try {
     await session.start()
@@ -620,12 +661,68 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
 }
 
 async function restartSessionTab(tabId: string): Promise<DesktopState> {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab) throw new Error('This session tab no longer exists')
+  if (tab.remote) throw new Error('A remote session cannot be restarted')
+  const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+  if (!profile) throw new Error('This session\'s workspace profile no longer exists')
+  if (installInProgress) throw new Error('An update is installing; sessions cannot be restarted right now')
+
+  // Stop the old process first (if a prior restart attempt already failed,
+  // there may be none) — its 'exit' handler, still attached, records the
+  // most recently seen Copilot session id, which is what lets the fresh
+  // process below resume the same conversation instead of starting over.
+  // Capture its terminal size too: the renderer's xterm instance is not
+  // recreated by a restart (the tab keeps its id), so nothing re-sends a
+  // resize afterward — without carrying this over, the new process spawns
+  // at PtySession's 80x24 default while xterm keeps rendering at its actual,
+  // larger size, and Copilot's TUI only ever draws into that leftover
+  // top-left 80x24 patch of the real canvas.
   const managed = managedTabs.get(tabId)
-  if (!managed) throw new Error('This session tab no longer exists')
-  await managed.session.restart()
-  tabsState = setTabProcessId(tabsState, tabId, managed.session.processId)
+  const dimensions = managed?.session.dimensions
+  if (managed) {
+    await managed.session.stop()
+    managed.session.removeAllListeners()
+  }
+  const resumeSessionId = tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId ?? null
+  const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
+
+  // Rebuild the launch plan from the profile's *current* settings — a
+  // restart exists precisely so a changed permission preset, provider
+  // config, credential, or launch option takes effect without losing the
+  // conversation, rather than replaying whatever was captured when this
+  // tab was first opened.
+  const plan = await buildSessionSpawnPlan(profile, resumeMode, resumeSessionId, [], null, tab.title)
+  const session = new PtySession({
+    file: plan.file,
+    args: plan.args,
+    cwd: plan.cwd,
+    env: plan.env,
+    spawnPty: spawnNodePty,
+    ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
+  })
+  managedTabs.set(tabId, { session })
+  tabsState = setTabStatus(tabsState, tabId, 'starting')
+  tabsState = setTabLaunchConfig(tabsState, tabId, {
+    launchedPermissionPreset: profile.permissionPreset,
+    permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+  })
+  tabsState = setTabSessionId(tabsState, tabId, plan.deterministicSessionId)
   syncTabState()
   broadcastState()
+  refreshMenus()
+  wireSessionEvents(tabId, session)
+
+  try {
+    await session.start()
+  } catch (error) {
+    managedTabs.delete(tabId)
+    tabsState = setTabStatus(tabsState, tabId, 'crashed')
+    syncTabState()
+    broadcastState()
+    throw error
+  }
+  persistProfileTabs()
   return snapshot()
 }
 

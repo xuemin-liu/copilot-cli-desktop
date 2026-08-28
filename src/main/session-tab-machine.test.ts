@@ -8,6 +8,7 @@ import {
   closeTab,
   createTab as createTabState,
   renameTab,
+  setTabLaunchConfig,
   setTabProcessId,
   setTabSessionId,
   setTabStatus,
@@ -100,6 +101,17 @@ test('setTabStatus, setTabProcessId, and setTabSessionId update only the matchin
   assert.equal(state.tabs[0]?.lastSessionId, 'session-xyz')
   assert.equal(state.tabs[1]?.status, 'starting')
   assert.equal(state.tabs[1]?.processId, null)
+})
+
+test('setTabLaunchConfig updates only the matching tab\'s permission fields', () => {
+  let state: TabsState = EMPTY_TABS_STATE
+  state = createTab(state, { id: 'a', title: 'A', workspaceProfileId: 'ws-1' })
+  state = createTab(state, { id: 'b', title: 'B', workspaceProfileId: 'ws-1' })
+  state = setTabLaunchConfig(state, 'a', { launchedPermissionPreset: 'full-auto', permissionWarning: 'be careful' })
+  assert.equal(state.tabs[0]?.launchedPermissionPreset, 'full-auto')
+  assert.equal(state.tabs[0]?.permissionWarning, 'be careful')
+  assert.equal(state.tabs[1]?.launchedPermissionPreset, 'default')
+  assert.equal(state.tabs[1]?.permissionWarning, null)
 })
 
 test('renameTab trims, bounds, and falls back to a default title', () => {

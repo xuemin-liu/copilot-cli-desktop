@@ -86,6 +86,15 @@ export class PtySession extends EventEmitter {
     return this.lastKnownSessionId
   }
 
+  /** The size this session was last told to use — either its construction
+   * default or the most recent `resize()` call. A caller that replaces this
+   * session (e.g. restarting the underlying process) needs this to spawn the
+   * new one at the terminal's actual current size instead of silently
+   * reverting to the 80x24 construction default. */
+  get dimensions(): { cols: number; rows: number } {
+    return { cols: this.options.cols, rows: this.options.rows }
+  }
+
   private setStatus(status: SessionLifecycleStatus): void {
     if (this.statusValue === status) return
     this.statusValue = status
@@ -176,6 +185,8 @@ export class PtySession extends EventEmitter {
   }
 
   resize(cols: number, rows: number): void {
+    this.options.cols = cols
+    this.options.rows = rows
     this.pty?.resize(cols, rows)
   }
 
@@ -214,12 +225,4 @@ export class PtySession extends EventEmitter {
     }
   }
 
-  async restart(): Promise<void> {
-    await this.stop()
-    this.stopping = false
-    this.outputLines.length = 0
-    this.pendingLine = ''
-    this.heuristicBuffer = ''
-    await this.start()
-  }
 }
