@@ -6,6 +6,7 @@ import {
   CLIPBOARD_OUTPUT_SETTLE_MS,
   CLIPBOARD_REDRAW_GUARD_MS,
   ClipboardRedrawRecovery,
+  NativeCopyGestureTracker,
   clipboardRedrawOutput,
   isClipboardOnlyViewport,
   isCursorHome,
@@ -84,6 +85,31 @@ test('recognizes only the collapsed copy/status viewport', () => {
   assert.equal(isClipboardOnlyViewport(['', 'ctrl+c / right-click copy']), true)
   assert.equal(isClipboardOnlyViewport(['', '']), false)
   assert.equal(isClipboardOnlyViewport(['copied to clipboard', 'new streamed response']), false)
+})
+
+test('arms native copy only after an unmodified text-selection drag', () => {
+  const tracker = new NativeCopyGestureTracker()
+
+  assert.equal(tracker.consumeSelection(), false)
+  tracker.onMouseDown(0, false, 10, 10)
+  tracker.onMouseMove(1, 13, 13)
+  tracker.onMouseUp(0, 13, 13)
+  assert.equal(tracker.consumeSelection(), false)
+
+  tracker.onMouseDown(0, false, 10, 10)
+  tracker.onMouseMove(1, 15, 10)
+  tracker.onMouseUp(0, 15, 10)
+  assert.equal(tracker.consumeSelection(), true)
+  assert.equal(tracker.consumeSelection(), false)
+
+  tracker.onMouseDown(0, true, 10, 10)
+  tracker.onMouseMove(1, 20, 10)
+  tracker.onMouseUp(0, 20, 10)
+  assert.equal(tracker.consumeSelection(), false)
+
+  tracker.onMouseDown(0, false, 10, 10)
+  tracker.onMouseUp(0, 20, 10)
+  assert.equal(tracker.consumeSelection(), true)
 })
 
 test('normalizes Copilot selection backgrounds in a serialized snapshot', () => {
@@ -178,6 +204,40 @@ test('a non-copy gesture times out, releases rendering, and re-arms', () => {
   scheduler.advance(CLIPBOARD_COPY_GESTURE_MS)
   assert.deepEqual(events, ['capture', 'begin', 'complete:none:false'])
   assert.equal(recovery.onCopyGesture(), true)
+})
+
+test('a clipboard response must arrive inside the bounded gesture window', () => {
+  const scheduler = new FakeScheduler()
+  const inWindowEvents: string[] = []
+  const inWindow = createRecovery(scheduler, inWindowEvents)
+
+  inWindow.onCopyGesture()
+  scheduler.advance(CLIPBOARD_COPY_GESTURE_MS - 1)
+  assert.equal(inWindow.onClipboardCopy(), true)
+  inWindow.rearm()
+  assert.deepEqual(inWindowEvents, ['capture', 'begin', 'complete:none:false'])
+
+  const lateEvents: string[] = []
+  const late = createRecovery(scheduler, lateEvents)
+  late.onCopyGesture()
+  scheduler.advance(CLIPBOARD_COPY_GESTURE_MS)
+  assert.equal(late.onClipboardCopy(), false)
+  assert.deepEqual(lateEvents, ['capture', 'begin', 'complete:none:false'])
+})
+
+test('copy status scanning is requested only while a confirmed copy awaits evidence', () => {
+  const scheduler = new FakeScheduler()
+  const recovery = createRecovery(scheduler, [])
+
+  assert.equal(recovery.isAwaitingCopyStatus(), false)
+  recovery.onCopyGesture()
+  assert.equal(recovery.isAwaitingCopyStatus(), false)
+  recovery.onClipboardCopy()
+  assert.equal(recovery.isAwaitingCopyStatus(), true)
+  recovery.onCursorHome()
+  assert.equal(recovery.isAwaitingCopyStatus(), true)
+  recovery.onOutputParsed(true)
+  assert.equal(recovery.isAwaitingCopyStatus(), false)
 })
 
 test('confirmed copy and redraw timeouts never restore stale content', () => {

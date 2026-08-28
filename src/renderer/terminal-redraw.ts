@@ -7,11 +7,17 @@ export const CLIPBOARD_REDRAW_GUARD_MS = 2_000
 /** Time to retain an OSC 52 recovery candidate before any redraw starts. */
 export const CLIPBOARD_COPY_ARM_MS = 5_000
 
-/** How long a copy gesture may wait for Copilot's OSC 52 response. */
+/**
+ * How long a proven copy gesture may wait for Copilot's OSC 52 response.
+ * Keep this bounded: widening a speculative guard makes Ctrl+C appear frozen.
+ */
 export const CLIPBOARD_COPY_GESTURE_MS = 500
 
 /** Quiet period after Copilot's status before the completed frame is shown. */
 export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
+
+/** Minimum mouse travel that identifies a Copilot-owned text selection drag. */
+export const NATIVE_SELECTION_DRAG_PX = 4
 
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {
@@ -26,7 +32,10 @@ const NAVIGATION_LINE = /^(?:←\s*)?open sidebar · \/ commands · \? help · t
 /**
  * Confirm the known failed Copilot frame from xterm's parsed viewport. This is
  * deliberately narrow: any prompt, response, or streaming content prevents a
- * saved frame from replacing the current terminal.
+ * saved frame from replacing the current terminal. A fully blank viewport is
+ * intentionally insufficient evidence because blank/alternate-screen frames
+ * are legitimate; restoring one from a stale snapshot causes the regression
+ * this guard is designed to prevent.
  */
 export function isClipboardOnlyViewport(lines: string[]): boolean {
   let chromeLines = 0
@@ -39,6 +48,56 @@ export function isClipboardOnlyViewport(lines: string[]): boolean {
     chromeLines += 1
   }
   return chromeLines > 0
+}
+
+/**
+ * Tracks the mouse drag that precedes Copilot's native copy command. This lets
+ * Ctrl+C remain an immediate interrupt when no selection was made, while still
+ * arming synchronized output before a selected-text copy reaches the PTY.
+ */
+export class NativeCopyGestureTracker {
+  private dragOrigin: { x: number; y: number } | null = null
+  private selectionPending = false
+
+  onMouseDown(button: number, shiftKey: boolean, x: number, y: number): void {
+    if (button !== 0) return
+    if (shiftKey) {
+      this.dragOrigin = null
+      this.selectionPending = false
+      return
+    }
+    this.dragOrigin = { x, y }
+    this.selectionPending = false
+  }
+
+  onMouseMove(buttons: number, x: number, y: number): void {
+    if (this.dragOrigin === null || (buttons & 1) === 0) return
+    this.recordDragDistance(x, y)
+  }
+
+  onMouseUp(button: number, x: number, y: number): void {
+    if (button !== 0) return
+    // Some input paths coalesce mousemove events. The release coordinates are
+    // the authoritative fallback, so a real selection drag is still detected.
+    this.recordDragDistance(x, y)
+    this.dragOrigin = null
+  }
+
+  consumeSelection(): boolean {
+    if (!this.selectionPending) return false
+    this.selectionPending = false
+    return true
+  }
+
+  private recordDragDistance(x: number, y: number): void {
+    if (this.dragOrigin === null) return
+    if (
+      Math.abs(x - this.dragOrigin.x) >= NATIVE_SELECTION_DRAG_PX
+      || Math.abs(y - this.dragOrigin.y) >= NATIVE_SELECTION_DRAG_PX
+    ) {
+      this.selectionPending = true
+    }
+  }
 }
 
 /** Remove Copilot's native blue selection background from a saved frame. */
@@ -134,11 +193,20 @@ export class ClipboardRedrawRecovery {
     return false
   }
 
-  /** Count xterm-parsed EL commands after the copy's top-left cursor move. */
+  /**
+   * Count the EL sequence present in the captured failing Copilot trace. Do not
+   * treat generic ED/CSI J clears as equivalent: full-screen apps use those for
+   * healthy redraws, so they are not copy-specific restoration evidence.
+   */
   onEraseLine(viewportRows: number): void {
     if (this.phase !== 'redrawing') return
     this.erasedLines += 1
     if (this.erasedLines >= Math.max(1, viewportRows - 1)) this.fullViewportErase = true
+  }
+
+  /** Whether the next parsed frame can contain the copy-status evidence. */
+  isAwaitingCopyStatus(): boolean {
+    return this.phase === 'armed' || this.phase === 'redrawing'
   }
 
   /** Called after one PTY output chunk has completed xterm parsing. */

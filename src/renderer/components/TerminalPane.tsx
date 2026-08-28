@@ -7,6 +7,7 @@ import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../termin
 import { decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
   ClipboardRedrawRecovery,
+  NativeCopyGestureTracker,
   clipboardRedrawOutput,
   isClipboardOnlyViewport,
   isCursorHome,
@@ -89,6 +90,7 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
       cancel: (timerId) => window.clearTimeout(timerId),
     })
     clipboardRedrawRef.current = clipboardRedraw
+    const nativeCopyGesture = new NativeCopyGestureTracker()
     // Copilot writes OSC 52 before trying its OS clipboard backend. On the
     // affected Windows releases its quoted cmd.exe -> clip.exe invocation
     // exits with code 1; accepting OSC 52 here gives the embedded terminal
@@ -124,14 +126,16 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
     const writePtyOutput = (data: string): void => {
       terminal.write(data, () => {
         let copyStatusRendered = false
-        for (let row = 0; row < terminal.rows; row += 1) {
-          const line = terminal.buffer.active
-            .getLine(terminal.buffer.active.viewportY + row)
-            ?.translateToString(true)
-            .trim()
-          if (line?.toLowerCase() === 'copied to clipboard') {
-            copyStatusRendered = true
-            break
+        if (clipboardRedraw.isAwaitingCopyStatus()) {
+          for (let row = 0; row < terminal.rows; row += 1) {
+            const line = terminal.buffer.active
+              .getLine(terminal.buffer.active.viewportY + row)
+              ?.translateToString(true)
+              .trim()
+            if (line?.toLowerCase() === 'copied to clipboard') {
+              copyStatusRendered = true
+              break
+            }
           }
         }
         clipboardRedraw.onOutputParsed(copyStatusRendered)
@@ -179,7 +183,10 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
-        clipboardRedraw.onCopyGesture()
+        // Ctrl+C is Copilot's interrupt key unless a preceding native mouse
+        // drag identifies this invocation as selected-text copy. Never arm the
+        // render guard speculatively: doing so freezes every ordinary Ctrl+C.
+        if (nativeCopyGesture.consumeSelection()) clipboardRedraw.onCopyGesture()
       }
       return true
     })
@@ -200,13 +207,28 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
       event.stopImmediatePropagation()
       void window.copilotDesktop.showTerminalContextMenu(terminal.getSelection())
     }
-    const handleCopyMouseDown = (event: MouseEvent): void => {
-      if (event.button === 2 && !terminal.hasSelection()) clipboardRedraw.onCopyGesture()
+    const handleMouseDown = (event: MouseEvent): void => {
+      nativeCopyGesture.onMouseDown(event.button, event.shiftKey, event.clientX, event.clientY)
+      if (event.button === 2 && !terminal.hasSelection()) {
+        // Right-click is Copilot's explicit native copy command, unlike the
+        // ambiguous Ctrl+C interrupt. Arm it unconditionally so coalesced or
+        // off-element drag events cannot leave the first copy unprotected.
+        nativeCopyGesture.consumeSelection()
+        clipboardRedraw.onCopyGesture()
+      }
+    }
+    const handleMouseMove = (event: MouseEvent): void => {
+      nativeCopyGesture.onMouseMove(event.buttons, event.clientX, event.clientY)
+    }
+    const handleMouseUp = (event: MouseEvent): void => {
+      nativeCopyGesture.onMouseUp(event.button, event.clientX, event.clientY)
     }
     // Only intercept right-click for Shift/xterm selections. Otherwise the
     // mouse sequence remains Copilot-owned and its native selected-text copy
     // reaches this app through the OSC 52 handler above.
-    container.addEventListener('mousedown', handleCopyMouseDown, true)
+    container.addEventListener('mousedown', handleMouseDown, true)
+    container.addEventListener('mousemove', handleMouseMove, true)
+    container.addEventListener('mouseup', handleMouseUp, true)
     container.addEventListener('contextmenu', handleContextMenu, true)
 
     terminal.onData((data) => {
@@ -254,7 +276,9 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
       if (clipboardRedrawRef.current === clipboardRedraw) clipboardRedrawRef.current = null
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)
-      container.removeEventListener('mousedown', handleCopyMouseDown, true)
+      container.removeEventListener('mousedown', handleMouseDown, true)
+      container.removeEventListener('mousemove', handleMouseMove, true)
+      container.removeEventListener('mouseup', handleMouseUp, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
       osc52Disposable.dispose()
