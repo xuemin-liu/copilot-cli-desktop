@@ -8,14 +8,16 @@ export const CLIPBOARD_REDRAW_GUARD_MS = 2_000
 export const CLIPBOARD_COPY_ARM_MS = 5_000
 
 /**
- * Copilot 1.0.80 and 1.0.81 can leave only their copy status line after the
- * first selected-text copy. Avoid disturbing a healthy viewport: request
- * recovery only when a previously substantial screen loses more than two
- * thirds of its visible text.
+ * How long a proven copy gesture may wait for Copilot's OSC 52 response.
+ * Keep this bounded: widening a speculative guard makes Ctrl+C appear frozen.
  */
-export function clipboardCopyNeedsRedraw(before: number, after: number): boolean {
-  return before >= 40 && after * 3 < before
-}
+export const CLIPBOARD_COPY_GESTURE_MS = 500
+
+/** Quiet period after Copilot's status before the completed frame is shown. */
+export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
+
+/** Minimum mouse travel that identifies a Copilot-owned text selection drag. */
+export const NATIVE_SELECTION_DRAG_PX = 4
 
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {
@@ -23,26 +25,78 @@ export function isCursorHome(params: (number | number[])[]): boolean {
   return params.every((value) => !Array.isArray(value) && (value === 0 || value === 1))
 }
 
-const CLIPBOARD_COPY_STATUS = /\u001b\[\d+;1H[^\u001b\r\n]{0,8}copied to clipboard/i
-const COPY_STATUS_CARRY_LENGTH = 96
+const COPY_STATUS_LINE = /^copied to clipboard$/i
+const COPY_HELP_LINE = /^ctrl\+c \/ right-click copy(?:\s+auto)?$/i
+const NAVIGATION_LINE = /^(?:←\s*)?open sidebar · \/ commands · \? help · tab next tab(?:\s+auto)?$/i
 
 /**
- * Matches Copilot's positioned copy-status write across arbitrary PTY chunk
- * boundaries. Requiring a CSI row/column move avoids treating ordinary model
- * prose that happens to mention the same phrase as a redraw boundary.
+ * Confirm the known failed Copilot frame from xterm's parsed viewport. This is
+ * deliberately narrow: any prompt, response, or streaming content prevents a
+ * saved frame from replacing the current terminal. A fully blank viewport is
+ * intentionally insufficient evidence because blank/alternate-screen frames
+ * are legitimate; restoring one from a stale snapshot causes the regression
+ * this guard is designed to prevent.
  */
-export class ClipboardCopyStatusMatcher {
-  private carry = ''
+export function isClipboardOnlyViewport(lines: string[]): boolean {
+  let chromeLines = 0
+  for (const rawLine of lines) {
+    const line = rawLine.trim().replace(/\s+/g, ' ')
+    if (line === '') continue
+    if (!COPY_STATUS_LINE.test(line) && !COPY_HELP_LINE.test(line) && !NAVIGATION_LINE.test(line)) {
+      return false
+    }
+    chromeLines += 1
+  }
+  return chromeLines > 0
+}
 
-  push(data: string): boolean {
-    const candidate = this.carry + data
-    const matched = CLIPBOARD_COPY_STATUS.test(candidate)
-    this.carry = candidate.slice(-COPY_STATUS_CARRY_LENGTH)
-    return matched
+/**
+ * Tracks the mouse drag that precedes Copilot's native copy command. This lets
+ * Ctrl+C remain an immediate interrupt when no selection was made, while still
+ * arming synchronized output before a selected-text copy reaches the PTY.
+ */
+export class NativeCopyGestureTracker {
+  private dragOrigin: { x: number; y: number } | null = null
+  private selectionPending = false
+
+  onMouseDown(button: number, shiftKey: boolean, x: number, y: number): void {
+    if (button !== 0) return
+    if (shiftKey) {
+      this.dragOrigin = null
+      this.selectionPending = false
+      return
+    }
+    this.dragOrigin = { x, y }
+    this.selectionPending = false
   }
 
-  reset(): void {
-    this.carry = ''
+  onMouseMove(buttons: number, x: number, y: number): void {
+    if (this.dragOrigin === null || (buttons & 1) === 0) return
+    this.recordDragDistance(x, y)
+  }
+
+  onMouseUp(button: number, x: number, y: number): void {
+    if (button !== 0) return
+    // Some input paths coalesce mousemove events. The release coordinates are
+    // the authoritative fallback, so a real selection drag is still detected.
+    this.recordDragDistance(x, y)
+    this.dragOrigin = null
+  }
+
+  consumeSelection(): boolean {
+    if (!this.selectionPending) return false
+    this.selectionPending = false
+    return true
+  }
+
+  private recordDragDistance(x: number, y: number): void {
+    if (this.dragOrigin === null) return
+    if (
+      Math.abs(x - this.dragOrigin.x) >= NATIVE_SELECTION_DRAG_PX
+      || Math.abs(y - this.dragOrigin.y) >= NATIVE_SELECTION_DRAG_PX
+    ) {
+      this.selectionPending = true
+    }
   }
 }
 
@@ -58,6 +112,15 @@ export function normalizeClipboardSnapshot(snapshot: string): string {
       if (parameter === 48 && parameters[index + 1] === 5 && parameters[index + 2] === 25) {
         removedSelectionBackground = true
         index += 2
+      } else if (
+        parameter === 48
+        && parameters[index + 1] === 2
+        && parameters[index + 2] === 38
+        && parameters[index + 3] === 79
+        && parameters[index + 4] === 120
+      ) {
+        removedSelectionBackground = true
+        index += 4
       } else {
         normalized.push(parameter)
       }
@@ -68,88 +131,111 @@ export function normalizeClipboardSnapshot(snapshot: string): string {
   })
 }
 
-/** Build one atomic xterm update that removes the failed frame completely. */
-export function clipboardRedrawOutput(rows: number, snapshot: string | null, showCopyStatus: boolean): string {
-  // SerializeAddon writes populated cells but does not erase stale cells where
-  // the snapshot was blank. Clear the viewport first so Copilot's erroneous
-  // top-row status cannot bleed through the restored frame.
+/** Finish one atomic xterm update, restoring the confirmed failed frame only. */
+export function clipboardRedrawOutput(snapshot: string | null): string {
   const restore = snapshot === null ? '' : `\u001b[2J\u001b[H${snapshot}`
-  // Clear the footer row before writing the replacement status; otherwise the
-  // tail of "ctrl+c / right-click copy" remains after the shorter message.
-  const copyStatus = showCopyStatus
-    ? `\u001b7\u001b[${rows};1H\u001b[2Kcopied to clipboard\u001b8`
-    : ''
-  return `${restore}${copyStatus}\u001b[?2026l`
+  return `${restore}\u001b[?2026l`
 }
 
 export interface ClipboardRedrawRecoveryHooks {
-  viewportContentLength(): number
   captureSnapshot(): string
   beginSynchronizedOutput(): void
+  isViewportCollapsed(): boolean
   completeSynchronizedOutput(snapshot: string | null, showCopyStatus: boolean): void
   schedule(callback: () => void, delayMs: number): number
   cancel(timerId: number): void
 }
 
-type ClipboardRedrawPhase = 'ready' | 'armed' | 'captured' | 'done'
+type ClipboardRedrawPhase = 'ready' | 'gesture' | 'armed' | 'redrawing' | 'settling' | 'done'
 
 /**
- * Coordinates the one first-copy workaround without assuming how long the
- * native clipboard attempt takes. OSC 52 captures the last healthy frame and
- * starts synchronized output; the actual top-left cursor move confirms the
- * destructive repaint; and Copilot's own positioned status write marks its
- * exact end.
+ * Coordinates the one first-copy workaround without parsing OSC sequences a
+ * second time or restoring a stale terminal snapshot. The user's copy gesture
+ * starts synchronized output before Copilot can answer. xterm remains the sole
+ * OSC parser, and the latest live buffer is revealed after Copilot's status and
+ * subsequent output have settled.
  */
 export class ClipboardRedrawRecovery {
   private phase: ClipboardRedrawPhase = 'ready'
-  private contentBeforeCopy = 0
   private snapshot: string | null = null
+  private erasedLines = 0
+  private fullViewportErase = false
   private timerId: number | null = null
+  private settleTimerId: number | null = null
+  private settleGuardTimerId: number | null = null
 
   constructor(private readonly hooks: ClipboardRedrawRecoveryHooks) {}
 
-  onClipboardCopy(): boolean {
+  /** Start the guard before a Ctrl+C or right-button event reaches the PTY. */
+  onCopyGesture(): boolean {
     if (this.phase !== 'ready') return false
-    this.contentBeforeCopy = this.hooks.viewportContentLength()
-    // Capture before Copilot emits any post-copy cursor movement. The renderer
-    // hook normalizes Copilot's selection-only background in this early frame,
-    // so recovery preserves content without retaining the selected highlight.
+    this.phase = 'gesture'
     this.snapshot = this.hooks.captureSnapshot()
-    this.phase = 'armed'
-    // Freeze immediately at OSC 52. Copilot can emit visible damage before
-    // the later cursor-home boundary, so waiting until then permits a flash of
-    // the broken frame even when the final state is eventually recovered.
     this.hooks.beginSynchronizedOutput()
-    this.schedule(() => this.finish(null, false), CLIPBOARD_COPY_ARM_MS)
+    this.schedule(() => this.finish(false, 'ready'), CLIPBOARD_COPY_GESTURE_MS)
+    return true
+  }
+
+  onClipboardCopy(): boolean {
+    if (this.phase !== 'gesture') return false
+    this.phase = 'armed'
+    this.schedule(() => this.finish(false, 'done'), CLIPBOARD_COPY_ARM_MS)
     return true
   }
 
   onCursorHome(): boolean {
-    if (this.phase !== 'armed') return false
-    this.phase = 'captured'
-    this.schedule(() => this.complete(), CLIPBOARD_REDRAW_GUARD_MS)
-    return true
+    if (this.phase === 'armed') {
+      this.phase = 'redrawing'
+      this.erasedLines = 0
+      this.schedule(() => this.finish(false, 'done'), CLIPBOARD_REDRAW_GUARD_MS)
+      return true
+    }
+    return false
   }
 
+  /**
+   * Count the EL sequence present in the captured failing Copilot trace. Do not
+   * treat generic ED/CSI J clears as equivalent: full-screen apps use those for
+   * healthy redraws, so they are not copy-specific restoration evidence.
+   */
+  onEraseLine(viewportRows: number): void {
+    if (this.phase !== 'redrawing') return
+    this.erasedLines += 1
+    if (this.erasedLines >= Math.max(1, viewportRows - 1)) this.fullViewportErase = true
+  }
+
+  /** Whether the next parsed frame can contain the copy-status evidence. */
   isAwaitingCopyStatus(): boolean {
-    return this.phase === 'captured'
+    return this.phase === 'armed' || this.phase === 'redrawing'
   }
 
   /** Called after one PTY output chunk has completed xterm parsing. */
   onOutputParsed(copyStatusRendered: boolean): void {
-    if (this.phase === 'captured' && copyStatusRendered) this.complete()
+    if (copyStatusRendered && (this.phase === 'armed' || this.phase === 'redrawing')) {
+      this.clearTimer()
+      this.phase = 'settling'
+      this.scheduleSettle()
+      this.settleGuardTimerId = this.hooks.schedule(() => {
+        this.settleGuardTimerId = null
+        this.completeAfterStatus()
+      }, CLIPBOARD_REDRAW_GUARD_MS)
+      return
+    }
+    if (this.phase === 'settling') {
+      this.scheduleSettle()
+    }
   }
 
   /** Re-arm the one-shot workaround for a replacement Copilot process. */
   rearm(): void {
-    if (this.phase === 'armed' || this.phase === 'captured') {
+    if (this.isActive()) {
       this.hooks.completeSynchronizedOutput(null, false)
     }
     this.reset('ready')
   }
 
   dispose(): void {
-    if (this.phase === 'armed' || this.phase === 'captured') {
+    if (this.isActive()) {
       this.hooks.completeSynchronizedOutput(null, false)
     }
     this.reset('done')
@@ -169,20 +255,50 @@ export class ClipboardRedrawRecovery {
     this.timerId = null
   }
 
-  private complete(): void {
-    const needsRedraw = this.snapshot !== null
-      && clipboardCopyNeedsRedraw(this.contentBeforeCopy, this.hooks.viewportContentLength())
-    this.finish(needsRedraw ? this.snapshot : null, needsRedraw)
+  private isActive(): boolean {
+    return this.phase === 'gesture'
+      || this.phase === 'armed'
+      || this.phase === 'redrawing'
+      || this.phase === 'settling'
   }
 
-  private finish(snapshot: string | null, showCopyStatus: boolean): void {
+  private scheduleSettle(): void {
+    if (this.settleTimerId !== null) this.hooks.cancel(this.settleTimerId)
+    this.settleTimerId = this.hooks.schedule(() => {
+      this.settleTimerId = null
+      this.completeAfterStatus()
+    }, CLIPBOARD_OUTPUT_SETTLE_MS)
+  }
+
+  private clearSettleTimers(): void {
+    if (this.settleTimerId !== null) this.hooks.cancel(this.settleTimerId)
+    if (this.settleGuardTimerId !== null) this.hooks.cancel(this.settleGuardTimerId)
+    this.settleTimerId = null
+    this.settleGuardTimerId = null
+  }
+
+  private completeAfterStatus(): void {
+    const snapshot = this.fullViewportErase && this.hooks.isViewportCollapsed()
+      ? this.snapshot
+      : null
+    this.finish(true, 'done', snapshot)
+  }
+
+  private finish(
+    showCopyStatus: boolean,
+    nextPhase: 'ready' | 'done',
+    snapshot: string | null = null,
+  ): void {
     this.hooks.completeSynchronizedOutput(snapshot, showCopyStatus)
-    this.reset('done')
+    this.reset(nextPhase)
   }
 
   private reset(phase: 'ready' | 'done'): void {
     this.clearTimer()
+    this.clearSettleTimers()
     this.phase = phase
     this.snapshot = null
+    this.erasedLines = 0
+    this.fullViewportErase = false
   }
 }
