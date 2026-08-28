@@ -160,6 +160,18 @@ function shuttingDown(): boolean {
   return installInProgress || quittingAllSessions
 }
 
+/** The in-flight restart promise for a tab, if any. A rapid double-click (two
+ * `click` events before the first restart has changed the tab's status), or
+ * the same restart being triggered again from the menu/tray/IPC while one is
+ * already running, must not both be admitted to tabTransitionQueue: the
+ * second would run right after the first finishes and immediately stop the
+ * replacement PTY the first just started, causing a pointless second restart
+ * (and another chance to lose continuity). restartSessionTab() returns this
+ * same promise to every caller instead of queueing a second one — unlike
+ * Close, which still needs to run once the restart it's queued behind
+ * finishes, a second Restart on the same tab is redundant with the first. */
+const pendingRestarts = new Map<string, Promise<DesktopState>>()
+
 function scheduleActivityBroadcast(tabId: string): void {
   if (activityBroadcastTimers.has(tabId)) return
   activityBroadcastTimers.set(tabId, setTimeout(() => {
@@ -773,7 +785,12 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   // below, once this restart's turn actually comes up, in case a shutdown
   // starts while it was queued behind another transition on the same tab.
   if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
-  return queueTabTransition(tabId, async () => {
+  // Coalesce with any restart already running or queued for this tab —
+  // every caller gets the one outcome instead of a second restart running
+  // right after the first and stopping the replacement it just started.
+  const pending = pendingRestarts.get(tabId)
+  if (pending) return pending
+  const restartPromise = queueTabTransition(tabId, async () => {
     if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
     // Re-read tab/profile fresh: this callback may run well after the
     // caller returned (queued behind another transition on the same tab),
@@ -869,6 +886,11 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     persistProfileTabs()
     return snapshot()
   })
+  pendingRestarts.set(tabId, restartPromise)
+  void restartPromise.catch(() => {}).finally(() => {
+    if (pendingRestarts.get(tabId) === restartPromise) pendingRestarts.delete(tabId)
+  })
+  return restartPromise
 }
 
 async function restoreTabsForActiveProfile(): Promise<void> {

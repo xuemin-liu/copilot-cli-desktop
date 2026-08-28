@@ -126,13 +126,24 @@ export class PtySession extends EventEmitter {
   async start(): Promise<void> {
     if (this.pty) throw new Error('This session has already started')
     this.setStatus('starting')
+    const spawnCols = this.options.cols
+    const spawnRows = this.options.rows
     const pty = await this.options.spawnPty(this.options.file, this.options.args, {
       cwd: this.options.cwd,
       env: { ...process.env, ...this.options.env },
-      cols: this.options.cols,
-      rows: this.options.rows,
+      cols: spawnCols,
+      rows: spawnRows,
     })
     this.pty = pty
+    // A resize() that arrives while spawnPty() is still resolving updates
+    // this.options (so a later restart still reads the latest size) but has
+    // no live pty to forward to yet — this.pty is still null at that point.
+    // Reconcile now against whatever was actually passed to spawnPty above,
+    // so the new pty doesn't stay stuck at a size it was told to abandon
+    // before it ever existed.
+    if (this.options.cols !== spawnCols || this.options.rows !== spawnRows) {
+      pty.resize(this.options.cols, this.options.rows)
+    }
 
     pty.onData((data: string) => {
       this.recordOutput(data)
