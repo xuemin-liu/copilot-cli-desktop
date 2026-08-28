@@ -3,11 +3,12 @@ import test from 'node:test'
 import {
   CLIPBOARD_COPY_ARM_MS,
   CLIPBOARD_REDRAW_GUARD_MS,
+  ClipboardCopyStatusMatcher,
   ClipboardRedrawRecovery,
   clipboardCopyNeedsRedraw,
   clipboardRedrawOutput,
-  hasClipboardCopyStatus,
   isCursorHome,
+  normalizeClipboardSnapshot,
 } from '../renderer/terminal-redraw.js'
 
 class FakeScheduler {
@@ -65,10 +66,21 @@ test('recognizes only CUP parameters that address the top-left cell', () => {
   assert.equal(isCursorHome([[1], 1]), false)
 })
 
-test('recognizes Copilot copy-status output without depending on ANSI placement', () => {
-  assert.equal(hasClipboardCopyStatus('\u001b[3;1H copied to clipboard      '), true)
-  assert.equal(hasClipboardCopyStatus('\u001b[3;1H COPIED TO CLIPBOARD'), true)
-  assert.equal(hasClipboardCopyStatus('\u001b[48;1H ctrl+c / right-click copy'), false)
+test('recognizes a positioned Copilot copy status split across PTY chunks', () => {
+  const matcher = new ClipboardCopyStatusMatcher()
+  assert.equal(matcher.push('\u001b[?25l\u001b[3;1H copied to clip'), false)
+  assert.equal(matcher.push('board      \u001b[46;3H'), true)
+  matcher.reset()
+  assert.equal(matcher.push('Copilot says it copied to clipboard'), false)
+  assert.equal(matcher.push('\u001b[48;1H ctrl+c / right-click copy'), false)
+})
+
+test('normalizes Copilot selection backgrounds in a serialized snapshot', () => {
+  assert.equal(
+    normalizeClipboardSnapshot('a\u001b[38;5;15;48;5;25;1mselected\u001b[49m text'),
+    'a\u001b[38;5;15;1;49mselected\u001b[49m text',
+  )
+  assert.equal(normalizeClipboardSnapshot('\u001b[48;5;24mnot selection'), '\u001b[48;5;24mnot selection')
 })
 
 test('restoration clears stale viewport cells and the complete footer row', () => {
@@ -99,10 +111,11 @@ test('recovers when Copilot delays its destructive copy redraw beyond 100 ms', (
 
   assert.equal(recovery.onClipboardCopy(), true)
   scheduler.advance(250)
-  assert.deepEqual(events, ['capture'])
+  assert.deepEqual(events, ['capture', 'begin'])
 
   assert.equal(recovery.onCursorHome(), true)
   assert.deepEqual(events, ['capture', 'begin'])
+  assert.equal(recovery.isAwaitingCopyStatus(), true)
   viewportLength = 19
   recovery.onOutputParsed(false)
   assert.deepEqual(events, ['capture', 'begin'])
@@ -110,7 +123,7 @@ test('recovers when Copilot delays its destructive copy redraw beyond 100 ms', (
   assert.deepEqual(events, ['capture', 'begin', 'complete:healthy-frame:true'])
 })
 
-test('expires an armed healthy copy without entering synchronized output', () => {
+test('releases synchronized output when an armed copy never redraws', () => {
   const scheduler = new FakeScheduler()
   const events: string[] = []
   const completions: Array<{ snapshot: string | null; showCopyStatus: boolean }> = []
@@ -125,8 +138,8 @@ test('expires an armed healthy copy without entering synchronized output', () =>
 
   assert.equal(recovery.onClipboardCopy(), true)
   scheduler.advance(CLIPBOARD_COPY_ARM_MS)
-  assert.deepEqual(events, [])
-  assert.deepEqual(completions, [])
+  assert.deepEqual(events, ['begin'])
+  assert.deepEqual(completions, [{ snapshot: null, showCopyStatus: false }])
   assert.equal(recovery.onClipboardCopy(), false)
 })
 
@@ -148,4 +161,22 @@ test('the redraw guard restores a collapsed viewport if Copilot omits its status
   viewportLength = 19
   scheduler.advance(CLIPBOARD_REDRAW_GUARD_MS)
   assert.deepEqual(completions, [{ snapshot: 'healthy-frame', showCopyStatus: true }])
+})
+
+test('re-arms first-copy recovery for a replacement Copilot process', () => {
+  const scheduler = new FakeScheduler()
+  const completions: Array<{ snapshot: string | null; showCopyStatus: boolean }> = []
+  const recovery = new ClipboardRedrawRecovery({
+    viewportContentLength: () => 240,
+    captureSnapshot: () => 'healthy-frame',
+    beginSynchronizedOutput: () => {},
+    completeSynchronizedOutput: (snapshot, showCopyStatus) => completions.push({ snapshot, showCopyStatus }),
+    schedule: scheduler.schedule,
+    cancel: scheduler.cancel,
+  })
+
+  assert.equal(recovery.onClipboardCopy(), true)
+  recovery.rearm()
+  assert.deepEqual(completions, [{ snapshot: null, showCopyStatus: false }])
+  assert.equal(recovery.onClipboardCopy(), true)
 })

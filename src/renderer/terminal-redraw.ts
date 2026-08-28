@@ -23,9 +23,49 @@ export function isCursorHome(params: (number | number[])[]): boolean {
   return params.every((value) => !Array.isArray(value) && (value === 0 || value === 1))
 }
 
-/** Identify the final chunk in Copilot's destructive first-copy repaint. */
-export function hasClipboardCopyStatus(data: string): boolean {
-  return data.toLowerCase().includes('copied to clipboard')
+const CLIPBOARD_COPY_STATUS = /\u001b\[\d+;1H[^\u001b\r\n]{0,8}copied to clipboard/i
+const COPY_STATUS_CARRY_LENGTH = 96
+
+/**
+ * Matches Copilot's positioned copy-status write across arbitrary PTY chunk
+ * boundaries. Requiring a CSI row/column move avoids treating ordinary model
+ * prose that happens to mention the same phrase as a redraw boundary.
+ */
+export class ClipboardCopyStatusMatcher {
+  private carry = ''
+
+  push(data: string): boolean {
+    const candidate = this.carry + data
+    const matched = CLIPBOARD_COPY_STATUS.test(candidate)
+    this.carry = candidate.slice(-COPY_STATUS_CARRY_LENGTH)
+    return matched
+  }
+
+  reset(): void {
+    this.carry = ''
+  }
+}
+
+/** Remove Copilot's native blue selection background from a saved frame. */
+export function normalizeClipboardSnapshot(snapshot: string): string {
+  return snapshot.replace(/\u001b\[([0-9;]*)m/g, (sequence, rawParameters: string) => {
+    const parameters = rawParameters === '' ? [0] : rawParameters.split(';').map(Number)
+    const normalized: number[] = []
+    let removedSelectionBackground = false
+    for (let index = 0; index < parameters.length; index += 1) {
+      const parameter = parameters[index]
+      if (parameter === undefined) break
+      if (parameter === 48 && parameters[index + 1] === 5 && parameters[index + 2] === 25) {
+        removedSelectionBackground = true
+        index += 2
+      } else {
+        normalized.push(parameter)
+      }
+    }
+    if (!removedSelectionBackground) return sequence
+    normalized.push(49)
+    return `\u001b[${normalized.join(';')}m`
+  })
 }
 
 /** Build one atomic xterm update that removes the failed frame completely. */
@@ -51,17 +91,17 @@ export interface ClipboardRedrawRecoveryHooks {
   cancel(timerId: number): void
 }
 
-type ClipboardRedrawPhase = 'idle' | 'armed' | 'captured'
+type ClipboardRedrawPhase = 'ready' | 'armed' | 'captured' | 'done'
 
 /**
  * Coordinates the one first-copy workaround without assuming how long the
  * native clipboard attempt takes. OSC 52 captures the last healthy frame and
- * arms recovery; the actual top-left cursor move starts synchronized output;
- * and Copilot's own status write marks the exact end of the destructive frame.
+ * starts synchronized output; the actual top-left cursor move confirms the
+ * destructive repaint; and Copilot's own positioned status write marks its
+ * exact end.
  */
 export class ClipboardRedrawRecovery {
-  private firstCopyPending = true
-  private phase: ClipboardRedrawPhase = 'idle'
+  private phase: ClipboardRedrawPhase = 'ready'
   private contentBeforeCopy = 0
   private snapshot: string | null = null
   private timerId: number | null = null
@@ -69,24 +109,30 @@ export class ClipboardRedrawRecovery {
   constructor(private readonly hooks: ClipboardRedrawRecoveryHooks) {}
 
   onClipboardCopy(): boolean {
-    if (!this.firstCopyPending || this.phase !== 'idle') return false
-    this.firstCopyPending = false
+    if (this.phase !== 'ready') return false
     this.contentBeforeCopy = this.hooks.viewportContentLength()
-    // Capture before Copilot emits any post-copy cursor movement. In 1.0.81
-    // the first cursor-home handler can already observe cells from the damaged
-    // frame, so waiting for that boundary preserves the erroneous top status.
+    // Capture before Copilot emits any post-copy cursor movement. The renderer
+    // hook normalizes Copilot's selection-only background in this early frame,
+    // so recovery preserves content without retaining the selected highlight.
     this.snapshot = this.hooks.captureSnapshot()
     this.phase = 'armed'
-    this.schedule(() => this.reset(), CLIPBOARD_COPY_ARM_MS)
+    // Freeze immediately at OSC 52. Copilot can emit visible damage before
+    // the later cursor-home boundary, so waiting until then permits a flash of
+    // the broken frame even when the final state is eventually recovered.
+    this.hooks.beginSynchronizedOutput()
+    this.schedule(() => this.finish(null, false), CLIPBOARD_COPY_ARM_MS)
     return true
   }
 
   onCursorHome(): boolean {
     if (this.phase !== 'armed') return false
     this.phase = 'captured'
-    this.hooks.beginSynchronizedOutput()
     this.schedule(() => this.complete(), CLIPBOARD_REDRAW_GUARD_MS)
     return true
+  }
+
+  isAwaitingCopyStatus(): boolean {
+    return this.phase === 'captured'
   }
 
   /** Called after one PTY output chunk has completed xterm parsing. */
@@ -94,10 +140,19 @@ export class ClipboardRedrawRecovery {
     if (this.phase === 'captured' && copyStatusRendered) this.complete()
   }
 
+  /** Re-arm the one-shot workaround for a replacement Copilot process. */
+  rearm(): void {
+    if (this.phase === 'armed' || this.phase === 'captured') {
+      this.hooks.completeSynchronizedOutput(null, false)
+    }
+    this.reset('ready')
+  }
+
   dispose(): void {
-    this.clearTimer()
-    this.phase = 'idle'
-    this.snapshot = null
+    if (this.phase === 'armed' || this.phase === 'captured') {
+      this.hooks.completeSynchronizedOutput(null, false)
+    }
+    this.reset('done')
   }
 
   private schedule(callback: () => void, delayMs: number): void {
@@ -115,17 +170,19 @@ export class ClipboardRedrawRecovery {
   }
 
   private complete(): void {
-    if (this.phase === 'idle') return
-    const needsRedraw = this.phase === 'captured'
-      && this.snapshot !== null
+    const needsRedraw = this.snapshot !== null
       && clipboardCopyNeedsRedraw(this.contentBeforeCopy, this.hooks.viewportContentLength())
-    this.hooks.completeSynchronizedOutput(needsRedraw ? this.snapshot : null, needsRedraw)
-    this.reset()
+    this.finish(needsRedraw ? this.snapshot : null, needsRedraw)
   }
 
-  private reset(): void {
+  private finish(snapshot: string | null, showCopyStatus: boolean): void {
+    this.hooks.completeSynchronizedOutput(snapshot, showCopyStatus)
+    this.reset('done')
+  }
+
+  private reset(phase: 'ready' | 'done'): void {
     this.clearTimer()
-    this.phase = 'idle'
+    this.phase = phase
     this.snapshot = null
   }
 }

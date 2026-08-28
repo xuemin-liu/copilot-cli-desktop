@@ -185,7 +185,12 @@ export function App(): JSX.Element {
               </div>
             )}
             {state.tabs.map((tab) => (
-              <TerminalPane key={tab.id} tabId={tab.id} active={tab.id === state.activeTabId} />
+              <TerminalPane
+                key={tab.id}
+                tabId={tab.id}
+                active={tab.id === state.activeTabId}
+                sessionProcessId={tab.processId}
+              />
             ))}
             {(() => {
               // Restart the tab that actually crashed, not just whichever

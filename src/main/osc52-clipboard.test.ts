@@ -25,3 +25,11 @@ test('removes historical OSC 52 writes from BEL- and ST-terminated backlog text'
   )
   assert.equal(stripOsc52Commands('ordinary terminal output'), 'ordinary terminal output')
 })
+
+test('removes a truncated unterminated OSC 52 write from the end of a backlog', () => {
+  assert.equal(stripOsc52Commands('before\u001b]52;c;dGVzdA…[truncated]'), 'before')
+  assert.equal(
+    stripOsc52Commands('before\u001b]52;c;dGVzdA…[truncated]\n\u001b[Hafter'),
+    'before\u001b[Hafter',
+  )
+})
