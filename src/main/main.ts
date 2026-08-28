@@ -122,13 +122,16 @@ interface ManagedTab {
 let tabsState: TabsState = EMPTY_TABS_STATE
 const managedTabs = new Map<string, ManagedTab>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
-// Restart is reachable from several entry points at once (the tab button, the
-// app menu accelerator, the tray menu, direct IPC) — without this, two
-// concurrent restarts of the same tab can both capture the same managed
-// session, each stop it and spawn a replacement, and the second
-// managedTabs.set() silently orphans the first replacement: a live Copilot
-// PTY the app can no longer track, stop, or close.
-const restartingTabs = new Set<string>()
+// Guards any operation that stops/replaces/removes a tab's managed session
+// (restart, close) against running concurrently with another one on the same
+// tab. Restart alone is reachable from several entry points at once (the tab
+// button, the app menu accelerator, the tray menu, direct IPC), and close can
+// race a restart that's already in flight: without this, two such operations
+// can both capture the same managed session, and whichever finishes last
+// either orphans a live, untracked Copilot PTY (a second restart) or resets
+// managedTabs for a tab that closeSessionTab already deleted from tabsState
+// (a restart racing a close) — a replacement process nothing can reach.
+const tabsInTransition = new Set<string>()
 
 function scheduleActivityBroadcast(tabId: string): void {
   if (activityBroadcastTimers.has(tabId)) return
@@ -467,10 +470,18 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
 
 interface SessionSpawnPlan {
   file: string
-  args: string[]
+  /** Every arg except the identity segment (--connect, or --session-id
+   * +--name, or --resume...) — combine with identityArgs() to get the final
+   * argv. Kept separate so a restart can recompute just the identity
+   * segment (pure/synchronous) after learning a fresher resume id, without
+   * re-running any of the fallible work below a second time. */
+  baseArgs: string[]
   cwd: string
   env: NodeJS.ProcessEnv
   deterministicSessionId: string | null
+  freshSession: boolean
+  connectSessionId: string | null
+  sessionTitle: string
 }
 
 /**
@@ -517,17 +528,12 @@ async function buildSessionSpawnPlan(
     { ...configuredEnvironment, ...vaultEnvironment },
     resolution.pathAdditions,
   )
-  const args = [
+  const baseArgs = [
     ...resolution.prefixArgs,
     // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
     // mouse-driven. Enable its terminal mouse protocol explicitly so clicks
     // continue to work even if the CLI's default or saved setting is off.
     '--mouse=on',
-    ...(connectSessionId
-      ? [`--connect=${connectSessionId}`]
-      : freshSession && deterministicSessionId
-        ? ['--session-id', deterministicSessionId!, '--name', sessionTitle]
-        : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })),
     ...attachmentPaths.flatMap((path) => ['--attachment', path]),
     ...launchArgs,
     ...buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
@@ -538,11 +544,32 @@ async function buildSessionSpawnPlan(
   ]
   return {
     file: resolution.command,
-    args,
+    baseArgs,
     cwd: profile.path,
     env: environment as NodeJS.ProcessEnv,
     deterministicSessionId,
+    freshSession,
+    connectSessionId,
+    sessionTitle,
   }
+}
+
+/** The part of a session's argv that depends on which conversation it's
+ * resuming (or starting fresh) — everything else in a SessionSpawnPlan is
+ * independent of this. Pure and synchronous, so it can be recomputed after
+ * an async gap (e.g. once a restart's old process has actually stopped and
+ * revealed a fresher session id) without redoing any of the fallible
+ * validation/credential work that produced the rest of the plan. */
+function identityArgs(plan: SessionSpawnPlan, resumeMode: ResumeMode, restoreLastSessionId: string | null): string[] {
+  return plan.connectSessionId
+    ? [`--connect=${plan.connectSessionId}`]
+    : plan.freshSession && plan.deterministicSessionId
+      ? ['--session-id', plan.deterministicSessionId, '--name', plan.sessionTitle]
+      : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
+}
+
+function assembleArgs(plan: SessionSpawnPlan, resumeMode: ResumeMode, restoreLastSessionId: string | null): string[] {
+  return [...plan.baseArgs, ...identityArgs(plan, resumeMode, restoreLastSessionId)]
 }
 
 /** Wires a session's lifecycle events to tab state for the given tab id.
@@ -595,7 +622,7 @@ async function createSessionTab(
 
   const session = new PtySession({
     file: plan.file,
-    args: plan.args,
+    args: assembleArgs(plan, resumeMode, restoreLastSessionId),
     cwd: plan.cwd,
     env: plan.env,
     spawnPty: spawnNodePty,
@@ -658,22 +685,33 @@ function renameSessionTab(tabId: string, title: string): DesktopState {
 }
 
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
-  const activityTimer = activityBroadcastTimers.get(tabId)
-  if (activityTimer) clearTimeout(activityTimer)
-  activityBroadcastTimers.delete(tabId)
-  const managed = managedTabs.get(tabId)
-  if (managed) {
-    await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
-    managed.session.removeAllListeners()
-    managedTabs.delete(tabId)
+  // Share the lock with restartSessionTab: closing a tab while its restart is
+  // still in flight could stop the very session the restart is about to
+  // replace, then delete the tab from tabsState — after which the restart
+  // would still go on to managedTabs.set() a brand-new process for a tab
+  // that no longer exists anywhere the app can reach it.
+  if (tabsInTransition.has(tabId)) throw new Error('This session is busy; try again in a moment')
+  tabsInTransition.add(tabId)
+  try {
+    const activityTimer = activityBroadcastTimers.get(tabId)
+    if (activityTimer) clearTimeout(activityTimer)
+    activityBroadcastTimers.delete(tabId)
+    const managed = managedTabs.get(tabId)
+    if (managed) {
+      await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+      managed.session.removeAllListeners()
+      managedTabs.delete(tabId)
+    }
+    tabsState = closeTab(tabsState, tabId)
+    syncTabState()
+    persistProfileTabs()
+    sessionLogBytesWritten.delete(tabId)
+    broadcastState()
+    refreshMenus()
+    return snapshot()
+  } finally {
+    tabsInTransition.delete(tabId)
   }
-  tabsState = closeTab(tabsState, tabId)
-  syncTabState()
-  persistProfileTabs()
-  sessionLogBytesWritten.delete(tabId)
-  broadcastState()
-  refreshMenus()
-  return snapshot()
 }
 
 async function restartSessionTab(tabId: string): Promise<DesktopState> {
@@ -689,9 +727,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
   if (!profile) throw new Error('This session\'s workspace profile no longer exists')
   if (installInProgress) throw new Error('An update is installing; sessions cannot be restarted right now')
-  if (restartingTabs.has(tabId)) throw new Error('This session is already restarting')
+  if (tabsInTransition.has(tabId)) throw new Error('This session is busy; try again in a moment')
 
-  restartingTabs.add(tabId)
+  tabsInTransition.add(tabId)
   try {
     const managed = managedTabs.get(tabId)
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
@@ -700,10 +738,13 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // touching the existing process. buildSessionSpawnPlan can reject (an
     // unavailable resolution, a newly saved but unsupported launch option, a
     // credential-store failure) — that must not cost the user an otherwise
-    // healthy, running session. The result itself is discarded: it can only
-    // guess at the eventual resume id, refined below once the old process
-    // has actually stopped.
-    await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+    // healthy, running session. Only the identity portion of the resulting
+    // args (which resume id to use) may need refreshing once the old
+    // process has actually stopped — identityArgs()/assembleArgs() recompute
+    // just that slice, purely and synchronously, so refreshing it below
+    // never reintroduces a second point where this can fail after the
+    // healthy process is already gone.
+    const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
 
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
@@ -712,23 +753,21 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // that would otherwise copy this into tabsState — relying on tabsState
     // alone here could still be reflecting an earlier cycle's id.
     const resumeSessionId = managed?.session.lastSessionId ?? bestKnownSessionId
-    // Likewise capture the terminal size only now, immediately before
-    // constructing the replacement, not earlier: the renderer's xterm
-    // instance isn't recreated by a restart (the tab keeps its id), so a
-    // window resize that lands while the old process was stopping updates
-    // that same old (still-referenced) session via desktop:resize-tab — an
-    // earlier snapshot would silently ignore it, spawning the replacement at
-    // a stale size and reproducing the display mismatch this was meant to
-    // fix. Without any managed session (a previously failed restart left
-    // none), fall back to undefined so PtySession uses its 80x24 default.
-    const dimensions = managed?.session.dimensions
     managed?.session.removeAllListeners()
+    // Capture the terminal size as the very last step before constructing
+    // the replacement — no further awaits happen between this line and
+    // `new PtySession(...)` below, so whatever size is current at this exact
+    // point (including a resize that landed anywhere up to now, via
+    // desktop:resize-tab on this same old, still-referenced session) is what
+    // the replacement actually gets. Without any managed session (a
+    // previously failed restart left none), fall back to undefined so
+    // PtySession uses its 80x24 default.
+    const dimensions = managed?.session.dimensions
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
-    const plan = await buildSessionSpawnPlan(profile, resumeMode, resumeSessionId, [], null, tab.title)
     const session = new PtySession({
       file: plan.file,
-      args: plan.args,
+      args: assembleArgs(plan, resumeMode, resumeSessionId),
       cwd: plan.cwd,
       env: plan.env,
       spawnPty: spawnNodePty,
@@ -740,7 +779,13 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       launchedPermissionPreset: profile.permissionPreset,
       permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
     })
-    tabsState = setTabSessionId(tabsState, tabId, plan.deterministicSessionId)
+    // The id actually baked into the argv above: the plan's own
+    // deterministicSessionId when starting fresh (unaffected by the
+    // post-stop refresh), or the freshest resumeSessionId otherwise — not
+    // plan.deterministicSessionId unconditionally, which was frozen from the
+    // pre-stop guess and would persist a stale id if a fresher one surfaced
+    // while the old process was stopping.
+    tabsState = setTabSessionId(tabsState, tabId, plan.freshSession ? plan.deterministicSessionId : resumeSessionId)
     syncTabState()
     broadcastState()
     refreshMenus()
@@ -765,7 +810,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     persistProfileTabs()
     return snapshot()
   } finally {
-    restartingTabs.delete(tabId)
+    tabsInTransition.delete(tabId)
   }
 }
 

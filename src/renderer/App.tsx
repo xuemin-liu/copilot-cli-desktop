@@ -158,7 +158,16 @@ export function App(): JSX.Element {
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
             onRename={requestTabRename}
             onClose={(tabId) => void window.copilotDesktop.closeTab(tabId)}
-            onRestart={(tabId) => void window.copilotDesktop.restartTab(tabId)}
+            onRestart={(tabId) => {
+              // The main process now serializes restarts per tab and rejects
+              // a second concurrent call (e.g. a rapid double-click) rather
+              // than racing two replacement processes — that rejection still
+              // needs a handler here or it surfaces as an unhandled promise
+              // rejection in the renderer.
+              window.copilotDesktop.restartTab(tabId).catch((error: unknown) => {
+                console.error('Failed to restart session tab', error)
+              })
+            }}
             onCreate={() => void window.copilotDesktop.createTab()}
           />
           <div className="terminal-area">

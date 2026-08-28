@@ -443,23 +443,35 @@ button:disabled {
   overflow-x: auto;
 }
 
-.tab {
+.tab-group {
   min-width: 150px;
   max-width: 260px;
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 0 7px 0 11px;
+  padding: 0 4px 0 0;
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 9px 9px 0 0;
   background: #181b23;
-  cursor: pointer;
 }
 
 .tab-active {
   border-color: #303640;
   background: #20242d;
+}
+
+/* The tab role owns selection; the restart/close buttons are its siblings
+   (not descendants) so assistive tech never has to reach through a
+   role="tab" element — which can be flattened to presentation-only — to
+   find them. */
+.tab {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 0 0 11px;
+  cursor: pointer;
 }
 
 .tab-status-dot {
@@ -500,6 +512,11 @@ button:disabled {
 .tab-restart:hover {
   color: #4f88ff;
   background: transparent;
+}
+
+.tab-restart:disabled {
+  color: #4a4f59;
+  cursor: default;
 }
 
 .tab-close {
