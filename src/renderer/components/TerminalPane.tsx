@@ -4,8 +4,13 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
-import { decodeOsc52ClipboardWrite } from '../osc52-clipboard.js'
-import { clipboardCopyNeedsRedraw, isCursorHome } from '../terminal-redraw.js'
+import { decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
+import {
+  ClipboardRedrawRecovery,
+  clipboardRedrawOutput,
+  hasClipboardCopyStatus,
+  isCursorHome,
+} from '../terminal-redraw.js'
 
 export interface TerminalPaneProps {
   tabId: string
@@ -41,11 +46,6 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     terminalRef.current = terminal
     fitRef.current = fitAddon
 
-    let firstClipboardRedrawPending = true
-    let redrawDelay = 0
-    let clipboardSnapshot: string | null = null
-    let clipboardSnapshotPending = false
-
     const viewportContentLength = (): number => {
       const buffer = terminal.buffer.active
       let length = 0
@@ -55,6 +55,18 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       return length
     }
 
+    const clipboardRedraw = new ClipboardRedrawRecovery({
+      viewportContentLength,
+      captureSnapshot: () => serializeAddon.serialize({ scrollback: 0, excludeModes: true }),
+      beginSynchronizedOutput: () => terminal.write('\u001b[?2026h'),
+      completeSynchronizedOutput: (snapshot, showCopyStatus) => {
+        // Ending synchronized-output mode makes xterm paint the completed
+        // state once, without exposing Copilot's intermediate blank frame.
+        terminal.write(clipboardRedrawOutput(terminal.rows, snapshot, showCopyStatus))
+      },
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancel: (timerId) => window.clearTimeout(timerId),
+    })
     // Copilot writes OSC 52 before trying its OS clipboard backend. On the
     // affected Windows releases its quoted cmd.exe -> clip.exe invocation
     // exits with code 1; accepting OSC 52 here gives the embedded terminal
@@ -64,46 +76,29 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
       if (text !== null) {
         void window.copilotDesktop.copyText(text)
 
-        // Hold xterm rendering across Copilot 1.0.80's first-copy update. It
-        // can erase the whole viewport without dirtying the unchanged cells
-        // in its own framebuffer, so there may be no repaint to follow.
-        if (firstClipboardRedrawPending) {
-          firstClipboardRedrawPending = false
-          const contentBeforeCopy = viewportContentLength()
-          clipboardSnapshotPending = true
-          // ConPTY reports DEC mode 2026 unsupported to Copilot 1.0.80, and
-          // captured copy streams contain no Copilot-owned 2026 enable/reset
-          // pair, so this temporary renderer hold cannot be ended by its TUI.
-          terminal.write('\u001b[?2026h')
-          redrawDelay = window.setTimeout(() => {
-            clipboardSnapshotPending = false
-            const needsRedraw = clipboardCopyNeedsRedraw(contentBeforeCopy, viewportContentLength())
-            const restore = needsRedraw && clipboardSnapshot ? clipboardSnapshot : ''
-            const copyStatus = needsRedraw
-              ? `\u001b7\u001b[${terminal.rows};1H copied to clipboard\u001b8`
-              : ''
-            // Ending synchronized-output mode makes xterm paint the completed
-            // state once, without exposing Copilot's intermediate blank frame.
-            terminal.write(`${restore}${copyStatus}\u001b[?2026l`)
-            clipboardSnapshot = null
-          }, 100)
-        }
+        // Hold xterm rendering across Copilot's first-copy update. Recovery is
+        // completed from the actual cursor-home redraw below, not a fixed delay
+        // from OSC 52: Copilot 1.0.81 can spend more than 100 ms trying its
+        // native clipboard backend before it emits the destructive TUI frame.
+        clipboardRedraw.onClipboardCopy()
       }
       // Consume every OSC 52 command. In particular, do not answer clipboard
       // read requests from terminal output and expose desktop clipboard data.
       return true
     })
 
-    // Copilot clears from cursor-home after first restoring the selected text
-    // to its normal style. Capture at that boundary so the fallback snapshot
-    // contains neither the stale selection highlight nor the subsequent erase.
+    // Copilot's top-left cursor move confirms that its destructive first-copy
+    // redraw has begun. The healthy snapshot was already captured at OSC 52;
+    // Copilot 1.0.81 can mutate cells before this parser boundary is observed.
     const cursorHomeDisposable = terminal.parser.registerCsiHandler({ final: 'H' }, (params) => {
-      if (clipboardSnapshotPending && isCursorHome(params)) {
-        clipboardSnapshotPending = false
-        clipboardSnapshot = serializeAddon.serialize({ scrollback: 0, excludeModes: true })
-      }
+      if (isCursorHome(params)) clipboardRedraw.onCursorHome()
       return false
     })
+
+    const writePtyOutput = (data: string): void => {
+      const copyStatusRendered = hasClipboardCopyStatus(data)
+      terminal.write(data, () => clipboardRedraw.onOutputParsed(copyStatusRendered))
+    }
 
     const openLink = (link: DetectedLink): void => {
       if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
@@ -185,11 +180,14 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
         bufferedLive.push(payload.data)
         return
       }
-      terminal.write(payload.data)
+      writePtyOutput(payload.data)
     })
     void window.copilotDesktop.getTabBacklog(tabId).then((backlog) => {
-      if (backlog) terminal.write(backlog)
-      for (const chunk of bufferedLive) terminal.write(chunk)
+      // Backlog is terminal history, not a new command stream. Remove old OSC
+      // 52 writes so replay cannot overwrite today's clipboard or consume the
+      // first-live-copy recovery before the user copies anything in this pane.
+      if (backlog) writePtyOutput(stripOsc52Commands(backlog))
+      for (const chunk of bufferedLive) writePtyOutput(chunk)
       bufferedLive.length = 0
       backlogApplied = true
     })
@@ -208,7 +206,7 @@ export function TerminalPane({ tabId, active }: TerminalPaneProps): JSX.Element 
     return () => {
       unsubscribe()
       cancelAnimationFrame(fitFrame)
-      window.clearTimeout(redrawDelay)
+      clipboardRedraw.dispose()
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)

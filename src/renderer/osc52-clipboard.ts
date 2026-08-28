@@ -1,5 +1,11 @@
 const MAX_CLIPBOARD_BYTES = 1_000_000
 const MAX_BASE64_LENGTH = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4
+const OSC52_COMMAND = /\u001b\]52;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g
+
+/** Remove historical clipboard commands before replaying a terminal backlog. */
+export function stripOsc52Commands(text: string): string {
+  return text.replace(OSC52_COMMAND, '')
+}
 
 /**
  * Decode an OSC 52 system-clipboard write (`c;<base64>`). Clipboard reads
