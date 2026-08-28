@@ -122,6 +122,13 @@ interface ManagedTab {
 let tabsState: TabsState = EMPTY_TABS_STATE
 const managedTabs = new Map<string, ManagedTab>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+// Restart is reachable from several entry points at once (the tab button, the
+// app menu accelerator, the tray menu, direct IPC) — without this, two
+// concurrent restarts of the same tab can both capture the same managed
+// session, each stop it and spawn a replacement, and the second
+// managedTabs.set() silently orphans the first replacement: a live Copilot
+// PTY the app can no longer track, stop, or close.
+const restartingTabs = new Set<string>()
 
 function scheduleActivityBroadcast(tabId: string): void {
   if (activityBroadcastTimers.has(tabId)) return
@@ -343,6 +350,15 @@ function activeAccessLabel(): string {
   return PERMISSION_PRESET_INFO[preset].label
 }
 
+// A remote tab has no workspace-profile launch config to rebuild against, so
+// restartSessionTab always rejects it — keep every entry point (menu, tray,
+// the tab button) consistently disabled for one instead of only some of them
+// surfacing that as a runtime error.
+function activeTabIsRestartable(): boolean {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
+  return tab !== undefined && !tab.remote
+}
+
 /**
  * Rebuilds both the tray menu and the application menu. The two menus share
  * enabled/disabled state derived from `installInProgress`, the active
@@ -369,7 +385,7 @@ function rebuildTrayMenu(): void {
     },
     {
       label: 'Restart Active Session',
-      enabled: !installInProgress && tabsState.activeTabId !== null,
+      enabled: !installInProgress && activeTabIsRestartable(),
       click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
     },
     {
@@ -663,67 +679,94 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
 async function restartSessionTab(tabId: string): Promise<DesktopState> {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   if (!tab) throw new Error('This session tab no longer exists')
+  // Restarting a remote tab used to work (the old PtySession.restart() just
+  // replayed its original --connect argument verbatim), but this function
+  // rebuilds args from a workspace profile's current settings, which a
+  // remote connection has none of. Keep restart consistently unavailable for
+  // remote tabs everywhere (menu/tray/button) rather than silently regress
+  // one of those entry points to a runtime error.
   if (tab.remote) throw new Error('A remote session cannot be restarted')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
   if (!profile) throw new Error('This session\'s workspace profile no longer exists')
   if (installInProgress) throw new Error('An update is installing; sessions cannot be restarted right now')
+  if (restartingTabs.has(tabId)) throw new Error('This session is already restarting')
 
-  // Stop the old process first (if a prior restart attempt already failed,
-  // there may be none) — its 'exit' handler, still attached, records the
-  // most recently seen Copilot session id, which is what lets the fresh
-  // process below resume the same conversation instead of starting over.
-  // Capture its terminal size too: the renderer's xterm instance is not
-  // recreated by a restart (the tab keeps its id), so nothing re-sends a
-  // resize afterward — without carrying this over, the new process spawns
-  // at PtySession's 80x24 default while xterm keeps rendering at its actual,
-  // larger size, and Copilot's TUI only ever draws into that leftover
-  // top-left 80x24 patch of the real canvas.
-  const managed = managedTabs.get(tabId)
-  const dimensions = managed?.session.dimensions
-  if (managed) {
-    await managed.session.stop()
-    managed.session.removeAllListeners()
-  }
-  const resumeSessionId = tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId ?? null
-  const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
-
-  // Rebuild the launch plan from the profile's *current* settings — a
-  // restart exists precisely so a changed permission preset, provider
-  // config, credential, or launch option takes effect without losing the
-  // conversation, rather than replaying whatever was captured when this
-  // tab was first opened.
-  const plan = await buildSessionSpawnPlan(profile, resumeMode, resumeSessionId, [], null, tab.title)
-  const session = new PtySession({
-    file: plan.file,
-    args: plan.args,
-    cwd: plan.cwd,
-    env: plan.env,
-    spawnPty: spawnNodePty,
-    ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
-  })
-  managedTabs.set(tabId, { session })
-  tabsState = setTabStatus(tabsState, tabId, 'starting')
-  tabsState = setTabLaunchConfig(tabsState, tabId, {
-    launchedPermissionPreset: profile.permissionPreset,
-    permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
-  })
-  tabsState = setTabSessionId(tabsState, tabId, plan.deterministicSessionId)
-  syncTabState()
-  broadcastState()
-  refreshMenus()
-  wireSessionEvents(tabId, session)
-
+  restartingTabs.add(tabId)
   try {
-    await session.start()
-  } catch (error) {
-    managedTabs.delete(tabId)
-    tabsState = setTabStatus(tabsState, tabId, 'crashed')
+    const managed = managedTabs.get(tabId)
+    const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
+
+    // Validate and build against the profile's *current* settings BEFORE
+    // touching the existing process. buildSessionSpawnPlan can reject (an
+    // unavailable resolution, a newly saved but unsupported launch option, a
+    // credential-store failure) — that must not cost the user an otherwise
+    // healthy, running session. The result itself is discarded: it can only
+    // guess at the eventual resume id, refined below once the old process
+    // has actually stopped.
+    await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+
+    if (managed) await managed.session.stop()
+    // Read the freshest known session id directly off the old session
+    // object, before removing its listeners: PtySession.stop() can return as
+    // soon as a force-kill timeout fires, ahead of the later 'exit' event
+    // that would otherwise copy this into tabsState — relying on tabsState
+    // alone here could still be reflecting an earlier cycle's id.
+    const resumeSessionId = managed?.session.lastSessionId ?? bestKnownSessionId
+    // Likewise capture the terminal size only now, immediately before
+    // constructing the replacement, not earlier: the renderer's xterm
+    // instance isn't recreated by a restart (the tab keeps its id), so a
+    // window resize that lands while the old process was stopping updates
+    // that same old (still-referenced) session via desktop:resize-tab — an
+    // earlier snapshot would silently ignore it, spawning the replacement at
+    // a stale size and reproducing the display mismatch this was meant to
+    // fix. Without any managed session (a previously failed restart left
+    // none), fall back to undefined so PtySession uses its 80x24 default.
+    const dimensions = managed?.session.dimensions
+    managed?.session.removeAllListeners()
+
+    const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
+    const plan = await buildSessionSpawnPlan(profile, resumeMode, resumeSessionId, [], null, tab.title)
+    const session = new PtySession({
+      file: plan.file,
+      args: plan.args,
+      cwd: plan.cwd,
+      env: plan.env,
+      spawnPty: spawnNodePty,
+      ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
+    })
+    managedTabs.set(tabId, { session })
+    tabsState = setTabStatus(tabsState, tabId, 'starting')
+    tabsState = setTabLaunchConfig(tabsState, tabId, {
+      launchedPermissionPreset: profile.permissionPreset,
+      permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+    })
+    tabsState = setTabSessionId(tabsState, tabId, plan.deterministicSessionId)
     syncTabState()
     broadcastState()
-    throw error
+    refreshMenus()
+    wireSessionEvents(tabId, session)
+
+    try {
+      await session.start()
+    } catch (error) {
+      managedTabs.delete(tabId)
+      tabsState = setTabStatus(tabsState, tabId, 'crashed')
+      // The old process's PID is still sitting in tabsState from its own
+      // last 'status' event ('stopping', emitted with the still-live PID
+      // just before the kill) — its own exit is 'expected' and emits no
+      // further status update to clear it, and the replacement above never
+      // reached 'running' to overwrite it. Without this, diagnostics and
+      // the tab UI would keep pointing at a PID that no longer exists.
+      tabsState = setTabProcessId(tabsState, tabId, null)
+      syncTabState()
+      broadcastState()
+      throw error
+    }
+    persistProfileTabs()
+    return snapshot()
+  } finally {
+    restartingTabs.delete(tabId)
   }
-  persistProfileTabs()
-  return snapshot()
 }
 
 async function restoreTabsForActiveProfile(): Promise<void> {
@@ -980,7 +1023,7 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !installInProgress && tabsState.activeTabId !== null,
+          enabled: !installInProgress && activeTabIsRestartable(),
           click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId),
         },
         { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => void showSettingsWindow() },
