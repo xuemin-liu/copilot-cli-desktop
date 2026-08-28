@@ -122,16 +122,43 @@ interface ManagedTab {
 let tabsState: TabsState = EMPTY_TABS_STATE
 const managedTabs = new Map<string, ManagedTab>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
-// Guards any operation that stops/replaces/removes a tab's managed session
-// (restart, close) against running concurrently with another one on the same
-// tab. Restart alone is reachable from several entry points at once (the tab
-// button, the app menu accelerator, the tray menu, direct IPC), and close can
-// race a restart that's already in flight: without this, two such operations
-// can both capture the same managed session, and whichever finishes last
-// either orphans a live, untracked Copilot PTY (a second restart) or resets
-// managedTabs for a tab that closeSessionTab already deleted from tabsState
-// (a restart racing a close) — a replacement process nothing can reach.
-const tabsInTransition = new Set<string>()
+
+// Serializes every operation that stops/replaces/removes a tab's managed
+// session (restart, close, and the global stop-all used by quit/update
+// install) against every other one on the *same* tab. Restart alone is
+// reachable from several entry points at once (the tab button, the app menu
+// accelerator, the tray menu, direct IPC); close can race a restart that's
+// already in flight; and a global shutdown can race either one. Without this,
+// two such operations can both capture the same managed session, and
+// whichever finishes last either orphans a live, untracked Copilot PTY (a
+// second restart, or a shutdown snapshot taken before a restart's
+// replacement is registered), or resets managedTabs for a tab another
+// operation already deleted from tabsState — a replacement process nothing
+// can ever reach again.
+//
+// A caller queued behind another one simply waits for it to settle (success
+// or failure, via the leading .catch(() => {})) before running, rather than
+// being rejected outright — closing a tab mid-restart should work once the
+// restart finishes, not fail and strand the user's click.
+const tabTransitionQueue = new Map<string, Promise<unknown>>()
+
+function queueTabTransition<T>(tabId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = tabTransitionQueue.get(tabId) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(fn)
+  tabTransitionQueue.set(tabId, next)
+  void next.catch(() => {}).finally(() => {
+    if (tabTransitionQueue.get(tabId) === next) tabTransitionQueue.delete(tabId)
+  })
+  return next
+}
+
+/** True once a global shutdown (quit or update install) has started stopping
+ * every session — checked before *admitting* a new restart so shutdown can't
+ * be raced by one that slips into the per-tab queue just ahead of it (a
+ * pointless spawn immediately followed by stopAllSessions killing it). */
+function shuttingDown(): boolean {
+  return installInProgress || quittingAllSessions
+}
 
 function scheduleActivityBroadcast(tabId: string): void {
   if (activityBroadcastTimers.has(tabId)) return
@@ -388,7 +415,7 @@ function rebuildTrayMenu(): void {
     },
     {
       label: 'Restart Active Session',
-      enabled: !installInProgress && activeTabIsRestartable(),
+      enabled: !shuttingDown() && activeTabIsRestartable(),
       click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
     },
     {
@@ -470,26 +497,47 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
 
 interface SessionSpawnPlan {
   file: string
-  /** Every arg except the identity segment (--connect, or --session-id
-   * +--name, or --resume...) — combine with identityArgs() to get the final
-   * argv. Kept separate so a restart can recompute just the identity
-   * segment (pure/synchronous) after learning a fresher resume id, without
-   * re-running any of the fallible work below a second time. */
-  baseArgs: string[]
   cwd: string
   env: NodeJS.ProcessEnv
-  deterministicSessionId: string | null
-  freshSession: boolean
+  prefixArgs: string[]
+  attachmentPaths: string[]
+  launch: SessionLaunchConfig
+  permissionArgs: string[]
+  secretArgs: string[]
   connectSessionId: string | null
   sessionTitle: string
 }
 
+/** Throws if the launch options a *fresh-vs-resume* choice would produce
+ * aren't supported by this Copilot CLI. `buildSessionLaunchArgs` is pure/sync
+ * (`--worktree` is its only freshSession-dependent flag), so this is cheap
+ * enough to run twice: once as an early, best-guess check in
+ * buildSessionSpawnPlan (before touching any existing process), and again
+ * inside finalizeSessionArgs against whichever freshSession turns out to be
+ * true once the final resume id is known. */
+function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: string | null, freshSession: boolean): void {
+  const launchArgs = buildSessionLaunchArgs(
+    connectSessionId ? { ...launch, remoteControl: 'inherit', remoteExport: 'inherit' } : launch,
+    freshSession,
+  )
+  const unsupportedLaunchOptions = launchArgs.filter((argument) => (
+    argument.startsWith('--') && !copilotCapabilities.supportedOptions.includes(argument)
+  ))
+  if (unsupportedLaunchOptions.length > 0) {
+    throw new Error(
+      `This Copilot CLI version does not support ${[...new Set(unsupportedLaunchOptions)].join(', ')}; update it or change the workspace launch profile`,
+    )
+  }
+}
+
 /**
  * Resolves a profile's current settings (permission preset, launch config,
- * provider config, credentials) into the argv/env a `PtySession` spawns
- * with. Shared by session creation and restart so a restart picks up
- * whatever is currently saved instead of whatever was saved when the tab
- * was first opened.
+ * provider config, credentials) into everything a `PtySession` spawn needs
+ * *except* the parts that depend on whether the launch is actually starting
+ * fresh or resuming a conversation — see finalizeSessionArgs() for those.
+ * Shared by session creation and restart so a restart picks up whatever is
+ * currently saved instead of whatever was saved when the tab was first
+ * opened.
  */
 async function buildSessionSpawnPlan(
   profile: WorkspaceProfile,
@@ -502,25 +550,14 @@ async function buildSessionSpawnPlan(
   if (!state.resolution || state.resolution.version === null) {
     throw new Error('The copilot CLI is not available. Resolve it from the diagnostics screen first.')
   }
-  const freshSession = !connectSessionId && resumeMode === 'new'
   if (connectSessionId && !copilotCapabilities.remoteSessions) {
     throw new Error('This Copilot CLI version does not support remote sessions; update it from Settings')
   }
-  const launchArgs = buildSessionLaunchArgs(
-    connectSessionId
-      ? { ...profile.launch, remoteControl: 'inherit', remoteExport: 'inherit' }
-      : profile.launch,
-    freshSession,
-  )
-  const unsupportedLaunchOptions = launchArgs.filter((argument) => (
-    argument.startsWith('--') && !copilotCapabilities.supportedOptions.includes(argument)
-  ))
-  if (unsupportedLaunchOptions.length > 0) {
-    throw new Error(
-      `This Copilot CLI version does not support ${[...new Set(unsupportedLaunchOptions)].join(', ')}; update it or change the workspace launch profile`,
-    )
-  }
-  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity ? randomUUID() : restoreLastSessionId
+  // Best-guess freshSession, so an unsupported launch option surfaces here,
+  // before the existing process is touched, in the overwhelmingly common
+  // case where the final freshSession (decided in finalizeSessionArgs, once
+  // the true resume id is known) agrees with this guess.
+  validateLaunchOptions(profile.launch, connectSessionId, !connectSessionId && resumeMode === 'new')
   const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
@@ -528,48 +565,64 @@ async function buildSessionSpawnPlan(
     { ...configuredEnvironment, ...vaultEnvironment },
     resolution.pathAdditions,
   )
-  const baseArgs = [
-    ...resolution.prefixArgs,
-    // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
-    // mouse-driven. Enable its terminal mouse protocol explicitly so clicks
-    // continue to work even if the CLI's default or saved setting is off.
-    '--mouse=on',
-    ...attachmentPaths.flatMap((path) => ['--attachment', path]),
-    ...launchArgs,
-    ...buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
+  return {
+    file: resolution.command,
+    cwd: profile.path,
+    env: environment as NodeJS.ProcessEnv,
+    prefixArgs: resolution.prefixArgs,
+    attachmentPaths,
+    launch: profile.launch,
+    permissionArgs: buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
     // PtySession merges process.env into this session's environment (see
     // pty-session.ts), so secretEnvArgs must see that same merged view to
     // also protect a credential that was only ever ambient, not vault-saved.
-    ...secretEnvArgs({ ...process.env, ...environment }),
-  ]
-  return {
-    file: resolution.command,
-    baseArgs,
-    cwd: profile.path,
-    env: environment as NodeJS.ProcessEnv,
-    deterministicSessionId,
-    freshSession,
+    secretArgs: secretEnvArgs({ ...process.env, ...environment }),
     connectSessionId,
     sessionTitle,
   }
 }
 
-/** The part of a session's argv that depends on which conversation it's
- * resuming (or starting fresh) — everything else in a SessionSpawnPlan is
- * independent of this. Pure and synchronous, so it can be recomputed after
- * an async gap (e.g. once a restart's old process has actually stopped and
- * revealed a fresher session id) without redoing any of the fallible
- * validation/credential work that produced the rest of the plan. */
-function identityArgs(plan: SessionSpawnPlan, resumeMode: ResumeMode, restoreLastSessionId: string | null): string[] {
-  return plan.connectSessionId
+/**
+ * Everything that depends on whether the launch is actually starting fresh
+ * or resuming a conversation — including which launch flags apply
+ * (`--worktree` only makes sense for a fresh session) and the identity
+ * segment (`--connect`, or `--session-id`+`--name`, or `--resume...`).
+ * Pure and synchronous, so it's safe to call again after an async gap (e.g.
+ * once a restart's old process has actually stopped and revealed a fresher
+ * resume id) without redoing any of buildSessionSpawnPlan's fallible work —
+ * and critical to call again rather than reusing an earlier freshSession
+ * guess, since that guess and the final one can disagree.
+ */
+function finalizeSessionArgs(
+  plan: SessionSpawnPlan,
+  resumeMode: ResumeMode,
+  restoreLastSessionId: string | null,
+): { args: string[]; deterministicSessionId: string | null } {
+  const freshSession = !plan.connectSessionId && resumeMode === 'new'
+  validateLaunchOptions(plan.launch, plan.connectSessionId, freshSession)
+  const launchArgs = buildSessionLaunchArgs(
+    plan.connectSessionId ? { ...plan.launch, remoteControl: 'inherit', remoteExport: 'inherit' } : plan.launch,
+    freshSession,
+  )
+  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity ? randomUUID() : restoreLastSessionId
+  const identity = plan.connectSessionId
     ? [`--connect=${plan.connectSessionId}`]
-    : plan.freshSession && plan.deterministicSessionId
-      ? ['--session-id', plan.deterministicSessionId, '--name', plan.sessionTitle]
+    : freshSession && deterministicSessionId
+      ? ['--session-id', deterministicSessionId, '--name', plan.sessionTitle]
       : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
-}
-
-function assembleArgs(plan: SessionSpawnPlan, resumeMode: ResumeMode, restoreLastSessionId: string | null): string[] {
-  return [...plan.baseArgs, ...identityArgs(plan, resumeMode, restoreLastSessionId)]
+  const args = [
+    ...plan.prefixArgs,
+    // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
+    // mouse-driven. Enable its terminal mouse protocol explicitly so clicks
+    // continue to work even if the CLI's default or saved setting is off.
+    '--mouse=on',
+    ...identity,
+    ...plan.attachmentPaths.flatMap((path) => ['--attachment', path]),
+    ...launchArgs,
+    ...plan.permissionArgs,
+    ...plan.secretArgs,
+  ]
+  return { args, deterministicSessionId }
 }
 
 /** Wires a session's lifecycle events to tab state for the given tab id.
@@ -619,10 +672,11 @@ async function createSessionTab(
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   const plan = await buildSessionSpawnPlan(profile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
 
   const session = new PtySession({
     file: plan.file,
-    args: assembleArgs(plan, resumeMode, restoreLastSessionId),
+    args,
     cwd: plan.cwd,
     env: plan.env,
     spawnPty: spawnNodePty,
@@ -635,7 +689,7 @@ async function createSessionTab(
     launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
     permissionWarning: connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
     remote: connectSessionId !== null,
-    lastSessionId: plan.deterministicSessionId,
+    lastSessionId: deterministicSessionId,
   })
   syncTabState()
   broadcastState()
@@ -685,14 +739,15 @@ function renameSessionTab(tabId: string, title: string): DesktopState {
 }
 
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
-  // Share the lock with restartSessionTab: closing a tab while its restart is
-  // still in flight could stop the very session the restart is about to
-  // replace, then delete the tab from tabsState — after which the restart
-  // would still go on to managedTabs.set() a brand-new process for a tab
-  // that no longer exists anywhere the app can reach it.
-  if (tabsInTransition.has(tabId)) throw new Error('This session is busy; try again in a moment')
-  tabsInTransition.add(tabId)
-  try {
+  // Share the queue with restartSessionTab: closing a tab while its restart
+  // is still in flight could otherwise stop the very session the restart is
+  // about to replace, then delete the tab from tabsState — after which the
+  // restart would still go on to managedTabs.set() a brand-new process for a
+  // tab that no longer exists anywhere the app can reach it. Queueing (rather
+  // than rejecting outright) means a Close that arrives mid-restart still
+  // takes effect once the restart's turn finishes, instead of silently
+  // dropping the user's click.
+  return queueTabTransition(tabId, async () => {
     const activityTimer = activityBroadcastTimers.get(tabId)
     if (activityTimer) clearTimeout(activityTimer)
     activityBroadcastTimers.delete(tabId)
@@ -709,28 +764,32 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     broadcastState()
     refreshMenus()
     return snapshot()
-  } finally {
-    tabsInTransition.delete(tabId)
-  }
+  })
 }
 
 async function restartSessionTab(tabId: string): Promise<DesktopState> {
-  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  if (!tab) throw new Error('This session tab no longer exists')
-  // Restarting a remote tab used to work (the old PtySession.restart() just
-  // replayed its original --connect argument verbatim), but this function
-  // rebuilds args from a workspace profile's current settings, which a
-  // remote connection has none of. Keep restart consistently unavailable for
-  // remote tabs everywhere (menu/tray/button) rather than silently regress
-  // one of those entry points to a runtime error.
-  if (tab.remote) throw new Error('A remote session cannot be restarted')
-  const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
-  if (!profile) throw new Error('This session\'s workspace profile no longer exists')
-  if (installInProgress) throw new Error('An update is installing; sessions cannot be restarted right now')
-  if (tabsInTransition.has(tabId)) throw new Error('This session is busy; try again in a moment')
+  // Admission check: a shutdown already underway shouldn't accept a new
+  // restart even if the per-tab queue is currently free — checked again
+  // below, once this restart's turn actually comes up, in case a shutdown
+  // starts while it was queued behind another transition on the same tab.
+  if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
+  return queueTabTransition(tabId, async () => {
+    if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
+    // Re-read tab/profile fresh: this callback may run well after the
+    // caller returned (queued behind another transition on the same tab),
+    // by which point the tab could have been closed or its profile removed.
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    if (!tab) throw new Error('This session tab no longer exists')
+    // Restarting a remote tab used to work (the old PtySession.restart() just
+    // replayed its original --connect argument verbatim), but this function
+    // rebuilds args from a workspace profile's current settings, which a
+    // remote connection has none of. Keep restart consistently unavailable for
+    // remote tabs everywhere (menu/tray/button) rather than silently regress
+    // one of those entry points to a runtime error.
+    if (tab.remote) throw new Error('A remote session cannot be restarted')
+    const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+    if (!profile) throw new Error('This session\'s workspace profile no longer exists')
 
-  tabsInTransition.add(tabId)
-  try {
     const managed = managedTabs.get(tabId)
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
 
@@ -738,12 +797,13 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // touching the existing process. buildSessionSpawnPlan can reject (an
     // unavailable resolution, a newly saved but unsupported launch option, a
     // credential-store failure) — that must not cost the user an otherwise
-    // healthy, running session. Only the identity portion of the resulting
-    // args (which resume id to use) may need refreshing once the old
-    // process has actually stopped — identityArgs()/assembleArgs() recompute
-    // just that slice, purely and synchronously, so refreshing it below
-    // never reintroduces a second point where this can fail after the
-    // healthy process is already gone.
+    // healthy, running session. Only the fresh/resume-dependent portion of
+    // the resulting args (including --worktree and which resume id to use)
+    // may need refreshing once the old process has actually stopped —
+    // finalizeSessionArgs() recomputes just that slice, purely and
+    // synchronously, from the *final* freshSession decision below, so
+    // refreshing it never reintroduces a second point where this can fail
+    // after the healthy process is already gone.
     const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
 
     if (managed) await managed.session.stop()
@@ -765,9 +825,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const dimensions = managed?.session.dimensions
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
+    const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
     const session = new PtySession({
       file: plan.file,
-      args: assembleArgs(plan, resumeMode, resumeSessionId),
+      args,
       cwd: plan.cwd,
       env: plan.env,
       spawnPty: spawnNodePty,
@@ -779,13 +840,11 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       launchedPermissionPreset: profile.permissionPreset,
       permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
     })
-    // The id actually baked into the argv above: the plan's own
-    // deterministicSessionId when starting fresh (unaffected by the
-    // post-stop refresh), or the freshest resumeSessionId otherwise — not
-    // plan.deterministicSessionId unconditionally, which was frozen from the
-    // pre-stop guess and would persist a stale id if a fresher one surfaced
-    // while the old process was stopping.
-    tabsState = setTabSessionId(tabsState, tabId, plan.freshSession ? plan.deterministicSessionId : resumeSessionId)
+    // deterministicSessionId is already correct by construction: it's the
+    // id finalizeSessionArgs actually baked into args above, computed from
+    // the final (post-stop) freshSession decision rather than a frozen
+    // pre-stop guess.
+    tabsState = setTabSessionId(tabsState, tabId, deterministicSessionId)
     syncTabState()
     broadcastState()
     refreshMenus()
@@ -809,9 +868,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     }
     persistProfileTabs()
     return snapshot()
-  } finally {
-    tabsInTransition.delete(tabId)
-  }
+  })
 }
 
 async function restoreTabsForActiveProfile(): Promise<void> {
@@ -1053,7 +1110,7 @@ function installApplicationMenu(): void {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
           enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && void closeSessionTab(tabsState.activeTabId),
+          click: () => tabsState.activeTabId && void closeSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
         },
         {
           label: 'Resume Session…',
@@ -1068,8 +1125,8 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !installInProgress && activeTabIsRestartable(),
-          click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId),
+          enabled: !shuttingDown() && activeTabIsRestartable(),
+          click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
         },
         { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => void showSettingsWindow() },
         { type: 'separator' },
@@ -1262,9 +1319,21 @@ function scheduleAutomaticUpdateCheck(delayMs = 15_000): void {
 }
 
 async function stopAllSessions(): Promise<void> {
-  await Promise.all([...managedTabs.values()].map((managed) => managed.session.stop().catch(() => {})))
-  for (const managed of managedTabs.values()) managed.session.removeAllListeners()
-  managedTabs.clear()
+  // Route every stop through the same per-tab queue restart/close use, so
+  // this can't snapshot managedTabs out from under an in-flight restart —
+  // stopping the old process it's about to replace while missing the
+  // replacement it goes on to register right after, orphaning a process
+  // that survives this "stop everything" call entirely. Tabs with a
+  // transition already queued (but not yet in managedTabs, e.g. a restart
+  // that hasn't reached managedTabs.set() yet) are included too.
+  const tabIds = new Set([...managedTabs.keys(), ...tabTransitionQueue.keys()])
+  await Promise.all([...tabIds].map((tabId) => queueTabTransition(tabId, async () => {
+    const managed = managedTabs.get(tabId)
+    if (!managed) return
+    await managed.session.stop().catch(() => {})
+    managed.session.removeAllListeners()
+    managedTabs.delete(tabId)
+  })))
 }
 
 // --- IPC: main window -------------------------------------------------

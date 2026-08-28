@@ -78,7 +78,9 @@ export function App(): JSX.Element {
         void window.copilotDesktop.createTab()
       } else if (event.key.toLowerCase() === 'w' && state.activeTabId) {
         event.preventDefault()
-        void window.copilotDesktop.closeTab(state.activeTabId)
+        window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
+          console.error('Failed to close session tab', error)
+        })
       } else if (event.key === ',') {
         event.preventDefault()
         void window.copilotDesktop.openSettings()
@@ -157,13 +159,16 @@ export function App(): JSX.Element {
             canOpenTab={state.tabs.length < state.maxSessionTabs}
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
             onRename={requestTabRename}
-            onClose={(tabId) => void window.copilotDesktop.closeTab(tabId)}
+            onClose={(tabId) => {
+              window.copilotDesktop.closeTab(tabId).catch((error: unknown) => {
+                console.error('Failed to close session tab', error)
+              })
+            }}
             onRestart={(tabId) => {
-              // The main process now serializes restarts per tab and rejects
-              // a second concurrent call (e.g. a rapid double-click) rather
-              // than racing two replacement processes — that rejection still
-              // needs a handler here or it surfaces as an unhandled promise
-              // rejection in the renderer.
+              // The main process can still reject a restart (an update
+              // installing, a tab closed out from under a queued restart) —
+              // that rejection needs a handler here or it surfaces as an
+              // unhandled promise rejection in the renderer.
               window.copilotDesktop.restartTab(tabId).catch((error: unknown) => {
                 console.error('Failed to restart session tab', error)
               })
