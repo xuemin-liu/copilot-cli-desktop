@@ -180,6 +180,46 @@ test('resize() forwards to the underlying pty', async () => {
   assert.deepEqual(pty.resized, [[120, 40]])
 })
 
+test('dimensions defaults to 80x24 and reflects the most recent resize()', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  assert.deepEqual(session.dimensions, { cols: 80, rows: 24 })
+  await session.start()
+  // A caller that replaces this session (e.g. to restart it under a fresh
+  // PtySession instance) reads this to spawn at the terminal's real current
+  // size — if resize() didn't persist it, a restart would silently revert
+  // to the 80x24 construction default while the renderer's xterm instance
+  // (unaware anything changed, since restart keeps the same tab) keeps
+  // rendering at its actual, larger size.
+  session.resize(120, 40)
+  assert.deepEqual(session.dimensions, { cols: 120, rows: 40 })
+})
+
+test('a resize() that arrives while spawnPty() is still resolving is still applied to the new pty', async () => {
+  const pty = new FakePty()
+  let resolveSpawn: ((pty: PtyLike) => void) | undefined
+  const spawnPty: SpawnPtyFn = () => new Promise<PtyLike>((resolve) => {
+    resolveSpawn = resolve
+  })
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', cols: 80, rows: 24, spawnPty })
+
+  const startPromise = session.start()
+  // The resize lands after spawnPty() was called but before it resolves —
+  // this.pty is still null, so resize() can only update this.options, not
+  // forward to a live pty (there isn't one yet).
+  session.resize(167, 57)
+  assert.deepEqual(pty.resized, [])
+
+  resolveSpawn?.(pty)
+  await startPromise
+
+  // start() must reconcile the pty to the latest stored size once it
+  // actually exists, rather than leaving it stuck at the 80x24 it was
+  // spawned with.
+  assert.deepEqual(pty.resized, [[167, 57]])
+  assert.deepEqual(session.dimensions, { cols: 167, rows: 57 })
+})
+
 test('write() and resize() safely ignore a session that has already exited', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })

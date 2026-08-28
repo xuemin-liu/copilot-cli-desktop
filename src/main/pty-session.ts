@@ -86,6 +86,15 @@ export class PtySession extends EventEmitter {
     return this.lastKnownSessionId
   }
 
+  /** The size this session was last told to use — either its construction
+   * default or the most recent `resize()` call. A caller that replaces this
+   * session (e.g. restarting the underlying process) needs this to spawn the
+   * new one at the terminal's actual current size instead of silently
+   * reverting to the 80x24 construction default. */
+  get dimensions(): { cols: number; rows: number } {
+    return { cols: this.options.cols, rows: this.options.rows }
+  }
+
   private setStatus(status: SessionLifecycleStatus): void {
     if (this.statusValue === status) return
     this.statusValue = status
@@ -117,13 +126,24 @@ export class PtySession extends EventEmitter {
   async start(): Promise<void> {
     if (this.pty) throw new Error('This session has already started')
     this.setStatus('starting')
+    const spawnCols = this.options.cols
+    const spawnRows = this.options.rows
     const pty = await this.options.spawnPty(this.options.file, this.options.args, {
       cwd: this.options.cwd,
       env: { ...process.env, ...this.options.env },
-      cols: this.options.cols,
-      rows: this.options.rows,
+      cols: spawnCols,
+      rows: spawnRows,
     })
     this.pty = pty
+    // A resize() that arrives while spawnPty() is still resolving updates
+    // this.options (so a later restart still reads the latest size) but has
+    // no live pty to forward to yet — this.pty is still null at that point.
+    // Reconcile now against whatever was actually passed to spawnPty above,
+    // so the new pty doesn't stay stuck at a size it was told to abandon
+    // before it ever existed.
+    if (this.options.cols !== spawnCols || this.options.rows !== spawnRows) {
+      pty.resize(this.options.cols, this.options.rows)
+    }
 
     pty.onData((data: string) => {
       this.recordOutput(data)
@@ -176,6 +196,8 @@ export class PtySession extends EventEmitter {
   }
 
   resize(cols: number, rows: number): void {
+    this.options.cols = cols
+    this.options.rows = rows
     this.pty?.resize(cols, rows)
   }
 
@@ -214,12 +236,4 @@ export class PtySession extends EventEmitter {
     }
   }
 
-  async restart(): Promise<void> {
-    await this.stop()
-    this.stopping = false
-    this.outputLines.length = 0
-    this.pendingLine = ''
-    this.heuristicBuffer = ''
-    await this.start()
-  }
 }

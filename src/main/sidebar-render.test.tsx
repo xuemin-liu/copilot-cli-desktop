@@ -119,7 +119,7 @@ test('Sidebar shows current session access and marks changed access as applying 
   )
 
   assert.match(markup, /Default \(prompt every time\)/)
-  assert.match(markup, /Full computer access \(--allow-all\) applies to newly created sessions \(Restart keeps current access\)/)
+  assert.match(markup, /Full computer access \(--allow-all\) applies on next launch or Restart/)
 })
 
 test('Sidebar uses the active tab workspace and surfaces legacy restriction warnings', () => {

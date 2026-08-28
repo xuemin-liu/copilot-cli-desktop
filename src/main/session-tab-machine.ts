@@ -88,6 +88,19 @@ export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: 
   }
 }
 
+/** Refreshes the launch-time permission fields after a restart rebuilds a
+ * tab's underlying process with the workspace profile's current settings. */
+export function setTabLaunchConfig(
+  state: TabsState,
+  tabId: string,
+  config: { launchedPermissionPreset: PermissionPreset | null; permissionWarning: string | null },
+): TabsState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, ...config } : tab)),
+  }
+}
+
 export function renameTab(state: TabsState, tabId: string, title: string): TabsState {
   const normalized = title.trim().slice(0, 120) || 'Copilot'
   return {
