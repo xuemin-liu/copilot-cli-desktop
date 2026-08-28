@@ -4,7 +4,11 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
-import { decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
+import {
+  decodeOsc52ClipboardWrite,
+  Osc52ClipboardSynchronizer,
+  stripOsc52Commands,
+} from '../osc52-clipboard.js'
 import {
   ClipboardCopyStatusMatcher,
   ClipboardRedrawRecovery,
@@ -50,21 +54,10 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
     terminalRef.current = terminal
     fitRef.current = fitAddon
 
-    const viewportContentLength = (): number => {
-      const buffer = terminal.buffer.active
-      let length = 0
-      for (let row = 0; row < terminal.rows; row += 1) {
-        length += buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim().length ?? 0
-      }
-      return length
-    }
-
     const clipboardRedraw = new ClipboardRedrawRecovery({
-      viewportContentLength,
       captureSnapshot: () => normalizeClipboardSnapshot(
         serializeAddon.serialize({ scrollback: 0, excludeModes: true }),
       ),
-      beginSynchronizedOutput: () => terminal.write('\u001b[?2026h'),
       completeSynchronizedOutput: (snapshot, showCopyStatus) => {
         // Ending synchronized-output mode makes xterm paint the completed
         // state once, without exposing Copilot's intermediate blank frame.
@@ -73,6 +66,9 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
       schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
       cancel: (timerId) => window.clearTimeout(timerId),
     })
+    const clipboardSynchronizer = new Osc52ClipboardSynchronizer(
+      () => clipboardRedraw.prepareClipboardCopy(),
+    )
     const copyStatusMatcher = new ClipboardCopyStatusMatcher()
     clipboardRedrawRef.current = clipboardRedraw
     copyStatusMatcherRef.current = copyStatusMatcher
@@ -105,12 +101,14 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
     })
 
     const writePtyOutput = (data: string): void => {
-      terminal.write(data, () => {
+      const synchronizedData = clipboardSynchronizer.push(data)
+      if (synchronizedData === '') return
+      terminal.write(synchronizedData, () => {
         if (!clipboardRedraw.isAwaitingCopyStatus()) {
           copyStatusMatcher.reset()
           return
         }
-        const copyStatusRendered = copyStatusMatcher.push(data)
+        const copyStatusRendered = copyStatusMatcher.push(synchronizedData)
         clipboardRedraw.onOutputParsed(copyStatusRendered)
         if (copyStatusRendered) copyStatusMatcher.reset()
       })

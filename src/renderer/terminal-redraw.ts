@@ -7,16 +7,6 @@ export const CLIPBOARD_REDRAW_GUARD_MS = 2_000
 /** Time to retain an OSC 52 recovery candidate before any redraw starts. */
 export const CLIPBOARD_COPY_ARM_MS = 5_000
 
-/**
- * Copilot 1.0.80 and 1.0.81 can leave only their copy status line after the
- * first selected-text copy. Avoid disturbing a healthy viewport: request
- * recovery only when a previously substantial screen loses more than two
- * thirds of its visible text.
- */
-export function clipboardCopyNeedsRedraw(before: number, after: number): boolean {
-  return before >= 40 && after * 3 < before
-}
-
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {
   if (params.length > 2) return false
@@ -83,15 +73,13 @@ export function clipboardRedrawOutput(rows: number, snapshot: string | null, sho
 }
 
 export interface ClipboardRedrawRecoveryHooks {
-  viewportContentLength(): number
   captureSnapshot(): string
-  beginSynchronizedOutput(): void
   completeSynchronizedOutput(snapshot: string | null, showCopyStatus: boolean): void
   schedule(callback: () => void, delayMs: number): number
   cancel(timerId: number): void
 }
 
-type ClipboardRedrawPhase = 'ready' | 'armed' | 'captured' | 'done'
+type ClipboardRedrawPhase = 'ready' | 'primed' | 'armed' | 'captured' | 'done'
 
 /**
  * Coordinates the one first-copy workaround without assuming how long the
@@ -102,24 +90,28 @@ type ClipboardRedrawPhase = 'ready' | 'armed' | 'captured' | 'done'
  */
 export class ClipboardRedrawRecovery {
   private phase: ClipboardRedrawPhase = 'ready'
-  private contentBeforeCopy = 0
   private snapshot: string | null = null
   private timerId: number | null = null
 
   constructor(private readonly hooks: ClipboardRedrawRecoveryHooks) {}
 
-  onClipboardCopy(): boolean {
+  /** Reserve the first-copy workaround before its PTY chunk enters xterm. */
+  prepareClipboardCopy(): boolean {
     if (this.phase !== 'ready') return false
-    this.contentBeforeCopy = this.hooks.viewportContentLength()
+    this.phase = 'primed'
+    return true
+  }
+
+  onClipboardCopy(): boolean {
+    if (this.phase !== 'primed') return false
     // Capture before Copilot emits any post-copy cursor movement. The renderer
     // hook normalizes Copilot's selection-only background in this early frame,
     // so recovery preserves content without retaining the selected highlight.
     this.snapshot = this.hooks.captureSnapshot()
     this.phase = 'armed'
-    // Freeze immediately at OSC 52. Copilot can emit visible damage before
-    // the later cursor-home boundary, so waiting until then permits a flash of
-    // the broken frame even when the final state is eventually recovered.
-    this.hooks.beginSynchronizedOutput()
+    // Synchronized output was inserted directly before this OSC 52 in the PTY
+    // stream. Doing it here with terminal.write() would queue the mode change
+    // behind the current chunk and allow Copilot's broken frame to flash.
     this.schedule(() => this.finish(null, false), CLIPBOARD_COPY_ARM_MS)
     return true
   }
@@ -142,14 +134,14 @@ export class ClipboardRedrawRecovery {
 
   /** Re-arm the one-shot workaround for a replacement Copilot process. */
   rearm(): void {
-    if (this.phase === 'armed' || this.phase === 'captured') {
+    if (this.phase === 'primed' || this.phase === 'armed' || this.phase === 'captured') {
       this.hooks.completeSynchronizedOutput(null, false)
     }
     this.reset('ready')
   }
 
   dispose(): void {
-    if (this.phase === 'armed' || this.phase === 'captured') {
+    if (this.phase === 'primed' || this.phase === 'armed' || this.phase === 'captured') {
       this.hooks.completeSynchronizedOutput(null, false)
     }
     this.reset('done')
@@ -170,9 +162,13 @@ export class ClipboardRedrawRecovery {
   }
 
   private complete(): void {
-    const needsRedraw = this.snapshot !== null
-      && clipboardCopyNeedsRedraw(this.contentBeforeCopy, this.hooks.viewportContentLength())
-    this.finish(needsRedraw ? this.snapshot : null, needsRedraw)
+    // Reaching this phase already requires the first valid OSC 52 write, a
+    // subsequent top-left cursor move, and either Copilot's positioned copy
+    // status or the redraw safety timeout. The old viewport-length heuristic
+    // was unreliable because a destroyed frame can retain enough footer text
+    // to look "healthy". Restore the known-good snapshot for this specific
+    // sequence instead of exposing that intermediate frame.
+    this.finish(this.snapshot, this.snapshot !== null)
   }
 
   private finish(snapshot: string | null, showCopyStatus: boolean): void {
