@@ -22,9 +22,11 @@ import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
+  isCloseBehavior,
   readDesktopConfig,
   recordDesktopVersion,
   writeDesktopConfig,
+  type CloseBehavior,
   type DesktopConfig,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
@@ -102,6 +104,7 @@ let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
 let trayHintShown = false
+let closePromptPending = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
@@ -370,6 +373,64 @@ function showNotification(title: string, body: string, onClick = restoreMainWind
   const notification = new Notification({ title, body, icon: iconPath() })
   notification.on('click', onClick)
   notification.show()
+}
+
+function hideWindowToTray(window: BrowserWindow): void {
+  if (!tray || tray.isDestroyed() || window.isDestroyed()) return
+  window.hide()
+  if (!trayHintShown) {
+    trayHintShown = true
+    showNotification(
+      'Copilot CLI Desktop is still running',
+      'Windows may place its icon under Show hidden icons in the notification area.',
+    )
+  }
+}
+
+async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void> {
+  desktopConfig.closeBehavior = closeBehavior
+  try {
+    await persistConfig()
+  } catch (error) {
+    await writeAppLog(`Failed to save close behavior: ${String(error)}`).catch(() => {})
+  }
+}
+
+async function promptForWindowClose(window: BrowserWindow): Promise<void> {
+  if (closePromptPending || window.isDestroyed()) return
+  closePromptPending = true
+  try {
+    const canMinimizeToTray = tray !== null && !tray.isDestroyed()
+    const buttons = canMinimizeToTray
+      ? ['Exit application', 'Minimize to tray', 'Cancel']
+      : ['Exit application', 'Cancel']
+    const result = await dialog.showMessageBox(window, {
+      type: 'question',
+      title: 'Close Copilot CLI Desktop',
+      message: 'What should happen when this window closes?',
+      detail: canMinimizeToTray
+        ? 'Minimizing keeps Copilot sessions running. Windows may place the app icon under Show hidden icons in the notification area.'
+        : 'The tray icon is disabled, so the application cannot remain available in the notification area.',
+      buttons,
+      defaultId: 0,
+      cancelId: buttons.length - 1,
+      noLink: true,
+      checkboxLabel: 'Remember my choice',
+      checkboxChecked: false,
+    })
+
+    if (result.response === 0) {
+      if (result.checkboxChecked) await rememberCloseBehavior('quit')
+      await requestExplicitQuit()
+      return
+    }
+    if (canMinimizeToTray && result.response === 1) {
+      if (result.checkboxChecked) await rememberCloseBehavior('tray')
+      hideWindowToTray(window)
+    }
+  } finally {
+    closePromptPending = false
+  }
 }
 
 // `state.resolution?.version !== null` is true both when resolution
@@ -1210,13 +1271,14 @@ function createWindow(showOnReady = true): BrowserWindow {
     if (targetUrl !== shellUrl()) event.preventDefault()
   })
   window.on('close', (event) => {
-    if (explicitQuitRequested || !desktopConfig.closeToTray || !tray) return
-    event.preventDefault()
-    window.hide()
-    if (!trayHintShown) {
-      trayHintShown = true
-      showNotification('Copilot CLI Desktop is still running', 'Use the tray icon to reopen it or quit.')
+    if (explicitQuitRequested || desktopConfig.closeBehavior === 'quit') return
+    if (desktopConfig.closeBehavior === 'tray' && tray && !tray.isDestroyed()) {
+      event.preventDefault()
+      hideWindowToTray(window)
+      return
     }
+    event.preventDefault()
+    void promptForWindowClose(window)
   })
   window.on('closed', () => {
     mainWindow = null
@@ -1260,7 +1322,7 @@ async function showSettingsWindow(): Promise<void> {
 }
 
 interface DesktopSettingsSnapshot {
-  closeToTray: boolean
+  closeBehavior: CloseBehavior
   trayEnabled: boolean
   notifications: boolean
   automaticUpdateChecks: boolean
@@ -1289,7 +1351,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     readAccessStatus(activeProfile?.permissionPreset ?? 'default', copilotCapabilities),
   ])
   return {
-    closeToTray: desktopConfig.closeToTray,
+    closeBehavior: desktopConfig.closeBehavior,
     trayEnabled: desktopConfig.trayEnabled,
     notifications: desktopConfig.notifications,
     automaticUpdateChecks: desktopConfig.automaticUpdateChecks,
@@ -1528,7 +1590,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   if (!preferences || typeof preferences !== 'object') throw new Error('Invalid desktop preferences')
   const values = preferences as Record<string, unknown>
   if (
-    typeof values.closeToTray !== 'boolean'
+    !isCloseBehavior(values.closeBehavior)
     || typeof values.trayEnabled !== 'boolean'
     || typeof values.notifications !== 'boolean'
     || typeof values.automaticUpdateChecks !== 'boolean'
@@ -1538,7 +1600,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   }
   const updateChecksChanged = desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
   const shortcutChanged = desktopConfig.globalShortcutEnabled !== values.globalShortcutEnabled
-  desktopConfig.closeToTray = values.closeToTray
+  desktopConfig.closeBehavior = values.closeBehavior
   desktopConfig.trayEnabled = values.trayEnabled
   desktopConfig.notifications = values.notifications
   desktopConfig.automaticUpdateChecks = values.automaticUpdateChecks
@@ -1800,5 +1862,5 @@ app.on('will-quit', () => {
 })
 
 app.on('window-all-closed', () => {
-  if (explicitQuitRequested || !desktopConfig.closeToTray || !tray) app.quit()
+  if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })

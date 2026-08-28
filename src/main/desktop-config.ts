@@ -13,7 +13,7 @@ export interface DesktopConfig {
   activeProfileId: string | null
   lastRunVersion: string | null
   rollbackVersion: string | null
-  closeToTray: boolean
+  closeBehavior: CloseBehavior
   trayEnabled: boolean
   notifications: boolean
   automaticUpdateChecks: boolean
@@ -22,12 +22,19 @@ export interface DesktopConfig {
   provider: CopilotProviderConfig
 }
 
+export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
+export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
+
+export function isCloseBehavior(value: unknown): value is CloseBehavior {
+  return CLOSE_BEHAVIORS.includes(value as CloseBehavior)
+}
+
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   profiles: [],
   activeProfileId: null,
   lastRunVersion: null,
   rollbackVersion: null,
-  closeToTray: true,
+  closeBehavior: 'ask',
   trayEnabled: true,
   notifications: true,
   automaticUpdateChecks: true,
@@ -167,7 +174,12 @@ export async function readDesktopConfig(filename: string): Promise<DesktopConfig
     rollbackVersion: typeof value.rollbackVersion === 'string' && /^[0-9A-Za-z.+-]{1,50}$/.test(value.rollbackVersion)
       ? value.rollbackVersion
       : null,
-    closeToTray: typeof value.closeToTray === 'boolean' ? value.closeToTray : true,
+    closeBehavior: isCloseBehavior(value.closeBehavior)
+      ? value.closeBehavior
+      // Older releases stored only closeToTray. Preserve an explicit exit
+      // preference, but migrate background closing to the new prompt so an
+      // overflow-hidden Windows tray icon cannot make the app appear lost.
+      : value.closeToTray === false ? 'quit' : 'ask',
     trayEnabled: typeof value.trayEnabled === 'boolean' ? value.trayEnabled : true,
     notifications: typeof value.notifications === 'boolean' ? value.notifications : true,
     automaticUpdateChecks: typeof value.automaticUpdateChecks === 'boolean' ? value.automaticUpdateChecks : true,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -119,5 +119,24 @@ test('readDesktopConfig tolerates a corrupt file by falling back to defaults', a
     await fs.writeFile(filename, 'not json', 'utf8')
     const config = await readDesktopConfig(filename)
     assert.deepEqual(config, DEFAULT_DESKTOP_CONFIG)
+  })
+})
+
+test('readDesktopConfig migrates legacy close-to-tray preferences safely', async () => {
+  await withTempFile(async (filename) => {
+    await writeFile(filename, JSON.stringify({ closeToTray: true }), 'utf8')
+    assert.equal((await readDesktopConfig(filename)).closeBehavior, 'ask')
+
+    await writeFile(filename, JSON.stringify({ closeToTray: false }), 'utf8')
+    assert.equal((await readDesktopConfig(filename)).closeBehavior, 'quit')
+  })
+})
+
+test('readDesktopConfig accepts persisted close behavior values', async () => {
+  await withTempFile(async (filename) => {
+    for (const closeBehavior of ['ask', 'tray', 'quit'] as const) {
+      await writeFile(filename, JSON.stringify({ closeBehavior }), 'utf8')
+      assert.equal((await readDesktopConfig(filename)).closeBehavior, closeBehavior)
+    }
   })
 })

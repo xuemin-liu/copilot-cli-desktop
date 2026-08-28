@@ -49,7 +49,7 @@ export interface CopilotDesktopBridge {
 }
 
 export interface DesktopSettingsSnapshot {
-  closeToTray: boolean
+  closeBehavior: 'ask' | 'tray' | 'quit'
   trayEnabled: boolean
   notifications: boolean
   automaticUpdateChecks: boolean
@@ -87,7 +87,7 @@ export interface DesktopSettingsSnapshot {
 export interface CopilotDesktopSettingsBridge {
   get(): Promise<DesktopSettingsSnapshot>
   updatePreferences(preferences: {
-    closeToTray: boolean
+    closeBehavior: 'ask' | 'tray' | 'quit'
     trayEnabled: boolean
     notifications: boolean
     automaticUpdateChecks: boolean

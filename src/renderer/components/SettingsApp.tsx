@@ -468,7 +468,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeToTray' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -476,7 +476,7 @@ export function SettingsApp(): JSX.Element | null {
       const next = { ...previous, ...patch }
       void window.copilotDesktopSettings
         .updatePreferences({
-          closeToTray: next.closeToTray,
+          closeBehavior: next.closeBehavior,
           trayEnabled: next.trayEnabled,
           notifications: next.notifications,
           automaticUpdateChecks: next.automaticUpdateChecks,
@@ -493,13 +493,18 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>General</h2>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.closeToTray}
-            onChange={(event) => updatePreference({ closeToTray: event.target.checked })}
-          />
-          Keep sessions running in the background when the window is closed
+        <label className="settings-row settings-row-select">
+          When the main window closes
+          <select
+            value={snapshot.closeBehavior}
+            onChange={(event) => updatePreference({
+              closeBehavior: event.target.value as DesktopSettingsSnapshot['closeBehavior'],
+            })}
+          >
+            <option value="ask">Ask every time</option>
+            <option value="tray">Minimize to tray</option>
+            <option value="quit">Exit the application</option>
+          </select>
         </label>
         <label className="settings-row">
           <input
