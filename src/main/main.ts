@@ -431,12 +431,18 @@ async function promptForWindowClose(window: BrowserWindow): Promise<void> {
       checkboxChecked: false,
     })
 
-    if (window.isDestroyed() || explicitQuitRequested) return
+    if (window.isDestroyed()) return
+    // Process this dialog's own Exit response before honoring a quit that
+    // was already in flight (for example, quitAndInstall). If that earlier
+    // updater quit fails and clears explicitQuitRequested while a remembered
+    // preference is being persisted, requestExplicitQuit below reasserts the
+    // user's independent Exit choice.
     if (result.response === 0) {
       if (result.checkboxChecked) await rememberCloseBehavior('quit')
       await requestExplicitQuit()
       return
     }
+    if (explicitQuitRequested) return
     if (canMinimizeToTray && result.response === 1) {
       // The independent Settings window can disable and destroy the tray
       // while this native dialog is open. Re-check immediately before the
