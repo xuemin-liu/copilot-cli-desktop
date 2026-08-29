@@ -435,10 +435,16 @@ export function SettingsApp(): JSX.Element | null {
 
   useEffect(() => {
     void window.copilotDesktopSettings.get().then(setSnapshot)
-    const unsubscribe = window.copilotDesktopSettings.onUpdateStateChanged((update) => {
+    const unsubscribeUpdate = window.copilotDesktopSettings.onUpdateStateChanged((update) => {
       setSnapshot((previous) => (previous ? { ...previous, update } : previous))
     })
-    return unsubscribe
+    const unsubscribePreferences = window.copilotDesktopSettings.onPreferencesChanged((preferences) => {
+      setSnapshot((previous) => (previous ? { ...previous, ...preferences } : previous))
+    })
+    return () => {
+      unsubscribeUpdate()
+      unsubscribePreferences()
+    }
   }, [])
 
   if (!snapshot) return <div className="loading-screen"><p>Loading settings…</p></div>
@@ -459,29 +465,20 @@ export function SettingsApp(): JSX.Element | null {
       .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
       .finally(() => setCliMaintenancePending(false))
   }
-  // Toggling two checkboxes in quick succession — before the first
-  // updatePreferences() IPC round-trip resolves — must not let the second
-  // call build its payload from the pre-toggle snapshot and revert the
-  // first change. Reading `previous` from React's functional-update form
-  // guarantees each call sees the latest (optimistically applied) state,
-  // even when several fire before any IPC response lands.
+  // Send only the field(s) the user changed. Besides making rapid toggles
+  // independent, this prevents an open Settings window from posting an old
+  // close behavior over a newer choice remembered by the native close dialog.
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeToTray' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
     >>,
   ): void => {
     setSnapshot((previous) => {
       if (!previous) return previous
       const next = { ...previous, ...patch }
       void window.copilotDesktopSettings
-        .updatePreferences({
-          closeToTray: next.closeToTray,
-          trayEnabled: next.trayEnabled,
-          notifications: next.notifications,
-          automaticUpdateChecks: next.automaticUpdateChecks,
-          globalShortcutEnabled: next.globalShortcutEnabled,
-        })
+        .updatePreferences(patch)
         .then(refresh)
       return next
     })
@@ -493,13 +490,18 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>General</h2>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.closeToTray}
-            onChange={(event) => updatePreference({ closeToTray: event.target.checked })}
-          />
-          Keep sessions running in the background when the window is closed
+        <label className="settings-row settings-row-select">
+          When the main window closes
+          <select
+            value={snapshot.closeBehavior}
+            onChange={(event) => updatePreference({
+              closeBehavior: event.target.value as DesktopSettingsSnapshot['closeBehavior'],
+            })}
+          >
+            <option value="ask">Ask every time</option>
+            <option value="tray">Minimize to tray</option>
+            <option value="quit">Exit the application</option>
+          </select>
         </label>
         <label className="settings-row">
           <input

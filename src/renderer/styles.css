@@ -859,6 +859,10 @@ button:disabled {
   margin: 8px 0;
 }
 
+.settings-row-select select {
+  margin-left: auto;
+}
+
 .profile-row {
   display: flex;
   align-items: center;

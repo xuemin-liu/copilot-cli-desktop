@@ -22,10 +22,13 @@ import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
+  isCloseBehavior,
   readDesktopConfig,
   recordDesktopVersion,
   writeDesktopConfig,
+  type CloseBehavior,
   type DesktopConfig,
+  type DesktopPreferences,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
 import {
@@ -102,6 +105,8 @@ let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
 let trayHintShown = false
+let closePromptWindow: BrowserWindow | null = null
+let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
@@ -372,6 +377,99 @@ function showNotification(title: string, body: string, onClick = restoreMainWind
   notification.show()
 }
 
+function hideWindowToTray(window: BrowserWindow): boolean {
+  if (!tray || tray.isDestroyed() || window.isDestroyed()) return false
+  window.hide()
+  if (!trayHintShown) {
+    trayHintShown = true
+    showNotification(
+      'Copilot CLI Desktop is still running',
+      'Windows may place its icon under Show hidden icons in the notification area.',
+    )
+  }
+  return true
+}
+
+async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void> {
+  desktopConfig.closeBehavior = closeBehavior
+  try {
+    await persistConfig()
+  } catch (error) {
+    await writeAppLog(`Failed to save close behavior: ${String(error)}`).catch(() => {})
+  }
+  broadcastSettingsPreferences()
+}
+
+function finishClosePrompt(window: BrowserWindow): void {
+  if (closePromptWindow !== window) return
+  closePromptWindow = null
+  const shouldResumeQuit = quitAfterClosePrompt && explicitQuitRequested
+  quitAfterClosePrompt = false
+  if (shouldResumeQuit) setImmediate(() => app.quit())
+}
+
+async function promptForWindowClose(window: BrowserWindow): Promise<void> {
+  if (closePromptWindow || window.isDestroyed()) return
+  closePromptWindow = window
+  try {
+    const canMinimizeToTray = tray !== null && !tray.isDestroyed()
+    const buttons = canMinimizeToTray
+      ? ['Exit application', 'Minimize to tray', 'Cancel']
+      : ['Exit application', 'Cancel']
+    const result = await dialog.showMessageBox(window, {
+      type: 'question',
+      title: 'Close Copilot CLI Desktop',
+      message: 'What should happen when this window closes?',
+      detail: canMinimizeToTray
+        ? 'Minimizing keeps Copilot sessions running. Windows may place the app icon under Show hidden icons in the notification area.'
+        : 'The tray icon is disabled, so the application cannot remain available in the notification area.',
+      buttons,
+      defaultId: 0,
+      cancelId: buttons.length - 1,
+      noLink: true,
+      checkboxLabel: 'Remember my choice',
+      checkboxChecked: false,
+    })
+
+    if (window.isDestroyed()) return
+    // Process this dialog's own Exit response before honoring a quit that
+    // was already in flight (for example, quitAndInstall). If that earlier
+    // updater quit fails and clears explicitQuitRequested while a remembered
+    // preference is being persisted, requestExplicitQuit below reasserts the
+    // user's independent Exit choice.
+    if (result.response === 0) {
+      if (result.checkboxChecked) await rememberCloseBehavior('quit')
+      await requestExplicitQuit()
+      return
+    }
+    if (explicitQuitRequested) return
+    if (canMinimizeToTray && result.response === 1) {
+      // The independent Settings window can disable and destroy the tray
+      // while this native dialog is open. Re-check immediately before the
+      // synchronous hide so that choice can never strand the main window.
+      if (!tray || tray.isDestroyed()) {
+        await dialog.showMessageBox(window, {
+          type: 'warning',
+          title: 'Tray icon unavailable',
+          message: 'The window was not minimized.',
+          detail: 'The tray icon was disabled while the close dialog was open. Enable it in Desktop Settings before minimizing to the tray.',
+          buttons: ['OK'],
+          defaultId: 0,
+        })
+        return
+      }
+      if (!hideWindowToTray(window)) return
+      if (result.checkboxChecked) await rememberCloseBehavior('tray')
+    }
+  } catch (error) {
+    if (!explicitQuitRequested && !window.isDestroyed()) {
+      await writeAppLog(`Close dialog failed: ${String(error)}`).catch(() => {})
+    }
+  } finally {
+    finishClosePrompt(window)
+  }
+}
+
 // `state.resolution?.version !== null` is true both when resolution
 // succeeded AND while it hasn't run yet (resolution is null, so the
 // optional-chain short-circuits to `undefined`, and `undefined !== null`).
@@ -447,9 +545,15 @@ function updateTrayVisibility(): void {
     tray.setToolTip('Copilot CLI Desktop')
     tray.on('click', restoreMainWindow)
     rebuildTrayMenu()
-  } else if (!desktopConfig.trayEnabled && tray) {
+  } else if (!desktopConfig.trayEnabled) {
+    // Restore a hidden window only when this call is actually removing a
+    // live tray at runtime. At startup tray is null; showing there would
+    // defeat --background and bypass the ready-to-show flash guard.
+    if (!tray) return
     tray.destroy()
     tray = null
+    const window = mainWindow
+    if (window && !window.isDestroyed() && !window.isVisible()) restoreMainWindow()
   }
 }
 
@@ -1210,15 +1314,17 @@ function createWindow(showOnReady = true): BrowserWindow {
     if (targetUrl !== shellUrl()) event.preventDefault()
   })
   window.on('close', (event) => {
-    if (explicitQuitRequested || !desktopConfig.closeToTray || !tray) return
-    event.preventDefault()
-    window.hide()
-    if (!trayHintShown) {
-      trayHintShown = true
-      showNotification('Copilot CLI Desktop is still running', 'Use the tray icon to reopen it or quit.')
+    if (explicitQuitRequested || desktopConfig.closeBehavior === 'quit') return
+    if (desktopConfig.closeBehavior === 'tray' && tray && !tray.isDestroyed()) {
+      event.preventDefault()
+      hideWindowToTray(window)
+      return
     }
+    event.preventDefault()
+    void promptForWindowClose(window)
   })
   window.on('closed', () => {
+    finishClosePrompt(window)
     mainWindow = null
   })
   void window.loadFile(rendererPath('index.html'))
@@ -1259,14 +1365,9 @@ async function showSettingsWindow(): Promise<void> {
   await window.loadFile(rendererPath('settings.html'))
 }
 
-interface DesktopSettingsSnapshot {
-  closeToTray: boolean
-  trayEnabled: boolean
-  notifications: boolean
-  automaticUpdateChecks: boolean
+interface DesktopSettingsSnapshot extends DesktopPreferences {
   launchAtLogin: boolean
   launchAtLoginAvailable: boolean
-  globalShortcutEnabled: boolean
   globalShortcutRegistered: boolean
   globalShortcutAccelerator: string
   credentials: Awaited<ReturnType<SecureCredentialStore['status']>> | null
@@ -1282,6 +1383,22 @@ interface DesktopSettingsSnapshot {
   resources: CopilotResourcesState
 }
 
+function settingsPreferences(): DesktopPreferences {
+  return {
+    closeBehavior: desktopConfig.closeBehavior,
+    trayEnabled: desktopConfig.trayEnabled,
+    notifications: desktopConfig.notifications,
+    automaticUpdateChecks: desktopConfig.automaticUpdateChecks,
+    globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
+  }
+}
+
+function broadcastSettingsPreferences(): void {
+  const window = settingsWindow
+  if (!window || window.isDestroyed() || window.webContents.getURL() !== settingsUrl()) return
+  window.webContents.send('desktop-settings:preferences-changed', settingsPreferences())
+}
+
 async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
   const activeProfile = activeWorkspaceProfile(desktopConfig)
   const [credentials, access] = await Promise.all([
@@ -1289,13 +1406,9 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     readAccessStatus(activeProfile?.permissionPreset ?? 'default', copilotCapabilities),
   ])
   return {
-    closeToTray: desktopConfig.closeToTray,
-    trayEnabled: desktopConfig.trayEnabled,
-    notifications: desktopConfig.notifications,
-    automaticUpdateChecks: desktopConfig.automaticUpdateChecks,
+    ...settingsPreferences(),
     launchAtLogin: launchAtLoginEnabled(),
     launchAtLoginAvailable: launchAtLoginAvailable(),
-    globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
     globalShortcutRegistered: globalShortcut.isRegistered(GLOBAL_TOGGLE_SHORTCUT),
     globalShortcutAccelerator: GLOBAL_TOGGLE_SHORTCUT_LABEL,
     credentials,
@@ -1525,27 +1638,53 @@ ipcMain.handle('desktop-settings:get', (event) => {
 })
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
   assertTrustedSettingsSender(event)
-  if (!preferences || typeof preferences !== 'object') throw new Error('Invalid desktop preferences')
+  if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)) {
+    throw new Error('Invalid desktop preferences')
+  }
   const values = preferences as Record<string, unknown>
+  const allowedKeys = new Set<keyof DesktopPreferences>([
+    'closeBehavior',
+    'trayEnabled',
+    'notifications',
+    'automaticUpdateChecks',
+    'globalShortcutEnabled',
+  ])
+  const keys = Object.keys(values)
+  if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
+    throw new Error('Invalid desktop preferences')
+  }
   if (
-    typeof values.closeToTray !== 'boolean'
-    || typeof values.trayEnabled !== 'boolean'
-    || typeof values.notifications !== 'boolean'
-    || typeof values.automaticUpdateChecks !== 'boolean'
-    || typeof values.globalShortcutEnabled !== 'boolean'
+    ('closeBehavior' in values && !isCloseBehavior(values.closeBehavior))
+    || ('trayEnabled' in values && typeof values.trayEnabled !== 'boolean')
+    || ('notifications' in values && typeof values.notifications !== 'boolean')
+    || ('automaticUpdateChecks' in values && typeof values.automaticUpdateChecks !== 'boolean')
+    || ('globalShortcutEnabled' in values && typeof values.globalShortcutEnabled !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
-  const updateChecksChanged = desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
-  const shortcutChanged = desktopConfig.globalShortcutEnabled !== values.globalShortcutEnabled
-  desktopConfig.closeToTray = values.closeToTray
-  desktopConfig.trayEnabled = values.trayEnabled
-  desktopConfig.notifications = values.notifications
-  desktopConfig.automaticUpdateChecks = values.automaticUpdateChecks
-  desktopConfig.globalShortcutEnabled = values.globalShortcutEnabled
+
+  const updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'
+    && desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
+  const shortcutChanged = typeof values.globalShortcutEnabled === 'boolean'
+    && desktopConfig.globalShortcutEnabled !== values.globalShortcutEnabled
+  if (isCloseBehavior(values.closeBehavior)) desktopConfig.closeBehavior = values.closeBehavior
+  if (typeof values.trayEnabled === 'boolean') desktopConfig.trayEnabled = values.trayEnabled
+  if (typeof values.notifications === 'boolean') desktopConfig.notifications = values.notifications
+  if (typeof values.automaticUpdateChecks === 'boolean') {
+    desktopConfig.automaticUpdateChecks = values.automaticUpdateChecks
+  }
+  if (typeof values.globalShortcutEnabled === 'boolean') {
+    desktopConfig.globalShortcutEnabled = values.globalShortcutEnabled
+  }
+  // A remembered tray action is unusable without a tray icon. Move back to
+  // the explicit prompt and restore a hidden window before persisting.
+  if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
+    desktopConfig.closeBehavior = 'ask'
+  }
   if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
   updateTrayVisibility()
   await persistConfig()
+  broadcastSettingsPreferences()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })
@@ -1781,6 +1920,11 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', (event) => {
   explicitQuitRequested = true
+  if (closePromptWindow && !closePromptWindow.isDestroyed()) {
+    event.preventDefault()
+    quitAfterClosePrompt = true
+    return
+  }
   if (quittingAllSessions || managedTabs.size === 0) return
   event.preventDefault()
   quittingAllSessions = true
@@ -1800,5 +1944,5 @@ app.on('will-quit', () => {
 })
 
 app.on('window-all-closed', () => {
-  if (explicitQuitRequested || !desktopConfig.closeToTray || !tray) app.quit()
+  if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })

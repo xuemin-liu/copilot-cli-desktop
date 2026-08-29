@@ -8,6 +8,7 @@ import type { SessionLaunchConfig } from '../main/session-launch.js'
 import type { CopilotCapabilities } from '../main/copilot-command.js'
 import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
+import type { DesktopPreferences } from '../main/desktop-config.js'
 
 export interface TabOutputPayload {
   tabId: string
@@ -48,14 +49,9 @@ export interface CopilotDesktopBridge {
   onTabExit(listener: (payload: TabExitPayload) => void): () => void
 }
 
-export interface DesktopSettingsSnapshot {
-  closeToTray: boolean
-  trayEnabled: boolean
-  notifications: boolean
-  automaticUpdateChecks: boolean
+export interface DesktopSettingsSnapshot extends DesktopPreferences {
   launchAtLogin: boolean
   launchAtLoginAvailable: boolean
-  globalShortcutEnabled: boolean
   globalShortcutRegistered: boolean
   globalShortcutAccelerator: string
   credentials: {
@@ -86,13 +82,7 @@ export interface DesktopSettingsSnapshot {
 
 export interface CopilotDesktopSettingsBridge {
   get(): Promise<DesktopSettingsSnapshot>
-  updatePreferences(preferences: {
-    closeToTray: boolean
-    trayEnabled: boolean
-    notifications: boolean
-    automaticUpdateChecks: boolean
-    globalShortcutEnabled: boolean
-  }): Promise<DesktopSettingsSnapshot>
+  updatePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopSettingsSnapshot>
   setLaunchAtLogin(enabled: boolean): Promise<DesktopSettingsSnapshot>
   updateWorkspaceProfile(
     profileId: string,
@@ -119,6 +109,7 @@ export interface CopilotDesktopSettingsBridge {
   addCopilotMcp(name: string, url: string, transport: 'http' | 'sse'): Promise<DesktopSettingsSnapshot>
   openCopilotConfig(): Promise<void>
   onUpdateStateChanged(listener: (state: DesktopSettingsSnapshot['update']) => void): () => void
+  onPreferencesChanged(listener: (preferences: DesktopPreferences) => void): () => void
 }
 
 declare global {
