@@ -106,6 +106,7 @@ let quittingAllSessions = false
 let explicitQuitRequested = false
 let trayHintShown = false
 let closePromptWindow: BrowserWindow | null = null
+let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
@@ -399,6 +400,14 @@ async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void
   broadcastSettingsPreferences()
 }
 
+function finishClosePrompt(window: BrowserWindow): void {
+  if (closePromptWindow !== window) return
+  closePromptWindow = null
+  const shouldResumeQuit = quitAfterClosePrompt && explicitQuitRequested
+  quitAfterClosePrompt = false
+  if (shouldResumeQuit) setImmediate(() => app.quit())
+}
+
 async function promptForWindowClose(window: BrowserWindow): Promise<void> {
   if (closePromptWindow || window.isDestroyed()) return
   closePromptWindow = window
@@ -451,7 +460,7 @@ async function promptForWindowClose(window: BrowserWindow): Promise<void> {
       await writeAppLog(`Close dialog failed: ${String(error)}`).catch(() => {})
     }
   } finally {
-    if (closePromptWindow === window) closePromptWindow = null
+    finishClosePrompt(window)
   }
 }
 
@@ -531,10 +540,12 @@ function updateTrayVisibility(): void {
     tray.on('click', restoreMainWindow)
     rebuildTrayMenu()
   } else if (!desktopConfig.trayEnabled) {
-    if (tray) {
-      tray.destroy()
-      tray = null
-    }
+    // Restore a hidden window only when this call is actually removing a
+    // live tray at runtime. At startup tray is null; showing there would
+    // defeat --background and bypass the ready-to-show flash guard.
+    if (!tray) return
+    tray.destroy()
+    tray = null
     const window = mainWindow
     if (window && !window.isDestroyed() && !window.isVisible()) restoreMainWindow()
   }
@@ -1307,7 +1318,7 @@ function createWindow(showOnReady = true): BrowserWindow {
     void promptForWindowClose(window)
   })
   window.on('closed', () => {
-    if (closePromptWindow === window) closePromptWindow = null
+    finishClosePrompt(window)
     mainWindow = null
   })
   void window.loadFile(rendererPath('index.html'))
@@ -1903,6 +1914,11 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', (event) => {
   explicitQuitRequested = true
+  if (closePromptWindow && !closePromptWindow.isDestroyed()) {
+    event.preventDefault()
+    quitAfterClosePrompt = true
+    return
+  }
   if (quittingAllSessions || managedTabs.size === 0) return
   event.preventDefault()
   quittingAllSessions = true
