@@ -22,6 +22,11 @@ export interface DesktopConfig {
   provider: CopilotProviderConfig
 }
 
+export type DesktopPreferences = Pick<
+  DesktopConfig,
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+>
+
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
 export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
 

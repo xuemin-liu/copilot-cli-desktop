@@ -435,10 +435,16 @@ export function SettingsApp(): JSX.Element | null {
 
   useEffect(() => {
     void window.copilotDesktopSettings.get().then(setSnapshot)
-    const unsubscribe = window.copilotDesktopSettings.onUpdateStateChanged((update) => {
+    const unsubscribeUpdate = window.copilotDesktopSettings.onUpdateStateChanged((update) => {
       setSnapshot((previous) => (previous ? { ...previous, update } : previous))
     })
-    return unsubscribe
+    const unsubscribePreferences = window.copilotDesktopSettings.onPreferencesChanged((preferences) => {
+      setSnapshot((previous) => (previous ? { ...previous, ...preferences } : previous))
+    })
+    return () => {
+      unsubscribeUpdate()
+      unsubscribePreferences()
+    }
   }, [])
 
   if (!snapshot) return <div className="loading-screen"><p>Loading settings…</p></div>
@@ -459,12 +465,9 @@ export function SettingsApp(): JSX.Element | null {
       .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
       .finally(() => setCliMaintenancePending(false))
   }
-  // Toggling two checkboxes in quick succession — before the first
-  // updatePreferences() IPC round-trip resolves — must not let the second
-  // call build its payload from the pre-toggle snapshot and revert the
-  // first change. Reading `previous` from React's functional-update form
-  // guarantees each call sees the latest (optimistically applied) state,
-  // even when several fire before any IPC response lands.
+  // Send only the field(s) the user changed. Besides making rapid toggles
+  // independent, this prevents an open Settings window from posting an old
+  // close behavior over a newer choice remembered by the native close dialog.
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
@@ -475,13 +478,7 @@ export function SettingsApp(): JSX.Element | null {
       if (!previous) return previous
       const next = { ...previous, ...patch }
       void window.copilotDesktopSettings
-        .updatePreferences({
-          closeBehavior: next.closeBehavior,
-          trayEnabled: next.trayEnabled,
-          notifications: next.notifications,
-          automaticUpdateChecks: next.automaticUpdateChecks,
-          globalShortcutEnabled: next.globalShortcutEnabled,
-        })
+        .updatePreferences(patch)
         .then(refresh)
       return next
     })

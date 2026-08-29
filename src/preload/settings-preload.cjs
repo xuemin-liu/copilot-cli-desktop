@@ -29,4 +29,9 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
     ipcRenderer.on('desktop-settings:update-state-changed', handler)
     return () => ipcRenderer.removeListener('desktop-settings:update-state-changed', handler)
   },
+  onPreferencesChanged: (listener) => {
+    const handler = (_event, preferences) => listener(preferences)
+    ipcRenderer.on('desktop-settings:preferences-changed', handler)
+    return () => ipcRenderer.removeListener('desktop-settings:preferences-changed', handler)
+  },
 })
