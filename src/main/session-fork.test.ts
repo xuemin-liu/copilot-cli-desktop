@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { forkSessionSnapshot } from './session-fork.js'
@@ -102,6 +102,73 @@ test('fork rejects missing, malformed, or context-less child history before publ
         return FORK
       }), /incomplete or unsupported fork history/)
       assert.equal(await readFile(join(source, 'events.jsonl'), 'utf8'), history)
+      assert.deepEqual(await readdir(join(directory, 'session-state')), [SOURCE])
+    }
+  })
+})
+
+test('nested attachments named like runtime files survive staging and publication', async () => {
+  await fixture(async (directory, source) => {
+    const names = ['events.jsonl', 'inuse.123.lock', '.workspace-fork.lock']
+    for (const name of names) await writeFile(join(source, 'files', name), `attachment ${name}`)
+    const id = await forkSessionSnapshot(resolution, directory, { COPILOT_HOME: directory }, SOURCE, 'Side', async (_resolution, _cwd, env) => {
+      const stagedSource = join(env.COPILOT_HOME!, 'session-state', SOURCE)
+      const child = join(env.COPILOT_HOME!, 'session-state', FORK)
+      assert.ok(!(await readdir(stagedSource)).includes('inuse.123.lock'))
+      await cp(stagedSource, child, { recursive: true })
+      await writeFile(join(child, 'events.jsonl'), history.replace(SOURCE, FORK))
+      return FORK
+    })
+    for (const name of names) {
+      assert.equal(await readFile(join(directory, 'session-state', id, 'files', name), 'utf8'), `attachment ${name}`)
+      assert.equal(await readFile(join(source, 'files', name), 'utf8'), `attachment ${name}`)
+    }
+  })
+})
+
+test('Windows runtime filename exclusions ignore case', { skip: process.platform !== 'win32' }, async () => {
+  await fixture(async (directory, source) => {
+    await rename(join(source, 'events.jsonl'), join(source, 'EVENTS.JSONL'))
+    await rename(join(source, 'inuse.123.lock'), join(source, 'INUSE.123.LOCK'))
+    await assert.rejects(forkSessionSnapshot(resolution, directory, { COPILOT_HOME: directory }, SOURCE, 'Side', async (_resolution, _cwd, env) => {
+      const stagedSource = join(env.COPILOT_HOME!, 'session-state', SOURCE)
+      const names = await readdir(stagedSource)
+      assert.ok(names.includes('events.jsonl'))
+      assert.ok(!names.includes('EVENTS.JSONL') && !names.includes('INUSE.123.LOCK'))
+      assert.equal(await readFile(join(stagedSource, 'events.jsonl'), 'utf8'), history)
+      throw new Error('Test inspection complete')
+    }), /Test inspection complete/)
+    assert.equal(await readFile(join(source, 'EVENTS.JSONL'), 'utf8'), history)
+  })
+})
+
+test('nested symlinks are rejected before the helper runs and cleanup preserves their target', async () => {
+  await fixture(async (directory, source) => {
+    const target = join(directory, 'external')
+    await mkdir(target)
+    await writeFile(join(target, 'sentinel'), 'untouched')
+    await symlink(target, join(source, 'files', 'events.jsonl'), process.platform === 'win32' ? 'junction' : 'dir')
+    let called = false
+    await assert.rejects(forkSessionSnapshot(resolution, directory, { COPILOT_HOME: directory }, SOURCE, 'Side', async () => { called = true; return FORK }), /symbolic links/)
+    assert.equal(called, false)
+    assert.equal(await readFile(join(target, 'sentinel'), 'utf8'), 'untouched')
+    assert.equal(await readFile(join(source, 'events.jsonl'), 'utf8'), history)
+    assert.deepEqual(await readdir(join(directory, 'session-state')), [SOURCE])
+  })
+})
+
+test('malformed source records return actionable errors without publishing a fork', async () => {
+  await fixture(async (directory, source) => {
+    for (const malformed of ['{bad json}\n', 'null\n']) {
+      await writeFile(join(source, 'events.jsonl'), history + malformed + history)
+      let called = false
+      await assert.rejects(forkSessionSnapshot(resolution, directory, { COPILOT_HOME: directory }, SOURCE, 'Side', async () => { called = true; return FORK }), (error: Error) => {
+        assert.ok(!(error instanceof SyntaxError))
+        assert.match(error.message, /source history format.*malformed saved record/)
+        return true
+      })
+      assert.equal(called, false)
+      assert.equal(await readFile(join(source, 'events.jsonl'), 'utf8'), history + malformed + history)
       assert.deepEqual(await readdir(join(directory, 'session-state')), [SOURCE])
     }
   })

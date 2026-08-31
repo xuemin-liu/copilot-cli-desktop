@@ -11,10 +11,10 @@ import { resolveCopilotBinary } from '../src/main/resolve-copilot.js'
 import { PtySession } from '../src/main/pty-session.js'
 import { spawnNodePty } from '../src/main/node-pty-backend.js'
 
-const directory = await mkdtemp(join(tmpdir(), 'copilot-fork-smoke-'))
-const env = { ...process.env, COPILOT_HOME: directory, COPILOT_DISABLE_KEYTAR: '1' }
 const resolution = await resolveCopilotBinary()
 assert.ok(resolution.version, 'Install Copilot CLI before running this smoke test')
+const directory = await mkdtemp(join(tmpdir(), 'copilot-fork-smoke-'))
+const env = { ...process.env, COPILOT_HOME: directory, COPILOT_DISABLE_KEYTAR: '1' }
 const rpc = new CopilotRpc(resolution, directory, env)
 const modelServer = createServer((request, response) => {
   request.resume()

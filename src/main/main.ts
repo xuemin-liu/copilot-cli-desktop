@@ -859,13 +859,13 @@ async function createSessionTab(
 async function forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState> {
   if (!isForkSessionId(sourceSessionId)) throw new Error('Enter a full source session UUID')
   const pending = pendingForks.get(tabId)
-  if (pending) return pending
+  if (pending) throw new Error('A side chat is already being created for this session. Wait for it to open.')
   const operation = queueTabTransition(tabId, async () => {
     if (shuttingDown()) throw new Error('The app is shutting down or updating')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || tab.remote || tab.sideChat) throw new Error('Select a local main session to fork into a side chat')
     const existing = tabsState.tabs.find((candidate) => candidate.sideParentTabId === tabId)
-    if (existing) return activateSessionTab(existing.id)
+    if (existing) throw new Error('This session already has a side chat. Close it before creating another fork.')
     if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error('Close a session tab before opening a side chat')
     const sourceProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
     if (!sourceProfile || !state.resolution) throw new Error('This session workspace is no longer available')

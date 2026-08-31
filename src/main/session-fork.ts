@@ -1,17 +1,11 @@
-import { cp, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdtemp, rename, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { forkStagedCopilotSession, isForkSessionId } from './copilot-rpc.js'
+import { scanSessionHistory } from './session-history.js'
 import type { CopilotResolution } from './types.js'
 
 type ForkRequest = typeof forkStagedCopilotSession
-const MAX_HISTORY_BYTES = 128 * 1024 * 1024
-type HistoryEvent = { type?: string; data?: { sessionId?: string; content?: unknown } }
-
-function conversationKey(event: HistoryEvent): string | null {
-  return event.type === 'user.message' || event.type === 'assistant.message'
-    ? JSON.stringify([event.type, event.data?.content]) : null
-}
 
 export function copilotSessionRoot(env: NodeJS.ProcessEnv): string {
   return join(resolve(env.COPILOT_HOME || join(homedir(), '.copilot')), 'session-state')
@@ -35,30 +29,27 @@ export async function forkSessionSnapshot(
   const historyPath = join(source, 'events.jsonl')
   const sourceInfo = await lstat(source).catch(() => null)
   if (!sourceInfo?.isDirectory() || sourceInfo.isSymbolicLink()) throw new Error('The source must be an existing local Copilot session')
-  const historyInfo = await lstat(historyPath).catch(() => null)
-  if (!historyInfo?.isFile() || historyInfo.size > MAX_HISTORY_BYTES) throw new Error('The source has no saved history, or its history is too large to fork safely')
-  const history = await readFile(historyPath, 'utf8')
-  // A concurrently streaming final event may not be complete yet. Only
-  // publish whole persisted records; the dialog explains this boundary.
-  const completeHistory = history.slice(0, history.lastIndexOf('\n') + 1)
-  if (!completeHistory) throw new Error('Wait for Copilot to save conversation history before forking')
-  const events = completeHistory.trim().split('\n').map((line) => JSON.parse(line) as HistoryEvent)
-  if (!events.some((event) => event.type === 'session.start' && event.data?.sessionId === sourceSessionId)) {
-    throw new Error('This Copilot session history format is not supported for safe forking')
-  }
   const staging = await mkdtemp(join(root, '.desktop-side-fork-'))
   try {
+    const frozenHistory = join(staging, 'source-events.jsonl')
+    let expected: Awaited<ReturnType<typeof scanSessionHistory>>
+    try { expected = await scanSessionHistory(historyPath, sourceSessionId, frozenHistory) }
+    catch (error) {
+      throw new Error(`The source history format is unsupported or invalid: ${error instanceof Error ? error.message : String(error)}. The original session was not changed.`)
+    }
     const stagedSource = join(staging, 'session-state', sourceSessionId)
     await cp(source, stagedSource, {
       recursive: true,
       filter: async (path) => {
-        if (/^(?:inuse\..*\.lock|\.workspace-fork\.lock|events\.jsonl)$/.test(basename(path))) return false
+        // Only runtime files at the session root are excluded. Attachments
+        // may legitimately have these names. Windows names ignore casing.
+        const name = process.platform === 'win32' ? basename(path).toLowerCase() : basename(path)
+        if (dirname(path) === source && /^(?:inuse\..*\.lock|\.workspace-fork\.lock|events\.jsonl)$/.test(name)) return false
         if ((await lstat(path)).isSymbolicLink()) throw new Error('Session contains symbolic links; it cannot be safely staged for forking')
         return true
       },
     })
-    await mkdir(stagedSource, { recursive: true })
-    await writeFile(join(stagedSource, 'events.jsonl'), completeHistory, { flag: 'wx' })
+    await rename(frozenHistory, join(stagedSource, 'events.jsonl'))
     const forkId = await requestFork(resolution, cwd, {
       ...environment, COPILOT_HOME: staging, COPILOT_DISABLE_KEYTAR: '1',
     }, sourceSessionId, title)
@@ -77,14 +68,8 @@ export async function forkSessionSnapshot(
     // context-less side chat. Copilot may rewrite event IDs/metadata, but
     // the saved conversation must survive in its original order.
     try {
-      const forkHistoryPath = join(stagedFork, 'events.jsonl')
-      const forkHistoryInfo = await lstat(forkHistoryPath)
-      if (!forkHistoryInfo.isFile() || forkHistoryInfo.size > MAX_HISTORY_BYTES) throw new Error('Invalid history file')
-      const forkEvents = (await readFile(forkHistoryPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as HistoryEvent)
-      if (!forkEvents.some((event) => event.type === 'session.start' && event.data?.sessionId === forkId)) throw new Error('Missing fork start')
-      const expected = events.map(conversationKey).filter((key) => key !== null)
-      const actual = forkEvents.map(conversationKey).filter((key) => key !== null)
-      if (JSON.stringify(expected) !== JSON.stringify(actual)) throw new Error('Conversation was not preserved')
+      const actual = await scanSessionHistory(join(stagedFork, 'events.jsonl'), forkId)
+      if (expected.messages !== actual.messages || expected.digest !== actual.digest) throw new Error('Conversation was not preserved')
     } catch {
       throw new Error('Copilot returned incomplete or unsupported fork history; the original session was not changed')
     }

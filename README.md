@@ -99,6 +99,9 @@ only the new child. This avoids a source-log truncation observed when 1.0.82 for
 an unloaded source through a separate helper. No embedded TCP server is enabled.
 Symlink-containing sessions and unknown history formats fail closed. Staging is
 removed after the operation; source history and live processes are never replaced.
+History validation streams fixed-size chunks and compares ordered message hashes,
+yielding to terminal/IPC work between chunks. Histories over 128 MiB or individual
+records over 8 MiB are rejected with an explanation to bound resource usage.
 
 Run `pnpm fork:smoke` for the isolated live-CLI test (local mock model, no paid
 requests), or `pnpm side-chat:preview` for the renderer fixture.
