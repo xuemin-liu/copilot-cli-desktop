@@ -180,6 +180,18 @@ test('resize() forwards to the underlying pty', async () => {
   assert.deepEqual(pty.resized, [[120, 40]])
 })
 
+test('repeated sizes from hiding and revealing a tab do not trigger a native redraw', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  session.resize(80, 24)
+  session.resize(120, 40)
+  session.resize(120, 40)
+  session.resize(120, 40)
+  session.resize(121, 40)
+  assert.deepEqual(pty.resized, [[120, 40], [121, 40]])
+})
+
 test('dimensions defaults to 80x24 and reflects the most recent resize()', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })

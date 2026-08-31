@@ -25,6 +25,7 @@ export interface CopilotDesktopBridge {
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
   createTab(resumeMode?: ResumeMode | null): Promise<DesktopState>
+  forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState>
   createTabWithAttachments(): Promise<DesktopState>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>

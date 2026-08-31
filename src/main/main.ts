@@ -63,6 +63,9 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
+import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
+import { forkSessionSnapshot } from './session-fork.js'
+import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
 import {
@@ -176,6 +179,7 @@ function shuttingDown(): boolean {
  * Close, which still needs to run once the restart it's queued behind
  * finishes, a second Restart on the same tab is redundant with the first. */
 const pendingRestarts = new Map<string, Promise<DesktopState>>()
+const pendingForks = new Map<string, Promise<DesktopState>>()
 
 function scheduleActivityBroadcast(tabId: string): void {
   if (activityBroadcastTimers.has(tabId)) return
@@ -326,7 +330,15 @@ function persistProfileTabs(): void {
   for (const profile of desktopConfig.profiles) {
     profile.tabs = tabsState.tabs
       .filter((tab) => tab.workspaceProfileId === profile.id)
-      .map((tab) => ({ title: tab.title, lastSessionId: tab.lastSessionId }))
+      .map((tab) => {
+        const parentSessionId = tabsState.tabs.find((parent) => parent.id === tab.sideParentTabId)?.lastSessionId
+        return {
+          title: tab.title,
+          lastSessionId: tab.lastSessionId,
+          ...(tab.sideChat ? { sideChat: true as const } : {}),
+          ...(parentSessionId ? { sideParentSessionId: parentSessionId } : {}),
+        }
+      })
   }
   void persistConfig().catch((error) => void writeAppLog(`Failed to save session tabs: ${String(error)}`))
 }
@@ -779,16 +791,23 @@ async function createSessionTab(
   attachmentPaths: string[] = [],
   connectSessionId: string | null = null,
   titleOverride: string | null = null,
+  sideOptions: { sideChat?: true; sideParentTabId?: string } = {},
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
+  if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
-  if (installInProgress) throw new Error('An update is installing; new sessions cannot be started right now')
+  if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
 
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
   const plan = await buildSessionSpawnPlan(profile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  // Recheck after credential resolution: another creation or shutdown may
+  // have completed during the await. Register the new tab synchronously.
+  if (shuttingDown()) throw new Error('The app is shutting down or updating')
+  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
+  if (sideOptions.sideChat) args.push('--mode=interactive')
 
   const session = new PtySession({
     file: plan.file,
@@ -803,9 +822,11 @@ async function createSessionTab(
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
     workspaceProfileId: profile.id,
     launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
-    permissionWarning: connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+    permissionWarning: sideOptions.sideChat ? SIDE_CHAT_PERMISSION_WARNING : connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
     remote: connectSessionId !== null,
     lastSessionId: deterministicSessionId,
+    ...sideOptions,
+    canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
   })
   syncTabState()
   broadcastState()
@@ -813,16 +834,59 @@ async function createSessionTab(
   wireSessionEvents(id, session)
 
   try {
-    await session.start()
+    await queueTabTransition(id, async () => {
+      if (shuttingDown()) throw new Error('The app is shutting down or updating')
+      await session.start()
+      if (shuttingDown()) {
+        await session.stop()
+        throw new Error('The app is shutting down or updating')
+      }
+    })
   } catch (error) {
-    tabsState = closeTab(tabsState, id)
-    managedTabs.delete(id)
+    if (managedTabs.get(id)?.session === session) {
+      session.removeAllListeners()
+      tabsState = closeTab(tabsState, id)
+      managedTabs.delete(id)
+    }
     syncTabState()
     broadcastState()
     throw error
   }
   persistProfileTabs()
   return snapshot()
+}
+
+async function forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState> {
+  if (!isForkSessionId(sourceSessionId)) throw new Error('Enter a full source session UUID')
+  const pending = pendingForks.get(tabId)
+  if (pending) throw new Error('A side chat is already being created for this session. Wait for it to open.')
+  const operation = queueTabTransition(tabId, async () => {
+    if (shuttingDown()) throw new Error('The app is shutting down or updating')
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    if (!tab || tab.remote || tab.sideChat) throw new Error('Select a local main session to fork into a side chat')
+    const existing = tabsState.tabs.find((candidate) => candidate.sideParentTabId === tabId)
+    if (existing) throw new Error('This session already has a side chat. Close it before creating another fork.')
+    if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error('Close a session tab before opening a side chat')
+    const sourceProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+    if (!sourceProfile || !state.resolution) throw new Error('This session workspace is no longer available')
+    const profile = sideChatProfile(sourceProfile, copilotCapabilities)
+    if (!supportsSessionFork(state.resolution.version)) throw new Error('Side chat needs Copilot CLI 1.0.82 or newer. Update Copilot CLI and restart this tab.')
+    const sessionTitle = title.trim().slice(0, 120) || `Side: ${tab.title}`.slice(0, 120)
+    const plan = await buildSessionSpawnPlan(profile, 'auto-resume', sourceSessionId, [], null, sessionTitle)
+    const forkId = await forkSessionSnapshot(state.resolution, plan.cwd, { ...process.env, ...plan.env }, sourceSessionId, sessionTitle)
+    try {
+      return await createSessionTab(profile, 'auto-resume', forkId, [], null, sessionTitle, { sideChat: true, sideParentTabId: tabId })
+    } catch (error) {
+      // Never delete copied history after an ambiguous launch failure. The
+      // user can recover it from Copilot's own session picker.
+      throw new Error(`Fork ${forkId} was saved, but its side terminal could not open: ${error instanceof Error ? error.message : String(error)}. Resume that ID to recover it.`)
+    }
+  })
+  pendingForks.set(tabId, operation)
+  void operation.catch(() => {}).finally(() => {
+    if (pendingForks.get(tabId) === operation) pendingForks.delete(tabId)
+  })
+  return operation
 }
 
 async function createSessionWithAttachments(): Promise<DesktopState> {
@@ -908,8 +972,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // remote tabs everywhere (menu/tray/button) rather than silently regress
     // one of those entry points to a runtime error.
     if (tab.remote) throw new Error('A remote session cannot be restarted')
-    const profile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
-    if (!profile) throw new Error('This session\'s workspace profile no longer exists')
+    const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+    if (!savedProfile) throw new Error('This session\'s workspace profile no longer exists')
+    const profile = tab.sideChat ? sideChatProfile(savedProfile, copilotCapabilities) : savedProfile
 
     const managed = managedTabs.get(tabId)
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
@@ -947,6 +1012,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
     const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
+    if (tab.sideChat) args.push('--mode=interactive')
     const session = new PtySession({
       file: plan.file,
       args,
@@ -959,7 +1025,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
       launchedPermissionPreset: profile.permissionPreset,
-      permissionWarning: permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+      permissionWarning: tab.sideChat ? SIDE_CHAT_PERMISSION_WARNING : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+      canFork: !tab.sideChat && supportsSessionFork(state.resolution?.version ?? null),
     })
     // deterministicSessionId is already correct by construction: it's the
     // id finalizeSessionArgs actually baked into args above, computed from
@@ -1000,11 +1067,19 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 async function restoreTabsForActiveProfile(): Promise<void> {
   const profile = activeWorkspaceProfile(desktopConfig)
   if (!profile || !state.resolution || state.resolution.version === null) return
-  const restored = profile.tabs.length > 0 ? profile.tabs : [{ title: profile.name, lastSessionId: null }]
+  const restored: WorkspaceProfile['tabs'] = profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }]
   for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
     const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
     try {
-      await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title)
+      // Parents are normally saved first. An unavailable parent leaves the
+      // fork as an independent restricted tab instead of dropping it.
+      const parent = candidate.sideParentSessionId
+        ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
+        : undefined
+      await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
+        ...(candidate.sideChat ? { sideChat: true as const } : {}),
+        ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
+      })
     } catch (error) {
       await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
     }
@@ -1516,6 +1591,13 @@ ipcMain.handle('desktop:restart-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return restartSessionTab(tabId)
+})
+ipcMain.handle('desktop:fork-side-chat', (event, tabId: unknown, sourceSessionId: unknown, title: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || typeof sourceSessionId !== 'string' || typeof title !== 'string' || title.length > 120) {
+    throw new Error('Invalid side-chat request')
+  }
+  return forkSideChat(tabId, sourceSessionId, title)
 })
 ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   assertTrustedIpcSender(event)

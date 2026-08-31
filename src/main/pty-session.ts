@@ -196,6 +196,9 @@ export class PtySession extends EventEmitter {
   }
 
   resize(cols: number, rows: number): void {
+    // ConPTY can redraw even for an unchanged size. In Copilot's native copy
+    // mode that redraw can replace the conversation with clipboard status.
+    if (cols === this.options.cols && rows === this.options.rows) return
     this.options.cols = cols
     this.options.rows = rows
     this.pty?.resize(cols, rows)

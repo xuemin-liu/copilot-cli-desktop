@@ -17,10 +17,11 @@ import {
 export interface TerminalPaneProps {
   tabId: string
   active: boolean
+  focused?: boolean
   sessionProcessId: number | null
 }
 
-export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPaneProps): JSX.Element {
+export function TerminalPane({ tabId, active, focused = active, sessionProcessId }: TerminalPaneProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -261,6 +262,9 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
     const fitTerminal = (): void => {
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => {
+        // display:none panes have no usable geometry. Preserve their last
+        // viewport instead of sending hidden/placeholder sizes to Copilot.
+        if (container.clientWidth === 0 || container.clientHeight === 0) return
         fitAddon.fit()
         void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
       })
@@ -302,8 +306,8 @@ export function TerminalPane({ tabId, active, sessionProcessId }: TerminalPanePr
   useEffect(() => {
     if (!active) return
     fitRef.current?.fit()
-    terminalRef.current?.focus()
-  }, [active])
+    if (focused) terminalRef.current?.focus()
+  }, [active, focused])
 
   return <div ref={containerRef} className={`terminal-pane${active ? ' terminal-pane-active' : ''}`} />
 }

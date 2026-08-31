@@ -29,6 +29,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Model selector | Per-workspace initial model/reasoning/context settings plus Copilot's native `/model` picker | Equivalent |
 | Plan/execute modes | Per-workspace interactive, plan, autopilot, and plan-then-autopilot defaults plus native Shift+Tab switching | Equivalent |
 | Session history/resume | Deterministic UUIDs, Copilot names, auto-resume, continue, interactive picker, and remote connect | Equivalent |
+| Forked side discussion | Independent, resizable right-hand PTY with read/search-only tools; original keeps running | Implemented via isolated snapshot + Copilot fork RPC (CLI 1.0.82+); confirm source UUID after native session switches; not an OS sandbox |
 | Token/tool metrics | Copilot CLI status/usage rendering and upstream OpenTelemetry export | Equivalent upstream; a native metrics dashboard is optional rather than required for parity |
 
 ## Workspaces, permissions, and process access

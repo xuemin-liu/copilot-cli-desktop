@@ -23,6 +23,9 @@ handle, only input/output/resize events.
   grouped or flat session views, manual/last-activity ordering, named recent
   workspace profiles, manual session naming, attachment-aware session
   creation, and restored session tabs.
+- **Fork into side chat** keeps a main conversation on the left and an independent,
+  resizable conversation on the right. Side chats use read/search-only model tools,
+  including after restart, and can be closed without stopping the main session.
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a
@@ -69,6 +72,46 @@ handle, only input/output/resize events.
   auditing, Windows CI, scheduled compatibility checks against the latest
   Copilot CLI, and signed tag-triggered releases with unsigned publication
   blocked.
+
+## Side chats
+
+Click **Fork into side chat** above a local terminal, check the source session UUID,
+and choose **Fork side chat**. The right-hand pane has its own terminal and input;
+drag the divider (or focus it and use the arrow keys) to resize it. One side chat
+can be open per main tab. Both panes count toward the 20-tab limit.
+
+- The source UUID is the last one known to Desktop. Native `/fork`, `/resume`,
+  `/new`, and `/clear` can change the CLI conversation without notifying Desktop;
+  use `/session` to check the current UUID and correct it in the fork dialog.
+- Only complete saved history is copied. Future messages do not merge between
+  the two conversations, and unfinished output may not yet be included.
+- Closing the side leaves the main running. Closing the main keeps its side as
+  an independent restricted tab. Open pairs and their restrictions are restored
+  when the workspace's tabs are restored after an app restart.
+- Side chats expose only `view`, `glob`, `grep`, and `ask_user` to the model.
+  Both processes still share files: this is **not an OS sandbox**, and it does
+  not isolate local CLI hooks or manually entered commands.
+
+Requires Copilot CLI **1.0.82+** and tool-allowlist support. The desktop stages a
+snapshot of the source's persisted session directory in a temporary
+`COPILOT_HOME`, asks Copilot's `sessions.fork` RPC to fork that copy, then publishes
+only the new child. This avoids a source-log truncation observed when 1.0.82 forks
+an unloaded source through a separate helper. No embedded TCP server is enabled.
+Symlink-containing sessions and unknown history formats fail closed. Staging is
+removed after the operation; source history and live processes are never replaced.
+History validation streams fixed-size chunks and compares ordered message hashes,
+yielding to terminal/IPC work between chunks. Histories over 128 MiB or individual
+records over 8 MiB are rejected with an explanation to bound resource usage.
+
+Run `pnpm fork:smoke` for the isolated live-CLI test (local mock model, no paid
+requests), or `pnpm side-chat:preview` for the renderer fixture.
+After building, `node scripts/electron-side-chat-check.mjs` opens the real
+Electron app with a disposable profile, saved conversation, and local mock model
+for a manual end-to-end check; close that test app to clean up its data.
+Run `npm run clipboard:smoke` for the automated native-copy → new-session →
+return regression in the real app and CLI. It uses the same disposable data
+and local mock model, and saves screenshots plus `result.json` under
+`test-results/clipboard-switch/` (no paid model requests).
 
 ## Permission presets
 

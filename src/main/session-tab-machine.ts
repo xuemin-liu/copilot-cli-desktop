@@ -19,6 +19,9 @@ export interface NewTabInput {
   remote: boolean
   lastSessionId?: string | null
   lastActivityAt?: number
+  sideChat?: true
+  sideParentTabId?: string
+  canFork?: boolean
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
@@ -39,6 +42,9 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     permissionWarning: input.permissionWarning,
     remote: input.remote,
     lastActivityAt: input.lastActivityAt ?? Date.now(),
+    ...(input.sideChat ? { sideChat: true as const } : {}),
+    ...(input.sideParentTabId ? { sideParentTabId: input.sideParentTabId } : {}),
+    ...(input.canFork !== undefined ? { canFork: input.canFork } : {}),
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
@@ -46,12 +52,19 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
 export function closeTab(state: TabsState, tabId: string): TabsState {
   const index = state.tabs.findIndex((tab) => tab.id === tabId)
   if (index === -1) return state
-  const tabs = state.tabs.filter((tab) => tab.id !== tabId)
+  const tabs = state.tabs.filter((tab) => tab.id !== tabId).map((tab) => {
+    if (tab.sideParentTabId !== tabId) return tab
+    const { sideParentTabId: _parent, ...detached } = tab
+    return detached
+  })
   let activeTabId = state.activeTabId
   if (activeTabId === tabId) {
-    // Prefer the tab that slid into the closed tab's position (the "next"
-    // tab); fall back to the one before it; otherwise no tab is active.
-    activeTabId = tabs[index]?.id ?? tabs[index - 1]?.id ?? null
+    // Keep the surviving pane of a split in view. For ordinary tabs,
+    // prefer the next tab, then the previous tab.
+    const parentId = state.tabs[index]?.sideParentTabId
+    const childId = state.tabs.find((tab) => tab.sideParentTabId === tabId)?.id
+    activeTabId = (parentId && tabs.some((tab) => tab.id === parentId) ? parentId : null)
+      ?? childId ?? tabs[index]?.id ?? tabs[index - 1]?.id ?? null
   }
   return { tabs, activeTabId }
 }
@@ -93,7 +106,7 @@ export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: 
 export function setTabLaunchConfig(
   state: TabsState,
   tabId: string,
-  config: { launchedPermissionPreset: PermissionPreset | null; permissionWarning: string | null },
+  config: { launchedPermissionPreset: PermissionPreset | null; permissionWarning: string | null; canFork?: boolean },
 ): TabsState {
   return {
     ...state,
@@ -122,4 +135,12 @@ export function tabsForWorkspace(state: TabsState, workspaceProfileId: string): 
 
 export function canOpenAnotherTab(state: TabsState): boolean {
   return state.tabs.length < MAX_SESSION_TABS
+}
+
+/** activeTabId is keyboard focus; a linked pair stays visible for either focus. */
+export function visibleSessionTabs(state: TabsState): { main: DesktopSessionTab | null; side: DesktopSessionTab | null } {
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const main = state.tabs.find((tab) => tab.id === active?.sideParentTabId) ?? active
+  const side = main ? state.tabs.find((tab) => tab.sideParentTabId === main.id) ?? null : null
+  return { main, side }
 }

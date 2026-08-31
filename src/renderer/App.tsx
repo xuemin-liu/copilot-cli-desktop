@@ -4,7 +4,7 @@ import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { TabBar } from './components/TabBar.js'
-import { TerminalPane } from './components/TerminalPane.js'
+import { SessionWorkspace } from './components/SessionWorkspace.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -21,12 +21,18 @@ const EMPTY_STATE: DesktopState = {
 type InputDialog =
   | { kind: 'rename'; tabId: string; value: string; pending: boolean; error: string | null }
   | { kind: 'remote'; value: string; pending: boolean; error: string | null }
+  | { kind: 'fork'; tabId: string; value: string; sourceSessionId: string; pending: boolean; error: string | null }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
   const [loading, setLoading] = useState(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
+  const [operationError, setOperationError] = useState<string | null>(null)
+  const handleOperation = (operation: Promise<DesktopState>): void => {
+    setOperationError(null)
+    void operation.catch((error: unknown) => setOperationError(error instanceof Error ? error.message : String(error)))
+  }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
   }
@@ -42,6 +48,8 @@ export function App(): JSX.Element {
     setInputDialog({ ...inputDialog, pending: true, error: null })
     const request = inputDialog.kind === 'remote'
       ? window.copilotDesktop.connectRemoteSession(value)
+      : inputDialog.kind === 'fork'
+        ? window.copilotDesktop.forkSideChat(inputDialog.tabId, inputDialog.sourceSessionId.trim(), value)
       : window.copilotDesktop.renameTab(inputDialog.tabId, value)
     void request
       .then(() => setInputDialog(null))
@@ -175,41 +183,13 @@ export function App(): JSX.Element {
             }}
             onCreate={() => void window.copilotDesktop.createTab()}
           />
-          <div className="terminal-area">
-            {state.tabs.length === 0 && (
-              <div className="empty-state">
-                <p>No session tabs are open.</p>
-                <button type="button" onClick={() => void window.copilotDesktop.createTab()}>
-                  Start a session
-                </button>
-              </div>
-            )}
-            {state.tabs.map((tab) => (
-              <TerminalPane
-                key={tab.id}
-                tabId={tab.id}
-                active={tab.id === state.activeTabId}
-                sessionProcessId={tab.processId}
-              />
-            ))}
-            {(() => {
-              // Restart the tab that actually crashed, not just whichever
-              // tab happens to be active — otherwise this button can kill
-              // and restart a healthy active session while an unrelated
-              // background tab is the one that crashed.
-              const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId)
-              if (activeTab?.status !== 'crashed') return null
-              return (
-                <button
-                  type="button"
-                  className="restart-button"
-                  onClick={() => void window.copilotDesktop.restartTab(activeTab.id)}
-                >
-                  Restart this session
-                </button>
-              )
-            })()}
-          </div>
+          {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}
+          <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={state.tabs.length < state.maxSessionTabs}
+            onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
+            onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
+            onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
+            onCreate={() => handleOperation(window.copilotDesktop.createTab())}
+            onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
           </>
         )}
       </main>
@@ -217,8 +197,18 @@ export function App(): JSX.Element {
         <div className="dialog-backdrop" role="presentation">
           <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}>
             <h2 id="input-dialog-title">
-              {inputDialog.kind === 'remote' ? 'Connect to remote session' : 'Rename session'}
+              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : 'Rename session'}
             </h2>
+            {inputDialog.kind === 'fork' && (
+              <>
+                <p>Copies saved history into a separate right-hand terminal. The main session keeps running; later messages are not merged.</p>
+                <label htmlFor="fork-source-id">Source session UUID</label>
+                <input id="fork-source-id" type="text" value={inputDialog.sourceSessionId} required maxLength={36} disabled={inputDialog.pending}
+                  onChange={(event) => setInputDialog({ ...inputDialog, sourceSessionId: event.target.value, error: null })} />
+                <p className="fork-hint">Last ID known to Desktop. If you used /fork, /resume, /new, or /clear inside Copilot, check /session and enter the current ID here.</p>
+                <p className="fork-hint">Read/search tools only. Both sessions share files; this is not an OS sandbox and does not isolate local hooks or manually entered commands. Unfinished output may not yet be saved.</p>
+              </>
+            )}
             <label htmlFor="input-dialog-value">
               {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : 'Session title'}
             </label>
@@ -235,7 +225,7 @@ export function App(): JSX.Element {
             <div className="input-dialog-actions">
               <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
               <button type="submit" className="primary-button" disabled={inputDialog.pending}>
-                {inputDialog.pending ? 'Working…' : inputDialog.kind === 'remote' ? 'Connect' : 'Rename'}
+                {inputDialog.pending ? 'Working…' : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : 'Rename'}
               </button>
             </div>
           </form>

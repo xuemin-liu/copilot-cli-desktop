@@ -14,6 +14,8 @@ export type SessionLifecycleStatus =
 export interface RestoredTab {
   title: string
   lastSessionId: string | null
+  sideChat?: true
+  sideParentSessionId?: string
 }
 
 export interface WorkspaceProfile {
@@ -37,6 +39,10 @@ export interface DesktopSessionTab {
   launchedPermissionPreset: PermissionPreset | null
   permissionWarning: string | null
   remote: boolean
+  /** Restricted fork; preserved even when its parent tab is closed. */
+  sideChat?: true
+  sideParentTabId?: string
+  canFork?: boolean
   /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */
   lastActivityAt: number
 }
