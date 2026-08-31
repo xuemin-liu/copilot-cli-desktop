@@ -122,7 +122,15 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
     const lastSessionId = typeof tab.lastSessionId === 'string' && tab.lastSessionId.length > 0
       ? tab.lastSessionId
       : null
-    tabs.push({ title: tab.title, lastSessionId })
+    tabs.push({
+      title: tab.title,
+      lastSessionId,
+      ...(tab.sideChat === true ? {
+        sideChat: true as const,
+        ...(typeof tab.sideParentSessionId === 'string' && tab.sideParentSessionId.length <= 128
+          ? { sideParentSessionId: tab.sideParentSessionId } : {}),
+      } : {}),
+    })
     if (tabs.length >= MAX_RESTORED_TABS) break
   }
   return tabs

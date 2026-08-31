@@ -80,7 +80,7 @@ export function Sidebar({
     ? activeTab.status === 'starting' || activeTab.status === 'running' || activeTab.status === 'approval-needed'
     : false
   const displayedPreset = sessionIsLive ? activeTab?.launchedPermissionPreset ?? null : null
-  const configuredPreset = activeTabProfile?.permissionPreset ?? null
+  const configuredPreset = activeTab?.sideChat ? 'read-only' : activeTabProfile?.permissionPreset ?? null
   const pendingPreset = configuredPreset && displayedPreset && configuredPreset !== displayedPreset
     ? configuredPreset
     : null
@@ -298,7 +298,7 @@ export function Sidebar({
           <span className="sidebar-access-dot" aria-hidden="true" />
           <span>
             {PERMISSION_PRESET_INFO[displayedPreset].label}
-            {activeTab?.permissionWarning && ' · Legacy restricted mode'}
+            {activeTab?.permissionWarning && !activeTab.sideChat && ' · Legacy restricted mode'}
             {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies on next launch or Restart`}
           </span>
         </div>

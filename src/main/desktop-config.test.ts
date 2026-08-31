@@ -112,6 +112,20 @@ test('writeDesktopConfig then readDesktopConfig round-trips profiles and setting
   })
 })
 
+test('side-chat restrictions and parent session survive config persistence', async () => {
+  await withTempFile(async (filename) => {
+    const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
+    const profile = activateWorkspaceProfile(config, 'C:\\work\\side-chat')
+    profile.permissionPreset = 'full-access'
+    profile.tabs = [
+      { title: 'Main', lastSessionId: 'source' },
+      { title: 'Side', lastSessionId: 'fork', sideChat: true, sideParentSessionId: 'source' },
+    ]
+    await writeDesktopConfig(filename, config)
+    assert.deepEqual((await readDesktopConfig(filename)).profiles[0]?.tabs, profile.tabs)
+  })
+})
+
 test('readDesktopConfig tolerates a corrupt file by falling back to defaults', async () => {
   await withTempFile(async (filename) => {
     await writeDesktopConfig(filename, { ...DEFAULT_DESKTOP_CONFIG })

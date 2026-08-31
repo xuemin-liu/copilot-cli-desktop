@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_SESSION_LAUNCH_CONFIG } from './session-launch.js'
 import type { DesktopSessionTab, WorkspaceProfile } from './types.js'
 import { Sidebar } from '../renderer/components/Sidebar.js'
+import { SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 
 function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab): string {
   return renderToStaticMarkup(
@@ -157,4 +158,21 @@ test('Sidebar does not claim effective access for remote or stopped sessions', (
   assert.match(remoteMarkup, /Remote session access unknown/)
   assert.doesNotMatch(remoteMarkup, />Full computer access \(--allow-all\)</)
   assert.match(stoppedMarkup, /Full computer access \(--allow-all\) applies to newly created sessions/)
+})
+
+test('Sidebar keeps side chat access restricted even when its workspace allows full access', () => {
+  const profiles: WorkspaceProfile[] = [{
+    id: 'workspace-1', name: 'one', path: 'D:\\one', permissionPreset: 'full-access',
+    defaultResumeMode: 'new', launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
+  }]
+  for (const status of ['running', 'crashed'] as const) {
+    const markup = renderAccess(profiles, {
+      id: 'side', title: 'Side', workspaceProfileId: 'workspace-1', lastSessionId: null,
+      status, processId: status === 'running' ? 42 : null, launchedPermissionPreset: 'read-only',
+      permissionWarning: SIDE_CHAT_PERMISSION_WARNING, remote: false, lastActivityAt: 123, sideChat: true,
+    })
+    assert.match(markup, /Restricted \(explicit read\/search allowlist\)/)
+    assert.doesNotMatch(markup, /Full computer access/)
+    assert.doesNotMatch(markup, /Legacy restricted mode/)
+  }
 })
