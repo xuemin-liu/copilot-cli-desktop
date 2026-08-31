@@ -2,7 +2,7 @@ import { cp, lstat, mkdtemp, rename, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { forkStagedCopilotSession, isForkSessionId } from './copilot-rpc.js'
-import { scanSessionHistory } from './session-history.js'
+import { scanSessionHistory, SessionHistoryValidationError } from './session-history.js'
 import type { CopilotResolution } from './types.js'
 
 type ForkRequest = typeof forkStagedCopilotSession
@@ -35,7 +35,10 @@ export async function forkSessionSnapshot(
     let expected: Awaited<ReturnType<typeof scanSessionHistory>>
     try { expected = await scanSessionHistory(historyPath, sourceSessionId, frozenHistory) }
     catch (error) {
-      throw new Error(`The source history format is unsupported or invalid: ${error instanceof Error ? error.message : String(error)}. The original session was not changed.`)
+      const reason = error instanceof SessionHistoryValidationError
+        ? 'The source history format is unsupported or invalid'
+        : 'Could not read or snapshot the source history'
+      throw new Error(`${reason}: ${error instanceof Error ? error.message : String(error)}. The original session was not changed.`, { cause: error })
     }
     const stagedSource = join(staging, 'session-state', sourceSessionId)
     await cp(source, stagedSource, {

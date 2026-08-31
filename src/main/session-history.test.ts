@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { scanSessionHistory } from './session-history.js'
+import { scanSessionHistory, SessionHistoryValidationError } from './session-history.js'
 
 const ID = '11111111-1111-4111-8111-111111111111'
 const start = JSON.stringify({ type: 'session.start', data: { sessionId: ID } }) + '\n'
@@ -50,6 +50,22 @@ test('oversized individual records fail with a bounded, actionable error', async
   await fixture(async (directory) => {
     const path = join(directory, 'events.jsonl')
     await writeFile(path, start + 'x'.repeat(8 * 1024 * 1024 + 1) + '\n')
-    await assert.rejects(scanSessionHistory(path, ID), /8 MiB safe-fork limit/)
+    await assert.rejects(scanSessionHistory(path, ID), { name: 'SessionHistoryValidationError', message: /8 MiB safe-fork limit/ })
+  })
+})
+
+test('history validation errors are typed separately from filesystem errors', async () => {
+  await fixture(async (directory) => {
+    const path = join(directory, 'events.jsonl')
+    await assert.rejects(scanSessionHistory(path, ID), (error: NodeJS.ErrnoException) => {
+      assert.equal(error.code, 'ENOENT')
+      assert.ok(!(error instanceof SessionHistoryValidationError))
+      return true
+    })
+    await assert.rejects(scanSessionHistory(directory, ID), SessionHistoryValidationError)
+    for (const content of ['', '{}\n', '{bad json}\n', 'null\n', start + '{"partial":']) {
+      await writeFile(path, content)
+      await assert.rejects(scanSessionHistory(path, ID), SessionHistoryValidationError)
+    }
   })
 })
