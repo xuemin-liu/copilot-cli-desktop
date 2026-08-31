@@ -16,6 +16,14 @@ if (process.versions.electron) {
   app.setPath('userData', process.env.DESKTOP_UI_CHECK_DATA)
   // Everything else, including IPC and PTY lifecycle, is production code.
   await import('../dist/src/main/main.js')
+  if (process.env.DESKTOP_UI_CLIPBOARD_CHECK === '1') {
+    const { runClipboardSwitchCheck } = await import('./clipboard-switch-check.mjs')
+    void runClipboardSwitchCheck().catch((error) => {
+      console.error(error)
+      process.exitCode = 1
+      app.quit()
+    })
+  }
 } else {
   const { CopilotRpc } = await import('../dist/src/main/copilot-rpc.js')
   const { resolveCopilotBinary } = await import('../dist/src/main/resolve-copilot.js')
@@ -40,6 +48,10 @@ if (process.versions.electron) {
     const baseUrl = `http://127.0.0.1:${address.port}/v1`
     const env = { ...process.env, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true', DESKTOP_UI_CHECK_DATA: appData }
     delete env.ELECTRON_RUN_AS_NODE
+    if (process.argv.includes('--clipboard-switch')) {
+      env.DESKTOP_UI_CLIPBOARD_CHECK = '1'
+      env.DESKTOP_UI_CHECK_ARTIFACTS = process.env.DESKTOP_UI_CHECK_ARTIFACTS || join(process.cwd(), 'test-results', 'clipboard-switch')
+    }
     // Trust only this newly-created disposable fixture, never a user folder.
     await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace] }))
     rpc = new CopilotRpc(resolution, workspace, env)
@@ -64,9 +76,16 @@ if (process.versions.electron) {
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
     console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
-    console.log('[electron-check] Use the Fork into side chat button. Close the app when finished.')
+    console.log(env.DESKTOP_UI_CLIPBOARD_CHECK === '1'
+      ? '[electron-check] Running automated clipboard/tab-switch regression.'
+      : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
     const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
     assert.equal(code, 0, 'Electron did not exit normally')
+    if (env.DESKTOP_UI_CLIPBOARD_CHECK === '1') {
+      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
+      assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run, not an earlier success')
+      assert.equal(result.passed, true, 'Clipboard/tab-switch UI regression failed (see test-results/clipboard-switch)')
+    }
     const remainingHistory = await readFile(historyPath, 'utf8')
     for (const event of originalHistory.trim().split('\n').map(JSON.parse)) assert.ok(remainingHistory.includes(event.id), 'Original history was changed')
     console.log('[electron-check] App exited cleanly; original conversation preserved.')

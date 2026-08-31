@@ -20,6 +20,7 @@
     "test": "npm run build && node --test \"dist/src/**/*.test.js\"",
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "fork:smoke": "npm run build && node dist/scripts/fork-smoke.js",
+    "clipboard:smoke": "npm run build && node scripts/electron-side-chat-check.mjs --clipboard-switch",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",

@@ -108,6 +108,10 @@ requests), or `pnpm side-chat:preview` for the renderer fixture.
 After building, `node scripts/electron-side-chat-check.mjs` opens the real
 Electron app with a disposable profile, saved conversation, and local mock model
 for a manual end-to-end check; close that test app to clean up its data.
+Run `npm run clipboard:smoke` for the automated native-copy → new-session →
+return regression in the real app and CLI. It uses the same disposable data
+and local mock model, and saves screenshots plus `result.json` under
+`test-results/clipboard-switch/` (no paid model requests).
 
 ## Permission presets
 

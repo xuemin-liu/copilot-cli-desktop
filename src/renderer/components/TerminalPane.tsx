@@ -262,6 +262,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     const fitTerminal = (): void => {
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => {
+        // display:none panes have no usable geometry. Preserve their last
+        // viewport instead of sending hidden/placeholder sizes to Copilot.
+        if (container.clientWidth === 0 || container.clientHeight === 0) return
         fitAddon.fit()
         void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
       })
