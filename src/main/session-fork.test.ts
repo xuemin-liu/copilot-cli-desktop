@@ -4,6 +4,7 @@ import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { forkSessionSnapshot } from './session-fork.js'
+import { SessionHistoryValidationError } from './session-history.js'
 import type { CopilotResolution } from './types.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
@@ -94,13 +95,31 @@ test('fork validates source format and independent UUID before publishing', asyn
 
 test('fork rejects missing, malformed, or context-less child history before publishing', async () => {
   await fixture(async (directory, source) => {
-    for (const content of [null, '{}\n', '{malformed', JSON.stringify({ type: 'session.start', data: { sessionId: FORK } }) + '\n']) {
+    for (const [content, detail] of [
+      [null, /ENOENT/],
+      ['{}\n', /no matching session start record/],
+      ['{private-malformed-record}\n', /malformed saved record/],
+      ['{partial', /incomplete record/],
+      [JSON.stringify({ type: 'session.start', data: { sessionId: FORK } }) + '\n', /Conversation was not preserved/],
+      [history.replace(SOURCE, FORK).replace('copied context', 'changed context'), /Conversation was not preserved/],
+    ] as const) {
       await assert.rejects(forkSessionSnapshot(resolution, directory, { COPILOT_HOME: directory }, SOURCE, 'Side', async (_resolution, _cwd, env) => {
         const child = join(env.COPILOT_HOME!, 'session-state', FORK)
         await mkdir(child)
         if (content !== null) await writeFile(join(child, 'events.jsonl'), content)
         return FORK
-      }), /incomplete or unsupported fork history/)
+      }), (error: Error) => {
+        assert.match(error.message, detail)
+        if (content === null) {
+          assert.match(error.message, /Could not read the fork history/)
+          assert.equal((error.cause as NodeJS.ErrnoException).code, 'ENOENT')
+        } else {
+          assert.match(error.message, /incomplete or unsupported fork history/)
+          assert.ok(error.cause instanceof SessionHistoryValidationError)
+        }
+        assert.doesNotMatch(error.message, /private-malformed-record/)
+        return true
+      })
       assert.equal(await readFile(join(source, 'events.jsonl'), 'utf8'), history)
       assert.deepEqual(await readdir(join(directory, 'session-state')), [SOURCE])
     }

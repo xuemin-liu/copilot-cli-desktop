@@ -36,7 +36,9 @@ export async function scanSessionHistory(path: string, sessionId: string, snapsh
       if (recordBytes > MAX_RECORD_BYTES) throw new SessionHistoryValidationError('A history record exceeds the 8 MiB safe-fork limit')
       if (part.length) parts.push(part)
     }
-    const stream = input.createReadStream({ autoClose: false, start: 0, end: size - 1, highWaterMark: 64 * 1024 })
+    // Let async iteration observe stream-close failures too. The outer
+    // finally still covers failures before stream creation and is idempotent.
+    const stream = input.createReadStream({ autoClose: true, start: 0, end: size - 1, highWaterMark: 64 * 1024 })
     try {
       for await (const chunk of stream) {
         const buffer = chunk as Buffer

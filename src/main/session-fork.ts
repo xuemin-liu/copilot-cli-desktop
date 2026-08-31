@@ -72,9 +72,12 @@ export async function forkSessionSnapshot(
     // the saved conversation must survive in its original order.
     try {
       const actual = await scanSessionHistory(join(stagedFork, 'events.jsonl'), forkId)
-      if (expected.messages !== actual.messages || expected.digest !== actual.digest) throw new Error('Conversation was not preserved')
-    } catch {
-      throw new Error('Copilot returned incomplete or unsupported fork history; the original session was not changed')
+      if (expected.messages !== actual.messages || expected.digest !== actual.digest) throw new SessionHistoryValidationError('Conversation was not preserved')
+    } catch (error) {
+      const reason = error instanceof SessionHistoryValidationError
+        ? 'Copilot returned incomplete or unsupported fork history'
+        : 'Could not read the fork history'
+      throw new Error(`${reason}: ${error instanceof Error ? error.message : String(error)}. The original session was not changed.`, { cause: error })
     }
     await rename(stagedFork, destination)
     return forkId
