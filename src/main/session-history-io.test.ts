@@ -17,7 +17,7 @@ const resolution: CopilotResolution = { kind: 'direct', command: 'copilot', pref
  * I/O use real files. These tests run sequentially in their own test process.
  * Restore both the default object and named builtin exports after each test.
  */
-async function fixture(t: TestContext, action: (directory: string, source: string, handles: FileHandle[]) => Promise<void>, fault: 'close' | 'open' | 'write', failure: Error, target: 'snapshot' | 'fork' = 'snapshot'): Promise<void> {
+async function fixture(t: TestContext, action: (directory: string, source: string, handles: FileHandle[]) => Promise<void>, fault: 'close' | 'open' | 'write' | ((handle: FileHandle) => void), failure: Error, target: 'snapshot' | 'fork' | 'source' = 'snapshot'): Promise<void> {
   const directory = await fs.mkdtemp(join(tmpdir(), 'desktop-history-io-unit-'))
   const source = join(directory, 'session-state', SOURCE)
   const handles: FileHandle[] = []
@@ -27,10 +27,11 @@ async function fixture(t: TestContext, action: (directory: string, source: strin
     await fs.writeFile(join(source, 'events.jsonl'), history)
     t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
       const selected = target === 'snapshot' ? args[1] === 'wx'
-        : String(args[0]).endsWith(join('session-state', FORK, 'events.jsonl'))
+        : String(args[0]).endsWith(join('session-state', target === 'fork' ? FORK : SOURCE, 'events.jsonl'))
       if (selected && fault === 'open') throw failure
       const handle = await realOpen(...args)
       handles.push(handle)
+      if (selected && typeof fault === 'function') fault(handle)
       if (selected && fault === 'close') {
         const close = handle.close.bind(handle)
         t.mock.method(handle, 'close', async () => {
@@ -52,6 +53,47 @@ async function fixture(t: TestContext, action: (directory: string, source: strin
     finally { await fs.rm(directory, { recursive: true, force: true }) }
   }
 }
+
+test('natural-end close failure rejects the scan promise even when later cleanup succeeds', async (t) => {
+  const failure = Object.assign(new Error('EIO: simulated first close failure'), { code: 'EIO' })
+  let closeAttempts = 0
+  let ended = false
+  let closed: Promise<void> | undefined
+  const streamErrors: Error[] = []
+  await fixture(t, async (_directory, source, handles) => {
+    try {
+      await assert.rejects(scanSessionHistory(join(source, 'events.jsonl'), SOURCE), (error) => error === failure)
+    } finally {
+      // Drain any late error/close events even when testing a regressed scanner.
+      await closed
+    }
+    assert.equal(ended, true, 'The valid history must reach natural stream end')
+    assert.ok(closeAttempts >= 2, 'The final idempotent cleanup must also run')
+    assert.deepEqual(streamErrors, [failure])
+    assert.equal(handles.length, 1)
+    assert.equal(handles[0]!.fd, -1)
+    assert.equal(await fs.readFile(join(source, 'events.jsonl'), 'utf8'), history)
+  }, (handle) => {
+    const close = handle.close.bind(handle)
+    t.mock.method(handle, 'close', async () => {
+      const firstClose = ++closeAttempts === 1
+      await close()
+      if (firstClose) throw failure
+      // Subsequent closes succeed, so the outer finally cannot supply the
+      // rejection being asserted: it must come from async stream iteration.
+    })
+    const createStream = handle.createReadStream.bind(handle)
+    t.mock.method(handle, 'createReadStream', (...args: Parameters<typeof handle.createReadStream>) => {
+      const stream = createStream(...args)
+      stream.once('end', () => { ended = true })
+      // Observe detached errors without letting an uncaught exception make
+      // this test fail for the wrong reason: the scan promise must reject.
+      stream.on('error', (error) => { streamErrors.push(error) })
+      closed = new Promise<void>((resolve) => { stream.once('close', resolve) })
+      return stream
+    })
+  }, failure, 'source')
+})
 
 for (const [fault, code] of [['open', 'EACCES'], ['close', 'EIO']] as const) {
   test(`fork history ${fault} failure preserves its I/O cause (${code}) and prevents publication`, async (t) => {
