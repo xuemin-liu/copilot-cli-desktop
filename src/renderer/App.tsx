@@ -128,6 +128,7 @@ export function App(): JSX.Element {
       <Sidebar
         profiles={state.profiles}
         tabs={state.tabs}
+        installedCliVersion={state.resolution?.version ?? null}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
         canOpenTab={state.tabs.length < state.maxSessionTabs}
@@ -163,6 +164,7 @@ export function App(): JSX.Element {
           <>
           <TabBar
             tabs={state.tabs}
+            installedCliVersion={state.resolution?.version ?? null}
             activeTabId={state.activeTabId}
             canOpenTab={state.tabs.length < state.maxSessionTabs}
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}

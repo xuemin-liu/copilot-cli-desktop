@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
   deleteCredential: (name) => ipcRenderer.invoke('desktop-settings:delete-credential', name),
   installCopilot: () => ipcRenderer.invoke('desktop-settings:install-copilot'),
   updateCopilot: () => ipcRenderer.invoke('desktop-settings:update-copilot'),
+  setCopilotAutoUpdate: (enabled, channel) =>
+    ipcRenderer.invoke('desktop-settings:set-copilot-auto-update', enabled, channel),
   recheckCopilotCapabilities: () => ipcRenderer.invoke('desktop-settings:recheck-copilot-capabilities'),
   refreshCopilotResources: () => ipcRenderer.invoke('desktop-settings:refresh-copilot-resources'),
   mutateCopilotResource: (action, kind, name) =>
@@ -33,5 +35,10 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
     const handler = (_event, preferences) => listener(preferences)
     ipcRenderer.on('desktop-settings:preferences-changed', handler)
     return () => ipcRenderer.removeListener('desktop-settings:preferences-changed', handler)
+  },
+  onCopilotStateChanged: (listener) => {
+    const handler = (_event, state) => listener(state)
+    ipcRenderer.on('desktop-settings:copilot-state-changed', handler)
+    return () => ipcRenderer.removeListener('desktop-settings:copilot-state-changed', handler)
   },
 })

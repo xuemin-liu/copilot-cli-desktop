@@ -9,6 +9,7 @@ import type { CopilotCapabilities } from '../main/copilot-command.js'
 import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 import type { DesktopPreferences } from '../main/desktop-config.js'
+import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
 
 export interface TabOutputPayload {
   tabId: string
@@ -78,6 +79,7 @@ export interface DesktopSettingsSnapshot extends DesktopPreferences {
   cliVersion: string | null
   cliCapabilities: CopilotCapabilities
   cliMaintenance: CopilotMaintenanceState
+  cliAutoUpdate: CopilotAutoUpdateState
   resources: CopilotResourcesState
 }
 
@@ -102,6 +104,7 @@ export interface CopilotDesktopSettingsBridge {
   deleteCredential(name: CredentialName): Promise<DesktopSettingsSnapshot>
   installCopilot(): Promise<DesktopSettingsSnapshot>
   updateCopilot(): Promise<DesktopSettingsSnapshot>
+  setCopilotAutoUpdate(enabled: boolean, channel: CopilotUpdateChannel): Promise<DesktopSettingsSnapshot>
   recheckCopilotCapabilities(): Promise<DesktopSettingsSnapshot>
   refreshCopilotResources(): Promise<DesktopSettingsSnapshot>
   mutateCopilotResource(action: CopilotResourceAction, kind: CopilotResourceKind, name: string): Promise<DesktopSettingsSnapshot>
@@ -111,6 +114,9 @@ export interface CopilotDesktopSettingsBridge {
   openCopilotConfig(): Promise<void>
   onUpdateStateChanged(listener: (state: DesktopSettingsSnapshot['update']) => void): () => void
   onPreferencesChanged(listener: (preferences: DesktopPreferences) => void): () => void
+  onCopilotStateChanged(
+    listener: (state: Pick<DesktopSettingsSnapshot, 'cliVersion' | 'cliCapabilities' | 'cliMaintenance'>) => void,
+  ): () => void
 }
 
 declare global {

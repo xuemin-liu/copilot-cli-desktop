@@ -11,6 +11,7 @@ function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab): str
     <Sidebar
       profiles={profiles}
       tabs={[tab]}
+      installedCliVersion="1.0.82"
       activeProfileId={profiles[0]?.id ?? null}
       activeTabId={tab.id}
       canOpenTab
@@ -48,12 +49,14 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
         lastSessionId: null,
         status: 'running',
         processId: 42,
+        cliVersion: '1.0.82',
         launchedPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
       }]}
       activeProfileId="workspace-1"
+      installedCliVersion="1.0.82"
       activeTabId="tab-1"
       canOpenTab
       collapsed={false}
@@ -97,12 +100,14 @@ test('Sidebar shows current session access and marks changed access as applying 
         lastSessionId: null,
         status: 'running',
         processId: 42,
+        cliVersion: '1.0.80',
         launchedPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
       }]}
       activeProfileId="workspace-1"
+      installedCliVersion="1.0.82"
       activeTabId="tab-1"
       canOpenTab
       collapsed={false}
@@ -121,6 +126,8 @@ test('Sidebar shows current session access and marks changed access as applying 
 
   assert.match(markup, /Default \(prompt every time\)/)
   assert.match(markup, /Full computer access \(--allow-all\) applies on next launch or Restart/)
+  assert.match(markup, /Old CLI/)
+  assert.match(markup, /restart this session to use 1\.0\.82/)
 })
 
 test('Sidebar uses the active tab workspace and surfaces legacy restriction warnings', () => {
@@ -131,6 +138,7 @@ test('Sidebar uses the active tab workspace and surfaces legacy restriction warn
   const markup = renderAccess(profiles, {
     id: 'tab-2', title: 'Two', workspaceProfileId: 'workspace-2', lastSessionId: null,
     status: 'running', processId: 42, launchedPermissionPreset: 'read-only',
+    cliVersion: '1.0.82',
     permissionWarning: 'Only shell and write tools are denied.', remote: false, lastActivityAt: 123,
   })
 
@@ -147,11 +155,13 @@ test('Sidebar does not claim effective access for remote or stopped sessions', (
   const remoteMarkup = renderAccess(profiles, {
     id: 'remote', title: 'Remote', workspaceProfileId: 'workspace-1', lastSessionId: null,
     status: 'running', processId: 42, launchedPermissionPreset: null, permissionWarning: null,
+    cliVersion: '1.0.82',
     remote: true, lastActivityAt: 123,
   })
   const stoppedMarkup = renderAccess(profiles, {
     id: 'stopped', title: 'Stopped', workspaceProfileId: 'workspace-1', lastSessionId: null,
     status: 'completed', processId: null, launchedPermissionPreset: 'full-access', permissionWarning: null,
+    cliVersion: '1.0.82',
     remote: false, lastActivityAt: 123,
   })
 
@@ -169,7 +179,7 @@ test('Sidebar keeps side chat access restricted even when its workspace allows f
     const markup = renderAccess(profiles, {
       id: 'side', title: 'Side', workspaceProfileId: 'workspace-1', lastSessionId: null,
       status, processId: status === 'running' ? 42 : null, launchedPermissionPreset: 'read-only',
-      permissionWarning: SIDE_CHAT_PERMISSION_WARNING, remote: false, lastActivityAt: 123, sideChat: true,
+      permissionWarning: SIDE_CHAT_PERMISSION_WARNING, remote: false, cliVersion: '1.0.82', lastActivityAt: 123, sideChat: true,
     })
     assert.match(markup, /Restricted \(explicit read\/search allowlist\)/)
     assert.doesNotMatch(markup, /Full computer access/)

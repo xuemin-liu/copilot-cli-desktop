@@ -14,6 +14,7 @@ export interface NewTabInput {
   id: string
   title: string
   workspaceProfileId: string
+  cliVersion: string | null
   launchedPermissionPreset: PermissionPreset | null
   permissionWarning: string | null
   remote: boolean
@@ -38,6 +39,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     lastSessionId: input.lastSessionId ?? null,
     status: 'starting',
     processId: null,
+    cliVersion: input.cliVersion,
     launchedPermissionPreset: input.launchedPermissionPreset,
     permissionWarning: input.permissionWarning,
     remote: input.remote,
@@ -106,7 +108,12 @@ export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: 
 export function setTabLaunchConfig(
   state: TabsState,
   tabId: string,
-  config: { launchedPermissionPreset: PermissionPreset | null; permissionWarning: string | null; canFork?: boolean },
+  config: {
+    cliVersion: string | null
+    launchedPermissionPreset: PermissionPreset | null
+    permissionWarning: string | null
+    canFork?: boolean
+  },
 ): TabsState {
   return {
     ...state,

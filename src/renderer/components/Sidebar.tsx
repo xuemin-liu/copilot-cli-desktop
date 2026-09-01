@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
+import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   starting: 'Starting',
@@ -31,6 +32,7 @@ function writeSidebarPreference(key: string, value: string): void {
 export interface SidebarProps {
   profiles: WorkspaceProfile[]
   tabs: DesktopSessionTab[]
+  installedCliVersion: string | null
   activeProfileId: string | null
   activeTabId: string | null
   canOpenTab: boolean
@@ -50,6 +52,7 @@ export interface SidebarProps {
 export function Sidebar({
   profiles,
   tabs,
+  installedCliVersion,
   activeProfileId,
   activeTabId,
   canOpenTab,
@@ -92,20 +95,26 @@ export function Sidebar({
   const orderTabs = (items: DesktopSessionTab[]): DesktopSessionTab[] => orderMode === 'last-updated'
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
-  const sessionButton = (tab: DesktopSessionTab, workspaceName?: string): JSX.Element => (
-    <button
+  const sessionButton = (tab: DesktopSessionTab, workspaceName?: string): JSX.Element => {
+    const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
+    const versionLabel = outdatedCli
+      ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
+      : null
+    return <button
       key={tab.id}
       type="button"
       className={`sidebar-session${tab.id === activeTabId ? ' sidebar-session-active' : ''}`}
-      title={`${tab.title} — ${STATUS_LABEL[tab.status]}${workspaceName ? ` — ${workspaceName}` : ''}`}
+      title={`${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`}
       onClick={() => onActivateTab(tab.id)}
       onDoubleClick={() => onRenameTab(tab.id, tab.title)}
     >
       <span className={`sidebar-status-dot tab-status-${tab.status}`} aria-hidden="true" />
       <span className="sidebar-session-title">{tab.title}</span>
-      <span className="sidebar-session-status">{STATUS_LABEL[tab.status]}</span>
+      <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
+        {outdatedCli ? 'Old CLI' : STATUS_LABEL[tab.status]}
+      </span>
     </button>
-  )
+  }
 
   return (
     <aside className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`} aria-label="Copilot navigation">

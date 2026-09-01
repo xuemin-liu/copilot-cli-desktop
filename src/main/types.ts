@@ -35,6 +35,8 @@ export interface DesktopSessionTab {
   lastSessionId: string | null
   status: SessionLifecycleStatus
   processId: number | null
+  /** Copilot CLI executable version captured when this process was spawned. */
+  cliVersion: string | null
   /** Permission preset captured when this local Copilot process was launched; unknown for remote connections. */
   launchedPermissionPreset: PermissionPreset | null
   permissionWarning: string | null

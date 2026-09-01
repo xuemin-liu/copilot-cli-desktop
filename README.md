@@ -57,7 +57,9 @@ handle, only input/output/resize events.
   AI-credit and continuation limits, worktrees, screen readers, remote control,
   and session-export privacy.
 - A Copilot management center that can install, repair, and update the official
-  CLI; detects supported integration capabilities; and manages plugins, remote
+  CLI; exposes Copilot's native session-start automatic updates with stable and
+  prerelease channels; labels sessions still running an older CLI after an
+  update; detects supported integration capabilities; and manages plugins, remote
   MCP servers, and skills without requiring users to memorize commands.
 - Remote-session connection from the sidebar using an existing Copilot session
   or task ID.
@@ -166,6 +168,16 @@ normal auto-resume no longer depends on banner wording.
 The resolver and real pty launch path are exercised against Copilot CLI in
 local smoke testing. Approval detection still requires maintenance if the
 CLI's human-readable output changes.
+
+## Copilot CLI automatic updates
+
+Copilot CLI's native automatic updater is enabled by default on the stable
+channel and runs when a session starts. Settings can disable it or opt into the
+prerelease channel. The desktop app re-detects the installed version without
+restarting; a session that was already running keeps its original executable
+and receives an **Old CLI** badge until that session is restarted (or, for a
+remote connection, closed and reconnected). The manual update action remains
+available, but requires all active sessions to be closed.
 
 ## Requirements
 

@@ -17,8 +17,17 @@ import {
   type TabsState,
 } from './session-tab-machine.js'
 
-function createTab(state: TabsState, input: Omit<NewTabInput, 'launchedPermissionPreset' | 'permissionWarning' | 'remote'>): TabsState {
-  return createTabState(state, { ...input, launchedPermissionPreset: 'default', permissionWarning: null, remote: false })
+function createTab(
+  state: TabsState,
+  input: Omit<NewTabInput, 'cliVersion' | 'launchedPermissionPreset' | 'permissionWarning' | 'remote'>,
+): TabsState {
+  return createTabState(state, {
+    ...input,
+    cliVersion: '1.0.80',
+    launchedPermissionPreset: 'default',
+    permissionWarning: null,
+    remote: false,
+  })
 }
 
 test('createTab adds a starting tab and makes it active', () => {
@@ -32,6 +41,7 @@ test('createTab adds a starting tab and makes it active', () => {
     lastSessionId: null,
     status: 'starting',
     processId: null,
+    cliVersion: '1.0.80',
     launchedPermissionPreset: 'default',
     permissionWarning: null,
     remote: false,
@@ -107,10 +117,16 @@ test('setTabLaunchConfig updates only the matching tab\'s permission fields', ()
   let state: TabsState = EMPTY_TABS_STATE
   state = createTab(state, { id: 'a', title: 'A', workspaceProfileId: 'ws-1' })
   state = createTab(state, { id: 'b', title: 'B', workspaceProfileId: 'ws-1' })
-  state = setTabLaunchConfig(state, 'a', { launchedPermissionPreset: 'full-auto', permissionWarning: 'be careful' })
+  state = setTabLaunchConfig(state, 'a', {
+    cliVersion: '1.0.82',
+    launchedPermissionPreset: 'full-auto',
+    permissionWarning: 'be careful',
+  })
+  assert.equal(state.tabs[0]?.cliVersion, '1.0.82')
   assert.equal(state.tabs[0]?.launchedPermissionPreset, 'full-auto')
   assert.equal(state.tabs[0]?.permissionWarning, 'be careful')
   assert.equal(state.tabs[1]?.launchedPermissionPreset, 'default')
+  assert.equal(state.tabs[1]?.cliVersion, '1.0.80')
   assert.equal(state.tabs[1]?.permissionWarning, null)
 })
 
