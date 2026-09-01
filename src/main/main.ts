@@ -103,8 +103,7 @@ const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
 const MAX_SESSION_TABS = 20
-const COPILOT_RESOLUTION_REFRESH_DELAY_MS = 10_000
-const COPILOT_RESOLUTION_REFRESH_RETRY_MS = 60_000
+const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
@@ -113,7 +112,7 @@ let credentialStore: SecureCredentialStore | null = null
 let updateController: DesktopUpdateController | null = null
 let updateCheckTimer: NodeJS.Timeout | null = null
 let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
-let copilotResolutionRefreshPromise: Promise<boolean> | null = null
+let copilotResolutionProbePromise: Promise<CopilotResolution> | null = null
 let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
@@ -1186,7 +1185,7 @@ async function updateWorkspaceProfile(
 }
 
 async function retryResolution(): Promise<DesktopState> {
-  state.resolution = await resolveCopilotBinary()
+  state.resolution = await probeCopilotResolution()
   await recheckCopilotCapabilities()
   broadcastState()
   broadcastCopilotSettingsState()
@@ -1205,46 +1204,50 @@ function sameCopilotResolution(left: CopilotResolution | null, right: CopilotRes
     && JSON.stringify(left.pathAdditions ?? []) === JSON.stringify(right.pathAdditions ?? [])
 }
 
+/** Share the executable/version probe across manual and background checks so
+ * a Settings recheck cannot race the post-session-start refresh. */
+async function probeCopilotResolution(): Promise<CopilotResolution> {
+  if (copilotResolutionProbePromise) return copilotResolutionProbePromise
+  const probe = resolveCopilotBinary()
+  copilotResolutionProbePromise = probe
+  try {
+    return await probe
+  } finally {
+    if (copilotResolutionProbePromise === probe) copilotResolutionProbePromise = null
+  }
+}
+
 /** Re-resolve the executable without disturbing running processes. Copilot's
  * native updater may replace the on-disk CLI at session start; existing PTYs
  * keep their captured version while future sessions use the refreshed one. */
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
-  if (copilotResolutionRefreshPromise) return copilotResolutionRefreshPromise
-  const refresh = (async () => {
-    const previousVersion = state.resolution?.version ?? null
-    const next = await resolveCopilotBinary()
-    if (sameCopilotResolution(state.resolution, next)) return false
-    state.resolution = next
-    await recheckCopilotCapabilities()
-    broadcastState()
-    broadcastCopilotSettingsState()
-    if (previousVersion && next.version && previousVersion !== next.version) {
-      await writeAppLog(`Detected Copilot CLI version change: ${previousVersion} -> ${next.version}`).catch(() => {})
-    }
-    return true
-  })()
-  copilotResolutionRefreshPromise = refresh
-  try {
-    return await refresh
-  } finally {
-    if (copilotResolutionRefreshPromise === refresh) copilotResolutionRefreshPromise = null
+  const previousVersion = state.resolution?.version ?? null
+  const next = await probeCopilotResolution()
+  if (sameCopilotResolution(state.resolution, next)) return false
+  state.resolution = next
+  await recheckCopilotCapabilities()
+  broadcastState()
+  broadcastCopilotSettingsState()
+  if (previousVersion && next.version && previousVersion !== next.version) {
+    await writeAppLog(`Detected Copilot CLI version change: ${previousVersion} -> ${next.version}`).catch(() => {})
   }
+  return true
 }
 
-function scheduleCopilotResolutionRefresh(
-  delayMs = COPILOT_RESOLUTION_REFRESH_DELAY_MS,
-  retryIfUnchanged = true,
-): void {
+function scheduleCopilotResolutionRefresh(attempt = 0): void {
+  const delayMs = COPILOT_RESOLUTION_REFRESH_DELAYS_MS[attempt]
+  if (delayMs === undefined) return
   if (copilotResolutionRefreshTimer) clearTimeout(copilotResolutionRefreshTimer)
   copilotResolutionRefreshTimer = setTimeout(() => {
     copilotResolutionRefreshTimer = null
     void refreshCopilotResolutionIfChanged()
       .then((changed) => {
-        if (!changed && retryIfUnchanged) {
-          scheduleCopilotResolutionRefresh(COPILOT_RESOLUTION_REFRESH_RETRY_MS, false)
-        }
+        if (!changed) scheduleCopilotResolutionRefresh(attempt + 1)
       })
-      .catch((error) => void writeAppLog(`Failed to refresh Copilot CLI version: ${String(error)}`).catch(() => {}))
+      .catch((error) => {
+        void writeAppLog(`Failed to refresh Copilot CLI version: ${String(error)}`).catch(() => {})
+        scheduleCopilotResolutionRefresh(attempt + 1)
+      })
   }, delayMs)
   copilotResolutionRefreshTimer.unref()
 }
