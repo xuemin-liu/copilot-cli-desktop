@@ -52,6 +52,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
         }
       `,
+      './resolve-copilot.js': `
+        export async function resolveCopilotBinary() {
+          return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null };
+        }
+        export function withCopilotPathAdditions(environment) { return environment; }
+      `,
     }
     const source = await readFile(mainPath, 'utf8')
     const bundle = await build({
@@ -70,7 +76,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/node-pty-backend\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })

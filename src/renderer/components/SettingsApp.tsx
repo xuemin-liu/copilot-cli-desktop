@@ -8,6 +8,7 @@ import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import type { SessionLaunchConfig } from '../../main/session-launch.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
+import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
   value,
@@ -432,6 +433,7 @@ export function SettingsApp(): JSX.Element | null {
   const [message, setMessage] = useState<string | null>(null)
   const [cliMaintenancePending, setCliMaintenancePending] = useState(false)
   const [capabilityCheckPending, setCapabilityCheckPending] = useState(false)
+  const [cliAutoUpdatePending, setCliAutoUpdatePending] = useState(false)
 
   useEffect(() => {
     void window.copilotDesktopSettings.get().then(setSnapshot)
@@ -441,9 +443,13 @@ export function SettingsApp(): JSX.Element | null {
     const unsubscribePreferences = window.copilotDesktopSettings.onPreferencesChanged((preferences) => {
       setSnapshot((previous) => (previous ? { ...previous, ...preferences } : previous))
     })
+    const unsubscribeCopilotState = window.copilotDesktopSettings.onCopilotStateChanged((copilotState) => {
+      setSnapshot((previous) => (previous ? { ...previous, ...copilotState } : previous))
+    })
     return () => {
       unsubscribeUpdate()
       unsubscribePreferences()
+      unsubscribeCopilotState()
     }
   }, [])
 
@@ -464,6 +470,16 @@ export function SettingsApp(): JSX.Element | null {
       .then(refresh)
       .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
       .finally(() => setCliMaintenancePending(false))
+  }
+  const setCopilotAutoUpdate = (enabled: boolean, channel: CopilotUpdateChannel): void => {
+    setCliAutoUpdatePending(true)
+    void window.copilotDesktopSettings.setCopilotAutoUpdate(enabled, channel)
+      .then((next) => {
+        refresh(next)
+        showMessage(`Copilot CLI automatic updates ${enabled ? `enabled on the ${channel} channel` : 'disabled'}.`)
+      })
+      .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
+      .finally(() => setCliAutoUpdatePending(false))
   }
   // Send only the field(s) the user changed. Besides making rapid toggles
   // independent, this prevents an open Settings window from posting an old
@@ -613,6 +629,35 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>Copilot CLI</h2>
+        <div className="settings-card">
+          <label className="settings-row">
+            <input
+              type="checkbox"
+              checked={snapshot.cliAutoUpdate.enabled}
+              disabled={cliAutoUpdatePending || snapshot.cliAutoUpdate.error !== null}
+              onChange={(event) => setCopilotAutoUpdate(event.target.checked, snapshot.cliAutoUpdate.channel)}
+            />
+            Automatically update Copilot CLI when a session starts
+          </label>
+          <label>
+            Update channel
+            <select
+              value={snapshot.cliAutoUpdate.channel}
+              disabled={cliAutoUpdatePending || snapshot.cliAutoUpdate.error !== null}
+              onChange={(event) => setCopilotAutoUpdate(
+                snapshot.cliAutoUpdate.enabled,
+                event.target.value as CopilotUpdateChannel,
+              )}
+            >
+              <option value="stable">Stable</option>
+              <option value="prerelease">Prerelease</option>
+            </select>
+          </label>
+          {snapshot.cliAutoUpdate.error && <p className="settings-warning">{snapshot.cliAutoUpdate.error}</p>}
+          <p className="settings-disclaimer">
+            Copilot updates at session start. Existing sessions keep their current CLI and are marked until restarted.
+          </p>
+        </div>
         <p>Detected version: {snapshot.cliVersion ?? 'not installed'}</p>
         <p>{snapshot.cliMaintenance.message}</p>
         {snapshot.cliVersion && (

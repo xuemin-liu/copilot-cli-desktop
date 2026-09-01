@@ -26,7 +26,7 @@ test('side chats never inherit full access, autopilot, custom agent or remote la
 })
 
 function pairedTabs() {
-  const fields = { workspaceProfileId: 'ws', launchedPermissionPreset: 'read-only' as const, permissionWarning: null, remote: false }
+  const fields = { workspaceProfileId: 'ws', launchedPermissionPreset: 'read-only' as const, permissionWarning: null, remote: false, cliVersion: '1.0.82' }
   let state = createTab(EMPTY_TABS_STATE, { ...fields, id: 'main', title: 'Main' })
   state = createTab(state, { ...fields, id: 'other', title: 'Other' })
   return createTab(state, { ...fields, id: 'side', title: 'Side', sideChat: true, sideParentTabId: 'main' })

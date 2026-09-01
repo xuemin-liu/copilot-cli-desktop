@@ -1,5 +1,6 @@
 import type { JSX } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus } from '../../main/types.js'
+import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   starting: 'Starting',
@@ -12,6 +13,7 @@ const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
 
 export interface TabBarProps {
   tabs: DesktopSessionTab[]
+  installedCliVersion: string | null
   activeTabId: string | null
   canOpenTab: boolean
   onActivate: (tabId: string) => void
@@ -21,7 +23,7 @@ export interface TabBarProps {
   onCreate: () => void
 }
 
-export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onRename, onClose, onRestart, onCreate }: TabBarProps): JSX.Element {
+export function TabBar({ tabs, installedCliVersion, activeTabId, canOpenTab, onActivate, onRename, onClose, onRestart, onCreate }: TabBarProps): JSX.Element {
   return (
     <div className="tab-bar" role="tablist">
       {tabs.map((tab) => {
@@ -32,6 +34,10 @@ export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onRename, on
         // Keep the tab selector and the action buttons as siblings instead,
         // with only the selector owning the tab role.
         const busy = tab.status === 'starting' || tab.status === 'stopping'
+        const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
+        const versionTitle = outdatedCli
+          ? `This session uses Copilot CLI ${tab.cliVersion ?? 'unknown'}; ${tab.remote ? 'close and reconnect' : 'restart it'} to use ${installedCliVersion ?? 'the installed version'}.`
+          : undefined
         return (
           <div key={tab.id} className={`tab-group${tab.id === activeTabId ? ' tab-active' : ''}`}>
             <div
@@ -43,6 +49,7 @@ export function TabBar({ tabs, activeTabId, canOpenTab, onActivate, onRename, on
             >
               <span className={`tab-status-dot tab-status-${tab.status}`} title={STATUS_LABEL[tab.status]} />
               <span className="tab-title">{tab.title}</span>
+              {outdatedCli && <span className="cli-version-badge" title={versionTitle}>Old CLI</span>}
             </div>
             {!tab.remote && (
               <button

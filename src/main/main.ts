@@ -44,6 +44,12 @@ import {
   type CopilotMaintenanceState,
 } from './copilot-maintenance.js'
 import {
+  isCopilotUpdateChannel,
+  readCopilotAutoUpdate,
+  writeCopilotAutoUpdate,
+  type CopilotAutoUpdateState,
+} from './copilot-auto-update.js'
+import {
   DEFAULT_COPILOT_RESOURCES_STATE,
   buildPluginInstallArgs,
   buildRemoteMcpAddArgs,
@@ -97,6 +103,8 @@ const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
 const MAX_SESSION_TABS = 20
+const COPILOT_RESOLUTION_REFRESH_DELAY_MS = 10_000
+const COPILOT_RESOLUTION_REFRESH_RETRY_MS = 60_000
 
 let mainWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
@@ -104,6 +112,8 @@ let tray: Tray | null = null
 let credentialStore: SecureCredentialStore | null = null
 let updateController: DesktopUpdateController | null = null
 let updateCheckTimer: NodeJS.Timeout | null = null
+let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
+let copilotResolutionRefreshPromise: Promise<boolean> | null = null
 let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
@@ -625,6 +635,7 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
 
 interface SessionSpawnPlan {
   file: string
+  cliVersion: string
   cwd: string
   env: NodeJS.ProcessEnv
   prefixArgs: string[]
@@ -675,7 +686,9 @@ async function buildSessionSpawnPlan(
   connectSessionId: string | null,
   sessionTitle: string,
 ): Promise<SessionSpawnPlan> {
-  if (!state.resolution || state.resolution.version === null) {
+  await refreshCopilotResolutionIfChanged()
+  const resolution = state.resolution
+  if (!resolution || resolution.version === null) {
     throw new Error('The copilot CLI is not available. Resolve it from the diagnostics screen first.')
   }
   if (connectSessionId && !copilotCapabilities.remoteSessions) {
@@ -686,7 +699,6 @@ async function buildSessionSpawnPlan(
   // case where the final freshSession (decided in finalizeSessionArgs, once
   // the true resume id is known) agrees with this guess.
   validateLaunchOptions(profile.launch, connectSessionId, !connectSessionId && resumeMode === 'new')
-  const resolution = state.resolution
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
   const environment = withCopilotPathAdditions(
@@ -695,6 +707,7 @@ async function buildSessionSpawnPlan(
   )
   return {
     file: resolution.command,
+    cliVersion: resolution.version,
     cwd: profile.path,
     env: environment as NodeJS.ProcessEnv,
     prefixArgs: resolution.prefixArgs,
@@ -824,6 +837,7 @@ async function createSessionTab(
     launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
     permissionWarning: sideOptions.sideChat ? SIDE_CHAT_PERMISSION_WARNING : connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
     remote: connectSessionId !== null,
+    cliVersion: plan.cliVersion,
     lastSessionId: deterministicSessionId,
     ...sideOptions,
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
@@ -842,6 +856,7 @@ async function createSessionTab(
         throw new Error('The app is shutting down or updating')
       }
     })
+    scheduleCopilotResolutionRefresh()
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
       session.removeAllListeners()
@@ -1024,6 +1039,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     managedTabs.set(tabId, { session })
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
+      cliVersion: plan.cliVersion,
       launchedPermissionPreset: profile.permissionPreset,
       permissionWarning: tab.sideChat ? SIDE_CHAT_PERMISSION_WARNING : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
       canFork: !tab.sideChat && supportsSessionFork(state.resolution?.version ?? null),
@@ -1040,6 +1056,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 
     try {
       await session.start()
+      scheduleCopilotResolutionRefresh()
     } catch (error) {
       managedTabs.delete(tabId)
       tabsState = setTabStatus(tabsState, tabId, 'crashed')
@@ -1172,10 +1189,64 @@ async function retryResolution(): Promise<DesktopState> {
   state.resolution = await resolveCopilotBinary()
   await recheckCopilotCapabilities()
   broadcastState()
+  broadcastCopilotSettingsState()
   if (state.resolution.version !== null && desktopConfig.activeProfileId && tabsState.tabs.length === 0) {
     await restoreTabsForActiveProfile()
   }
   return snapshot()
+}
+
+function sameCopilotResolution(left: CopilotResolution | null, right: CopilotResolution): boolean {
+  return left?.kind === right.kind
+    && left.command === right.command
+    && left.resolvedPath === right.resolvedPath
+    && left.version === right.version
+    && JSON.stringify(left.prefixArgs) === JSON.stringify(right.prefixArgs)
+    && JSON.stringify(left.pathAdditions ?? []) === JSON.stringify(right.pathAdditions ?? [])
+}
+
+/** Re-resolve the executable without disturbing running processes. Copilot's
+ * native updater may replace the on-disk CLI at session start; existing PTYs
+ * keep their captured version while future sessions use the refreshed one. */
+async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
+  if (copilotResolutionRefreshPromise) return copilotResolutionRefreshPromise
+  const refresh = (async () => {
+    const previousVersion = state.resolution?.version ?? null
+    const next = await resolveCopilotBinary()
+    if (sameCopilotResolution(state.resolution, next)) return false
+    state.resolution = next
+    await recheckCopilotCapabilities()
+    broadcastState()
+    broadcastCopilotSettingsState()
+    if (previousVersion && next.version && previousVersion !== next.version) {
+      await writeAppLog(`Detected Copilot CLI version change: ${previousVersion} -> ${next.version}`).catch(() => {})
+    }
+    return true
+  })()
+  copilotResolutionRefreshPromise = refresh
+  try {
+    return await refresh
+  } finally {
+    if (copilotResolutionRefreshPromise === refresh) copilotResolutionRefreshPromise = null
+  }
+}
+
+function scheduleCopilotResolutionRefresh(
+  delayMs = COPILOT_RESOLUTION_REFRESH_DELAY_MS,
+  retryIfUnchanged = true,
+): void {
+  if (copilotResolutionRefreshTimer) clearTimeout(copilotResolutionRefreshTimer)
+  copilotResolutionRefreshTimer = setTimeout(() => {
+    copilotResolutionRefreshTimer = null
+    void refreshCopilotResolutionIfChanged()
+      .then((changed) => {
+        if (!changed && retryIfUnchanged) {
+          scheduleCopilotResolutionRefresh(COPILOT_RESOLUTION_REFRESH_RETRY_MS, false)
+        }
+      })
+      .catch((error) => void writeAppLog(`Failed to refresh Copilot CLI version: ${String(error)}`).catch(() => {}))
+  }, delayMs)
+  copilotResolutionRefreshTimer.unref()
 }
 
 async function recheckCopilotCapabilities(): Promise<void> {
@@ -1455,7 +1526,13 @@ interface DesktopSettingsSnapshot extends DesktopPreferences {
   cliVersion: string | null
   cliCapabilities: CopilotCapabilities
   cliMaintenance: CopilotMaintenanceState
+  cliAutoUpdate: CopilotAutoUpdateState
   resources: CopilotResourcesState
+}
+
+function copilotUserSettingsPath(): string {
+  const configDirectory = process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot')
+  return join(configDirectory, 'settings.json')
 }
 
 function settingsPreferences(): DesktopPreferences {
@@ -1476,9 +1553,10 @@ function broadcastSettingsPreferences(): void {
 
 async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
   const activeProfile = activeWorkspaceProfile(desktopConfig)
-  const [credentials, access] = await Promise.all([
+  const [credentials, access, cliAutoUpdate] = await Promise.all([
     credentialStore ? credentialStore.status() : Promise.resolve(null),
     readAccessStatus(activeProfile?.permissionPreset ?? 'default', copilotCapabilities),
+    readCopilotAutoUpdate(copilotUserSettingsPath()),
   ])
   return {
     ...settingsPreferences(),
@@ -1495,6 +1573,7 @@ async function settingsSnapshot(): Promise<DesktopSettingsSnapshot> {
     cliVersion: state.resolution?.version ?? null,
     cliCapabilities: { ...copilotCapabilities },
     cliMaintenance: { ...copilotMaintenance },
+    cliAutoUpdate,
     resources: { ...copilotResources },
     update: updateController?.snapshot ?? {
       status: 'unavailable',
@@ -1513,6 +1592,17 @@ function broadcastUpdateState(update: DesktopUpdateState): void {
   const window = settingsWindow
   if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), settingsUrl())) {
     window.webContents.send('desktop-settings:update-state-changed', update)
+  }
+}
+
+function broadcastCopilotSettingsState(): void {
+  const window = settingsWindow
+  if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), settingsUrl())) {
+    window.webContents.send('desktop-settings:copilot-state-changed', {
+      cliVersion: state.resolution?.version ?? null,
+      cliCapabilities: { ...copilotCapabilities },
+      cliMaintenance: { ...copilotMaintenance },
+    })
   }
 }
 
@@ -1895,6 +1985,14 @@ ipcMain.handle('desktop-settings:update-copilot', async (event) => {
   await maintainCopilotCli('update')
   return settingsSnapshot()
 })
+ipcMain.handle('desktop-settings:set-copilot-auto-update', async (event, enabled: unknown, channel: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof enabled !== 'boolean' || !isCopilotUpdateChannel(channel)) {
+    throw new Error('Invalid Copilot CLI update preference')
+  }
+  await writeCopilotAutoUpdate(copilotUserSettingsPath(), enabled, channel)
+  return settingsSnapshot()
+})
 ipcMain.handle('desktop-settings:recheck-copilot-capabilities', async (event) => {
   assertTrustedSettingsSender(event)
   await recheckCopilotCapabilities()
@@ -2022,6 +2120,7 @@ app.on('before-quit', (event) => {
 
 app.on('will-quit', () => {
   if (updateCheckTimer) clearTimeout(updateCheckTimer)
+  if (copilotResolutionRefreshTimer) clearTimeout(copilotResolutionRefreshTimer)
   globalShortcut.unregisterAll()
 })
 
