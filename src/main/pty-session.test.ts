@@ -75,7 +75,7 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
-test('approval heuristic reassembles text split across pty chunks without trusting displayed session IDs', async () => {
+test('heuristics reassemble text split across pty chunks without trusting session IDs by default', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
   await session.start()
@@ -86,6 +86,18 @@ test('approval heuristic reassembles text split across pty chunks without trusti
   assert.equal(session.status, 'approval-needed')
   pty.emit('data', 'session-9\n')
   assert.equal(session.lastSessionId, null)
+})
+
+test('legacy sessions can opt into bounded session-id banner discovery', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({
+    file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), discoverSessionIdFromOutput: true,
+  })
+  await session.start()
+  pty.emit('data', 'Resume this session with copilot --res')
+  assert.equal(session.lastSessionId, null)
+  pty.emit('data', 'ume=work-session-9\n')
+  assert.equal(session.lastSessionId, 'work-session-9')
 })
 
 test('approval-needed stays up across ordinary output until an explicit transition', async () => {
@@ -170,9 +182,9 @@ test('stop() kills the process and does not report a crash for the expected exit
   assert.ok(!statuses.includes('crashed'))
 })
 
-test('only a trusted session id supplied at construction is used for auto-resume', async () => {
+test('a trusted constructor session id is never replaced by banner discovery', async () => {
   const pty = new FakePty()
-  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), sessionId: 'trusted-session-1' })
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), sessionId: 'trusted-session-1', discoverSessionIdFromOutput: true })
   await session.start()
   pty.emit('data', 'Session ID: work-session-9\n')
   assert.equal(session.lastSessionId, 'trusted-session-1')

@@ -20,11 +20,27 @@ export function isCopilotProviderType(value: unknown): value is CopilotProviderT
   return value === 'github' || value === 'openai' || value === 'azure' || value === 'anthropic'
 }
 
-export function normalizeProviderConfig(value: unknown): CopilotProviderConfig {
+export function normalizeProviderConfig(
+  value: unknown,
+  reportMigration?: (message: string) => void,
+): CopilotProviderConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...DEFAULT_PROVIDER_CONFIG }
   const record = value as Record<string, unknown>
   const type = isCopilotProviderType(record.type) ? record.type : 'github'
-  const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim().slice(0, 2_048) : ''
+  let baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim().slice(0, 2_048) : ''
+  if (baseUrl) {
+    try {
+      const parsed = new URL(baseUrl)
+      if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && (parsed.username || parsed.password)) {
+        parsed.username = ''
+        parsed.password = ''
+        baseUrl = parsed.href
+        reportMigration?.('Removed embedded credentials from the saved provider base URL; use the protected credential fields instead.')
+      }
+    } catch {
+      // Leave other invalid values intact so Settings can show its usual validation error.
+    }
+  }
   const model = typeof record.model === 'string' ? record.model.trim().slice(0, 200) : ''
   return {
     type,

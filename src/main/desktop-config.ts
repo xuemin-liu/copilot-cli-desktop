@@ -136,7 +136,10 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
   return tabs
 }
 
-export async function readDesktopConfig(filename: string): Promise<DesktopConfig> {
+export async function readDesktopConfig(
+  filename: string,
+  reportMigration?: (message: string) => void,
+): Promise<DesktopConfig> {
   let parsed: unknown
   try {
     parsed = JSON.parse(await readFile(filename, 'utf8')) as unknown
@@ -198,7 +201,7 @@ export async function readDesktopConfig(filename: string): Promise<DesktopConfig
     automaticUpdateChecks: typeof value.automaticUpdateChecks === 'boolean' ? value.automaticUpdateChecks : true,
     globalShortcutEnabled: typeof value.globalShortcutEnabled === 'boolean' ? value.globalShortcutEnabled : false,
     launchAtLogin: typeof value.launchAtLogin === 'boolean' ? value.launchAtLogin : false,
-    provider: normalizeProviderConfig(value.provider),
+    provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isLocalFilesystemPath, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
+import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
 
 test('isLocalFilesystemPath rejects UNC and device paths without rejecting local drives', () => {
   for (const candidate of ['\\\\server\\share\\file.txt', '//server/share/file.txt', '\\\\?\\C:\\secret', '\\??\\C:\\secret']) {
@@ -20,4 +20,11 @@ test('session tab IDs cannot traverse log directories', () => {
   assert.equal(isSessionTabId('tab-42'), true)
   assert.equal(isSessionTabId('..\\..\\outside'), false)
   assert.equal(isSessionTabId('tab-0'), false)
+})
+
+test('revealed paths must remain inside their owning workspace', () => {
+  assert.equal(isPathWithinRoot('C:\\work\\repo', 'C:\\work\\repo\\src\\file.ts'), true)
+  assert.equal(isPathWithinRoot('C:\\work\\repo', 'C:\\work\\repo'), true)
+  assert.equal(isPathWithinRoot('C:\\work\\repo', 'C:\\work\\outside.txt'), false)
+  assert.equal(isPathWithinRoot('C:\\work\\repo', 'D:\\outside.txt'), false)
 })

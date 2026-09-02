@@ -23,6 +23,16 @@ export function isLocalFilesystemPath(candidate: string): boolean {
   return !root.startsWith('\\\\')
 }
 
+/** Lexically contain a resolved Windows path to its owning workspace. */
+export function isPathWithinRoot(root: string, candidate: string): boolean {
+  const relative = win32.relative(win32.resolve(root), win32.resolve(candidate))
+  return relative === '' || (
+    relative !== '..'
+    && !relative.startsWith(`..${win32.sep}`)
+    && !win32.isAbsolute(relative)
+  )
+}
+
 export function isSessionTabId(value: unknown): value is string {
   return typeof value === 'string' && /^tab-[1-9]\d*$/.test(value)
 }

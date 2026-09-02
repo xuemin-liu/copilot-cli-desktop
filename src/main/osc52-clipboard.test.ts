@@ -37,11 +37,12 @@ test('removes a truncated unterminated OSC 52 write from the end of a backlog', 
 test('clipboard writes require and consume a recent local copy gesture', () => {
   let now = 100
   const gate = new ClipboardWriteGate(() => now, 50)
-  assert.equal(gate.consume(), false)
+  assert.equal(gate.consumeDecodedWrite('text'), false)
   gate.authorize()
-  assert.equal(gate.consume(), true)
-  assert.equal(gate.consume(), false)
+  assert.equal(gate.consumeDecodedWrite(null), false)
+  assert.equal(gate.consumeDecodedWrite('text'), true)
+  assert.equal(gate.consumeDecodedWrite('text'), false)
   gate.authorize()
   now = 151
-  assert.equal(gate.consume(), false)
+  assert.equal(gate.consumeDecodedWrite('text'), false)
 })

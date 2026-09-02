@@ -36,3 +36,14 @@ test('provider configuration validates required custom-provider fields', () => {
     type: 'github', baseUrl: '', model: '', offline: false,
   })
 })
+
+test('legacy embedded provider credentials are removed during normalization', () => {
+  const migrations: string[] = []
+  const config = normalizeProviderConfig({
+    type: 'openai', baseUrl: 'https://user:token@gateway.example/v1', model: 'model', offline: false,
+  }, (message) => migrations.push(message))
+  assert.equal(config.baseUrl, 'https://gateway.example/v1')
+  assert.equal(migrations.length, 1)
+  assert.doesNotMatch(migrations[0] ?? '', /user|token/)
+  assert.doesNotThrow(() => validateProviderConfig(config))
+})

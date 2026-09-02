@@ -1,3 +1,5 @@
+import { isValidSessionId } from './session-id.js'
+
 /**
  * HEURISTIC, NOT A PROTOCOL. GitHub Copilot CLI does not publish a structured
  * event stream for approval prompts (unlike, say, a JSON event line a desktop
@@ -24,4 +26,18 @@ const APPROVAL_PATTERNS: readonly RegExp[] = [
 
 export function detectApprovalPrompt(chunk: string): boolean {
   return APPROVAL_PATTERNS.some((pattern) => pattern.test(chunk))
+}
+
+const SESSION_ID_PATTERNS: readonly RegExp[] = [
+  /\bsession[\s_-]?id\b\s*[:=]\s*([A-Za-z0-9._-]{4,64})(?=\s|\u001b)/i,
+  /\bresume(?:\s+this\s+session)?\s+with\b[^\n]*--resume[= ]([A-Za-z0-9._-]{4,64})(?=\s|\u001b)/i,
+]
+
+/** Best-effort fallback for CLI versions that cannot accept --session-id. */
+export function extractSessionId(chunk: string): string | null {
+  for (const pattern of SESSION_ID_PATTERNS) {
+    const candidate = pattern.exec(chunk)?.[1]
+    if (candidate && isValidSessionId(candidate)) return candidate
+  }
+  return null
 }

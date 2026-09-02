@@ -11,60 +11,114 @@ type SpawnWatchdog = (
   options: Parameters<typeof spawn>[2],
 ) => ChildProcess
 
+interface SharedWatchdog {
+  child: ChildProcess
+  trackedPids: Set<number>
+}
+
+let sharedWatchdog: SharedWatchdog | null = null
+let failureReported = false
+let failureReporter: (message: string) => void = (message) => console.error(message)
+
 function quotePowerShellLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
 }
 
-export function buildWatchdogEncodedCommand(pid: number, environment: NodeJS.ProcessEnv = process.env): string {
-  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid watchdog process ID')
+export function configureWindowsProcessWatchdogReporter(reporter: (message: string) => void): void {
+  failureReporter = reporter
+}
+
+function reportFailure(error: unknown): void {
+  if (failureReported) return
+  failureReported = true
+  failureReporter(`Windows child-process watchdog is unavailable: ${error instanceof Error ? error.message : String(error)}`)
+}
+
+/** Fixed shared watcher program; PIDs arrive as validated decimal line messages. */
+export function buildWatchdogEncodedCommand(environment: NodeJS.ProcessEnv = process.env): string {
   const taskkill = quotePowerShellLiteral(windowsSystemExecutable('taskkill.exe', environment))
   const script = [
-    '$release = [Console]::In.ReadToEnd()',
-    "if ($release -ne 'release') {",
-    `  & ${taskkill} /PID ${pid} /T /F | Out-Null`,
+    '$tracked = [System.Collections.Generic.HashSet[int]]::new()',
+    'while (($line = [Console]::In.ReadLine()) -ne $null) {',
+    "  if ($line -match '^track ([1-9][0-9]*)$') { [void]$tracked.Add([int]$Matches[1]) }",
+    "  elseif ($line -match '^release ([1-9][0-9]*)$') { [void]$tracked.Remove([int]$Matches[1]) }",
+    '}',
+    'foreach ($processId in $tracked) {',
+    `  & ${taskkill} /PID $processId /T /F | Out-Null`,
     '}',
   ].join('\n')
   return Buffer.from(script, 'utf16le').toString('base64')
 }
 
+function createSharedWatchdog(
+  environment: NodeJS.ProcessEnv,
+  spawnWatchdog: SpawnWatchdog,
+): SharedWatchdog | null {
+  try {
+    const systemDirectory = windowsSystemDirectory(environment)
+    const executable = windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe', environment)
+    const child = spawnWatchdog(executable, [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle', 'Hidden',
+      '-EncodedCommand', buildWatchdogEncodedCommand(environment),
+    ], {
+      cwd: systemDirectory,
+      detached: true,
+      windowsHide: true,
+      stdio: ['pipe', 'ignore', 'ignore'],
+      env: {
+        SystemRoot: environment.SystemRoot ?? environment.windir ?? 'C:\\Windows',
+        windir: environment.windir ?? environment.SystemRoot ?? 'C:\\Windows',
+      },
+    })
+    const watcher: SharedWatchdog = { child, trackedPids: new Set() }
+    child.once('error', reportFailure)
+    child.stdin?.once('error', reportFailure)
+    child.once('exit', (code, signal) => {
+      if (sharedWatchdog === watcher) sharedWatchdog = null
+      // Exit code 0 is the expected stdin-EOF path when the owning Node
+      // process is itself shutting down; its remaining PIDs are killed then.
+      if (code !== 0 || signal) {
+        reportFailure(`watcher exited unexpectedly (code ${String(code)}, signal ${String(signal ?? 'none')})`)
+      }
+    })
+    child.unref()
+    ;(child.stdin as (NodeJS.WritableStream & { unref?: () => void }) | null)?.unref?.()
+    return watcher
+  } catch (error) {
+    reportFailure(error)
+    return null
+  }
+}
+
 /**
- * A detached, credential-free PowerShell process holds a pipe lease from the
- * owner. A normal PTY exit writes `release`; an abrupt owner death closes the
- * pipe without it, causing the watcher to terminate the whole PTY process tree.
+ * One detached, credential-free PowerShell process tracks every child owned by
+ * this Node/Electron process. Normal exits release individual PIDs; abrupt
+ * owner death closes the shared pipe and terminates every remaining tree.
  */
 export function startWindowsProcessWatchdog(
   pid: number,
   environment: NodeJS.ProcessEnv = process.env,
   spawnWatchdog: SpawnWatchdog = spawn,
 ): ProcessWatchdogLease {
-  const systemDirectory = windowsSystemDirectory(environment)
-  const executable = windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe', environment)
-  const child = spawnWatchdog(executable, [
-    '-NoLogo',
-    '-NoProfile',
-    '-NonInteractive',
-    '-WindowStyle', 'Hidden',
-    '-EncodedCommand', buildWatchdogEncodedCommand(pid, environment),
-  ], {
-    cwd: systemDirectory,
-    detached: true,
-    windowsHide: true,
-    stdio: ['pipe', 'ignore', 'ignore'],
-    env: {
-      SystemRoot: environment.SystemRoot ?? environment.windir ?? 'C:\\Windows',
-      windir: environment.windir ?? environment.SystemRoot ?? 'C:\\Windows',
-    },
-  })
-  child.on('error', () => undefined)
-  child.stdin?.on('error', () => undefined)
-  child.unref()
-  ;(child.stdin as (NodeJS.WritableStream & { unref?: () => void }) | null)?.unref?.()
+  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid watchdog process ID')
+  const watcher = sharedWatchdog ?? createSharedWatchdog(environment, spawnWatchdog)
+  if (!watcher?.child.stdin || watcher.child.stdin.destroyed) {
+    reportFailure('watcher input pipe is unavailable')
+    return { release: () => undefined }
+  }
+  sharedWatchdog = watcher
+  watcher.trackedPids.add(pid)
+  watcher.child.stdin.write(`track ${pid}\n`)
   let released = false
   return {
     release: () => {
       if (released) return
       released = true
-      if (child.stdin && !child.stdin.destroyed) child.stdin.end('release')
+      watcher.trackedPids.delete(pid)
+      if (!watcher.child.stdin?.destroyed) watcher.child.stdin?.write(`release ${pid}\n`)
     },
   }
 }

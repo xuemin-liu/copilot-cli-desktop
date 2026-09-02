@@ -11,14 +11,15 @@ export class ClipboardWriteGate {
 
   constructor(
     private readonly now: () => number = Date.now,
-    private readonly lifetimeMs = 2_000,
+    private readonly lifetimeMs = 5_000,
   ) {}
 
   authorize(): void {
     this.authorizedUntil = this.now() + this.lifetimeMs
   }
 
-  consume(): boolean {
+  consumeDecodedWrite(decoded: string | null): decoded is string {
+    if (decoded === null) return false
     const allowed = this.authorizedUntil > 0 && this.now() <= this.authorizedUntil
     this.authorizedUntil = 0
     return allowed

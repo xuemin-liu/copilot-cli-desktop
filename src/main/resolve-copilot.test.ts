@@ -54,8 +54,9 @@ test('resolveCopilotBinary unwraps an npm shim to trusted node and package entry
     [`${WHERE} copilot`]: { stdout: `${shim}\r\n` },
     [`${node} ${entry} --version`]: { stdout: 'GitHub Copilot CLI 1.0.82\n' },
   }), 'win32', (path) => existing.has(path), async (path) => {
+    if (path === shim) return '@"%dp0%\\node_modules\\@github\\copilot\\index.js" %*'
     assert.equal(path, manifest)
-    return JSON.stringify({ bin: { copilot: 'index.js' } })
+    return JSON.stringify({ name: '@github/copilot', bin: { copilot: 'index.js' } })
   })
   assert.equal(resolution.command, node)
   assert.deepEqual(resolution.prefixArgs, [entry])
@@ -68,7 +69,9 @@ test('resolveCopilotBinary refuses an unverifiable command shim instead of invok
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     [`${WHERE} copilot`]: { stdout: `${shim}\r\n` },
     [`${WHERE} gh`]: new Error('not found'),
-  }), 'win32', (path) => path === shim, async () => JSON.stringify({ bin: { copilot: '..\\outside.js' } }))
+  }), 'win32', (path) => path === shim, async (path) => path === shim
+    ? '@"%dp0%\\node_modules\\@github\\copilot\\..\\outside.js" %*'
+    : JSON.stringify({ name: '@github/copilot', bin: { copilot: '..\\outside.js' } }))
   assert.equal(resolution.version, null)
   assert.match(resolution.error ?? '', /unsupported or failed direct launch/)
 })
@@ -81,9 +84,30 @@ test('resolveCopilotBinary checks standard npm location when Electron PATH is in
   const resolution = await resolveCopilotBinary({ ProgramFiles: 'C:\\Program Files' }, fakeExecFile({
     [`${WHERE} copilot`]: new Error('not found'),
     [`${node} ${entry} --version`]: { stdout: '1.0.82\n' },
-  }), 'win32', (path) => existing.has(path), async () => JSON.stringify({ bin: 'index.js' }))
+  }), 'win32', (path) => existing.has(path), async (path) => path === shim
+    ? '@"%dp0%\\node_modules\\@github\\copilot\\index.js" %*'
+    : JSON.stringify({ name: '@github/copilot', bin: 'index.js' }))
   assert.equal(resolution.command, node)
   assert.deepEqual(resolution.pathAdditions, ['C:\\Program Files\\nodejs'])
+})
+
+test('resolveCopilotBinary follows a verified pnpm shim target', async () => {
+  const shim = 'C:\\Users\\tester\\AppData\\Local\\pnpm\\copilot.cmd'
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const packageDirectory = 'C:\\Users\\tester\\AppData\\Local\\pnpm\\global\\5\\.pnpm\\@github+copilot@1.0.82\\node_modules\\@github\\copilot'
+  const entry = `${packageDirectory}\\index.js`
+  const manifest = `${packageDirectory}\\package.json`
+  const existing = new Set([shim, node, entry])
+  const resolution = await resolveCopilotBinary({ ProgramFiles: 'C:\\Program Files' }, fakeExecFile({
+    [`${WHERE} copilot`]: { stdout: `${shim}\r\n` },
+    [`${node} ${entry} --version`]: { stdout: '1.0.82\n' },
+  }), 'win32', (path) => existing.has(path), async (path) => {
+    if (path === shim) return '@"%dp0%\\global\\5\\.pnpm\\@github+copilot@1.0.82\\node_modules\\@github\\copilot\\index.js" %*'
+    assert.equal(path, manifest)
+    return JSON.stringify({ name: '@github/copilot', bin: { copilot: 'index.js' } })
+  })
+  assert.equal(resolution.command, node)
+  assert.deepEqual(resolution.prefixArgs, [entry])
 })
 
 test('withCopilotPathAdditions uses the platform delimiter without mutating the source', () => {

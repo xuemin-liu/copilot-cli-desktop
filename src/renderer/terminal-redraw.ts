@@ -9,9 +9,10 @@ export const CLIPBOARD_COPY_ARM_MS = 5_000
 
 /**
  * How long a proven copy gesture may wait for Copilot's OSC 52 response.
- * Keep this bounded: widening a speculative guard makes Ctrl+C appear frozen.
+ * Mouse or keyboard selection must be observed first, so ordinary Ctrl+C is
+ * never delayed while Copilot has enough time to emit its clipboard response.
  */
-export const CLIPBOARD_COPY_GESTURE_MS = 500
+export const CLIPBOARD_COPY_GESTURE_MS = 5_000
 
 /** Quiet period after Copilot's status before the completed frame is shown. */
 export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
@@ -81,6 +82,13 @@ export class NativeCopyGestureTracker {
     // the authoritative fallback, so a real selection drag is still detected.
     this.recordDragDistance(x, y)
     this.dragOrigin = null
+  }
+
+  onKeyDown(key: string, shiftKey: boolean): void {
+    if (!shiftKey) return
+    if (/^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End|PageUp|PageDown)$/.test(key)) {
+      this.selectionPending = true
+    }
   }
 
   consumeSelection(): boolean {

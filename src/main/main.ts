@@ -61,8 +61,9 @@ import {
   type CopilotResourcesState,
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
-import { isLocalFilesystemPath, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
+import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
 import { spawnNodePty } from './node-pty-backend.js'
+import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import {
   isCopilotProviderType,
@@ -308,6 +309,8 @@ async function appendSessionLog(tabId: string, chunk: string): Promise<void> {
   await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, { encoding: 'utf8', mode: 0o600 })
   sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
 }
+
+configureWindowsProcessWatchdogReporter((message) => void writeAppLog(message))
 
 function writeSessionLog(tabId: string, chunk: string): Promise<void> {
   const previous = sessionLogWriteQueues.get(tabId) ?? Promise.resolve()
@@ -855,6 +858,7 @@ async function createSessionTab(
     env: plan.env,
     spawnPty: spawnNodePty,
     sessionId: deterministicSessionId,
+    discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
   })
   managedTabs.set(id, { session })
   tabsState = createTab(tabsState, {
@@ -1063,6 +1067,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       env: plan.env,
       spawnPty: spawnNodePty,
       sessionId: deterministicSessionId,
+      discoverSessionIdFromOutput: deterministicSessionId === null,
       ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
     })
     managedTabs.set(tabId, { session })
@@ -1376,7 +1381,6 @@ async function refreshCopilotResources(environment?: NodeJS.ProcessEnv): Promise
     const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], {
       cwd: activeWorkspaceProfile(desktopConfig)?.path,
       env: environment ?? resourceCopilotEnvironment(),
-      protectSecrets: true,
     })
     const output = (result.stdout || result.stderr).trim().slice(0, 500_000)
     copilotResources = {
@@ -1400,7 +1404,6 @@ async function runCopilotResourceMutation(args: string[]): Promise<void> {
     cwd: activeWorkspaceProfile(desktopConfig)?.path,
     timeout: 2 * 60_000,
     env: environment,
-    protectSecrets: true,
   })
   try {
     await refreshCopilotResources(environment)
@@ -1853,6 +1856,7 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   if (!owningProfile) throw new Error('The session workspace is unavailable')
   const baseDirectory = owningProfile.path
   const resolved = resolve(baseDirectory, candidate)
+  if (!isPathWithinRoot(baseDirectory, resolved)) throw new Error('Only paths within the session workspace can be revealed')
   // The text a session prints is not guaranteed to name a real file (it may
   // be prose that merely looks path-shaped). Silently do nothing rather than
   // opening Explorer to a location that doesn't exist.
@@ -2117,8 +2121,12 @@ if (!app.requestSingleInstanceLock()) {
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
-    desktopConfig = await readDesktopConfig(configPath())
-    if (recordDesktopVersion(desktopConfig, app.getVersion())) await persistConfig()
+    let desktopConfigMigrated = false
+    desktopConfig = await readDesktopConfig(configPath(), (message) => {
+      desktopConfigMigrated = true
+      void writeAppLog(message)
+    })
+    if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(

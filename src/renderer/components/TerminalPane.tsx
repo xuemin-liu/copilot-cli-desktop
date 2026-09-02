@@ -99,7 +99,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // the same clipboard fallback that supporting native terminals provide.
     const osc52Disposable = terminal.parser.registerOscHandler(52, (data) => {
       const text = decodeOsc52ClipboardWrite(data)
-      if (text !== null && clipboardWriteGate.consume()) {
+      if (clipboardWriteGate.consumeDecodedWrite(text)) {
         void window.copilotDesktop.copyText(text)
 
         // Hold xterm rendering across Copilot's first-copy update. Recovery is
@@ -183,6 +183,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // still hold Shift to make an xterm selection; copy that fallback through
     // Electron, while Ctrl+C without an xterm selection reaches Copilot.
     terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown') nativeCopyGesture.onKeyDown(event.key, event.shiftKey)
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
         // Ctrl+C is Copilot's interrupt key unless a preceding native mouse

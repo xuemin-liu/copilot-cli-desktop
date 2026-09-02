@@ -112,6 +112,18 @@ test('arms native copy only after an unmodified text-selection drag', () => {
   assert.equal(tracker.consumeSelection(), true)
 })
 
+test('arms native copy after keyboard-driven TUI selection', () => {
+  const tracker = new NativeCopyGestureTracker()
+  tracker.onKeyDown('ArrowLeft', false)
+  assert.equal(tracker.consumeSelection(), false)
+  tracker.onKeyDown('ArrowLeft', true)
+  assert.equal(tracker.consumeSelection(), true)
+  tracker.onKeyDown('PageDown', true)
+  assert.equal(tracker.consumeSelection(), true)
+  tracker.onKeyDown('c', true)
+  assert.equal(tracker.consumeSelection(), false)
+})
+
 test('normalizes Copilot selection backgrounds in a serialized snapshot', () => {
   assert.equal(
     normalizeClipboardSnapshot('a\u001b[38;5;15;48;5;25;1mselected\u001b[49m text'),

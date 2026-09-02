@@ -191,3 +191,14 @@ test('file reveal rejects a syntactically valid but nonexistent session tab', as
     )
   })
 })
+
+test('file reveal rejects paths outside the session workspace', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    const state = await harness.createMain()
+    await assert.rejects(
+      () => harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'),
+      /within the session workspace/,
+    )
+  })
+})

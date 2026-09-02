@@ -26,11 +26,9 @@ test('parseCopilotCapabilities does not mistake --model for --mode', () => {
   assert.equal(parseCopilotCapabilities('--model MODEL --effort LEVEL').launchProfiles, false)
 })
 
-test('buildCopilotCommandArgs inserts secret masking before resource subcommands', () => {
+test('buildCopilotCommandArgs preserves the resolved executable prefix', () => {
   assert.deepEqual(buildCopilotCommandArgs(
     { prefixArgs: ['entry.js'] },
     ['plugins', 'install', 'source'],
-    { GH_TOKEN: 'secret' },
-    true,
-  ), ['entry.js', '--secret-env-vars=GH_TOKEN', 'plugins', 'install', 'source'])
+  ), ['entry.js', 'plugins', 'install', 'source'])
 })

@@ -8,6 +8,7 @@ import type { CopilotResolution } from './types.js'
 const execFileAsync = promisify(execFile)
 const COPILOT_PROBE_TIMEOUT_MS = 8_000
 const COPILOT_PACKAGE_PATH = ['@github', 'copilot'] as const
+const COPILOT_PACKAGE_MARKER = `\\node_modules\\${COPILOT_PACKAGE_PATH.join('\\')}\\`
 
 export type ExecFileFn = (
   file: string,
@@ -107,6 +108,25 @@ function isContainedPath(parent: string, candidate: string): boolean {
   return relative.length > 0 && !relative.startsWith(`..${win32.sep}`) && relative !== '..' && !win32.isAbsolute(relative)
 }
 
+function shimPackageEntries(shimText: string, shimDirectory: string): string[] {
+  if (shimText.length > 64 * 1024) return []
+  const entries: string[] = []
+  const pattern = /(?:%~dp0|%dp0%)[\\/]([^"%\r\n]+?\.(?:c?js|mjs|exe))(?=["\s]|$)/gi
+  for (const match of shimText.matchAll(pattern)) {
+    const relative = match[1]?.trim()
+    if (!relative) continue
+    entries.push(win32.resolve(shimDirectory, relative))
+  }
+  return [...new Set(entries)]
+}
+
+function packageDirectoryForEntry(entry: string): string | null {
+  const normalized = entry.replaceAll('/', '\\')
+  const markerIndex = normalized.toLowerCase().lastIndexOf(COPILOT_PACKAGE_MARKER.toLowerCase())
+  if (markerIndex < 0) return null
+  return normalized.slice(0, markerIndex + COPILOT_PACKAGE_MARKER.length - 1)
+}
+
 async function locateNodeExecutable(
   shimDirectory: string,
   env: NodeJS.ProcessEnv,
@@ -126,9 +146,10 @@ async function locateNodeExecutable(
 }
 
 /**
- * npm's Windows `copilot.cmd` shim ultimately invokes the adjacent package's
- * bin entry with Node. Resolve that verified package entry and execute it
- * directly, so workspace-controlled data never crosses a cmd.exe parser.
+ * Windows package-manager shims ultimately invoke an installed package entry
+ * with Node. Resolve the target declared by the shim, then verify it against
+ * @github/copilot's manifest and execute it directly. This supports npm,
+ * pnpm, and Yarn layouts without crossing a cmd.exe parser.
  */
 async function unwrapCopilotNpmShim(
   shimPath: string,
@@ -139,28 +160,44 @@ async function unwrapCopilotNpmShim(
 ): Promise<Pick<CopilotResolution, 'command' | 'prefixArgs' | 'resolvedPath' | 'pathAdditions'> | null> {
   if (win32.basename(shimPath).toLowerCase() !== 'copilot.cmd') return null
   const shimDirectory = win32.dirname(shimPath)
-  const packageDirectory = win32.join(shimDirectory, 'node_modules', ...COPILOT_PACKAGE_PATH)
-  let manifest: unknown
+  let shimText: string
   try {
-    manifest = JSON.parse(await readTextFile(win32.join(packageDirectory, 'package.json')))
+    shimText = await readTextFile(shimPath)
   } catch {
     return null
   }
-  const relativeEntry = packageBinEntry(manifest)
-  if (!relativeEntry) return null
-  const entry = win32.resolve(packageDirectory, relativeEntry)
-  if (!isContainedPath(packageDirectory, entry) || !pathExists(entry)) return null
-  if (entry.toLowerCase().endsWith('.exe')) {
-    return { command: entry, prefixArgs: [], resolvedPath: shimPath, pathAdditions: [] }
+
+  for (const declaredEntry of shimPackageEntries(shimText, shimDirectory)) {
+    const packageDirectory = packageDirectoryForEntry(declaredEntry)
+    if (!packageDirectory) continue
+    let manifest: unknown
+    try {
+      manifest = JSON.parse(await readTextFile(win32.join(packageDirectory, 'package.json')))
+    } catch {
+      continue
+    }
+    if ((manifest as { name?: unknown }).name !== '@github/copilot') continue
+    const relativeEntry = packageBinEntry(manifest)
+    if (!relativeEntry) continue
+    const entry = win32.resolve(packageDirectory, relativeEntry)
+    if (
+      !isContainedPath(packageDirectory, entry)
+      || entry.toLowerCase() !== declaredEntry.toLowerCase()
+      || !pathExists(entry)
+    ) continue
+    if (entry.toLowerCase().endsWith('.exe')) {
+      return { command: entry, prefixArgs: [], resolvedPath: shimPath, pathAdditions: [] }
+    }
+    const node = await locateNodeExecutable(shimDirectory, env, execFileFn, pathExists)
+    if (!node) return null
+    return {
+      command: node,
+      prefixArgs: [entry],
+      resolvedPath: shimPath,
+      pathAdditions: [win32.dirname(node)],
+    }
   }
-  const node = await locateNodeExecutable(shimDirectory, env, execFileFn, pathExists)
-  if (!node) return null
-  return {
-    command: node,
-    prefixArgs: [entry],
-    resolvedPath: shimPath,
-    pathAdditions: [win32.dirname(node)],
-  }
+  return null
 }
 
 export function withCopilotPathAdditions(
@@ -218,7 +255,7 @@ export async function resolveCopilotBinary(
       if (!pathExists(candidate) || located.paths.includes(candidate)) continue
       const launch = await probeWindowsCopilotPath(candidate, env, execFileFn, pathExists, readTextFile)
       if (launch) return { kind: 'direct', ...launch, error: null }
-      attempts.push(`${candidate}: npm package entry could not be verified`)
+      attempts.push(`${candidate}: package-manager shim target could not be verified`)
     }
   } else {
     const direct = await tryVersion('copilot', ['--version'], env, execFileFn)

@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { CopilotResolution } from './types.js'
 import { withCopilotPathAdditions } from './resolve-copilot.js'
-import { secretEnvArgs } from './secure-credentials.js'
 
 const execFileAsync = promisify(execFile)
 const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
@@ -20,14 +19,8 @@ export interface CopilotCommandResult {
 export function buildCopilotCommandArgs(
   resolution: Pick<CopilotResolution, 'prefixArgs'>,
   args: readonly string[],
-  environment: NodeJS.ProcessEnv,
-  protectSecrets: boolean,
 ): string[] {
-  return [
-    ...resolution.prefixArgs,
-    ...(protectSecrets ? secretEnvArgs(environment) : []),
-    ...args,
-  ]
+  return [...resolution.prefixArgs, ...args]
 }
 
 export async function runCopilotCommand(
@@ -37,14 +30,13 @@ export async function runCopilotCommand(
     timeout?: number | undefined
     cwd?: string | undefined
     env?: NodeJS.ProcessEnv | undefined
-    protectSecrets?: boolean | undefined
   } = {},
 ): Promise<CopilotCommandResult> {
   if (resolution.version === null) throw new Error('Copilot CLI is not installed')
   const env = withCopilotPathAdditions(options.env ?? process.env, resolution.pathAdditions)
   const result = await execFileAsync(
     resolution.command,
-    buildCopilotCommandArgs(resolution, args, env, options.protectSecrets === true),
+    buildCopilotCommandArgs(resolution, args),
     {
       env,
       timeout: options.timeout ?? 30_000,

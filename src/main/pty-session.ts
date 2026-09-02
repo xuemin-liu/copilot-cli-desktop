@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { windowsSystemExecutable } from './resolve-copilot.js'
-import { detectApprovalPrompt } from './approval-heuristic.js'
+import { detectApprovalPrompt, extractSessionId } from './approval-heuristic.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 
@@ -25,6 +25,7 @@ export interface PtySessionOptions {
   spawnPty: SpawnPtyFn
   forceKillTimeoutMs?: number
   sessionId?: string | null
+  discoverSessionIdFromOutput?: boolean
 }
 
 export interface PtySessionExit {
@@ -154,6 +155,9 @@ export class PtySession extends EventEmitter {
       // Scan a bounded rolling stream so the heuristics see text spanning
       // adjacent reads rather than treating transport chunks as message lines.
       this.heuristicBuffer = `${this.heuristicBuffer}${data}`.slice(-MAX_HEURISTIC_CHARS)
+      if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromOutput === true) {
+        this.lastKnownSessionId = extractSessionId(this.heuristicBuffer)
+      }
       if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {
         this.setStatus('approval-needed')
         this.emit('desktop-event', { type: 'approval-needed' })
