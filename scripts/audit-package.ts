@@ -1,5 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
+import { listPackage } from '@electron/asar'
+import { FuseState, FuseV1Options, getCurrentFuseWire } from '@electron/fuses'
 
 const unpackedRoot = resolve(process.argv[2] ?? 'release/win-unpacked')
 const resourcesRoot = join(unpackedRoot, 'resources')
@@ -33,6 +35,25 @@ if (!nativeAddons.some((path) => /node-pty/i.test(path))) {
 
 const executables = readdirSync(unpackedRoot).filter((entry) => entry.toLowerCase().endsWith('.exe'))
 if (executables.length === 0) throw new Error(`No Windows executable was found in ${unpackedRoot}`)
+
+const archiveEntries = listPackage(asarPath, { isPack: false })
+const forbiddenEntries = archiveEntries.filter((entry) => /(?:\.test\.js|\.map)$|[\\/]fixtures[\\/]|^[\\/]dist[\\/]scripts[\\/]/i.test(entry))
+if (forbiddenEntries.length > 0) throw new Error(`Packaged archive contains development-only files: ${forbiddenEntries.join(', ')}`)
+
+const applicationExecutable = join(unpackedRoot, executables[0]!)
+const fuses = await getCurrentFuseWire(applicationExecutable)
+const expectedFuses = new Map([
+  [FuseV1Options.RunAsNode, FuseState.DISABLE],
+  [FuseV1Options.EnableCookieEncryption, FuseState.ENABLE],
+  [FuseV1Options.EnableNodeOptionsEnvironmentVariable, FuseState.DISABLE],
+  [FuseV1Options.EnableNodeCliInspectArguments, FuseState.DISABLE],
+  [FuseV1Options.EnableEmbeddedAsarIntegrityValidation, FuseState.ENABLE],
+  [FuseV1Options.OnlyLoadAppFromAsar, FuseState.ENABLE],
+  [FuseV1Options.GrantFileProtocolExtraPrivileges, FuseState.DISABLE],
+])
+for (const [fuse, expected] of expectedFuses) {
+  if (fuses[fuse] !== expected) throw new Error(`Packaged Electron fuse ${fuse} is not hardened`)
+}
 
 process.stdout.write(
   `Packaged runtime audit passed (${basename(asarPath)}, ${nativeAddons.length} native addon(s), ${executables.length} executable(s)).\n`,

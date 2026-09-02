@@ -28,27 +28,16 @@ export function detectApprovalPrompt(chunk: string): boolean {
   return APPROVAL_PATTERNS.some((pattern) => pattern.test(chunk))
 }
 
-/**
- * Best-effort extraction of a `copilot` session id from pty output, so a tab
- * can auto-resume with `--resume=<id>` next time it opens. UNVERIFIED against
- * the real CLI's actual banner/log text — adjust these patterns once the
- * `copilot` binary is available to observe real output.
- *
- * The capture groups below intentionally allow a leading '-' (matching
- * whatever id-shaped text appears in the output) so `isValidSessionId` can
- * reject it explicitly rather than by accident of the regex. An id captured
- * from untrusted terminal output must never be trusted to be safe for a
- * command line without that separate check — see resume-args.ts.
- */
 const SESSION_ID_PATTERNS: readonly RegExp[] = [
-  /\bsession[\s_-]?id\b\s*[:=]\s*([A-Za-z0-9._-]{4,64})/i,
-  /\bresume(?:\s+this\s+session)?\s+with\b[^\n]*--resume[= ]([A-Za-z0-9._-]{4,64})/i,
+  /\bsession[\s_-]?id\b\s*[:=]\s*([A-Za-z0-9._-]{4,64})(?=\s|\u001b)/i,
+  /\bresume(?:\s+this\s+session)?\s+with\b[^\n]*--resume[= ]([A-Za-z0-9._-]{4,64})(?=\s|\u001b)/i,
 ]
 
+/** Best-effort fallback for CLI versions that cannot accept --session-id. */
 export function extractSessionId(chunk: string): string | null {
   for (const pattern of SESSION_ID_PATTERNS) {
-    const match = pattern.exec(chunk)
-    if (match?.[1] && isValidSessionId(match[1])) return match[1]
+    const candidate = pattern.exec(chunk)?.[1]
+    if (candidate && isValidSessionId(candidate)) return candidate
   }
   return null
 }

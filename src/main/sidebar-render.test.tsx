@@ -124,7 +124,7 @@ test('Sidebar shows current session access and marks changed access as applying 
     />,
   )
 
-  assert.match(markup, /Default \(prompt every time\)/)
+  assert.match(markup, /Copilot default \(uses CLI setting\)/)
   assert.match(markup, /Full computer access \(--allow-all\) applies on next launch or Restart/)
   assert.match(markup, /Old CLI/)
   assert.match(markup, /restart this session to use 1\.0\.82/)
@@ -144,7 +144,7 @@ test('Sidebar uses the active tab workspace and surfaces legacy restriction warn
 
   assert.match(markup, /Restricted \(explicit read\/search allowlist\)/)
   assert.match(markup, /Legacy restricted mode/)
-  assert.doesNotMatch(markup, /Default \(prompt every time\)/)
+  assert.doesNotMatch(markup, /Copilot default \(uses CLI setting\)/)
 })
 
 test('Sidebar does not claim effective access for remote or stopped sessions', () => {

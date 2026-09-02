@@ -1,7 +1,8 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { randomBytes } from 'node:crypto'
-import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import lockfile from 'proper-lockfile'
 import { quarantineCorruptFile, writeFileAtomic } from '../main/atomic-file.js'
 
 export type DaemonStatus = 'starting' | 'running' | 'restarting' | 'crashed' | 'stopping'
@@ -45,7 +46,7 @@ export function getCliPaths(environment: NodeJS.ProcessEnv = process.env): CliPa
 }
 
 export async function ensureCliDirectories(paths: CliPaths): Promise<void> {
-  await mkdir(paths.root, { recursive: true })
+  await mkdir(paths.root, { recursive: true, mode: 0o700 })
 }
 
 /**
@@ -107,6 +108,22 @@ interface ControllerLock {
   createdAt: string
 }
 
+const INCOMPLETE_LOCK_RETRIES = 4
+const INCOMPLETE_LOCK_RETRY_MS = 25
+const STALE_INVALID_LOCK_MS = 30_000
+const LOCK_ACQUIRE_ATTEMPTS = 3
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
+}
+
+export function constantTimeTokenEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, 'utf8')
+  const rightBytes = Buffer.from(right, 'utf8')
+  if (leftBytes.length !== rightBytes.length) return false
+  return timingSafeEqual(leftBytes, rightBytes)
+}
+
 async function readControllerLock(paths: CliPaths): Promise<ControllerLock | null> {
   try {
     const parsed = JSON.parse(await readFile(paths.lockPath, 'utf8')) as Partial<ControllerLock>
@@ -121,6 +138,15 @@ async function readControllerLock(paths: CliPaths): Promise<ControllerLock | nul
   } catch {
     return null
   }
+}
+
+async function readSettledControllerLock(paths: CliPaths): Promise<ControllerLock | null> {
+  for (let attempt = 0; attempt < INCOMPLETE_LOCK_RETRIES; attempt += 1) {
+    const lock = await readControllerLock(paths)
+    if (lock) return lock
+    if (attempt + 1 < INCOMPLETE_LOCK_RETRIES) await delay(INCOMPLETE_LOCK_RETRY_MS)
+  }
+  return null
 }
 
 export function isProcessAlive(pid: number): boolean {
@@ -148,8 +174,9 @@ async function writeControllerLock(paths: CliPaths, lock: ControllerLock, exclus
 }
 
 export async function acquireControllerLock(paths: CliPaths): Promise<string> {
-  await mkdir(paths.root, { recursive: true })
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  await mkdir(paths.root, { recursive: true, mode: 0o700 })
+  const recoveryPath = `${paths.lockPath}.recovery`
+  for (let attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS; attempt += 1) {
     const token = randomBytes(24).toString('hex')
     const lock: ControllerLock = {
       version: 1,
@@ -162,11 +189,34 @@ export async function acquireControllerLock(paths: CliPaths): Promise<string> {
       return token
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const existing = await readControllerLock(paths)
-      if (existing && isProcessAlive(existing.pid)) {
-        throw new Error(`Another copilot-desktop controller operation is active (PID ${existing.pid})`)
+      const releaseRecovery = await lockfile.lock(paths.root, {
+        lockfilePath: recoveryPath,
+        realpath: false,
+        stale: STALE_INVALID_LOCK_MS,
+        update: 10_000,
+        retries: { retries: 10, minTimeout: INCOMPLETE_LOCK_RETRY_MS, maxTimeout: INCOMPLETE_LOCK_RETRY_MS },
+      })
+      try {
+        // Re-read only after exclusively claiming stale-lock recovery. This
+        // prevents two starters from both unlinking the lock one of them just
+        // created (an ABA race around a dead or partially-written lock).
+        const existing = await readSettledControllerLock(paths)
+        if (existing && isProcessAlive(existing.pid)) {
+          throw new Error(`Another copilot-desktop controller operation is active (PID ${existing.pid})`)
+        }
+        if (!existing) {
+          const info = await stat(paths.lockPath).catch((statError: NodeJS.ErrnoException) => {
+            if (statError.code === 'ENOENT') return null
+            throw statError
+          })
+          if (!info) continue
+          const age = Date.now() - info.mtimeMs
+          if (age < STALE_INVALID_LOCK_MS) throw new Error('The controller lock is still being created; retry shortly')
+        }
+        await rm(paths.lockPath, { force: true })
+      } finally {
+        await releaseRecovery()
       }
-      await rm(paths.lockPath, { force: true })
     }
   }
   throw new Error('Could not acquire the copilot-desktop controller lock')
@@ -174,13 +224,13 @@ export async function acquireControllerLock(paths: CliPaths): Promise<string> {
 
 export async function claimControllerLock(paths: CliPaths, token: string): Promise<void> {
   const existing = await readControllerLock(paths)
-  if (!existing || existing.token !== token) throw new Error('The controller startup lock is missing or invalid')
+  if (!existing || !constantTimeTokenEqual(existing.token, token)) throw new Error('The controller startup lock is missing or invalid')
   await writeControllerLock(paths, { ...existing, pid: process.pid }, false)
 }
 
 export async function releaseControllerLock(paths: CliPaths, token: string, expectedPid: number): Promise<boolean> {
   const existing = await readControllerLock(paths)
-  if (!existing || existing.token !== token || existing.pid !== expectedPid) return false
+  if (!existing || !constantTimeTokenEqual(existing.token, token) || existing.pid !== expectedPid) return false
   await rm(paths.lockPath, { force: true })
   return true
 }

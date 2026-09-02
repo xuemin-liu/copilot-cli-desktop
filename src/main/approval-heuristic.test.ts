@@ -17,23 +17,10 @@ test('detectApprovalPrompt ignores ordinary streamed output', () => {
   assert.equal(detectApprovalPrompt(''), false)
 })
 
-test('extractSessionId reads a labeled session id', () => {
-  assert.equal(extractSessionId('Session ID: 8f3c2a91-aa'), '8f3c2a91-aa')
-  assert.equal(extractSessionId('session_id=work-2026-08-24'), 'work-2026-08-24')
-})
-
-test('extractSessionId reads an id referenced inside a --resume hint', () => {
-  assert.equal(
-    extractSessionId('Resume this session with `copilot --resume=abcDEF123`'),
-    'abcDEF123',
-  )
-})
-
-test('extractSessionId returns null when no id-shaped text is present', () => {
-  assert.equal(extractSessionId('Copilot is ready. Type a message to begin.'), null)
-})
-
-test('extractSessionId rejects an option-looking captured value instead of treating it as an id', () => {
-  assert.equal(extractSessionId('session id: --allow-all-tools'), null)
-  assert.equal(extractSessionId('session_id=-abcd'), null)
+test('extractSessionId recognizes only bounded resume banners', () => {
+  assert.equal(extractSessionId('Session ID: work-session-9\n'), 'work-session-9')
+  assert.equal(extractSessionId('Resume this session with copilot --resume=abc123\n'), 'abc123')
+  assert.equal(extractSessionId('Session ID: --allow-all-tools\n'), null)
+  assert.equal(extractSessionId('Session ID: work-'), null)
+  assert.equal(extractSessionId('ordinary output'), null)
 })

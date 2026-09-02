@@ -9,15 +9,23 @@ export const CLIPBOARD_COPY_ARM_MS = 5_000
 
 /**
  * How long a proven copy gesture may wait for Copilot's OSC 52 response.
- * Keep this bounded: widening a speculative guard makes Ctrl+C appear frozen.
+ * Keep the visual hold short; the independent clipboard gate remains open
+ * longer and starts a new synchronized frame if OSC 52 arrives afterward.
  */
 export const CLIPBOARD_COPY_GESTURE_MS = 500
+
+/** How recently keyboard selection must have changed before Ctrl+C copies. */
+export const NATIVE_KEYBOARD_SELECTION_MS = 2_000
 
 /** Quiet period after Copilot's status before the completed frame is shown. */
 export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
 
 /** Minimum mouse travel that identifies a Copilot-owned text selection drag. */
 export const NATIVE_SELECTION_DRAG_PX = 4
+
+const MODIFIER_KEYS = new Set([
+  'Alt', 'AltGraph', 'CapsLock', 'Control', 'Meta', 'NumLock', 'OS', 'ScrollLock', 'Shift',
+])
 
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {
@@ -58,6 +66,9 @@ export function isClipboardOnlyViewport(lines: string[]): boolean {
 export class NativeCopyGestureTracker {
   private dragOrigin: { x: number; y: number } | null = null
   private selectionPending = false
+  private keyboardSelectionExpiresAt = 0
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   onMouseDown(button: number, shiftKey: boolean, x: number, y: number): void {
     if (button !== 0) return
@@ -68,6 +79,7 @@ export class NativeCopyGestureTracker {
     }
     this.dragOrigin = { x, y }
     this.selectionPending = false
+    this.keyboardSelectionExpiresAt = 0
   }
 
   onMouseMove(buttons: number, x: number, y: number): void {
@@ -83,9 +95,23 @@ export class NativeCopyGestureTracker {
     this.dragOrigin = null
   }
 
+  onKeyDown(key: string, shiftKey: boolean): void {
+    if (shiftKey && /^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown)$/.test(key)) {
+      this.selectionPending = true
+      this.keyboardSelectionExpiresAt = this.now() + NATIVE_KEYBOARD_SELECTION_MS
+    } else if (!shiftKey && !MODIFIER_KEYS.has(key)) {
+      this.selectionPending = false
+      this.keyboardSelectionExpiresAt = 0
+    }
+  }
+
   consumeSelection(): boolean {
+    if (this.keyboardSelectionExpiresAt > 0 && this.now() > this.keyboardSelectionExpiresAt) {
+      this.selectionPending = false
+    }
     if (!this.selectionPending) return false
     this.selectionPending = false
+    this.keyboardSelectionExpiresAt = 0
     return true
   }
 
@@ -177,6 +203,14 @@ export class ClipboardRedrawRecovery {
   }
 
   onClipboardCopy(): boolean {
+    // The clipboard authorization intentionally outlives the short visual
+    // gesture hold. If OSC 52 arrives later, begin a fresh synchronized frame
+    // at that confirmed-copy boundary before Copilot's destructive redraw.
+    if (this.phase === 'ready') {
+      this.phase = 'gesture'
+      this.snapshot = this.hooks.captureSnapshot()
+      this.hooks.beginSynchronizedOutput()
+    }
     if (this.phase !== 'gesture') return false
     this.phase = 'armed'
     this.schedule(() => this.finish(false, 'done'), CLIPBOARD_COPY_ARM_MS)

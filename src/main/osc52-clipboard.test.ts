@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { decodeOsc52ClipboardWrite, stripOsc52Commands } from '../renderer/osc52-clipboard.js'
+import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../renderer/osc52-clipboard.js'
 
 test('decodes a Copilot OSC 52 system clipboard write as UTF-8', () => {
   const encoded = Buffer.from('copied 界', 'utf8').toString('base64')
@@ -32,4 +32,17 @@ test('removes a truncated unterminated OSC 52 write from the end of a backlog', 
     stripOsc52Commands('before\u001b]52;c;dGVzdA…[truncated]\n\u001b[Hafter'),
     'before\u001b[Hafter',
   )
+})
+
+test('clipboard writes require and consume a recent local copy gesture', () => {
+  let now = 100
+  const gate = new ClipboardWriteGate(() => now, 50)
+  assert.equal(gate.consumeDecodedWrite('text'), false)
+  gate.authorize()
+  assert.equal(gate.consumeDecodedWrite(null), false)
+  assert.equal(gate.consumeDecodedWrite('text'), true)
+  assert.equal(gate.consumeDecodedWrite('text'), false)
+  gate.authorize()
+  now = 151
+  assert.equal(gate.consumeDecodedWrite('text'), false)
 })

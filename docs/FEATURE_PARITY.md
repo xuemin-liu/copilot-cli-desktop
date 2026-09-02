@@ -38,7 +38,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | --- | --- | --- |
 | Named recent workspace profiles | Named profiles keyed by normalized folder path | Equivalent |
 | Read-only permission | Restricted preset uses `--available-tools=view,glob,grep,ask_user` | Explicit allowlist; mutating, network, extension, memory, and delegated-agent tools are unavailable to the model |
-| Workspace/default permission | Default prompt mode and trusted-directory mode | Equivalent |
+| Workspace/default permission | Copilot-default mode (honors upstream `defaultPermissionMode`) and trusted-directory mode | Equivalent; the UI does not overstate the safety of an upstream allow-all default |
 | Full computer access | Official Copilot `--allow-all` mode | Equivalent |
 | Permission shown in Settings/tray | Settings access card, sidebar badge, and tray label | Equivalent |
 | Windows elevation warning | Detects integrity level and warns when sessions inherit administrator rights | Equivalent |
@@ -53,7 +53,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Provider endpoint/model/type | Global BYOK provider settings for OpenAI-compatible, Azure, and Anthropic endpoints | Equivalent |
 | Offline provider mode | Official `COPILOT_OFFLINE=true` setting | Equivalent |
 | Inherited environment precedence | Inherited values override protected/configured values and are shown read-only | Equivalent |
-| Prevent secrets reaching tools | Every configured credential is passed through Copilot’s `--secret-env-vars` protection | Copilot-specific additional protection |
+| Prevent secrets reaching tools | Authenticated sessions and fork helpers receive `--secret-env-vars`; vault credentials are withheld from resource and unrelated helpers | Copilot-specific additional protection |
 | Migrate Harness plaintext credential YAML | No equivalent plaintext desktop store exists | Not applicable |
 
 ## Lifecycle, recovery, and operating-system integration
@@ -62,7 +62,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | --- | --- | --- |
 | Runtime supervision | One supervised PTY process per session with restart/crash handling | Equivalent |
 | Startup checkpoints for local HTTP server | CLI resolution diagnostics plus per-tab starting/running/crashed states | Equivalent to CLI lifecycle; HTTP URL/readiness stages are not applicable |
-| Recent output and diagnostics | Bounded session backlog, per-session logs, app log, and copyable redacted diagnostics | Equivalent |
+| Recent output and diagnostics | Bounded session backlog, private rotating session/app logs, and copyable redacted diagnostics | Equivalent |
 | Restart runtime | Restart active/crashed Copilot session from UI, menu, or tray | Equivalent per-session model |
 | Tray/background behavior | Configurable tray, close-to-tray, status, actions, and explicit quit | Equivalent |
 | Native notifications | Approval, completion, and crash notifications route to the relevant tab | Equivalent; approval/session recognition uses documented terminal heuristics |
@@ -76,7 +76,7 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Electron update center | Check, download progress, install/restart, releases link | Equivalent |
 | Previous release rollback link | Opens the previously recorded version’s release | Equivalent |
 | Signed public releases | Release workflow refuses unsigned publication and verifies Authenticode | Equivalent |
-| Packaged dependency audit | Verifies ASAR, executable, and unpacked native node-pty addon | Equivalent to Copilot’s runtime shape |
+| Packaged dependency audit | Verifies ASAR, executable, native node-pty addon, Electron fuses, and exclusion of tests/maps/fixtures | Equivalent to Copilot’s runtime shape |
 | Runtime compatibility schedule | Weekly job installs latest official `@github/copilot` and runs tests/smokes | Equivalent |
 | Dependency update automation | Dependabot for npm and GitHub Actions | Equivalent |
 | Copilot CLI install/update | Native install, repair, update, version, and capability status | Equivalent plus recovery workflow |

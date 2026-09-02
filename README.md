@@ -32,7 +32,8 @@ handle, only input/output/resize events.
   manual "Resume session…" action that opens `copilot --resume`'s own
   interactive picker directly inside the terminal pane.
 - Per-session pty process supervision: crash detection, a restart action, and
-  per-session log capture to disk under the app's user-data directory.
+  private per-session log capture under the app's user-data directory. Logs
+  rotate at 5 MiB; launch directories are limited to 7 days and the latest 20.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
   each, with lifecycle badges (starting / running / needs-approval / stopping
   / completed / crashed) restored per workspace profile.
@@ -65,7 +66,8 @@ handle, only input/output/resize events.
   or task ID.
 - Visible Windows elevation and permission-access status, with warnings for
   high-trust modes and elevated launches.
-- Stops the full process tree for every running session on app quit.
+- Stops the full process tree for every running session on app quit, with a
+  detached Windows watchdog covering abrupt desktop-process termination.
 - A background CLI (`copilot-desktop`) with a token-protected, loopback-only
   HTTP control server (`start` / `status` / `restart` / `logs` / `stop`) and a
   first-class `run --prompt` command for official non-interactive Copilot
@@ -125,7 +127,7 @@ onto that flag surface, set per workspace profile in Settings:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
-| Default | (none) | Read-only actions run automatically; every mutating action (shell, edits, URL fetches, MCP tools) prompts. |
+| Copilot default | (none) | Uses Copilot CLI's configured `defaultPermissionMode`. A normal installation prompts for mutating actions, but an upstream allow-all setting remains allow-all. |
 | Restricted | `--available-tools=view,glob,grep,ask_user` | Only explicit read/search/interaction tools are visible to the model. Shell, write, web, MCP, skill, memory, and delegated-agent tools are excluded. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
@@ -140,8 +142,8 @@ Each tab tracks a resume mode (per workspace profile, overridable per tab):
 - **New** — starts a fresh session with a generated UUID and Copilot-visible
   name when the installed CLI exposes `--session-id` and `--name`.
 - **Auto-resume** — uses `--resume <id>` with the UUID assigned when the tab
-  was created; older CLI versions fall back to output capture and start a new
-  session if no id is known.
+  was created; older CLI versions that cannot accept a desktop-assigned UUID
+  start a new session if no trusted id is known.
 - **Continue** — always uses `--continue` (resumes the most recent session,
   preferring the current working directory).
 - **Picker** — used by the "Resume session…" button; runs `copilot --resume`
@@ -161,9 +163,9 @@ events, so approval detection remains a best-effort regex heuristic:
   `[y/n]`, "Do you want to proceed?", etc.). It will both miss real prompts
   and misfire on unrelated text that merely resembles one.
 
-Output-based session-id capture remains only as a compatibility fallback for
-older Copilot releases. Current releases receive a UUID before launch, so
-normal auto-resume no longer depends on banner wording.
+Session IDs are never inferred from terminal output. Current releases receive
+a UUID before launch, so untrusted terminal text cannot redirect later resume
+or fork operations.
 
 The resolver and real pty launch path are exercised against Copilot CLI in
 local smoke testing. Approval detection still requires maintenance if the
@@ -185,7 +187,8 @@ available, but requires all active sessions to be closed.
 - Node.js 24 and pnpm 11.5.3 for source development and the CLI.
 - The [`copilot` CLI](https://github.com/github/copilot-cli) itself on PATH to
   actually spawn sessions. It can also be installed or repaired from Desktop Settings using
-  the official Windows WinGet package, with npm as a fallback.
+  the official Windows WinGet package. Verified npm installations remain
+  supported for launch, but the desktop never runs npm lifecycle scripts to install one.
   Neither is required to build, typecheck, or run the unit tests.
 
 `node-pty` 1.x's native addon is built on `node-addon-api` (N-API), which is
@@ -216,10 +219,11 @@ Choose a workspace folder from the main window, then open **File → Desktop
 Settings** to rename a profile, configure its permission preset and resume
 mode, select a provider, and save protected credentials. Paste only the value (for example
 `sk-...`), not a `NAME=value` assignment. The desktop app encrypts each value
-with Windows DPAPI (`safeStorage`) and decrypts it only into the environment
-of the pty process it spawns — it is never sent back to any renderer. An
-environment variable already set on the machine always takes precedence over
-a saved vault entry.
+with Windows DPAPI (`safeStorage`) and decrypts it only for an authenticated
+interactive Copilot session. Vault credentials are not exposed to renderers,
+resource installers, or unrelated helper processes; fork helpers also receive
+Copilot's secret-environment masking flags. An environment variable already
+set on the machine always takes precedence over a saved vault entry.
 
 The vault is global to the desktop app: a saved credential applies to every
 workspace profile's spawned sessions, since these are process environment
@@ -255,7 +259,7 @@ copilot-desktop logs --tail 100
 copilot-desktop stop
 ```
 
-The controller state and log live under
+The controller state and private, 5 MiB rotating log live under
 `%APPDATA%\copilot-cli-desktop\cli`. Its private HTTP control server uses a
 random bearer token and listens only on `127.0.0.1`. Only one controller is
 supported per Windows user; set `COPILOT_DESKTOP_CLI_HOME` to isolate state
@@ -283,11 +287,11 @@ pnpm pack:win   # unpacked application
 pnpm dist:win   # NSIS installer
 ```
 
-Artifacts are written to `release/`. Local installers are unsigned. Public
-tagged releases require the GitHub Actions secrets `WINDOWS_CSC_LINK` and
-`WINDOWS_CSC_KEY_PASSWORD`; the release workflow refuses to publish when
-signing is unavailable. Packaging also audits the unpacked runtime for the
-application archive, native `node-pty` addon, and required executable files.
+Artifacts are written to `release/`. Local and explicitly manual historical
+builds may be unsigned. Automated public tagged releases require the GitHub
+Actions secrets `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`; the release
+workflow refuses unsigned publication. Packaging audits the archive, native
+`node-pty` addon, required executables, Electron fuses, and production-only files.
 
 ## Continuous integration and releases
 
@@ -305,9 +309,9 @@ applicability decision are recorded in [`docs/FEATURE_PARITY.md`](docs/FEATURE_P
 ## Live-verification boundary
 
 Copilot CLI resolution and real pty startup are verified locally. Approval
-prompt wording, older-version session-id banner parsing, every upstream provider account,
-and every possible resume history remain dependent on Copilot CLI and account
-state. Pure logic (permission-preset mapping, tab state, resume arguments,
+prompt wording, every upstream provider account, and every possible resume
+history remain dependent on Copilot CLI and account state. Pure logic
+(permission-preset mapping, tab state, resume arguments,
 provider environment, encrypted-vault serialization, and pty lifecycle) is
 covered by unit tests and does not depend on a live account.
 

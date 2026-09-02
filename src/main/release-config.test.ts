@@ -5,6 +5,8 @@ import test from 'node:test'
 interface PackageBuildConfig {
   scripts?: Record<string, unknown>
   build?: {
+    afterPack?: unknown
+    files?: unknown[]
     publish?: Array<{ provider?: unknown; owner?: unknown; repo?: unknown }>
     nsis?: { artifactName?: unknown }
   }
@@ -21,6 +23,9 @@ test('release configuration keeps the GitHub updater feed, asset name, and packa
   assert.match(String(manifest.scripts?.['pack:win']), /audit-package/)
   assert.match(String(manifest.scripts?.['dist:win']), /audit-package/)
   assert.match(String(manifest.scripts?.['dist:win']), /--publish never/)
+  assert.equal(manifest.build?.afterPack, 'scripts/after-pack.cjs')
+  assert.ok(manifest.build?.files?.includes('!dist/**/*.test.js'))
+  assert.ok(manifest.build?.files?.includes('!dist/**/*.map'))
 })
 
 test('release workflow refuses to publish an unsigned Windows installer', async () => {
@@ -28,6 +33,7 @@ test('release workflow refuses to publish an unsigned Windows installer', async 
   assert.match(workflow, /WINDOWS_CSC_LINK is required/)
   assert.match(workflow, /Get-AuthenticodeSignature/)
   assert.doesNotMatch(workflow, /publishing an unsigned release/)
+  assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d/)
 })
 
 test('latest Copilot CLI compatibility is exercised on a schedule', async () => {

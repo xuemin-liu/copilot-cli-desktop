@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { EMPTY_COPILOT_CAPABILITIES, parseCopilotCapabilities } from './copilot-command.js'
+import { buildCopilotCommandArgs, EMPTY_COPILOT_CAPABILITIES, parseCopilotCapabilities } from './copilot-command.js'
 
 test('parseCopilotCapabilities detects supported integration surfaces', () => {
   assert.deepEqual(parseCopilotCapabilities(`
@@ -24,4 +24,11 @@ test('parseCopilotCapabilities detects supported integration surfaces', () => {
 
 test('parseCopilotCapabilities does not mistake --model for --mode', () => {
   assert.equal(parseCopilotCapabilities('--model MODEL --effort LEVEL').launchProfiles, false)
+})
+
+test('buildCopilotCommandArgs preserves the resolved executable prefix', () => {
+  assert.deepEqual(buildCopilotCommandArgs(
+    { prefixArgs: ['entry.js'] },
+    ['plugins', 'install', 'source'],
+  ), ['entry.js', 'plugins', 'install', 'source'])
 })

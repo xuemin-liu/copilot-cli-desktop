@@ -10,7 +10,7 @@ import {
 const MODERN_CAPABILITIES = { toolAllowlist: true }
 const LEGACY_CAPABILITIES = { toolAllowlist: false }
 
-test('buildPermissionArgs: default prompts for everything and adds no flags', () => {
+test('buildPermissionArgs: default defers to the Copilot CLI setting and adds no flags', () => {
   assert.deepEqual(buildPermissionArgs('default', 'C:\\work\\project', MODERN_CAPABILITIES), [])
 })
 

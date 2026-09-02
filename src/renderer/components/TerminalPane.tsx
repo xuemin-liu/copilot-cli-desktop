@@ -4,7 +4,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
-import { decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
+import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
   ClipboardRedrawRecovery,
   NativeCopyGestureTracker,
@@ -92,13 +92,14 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     })
     clipboardRedrawRef.current = clipboardRedraw
     const nativeCopyGesture = new NativeCopyGestureTracker()
+    const clipboardWriteGate = new ClipboardWriteGate()
     // Copilot writes OSC 52 before trying its OS clipboard backend. On the
     // affected Windows releases its quoted cmd.exe -> clip.exe invocation
     // exits with code 1; accepting OSC 52 here gives the embedded terminal
     // the same clipboard fallback that supporting native terminals provide.
     const osc52Disposable = terminal.parser.registerOscHandler(52, (data) => {
       const text = decodeOsc52ClipboardWrite(data)
-      if (text !== null) {
+      if (clipboardWriteGate.consumeDecodedWrite(text)) {
         void window.copilotDesktop.copyText(text)
 
         // Hold xterm rendering across Copilot's first-copy update. Recovery is
@@ -184,10 +185,15 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
-        // Ctrl+C is Copilot's interrupt key unless a preceding native mouse
-        // drag identifies this invocation as selected-text copy. Never arm the
-        // render guard speculatively: doing so freezes every ordinary Ctrl+C.
-        if (nativeCopyGesture.consumeSelection()) clipboardRedraw.onCopyGesture()
+        // Ctrl+C is Copilot's interrupt key unless a recent native mouse or
+        // keyboard selection identifies this invocation as selected-text copy.
+        // Never arm the render guard without that bounded evidence.
+        if (nativeCopyGesture.consumeSelection()) {
+          clipboardWriteGate.authorize()
+          clipboardRedraw.onCopyGesture()
+        }
+      } else if (event.type === 'keydown') {
+        nativeCopyGesture.onKeyDown(event.key, event.shiftKey)
       }
       return true
     })
@@ -215,6 +221,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         // ambiguous Ctrl+C interrupt. Arm it unconditionally so coalesced or
         // off-element drag events cannot leave the first copy unprotected.
         nativeCopyGesture.consumeSelection()
+        clipboardWriteGate.authorize()
         clipboardRedraw.onCopyGesture()
       }
     }
@@ -277,6 +284,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       cancelAnimationFrame(fitFrame)
       window.clearTimeout(copyStatusTimer)
       clipboardRedraw.dispose()
+      clipboardWriteGate.clear()
       if (clipboardRedrawRef.current === clipboardRedraw) clipboardRedrawRef.current = null
       resizeObserver.disconnect()
       container.removeEventListener('keydown', handlePasteKey, true)

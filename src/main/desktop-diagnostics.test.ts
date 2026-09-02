@@ -12,6 +12,22 @@ test('redactDiagnosticText masks common secret shapes', () => {
   )
 })
 
+test('redacts token families, JSON secrets, URL credentials, and cookies', () => {
+  const text = redactDiagnosticText([
+    'github_pat_1234567890abcdefghij_extra',
+    'ghs_1234567890abcdef',
+    'sk-1234567890abcdef',
+    'AKIA1234567890ABCDEF',
+    'eyJabcdefgh.abcdefgh.abcdefgh',
+    '"apiKey":"hidden"',
+    'https://user:pass@example.com/path',
+    'Cookie: session=hidden',
+    'TOKEN=bare-token PASSWORD=bare-password API_KEY=bare-key SECRET=bare-secret',
+    'copilot --password "command-line-hidden" --token=another-hidden-value',
+  ].join('\n'))
+  assert.doesNotMatch(text, /hidden|another-hidden-value|bare-|user:pass|github_pat_|ghs_|sk-|AKIA|eyJ/)
+})
+
 test('redactDiagnosticText leaves ordinary text untouched', () => {
   assert.equal(redactDiagnosticText('Session started successfully.'), 'Session started successfully.')
 })

@@ -92,8 +92,8 @@ test('RPC times out and rejects new work after stop', async () => {
 })
 
 test('session fork version and UUID validation are conservative', () => {
-  for (const version of [null, 'unknown', '1.0.81', '1.0.82-preview', '0.9.999']) assert.equal(supportsSessionFork(version), false)
-  for (const version of ['1.0.82', '1.0.83', '1.1.0', '2.0.0']) assert.equal(supportsSessionFork(version), true)
+  for (const version of [null, 'unknown', '1.0.81', '0.9.999']) assert.equal(supportsSessionFork(version), false)
+  for (const version of ['1.0.82-preview', '1.0.82', '1.0.83', '1.1.0', '2.0.0']) assert.equal(supportsSessionFork(version), true)
   assert.ok(isForkSessionId(SOURCE))
   for (const id of ['--flag', '../path', '', null, '123']) assert.equal(isForkSessionId(id), false)
 })

@@ -10,6 +10,8 @@ export interface PtyLike {
   write(data: string): void
   resize(cols: number, rows: number): void
   kill(signal?: string): void
+  /** Release native/process handles after either natural exit or termination. */
+  dispose?(): void
 }
 
 export interface SpawnOptions {

@@ -16,6 +16,7 @@ interface Harness {
   createMain(): Promise<DesktopState>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
   restore(): Promise<void>
+  beginQuit(): void
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; stopped: boolean }[]
@@ -57,6 +58,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null };
         }
         export function withCopilotPathAdditions(environment) { return environment; }
+        export function windowsSystemDirectory() { return 'C:/Windows/System32'; }
+        export function windowsSystemExecutable(name) { return 'C:/Windows/System32/' + name; }
+        export async function findWindowsExecutable() { return null; }
       `,
     }
     const source = await readFile(mainPath, 'utf8')
@@ -70,6 +74,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           createMain: () => createSessionTab(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForActiveProfile,
+          beginQuit: () => app.emit('before-quit', { preventDefault() {} }),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
           async cleanup() { await stopAllSessions(); await configWriteQueue; },
         };
@@ -154,5 +159,46 @@ test('duplicate fork IPC reports existing side chat instead of ignoring UUID/tit
     assert.equal(after.activeTabId, main.activeTabId)
     assert.deepEqual(after.tabs.map((tab) => [tab.id, tab.title, tab.lastSessionId]), opened.tabs.map((tab) => [tab.id, tab.title, tab.lastSessionId]))
     assert.equal(harness.spawns.length, 2)
+  })
+})
+
+test('concurrent profile restoration coalesces to one set of session processes', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.tabs = [{ title: 'Main', lastSessionId: SOURCE }, { title: 'Side', lastSessionId: FORK, sideChat: true, sideParentSessionId: SOURCE }]
+    await Promise.all([harness.restore(), harness.restore()])
+    const state = await harness.request('desktop:get-state')
+    assert.equal(state.tabs.length, 2)
+    assert.equal(harness.spawns.length, 2)
+  })
+})
+
+test('quit admission prevents a zero-tab pending creation from spawning', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    harness.beginQuit()
+    await assert.rejects(() => harness.createMain(), /shutting down/)
+    assert.equal(harness.spawns.length, 0)
+  })
+})
+
+test('file reveal rejects a syntactically valid but nonexistent session tab', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    await assert.rejects(
+      () => harness.request('desktop:reveal-path', 'tab-999', 'C:\\Windows\\notepad.exe'),
+      /Invalid session tab/,
+    )
+  })
+})
+
+test('file reveal rejects paths outside the session workspace', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    const state = await harness.createMain()
+    await assert.rejects(
+      () => harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'),
+      /within the session workspace/,
+    )
   })
 })

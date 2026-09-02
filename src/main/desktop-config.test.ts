@@ -154,3 +154,15 @@ test('readDesktopConfig accepts persisted close behavior values', async () => {
     }
   })
 })
+
+test('readDesktopConfig reports and sanitizes legacy provider URL credentials', async () => {
+  await withTempFile(async (filename) => {
+    await writeFile(filename, JSON.stringify({
+      provider: { type: 'openai', baseUrl: 'https://name:secret@example.test/v1', model: 'model' },
+    }), 'utf8')
+    const migrations: string[] = []
+    const config = await readDesktopConfig(filename, (message) => migrations.push(message))
+    assert.equal(config.provider.baseUrl, 'https://example.test/v1')
+    assert.equal(migrations.length, 1)
+  })
+})

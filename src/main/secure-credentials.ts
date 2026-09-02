@@ -27,6 +27,22 @@ export function isCredentialName(value: unknown): value is CredentialName {
   return typeof value === 'string' && (CREDENTIAL_NAMES as readonly string[]).includes(value)
 }
 
+const SENSITIVE_ENVIRONMENT_NAME = /(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIALS?|AUTHORIZATION)/i
+
+export function sensitiveEnvironmentNames(environment: NodeJS.ProcessEnv): string[] {
+  return Object.keys(environment)
+    .filter((name) => typeof environment[name] === 'string' && environment[name]!.length > 0)
+    .filter((name) => isCredentialName(name.toUpperCase()) || SENSITIVE_ENVIRONMENT_NAME.test(name))
+    .sort((left, right) => left.localeCompare(right))
+}
+
+/** Remove credentials before spawning helpers that do not need authentication. */
+export function withoutSensitiveEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = { ...environment }
+  for (const name of sensitiveEnvironmentNames(result)) delete result[name]
+  return result
+}
+
 export interface EncryptionProvider {
   isEncryptionAvailable(): boolean
   encryptString(value: string): Buffer
@@ -229,7 +245,6 @@ export class SecureCredentialStore {
  * descendants.
  */
 export function secretEnvArgs(mergedEnvironment: NodeJS.ProcessEnv): string[] {
-  return CREDENTIAL_NAMES
-    .filter((name) => typeof mergedEnvironment[name] === 'string' && mergedEnvironment[name]!.length > 0)
+  return sensitiveEnvironmentNames(mergedEnvironment)
     .map((name) => `--secret-env-vars=${name}`)
 }

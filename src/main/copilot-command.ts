@@ -16,16 +16,27 @@ export interface CopilotCommandResult {
   stderr: string
 }
 
+export function buildCopilotCommandArgs(
+  resolution: Pick<CopilotResolution, 'prefixArgs'>,
+  args: readonly string[],
+): string[] {
+  return [...resolution.prefixArgs, ...args]
+}
+
 export async function runCopilotCommand(
   resolution: CopilotResolution,
   args: readonly string[],
-  options: { timeout?: number | undefined; cwd?: string | undefined; env?: NodeJS.ProcessEnv | undefined } = {},
+  options: {
+    timeout?: number | undefined
+    cwd?: string | undefined
+    env?: NodeJS.ProcessEnv | undefined
+  } = {},
 ): Promise<CopilotCommandResult> {
   if (resolution.version === null) throw new Error('Copilot CLI is not installed')
   const env = withCopilotPathAdditions(options.env ?? process.env, resolution.pathAdditions)
   const result = await execFileAsync(
     resolution.command,
-    [...resolution.prefixArgs, ...args],
+    buildCopilotCommandArgs(resolution, args),
     {
       env,
       timeout: options.timeout ?? 30_000,

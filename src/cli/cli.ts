@@ -22,6 +22,7 @@ import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-
 import { secretEnvArgs } from '../main/secure-credentials.js'
 import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES } from '../main/copilot-command.js'
 import { needsToolAllowlistProbe, permissionCompatibilityWarning } from '../main/permission-presets.js'
+import { startWindowsProcessWatchdog } from '../main/windows-process-watchdog.js'
 
 const paths = getCliPaths()
 const daemonEntry = fileURLToPath(new URL('./daemon.js', import.meta.url))
@@ -99,7 +100,7 @@ async function start(workspaceArgument: string | undefined, extraArgs: string[])
       return
     }
 
-    const logHandle = openSync(paths.logPath, 'a')
+    const logHandle = openSync(paths.logPath, 'a', 0o600)
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(process.execPath, [daemonEntry, workspace, ...extraArgs], {
@@ -223,8 +224,15 @@ async function runProgrammatic(rawArgs: string[]): Promise<void> {
       stdio: 'inherit',
       windowsHide: false,
     })
-    child.once('error', reject)
+    const watchdog = process.platform === 'win32' && child.pid
+      ? startWindowsProcessWatchdog(child.pid, environment)
+      : null
+    child.once('error', (error) => {
+      watchdog?.release()
+      reject(error)
+    })
     child.once('exit', (code, signal) => {
+      watchdog?.release()
       if (code === 0) resolveRun()
       else reject(new Error(`copilot run failed (code ${String(code)}, signal ${String(signal ?? 'none')})`))
     })
