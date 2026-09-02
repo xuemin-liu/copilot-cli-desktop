@@ -1,6 +1,6 @@
 {
   "name": "copilot-cli-desktop",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "author": "copilot-cli-desktop contributors",
   "description": "An unofficial Windows-first Electron desktop shell for the GitHub Copilot CLI",
@@ -24,8 +24,8 @@
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
-    "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js",
-    "dist:win": "npm run build && electron-builder --win --publish never && node dist/scripts/audit-package.js"
+    "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
+    "dist:win": "npm run build && electron-builder --win --publish never && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
@@ -57,7 +57,16 @@
     "productName": "Copilot CLI Desktop",
     "asar": true,
     "npmRebuild": false,
-    "afterPack": "scripts/after-pack.cjs",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": true
+    },
     "directories": {
       "output": "release"
     },

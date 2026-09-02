@@ -108,6 +108,8 @@ import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
 const BACKGROUND_START_ARGUMENT = '--background'
+const PACKAGE_SMOKE_ENVIRONMENT = 'COPILOT_DESKTOP_PACKAGE_SMOKE'
+const PACKAGE_SMOKE_READY_MARKER = '[package-smoke] renderer-ready'
 const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
@@ -1489,7 +1491,10 @@ function installApplicationMenu(): void {
   Menu.setApplicationMenu(menu)
 }
 
-function createWindow(showOnReady = true): BrowserWindow {
+function createWindow(
+  showOnReady = true,
+  packageSmokeCallbacks?: { didFinishLoad: () => void; didFailLoad: (description: string) => void },
+): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -1509,6 +1514,17 @@ function createWindow(showOnReady = true): BrowserWindow {
   })
   window.webContents.session.setPermissionCheckHandler(() => false)
   window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  let mainFrameLoadFailed = false
+  if (packageSmokeCallbacks) {
+    window.webContents.once('did-fail-load', (_event, _errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+      if (!isMainFrame) return
+      mainFrameLoadFailed = true
+      packageSmokeCallbacks.didFailLoad(errorDescription)
+    })
+    window.webContents.once('did-finish-load', () => {
+      if (!mainFrameLoadFailed) packageSmokeCallbacks.didFinishLoad()
+    })
+  }
   window.once('ready-to-show', () => {
     if (showOnReady) window.show()
   })
@@ -2152,7 +2168,19 @@ if (!app.requestSingleInstanceLock()) {
     credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage)
 
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
-    mainWindow = createWindow(!startHidden)
+    const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'
+    mainWindow = createWindow(!startHidden, packageSmokeTest
+      ? {
+        didFinishLoad: () => {
+          process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
+          setTimeout(() => app.exit(0), 250)
+        },
+        didFailLoad: (description) => {
+          process.stderr.write(`[package-smoke] renderer-load-failed: ${description}\n`)
+          setTimeout(() => app.exit(1), 250)
+        },
+      }
+      : undefined)
     updateTrayVisibility()
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)

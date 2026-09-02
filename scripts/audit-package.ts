@@ -49,7 +49,10 @@ const expectedFuses = new Map([
   [FuseV1Options.EnableNodeCliInspectArguments, FuseState.DISABLE],
   [FuseV1Options.EnableEmbeddedAsarIntegrityValidation, FuseState.ENABLE],
   [FuseV1Options.OnlyLoadAppFromAsar, FuseState.ENABLE],
-  [FuseV1Options.GrantFileProtocolExtraPrivileges, FuseState.DISABLE],
+  [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot, FuseState.DISABLE],
+  // The renderer is loaded from file:// inside app.asar. Disabling this fuse
+  // makes Electron reject that entry point with ERR_FILE_NOT_FOUND.
+  [FuseV1Options.GrantFileProtocolExtraPrivileges, FuseState.ENABLE],
 ])
 for (const [fuse, expected] of expectedFuses) {
   if (fuses[fuse] !== expected) throw new Error(`Packaged Electron fuse ${fuse} is not hardened`)

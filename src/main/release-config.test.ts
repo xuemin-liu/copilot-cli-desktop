@@ -5,7 +5,7 @@ import test from 'node:test'
 interface PackageBuildConfig {
   scripts?: Record<string, unknown>
   build?: {
-    afterPack?: unknown
+    electronFuses?: Record<string, unknown>
     files?: unknown[]
     publish?: Array<{ provider?: unknown; owner?: unknown; repo?: unknown }>
     nsis?: { artifactName?: unknown }
@@ -21,9 +21,20 @@ test('release configuration keeps the GitHub updater feed, asset name, and packa
   }])
   assert.equal(manifest.build?.nsis?.artifactName, 'Copilot-CLI-Desktop-Setup-${version}.${ext}')
   assert.match(String(manifest.scripts?.['pack:win']), /audit-package/)
+  assert.match(String(manifest.scripts?.['pack:win']), /package-smoke/)
   assert.match(String(manifest.scripts?.['dist:win']), /audit-package/)
+  assert.match(String(manifest.scripts?.['dist:win']), /package-smoke/)
   assert.match(String(manifest.scripts?.['dist:win']), /--publish never/)
-  assert.equal(manifest.build?.afterPack, 'scripts/after-pack.cjs')
+  assert.deepEqual(manifest.build?.electronFuses, {
+    runAsNode: false,
+    enableCookieEncryption: true,
+    enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: false,
+    enableEmbeddedAsarIntegrityValidation: true,
+    onlyLoadAppFromAsar: true,
+    loadBrowserProcessSpecificV8Snapshot: false,
+    grantFileProtocolExtraPrivileges: true,
+  })
   assert.ok(manifest.build?.files?.includes('!dist/**/*.test.js'))
   assert.ok(manifest.build?.files?.includes('!dist/**/*.map'))
 })
