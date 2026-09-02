@@ -23,7 +23,9 @@ export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
 /** Minimum mouse travel that identifies a Copilot-owned text selection drag. */
 export const NATIVE_SELECTION_DRAG_PX = 4
 
-const MODIFIER_KEYS = new Set(['Alt', 'AltGraph', 'Control', 'Meta', 'OS', 'Shift'])
+const MODIFIER_KEYS = new Set([
+  'Alt', 'AltGraph', 'CapsLock', 'Control', 'Meta', 'NumLock', 'OS', 'ScrollLock', 'Shift',
+])
 
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {

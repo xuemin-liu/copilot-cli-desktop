@@ -134,6 +134,9 @@ test('arms native copy after keyboard-driven TUI selection', () => {
 
   tracker.onMouseDown(0, false, 10, 10)
   tracker.onMouseUp(0, 20, 10)
+  tracker.onKeyDown('CapsLock', false)
+  tracker.onKeyDown('NumLock', false)
+  tracker.onKeyDown('ScrollLock', false)
   tracker.onKeyDown('Control', false)
   assert.equal(tracker.consumeSelection(), true)
 })
