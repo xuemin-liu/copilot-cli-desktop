@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { detectApprovalPrompt, extractSessionId } from './approval-heuristic.js'
+import { windowsSystemExecutable } from './resolve-copilot.js'
+import { detectApprovalPrompt } from './approval-heuristic.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 
@@ -23,6 +24,7 @@ export interface PtySessionOptions {
   rows?: number
   spawnPty: SpawnPtyFn
   forceKillTimeoutMs?: number
+  sessionId?: string | null
 }
 
 export interface PtySessionExit {
@@ -46,7 +48,7 @@ export class PtySession extends EventEmitter {
   private readonly outputLines: string[] = []
   private pendingLine = ''
   private heuristicBuffer = ''
-  private lastKnownSessionId: string | null = null
+  private lastKnownSessionId: string | null
 
   constructor(options: PtySessionOptions) {
     super()
@@ -56,6 +58,7 @@ export class PtySession extends EventEmitter {
       rows: options.rows ?? 24,
       forceKillTimeoutMs: options.forceKillTimeoutMs ?? 3_000,
     }
+    this.lastKnownSessionId = options.sessionId ?? null
   }
 
   get status(): SessionLifecycleStatus {
@@ -151,8 +154,6 @@ export class PtySession extends EventEmitter {
       // Scan a bounded rolling stream so the heuristics see text spanning
       // adjacent reads rather than treating transport chunks as message lines.
       this.heuristicBuffer = `${this.heuristicBuffer}${data}`.slice(-MAX_HEURISTIC_CHARS)
-      const sessionId = extractSessionId(this.heuristicBuffer)
-      if (sessionId) this.lastKnownSessionId = sessionId
       if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {
         this.setStatus('approval-needed')
         this.emit('desktop-event', { type: 'approval-needed' })
@@ -182,6 +183,7 @@ export class PtySession extends EventEmitter {
         }
       }
       this.emit('exit', { exitCode, signal, expected } satisfies PtySessionExit)
+      pty.dispose?.()
     })
 
     this.setStatus('running')
@@ -219,12 +221,12 @@ export class PtySession extends EventEmitter {
 
     if (process.platform === 'win32' && pty.pid) {
       try {
-        await execFileAsync('taskkill.exe', ['/PID', String(pty.pid), '/T', '/F'], {
+        await execFileAsync(windowsSystemExecutable('taskkill.exe'), ['/PID', String(pty.pid), '/T', '/F'], {
           windowsHide: true,
           timeout: 5_000,
         })
       } catch {
-        pty.kill()
+        try { pty.kill() } catch { pty.dispose?.() }
       }
     } else {
       pty.kill('SIGTERM')
@@ -235,7 +237,12 @@ export class PtySession extends EventEmitter {
       new Promise<true>((resolve) => setTimeout(() => resolve(true), this.options.forceKillTimeoutMs)),
     ])
     if (timedOut && this.pty === pty) {
-      pty.kill('SIGKILL')
+      try {
+        if (process.platform === 'win32') pty.kill()
+        else pty.kill('SIGKILL')
+      } catch {
+        pty.dispose?.()
+      }
     }
   }
 

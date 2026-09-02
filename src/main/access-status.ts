@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { windowsSystemExecutable } from './resolve-copilot.js'
 import { PERMISSION_PRESET_INFO, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 
 const execFileAsync = promisify(execFile)
@@ -25,7 +26,7 @@ async function detectElevation(): Promise<ElevationStatus> {
     return typeof process.getuid === 'function' && process.getuid() === 0 ? 'administrator' : 'standard-user'
   }
   try {
-    const { stdout } = await execFileAsync('whoami.exe', ['/groups', '/fo', 'csv', '/nh'], {
+    const { stdout } = await execFileAsync(windowsSystemExecutable('whoami.exe'), ['/groups', '/fo', 'csv', '/nh'], {
       windowsHide: true,
       timeout: 3_000,
     })

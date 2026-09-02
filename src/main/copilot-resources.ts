@@ -1,3 +1,5 @@
+import { parseSafeHttpUrl } from './external-targets.js'
+
 export type CopilotResourceKind = 'plugin' | 'mcp' | 'skill'
 export type CopilotResourceAction = 'enable' | 'disable' | 'remove'
 
@@ -47,7 +49,6 @@ export function buildSkillInstallArgs(source: string, project: boolean): string[
 }
 
 export function buildRemoteMcpAddArgs(name: string, url: string, transport: 'http' | 'sse'): string[] {
-  const parsed = new URL(normalizedValue(url, 'MCP server URL'))
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('MCP server URL must use HTTP or HTTPS')
+  const parsed = parseSafeHttpUrl(normalizedValue(url, 'MCP server URL'), 'MCP server URL')
   return ['mcp', 'add', '--transport', transport, normalizedValue(name, 'MCP server name', 100), parsed.href]
 }

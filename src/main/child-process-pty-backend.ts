@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { constants } from 'node:os'
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
+import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 
 /**
  * Headless backend for the background CLI daemon (src/cli/daemon.ts). Unlike
@@ -33,6 +34,10 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
   // Writable streams emit an unhandled `error` in that race unless a listener
   // is present, which would otherwise terminate the background daemon.
   child.stdin?.on('error', () => undefined)
+  const watchdog = process.platform === 'win32' && child.pid
+    ? startWindowsProcessWatchdog(child.pid)
+    : null
+  child.once('exit', () => watchdog?.release())
 
   return {
     pid: child.pid,
@@ -67,6 +72,12 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     resize: () => {},
     kill: (signal) => {
       child.kill(signal as NodeJS.Signals | undefined)
+    },
+    dispose: () => {
+      watchdog?.release()
+      child.stdin?.destroy()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
     },
   }
 }

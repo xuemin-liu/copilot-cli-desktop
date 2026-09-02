@@ -31,6 +31,7 @@ import {
   type DesktopPreferences,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
+import { appendBoundedLog, pruneSessionLogDirectories } from './log-retention.js'
 import {
   EMPTY_COPILOT_CAPABILITIES,
   discoverCopilotCapabilities,
@@ -60,6 +61,7 @@ import {
   type CopilotResourcesState,
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
+import { isLocalFilesystemPath, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import {
@@ -79,7 +81,13 @@ import {
   normalizeSessionLaunchConfig,
   type SessionLaunchConfig,
 } from './session-launch.js'
-import { SecureCredentialStore, isCredentialName, secretEnvArgs, type CredentialName } from './secure-credentials.js'
+import {
+  SecureCredentialStore,
+  isCredentialName,
+  secretEnvArgs,
+  withoutSensitiveEnvironment,
+  type CredentialName,
+} from './secure-credentials.js'
 import {
   EMPTY_TABS_STATE,
   activateTab,
@@ -121,6 +129,7 @@ let closePromptWindow: BrowserWindow | null = null
 let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
+let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
 let capabilityProbeGeneration = 0
@@ -174,7 +183,7 @@ function queueTabTransition<T>(tabId: string, fn: () => Promise<T>): Promise<T> 
  * be raced by one that slips into the per-tab queue just ahead of it (a
  * pointless spawn immediately followed by stopAllSessions killing it). */
 function shuttingDown(): boolean {
-  return installInProgress || quittingAllSessions
+  return installInProgress || quittingAllSessions || explicitQuitRequested
 }
 
 /** The in-flight restart promise for a tab, if any. A rapid double-click (two
@@ -188,6 +197,7 @@ function shuttingDown(): boolean {
  * Close, which still needs to run once the restart it's queued behind
  * finishes, a second Restart on the same tab is redundant with the first. */
 const pendingRestarts = new Map<string, Promise<DesktopState>>()
+const pendingProfileRestores = new Map<string, Promise<void>>()
 const pendingForks = new Map<string, Promise<DesktopState>>()
 
 function scheduleActivityBroadcast(tabId: string): void {
@@ -262,6 +272,7 @@ function protectedCredentialPath(): string {
 const launchId = randomUUID()
 
 function sessionLogPath(tabId: string): string {
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
   return join(app.getPath('userData'), 'logs', 'sessions', launchId, `${tabId}.log`)
 }
 
@@ -269,28 +280,44 @@ function appLogPath(): string {
   return join(app.getPath('userData'), 'logs', 'app.log')
 }
 
-async function writeAppLog(line: string): Promise<void> {
-  await mkdir(dirname(appLogPath()), { recursive: true })
-  await appendFile(appLogPath(), `${new Date().toISOString()} ${line}\n`, 'utf8').catch(() => {})
+function writeAppLog(line: string): Promise<void> {
+  const operation = appLogWriteQueue.then(() => appendBoundedLog(
+    appLogPath(),
+    `${new Date().toISOString()} ${line}\n`,
+  ))
+  appLogWriteQueue = operation.catch(() => undefined)
+  return appLogWriteQueue
 }
 
 const MAX_SESSION_LOG_BYTES = 5 * 1024 * 1024
 const sessionLogBytesWritten = new Map<string, number>()
+const sessionLogWriteQueues = new Map<string, Promise<void>>()
 
-async function writeSessionLog(tabId: string, chunk: string): Promise<void> {
+async function appendSessionLog(tabId: string, chunk: string): Promise<void> {
   const written = sessionLogBytesWritten.get(tabId) ?? 0
   if (written >= MAX_SESSION_LOG_BYTES) return
   const filename = sessionLogPath(tabId)
-  await mkdir(dirname(filename), { recursive: true })
+  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
   const chunkBytes = Buffer.byteLength(chunk, 'utf8')
   if (written + chunkBytes <= MAX_SESSION_LOG_BYTES) {
-    await appendFile(filename, chunk, 'utf8').catch(() => {})
+    await appendFile(filename, chunk, { encoding: 'utf8', mode: 0o600 })
     sessionLogBytesWritten.set(tabId, written + chunkBytes)
     return
   }
   const truncated = truncateUtf8(chunk, MAX_SESSION_LOG_BYTES - written)
-  await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, 'utf8').catch(() => {})
+  await appendFile(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`, { encoding: 'utf8', mode: 0o600 })
   sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
+}
+
+function writeSessionLog(tabId: string, chunk: string): Promise<void> {
+  const previous = sessionLogWriteQueues.get(tabId) ?? Promise.resolve()
+  const operation = previous.then(() => appendSessionLog(tabId, chunk))
+  const tracked = operation.catch(() => undefined)
+  sessionLogWriteQueues.set(tabId, tracked)
+  void tracked.finally(() => {
+    if (sessionLogWriteQueues.get(tabId) === tracked) sessionLogWriteQueues.delete(tabId)
+  })
+  return operation
 }
 
 function snapshot(): DesktopState {
@@ -542,19 +569,19 @@ function rebuildTrayMenu(): void {
     {
       label: 'New Session Tab',
       enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-      click: () => void createSessionTab().catch((error) => void writeAppLog(String(error))),
+      click: () => observe(createSessionTab(), 'Could not create session tab'),
     },
     {
       label: 'Restart Active Session',
       enabled: !shuttingDown() && activeTabIsRestartable(),
-      click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
+      click: () => tabsState.activeTabId && observe(restartSessionTab(tabsState.activeTabId), 'Could not restart session tab'),
     },
     {
       label: 'Show Active Session Log',
       enabled: tabsState.activeTabId !== null,
-      click: () => tabsState.activeTabId && void showSessionLog(tabsState.activeTabId),
+      click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
     },
-    { label: 'Desktop Settings…', click: () => void showSettingsWindow() },
+    { label: 'Desktop Settings…', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
     { type: 'separator' },
     { label: 'Quit', click: () => void requestExplicitQuit() },
   ]))
@@ -585,15 +612,15 @@ async function requestExplicitQuit(): Promise<void> {
 
 async function showSessionLog(tabId: string): Promise<void> {
   const filename = sessionLogPath(tabId)
-  await mkdir(dirname(filename), { recursive: true })
-  await appendFile(filename, '', 'utf8')
+  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
+  await appendFile(filename, '', { encoding: 'utf8', mode: 0o600 })
   shell.showItemInFolder(filename)
 }
 
 async function showApplicationLog(): Promise<void> {
   const filename = appLogPath()
-  await mkdir(dirname(filename), { recursive: true })
-  await appendFile(filename, '', 'utf8')
+  await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
+  await appendFile(filename, '', { encoding: 'utf8', mode: 0o600 })
   shell.showItemInFolder(filename)
 }
 
@@ -748,7 +775,7 @@ function finalizeSessionArgs(
   const identity = plan.connectSessionId
     ? [`--connect=${plan.connectSessionId}`]
     : freshSession && deterministicSessionId
-      ? ['--session-id', deterministicSessionId, '--name', plan.sessionTitle]
+      ? [`--session-id=${deterministicSessionId}`, `--name=${plan.sessionTitle}`]
       : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
   const args = [
     ...plan.prefixArgs,
@@ -757,7 +784,7 @@ function finalizeSessionArgs(
     // continue to work even if the CLI's default or saved setting is off.
     '--mouse=on',
     ...identity,
-    ...plan.attachmentPaths.flatMap((path) => ['--attachment', path]),
+    ...plan.attachmentPaths.map((path) => `--attachment=${path}`),
     ...launchArgs,
     ...plan.permissionArgs,
     ...plan.secretArgs,
@@ -779,7 +806,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('log', (chunk: string) => {
     tabsState = touchTab(tabsState, id)
     scheduleActivityBroadcast(id)
-    void writeSessionLog(id, chunk)
+    observe(writeSessionLog(id, chunk), 'Could not write session log')
     const window = mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk })
   })
@@ -827,6 +854,7 @@ async function createSessionTab(
     cwd: plan.cwd,
     env: plan.env,
     spawnPty: spawnNodePty,
+    sessionId: deterministicSessionId,
   })
   managedTabs.set(id, { session })
   tabsState = createTab(tabsState, {
@@ -954,6 +982,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     tabsState = closeTab(tabsState, tabId)
     syncTabState()
     persistProfileTabs()
+    await sessionLogWriteQueues.get(tabId)
     sessionLogBytesWritten.delete(tabId)
     broadcastState()
     refreshMenus()
@@ -1033,6 +1062,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       cwd: plan.cwd,
       env: plan.env,
       spawnPty: spawnNodePty,
+      sessionId: deterministicSessionId,
       ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
     })
     managedTabs.set(tabId, { session })
@@ -1083,25 +1113,38 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 async function restoreTabsForActiveProfile(): Promise<void> {
   const profile = activeWorkspaceProfile(desktopConfig)
   if (!profile || !state.resolution || state.resolution.version === null) return
-  const restored: WorkspaceProfile['tabs'] = profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }]
-  for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
-    const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
-    try {
-      // Parents are normally saved first. An unavailable parent leaves the
-      // fork as an independent restricted tab instead of dropping it.
-      const parent = candidate.sideParentSessionId
-        ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
-        : undefined
-      await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
-        ...(candidate.sideChat ? { sideChat: true as const } : {}),
-        ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-      })
-    } catch (error) {
-      await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
+  const pending = pendingProfileRestores.get(profile.id)
+  if (pending) return pending
+  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id)) return
+  const operation = (async () => {
+    const restored: WorkspaceProfile['tabs'] = profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }]
+    for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
+      const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
+      try {
+        const parent = candidate.sideParentSessionId
+          ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
+          : undefined
+        await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
+          ...(candidate.sideChat ? { sideChat: true as const } : {}),
+          ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
+        })
+      } catch (error) {
+        await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
+      }
     }
+    syncTabState()
+    broadcastState()
+  })()
+  pendingProfileRestores.set(profile.id, operation)
+  try {
+    await operation
+  } finally {
+    if (pendingProfileRestores.get(profile.id) === operation) pendingProfileRestores.delete(profile.id)
   }
-  syncTabState()
-  broadcastState()
+}
+
+function observe(operation: Promise<unknown>, context: string): void {
+  void operation.catch((error) => writeAppLog(`${context}: ${String(error)}`))
 }
 
 async function selectWorkspace(): Promise<DesktopState> {
@@ -1318,10 +1361,11 @@ function resolvedCopilot(): CopilotResolution {
   return resolution
 }
 
-async function managedCopilotEnvironment(): Promise<NodeJS.ProcessEnv> {
-  const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
-  const provider = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
-  return { ...process.env, ...provider, ...vaultEnvironment }
+function resourceCopilotEnvironment(): NodeJS.ProcessEnv {
+  // Resource discovery and installation must not inherit provider or GitHub
+  // credentials. Private authenticated installs remain available directly in
+  // Copilot CLI, where the user can make that trust decision explicitly.
+  return withoutSensitiveEnvironment(process.env)
 }
 
 async function refreshCopilotResources(environment?: NodeJS.ProcessEnv): Promise<void> {
@@ -1331,7 +1375,8 @@ async function refreshCopilotResources(environment?: NodeJS.ProcessEnv): Promise
   try {
     const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], {
       cwd: activeWorkspaceProfile(desktopConfig)?.path,
-      env: environment ?? await managedCopilotEnvironment(),
+      env: environment ?? resourceCopilotEnvironment(),
+      protectSecrets: true,
     })
     const output = (result.stdout || result.stderr).trim().slice(0, 500_000)
     copilotResources = {
@@ -1350,11 +1395,12 @@ async function refreshCopilotResources(environment?: NodeJS.ProcessEnv): Promise
 }
 
 async function runCopilotResourceMutation(args: string[]): Promise<void> {
-  const environment = await managedCopilotEnvironment()
+  const environment = resourceCopilotEnvironment()
   await runCopilotCommand(resolvedCopilot(), args, {
     cwd: activeWorkspaceProfile(desktopConfig)?.path,
     timeout: 2 * 60_000,
     env: environment,
+    protectSecrets: true,
   })
   try {
     await refreshCopilotResources(environment)
@@ -1374,36 +1420,36 @@ function installApplicationMenu(): void {
     {
       label: 'File',
       submenu: [
-        { label: 'Open Workspace…', accelerator: 'CmdOrCtrl+O', click: () => void selectWorkspace() },
+        { label: 'Open Workspace…', accelerator: 'CmdOrCtrl+O', click: () => observe(selectWorkspace(), 'Could not open workspace') },
         {
           label: 'New Session Tab',
           accelerator: 'CmdOrCtrl+T',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => void createSessionTab().catch((error) => void writeAppLog(String(error))),
+          click: () => observe(createSessionTab(), 'Could not create session tab'),
         },
         {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
           enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && void closeSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
+          click: () => tabsState.activeTabId && observe(closeSessionTab(tabsState.activeTabId), 'Could not close session tab'),
         },
         {
           label: 'Resume Session…',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => void createSessionTab(undefined, 'picker').catch((error) => void writeAppLog(String(error))),
+          click: () => observe(createSessionTab(undefined, 'picker'), 'Could not open session picker'),
         },
         {
           label: 'New Session with Attachments…',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => void createSessionWithAttachments().catch((error) => void writeAppLog(String(error))),
+          click: () => observe(createSessionWithAttachments(), 'Could not create attached session'),
         },
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
           enabled: !shuttingDown() && activeTabIsRestartable(),
-          click: () => tabsState.activeTabId && void restartSessionTab(tabsState.activeTabId).catch((error) => void writeAppLog(String(error))),
+          click: () => tabsState.activeTabId && observe(restartSessionTab(tabsState.activeTabId), 'Could not restart session tab'),
         },
-        { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => void showSettingsWindow() },
+        { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
         { type: 'separator' },
         { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() },
       ],
@@ -1411,9 +1457,11 @@ function installApplicationMenu(): void {
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
+        ...(!app.isPackaged ? [
+          { role: 'reload' as const },
+          { role: 'toggleDevTools' as const },
+          { type: 'separator' as const },
+        ] : []),
         { role: 'resetZoom' },
         { role: 'zoomIn' },
         { role: 'zoomOut' },
@@ -1425,12 +1473,12 @@ function installApplicationMenu(): void {
         {
           label: 'Show Active Session Log',
           enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && void showSessionLog(tabsState.activeTabId),
+          click: () => tabsState.activeTabId && observe(showSessionLog(tabsState.activeTabId), 'Could not show session log'),
         },
-        { label: 'Show Application Log', click: () => void showApplicationLog() },
+        { label: 'Show Application Log', click: () => observe(showApplicationLog(), 'Could not show application log') },
         { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },
         { type: 'separator' },
-        { label: 'Open Releases', click: () => void shell.openExternal(RELEASES_URL) },
+        { label: 'Open Releases', click: () => observe(shell.openExternal(RELEASES_URL), 'Could not open releases') },
         { role: 'about' },
       ],
     },
@@ -1453,8 +1501,11 @@ function createWindow(showOnReady = true): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
     },
   })
+  window.webContents.session.setPermissionCheckHandler(() => false)
+  window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   window.once('ready-to-show', () => {
     if (showOnReady) window.show()
   })
@@ -1470,13 +1521,13 @@ function createWindow(showOnReady = true): BrowserWindow {
       return
     }
     event.preventDefault()
-    void promptForWindowClose(window)
+    observe(promptForWindowClose(window), 'Could not show close confirmation')
   })
   window.on('closed', () => {
     finishClosePrompt(window)
     mainWindow = null
   })
-  void window.loadFile(rendererPath('index.html'))
+  observe(window.loadFile(rendererPath('index.html')), 'Could not load application window')
   return window
 }
 
@@ -1500,8 +1551,11 @@ async function showSettingsWindow(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
     },
   })
+  window.webContents.session.setPermissionCheckHandler(() => false)
+  window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
   settingsWindow = window
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, targetUrl) => {
@@ -1616,7 +1670,8 @@ function scheduleAutomaticUpdateCheck(delayMs = 15_000): void {
   updateCheckTimer = setTimeout(() => {
     updateCheckTimer = null
     const operation = updateController?.snapshot.canCheck ? updateController.check() : Promise.resolve()
-    void operation.finally(() => scheduleAutomaticUpdateCheck(6 * 60 * 60 * 1_000))
+    void operation.catch((error) => writeAppLog(`Automatic update check failed: ${String(error)}`))
+      .finally(() => scheduleAutomaticUpdateCheck(6 * 60 * 60 * 1_000))
   }, delayMs)
   updateCheckTimer.unref()
 }
@@ -1699,7 +1754,14 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {
   assertTrustedIpcSender(event)
-  if (typeof tabId !== 'string' || typeof cols !== 'number' || typeof rows !== 'number') {
+  if (
+    !isSessionTabId(tabId)
+    || typeof cols !== 'number'
+    || typeof rows !== 'number'
+    || !Number.isFinite(cols)
+    || !Number.isFinite(rows)
+    || cols < 1 || rows < 1 || cols > 1_000 || rows > 1_000
+  ) {
     throw new Error('Invalid pty resize request')
   }
   managedTabs.get(tabId)?.session.resize(Math.max(1, Math.round(cols)), Math.max(1, Math.round(rows)))
@@ -1715,7 +1777,7 @@ ipcMain.handle('desktop:open-settings', (event) => {
 })
 ipcMain.handle('desktop:show-session-log', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
-  if (typeof tabId !== 'string') throw new Error('Invalid session tab')
+  if (!isSessionTabId(tabId) || !tabsState.tabs.some((tab) => tab.id === tabId)) throw new Error('Invalid session tab')
   return showSessionLog(tabId)
 })
 ipcMain.handle('desktop:copy-diagnostics', (event) => {
@@ -1763,23 +1825,12 @@ ipcMain.handle('desktop:connect-remote-session', (event, sessionId: unknown) => 
 ipcMain.handle('desktop:open-external-url', async (event, url: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof url !== 'string' || url.length === 0 || url.length > 8_192) throw new Error('Invalid URL')
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error('Invalid URL')
-  }
-  // Only ever hand the OS browser a link the terminal itself printed, and
-  // only when it is a web URL — never a scheme that could launch another
-  // local program (file:, mailto:, a custom app protocol, etc.).
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Only http and https links can be opened')
+  const parsed = parseSafeHttpUrl(url)
   await shell.openExternal(parsed.href)
 })
 async function pathExists(candidate: string, timeoutMs = 3_000): Promise<boolean> {
-  // A path a session prints can name a UNC/network location; a disconnected
-  // or slow share can leave `access` pending for a long time. Fail closed on
-  // a timeout rather than blocking this handler (and, if it were ever done
-  // synchronously, the whole main-process event loop) indefinitely.
+  // Even local removable or offline storage can leave `access` pending. Fail
+  // closed on a timeout rather than leaving this IPC request open indefinitely.
   let timer: NodeJS.Timeout | undefined
   try {
     return await Promise.race([
@@ -1795,9 +1846,12 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   if (typeof tabId !== 'string' || typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 4_096) {
     throw new Error('Invalid file path')
   }
+  if (!isSessionTabId(tabId) || !isLocalFilesystemPath(candidate)) throw new Error('Only local file paths can be revealed')
   const tab = tabsState.tabs.find((item) => item.id === tabId)
-  const owningProfile = tab ? desktopConfig.profiles.find((profile) => profile.id === tab.workspaceProfileId) : null
-  const baseDirectory = owningProfile?.path ?? activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home')
+  if (!tab) throw new Error('Invalid session tab')
+  const owningProfile = desktopConfig.profiles.find((profile) => profile.id === tab.workspaceProfileId)
+  if (!owningProfile) throw new Error('The session workspace is unavailable')
+  const baseDirectory = owningProfile.path
   const resolved = resolve(baseDirectory, candidate)
   // The text a session prints is not guaranteed to name a real file (it may
   // be prose that merely looks path-shaped). Silently do nothing rather than
@@ -2061,6 +2115,8 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
     state.desktopVersion = app.getVersion()
+    await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
+      .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
     desktopConfig = await readDesktopConfig(configPath())
     if (recordDesktopVersion(desktopConfig, app.getVersion())) await persistConfig()
     syncWorkspaceState()
@@ -2080,7 +2136,7 @@ if (!app.requestSingleInstanceLock()) {
         showNotification(
           'Copilot CLI Desktop update available',
           `Version ${update.availableVersion ?? 'new'} is ready to download.`,
-          () => void showSettingsWindow(),
+          () => observe(showSettingsWindow(), 'Could not open Settings'),
         )
       }
     })
@@ -2118,6 +2174,7 @@ app.on('before-quit', (event) => {
   // before that last write actually lands on disk.
   void stopAllSessions()
     .then(() => configWriteQueue)
+    .catch((error) => writeAppLog(`Shutdown cleanup failed: ${String(error)}`))
     .finally(() => app.quit())
 })
 

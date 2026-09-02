@@ -1,7 +1,9 @@
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createConnection, type Socket } from 'node:net'
 import type { CopilotResolution } from './types.js'
-import { withCopilotPathAdditions } from './resolve-copilot.js'
+import { windowsSystemExecutable, withCopilotPathAdditions } from './resolve-copilot.js'
+import { secretEnvArgs } from './secure-credentials.js'
+import { startWindowsProcessWatchdog, type ProcessWatchdogLease } from './windows-process-watchdog.js'
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024
 
@@ -14,6 +16,7 @@ const MAX_FRAME_BYTES = 8 * 1024 * 1024
 export class CopilotRpc {
   private readonly child: ChildProcessWithoutNullStreams | null
   private readonly socket: Socket | null
+  private readonly watchdog: ProcessWatchdogLease | null
   private buffer = Buffer.alloc(0)
   private sequence = 0
   private closed = false
@@ -26,6 +29,7 @@ export class CopilotRpc {
   constructor(resolution: CopilotResolution | { port: number }, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env) {
     if ('port' in resolution) {
       this.child = null
+      this.watchdog = null
       this.socket = createConnection({ host: '127.0.0.1', port: resolution.port })
       this.socket.on('data', (chunk: Buffer) => this.read(chunk))
       this.socket.on('error', () => this.fail(new Error('The session control connection is not ready. Wait for Copilot to finish starting, or restart this tab.')))
@@ -33,18 +37,28 @@ export class CopilotRpc {
       return
     }
     this.socket = null
-    this.child = spawn(resolution.command, [...resolution.prefixArgs, '--headless', '--stdio', '--no-auto-update'], {
+    this.child = spawn(resolution.command, [
+      ...resolution.prefixArgs,
+      ...secretEnvArgs(env),
+      '--headless', '--stdio', '--no-auto-update',
+    ], {
       cwd,
       env: withCopilotPathAdditions({ ...env, NODE_DEBUG: '' }, resolution.pathAdditions),
       windowsHide: true,
       stdio: 'pipe',
     })
+    this.watchdog = process.platform === 'win32' && this.child.pid
+      ? startWindowsProcessWatchdog(this.child.pid, env)
+      : null
     this.child.stdout.on('data', (chunk: Buffer) => this.read(chunk))
     // Drain logs without exposing credentials or session contents to the UI.
     this.child.stderr.resume()
     this.child.stdin.on('error', () => this.fail(new Error('Copilot fork connection closed')))
     this.child.on('error', () => this.fail(new Error('Could not start the Copilot fork helper')))
-    this.child.on('exit', () => this.fail(new Error('Copilot fork helper exited. Update Copilot CLI if background RPC is unavailable.')))
+    this.child.on('exit', () => {
+      this.watchdog?.release()
+      this.fail(new Error('Copilot fork helper exited. Update Copilot CLI if background RPC is unavailable.'))
+    })
   }
 
   request(method: string, params: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<unknown> {
@@ -119,15 +133,18 @@ export class CopilotRpc {
     this.socket?.destroy()
     if (!this.child) return
     this.child.stdin.destroy()
-    if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return
-    // A Windows command shim can own another process. Stop the whole helper
-    // tree, never any of the independent interactive PTYs.
-    if (process.platform === 'win32') {
-      const pid = this.child.pid
-      await new Promise<void>((resolveStop) => {
-        execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, () => resolveStop())
-      })
-    } else this.child.kill('SIGKILL')
+    try {
+      if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return
+      // Stop the whole helper tree, never any of the independent interactive PTYs.
+      if (process.platform === 'win32') {
+        const pid = this.child.pid
+        await new Promise<void>((resolveStop) => {
+          execFile(windowsSystemExecutable('taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, () => resolveStop())
+        })
+      } else this.child.kill('SIGKILL')
+    } finally {
+      this.watchdog?.release()
+    }
   }
 }
 
@@ -136,7 +153,7 @@ export function isForkSessionId(value: unknown): value is string {
 }
 
 export function supportsSessionFork(version: string | null): boolean {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? '')
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/.exec(version ?? '')
   if (!match) return false
   const [major, minor, patch] = match.slice(1).map(Number)
   return major! > 1 || (major === 1 && (minor! > 0 || patch! >= 82))

@@ -3,7 +3,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { SecureCredentialStore, secretEnvArgs, type EncryptionProvider } from './secure-credentials.js'
+import {
+  SecureCredentialStore,
+  secretEnvArgs,
+  withoutSensitiveEnvironment,
+  type EncryptionProvider,
+} from './secure-credentials.js'
 
 function fakeEncryption(available = true): EncryptionProvider {
   return {
@@ -106,7 +111,7 @@ test('writing an empty document removes the file entirely', async () => {
 test('secretEnvArgs marks every configured credential variable present in the environment', () => {
   assert.deepEqual(
     secretEnvArgs({ GH_TOKEN: 'gho_test', COPILOT_PROVIDER_API_KEY: 'sk-test', COPILOT_GITHUB_TOKEN: 'github_pat_test' }),
-    ['--secret-env-vars=COPILOT_PROVIDER_API_KEY', '--secret-env-vars=COPILOT_GITHUB_TOKEN', '--secret-env-vars=GH_TOKEN'],
+    ['--secret-env-vars=COPILOT_GITHUB_TOKEN', '--secret-env-vars=COPILOT_PROVIDER_API_KEY', '--secret-env-vars=GH_TOKEN'],
   )
 })
 
@@ -127,6 +132,20 @@ test('secretEnvArgs protects a credential that is only ambient (not vault-inject
 
 test('secretEnvArgs ignores an empty-string value', () => {
   assert.deepEqual(secretEnvArgs({ GH_TOKEN: '' }), [])
+})
+
+test('secretEnvArgs protects common ambient secret names beyond the desktop vault', () => {
+  assert.deepEqual(
+    secretEnvArgs({ AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', servicePassword: 'secret', ORDINARY: 'visible' }),
+    ['--secret-env-vars=AWS_ACCESS_KEY_ID', '--secret-env-vars=servicePassword'],
+  )
+})
+
+test('withoutSensitiveEnvironment removes credentials without mutating the source', () => {
+  const source = { GH_TOKEN: 'secret', COPILOT_PROVIDER_API_KEY: 'key', PATH: 'safe' }
+  const result = withoutSensitiveEnvironment(source)
+  assert.deepEqual(result, { PATH: 'safe' })
+  assert.equal(source.GH_TOKEN, 'secret')
 })
 
 test('concurrent saveCredential calls for different variables do not clobber each other', async () => {

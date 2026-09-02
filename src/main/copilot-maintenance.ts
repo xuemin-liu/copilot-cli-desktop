@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { runCopilotCommand } from './copilot-command.js'
+import { findWindowsExecutable, windowsSystemDirectory } from './resolve-copilot.js'
+import { withoutSensitiveEnvironment } from './secure-credentials.js'
 import type { CopilotResolution } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -21,40 +23,27 @@ export const DEFAULT_COPILOT_MAINTENANCE_STATE: CopilotMaintenanceState = {
 
 export async function installCopilotCli(): Promise<string> {
   if (process.platform === 'win32') {
-    try {
-      const winget = await execFileAsync('winget.exe', [
-        'install', '--id', 'GitHub.Copilot', '--exact', '--source', 'winget',
-        '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity',
-      ], { timeout: 10 * 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 })
-      return `${winget.stdout}\n${winget.stderr}`.trim()
-    } catch (wingetError) {
-      // WinGet is the official Windows path and does not require a separate
-      // Node.js installation. Fall back to npm for machines where WinGet is
-      // unavailable or its package source is disabled.
-      const wingetMessage = wingetError instanceof Error ? wingetError.message : String(wingetError)
-      try {
-        const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe'
-        const result = await execFileAsync(
-          comspec,
-          ['/d', '/s', '/c', 'call', 'npm.cmd', 'install', '--global', '@github/copilot@latest'],
-          { timeout: 10 * 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
-        )
-        return `${result.stdout}\n${result.stderr}`.trim()
-      } catch (npmError) {
-        const npmMessage = npmError instanceof Error ? npmError.message : String(npmError)
-        throw new Error(`WinGet installation failed: ${wingetMessage}. npm fallback failed: ${npmMessage}`)
-      }
-    }
+    const wingetPath = await findWindowsExecutable('winget')
+    if (!wingetPath) throw new Error('WinGet is unavailable. Install GitHub Copilot CLI from a trusted package source and retry detection.')
+    const winget = await execFileAsync(wingetPath, [
+      'install', '--id', 'GitHub.Copilot', '--exact', '--source', 'winget',
+      '--accept-package-agreements', '--accept-source-agreements', '--silent', '--disable-interactivity',
+    ], {
+      cwd: windowsSystemDirectory(),
+      env: withoutSensitiveEnvironment(process.env),
+      timeout: 10 * 60_000,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+    })
+    return `${winget.stdout}\n${winget.stderr}`.trim()
   }
-  const result = await execFileAsync(
-    'npm',
-    ['install', '--global', '@github/copilot@latest'],
-    { timeout: 10 * 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
-  )
-  return `${result.stdout}\n${result.stderr}`.trim()
+  throw new Error('Automatic installation is supported only on Windows through WinGet. Install Copilot CLI from a trusted package source.')
 }
 
 export async function updateCopilotCli(resolution: CopilotResolution): Promise<string> {
-  const result = await runCopilotCommand(resolution, ['update'], { timeout: 10 * 60_000 })
+  const result = await runCopilotCommand(resolution, ['update'], {
+    env: withoutSensitiveEnvironment(process.env),
+    timeout: 10 * 60_000,
+  })
   return `${result.stdout}\n${result.stderr}`.trim()
 }

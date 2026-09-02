@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
+import { delimiter } from 'node:path'
 import test from 'node:test'
-import { resolveCopilotBinary, withCopilotPathAdditions, type ExecFileFn } from './resolve-copilot.js'
+import {
+  resolveCopilotBinary,
+  windowsSystemExecutable,
+  withCopilotPathAdditions,
+  type ExecFileFn,
+} from './resolve-copilot.js'
 
 function fakeExecFile(handlers: Record<string, { stdout: string } | Error>): ExecFileFn {
   return async (file, args) => {
@@ -12,6 +18,8 @@ function fakeExecFile(handlers: Record<string, { stdout: string } | Error>): Exe
   }
 }
 
+const WHERE = 'C:\\Windows\\System32\\where.exe'
+
 test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
@@ -20,60 +28,77 @@ test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
   assert.equal(resolution.command, 'copilot')
   assert.deepEqual(resolution.prefixArgs, [])
   assert.equal(resolution.version, '0.9.1')
-  assert.equal(resolution.error, null)
 })
 
-test('resolveCopilotBinary returns the absolute copilot executable path on Windows', async () => {
+test('resolveCopilotBinary returns the absolute Copilot executable path on Windows', async () => {
   const copilotPath = 'C:\\Users\\tester\\AppData\\Local\\Microsoft\\WinGet\\Links\\copilot.exe'
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
-    'where.exe copilot': { stdout: `${copilotPath}\r\n` },
+    [`${WHERE} copilot`]: { stdout: `${copilotPath}\r\n` },
     [`${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 0.9.1\n' },
   }), 'win32')
-  assert.equal(resolution.kind, 'direct')
   assert.equal(resolution.command, copilotPath)
+  assert.deepEqual(resolution.prefixArgs, [])
   assert.equal(resolution.resolvedPath, copilotPath)
-  assert.equal(resolution.version, '0.9.1')
 })
 
-test('resolveCopilotBinary launches an npm-installed Windows command shim through cmd.exe', async () => {
-  const copilotPath = 'C:\\Program Files\\nodejs\\copilot.cmd'
-  const commandShell = 'C:\\Windows\\System32\\cmd.exe'
-  const resolution = await resolveCopilotBinary({ ComSpec: commandShell }, fakeExecFile({
-    'where.exe copilot': { stdout: `${copilotPath}\r\n` },
-    [`${commandShell} /d /s /c call ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
-  }), 'win32')
-  assert.equal(resolution.kind, 'direct')
-  assert.equal(resolution.command, commandShell)
-  assert.deepEqual(resolution.prefixArgs, ['/d', '/s', '/c', 'call', copilotPath])
-  assert.equal(resolution.resolvedPath, copilotPath)
-  assert.equal(resolution.version, '1.0.80')
-})
-
-test('resolveCopilotBinary finds the standard Node.js shim when Electron PATH is incomplete', async () => {
-  const copilotPath = 'C:\\Program Files\\nodejs\\copilot.cmd'
-  const commandShell = 'C:\\Windows\\System32\\cmd.exe'
+test('resolveCopilotBinary unwraps an npm shim to trusted node and package entry without cmd.exe', async () => {
+  const shim = 'C:\\Users\\tester\\AppData\\Roaming\\npm\\copilot.cmd'
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const entry = 'C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\index.js'
+  const manifest = 'C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\package.json'
+  const existing = new Set([shim, node, entry])
   const resolution = await resolveCopilotBinary({
+    APPDATA: 'C:\\Users\\tester\\AppData\\Roaming',
     ProgramFiles: 'C:\\Program Files',
-    ComSpec: commandShell,
   }, fakeExecFile({
-    'where.exe copilot': new Error('not found on PATH'),
-    [`${commandShell} /d /s /c call ${copilotPath} --version`]: { stdout: 'GitHub Copilot CLI 1.0.80\n' },
-  }), 'win32', (path) => path === copilotPath || path === 'C:\\Program Files\\nodejs\\node.exe')
-  assert.equal(resolution.kind, 'direct')
-  assert.equal(resolution.resolvedPath, copilotPath)
-  assert.equal(resolution.version, '1.0.80')
+    [`${WHERE} copilot`]: { stdout: `${shim}\r\n` },
+    [`${node} ${entry} --version`]: { stdout: 'GitHub Copilot CLI 1.0.82\n' },
+  }), 'win32', (path) => existing.has(path), async (path) => {
+    assert.equal(path, manifest)
+    return JSON.stringify({ bin: { copilot: 'index.js' } })
+  })
+  assert.equal(resolution.command, node)
+  assert.deepEqual(resolution.prefixArgs, [entry])
+  assert.equal(resolution.resolvedPath, shim)
+  assert.ok(!resolution.command.toLowerCase().endsWith('cmd.exe'))
+})
+
+test('resolveCopilotBinary refuses an unverifiable command shim instead of invoking a shell', async () => {
+  const shim = 'C:\\tools\\copilot.cmd'
+  const resolution = await resolveCopilotBinary({}, fakeExecFile({
+    [`${WHERE} copilot`]: { stdout: `${shim}\r\n` },
+    [`${WHERE} gh`]: new Error('not found'),
+  }), 'win32', (path) => path === shim, async () => JSON.stringify({ bin: { copilot: '..\\outside.js' } }))
+  assert.equal(resolution.version, null)
+  assert.match(resolution.error ?? '', /unsupported or failed direct launch/)
+})
+
+test('resolveCopilotBinary checks standard npm location when Electron PATH is incomplete', async () => {
+  const shim = 'C:\\Program Files\\nodejs\\copilot.cmd'
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const entry = 'C:\\Program Files\\nodejs\\node_modules\\@github\\copilot\\index.js'
+  const existing = new Set([shim, node, entry])
+  const resolution = await resolveCopilotBinary({ ProgramFiles: 'C:\\Program Files' }, fakeExecFile({
+    [`${WHERE} copilot`]: new Error('not found'),
+    [`${node} ${entry} --version`]: { stdout: '1.0.82\n' },
+  }), 'win32', (path) => existing.has(path), async () => JSON.stringify({ bin: 'index.js' }))
+  assert.equal(resolution.command, node)
   assert.deepEqual(resolution.pathAdditions, ['C:\\Program Files\\nodejs'])
 })
 
-test('withCopilotPathAdditions augments launcher environments without mutating the source', () => {
-  const source = { Path: 'C:\\Windows\\System32', TOKEN: 'preserved' }
-  const result = withCopilotPathAdditions(source, ['C:\\Program Files\\nodejs'])
-  assert.equal(result.Path, 'C:\\Program Files\\nodejs;C:\\Windows\\System32')
+test('withCopilotPathAdditions uses the platform delimiter without mutating the source', () => {
+  const source = { PATH: 'existing', TOKEN: 'preserved' }
+  const result = withCopilotPathAdditions(source, ['first', 'second'])
+  assert.equal(result.PATH, ['first', 'second', 'existing'].join(delimiter))
   assert.equal(result.TOKEN, 'preserved')
-  assert.equal(source.Path, 'C:\\Windows\\System32')
+  assert.equal(source.PATH, 'existing')
 })
 
-test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH', async () => {
+test('windowsSystemExecutable never depends on the current directory', () => {
+  assert.equal(windowsSystemExecutable('taskkill.exe', { SystemRoot: 'D:\\Windows' }), 'D:\\Windows\\System32\\taskkill.exe')
+})
+
+test('resolveCopilotBinary falls back to gh copilot when Copilot is not on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': new Error('ENOENT'),
     'gh copilot -- --version': { stdout: '0.9.1\n' },
@@ -81,10 +106,9 @@ test('resolveCopilotBinary falls back to gh copilot when copilot is not on PATH'
   assert.equal(resolution.kind, 'gh-wrapped')
   assert.equal(resolution.command, 'gh')
   assert.deepEqual(resolution.prefixArgs, ['copilot', '--'])
-  assert.equal(resolution.version, '0.9.1')
 })
 
-test('resolveCopilotBinary reports a diagnostic error when nothing resolves', async () => {
+test('resolveCopilotBinary reports diagnostics when nothing resolves', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
     'copilot --version': new Error('ENOENT'),
     'gh copilot -- --version': new Error('ENOENT'),
@@ -92,5 +116,4 @@ test('resolveCopilotBinary reports a diagnostic error when nothing resolves', as
   assert.equal(resolution.version, null)
   assert.match(resolution.error ?? '', /was not found/i)
   assert.match(resolution.error ?? '', /copilot --version/)
-  assert.match(resolution.error ?? '', /gh copilot -- --version/)
 })

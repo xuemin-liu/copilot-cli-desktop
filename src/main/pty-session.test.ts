@@ -9,6 +9,7 @@ class FakePty extends EventEmitter implements PtyLike {
   written: string[] = []
   killed: string[] = []
   resized: Array<[number, number]> = []
+  disposed = 0
 
   onData(listener: (data: string) => void): void {
     this.on('data', listener)
@@ -30,6 +31,10 @@ class FakePty extends EventEmitter implements PtyLike {
     this.killed.push(signal ?? 'default')
     // Simulate the OS terminating the process shortly after a kill signal.
     setImmediate(() => this.emit('exit', { exitCode: 0, signal: undefined }))
+  }
+
+  dispose(): void {
+    this.disposed += 1
   }
 }
 
@@ -70,7 +75,7 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
-test('approval and session-id heuristics reassemble text split across pty chunks', async () => {
+test('approval heuristic reassembles text split across pty chunks without trusting displayed session IDs', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
   await session.start()
@@ -80,7 +85,7 @@ test('approval and session-id heuristics reassemble text split across pty chunks
   pty.emit('data', 'ceed with this edit?\nSession ID: work-')
   assert.equal(session.status, 'approval-needed')
   pty.emit('data', 'session-9\n')
-  assert.equal(session.lastSessionId, 'work-session-9')
+  assert.equal(session.lastSessionId, null)
 })
 
 test('approval-needed stays up across ordinary output until an explicit transition', async () => {
@@ -150,6 +155,7 @@ test('a clean exit with code 0 marks the session completed', async () => {
   await session.start()
   pty.emit('exit', { exitCode: 0, signal: undefined })
   assert.equal(session.status, 'completed')
+  assert.equal(pty.disposed, 1)
 })
 
 test('stop() kills the process and does not report a crash for the expected exit', async () => {
@@ -164,12 +170,12 @@ test('stop() kills the process and does not report a crash for the expected exit
   assert.ok(!statuses.includes('crashed'))
 })
 
-test('a session id observed in output is captured for later auto-resume', async () => {
+test('only a trusted session id supplied at construction is used for auto-resume', async () => {
   const pty = new FakePty()
-  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), sessionId: 'trusted-session-1' })
   await session.start()
   pty.emit('data', 'Session ID: work-session-9\n')
-  assert.equal(session.lastSessionId, 'work-session-9')
+  assert.equal(session.lastSessionId, 'trusted-session-1')
 })
 
 test('resize() forwards to the underlying pty', async () => {

@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { appendFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { resolve } from 'node:path'
+import { appendBoundedLog } from '../main/log-retention.js'
 import { spawnChildProcessPty } from '../main/child-process-pty-backend.js'
 import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from '../main/copilot-command.js'
 import {
@@ -19,6 +19,7 @@ import { secretEnvArgs } from '../main/secure-credentials.js'
 import type { CopilotResolution } from '../main/types.js'
 import {
   ensureCliDirectories,
+  constantTimeTokenEqual,
   claimControllerLock,
   getCliPaths,
   releaseControllerLock,
@@ -51,9 +52,12 @@ let stateWriteQueue = Promise.resolve()
 let mutationQueue = Promise.resolve()
 let copilotResolution: CopilotResolution | null = null
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
+let logWriteQueue: Promise<void> = Promise.resolve()
 
-async function log(message: string): Promise<void> {
-  await appendFile(paths.logPath, `[${new Date().toISOString()}] ${message}\n`, 'utf8')
+function log(message: string): Promise<void> {
+  const operation = logWriteQueue.then(() => appendBoundedLog(paths.logPath, `[${new Date().toISOString()}] ${message}\n`))
+  logWriteQueue = operation.catch(() => undefined)
+  return operation
 }
 
 async function updateState(patch: Partial<DaemonState>): Promise<void> {
@@ -85,7 +89,10 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
 }
 
 function authorized(request: IncomingMessage): boolean {
-  return request.headers.authorization === `Bearer ${token}`
+  const supplied = request.headers.authorization
+  return typeof supplied === 'string'
+    && supplied.startsWith('Bearer ')
+    && constantTimeTokenEqual(supplied.slice('Bearer '.length), token)
 }
 
 function createSession(): PtySession {

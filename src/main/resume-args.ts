@@ -25,10 +25,10 @@ export interface ResumeArgsInput {
  * known yet (e.g. the very first time a tab is opened for a workspace), or
  * when the known id fails validation.
  *
- * `lastSessionId` may originate from untrusted PTY output (heuristic
- * extraction), persisted tab state loaded from disk, or a `--session-id`
- * command-line flag — none of which are safe to trust verbatim on a command
- * line. Two things guard that boundary: `isValidSessionId` rejects anything
+ * `lastSessionId` may originate from persisted tab state loaded from disk or
+ * a `--session-id` command-line flag, neither of which is safe to trust
+ * verbatim on a command line. Two things guard that boundary:
+ * `isValidSessionId` rejects anything
  * that isn't a plain identifier (in particular anything starting with '-',
  * which could otherwise be parsed as an unrelated option such as
  * `--allow-all-tools`), and the id is always emitted as a single

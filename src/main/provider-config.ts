@@ -1,3 +1,5 @@
+import { parseSafeHttpUrl } from './external-targets.js'
+
 export type CopilotProviderType = 'github' | 'openai' | 'azure' | 'anthropic'
 
 export interface CopilotProviderConfig {
@@ -36,15 +38,7 @@ export function validateProviderConfig(config: CopilotProviderConfig): void {
   if (config.type === 'github') return
   if (!config.baseUrl) throw new Error('A provider base URL is required for a custom model provider')
   if (!config.model) throw new Error('A model identifier is required for a custom model provider')
-  let url: URL
-  try {
-    url = new URL(config.baseUrl)
-  } catch {
-    throw new Error('Provider base URL must be a valid HTTP or HTTPS URL')
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Provider base URL must use HTTP or HTTPS')
-  }
+  parseSafeHttpUrl(config.baseUrl, 'Provider base URL')
 }
 
 export function providerEnvironment(

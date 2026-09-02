@@ -6,6 +6,29 @@ const MAX_BASE64_LENGTH = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4
 // swallow every later backlog/live byte until another BEL or ST arrived.
 const OSC52_COMMAND = /\u001b\]52;[^\u0007\u001b]*(?:\u0007|\u001b\\|(?=\u001b)|$)/g
 
+export class ClipboardWriteGate {
+  private authorizedUntil = 0
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly lifetimeMs = 2_000,
+  ) {}
+
+  authorize(): void {
+    this.authorizedUntil = this.now() + this.lifetimeMs
+  }
+
+  consume(): boolean {
+    const allowed = this.authorizedUntil > 0 && this.now() <= this.authorizedUntil
+    this.authorizedUntil = 0
+    return allowed
+  }
+
+  clear(): void {
+    this.authorizedUntil = 0
+  }
+}
+
 /** Remove historical clipboard commands before replaying a terminal backlog. */
 export function stripOsc52Commands(text: string): string {
   return text.replace(OSC52_COMMAND, '')

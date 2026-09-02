@@ -1,4 +1,5 @@
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
+import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 
 /**
  * Describe the renderer that actually consumes this PTY's output instead of
@@ -40,6 +41,11 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
     rows: options.rows,
     name: 'xterm-256color',
   })
+  const watchdog = process.platform === 'win32' && child.pid
+    ? startWindowsProcessWatchdog(child.pid)
+    : null
+  child.onExit(() => watchdog?.release())
+  let disposed = false
   return {
     pid: child.pid,
     onData: (listener) => child.onData(listener),
@@ -53,5 +59,11 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
       }
     },
     kill: (signal) => child.kill(signal),
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      watchdog?.release()
+      try { child.kill() } catch { /* The process may already have exited. */ }
+    },
   }
 }

@@ -25,10 +25,10 @@ export interface PermissionPresetInfo {
 export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, PermissionPresetInfo>> = {
   'default': {
     id: 'default',
-    label: 'Default (prompt every time)',
+    label: 'Copilot default (uses CLI setting)',
     description:
-      'Read-only actions run automatically. Copilot CLI prompts for approval before every mutating '
-      + 'action: shell commands, file edits, URL fetches, and MCP tool calls.',
+      'Applies no desktop permission override. Copilot CLI uses its configured defaultPermissionMode '
+      + '(normally manual, but it may be assisted or allow-all).',
   },
   'read-only': {
     id: 'read-only',
