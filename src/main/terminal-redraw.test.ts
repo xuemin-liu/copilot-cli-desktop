@@ -5,6 +5,7 @@ import {
   CLIPBOARD_COPY_GESTURE_MS,
   CLIPBOARD_OUTPUT_SETTLE_MS,
   CLIPBOARD_REDRAW_GUARD_MS,
+  NATIVE_KEYBOARD_SELECTION_MS,
   ClipboardRedrawRecovery,
   NativeCopyGestureTracker,
   clipboardRedrawOutput,
@@ -113,14 +114,21 @@ test('arms native copy only after an unmodified text-selection drag', () => {
 })
 
 test('arms native copy after keyboard-driven TUI selection', () => {
-  const tracker = new NativeCopyGestureTracker()
+  let now = 100
+  const tracker = new NativeCopyGestureTracker(() => now)
   tracker.onKeyDown('ArrowLeft', false)
   assert.equal(tracker.consumeSelection(), false)
   tracker.onKeyDown('ArrowLeft', true)
   assert.equal(tracker.consumeSelection(), true)
+
   tracker.onKeyDown('PageDown', true)
-  assert.equal(tracker.consumeSelection(), true)
-  tracker.onKeyDown('c', true)
+  assert.equal(tracker.consumeSelection(), false)
+  tracker.onKeyDown('ArrowUp', true)
+  now += NATIVE_KEYBOARD_SELECTION_MS + 1
+  assert.equal(tracker.consumeSelection(), false)
+
+  tracker.onKeyDown('ArrowRight', true)
+  tracker.onKeyDown('x', false)
   assert.equal(tracker.consumeSelection(), false)
 })
 
@@ -218,7 +226,7 @@ test('a non-copy gesture times out, releases rendering, and re-arms', () => {
   assert.equal(recovery.onCopyGesture(), true)
 })
 
-test('a clipboard response must arrive inside the bounded gesture window', () => {
+test('a late confirmed clipboard response starts a fresh synchronized frame', () => {
   const scheduler = new FakeScheduler()
   const inWindowEvents: string[] = []
   const inWindow = createRecovery(scheduler, inWindowEvents)
@@ -233,8 +241,10 @@ test('a clipboard response must arrive inside the bounded gesture window', () =>
   const late = createRecovery(scheduler, lateEvents)
   late.onCopyGesture()
   scheduler.advance(CLIPBOARD_COPY_GESTURE_MS)
-  assert.equal(late.onClipboardCopy(), false)
-  assert.deepEqual(lateEvents, ['capture', 'begin', 'complete:none:false'])
+  assert.equal(late.onClipboardCopy(), true)
+  assert.deepEqual(lateEvents, ['capture', 'begin', 'complete:none:false', 'capture', 'begin'])
+  late.rearm()
+  assert.deepEqual(lateEvents, ['capture', 'begin', 'complete:none:false', 'capture', 'begin', 'complete:none:false'])
 })
 
 test('copy status scanning is requested only while a confirmed copy awaits evidence', () => {

@@ -13,10 +13,10 @@ type SpawnWatchdog = (
 
 interface SharedWatchdog {
   child: ChildProcess
-  trackedPids: Set<number>
 }
 
 let sharedWatchdog: SharedWatchdog | null = null
+const trackedPids = new Set<number>()
 let failureReported = false
 let failureReporter: (message: string) => void = (message) => console.error(message)
 
@@ -73,7 +73,7 @@ function createSharedWatchdog(
         windir: environment.windir ?? environment.SystemRoot ?? 'C:\\Windows',
       },
     })
-    const watcher: SharedWatchdog = { child, trackedPids: new Set() }
+    const watcher: SharedWatchdog = { child }
     child.once('error', reportFailure)
     child.stdin?.once('error', reportFailure)
     child.once('exit', (code, signal) => {
@@ -86,6 +86,7 @@ function createSharedWatchdog(
     })
     child.unref()
     ;(child.stdin as (NodeJS.WritableStream & { unref?: () => void }) | null)?.unref?.()
+    for (const trackedPid of trackedPids) child.stdin?.write(`track ${trackedPid}\n`)
     return watcher
   } catch (error) {
     reportFailure(error)
@@ -104,21 +105,22 @@ export function startWindowsProcessWatchdog(
   spawnWatchdog: SpawnWatchdog = spawn,
 ): ProcessWatchdogLease {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid watchdog process ID')
-  const watcher = sharedWatchdog ?? createSharedWatchdog(environment, spawnWatchdog)
+  const existingWatcher = sharedWatchdog
+  trackedPids.add(pid)
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    trackedPids.delete(pid)
+    const activeInput = sharedWatchdog?.child.stdin
+    if (activeInput && !activeInput.destroyed) activeInput.write(`release ${pid}\n`)
+  }
+  const watcher = existingWatcher ?? createSharedWatchdog(environment, spawnWatchdog)
   if (!watcher?.child.stdin || watcher.child.stdin.destroyed) {
     reportFailure('watcher input pipe is unavailable')
-    return { release: () => undefined }
+    return { release }
   }
   sharedWatchdog = watcher
-  watcher.trackedPids.add(pid)
-  watcher.child.stdin.write(`track ${pid}\n`)
-  let released = false
-  return {
-    release: () => {
-      if (released) return
-      released = true
-      watcher.trackedPids.delete(pid)
-      if (!watcher.child.stdin?.destroyed) watcher.child.stdin?.write(`release ${pid}\n`)
-    },
-  }
+  if (existingWatcher) watcher.child.stdin.write(`track ${pid}\n`)
+  return { release }
 }

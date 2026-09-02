@@ -183,16 +183,17 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // still hold Shift to make an xterm selection; copy that fallback through
     // Electron, while Ctrl+C without an xterm selection reaches Copilot.
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type === 'keydown') nativeCopyGesture.onKeyDown(event.key, event.shiftKey)
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
-        // Ctrl+C is Copilot's interrupt key unless a preceding native mouse
-        // drag identifies this invocation as selected-text copy. Never arm the
-        // render guard speculatively: doing so freezes every ordinary Ctrl+C.
+        // Ctrl+C is Copilot's interrupt key unless a recent native mouse or
+        // keyboard selection identifies this invocation as selected-text copy.
+        // Never arm the render guard without that bounded evidence.
         if (nativeCopyGesture.consumeSelection()) {
           clipboardWriteGate.authorize()
           clipboardRedraw.onCopyGesture()
         }
+      } else if (event.type === 'keydown') {
+        nativeCopyGesture.onKeyDown(event.key, event.shiftKey)
       }
       return true
     })
