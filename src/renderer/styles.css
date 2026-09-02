@@ -724,6 +724,34 @@ button:disabled {
   padding: 0 20px;
 }
 
+.diagnostics-view-compact {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid #654f1d;
+  background: #2a2415;
+}
+
+.diagnostics-view-compact h1 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.diagnostics-view-compact p {
+  margin: 4px 0;
+}
+
+.diagnostics-view-compact .diagnostics-actions {
+  margin: 8px 0 0;
+}
+
+.diagnostics-view-compact .diagnostics-detail pre {
+  max-height: 88px;
+  margin-bottom: 0;
+  overflow: auto;
+}
+
 .diagnostics-actions {
   display: flex;
   gap: 8px;

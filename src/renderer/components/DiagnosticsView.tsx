@@ -7,9 +7,10 @@ export interface DiagnosticsViewProps {
   onRetry: () => Promise<void>
   onInstall: () => Promise<void>
   onCopyDiagnostics: () => Promise<void>
+  compact?: boolean
 }
 
-export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnostics }: DiagnosticsViewProps): JSX.Element {
+export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnostics, compact = false }: DiagnosticsViewProps): JSX.Element {
   const [retrying, setRetrying] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -36,15 +37,19 @@ export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnost
   }
 
   return (
-    <div className="diagnostics-view">
-      <h1>Copilot CLI was not found</h1>
-      <p>
-        This desktop app could not locate the <code>copilot</code> binary. Install the official npm package below, or get it from{' '}
-        <a href="https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli" target="_blank" rel="noreferrer">
-          GitHub's installation guide
-        </a>
-        , then retry.
-      </p>
+    <div className={`diagnostics-view${compact ? ' diagnostics-view-compact' : ''}`}>
+      {compact ? <h2>Copilot CLI is unavailable</h2> : <h1>Copilot CLI was not found</h1>}
+      {compact ? (
+        <p role="status">Existing terminals remain available, but new sessions need the Copilot CLI. Install it or retry detection.</p>
+      ) : (
+        <p>
+          This desktop app could not locate the <code>copilot</code> binary. Install the official npm package below, or get it from{' '}
+          <a href="https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli" target="_blank" rel="noreferrer">
+            GitHub's installation guide
+          </a>
+          , then retry.
+        </p>
+      )}
       <div className="diagnostics-actions">
         <button type="button" className="primary-button" onClick={handleInstall} disabled={installing || retrying}>
           {installing ? 'Installing…' : 'Install Copilot CLI'}
