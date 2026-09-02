@@ -23,6 +23,8 @@ export const CLIPBOARD_OUTPUT_SETTLE_MS = 150
 /** Minimum mouse travel that identifies a Copilot-owned text selection drag. */
 export const NATIVE_SELECTION_DRAG_PX = 4
 
+const MODIFIER_KEYS = new Set(['Alt', 'AltGraph', 'Control', 'Meta', 'OS', 'Shift'])
+
 /** Whether public xterm CSI parameters address the top-left cell. */
 export function isCursorHome(params: (number | number[])[]): boolean {
   if (params.length > 2) return false
@@ -95,7 +97,7 @@ export class NativeCopyGestureTracker {
     if (shiftKey && /^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown)$/.test(key)) {
       this.selectionPending = true
       this.keyboardSelectionExpiresAt = this.now() + NATIVE_KEYBOARD_SELECTION_MS
-    } else if (!shiftKey) {
+    } else if (!shiftKey && !MODIFIER_KEYS.has(key)) {
       this.selectionPending = false
       this.keyboardSelectionExpiresAt = 0
     }

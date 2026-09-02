@@ -105,7 +105,7 @@ export function startWindowsProcessWatchdog(
   spawnWatchdog: SpawnWatchdog = spawn,
 ): ProcessWatchdogLease {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid watchdog process ID')
-  const existingWatcher = sharedWatchdog
+  let existingWatcher = sharedWatchdog
   trackedPids.add(pid)
   let released = false
   const release = (): void => {
@@ -114,6 +114,11 @@ export function startWindowsProcessWatchdog(
     trackedPids.delete(pid)
     const activeInput = sharedWatchdog?.child.stdin
     if (activeInput && !activeInput.destroyed) activeInput.write(`release ${pid}\n`)
+  }
+  if (existingWatcher && (!existingWatcher.child.stdin || existingWatcher.child.stdin.destroyed)) {
+    reportFailure('watcher input pipe is unavailable')
+    if (sharedWatchdog === existingWatcher) sharedWatchdog = null
+    existingWatcher = null
   }
   const watcher = existingWatcher ?? createSharedWatchdog(environment, spawnWatchdog)
   if (!watcher?.child.stdin || watcher.child.stdin.destroyed) {

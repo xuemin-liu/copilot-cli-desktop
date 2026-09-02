@@ -119,6 +119,7 @@ test('arms native copy after keyboard-driven TUI selection', () => {
   tracker.onKeyDown('ArrowLeft', false)
   assert.equal(tracker.consumeSelection(), false)
   tracker.onKeyDown('ArrowLeft', true)
+  tracker.onKeyDown('Control', false)
   assert.equal(tracker.consumeSelection(), true)
 
   tracker.onKeyDown('PageDown', true)
@@ -130,6 +131,11 @@ test('arms native copy after keyboard-driven TUI selection', () => {
   tracker.onKeyDown('ArrowRight', true)
   tracker.onKeyDown('x', false)
   assert.equal(tracker.consumeSelection(), false)
+
+  tracker.onMouseDown(0, false, 10, 10)
+  tracker.onMouseUp(0, 20, 10)
+  tracker.onKeyDown('Control', false)
+  assert.equal(tracker.consumeSelection(), true)
 })
 
 test('normalizes Copilot selection backgrounds in a serialized snapshot', () => {
