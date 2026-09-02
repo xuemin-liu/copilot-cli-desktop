@@ -18,7 +18,11 @@ import {
 } from 'electron'
 import electronUpdater from 'electron-updater'
 import { readAccessStatus } from './access-status.js'
-import { sameCopilotResolution, shouldAdoptRefreshedResolution } from './copilot-resolution-state.js'
+import {
+  TRANSIENT_REFRESH_FAILURE_TOLERANCE,
+  sameCopilotResolution,
+  shouldAdoptRefreshedResolution,
+} from './copilot-resolution-state.js'
 import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
@@ -125,6 +129,7 @@ let updateController: DesktopUpdateController | null = null
 let updateCheckTimer: NodeJS.Timeout | null = null
 let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
 let copilotResolutionProbePromise: Promise<CopilotResolution> | null = null
+let copilotResolutionRefreshFailures = 0
 let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
@@ -1237,6 +1242,7 @@ async function updateWorkspaceProfile(
 
 async function retryResolution(): Promise<DesktopState> {
   state.resolution = await probeCopilotResolution()
+  copilotResolutionRefreshFailures = 0
   await recheckCopilotCapabilities()
   broadcastState()
   broadcastCopilotSettingsState()
@@ -1265,13 +1271,18 @@ async function probeCopilotResolution(): Promise<CopilotResolution> {
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
   const previousVersion = state.resolution?.version ?? null
   const next = await probeCopilotResolution()
-  if (!shouldAdoptRefreshedResolution(state.resolution, next)) {
+  if (isCopilotResolved() && next.version === null) copilotResolutionRefreshFailures += 1
+  else copilotResolutionRefreshFailures = 0
+  if (!shouldAdoptRefreshedResolution(state.resolution, next, copilotResolutionRefreshFailures)) {
     if (!sameCopilotResolution(state.resolution, next) && next.version === null) {
-      await writeAppLog(`Ignored transient Copilot CLI refresh failure: ${next.error ?? 'version probe failed'}`).catch(() => {})
+      await writeAppLog(
+        `Ignored transient Copilot CLI refresh failure (${copilotResolutionRefreshFailures}/${TRANSIENT_REFRESH_FAILURE_TOLERANCE}): ${next.error ?? 'version probe failed'}`,
+      ).catch(() => {})
     }
     return false
   }
   state.resolution = next
+  copilotResolutionRefreshFailures = 0
   await recheckCopilotCapabilities()
   broadcastState()
   broadcastCopilotSettingsState()

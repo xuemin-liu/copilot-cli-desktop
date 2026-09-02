@@ -10,3 +10,11 @@ export function desktopViewMode(
   if (loading || resolution === null) return 'loading'
   return resolution.version === null && !hasSessionTabs ? 'diagnostics' : 'desktop'
 }
+
+export function canOpenSessionTab(
+  resolution: CopilotResolution | null,
+  tabCount: number,
+  maxSessionTabs: number,
+): boolean {
+  return resolution !== null && resolution.version !== null && tabCount < maxSessionTabs
+}

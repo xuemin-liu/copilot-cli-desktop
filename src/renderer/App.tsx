@@ -5,7 +5,7 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { TabBar } from './components/TabBar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
-import { desktopViewMode } from './desktop-view-state.js'
+import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -30,6 +30,7 @@ export function App(): JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const [operationError, setOperationError] = useState<string | null>(null)
+  const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(error instanceof Error ? error.message : String(error)))
@@ -84,7 +85,7 @@ export function App(): JSX.Element {
       if (!modifier) return
       if (event.key.toLowerCase() === 't') {
         event.preventDefault()
-        void window.copilotDesktop.createTab()
+        if (canOpenTab) handleOperation(window.copilotDesktop.createTab())
       } else if (event.key.toLowerCase() === 'w' && state.activeTabId) {
         event.preventDefault()
         window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
@@ -97,7 +98,7 @@ export function App(): JSX.Element {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [state.activeTabId])
+  }, [canOpenTab, state.activeTabId])
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
 
@@ -134,7 +135,7 @@ export function App(): JSX.Element {
         installedCliVersion={state.resolution?.version ?? null}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
-        canOpenTab={state.tabs.length < state.maxSessionTabs}
+        canOpenTab={canOpenTab}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => {
           setSidebarCollapsed((collapsed) => {
@@ -147,13 +148,28 @@ export function App(): JSX.Element {
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
         onRenameTab={requestTabRename}
-        onCreateTab={() => void window.copilotDesktop.createTab()}
-        onCreateTabWithAttachments={() => void window.copilotDesktop.createTabWithAttachments()}
+        onCreateTab={() => handleOperation(window.copilotDesktop.createTab())}
+        onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
-        onResumePicker={() => void window.copilotDesktop.createTab('picker')}
+        onResumePicker={() => handleOperation(window.copilotDesktop.createTab('picker'))}
         onConnectRemote={() => setInputDialog({ kind: 'remote', value: '', pending: false, error: null })}
       />
       <main className="main-content">
+        {state.resolution?.version === null && state.tabs.length > 0 && (
+          <DiagnosticsView
+            compact
+            resolution={state.resolution}
+            onRetry={async () => {
+              const next = await window.copilotDesktop.retryResolution()
+              setState(next)
+            }}
+            onInstall={async () => {
+              const next = await window.copilotDesktop.installCopilot()
+              setState(next)
+            }}
+            onCopyDiagnostics={() => window.copilotDesktop.copyDiagnostics()}
+          />
+        )}
         {state.activeProfileId === null ? (
           <div className="empty-state welcome-state">
             <div className="welcome-mark" aria-hidden="true">C</div>
@@ -169,7 +185,7 @@ export function App(): JSX.Element {
             tabs={state.tabs}
             installedCliVersion={state.resolution?.version ?? null}
             activeTabId={state.activeTabId}
-            canOpenTab={state.tabs.length < state.maxSessionTabs}
+            canOpenTab={canOpenTab}
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
             onRename={requestTabRename}
             onClose={(tabId) => {
@@ -186,10 +202,10 @@ export function App(): JSX.Element {
                 console.error('Failed to restart session tab', error)
               })
             }}
-            onCreate={() => void window.copilotDesktop.createTab()}
+            onCreate={() => handleOperation(window.copilotDesktop.createTab())}
           />
           {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}
-          <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={state.tabs.length < state.maxSessionTabs}
+          <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}

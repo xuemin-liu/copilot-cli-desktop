@@ -1,5 +1,7 @@
 import type { CopilotResolution } from './types.js'
 
+export const TRANSIENT_REFRESH_FAILURE_TOLERANCE = 2
+
 export function sameCopilotResolution(left: CopilotResolution | null, right: CopilotResolution): boolean {
   return left?.kind === right.kind
     && left.command === right.command
@@ -15,7 +17,11 @@ export function sameCopilotResolution(left: CopilotResolution | null, right: Cop
 export function shouldAdoptRefreshedResolution(
   current: CopilotResolution | null,
   candidate: CopilotResolution,
+  consecutiveFailures: number,
 ): boolean {
   if (sameCopilotResolution(current, candidate)) return false
-  return current?.version === null || current === null || candidate.version !== null
+  if (current !== null && current.version !== null && candidate.version === null) {
+    return consecutiveFailures > TRANSIENT_REFRESH_FAILURE_TOLERANCE
+  }
+  return true
 }
