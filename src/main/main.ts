@@ -18,6 +18,7 @@ import {
 } from 'electron'
 import electronUpdater from 'electron-updater'
 import { readAccessStatus } from './access-status.js'
+import { sameCopilotResolution, shouldAdoptRefreshedResolution } from './copilot-resolution-state.js'
 import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
@@ -1245,15 +1246,6 @@ async function retryResolution(): Promise<DesktopState> {
   return snapshot()
 }
 
-function sameCopilotResolution(left: CopilotResolution | null, right: CopilotResolution): boolean {
-  return left?.kind === right.kind
-    && left.command === right.command
-    && left.resolvedPath === right.resolvedPath
-    && left.version === right.version
-    && JSON.stringify(left.prefixArgs) === JSON.stringify(right.prefixArgs)
-    && JSON.stringify(left.pathAdditions ?? []) === JSON.stringify(right.pathAdditions ?? [])
-}
-
 /** Share the executable/version probe across manual and background checks so
  * a Settings recheck cannot race the post-session-start refresh. */
 async function probeCopilotResolution(): Promise<CopilotResolution> {
@@ -1273,7 +1265,12 @@ async function probeCopilotResolution(): Promise<CopilotResolution> {
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
   const previousVersion = state.resolution?.version ?? null
   const next = await probeCopilotResolution()
-  if (sameCopilotResolution(state.resolution, next)) return false
+  if (!shouldAdoptRefreshedResolution(state.resolution, next)) {
+    if (!sameCopilotResolution(state.resolution, next) && next.version === null) {
+      await writeAppLog(`Ignored transient Copilot CLI refresh failure: ${next.error ?? 'version probe failed'}`).catch(() => {})
+    }
+    return false
+  }
   state.resolution = next
   await recheckCopilotCapabilities()
   broadcastState()

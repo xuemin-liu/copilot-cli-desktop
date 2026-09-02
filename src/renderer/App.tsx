@@ -5,6 +5,7 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { TabBar } from './components/TabBar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
+import { desktopViewMode } from './desktop-view-state.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -98,7 +99,9 @@ export function App(): JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [state.activeTabId])
 
-  if (loading) {
+  const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
+
+  if (viewMode === 'loading') {
     return (
       <div className="loading-screen">
         <p>Resolving the copilot CLI…</p>
@@ -106,7 +109,7 @@ export function App(): JSX.Element {
     )
   }
 
-  if (!state.resolution || state.resolution.version === null) {
+  if (viewMode === 'diagnostics') {
     return (
       <DiagnosticsView
         resolution={state.resolution}
