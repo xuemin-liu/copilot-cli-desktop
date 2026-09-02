@@ -37,10 +37,10 @@ export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnost
   }
 
   return (
-    <div className={`diagnostics-view${compact ? ' diagnostics-view-compact' : ''}`} role={compact ? 'alert' : undefined}>
-      <h1>{compact ? 'Copilot CLI is unavailable' : 'Copilot CLI was not found'}</h1>
+    <div className={`diagnostics-view${compact ? ' diagnostics-view-compact' : ''}`}>
+      {compact ? <h2>Copilot CLI is unavailable</h2> : <h1>Copilot CLI was not found</h1>}
       {compact ? (
-        <p>Existing terminals remain available, but new sessions need the Copilot CLI. Install it or retry detection.</p>
+        <p role="status">Existing terminals remain available, but new sessions need the Copilot CLI. Install it or retry detection.</p>
       ) : (
         <p>
           This desktop app could not locate the <code>copilot</code> binary. Install the official npm package below, or get it from{' '}

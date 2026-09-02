@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  EMPTY_RESOLUTION_REFRESH_FAILURE_STATE,
   TRANSIENT_REFRESH_FAILURE_TOLERANCE,
   sameCopilotResolution,
   shouldAdoptRefreshedResolution,
+  trackResolutionRefreshFailure,
 } from './copilot-resolution-state.js'
 import type { CopilotResolution } from './types.js'
 
@@ -40,4 +42,25 @@ test('a persistent failed refresh eventually replaces a stale resolution', () =>
 test('an unchanged refresh is ignored', () => {
   assert.equal(sameCopilotResolution(FOUND, { ...FOUND }), true)
   assert.equal(shouldAdoptRefreshedResolution(FOUND, { ...FOUND }, 0), false)
+})
+
+test('callers sharing one failed probe only consume one retry', () => {
+  const missing = { ...FOUND, version: null, error: 'copilot CLI was not found' }
+  const first = trackResolutionRefreshFailure(FOUND, missing, EMPTY_RESOLUTION_REFRESH_FAILURE_STATE, 7)
+  const duplicate = trackResolutionRefreshFailure(FOUND, missing, first, 7)
+  const secondProbe = trackResolutionRefreshFailure(FOUND, missing, duplicate, 8)
+
+  assert.equal(first.consecutiveFailures, 1)
+  assert.strictEqual(duplicate, first)
+  assert.equal(secondProbe.consecutiveFailures, 2)
+})
+
+test('a successful probe resets the failed-probe tracker', () => {
+  const failed = trackResolutionRefreshFailure(
+    FOUND,
+    { ...FOUND, version: null },
+    EMPTY_RESOLUTION_REFRESH_FAILURE_STATE,
+    7,
+  )
+  assert.strictEqual(trackResolutionRefreshFailure(FOUND, FOUND, failed, 8), EMPTY_RESOLUTION_REFRESH_FAILURE_STATE)
 })

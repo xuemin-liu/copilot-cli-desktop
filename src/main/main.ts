@@ -19,9 +19,11 @@ import {
 import electronUpdater from 'electron-updater'
 import { readAccessStatus } from './access-status.js'
 import {
+  EMPTY_RESOLUTION_REFRESH_FAILURE_STATE,
   TRANSIENT_REFRESH_FAILURE_TOLERANCE,
   sameCopilotResolution,
   shouldAdoptRefreshedResolution,
+  trackResolutionRefreshFailure,
 } from './copilot-resolution-state.js'
 import {
   DEFAULT_DESKTOP_CONFIG,
@@ -128,8 +130,9 @@ let credentialStore: SecureCredentialStore | null = null
 let updateController: DesktopUpdateController | null = null
 let updateCheckTimer: NodeJS.Timeout | null = null
 let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
-let copilotResolutionProbePromise: Promise<CopilotResolution> | null = null
-let copilotResolutionRefreshFailures = 0
+let copilotResolutionProbePromise: Promise<{ resolution: CopilotResolution; sequence: number }> | null = null
+let copilotResolutionProbeSequence = 0
+let copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
 let installInProgress = false
 let quittingAllSessions = false
 let explicitQuitRequested = false
@@ -1241,8 +1244,9 @@ async function updateWorkspaceProfile(
 }
 
 async function retryResolution(): Promise<DesktopState> {
-  state.resolution = await probeCopilotResolution()
-  copilotResolutionRefreshFailures = 0
+  const probe = await probeCopilotResolution()
+  state.resolution = probe.resolution
+  copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
   broadcastState()
   broadcastCopilotSettingsState()
@@ -1254,9 +1258,10 @@ async function retryResolution(): Promise<DesktopState> {
 
 /** Share the executable/version probe across manual and background checks so
  * a Settings recheck cannot race the post-session-start refresh. */
-async function probeCopilotResolution(): Promise<CopilotResolution> {
+async function probeCopilotResolution(): Promise<{ resolution: CopilotResolution; sequence: number }> {
   if (copilotResolutionProbePromise) return copilotResolutionProbePromise
-  const probe = resolveCopilotBinary()
+  const sequence = ++copilotResolutionProbeSequence
+  const probe = resolveCopilotBinary().then((resolution) => ({ resolution, sequence }))
   copilotResolutionProbePromise = probe
   try {
     return await probe
@@ -1270,19 +1275,26 @@ async function probeCopilotResolution(): Promise<CopilotResolution> {
  * keep their captured version while future sessions use the refreshed one. */
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
   const previousVersion = state.resolution?.version ?? null
-  const next = await probeCopilotResolution()
-  if (isCopilotResolved() && next.version === null) copilotResolutionRefreshFailures += 1
-  else copilotResolutionRefreshFailures = 0
-  if (!shouldAdoptRefreshedResolution(state.resolution, next, copilotResolutionRefreshFailures)) {
-    if (!sameCopilotResolution(state.resolution, next) && next.version === null) {
+  const probe = await probeCopilotResolution()
+  const next = probe.resolution
+  const previousFailureState = copilotResolutionRefreshFailureState
+  copilotResolutionRefreshFailureState = trackResolutionRefreshFailure(
+    state.resolution,
+    next,
+    previousFailureState,
+    probe.sequence,
+  )
+  const countedFailure = copilotResolutionRefreshFailureState !== previousFailureState
+  if (!shouldAdoptRefreshedResolution(state.resolution, next, copilotResolutionRefreshFailureState.consecutiveFailures)) {
+    if (countedFailure && !sameCopilotResolution(state.resolution, next) && next.version === null) {
       await writeAppLog(
-        `Ignored transient Copilot CLI refresh failure (${copilotResolutionRefreshFailures}/${TRANSIENT_REFRESH_FAILURE_TOLERANCE}): ${next.error ?? 'version probe failed'}`,
+        `Ignored transient Copilot CLI refresh failure (${copilotResolutionRefreshFailureState.consecutiveFailures}/${TRANSIENT_REFRESH_FAILURE_TOLERANCE}): ${next.error ?? 'version probe failed'}`,
       ).catch(() => {})
     }
     return false
   }
   state.resolution = next
-  copilotResolutionRefreshFailures = 0
+  copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
   await recheckCopilotCapabilities()
   broadcastState()
   broadcastCopilotSettingsState()

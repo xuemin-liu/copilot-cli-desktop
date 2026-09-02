@@ -188,20 +188,8 @@ export function App(): JSX.Element {
             canOpenTab={canOpenTab}
             onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
             onRename={requestTabRename}
-            onClose={(tabId) => {
-              window.copilotDesktop.closeTab(tabId).catch((error: unknown) => {
-                console.error('Failed to close session tab', error)
-              })
-            }}
-            onRestart={(tabId) => {
-              // The main process can still reject a restart (an update
-              // installing, a tab closed out from under a queued restart) —
-              // that rejection needs a handler here or it surfaces as an
-              // unhandled promise rejection in the renderer.
-              window.copilotDesktop.restartTab(tabId).catch((error: unknown) => {
-                console.error('Failed to restart session tab', error)
-              })
-            }}
+            onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
+            onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
             onCreate={() => handleOperation(window.copilotDesktop.createTab())}
           />
           {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}

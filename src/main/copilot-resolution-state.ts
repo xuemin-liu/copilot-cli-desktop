@@ -2,6 +2,16 @@ import type { CopilotResolution } from './types.js'
 
 export const TRANSIENT_REFRESH_FAILURE_TOLERANCE = 2
 
+export interface ResolutionRefreshFailureState {
+  consecutiveFailures: number
+  lastFailedProbeSequence: number | null
+}
+
+export const EMPTY_RESOLUTION_REFRESH_FAILURE_STATE: ResolutionRefreshFailureState = {
+  consecutiveFailures: 0,
+  lastFailedProbeSequence: null,
+}
+
 export function sameCopilotResolution(left: CopilotResolution | null, right: CopilotResolution): boolean {
   return left?.kind === right.kind
     && left.command === right.command
@@ -24,4 +34,21 @@ export function shouldAdoptRefreshedResolution(
     return consecutiveFailures > TRANSIENT_REFRESH_FAILURE_TOLERANCE
   }
   return true
+}
+
+/** Count distinct failed probes rather than callers sharing the same probe. */
+export function trackResolutionRefreshFailure(
+  current: CopilotResolution | null,
+  candidate: CopilotResolution,
+  previous: ResolutionRefreshFailureState,
+  probeSequence: number,
+): ResolutionRefreshFailureState {
+  if (current?.version === null || current === null || candidate.version !== null) {
+    return EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
+  }
+  if (previous.lastFailedProbeSequence === probeSequence) return previous
+  return {
+    consecutiveFailures: previous.consecutiveFailures + 1,
+    lastFailedProbeSequence: probeSequence,
+  }
 }

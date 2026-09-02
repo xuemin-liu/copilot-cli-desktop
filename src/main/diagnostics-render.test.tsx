@@ -21,7 +21,9 @@ test('compact CLI diagnostics preserve recovery actions beside existing terminal
     />,
   )
 
-  assert.match(markup, /role="alert"/)
+  assert.doesNotMatch(markup, /role="alert"/)
+  assert.match(markup, /<h2>Copilot CLI is unavailable<\/h2>/)
+  assert.match(markup, /<p role="status">Existing terminals remain available/)
   assert.match(markup, /Existing terminals remain available/)
   assert.match(markup, />Install Copilot CLI</)
   assert.match(markup, />Retry</)
