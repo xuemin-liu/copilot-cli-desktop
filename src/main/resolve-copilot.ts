@@ -205,7 +205,8 @@ export function withCopilotPathAdditions(
   additions: readonly string[] | undefined = [],
 ): NodeJS.ProcessEnv {
   if (!additions || additions.length === 0) return env
-  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'Path'
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path')
+  if (!pathKey) return env
   const currentPath = env[pathKey] ?? ''
   return { ...env, [pathKey]: [...additions, currentPath].filter(Boolean).join(delimiter) }
 }

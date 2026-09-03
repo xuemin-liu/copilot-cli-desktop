@@ -755,8 +755,10 @@ async function buildSessionSpawnPlan(
     attachmentPaths,
     launch: profile.launch,
     permissionArgs: buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
-    // Include ambient credentials in the protected CLI arguments even when
-    // they were inherited rather than saved in the vault.
+    // This must receive the full environment that PtySession will pass to
+    // Copilot, not only provider/vault overrides. Ambient credentials also
+    // reach Copilot through PtySession's process.env merge and must be named
+    // here so they are withheld from shell commands and MCP servers.
     secretArgs: secretEnvArgs(environment),
     connectSessionId,
     sessionTitle,

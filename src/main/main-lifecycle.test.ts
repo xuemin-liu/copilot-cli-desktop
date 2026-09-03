@@ -128,6 +128,22 @@ test('session launch keeps the inherited PATH when adding the Copilot runtime di
   })
 })
 
+test('session launch protects credentials inherited from the ambient environment', async () => {
+  const name = 'DESKTOP_LIFECYCLE_TEST_TOKEN'
+  const previous = process.env[name]
+  process.env[name] = 'test-only-secret'
+  try {
+    await fixture(async (harness, directory) => {
+      configure(harness, directory)
+      await harness.createMain()
+      assert.ok(harness.spawns[0]?.args.includes(`--secret-env-vars=${name}`))
+    })
+  } finally {
+    if (previous === undefined) delete process.env[name]
+    else process.env[name] = previous
+  }
+})
+
 test('restart IPC reapplies side-chat restrictions after profile escalation, before stopping the old PTY', async () => {
   await fixture(async (harness, directory) => {
     const { profile, capabilities } = configure(harness, directory)
