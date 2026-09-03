@@ -740,9 +740,10 @@ async function buildSessionSpawnPlan(
   // the true resume id is known) agrees with this guess.
   validateLaunchOptions(profile.launch, connectSessionId, !connectSessionId && resumeMode === 'new')
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
-  const configuredEnvironment = providerEnvironment(desktopConfig.provider, { ...process.env, ...vaultEnvironment })
+  const inheritedEnvironment = { ...process.env, ...vaultEnvironment }
+  const configuredEnvironment = providerEnvironment(desktopConfig.provider, inheritedEnvironment)
   const environment = withCopilotPathAdditions(
-    { ...configuredEnvironment, ...vaultEnvironment },
+    { ...inheritedEnvironment, ...configuredEnvironment },
     resolution.pathAdditions,
   )
   return {
@@ -754,10 +755,11 @@ async function buildSessionSpawnPlan(
     attachmentPaths,
     launch: profile.launch,
     permissionArgs: buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities),
-    // PtySession merges process.env into this session's environment (see
-    // pty-session.ts), so secretEnvArgs must see that same merged view to
-    // also protect a credential that was only ever ambient, not vault-saved.
-    secretArgs: secretEnvArgs({ ...process.env, ...environment }),
+    // This must receive the full environment that PtySession will pass to
+    // Copilot, not only provider/vault overrides. Ambient credentials also
+    // reach Copilot through PtySession's process.env merge and must be named
+    // here so they are withheld from shell commands and MCP servers.
+    secretArgs: secretEnvArgs(environment),
     connectSessionId,
     sessionTitle,
   }

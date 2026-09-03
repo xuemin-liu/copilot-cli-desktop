@@ -118,6 +118,12 @@ test('withCopilotPathAdditions uses the platform delimiter without mutating the 
   assert.equal(source.PATH, 'existing')
 })
 
+test('withCopilotPathAdditions does not invent PATH in a partial environment', () => {
+  const source = { COPILOT_MODEL: 'test-model' }
+  assert.equal(withCopilotPathAdditions(source, ['first']), source)
+  assert.deepEqual(source, { COPILOT_MODEL: 'test-model' })
+})
+
 test('windowsSystemExecutable never depends on the current directory', () => {
   assert.equal(windowsSystemExecutable('taskkill.exe', { SystemRoot: 'D:\\Windows' }), 'D:\\Windows\\System32\\taskkill.exe')
 })
