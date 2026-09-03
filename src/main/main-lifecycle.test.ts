@@ -19,7 +19,7 @@ interface Harness {
   beginQuit(): void
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
-  spawns: { args: string[]; stopped: boolean }[]
+  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -47,7 +47,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const spawns = [];
         export async function spawnNodePty(file, args, options) {
           const exits = new Set();
-          const record = { args, stopped: false };
+          const record = { args, env: options.env, stopped: false };
           spawns.push(record);
           return { pid: undefined, onData() {}, onExit(fn) { exits.add(fn); }, write() {}, resize() {},
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
@@ -55,9 +55,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
-          return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null };
+          return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
         }
-        export function withCopilotPathAdditions(environment) { return environment; }
+        export function withCopilotPathAdditions(environment, additions = []) {
+          const key = Object.keys(environment).find((name) => name.toLowerCase() === 'path') || 'Path';
+          return { ...environment, [key]: [...additions, environment[key]].filter(Boolean).join(';') };
+        }
         export function windowsSystemDirectory() { return 'C:/Windows/System32'; }
         export function windowsSystemExecutable(name) { return 'C:/Windows/System32/' + name; }
         export async function findWindowsExecutable() { return null; }
@@ -70,7 +73,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const lifecycleTest = {
           spawns,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
-            state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null }; syncWorkspaceState(); },
+            state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForActiveProfile,
@@ -109,6 +112,21 @@ function assertRestricted(args: string[]): void {
   assert.ok(args.includes('--no-remote') && args.includes('--no-remote-export'))
   for (const forbidden of ['--allow-all', '--autopilot', 'autopilot', '--agent', '--worktree']) assert.ok(!args.includes(forbidden), `Unexpected launch arg: ${forbidden}`)
 }
+
+test('session launch keeps the inherited PATH when adding the Copilot runtime directory', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === 'path') ?? 'Path'
+    const inheritedPath = process.env[pathKey] ?? ''
+
+    await harness.createMain()
+
+    assert.equal(
+      harness.spawns[0]?.env[pathKey],
+      ['C:/Program Files/nodejs', inheritedPath].filter(Boolean).join(';'),
+    )
+  })
+})
 
 test('restart IPC reapplies side-chat restrictions after profile escalation, before stopping the old PTY', async () => {
   await fixture(async (harness, directory) => {
