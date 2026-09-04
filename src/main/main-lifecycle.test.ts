@@ -19,7 +19,7 @@ interface Harness {
   beginQuit(): void
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
-  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean }[]
+  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -47,9 +47,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const spawns = [];
         export async function spawnNodePty(file, args, options) {
           const exits = new Set();
-          const record = { args, env: options.env, stopped: false };
+          const dataListeners = new Set();
+          const record = { args, env: options.env, stopped: false, written: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
-          return { pid: undefined, onData() {}, onExit(fn) { exits.add(fn); }, write() {}, resize() {},
+          return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize() {},
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
         }
       `,
@@ -157,7 +158,7 @@ test('restart IPC reapplies side-chat restrictions after profile escalation, bef
     assertRestricted(harness.spawns[2]!.args)
     assert.equal(harness.spawns[0]!.stopped, false)
     assert.equal(harness.spawns[1]!.stopped, true)
-    assert.equal(restarted.tabs.find((tab) => tab.id === sideId)?.launchedPermissionPreset, 'read-only')
+    assert.equal(restarted.tabs.find((tab) => tab.id === sideId)?.sessionPermissionPreset, 'read-only')
     assert.equal(restarted.tabs.find((tab) => tab.id === sideId)?.lastSessionId, FORK)
     capabilities.toolAllowlist = false
     await assert.rejects(harness.request('desktop:restart-tab', sideId), /tool allowlists/)
@@ -178,7 +179,7 @@ test('restored side chats remain restricted under a full-access autopilot worksp
     assert.ok(harness.spawns[0]!.args.includes('--allow-all'))
     assertRestricted(harness.spawns[1]!.args)
     assert.equal(state.tabs[1]!.sideParentTabId, state.tabs[0]!.id)
-    assert.equal(state.tabs[1]!.launchedPermissionPreset, 'read-only')
+    assert.equal(state.tabs[1]!.sessionPermissionPreset, 'read-only')
   })
 })
 
@@ -234,5 +235,55 @@ test('file reveal rejects paths outside the session workspace', async () => {
       () => harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'),
       /within the session workspace/,
     )
+  })
+})
+
+test('profile permission edits affect new sessions but restart preserves an existing session permission', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    const opened = await harness.createMain()
+    profile.permissionPreset = 'full-access'
+
+    const restarted = await harness.request('desktop:restart-tab', opened.activeTabId)
+
+    assert.equal(harness.spawns.length, 2)
+    assert.ok(!harness.spawns[1]!.args.includes('--allow-all'))
+    assert.equal(restarted.tabs[0]?.sessionPermissionPreset, 'default')
+  })
+})
+
+test('restored sessions use their persisted permission instead of the current profile default', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.permissionPreset = 'read-only'
+    profile.tabs = [{ title: 'Existing', lastSessionId: SOURCE, sessionPermissionPreset: 'full-access' }]
+
+    await harness.restore()
+    const state = await harness.request('desktop:get-state')
+
+    assert.ok(harness.spawns[0]!.args.includes('--allow-all'))
+    assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--available-tools=')))
+    assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-access')
+  })
+})
+
+test('terminal permission command updates only the session and relaunches immutable restricted flags', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.permissionPreset = 'read-only'
+    const opened = await harness.createMain()
+    const tabId = opened.activeTabId!
+
+    await harness.request('desktop:write-tab', tabId, '/permissions allow-all\r')
+    harness.spawns[0]!.emitData('All permissions are now enabled. Tool, path, and URL requests will be automatically approved.')
+    await new Promise((resolve) => setImmediate(resolve))
+    const state = await harness.request('desktop:get-state')
+
+    assert.equal(profile.permissionPreset, 'read-only')
+    assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-access')
+    assert.equal(harness.spawns.length, 2)
+    assert.ok(harness.spawns[0]!.written.includes('/permissions allow-all\r'))
+    assert.ok(harness.spawns[1]!.args.includes('--allow-all'))
+    assert.ok(!harness.spawns[1]!.args.some((arg) => arg.startsWith('--available-tools=')))
   })
 })

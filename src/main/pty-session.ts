@@ -3,6 +3,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { windowsSystemExecutable } from './resolve-copilot.js'
 import { detectApprovalPrompt, extractSessionId } from './approval-heuristic.js'
+import {
+  CopilotPermissionCommandTracker,
+  permissionConfirmationMarker,
+  type CopilotPermissionMode,
+} from './copilot-permission-command.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 
@@ -14,6 +19,7 @@ const MAX_OUTPUT_LINES = 500
 const MAX_LINE_CHARS = 8_000
 const MAX_PENDING_CHARS = 64_000
 const MAX_HEURISTIC_CHARS = 16_000
+const MAX_PERMISSION_OUTPUT_CHARS = 4_000
 
 export interface PtySessionOptions {
   file: string
@@ -50,6 +56,9 @@ export class PtySession extends EventEmitter {
   private pendingLine = ''
   private heuristicBuffer = ''
   private lastKnownSessionId: string | null
+  private readonly permissionCommandTracker = new CopilotPermissionCommandTracker()
+  private readonly pendingPermissionModes: CopilotPermissionMode[] = []
+  private permissionOutputBuffer = ''
 
   constructor(options: PtySessionOptions) {
     super()
@@ -151,6 +160,19 @@ export class PtySession extends EventEmitter {
 
     pty.onData((data: string) => {
       this.recordOutput(data)
+      if (this.pendingPermissionModes.length > 0) {
+        this.permissionOutputBuffer = `${this.permissionOutputBuffer}${data}`.slice(-MAX_PERMISSION_OUTPUT_CHARS)
+        let pendingPermissionMode = this.pendingPermissionModes[0]
+        while (pendingPermissionMode) {
+          const marker = permissionConfirmationMarker(pendingPermissionMode)
+          const markerIndex = this.permissionOutputBuffer.indexOf(marker)
+          if (markerIndex === -1) break
+          this.pendingPermissionModes.shift()
+          this.permissionOutputBuffer = this.permissionOutputBuffer.slice(markerIndex + marker.length)
+          this.emit('permission-command', pendingPermissionMode)
+          pendingPermissionMode = this.pendingPermissionModes[0]
+        }
+      }
       // PTY reads can split a prompt or session-id banner at any byte boundary.
       // Scan a bounded rolling stream so the heuristics see text spanning
       // adjacent reads rather than treating transport chunks as message lines.
@@ -198,6 +220,9 @@ export class PtySession extends EventEmitter {
     if (!this.pty) return
     if (this.statusValue === 'approval-needed') this.setStatus('running')
     this.heuristicBuffer = ''
+    const permissionModes = this.permissionCommandTracker.accept(data)
+    if (permissionModes.length > 0 && this.pendingPermissionModes.length === 0) this.permissionOutputBuffer = ''
+    this.pendingPermissionModes.push(...permissionModes)
     this.pty.write(data)
   }
 

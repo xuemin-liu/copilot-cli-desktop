@@ -119,19 +119,29 @@ and local mock model, and saves screenshots plus `result.json` under
 
 ## Permission presets
 
-`copilot` has no single named permission-mode enum. It exposes flags instead:
-`--available-tools`, `--excluded-tools`, `--allow-tool`, `--deny-tool`,
-`--allow-all-tools` (`/yolo`), `--allow-url`, and `--add-dir` (trust a
-directory permanently). This app maps five presets
-onto that flag surface, set per workspace profile in Settings:
+Copilot CLI exposes the runtime modes `default`, `assisted`, and `allow-all`,
+plus launch-time flags such as `--available-tools`, `--allow-all-tools`, and
+`--add-dir`. This app maps six startup presets onto that surface. A workspace
+profile supplies the default only when a new session is created; every tab
+then owns and persists its permission independently:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
 | Copilot default | (none) | Uses Copilot CLI's configured `defaultPermissionMode`. A normal installation prompts for mutating actions, but an upstream allow-all setting remains allow-all. |
+| Assisted approval | `--assisted-approval` | Permission prompts include Copilot's LLM safety recommendation. |
 | Restricted | `--available-tools=view,glob,grep,ask_user` | Only explicit read/search/interaction tools are visible to the model. Shell, write, web, MCP, skill, memory, and delegated-agent tools are excluded. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
 | Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
+
+Inside an existing terminal, `/permissions default`, `/permissions assisted`,
+and `/permissions allow-all` (including `/allow-all` and `/yolo`) update that
+session's permission badge without changing its profile. If a session began
+with an app-defined launch restriction that Copilot cannot undo in place, the
+desktop transparently relaunches the same tab and resumes the same Copilot
+session with the requested native mode. Restarting or restoring a tab keeps
+its session permission; the profile default continues to apply only to new
+sessions. Restricted side chats remain restricted.
 
 See `src/main/permission-presets.ts`.
 
@@ -238,9 +248,9 @@ approval-needed, session-completed, and session-crashed (also toggleable);
 clicking one focuses the window and the relevant tab.
 
 Workspace profiles are keyed by normalized folder path and remember a name,
-permission preset, default resume mode, launch profile, and the last set of
-open tabs (title + deterministic session id on current Copilot versions) to
-restore next time that profile is activated.
+startup permission, default resume mode, launch profile, and the last set of
+open tabs (title + deterministic session id + session-owned permission on
+current Copilot versions) to restore next time that profile is activated.
 
 ## Background CLI
 

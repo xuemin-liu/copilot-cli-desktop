@@ -1,15 +1,11 @@
-/**
- * GitHub Copilot CLI has no single named permission-mode enum (unlike some other
- * agent CLIs). Instead it exposes flags: `--allow-tool`, `--deny-tool`,
- * `--allow-all-tools` (aka `/yolo`), `--allow-url`, and `--add-dir` (trust a
- * directory permanently). These presets map onto that flag surface so a
- * workspace profile can pick a coarse-grained default without hand-editing
- * flags every time a session starts.
- */
-export type PermissionPreset = 'default' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
+/** Workspace-profile defaults and the effective permission carried by a tab.
+ * Copilot's native runtime modes are default, assisted, and allow-all. The
+ * remaining presets are launch-time bundles supplied by the desktop app. */
+export type PermissionPreset = 'default' | 'assisted' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
 
 export const PERMISSION_PRESETS: readonly PermissionPreset[] = [
   'default',
+  'assisted',
   'read-only',
   'trusted-directory',
   'full-auto',
@@ -29,6 +25,12 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
     description:
       'Applies no desktop permission override. Copilot CLI uses its configured defaultPermissionMode '
       + '(normally manual, but it may be assisted or allow-all).',
+  },
+  'assisted': {
+    id: 'assisted',
+    label: 'Assisted approval',
+    description:
+      'Copilot asks before sensitive actions and includes an LLM safety recommendation with each permission request.',
   },
   'read-only': {
     id: 'read-only',
@@ -80,6 +82,8 @@ export function buildPermissionArgs(
   switch (preset) {
     case 'default':
       return []
+    case 'assisted':
+      return ['--assisted-approval']
     case 'read-only':
       return capabilities.toolAllowlist
         ? ['--available-tools=view,glob,grep,ask_user']

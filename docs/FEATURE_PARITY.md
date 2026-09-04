@@ -40,7 +40,8 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 | Read-only permission | Restricted preset uses `--available-tools=view,glob,grep,ask_user` | Explicit allowlist; mutating, network, extension, memory, and delegated-agent tools are unavailable to the model |
 | Workspace/default permission | Copilot-default mode (honors upstream `defaultPermissionMode`) and trusted-directory mode | Equivalent; the UI does not overstate the safety of an upstream allow-all default |
 | Full computer access | Official Copilot `--allow-all` mode | Equivalent |
-| Permission shown in Settings/tray | Settings access card, sidebar badge, and tray label | Equivalent |
+| Per-session permission changes | Profile permission initializes new sessions; direct `/permissions` mode commands update and persist the tab independently | Equivalent; immutable launch bundles transparently resume the same logical session under the selected native mode |
+| Permission shown in Settings/tray | Settings access card, session-owned sidebar badge, and active-session tray label | Equivalent |
 | Windows elevation warning | Detects integrity level and warns when sessions inherit administrator rights | Equivalent |
 | Native browse support | Electron’s native directory picker | Equivalent; no embedded Web UI patch is required |
 

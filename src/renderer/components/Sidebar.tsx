@@ -79,15 +79,12 @@ export function Sidebar({
   const activeTabProfile = activeTab
     ? profiles.find((profile) => profile.id === activeTab.workspaceProfileId) ?? null
     : activeProfile
-  const sessionIsLive = activeTab
-    ? activeTab.status === 'starting' || activeTab.status === 'running' || activeTab.status === 'approval-needed'
-    : false
-  const displayedPreset = sessionIsLive ? activeTab?.launchedPermissionPreset ?? null : null
+  const displayedPreset = activeTab?.sessionPermissionPreset ?? null
   const configuredPreset = activeTab?.sideChat ? 'read-only' : activeTabProfile?.permissionPreset ?? null
   const pendingPreset = configuredPreset && displayedPreset && configuredPreset !== displayedPreset
     ? configuredPreset
     : null
-  const configuredOnly = !sessionIsLive && configuredPreset
+  const configuredOnly = !activeTab && configuredPreset
   const startSession = (): void => {
     if (activeProfileId === null) onSelectWorkspace()
     else onCreateTab()
@@ -294,7 +291,7 @@ export function Sidebar({
         })}
       </div>
 
-      {activeTab?.remote && sessionIsLive ? (
+      {activeTab?.remote && !displayedPreset ? (
         <div className="sidebar-access" title="The desktop cannot determine permissions configured by the remote session host.">
           <span className="sidebar-access-dot" aria-hidden="true" />
           <span>Remote session access unknown</span>
@@ -308,7 +305,7 @@ export function Sidebar({
           <span>
             {PERMISSION_PRESET_INFO[displayedPreset].label}
             {activeTab?.permissionWarning && !activeTab.sideChat && ' · Legacy restricted mode'}
-            {pendingPreset && ` · ${PERMISSION_PRESET_INFO[pendingPreset].label} applies on next launch or Restart`}
+            {pendingPreset && ` · Profile default for new sessions: ${PERMISSION_PRESET_INFO[pendingPreset].label}`}
           </span>
         </div>
       ) : configuredOnly ? (

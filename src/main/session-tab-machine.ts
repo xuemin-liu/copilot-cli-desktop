@@ -15,7 +15,7 @@ export interface NewTabInput {
   title: string
   workspaceProfileId: string
   cliVersion: string | null
-  launchedPermissionPreset: PermissionPreset | null
+  sessionPermissionPreset: PermissionPreset | null
   permissionWarning: string | null
   remote: boolean
   lastSessionId?: string | null
@@ -40,7 +40,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     status: 'starting',
     processId: null,
     cliVersion: input.cliVersion,
-    launchedPermissionPreset: input.launchedPermissionPreset,
+    sessionPermissionPreset: input.sessionPermissionPreset,
     permissionWarning: input.permissionWarning,
     remote: input.remote,
     lastActivityAt: input.lastActivityAt ?? Date.now(),
@@ -103,14 +103,13 @@ export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: 
   }
 }
 
-/** Refreshes the launch-time permission fields after a restart rebuilds a
- * tab's underlying process with the workspace profile's current settings. */
+/** Refreshes process metadata after a restart while preserving session-owned settings. */
 export function setTabLaunchConfig(
   state: TabsState,
   tabId: string,
   config: {
     cliVersion: string | null
-    launchedPermissionPreset: PermissionPreset | null
+    sessionPermissionPreset: PermissionPreset | null
     permissionWarning: string | null
     canFork?: boolean
   },
@@ -118,6 +117,20 @@ export function setTabLaunchConfig(
   return {
     ...state,
     tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, ...config } : tab)),
+  }
+}
+
+export function setTabPermissionPreset(
+  state: TabsState,
+  tabId: string,
+  sessionPermissionPreset: PermissionPreset | null,
+  permissionWarning: string | null,
+): TabsState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => (
+      tab.id === tabId ? { ...tab, sessionPermissionPreset, permissionWarning, lastActivityAt: Date.now() } : tab
+    )),
   }
 }
 

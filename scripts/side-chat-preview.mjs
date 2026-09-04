@@ -12,7 +12,7 @@ const built = await build({
       import { createTab, closeTab, activateTab, renameTab, EMPTY_TABS_STATE } from './src/main/session-tab-machine.ts';
       import { DEFAULT_SESSION_LAUNCH_CONFIG } from './src/main/session-launch.ts';
       const profile = {id:'preview', name:'Side chat preview', path:'C:\\\\preview', permissionPreset:'default', defaultResumeMode:'new', launch:DEFAULT_SESSION_LAUNCH_CONFIG, tabs:[]};
-      const fields = {workspaceProfileId:profile.id, launchedPermissionPreset:'default', permissionWarning:null, remote:false, canFork:true};
+      const fields = {workspaceProfileId:profile.id, sessionPermissionPreset:'default', permissionWarning:null, remote:false, canFork:true};
       let tabs = createTab(EMPTY_TABS_STATE, {...fields,id:'main',title:'Main discussion',lastSessionId:'11111111-1111-4111-8111-111111111111'});
       tabs = createTab(tabs,{...fields,id:'other',title:'Other work'});
       tabs = activateTab(tabs,'main');
@@ -29,7 +29,7 @@ const built = await build({
         closeTab:(id)=>{tabs=closeTab(tabs,id);return update()},
         renameTab:(id,title)=>{tabs=renameTab(tabs,id,title);return update()},
         restartTab:async()=>snapshot(),
-        forkSideChat:(id,sourceSessionId,title)=>{tabs=createTab(tabs,{...fields,id:'side-'+ ++sequence,title,sideChat:true,sideParentTabId:id,launchedPermissionPreset:'read-only',canFork:false});return update()},
+        forkSideChat:(id,sourceSessionId,title)=>{tabs=createTab(tabs,{...fields,id:'side-'+ ++sequence,title,sideChat:true,sideParentTabId:id,sessionPermissionPreset:'read-only',canFork:false});return update()},
         createTab:()=>{tabs=createTab(tabs,{...fields,id:'new-'+ ++sequence,title:'New work'});return update()},
         getTabBacklog:async(id)=>'\\x1b[32m'+(id.startsWith('side')?'Forked context — separate conversation':'Original conversation — still running')+'\\x1b[0m\\r\\n> ',
         writeTab:async(id,data)=>{for(const listener of outputs)listener({tabId:id,data})},

@@ -50,7 +50,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
         status: 'running',
         processId: 42,
         cliVersion: '1.0.82',
-        launchedPermissionPreset: 'default',
+        sessionPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
@@ -101,7 +101,7 @@ test('Sidebar shows current session access and marks changed access as applying 
         status: 'running',
         processId: 42,
         cliVersion: '1.0.80',
-        launchedPermissionPreset: 'default',
+        sessionPermissionPreset: 'default',
         permissionWarning: null,
         remote: false,
         lastActivityAt: 123,
@@ -125,7 +125,7 @@ test('Sidebar shows current session access and marks changed access as applying 
   )
 
   assert.match(markup, /Copilot default \(uses CLI setting\)/)
-  assert.match(markup, /Full computer access \(--allow-all\) applies on next launch or Restart/)
+  assert.match(markup, /Profile default for new sessions: Full computer access \(--allow-all\)/)
   assert.match(markup, /Old CLI/)
   assert.match(markup, /restart this session to use 1\.0\.82/)
 })
@@ -137,7 +137,7 @@ test('Sidebar uses the active tab workspace and surfaces legacy restriction warn
   ]
   const markup = renderAccess(profiles, {
     id: 'tab-2', title: 'Two', workspaceProfileId: 'workspace-2', lastSessionId: null,
-    status: 'running', processId: 42, launchedPermissionPreset: 'read-only',
+    status: 'running', processId: 42, sessionPermissionPreset: 'read-only',
     cliVersion: '1.0.82',
     permissionWarning: 'Only shell and write tools are denied.', remote: false, lastActivityAt: 123,
   })
@@ -147,27 +147,28 @@ test('Sidebar uses the active tab workspace and surfaces legacy restriction warn
   assert.doesNotMatch(markup, /Copilot default \(uses CLI setting\)/)
 })
 
-test('Sidebar does not claim effective access for remote or stopped sessions', () => {
+test('Sidebar shows persisted access for stopped sessions and unknown access for untouched remote sessions', () => {
   const profiles: WorkspaceProfile[] = [{
     id: 'workspace-1', name: 'one', path: 'D:\\one', permissionPreset: 'full-access',
     defaultResumeMode: 'new', launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
   }]
   const remoteMarkup = renderAccess(profiles, {
     id: 'remote', title: 'Remote', workspaceProfileId: 'workspace-1', lastSessionId: null,
-    status: 'running', processId: 42, launchedPermissionPreset: null, permissionWarning: null,
+    status: 'running', processId: 42, sessionPermissionPreset: null, permissionWarning: null,
     cliVersion: '1.0.82',
     remote: true, lastActivityAt: 123,
   })
   const stoppedMarkup = renderAccess(profiles, {
     id: 'stopped', title: 'Stopped', workspaceProfileId: 'workspace-1', lastSessionId: null,
-    status: 'completed', processId: null, launchedPermissionPreset: 'full-access', permissionWarning: null,
+    status: 'completed', processId: null, sessionPermissionPreset: 'full-access', permissionWarning: null,
     cliVersion: '1.0.82',
     remote: false, lastActivityAt: 123,
   })
 
   assert.match(remoteMarkup, /Remote session access unknown/)
   assert.doesNotMatch(remoteMarkup, />Full computer access \(--allow-all\)</)
-  assert.match(stoppedMarkup, /Full computer access \(--allow-all\) applies to newly created sessions/)
+  assert.match(stoppedMarkup, />Full computer access \(--allow-all\)</)
+  assert.doesNotMatch(stoppedMarkup, /applies to newly created sessions/)
 })
 
 test('Sidebar keeps side chat access restricted even when its workspace allows full access', () => {
@@ -178,7 +179,7 @@ test('Sidebar keeps side chat access restricted even when its workspace allows f
   for (const status of ['running', 'crashed'] as const) {
     const markup = renderAccess(profiles, {
       id: 'side', title: 'Side', workspaceProfileId: 'workspace-1', lastSessionId: null,
-      status, processId: status === 'running' ? 42 : null, launchedPermissionPreset: 'read-only',
+      status, processId: status === 'running' ? 42 : null, sessionPermissionPreset: 'read-only',
       permissionWarning: SIDE_CHAT_PERMISSION_WARNING, remote: false, cliVersion: '1.0.82', lastActivityAt: 123, sideChat: true,
     })
     assert.match(markup, /Restricted \(explicit read\/search allowlist\)/)

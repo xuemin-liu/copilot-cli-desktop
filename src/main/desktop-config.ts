@@ -125,6 +125,9 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
     tabs.push({
       title: tab.title,
       lastSessionId,
+      ...(isPermissionPreset(tab.sessionPermissionPreset)
+        ? { sessionPermissionPreset: tab.sessionPermissionPreset }
+        : {}),
       ...(tab.sideChat === true ? {
         sideChat: true as const,
         ...(typeof tab.sideParentSessionId === 'string' && tab.sideParentSessionId.length <= 128

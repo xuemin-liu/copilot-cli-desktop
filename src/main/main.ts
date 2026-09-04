@@ -73,6 +73,11 @@ import { spawnNodePty } from './node-pty-backend.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import {
+  nativeModeForPermissionPreset,
+  permissionPresetForMode,
+  type CopilotPermissionMode,
+} from './copilot-permission-command.js'
+import {
   isCopilotProviderType,
   providerEnvironment,
   validateProviderConfig,
@@ -104,6 +109,7 @@ import {
   renameTab,
   setTabLaunchConfig,
   setTabProcessId,
+  setTabPermissionPreset,
   setTabSessionId,
   setTabStatus,
   touchTab,
@@ -385,6 +391,7 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
           ...(tab.sideChat ? { sideChat: true as const } : {}),
           ...(parentSessionId ? { sideParentSessionId: parentSessionId } : {}),
         }
@@ -548,7 +555,10 @@ function trayStatusLabel(): string {
 }
 
 function activeAccessLabel(): string {
-  const preset = activeWorkspaceProfile(desktopConfig)?.permissionPreset ?? 'default'
+  const activeTab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
+  const preset = activeTab?.sessionPermissionPreset
+    ?? activeWorkspaceProfile(desktopConfig)?.permissionPreset
+    ?? 'default'
   return PERMISSION_PRESET_INFO[preset].label
 }
 
@@ -714,9 +724,9 @@ function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: st
  * provider config, credentials) into everything a `PtySession` spawn needs
  * *except* the parts that depend on whether the launch is actually starting
  * fresh or resuming a conversation — see finalizeSessionArgs() for those.
- * Shared by session creation and restart so a restart picks up whatever is
- * currently saved instead of whatever was saved when the tab was first
- * opened.
+ * Shared by session creation and restart. Callers pass a profile snapshot
+ * whose permission is the session-owned value; profile edits only affect new
+ * sessions.
  */
 async function buildSessionSpawnPlan(
   profile: WorkspaceProfile,
@@ -826,6 +836,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     const window = mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk })
   })
+  session.on('permission-command', (mode: CopilotPermissionMode) => {
+    applySessionPermissionCommand(id, session, mode)
+  })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
     if (session.lastSessionId) {
@@ -839,6 +852,34 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
 }
 
+function applySessionPermissionCommand(id: string, session: PtySession, mode: CopilotPermissionMode): void {
+  if (managedTabs.get(id)?.session !== session) return
+  const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+  if (!tab || tab.sideChat) return
+  const previousPreset = tab.sessionPermissionPreset
+  const nextPreset = permissionPresetForMode(mode)
+  if (previousPreset === nextPreset) return
+
+  tabsState = setTabPermissionPreset(
+    tabsState,
+    id,
+    nextPreset,
+    tab.remote ? null : permissionCompatibilityWarning(nextPreset, copilotCapabilities),
+  )
+  syncTabState()
+  persistProfileTabs()
+  broadcastState()
+  refreshMenus()
+
+  // Native modes can change in place. App-defined bundles such as restricted,
+  // trusted-directory, and tools-only auto mode contain launch flags that the
+  // CLI cannot undo at runtime, so rebuild this tab and resume the same Copilot
+  // session under the user's requested native mode.
+  if (!tab.remote && nativeModeForPermissionPreset(previousPreset) === null) {
+    observe(restartSessionTab(id), 'Could not apply the session permission change')
+  }
+}
+
 async function createSessionTab(
   profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
   resumeModeOverride: ResumeMode | null = null,
@@ -847,6 +888,7 @@ async function createSessionTab(
   connectSessionId: string | null = null,
   titleOverride: string | null = null,
   sideOptions: { sideChat?: true; sideParentTabId?: string } = {},
+  sessionPermissionPresetOverride: PermissionPreset | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
@@ -856,7 +898,15 @@ async function createSessionTab(
   const id = `tab-${nextTabSequence++}`
   const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
-  const plan = await buildSessionSpawnPlan(profile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  const sessionPermissionPreset = connectSessionId
+    ? null
+    : sideOptions.sideChat
+      ? 'read-only'
+      : sessionPermissionPresetOverride ?? profile.permissionPreset
+  const launchProfile = sessionPermissionPreset
+    ? { ...profile, permissionPreset: sessionPermissionPreset }
+    : profile
+  const plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
   // Recheck after credential resolution: another creation or shutdown may
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
@@ -878,8 +928,8 @@ async function createSessionTab(
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
     workspaceProfileId: profile.id,
-    launchedPermissionPreset: connectSessionId ? null : profile.permissionPreset,
-    permissionWarning: sideOptions.sideChat ? SIDE_CHAT_PERMISSION_WARNING : connectSessionId ? null : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+    sessionPermissionPreset,
+    permissionWarning: sideOptions.sideChat ? SIDE_CHAT_PERMISSION_WARNING : connectSessionId ? null : permissionCompatibilityWarning(sessionPermissionPreset!, copilotCapabilities),
     remote: connectSessionId !== null,
     cliVersion: plan.cliVersion,
     lastSessionId: deterministicSessionId,
@@ -1034,12 +1084,17 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     if (tab.remote) throw new Error('A remote session cannot be restarted')
     const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
     if (!savedProfile) throw new Error('This session\'s workspace profile no longer exists')
-    const profile = tab.sideChat ? sideChatProfile(savedProfile, copilotCapabilities) : savedProfile
+    const sessionPermissionPreset = tab.sideChat
+      ? 'read-only'
+      : tab.sessionPermissionPreset ?? savedProfile.permissionPreset
+    const profile = tab.sideChat
+      ? sideChatProfile(savedProfile, copilotCapabilities)
+      : { ...savedProfile, permissionPreset: sessionPermissionPreset }
 
     const managed = managedTabs.get(tabId)
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
 
-    // Validate and build against the profile's *current* settings BEFORE
+    // Validate and build against the session's saved settings BEFORE
     // touching the existing process. buildSessionSpawnPlan can reject (an
     // unavailable resolution, a newly saved but unsupported launch option, a
     // credential-store failure) — that must not cost the user an otherwise
@@ -1087,8 +1142,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
       cliVersion: plan.cliVersion,
-      launchedPermissionPreset: profile.permissionPreset,
-      permissionWarning: tab.sideChat ? SIDE_CHAT_PERMISSION_WARNING : permissionCompatibilityWarning(profile.permissionPreset, copilotCapabilities),
+      sessionPermissionPreset,
+      permissionWarning: tab.sideChat ? SIDE_CHAT_PERMISSION_WARNING : permissionCompatibilityWarning(sessionPermissionPreset, copilotCapabilities),
       canFork: !tab.sideChat && supportsSessionFork(state.resolution?.version ?? null),
     })
     // deterministicSessionId is already correct by construction: it's the
@@ -1145,7 +1200,7 @@ async function restoreTabsForActiveProfile(): Promise<void> {
         await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
           ...(candidate.sideChat ? { sideChat: true as const } : {}),
           ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-        })
+        }, candidate.sessionPermissionPreset ?? profile.permissionPreset)
       } catch (error) {
         await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
       }

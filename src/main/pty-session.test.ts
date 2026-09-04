@@ -75,6 +75,24 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
+test('write() reports direct runtime permission commands submitted by the user', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  const modes: string[] = []
+  session.on('permission-command', (mode: string) => modes.push(mode))
+
+  for (const char of '/permissions assisted') session.write(char)
+  session.write('\r')
+  session.write('/permissions show\r')
+  session.write('/yolo\r')
+
+  assert.deepEqual(modes, [])
+  pty.emit('data', 'Auto approval is now enabled. Permission requests include a recommendation. '
+    + 'All permissions are now enabled. Tool requests are automatically approved.')
+  assert.deepEqual(modes, ['assisted', 'allow-all'])
+})
+
 test('heuristics reassemble text split across pty chunks without trusting session IDs by default', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })

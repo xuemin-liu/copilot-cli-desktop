@@ -14,6 +14,8 @@ export type SessionLifecycleStatus =
 export interface RestoredTab {
   title: string
   lastSessionId: string | null
+  /** Session-owned permission. Missing in config files written by older releases. */
+  sessionPermissionPreset?: PermissionPreset
   sideChat?: true
   sideParentSessionId?: string
 }
@@ -37,8 +39,8 @@ export interface DesktopSessionTab {
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null
-  /** Permission preset captured when this local Copilot process was launched; unknown for remote connections. */
-  launchedPermissionPreset: PermissionPreset | null
+  /** Effective permission owned by this session; initially copied from its profile. */
+  sessionPermissionPreset: PermissionPreset | null
   permissionWarning: string | null
   remote: boolean
   /** Restricted fork; preserved even when its parent tab is closed. */

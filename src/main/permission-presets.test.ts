@@ -14,6 +14,10 @@ test('buildPermissionArgs: default defers to the Copilot CLI setting and adds no
   assert.deepEqual(buildPermissionArgs('default', 'C:\\work\\project', MODERN_CAPABILITIES), [])
 })
 
+test('buildPermissionArgs: assisted asks Copilot for safety recommendations', () => {
+  assert.deepEqual(buildPermissionArgs('assisted', 'C:\\work\\project', MODERN_CAPABILITIES), ['--assisted-approval'])
+})
+
 test('buildPermissionArgs: trusted-directory adds --add-dir with the workspace path', () => {
   assert.deepEqual(
     buildPermissionArgs('trusted-directory', 'C:\\work\\project', MODERN_CAPABILITIES),
@@ -51,13 +55,14 @@ test('legacy restricted mode explains its weaker compatibility guarantee', () =>
 
 test('only restricted mode needs a tool-allowlist capability probe', () => {
   assert.equal(needsToolAllowlistProbe('read-only'), true)
-  for (const preset of ['default', 'trusted-directory', 'full-auto', 'full-access'] as const) {
+  for (const preset of ['default', 'assisted', 'trusted-directory', 'full-auto', 'full-access'] as const) {
     assert.equal(needsToolAllowlistProbe(preset), false)
   }
 })
 
 test('isPermissionPreset narrows valid preset strings and rejects everything else', () => {
   assert.equal(isPermissionPreset('default'), true)
+  assert.equal(isPermissionPreset('assisted'), true)
   assert.equal(isPermissionPreset('read-only'), true)
   assert.equal(isPermissionPreset('trusted-directory'), true)
   assert.equal(isPermissionPreset('full-auto'), true)
