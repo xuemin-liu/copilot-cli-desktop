@@ -9,6 +9,7 @@ import {
   ClipboardRedrawRecovery,
   NativeCopyGestureTracker,
   clipboardRedrawOutput,
+  findClipboardFooterRow,
   isClipboardOnlyViewport,
   isCursorHome,
   normalizeClipboardSnapshot,
@@ -86,6 +87,19 @@ test('recognizes only the collapsed copy/status viewport', () => {
   assert.equal(isClipboardOnlyViewport(['', 'ctrl+c / right-click copy']), true)
   assert.equal(isClipboardOnlyViewport(['', '']), false)
   assert.equal(isClipboardOnlyViewport(['copied to clipboard', 'new streamed response']), false)
+})
+
+test('finds the native footer row with model suffixes and wrapped footer text', () => {
+  assert.equal(findClipboardFooterRow(['prompt', '', ' ctrl+c / right-click copy     model-name']), 2)
+  assert.equal(findClipboardFooterRow(['prompt', '', ' ← open sidebar · / commands · ? help · tab next tab', 'model-name']), 2)
+  assert.equal(findClipboardFooterRow(['prompt', '', 'open sidebar · / commands · ? help · tab next tab   Auto']), 2)
+})
+
+test('does not guess a footer from the collapsed status or ordinary content', () => {
+  assert.equal(findClipboardFooterRow(['copied to clipboard', '', '']), null)
+  assert.equal(findClipboardFooterRow(['ctrl+c / right-click copy', '', '', '', 'prompt']), null)
+  assert.equal(findClipboardFooterRow(['response', 'Tip: copying text', 'prompt']), null)
+  assert.equal(findClipboardFooterRow([]), null)
 })
 
 test('arms native drag copy only after an unmodified text-selection drag', () => {

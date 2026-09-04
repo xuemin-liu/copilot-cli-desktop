@@ -9,6 +9,7 @@ import {
   ClipboardRedrawRecovery,
   NativeCopyGestureTracker,
   clipboardRedrawOutput,
+  findClipboardFooterRow,
   isClipboardOnlyViewport,
   isCursorHome,
   normalizeClipboardSnapshot,
@@ -53,15 +54,57 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     const copyStatusElement = document.createElement('div')
     copyStatusElement.className = 'terminal-copy-status'
-    copyStatusElement.textContent = 'copied to clipboard'
     container.appendChild(copyStatusElement)
     let copyStatusTimer = 0
-    const showCopyConfirmation = (): void => {
+    const hideCopyConfirmation = (): void => {
       window.clearTimeout(copyStatusTimer)
+      copyStatusElement.classList.remove('terminal-copy-status-visible')
+    }
+    const readNativeCopyStatus = (): { row: number; text: string } | null => {
+      for (let row = terminal.rows - 1; row >= 0; row -= 1) {
+        const text = terminal.buffer.active
+          .getLine(terminal.buffer.active.viewportY + row)?.translateToString(true) ?? ''
+        if (text.trim().toLowerCase() === 'copied to clipboard') return { row, text }
+      }
+      return null
+    }
+    const showCopyConfirmation = (status: { row: number; text: string }): void => {
+      // The collapsed first-copy frame can place its status near the top.
+      // Find the footer in the restored buffer instead; never mask a guessed
+      // row if the CLI's footer layout is not recognized.
+      const lines = Array.from({ length: terminal.rows }, (_, row) => terminal.buffer.active
+        .getLine(terminal.buffer.active.viewportY + row)?.translateToString(true) ?? '')
+      const footerRow = findClipboardFooterRow(lines)
+      if (footerRow === null) return
+      const screen = terminal.element?.querySelector('.xterm-screen')
+      if (!screen) return
+      const screenRect = screen.getBoundingClientRect()
+      const paneRect = container.getBoundingClientRect()
+      if (screenRect.width === 0 || screenRect.height === 0) return
+      const nativeRow = screen.querySelector('.xterm-rows')?.children.item(footerRow)
+      const rowRect = nativeRow?.getBoundingClientRect()
+      const rowStyle = nativeRow ? window.getComputedStyle(nativeRow) : null
+      const viewport = terminal.element?.querySelector('.xterm-scrollable-element')
+      const rowHeight = rowRect?.height ?? screenRect.height / terminal.rows
+      // Only a restored frame needs a fallback. Cover exactly the native row,
+      // including its whitespace, rather than the pane's bottom padding/gap.
+      hideCopyConfirmation()
+      copyStatusElement.textContent = status.text
+      Object.assign(copyStatusElement.style, {
+        left: `${(rowRect?.left ?? screenRect.left) - paneRect.left}px`,
+        top: `${(rowRect?.top ?? screenRect.top + footerRow * rowHeight) - paneRect.top}px`,
+        width: `${rowRect?.width ?? screenRect.width}px`,
+        height: `${rowHeight}px`,
+        lineHeight: `${rowHeight}px`,
+        fontFamily: rowStyle?.fontFamily ?? terminal.options.fontFamily,
+        fontSize: rowStyle?.fontSize ?? `${terminal.options.fontSize}px`,
+        // Copilot can change xterm's default colors with OSC 10/11, without
+        // changing options.theme. Use the currently rendered terminal colors.
+        color: rowStyle?.color ?? terminal.options.theme?.foreground ?? '#e6edf3',
+        background: viewport ? window.getComputedStyle(viewport).backgroundColor : terminal.options.theme?.background ?? '#0b1020',
+      })
       copyStatusElement.classList.add('terminal-copy-status-visible')
-      copyStatusTimer = window.setTimeout(() => {
-        copyStatusElement.classList.remove('terminal-copy-status-visible')
-      }, 1_800)
+      copyStatusTimer = window.setTimeout(hideCopyConfirmation, 1_800)
     }
 
     const clipboardRedraw = new ClipboardRedrawRecovery({
@@ -81,10 +124,14 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         return isClipboardOnlyViewport(lines)
       },
       completeSynchronizedOutput: (snapshot, showCopyStatus) => {
+        // A healthy frame already contains Copilot's own status. Only retain
+        // its text/row when restoring the snapshot would replace that status.
+        const copyStatus = snapshot !== null && showCopyStatus ? readNativeCopyStatus() : null
+        hideCopyConfirmation()
         // Ending synchronized-output mode makes xterm paint the completed
         // state once, without exposing Copilot's intermediate blank frame.
         terminal.write(clipboardRedrawOutput(snapshot), () => {
-          if (showCopyStatus) showCopyConfirmation()
+          if (copyStatus) showCopyConfirmation(copyStatus)
         })
       },
       schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
@@ -127,19 +174,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     const writePtyOutput = (data: string): void => {
       terminal.write(data, () => {
-        let copyStatusRendered = false
-        if (clipboardRedraw.isAwaitingCopyStatus()) {
-          for (let row = 0; row < terminal.rows; row += 1) {
-            const line = terminal.buffer.active
-              .getLine(terminal.buffer.active.viewportY + row)
-              ?.translateToString(true)
-              .trim()
-            if (line?.toLowerCase() === 'copied to clipboard') {
-              copyStatusRendered = true
-              break
-            }
-          }
-        }
+        const copyStatusRendered = clipboardRedraw.isAwaitingCopyStatus() && readNativeCopyStatus() !== null
         clipboardRedraw.onOutputParsed(copyStatusRendered)
       })
     }
@@ -267,6 +302,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     let fitFrame = 0
     const fitTerminal = (): void => {
+      // A resize invalidates the fallback's captured row geometry. Copilot
+      // redraws the footer for the new terminal size itself.
+      hideCopyConfirmation()
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => {
         // display:none panes have no usable geometry. Preserve their last

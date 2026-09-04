@@ -119,6 +119,9 @@ and local mock model, and saves screenshots plus `result.json` under
 After building, run `node scripts/electron-side-chat-check.mjs --clipboard-multi-click`
 to test drag-select → double-click → Ctrl+C, including the physical Control-key
 sequence. Its screenshots and results are saved under `test-results/clipboard-multi-click/`.
+Use `node scripts/electron-side-chat-check.mjs --clipboard-status` to compare the
+first and second copy confirmations' color and terminal-row alignment. Screenshots
+and measurements are saved under `test-results/clipboard-status/`.
 
 ## Permission presets
 

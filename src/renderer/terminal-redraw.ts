@@ -37,6 +37,18 @@ const COPY_STATUS_LINE = /^copied to clipboard$/i
 const COPY_HELP_LINE = /^ctrl\+c \/ right-click copy(?:\s+auto)?$/i
 const NAVIGATION_LINE = /^(?:←\s*)?open sidebar · \/ commands · \? help · tab next tab(?:\s+auto)?$/i
 
+/** Locate the restored TUI footer, allowing a model/mode suffix or wrapped row. */
+export function findClipboardFooterRow(lines: string[]): number | null {
+  for (let row = lines.length - 1; row >= Math.max(0, lines.length - 3); row -= 1) {
+    const line = lines[row]!.trim().replace(/\s+/g, ' ')
+    if (/^ctrl\+c \/ right-click copy(?:\s|$)/i.test(line)
+      || /^(?:←\s*)?open sidebar · \/ commands · \? help · tab next tab(?:\s|$)/i.test(line)) {
+      return row
+    }
+  }
+  return null
+}
+
 /**
  * Confirm the known failed Copilot frame from xterm's parsed viewport. This is
  * deliberately narrow: any prompt, response, or streaming content prevents a

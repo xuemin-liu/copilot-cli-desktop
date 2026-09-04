@@ -592,23 +592,13 @@ button:disabled {
 .terminal-copy-status {
   position: absolute;
   z-index: 5;
-  right: 10px;
-  bottom: 10px;
-  left: 10px;
   display: none;
-  height: 18px;
-  align-items: center;
-  padding-left: 7px;
   pointer-events: none;
-  background: #0b1020;
-  color: #3b78ff;
-  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 18px;
+  white-space: pre;
 }
 
 .terminal-copy-status-visible {
-  display: flex;
+  display: block;
 }
 
 .empty-state {

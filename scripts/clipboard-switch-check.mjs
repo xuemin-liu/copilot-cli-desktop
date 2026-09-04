@@ -27,6 +27,8 @@ export async function runClipboardSwitchCheck() {
   const screenshot = async (name) => writeFile(join(artifacts, `${name}.png`), (await window.webContents.capturePage()).toPNG())
   const originalClipboard = clipboard.readText()
   const multiClick = process.env.DESKTOP_UI_COPY_MULTI_CLICK === '1'
+  const statusCheck = process.env.DESKTOP_UI_COPY_STATUS === '1'
+  let copyStatusComparison
   let copied = ''
   try {
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
@@ -74,6 +76,43 @@ export async function runClipboardSwitchCheck() {
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] })
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' })
     copied = await until(() => clipboard.readText() !== originalClipboard && clipboard.readText().includes('desktop-side-chat-42') && clipboard.readText(), 'native selection copied via OSC 52')
+    const readCopyStatus = () => ui(`(() => {
+      const pane = document.querySelector(${JSON.stringify(selector)});
+      const overlay = pane.querySelector('.terminal-copy-status-visible');
+      const row = Array.from(pane.querySelectorAll('.xterm-rows > div')).find(row => row.textContent.trim().startsWith('copied to clipboard'));
+      const element = overlay || row;
+      if (!element) return null;
+      const text = overlay || Array.from(row.querySelectorAll('span')).find(span => span.textContent.includes('copied')) || row;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(text);
+      return {overlay: !!overlay, top: rect.top, left: rect.left, width: rect.width, height: rect.height, color: style.color, fontSize: style.fontSize, lineHeight: style.lineHeight};
+    })()`)
+    if (statusCheck) {
+      const first = await until(readCopyStatus, 'first copy status visible')
+      await writeFile(join(artifacts, 'copy-status.json'), JSON.stringify({first}, null, 2))
+      await screenshot('02-first-copy-status')
+      await delay(2300)
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: selection.x, y: selection.y })
+      for (let step = 1; step <= 12; step++) {
+        window.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', modifiers: ['leftButtonDown'], x: Math.round(selection.x + (selection.endX - selection.x) * step / 12), y: selection.y })
+        await delay(20)
+      }
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: selection.endX, y: selection.y })
+      await delay(300)
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'right', clickCount: 1, x: selection.x + 100, y: selection.y })
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'right', clickCount: 1, x: selection.x + 100, y: selection.y })
+      const second = await until(readCopyStatus, 'second copy status visible')
+      await screenshot('02-second-copy-status')
+      copyStatusComparison = {first, second}
+      await writeFile(join(artifacts, 'copy-status.json'), JSON.stringify(copyStatusComparison, null, 2))
+      console.log('[clipboard-status]', JSON.stringify(copyStatusComparison))
+      assert.equal(first.color, second.color, 'First-copy confirmation color differs from native status')
+      assert.equal(first.fontSize, second.fontSize, 'First-copy confirmation font size differs from native status')
+      assert.ok(Math.abs(first.top - second.top) <= 1, 'First-copy confirmation is not aligned to the native row')
+      assert.ok(Math.abs(first.left - second.left) <= 1, 'First-copy confirmation is not aligned horizontally')
+      assert.ok(Math.abs(first.width - second.width) <= 1, 'First-copy confirmation does not cover the native row width')
+      assert.ok(Math.abs(first.height - second.height) <= 1, 'First-copy confirmation does not cover the full native row')
+    }
     await delay(2300)
     await screenshot('02-after-copy')
     const afterCopy = await text()
@@ -91,6 +130,7 @@ export async function runClipboardSwitchCheck() {
       cli: finalState.resolution.version,
       selectionGesture: multiClick ? 'drag-then-double-click' : 'drag',
       copiedMarker: copied.includes('desktop-side-chat-42'),
+      ...(copyStatusComparison ? {copyStatusComparison} : {}),
       beforeSwitchRetained: afterCopy.includes('desktop-side-chat-42'),
       afterReturnRetained: afterReturn.includes('desktop-side-chat-42'),
       independentSessionIds: source.lastSessionId !== side.lastSessionId,
