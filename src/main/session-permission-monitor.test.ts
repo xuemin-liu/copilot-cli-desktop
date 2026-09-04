@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
 
-test('monitor ignores history and emits newly appended structured permission changes', async () => {
+test('monitor seeds from bounded history and emits newly appended structured permission changes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'copilot-permission-monitor-'))
   const path = join(directory, 'events.jsonl')
   try {
@@ -14,19 +14,19 @@ test('monitor ignores history and emits newly appended structured permission cha
     const monitor = new SessionPermissionMonitor(path, (mode) => modes.push(mode), 60_000)
     await monitor.start()
     await monitor.poll()
-    assert.deepEqual(modes, [])
+    assert.deepEqual(modes, ['allow-all'])
 
     await appendFile(path, '{"type":"assistant.message","data":{"content":"All permissions are now enabled."}}\n')
     await appendFile(path, '{"type":"session.permissions_changed","data":{"mode":"manual"}}\n')
     await monitor.poll()
-    assert.deepEqual(modes, ['manual'])
+    assert.deepEqual(modes, ['allow-all', 'manual'])
 
     await appendFile(path, '{"type":"session.permissions_changed","data":{"mode":"assis')
     await monitor.poll()
-    assert.deepEqual(modes, ['manual'])
+    assert.deepEqual(modes, ['allow-all', 'manual'])
     await appendFile(path, 'ted"}}\n')
     await monitor.poll()
-    assert.deepEqual(modes, ['manual', 'assisted'])
+    assert.deepEqual(modes, ['allow-all', 'manual', 'assisted'])
     monitor.stop()
   } finally {
     await rm(directory, { recursive: true, force: true })

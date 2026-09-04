@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
-import { SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
+import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
@@ -87,16 +87,9 @@ export function Sidebar({
     ? configuredPreset
     : null
   const configuredOnly = !activeTab && configuredPreset
-  const displayedAccessLabel = displayedPreset && displayedMode
-    ? displayedPreset === 'read-only'
-      ? `Restricted tools · ${SESSION_PERMISSION_MODE_INFO[displayedMode].label}`
-      : displayedPreset === 'trusted-directory'
-        ? `Trusted directory · ${SESSION_PERMISSION_MODE_INFO[displayedMode].label}`
-        : SESSION_PERMISSION_MODE_INFO[displayedMode].label
-    : displayedPreset ? PERMISSION_PRESET_INFO[displayedPreset].label : null
-  const displayedAccessClass = displayedMode === 'allow-all'
-    ? 'full-access'
-    : displayedMode ?? displayedPreset
+  const displayedAccess = displayedPreset
+    ? describeSessionPermission(displayedPreset, displayedMode)
+    : null
   const startSession = (): void => {
     if (activeProfileId === null) onSelectWorkspace()
     else onCreateTab()
@@ -310,7 +303,7 @@ export function Sidebar({
         </div>
       ) : displayedPreset ? (
         <div
-          className={`sidebar-access sidebar-access-${displayedAccessClass}`}
+          className={`sidebar-access sidebar-access-${displayedAccess?.tone}`}
           title={[
             PERMISSION_PRESET_INFO[displayedPreset].description,
             displayedMode ? `Current Copilot approval mode: ${SESSION_PERMISSION_MODE_INFO[displayedMode].label}.` : null,
@@ -319,7 +312,7 @@ export function Sidebar({
         >
           <span className="sidebar-access-dot" aria-hidden="true" />
           <span>
-            {displayedAccessLabel}
+            {displayedAccess?.label}
             {activeTab?.permissionWarning && !activeTab.sideChat && ' · Legacy restricted mode'}
             {pendingPreset && ` · Profile default for new sessions: ${PERMISSION_PRESET_INFO[pendingPreset].label}`}
           </span>

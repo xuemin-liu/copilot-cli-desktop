@@ -199,5 +199,6 @@ test('Sidebar keeps side chat access restricted even when its workspace allows f
     permissionWarning: SIDE_CHAT_PERMISSION_WARNING, remote: false, cliVersion: '1.0.82', lastActivityAt: 124, sideChat: true,
   })
   assert.match(changedModeMarkup, /Restricted tools · Allow all/)
+  assert.match(changedModeMarkup, /sidebar-access-read-only/)
   assert.doesNotMatch(changedModeMarkup, />Full computer access/)
 })

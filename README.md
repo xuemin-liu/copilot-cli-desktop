@@ -137,10 +137,12 @@ Inside an existing terminal, permission changes made through Copilot's direct
 commands, history recall, completion, or permission picker update that
 session's approval-mode badge without changing its profile. The desktop reads
 Copilot's structured `session.permissions_changed` records rather than parsing
-terminal prose. Restarting or restoring a tab keeps its launch restriction and
-last observed approval mode; the profile default continues to apply only to
-new sessions. A Restricted session or side chat can change its approval mode,
-but its launch-time read/search tool allowlist remains visible in the badge.
+terminal prose. Restarting or restoring a tab reapplies additive restrictions
+such as the read/search allowlist or trusted directory; Copilot restores its
+own durable runtime approval mode, so the desktop does not replay `--allow-all`
+as an irrevocable baseline. The profile default continues to apply only to new
+sessions. A Restricted session or side chat can change its approval mode, but
+its launch-time read/search tool allowlist remains visible in the badge.
 
 See `src/main/permission-presets.ts`.
 

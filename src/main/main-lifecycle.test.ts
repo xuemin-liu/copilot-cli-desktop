@@ -180,7 +180,7 @@ test('restored side chats remain restricted under a full-access autopilot worksp
     await harness.restore()
     const state = await harness.request('desktop:get-state')
     assert.equal(state.tabs.length, 2)
-    assert.ok(harness.spawns[0]!.args.includes('--allow-all'))
+    assert.ok(!harness.spawns[0]!.args.includes('--allow-all'), 'resumed main session restores its own runtime mode')
     assertRestricted(harness.spawns[1]!.args)
     assert.equal(state.tabs[1]!.sideParentTabId, state.tabs[0]!.id)
     assert.equal(state.tabs[1]!.sessionPermissionPreset, 'read-only')
@@ -256,6 +256,24 @@ test('profile permission edits affect new sessions but restart preserves an exis
   })
 })
 
+test('default auto-resume mints an id when it actually starts a fresh session', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    const opened = await harness.createMain()
+    const sessionId = opened.tabs[0]?.lastSessionId
+    assert.ok(sessionId)
+    assert.ok(harness.spawns[0]?.args.includes(`--session-id=${sessionId}`))
+
+    const sessionDirectory = join(directory, 'session-state', sessionId)
+    await mkdir(sessionDirectory, { recursive: true })
+    await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"auto","allowAllPermissions":false}}\n')
+    harness.spawns[0]!.emitData('\u001b[?25h')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const changed = await harness.request('desktop:get-state')
+    assert.equal(changed.tabs[0]?.sessionPermissionMode, 'assisted')
+  })
+})
+
 test('restored sessions use their persisted permission instead of the current profile default', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)
@@ -266,13 +284,13 @@ test('restored sessions use their persisted permission instead of the current pr
     await harness.restore()
     const state = await harness.request('desktop:get-state')
 
-    assert.ok(harness.spawns[0]!.args.includes('--allow-all'))
+    assert.ok(!harness.spawns[0]!.args.includes('--allow-all'))
     assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--available-tools=')))
     assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-access')
   })
 })
 
-test('structured permission events update only the session and restart preserves its launch bundle plus mode', async () => {
+test('structured permission events update only the session and resume without replaying mode as a baseline flag', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)
     profile.permissionPreset = 'read-only'
@@ -283,8 +301,9 @@ test('structured permission events update only the session and restart preserves
     const sessionId = opened.tabs[0]!.lastSessionId!
     const sessionDirectory = join(directory, 'session-state', sessionId)
     await mkdir(sessionDirectory, { recursive: true })
-    await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"mode":"allow-all"}}\n')
-    await new Promise((resolve) => setTimeout(resolve, 400))
+    await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"on","allowAllPermissions":true}}\n')
+    harness.spawns[0]!.emitData('\u001b[?25h')
+    await new Promise((resolve) => setTimeout(resolve, 150))
     const changed = await harness.request('desktop:get-state')
 
     assert.equal(profile.permissionPreset, 'read-only')
@@ -297,18 +316,41 @@ test('structured permission events update only the session and restart preserves
     assert.equal(restarted.tabs[0]?.sessionPermissionPreset, 'read-only')
     assert.equal(restarted.tabs[0]?.sessionPermissionMode, 'allow-all')
     assert.equal(harness.spawns.length, 2)
-    assert.ok(harness.spawns[1]!.args.includes('--allow-all'))
+    assert.ok(!harness.spawns[1]!.args.includes('--allow-all'))
     assert.ok(harness.spawns[1]!.args.some((arg) => arg.startsWith('--available-tools=')))
+  })
+})
+
+test('side-chat runtime mode is displayed but never persisted or replayed as a launch flag', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    const main = await harness.createMain()
+    const opened = await harness.createSide(profile, main.activeTabId!)
+    const sideId = opened.activeTabId!
+    const sessionDirectory = join(directory, 'session-state', FORK)
+    await mkdir(sessionDirectory, { recursive: true })
+    await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"on","allowAllPermissions":true}}\n')
+    harness.spawns[1]!.emitData('\u001b[?25h')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    const changed = await harness.request('desktop:get-state')
+    assert.equal(changed.tabs.find((tab) => tab.id === sideId)?.sessionPermissionMode, 'allow-all')
+    assert.equal(profile.tabs.find((tab) => tab.sideChat)?.sessionPermissionMode, undefined)
+
+    await harness.request('desktop:restart-tab', sideId)
+    assertRestricted(harness.spawns[2]!.args)
   })
 })
 
 test('remote tabs are never persisted as restorable local sessions', async () => {
   await fixture(async (harness, directory) => {
     const { profile, capabilities } = configure(harness, directory)
+    profile.permissionPreset = 'read-only'
     capabilities.remoteSessions = true
     const state = await harness.request('desktop:connect-remote-session', 'remote-session-1')
     assert.equal(state.tabs[0]?.remote, true)
     assert.equal(state.tabs[0]?.sessionPermissionPreset, null)
+    assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--available-tools=')))
     assert.deepEqual(profile.tabs, [])
   })
 })

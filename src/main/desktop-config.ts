@@ -129,7 +129,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
       ...(isPermissionPreset(tab.sessionPermissionPreset)
         ? { sessionPermissionPreset: tab.sessionPermissionPreset }
         : {}),
-      ...(lastSessionId && isSessionPermissionMode(tab.sessionPermissionMode)
+      ...(lastSessionId && tab.sideChat !== true && isSessionPermissionMode(tab.sessionPermissionMode)
         ? { sessionPermissionMode: tab.sessionPermissionMode }
         : {}),
       ...(tab.sideChat === true ? {

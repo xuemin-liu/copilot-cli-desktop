@@ -336,7 +336,9 @@ button:disabled {
 .sidebar-access-full-auto .sidebar-access-dot { background: #ffb84d; }
 .sidebar-access-full-access .sidebar-access-dot { background: #ff6873; }
 .sidebar-access-read-only .sidebar-access-dot { background: #20c9a6; }
+.sidebar-access-trusted-directory .sidebar-access-dot { background: #20c9a6; }
 .sidebar-access-assisted .sidebar-access-dot { background: #60a5fa; }
+.sidebar-access-manual .sidebar-access-dot { background: #8b949e; }
 
 .workspace-row {
   min-height: 36px;

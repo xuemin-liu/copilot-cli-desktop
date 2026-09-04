@@ -72,8 +72,7 @@ import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpU
 import { spawnNodePty } from './node-pty-backend.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
-import { SESSION_PERMISSION_MODE_INFO, type SessionPermissionMode } from './permission-modes.js'
-import { SessionPermissionMonitor } from './session-permission-monitor.js'
+import { describeSessionPermission, type SessionPermissionMode } from './permission-modes.js'
 import {
   isCopilotProviderType,
   providerEnvironment,
@@ -82,7 +81,7 @@ import {
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
-import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
+import { forkSessionSnapshot } from './session-fork.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -158,7 +157,6 @@ let copilotResources: CopilotResourcesState = { ...DEFAULT_COPILOT_RESOURCES_STA
 
 interface ManagedTab {
   session: PtySession
-  permissionMonitor?: SessionPermissionMonitor
 }
 
 let tabsState: TabsState = EMPTY_TABS_STATE
@@ -390,7 +388,9 @@ function persistProfileTabs(): void {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
-          ...(tab.lastSessionId && tab.sessionPermissionMode ? { sessionPermissionMode: tab.sessionPermissionMode } : {}),
+          ...(tab.lastSessionId && tab.sessionPermissionMode && !tab.sideChat
+            ? { sessionPermissionMode: tab.sessionPermissionMode }
+            : {}),
           ...(tab.sideChat ? { sideChat: true as const } : {}),
           ...(parentSessionId ? { sideParentSessionId: parentSessionId } : {}),
         }
@@ -559,14 +559,7 @@ function activeAccessLabel(): string {
   const preset = activeTab?.sessionPermissionPreset
     ?? activeWorkspaceProfile(desktopConfig)?.permissionPreset
     ?? 'default'
-  const mode = activeTab?.sessionPermissionMode
-  if (mode) {
-    const modeLabel = SESSION_PERMISSION_MODE_INFO[mode].label
-    if (preset === 'read-only') return `Restricted tools · ${modeLabel}`
-    if (preset === 'trusted-directory') return `Trusted directory · ${modeLabel}`
-    return modeLabel
-  }
-  return PERMISSION_PRESET_INFO[preset].label
+  return describeSessionPermission(preset, activeTab?.sessionPermissionMode ?? null).label
 }
 
 // A remote tab has no workspace-profile launch config to rebuild against, so
@@ -699,7 +692,8 @@ interface SessionSpawnPlan {
   prefixArgs: string[]
   attachmentPaths: string[]
   launch: SessionLaunchConfig
-  permissionArgs: string[]
+  permissionPreset: PermissionPreset
+  permissionCapabilities: { toolAllowlist: boolean }
   secretArgs: string[]
   connectSessionId: string | null
   sessionTitle: string
@@ -738,7 +732,6 @@ function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: st
  */
 async function buildSessionSpawnPlan(
   profile: WorkspaceProfile,
-  sessionPermissionMode: SessionPermissionMode | null,
   resumeMode: ResumeMode,
   restoreLastSessionId: string | null,
   attachmentPaths: string[],
@@ -757,7 +750,9 @@ async function buildSessionSpawnPlan(
   // before the existing process is touched, in the overwhelmingly common
   // case where the final freshSession (decided in finalizeSessionArgs, once
   // the true resume id is known) agrees with this guess.
-  validateLaunchOptions(profile.launch, connectSessionId, !connectSessionId && resumeMode === 'new')
+  const likelyFreshSession = !connectSessionId
+    && (resumeMode === 'new' || (resumeMode === 'auto-resume' && buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId }).length === 0))
+  validateLaunchOptions(profile.launch, connectSessionId, likelyFreshSession)
   const vaultEnvironment = credentialStore ? await credentialStore.resolveEnvironment() : {}
   const inheritedEnvironment = { ...process.env, ...vaultEnvironment }
   const configuredEnvironment = providerEnvironment(desktopConfig.provider, inheritedEnvironment)
@@ -773,7 +768,8 @@ async function buildSessionSpawnPlan(
     prefixArgs: resolution.prefixArgs,
     attachmentPaths,
     launch: profile.launch,
-    permissionArgs: buildPermissionArgs(profile.permissionPreset, profile.path, copilotCapabilities, sessionPermissionMode),
+    permissionPreset: profile.permissionPreset,
+    permissionCapabilities: { toolAllowlist: copilotCapabilities.toolAllowlist },
     // This must receive the full environment that PtySession will pass to
     // Copilot, not only provider/vault overrides. Ambient credentials also
     // reach Copilot through PtySession's process.env merge and must be named
@@ -800,7 +796,9 @@ function finalizeSessionArgs(
   resumeMode: ResumeMode,
   restoreLastSessionId: string | null,
 ): { args: string[]; deterministicSessionId: string | null } {
-  const freshSession = !plan.connectSessionId && resumeMode === 'new'
+  const resumeArgs = buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
+  const freshSession = !plan.connectSessionId
+    && (resumeMode === 'new' || (resumeMode === 'auto-resume' && resumeArgs.length === 0))
   validateLaunchOptions(plan.launch, plan.connectSessionId, freshSession)
   const launchArgs = buildSessionLaunchArgs(
     plan.connectSessionId ? { ...plan.launch, remoteControl: 'inherit', remoteExport: 'inherit' } : plan.launch,
@@ -811,7 +809,7 @@ function finalizeSessionArgs(
     ? [`--connect=${plan.connectSessionId}`]
     : freshSession && deterministicSessionId
       ? [`--session-id=${deterministicSessionId}`, `--name=${plan.sessionTitle}`]
-      : buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
+      : resumeArgs
   const args = [
     ...plan.prefixArgs,
     // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
@@ -821,7 +819,9 @@ function finalizeSessionArgs(
     ...identity,
     ...plan.attachmentPaths.map((path) => `--attachment=${path}`),
     ...launchArgs,
-    ...plan.permissionArgs,
+    ...(plan.connectSessionId
+      ? []
+      : buildPermissionArgs(plan.permissionPreset, plan.cwd, plan.permissionCapabilities, freshSession)),
     ...plan.secretArgs,
   ]
   return { args, deterministicSessionId }
@@ -830,7 +830,7 @@ function finalizeSessionArgs(
 /** Wires a session's lifecycle events to tab state for the given tab id.
  * Shared by session creation and restart, since a restarted tab keeps its
  * id but is backed by a brand-new `PtySession` instance. */
-function wireSessionEvents(id: string, session: PtySession, environment: NodeJS.ProcessEnv): void {
+function wireSessionEvents(id: string, session: PtySession): void {
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
@@ -851,15 +851,13 @@ function wireSessionEvents(id: string, session: PtySession, environment: NodeJS.
     syncTabState()
     persistProfileTabs()
     broadcastState()
-    observe(attachSessionPermissionMonitor(id, session, environment, sessionId), 'Could not monitor session permissions')
+  })
+  session.on('permission-mode', (mode: SessionPermissionMode) => applySessionPermissionMode(id, session, mode))
+  session.on('permission-monitor-error', (message: string) => {
+    observe(writeAppLog(`Could not monitor session permissions: ${message}`), 'Could not write permission monitor error')
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
-    const managed = managedTabs.get(id)
-    if (managed?.session === session && managed.permissionMonitor) {
-      const monitor = managed.permissionMonitor
-      observe(monitor.poll().finally(() => monitor.stop()), 'Could not read final session permission state')
-    }
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
     }
@@ -880,30 +878,6 @@ function applySessionPermissionMode(id: string, session: PtySession, mode: Sessi
   persistProfileTabs()
   broadcastState()
   refreshMenus()
-}
-
-async function attachSessionPermissionMonitor(
-  id: string,
-  session: PtySession,
-  environment: NodeJS.ProcessEnv,
-  sessionId: string,
-): Promise<void> {
-  const managed = managedTabs.get(id)
-  const tab = tabsState.tabs.find((candidate) => candidate.id === id)
-  if (!managed || managed.session !== session || !tab || tab.remote) return
-  managed.permissionMonitor?.stop()
-  const monitor = new SessionPermissionMonitor(
-    join(copilotSessionRoot(environment), sessionId, 'events.jsonl'),
-    (mode) => applySessionPermissionMode(id, session, mode),
-  )
-  managed.permissionMonitor = monitor
-  try {
-    await monitor.start()
-  } catch (error) {
-    if (managedTabs.get(id)?.permissionMonitor === monitor) delete managed.permissionMonitor
-    monitor.stop()
-    throw error
-  }
 }
 
 async function createSessionTab(
@@ -933,8 +907,8 @@ async function createSessionTab(
   const launchProfile = sessionPermissionPreset
     ? { ...profile, permissionPreset: sessionPermissionPreset }
     : profile
-  const sessionPermissionMode = connectSessionId ? null : sessionPermissionModeOverride
-  const plan = await buildSessionSpawnPlan(launchProfile, sessionPermissionMode, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  const sessionPermissionMode = connectSessionId || sideOptions.sideChat ? null : sessionPermissionModeOverride
+  const plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
   // Recheck after credential resolution: another creation or shutdown may
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
@@ -950,6 +924,7 @@ async function createSessionTab(
     spawnPty: spawnNodePty,
     sessionId: deterministicSessionId,
     discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
+    monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
   tabsState = createTab(tabsState, {
@@ -968,15 +943,11 @@ async function createSessionTab(
   syncTabState()
   broadcastState()
   refreshMenus()
-  wireSessionEvents(id, session, plan.env)
+  wireSessionEvents(id, session)
 
   try {
     await queueTabTransition(id, async () => {
       if (shuttingDown()) throw new Error('The app is shutting down or updating')
-      if (deterministicSessionId) {
-        await attachSessionPermissionMonitor(id, session, plan.env, deterministicSessionId)
-          .catch((error) => writeAppLog(`Could not monitor session permissions: ${String(error)}`))
-      }
       await session.start()
       if (shuttingDown()) {
         await session.stop()
@@ -986,7 +957,6 @@ async function createSessionTab(
     scheduleCopilotResolutionRefresh()
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
-      managedTabs.get(id)?.permissionMonitor?.stop()
       session.removeAllListeners()
       tabsState = closeTab(tabsState, id)
       managedTabs.delete(id)
@@ -1015,7 +985,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
     const profile = sideChatProfile(sourceProfile, copilotCapabilities)
     if (!supportsSessionFork(state.resolution.version)) throw new Error('Side chat needs Copilot CLI 1.0.82 or newer. Update Copilot CLI and restart this tab.')
     const sessionTitle = title.trim().slice(0, 120) || `Side: ${tab.title}`.slice(0, 120)
-    const plan = await buildSessionSpawnPlan(profile, null, 'auto-resume', sourceSessionId, [], null, sessionTitle)
+    const plan = await buildSessionSpawnPlan(profile, 'auto-resume', sourceSessionId, [], null, sessionTitle)
     const forkId = await forkSessionSnapshot(state.resolution, plan.cwd, { ...process.env, ...plan.env }, sourceSessionId, sessionTitle)
     try {
       return await createSessionTab(profile, 'auto-resume', forkId, [], null, sessionTitle, { sideChat: true, sideParentTabId: tabId })
@@ -1076,11 +1046,6 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     activityBroadcastTimers.delete(tabId)
     const managed = managedTabs.get(tabId)
     if (managed) {
-      if (managed.permissionMonitor) {
-        await managed.permissionMonitor.poll()
-          .catch((error) => writeAppLog(`Could not read final session permissions: ${String(error)}`))
-      }
-      managed.permissionMonitor?.stop()
       await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
       managed.session.removeAllListeners()
       managedTabs.delete(tabId)
@@ -1122,12 +1087,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // one of those entry points to a runtime error.
     if (tab.remote) throw new Error('A remote session cannot be restarted')
     const managed = managedTabs.get(tabId)
-    if (managed?.permissionMonitor) {
-      await managed.permissionMonitor.poll()
-        .catch((error) => writeAppLog(`Could not read session permissions before restart: ${String(error)}`))
-      tab = tabsState.tabs.find((candidate) => candidate.id === tabId) ?? tab
-    }
-    const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId)
+    const workspaceProfileId = tab.workspaceProfileId
+    const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === workspaceProfileId)
     if (!savedProfile) throw new Error('This session\'s workspace profile no longer exists')
     const sessionPermissionPreset = tab.sideChat
       ? 'read-only'
@@ -1149,9 +1110,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // synchronously, from the *final* freshSession decision below, so
     // refreshing it never reintroduces a second point where this can fail
     // after the healthy process is already gone.
-    const plan = await buildSessionSpawnPlan(profile, tab.sessionPermissionMode, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+    const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
 
-    managed?.permissionMonitor?.stop()
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
     // object, before removing its listeners: PtySession.stop() can return as
@@ -1159,6 +1119,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // that would otherwise copy this into tabsState — relying on tabsState
     // alone here could still be reflecting an earlier cycle's id.
     const resumeSessionId = managed?.session.lastSessionId ?? bestKnownSessionId
+    tab = tabsState.tabs.find((candidate) => candidate.id === tabId) ?? tab
     managed?.session.removeAllListeners()
     // Capture the terminal size as the very last step before constructing
     // the replacement — no further awaits happen between this line and
@@ -1181,6 +1142,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       spawnPty: spawnNodePty,
       sessionId: deterministicSessionId,
       discoverSessionIdFromOutput: deterministicSessionId === null,
+      monitorSessionPermissions: true,
       ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
     })
     managedTabs.set(tabId, { session })
@@ -1200,13 +1162,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     syncTabState()
     broadcastState()
     refreshMenus()
-    wireSessionEvents(tabId, session, plan.env)
+    wireSessionEvents(tabId, session)
 
     try {
-      if (deterministicSessionId) {
-        await attachSessionPermissionMonitor(tabId, session, plan.env, deterministicSessionId)
-          .catch((error) => writeAppLog(`Could not monitor session permissions: ${String(error)}`))
-      }
       await session.start()
       scheduleCopilotResolutionRefresh()
     } catch (error) {
@@ -1250,7 +1208,7 @@ async function restoreTabsForActiveProfile(): Promise<void> {
         await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
           ...(candidate.sideChat ? { sideChat: true as const } : {}),
           ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sessionPermissionMode ?? null)
+        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null)
       } catch (error) {
         await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
       }
@@ -1834,7 +1792,6 @@ async function stopAllSessions(): Promise<void> {
   await Promise.all([...tabIds].map((tabId) => queueTabTransition(tabId, async () => {
     const managed = managedTabs.get(tabId)
     if (!managed) return
-    managed.permissionMonitor?.stop()
     await managed.session.stop().catch(() => {})
     managed.session.removeAllListeners()
     managedTabs.delete(tabId)

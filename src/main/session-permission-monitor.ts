@@ -3,58 +3,74 @@ import { parsePermissionChangedEvent, type SessionPermissionMode } from './permi
 
 const READ_CHUNK_BYTES = 64 * 1024
 const MAX_PENDING_RECORD_BYTES = 8 * 1024 * 1024
+const MAX_HISTORY_BYTES = 8 * 1024 * 1024
 
 function isMissing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
-/** Tails Copilot's structured session event stream from the point this
- * process attaches. Historical permission events are deliberately ignored;
- * restored tabs already carry their last observed mode in desktop config. */
+/** Tails Copilot's structured session event stream. Startup replays a bounded
+ * suffix so sessions discovered after launch and resumed sessions are seeded
+ * from Copilot's own durable state rather than desktop timing. */
 export class SessionPermissionMonitor {
   private offset = 0
   private pending = Buffer.alloc(0)
   private timer: NodeJS.Timeout | null = null
+  private activityTimer: NodeJS.Timeout | null = null
   private pollPromise: Promise<void> | null = null
   private stopped = false
+  private discardPartialRecord = false
 
   constructor(
     private readonly path: string,
     private readonly onMode: (mode: SessionPermissionMode) => void,
-    private readonly pollIntervalMs = 250,
+    private readonly pollIntervalMs = 5_000,
+    private readonly onDiagnostic: (message: string) => void = () => {},
   ) {}
 
   async start(): Promise<void> {
     if (this.stopped || this.timer) return
     try {
-      this.offset = (await stat(this.path)).size
+      const size = (await stat(this.path)).size
+      this.offset = Math.max(0, size - MAX_HISTORY_BYTES)
+      this.discardPartialRecord = this.offset > 0
     } catch (error) {
       if (!isMissing(error)) throw error
       this.offset = 0
     }
     if (this.stopped) return
-    this.timer = setInterval(() => void this.poll().catch(() => {}), this.pollIntervalMs)
+    await this.poll()
+    if (this.stopped) return
+    this.timer = setInterval(() => {
+      void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
+    }, this.pollIntervalMs)
     this.timer.unref()
+  }
+
+  notifyActivity(): void {
+    if (this.stopped) return
+    if (this.activityTimer) clearTimeout(this.activityTimer)
+    this.activityTimer = setTimeout(() => {
+      this.activityTimer = null
+      void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
+    }, 75)
+    this.activityTimer.unref()
   }
 
   poll(): Promise<void> {
     if (this.stopped) return Promise.resolve()
-    if (this.pollPromise) return this.pollPromise
-    const operation = this.readAppendedEvents()
-    this.pollPromise = operation
-    void operation.then(() => {
-      if (this.pollPromise === operation) this.pollPromise = null
-    }, () => {
-      if (this.pollPromise === operation) this.pollPromise = null
+    return this.pollPromise ??= this.readAppendedEvents().finally(() => {
+      this.pollPromise = null
     })
-    return operation
   }
 
   stop(): void {
     this.stopped = true
     if (this.timer) clearInterval(this.timer)
+    if (this.activityTimer) clearTimeout(this.activityTimer)
     this.timer = null
+    this.activityTimer = null
   }
 
   private async readAppendedEvents(): Promise<void> {
@@ -68,6 +84,7 @@ export class SessionPermissionMonitor {
     if (size < this.offset) {
       this.offset = 0
       this.pending = Buffer.alloc(0)
+      this.discardPartialRecord = false
     }
     if (size === this.offset) return
 
@@ -79,7 +96,8 @@ export class SessionPermissionMonitor {
         const { bytesRead } = await file.read(chunk, 0, length, this.offset)
         if (bytesRead === 0) break
         this.offset += bytesRead
-        this.consume(Buffer.concat([this.pending, chunk.subarray(0, bytesRead)]))
+        const data = chunk.subarray(0, bytesRead)
+        this.consume(this.pending.length === 0 ? data : Buffer.concat([this.pending, data]))
       }
     } finally {
       await file.close()
@@ -87,9 +105,18 @@ export class SessionPermissionMonitor {
   }
 
   private consume(buffer: Buffer): void {
+    if (this.discardPartialRecord) {
+      const newline = buffer.indexOf(10)
+      if (newline === -1) return
+      buffer = buffer.subarray(newline + 1)
+      this.discardPartialRecord = false
+    }
     let start = 0
     for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
-      const mode = parsePermissionChangedEvent(buffer.subarray(start, end).toString('utf8').trim())
+      const mode = parsePermissionChangedEvent(
+        buffer.subarray(start, end).toString('utf8').trim(),
+        (payload) => this.onDiagnostic(`Unknown session.permissions_changed payload: ${JSON.stringify(payload)}`),
+      )
       if (mode) this.onMode(mode)
       start = end + 1
     }

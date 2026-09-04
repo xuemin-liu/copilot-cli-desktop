@@ -1,5 +1,3 @@
-import type { SessionPermissionMode } from './permission-modes.js'
-
 /** Launch-time permission bundle supplied by a workspace profile. */
 export type PermissionPreset = 'default' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
 
@@ -65,40 +63,33 @@ export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
 /**
  * Build the `copilot` CLI launch flags for a permission preset. `workspacePath`
  * must be an absolute, already-resolved path — this function does not resolve
- * or validate it.
+ * or validate it. Mode-establishing flags are supplied only for a fresh
+ * session; on resume Copilot restores its durable runtime mode itself.
  */
 export function buildPermissionArgs(
   preset: PermissionPreset,
   workspacePath: string,
   capabilities: { toolAllowlist: boolean },
-  sessionMode: SessionPermissionMode | null = null,
+  freshSession = true,
 ): string[] {
-  let args: string[]
   switch (preset) {
     case 'default':
-      args = []
-      break
+      return []
     case 'read-only':
-      args = capabilities.toolAllowlist
+      return capabilities.toolAllowlist
         ? ['--available-tools=view,glob,grep,ask_user']
         : ['--deny-tool=write', '--deny-tool=shell']
-      break
     case 'trusted-directory':
-      args = ['--add-dir', workspacePath]
-      break
+      return ['--add-dir', workspacePath]
     case 'full-auto':
-      args = sessionMode ? [] : ['--allow-all-tools']
-      break
+      return freshSession ? ['--allow-all-tools'] : []
     case 'full-access':
-      args = sessionMode ? [] : ['--allow-all']
-      break
+      return freshSession ? ['--allow-all'] : []
     default: {
       const exhaustive: never = preset
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)
     }
   }
-  if (sessionMode === 'allow-all') args.push('--allow-all')
-  return args
 }
 
 export function permissionCompatibilityWarning(

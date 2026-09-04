@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import test from 'node:test'
 import { PtySession } from './pty-session.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
@@ -159,7 +159,9 @@ test('unexpected exit with a nonzero code marks the session crashed and emits a 
   session.on('desktop-event', (event: { type: string; message?: string }) => {
     if (event.type === 'session-crashed') crashMessage = event.message ?? null
   })
+  const exited = once(session, 'exit')
   pty.emit('exit', { exitCode: 1, signal: undefined })
+  await exited
   assert.equal(session.status, 'crashed')
   assert.match(crashMessage ?? '', /unexpectedly/)
 })
@@ -168,7 +170,9 @@ test('a clean exit with code 0 marks the session completed', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
   await session.start()
+  const exited = once(session, 'exit')
   pty.emit('exit', { exitCode: 0, signal: undefined })
+  await exited
   assert.equal(session.status, 'completed')
   assert.equal(pty.disposed, 1)
 })
