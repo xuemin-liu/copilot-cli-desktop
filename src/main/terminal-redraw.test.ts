@@ -88,7 +88,7 @@ test('recognizes only the collapsed copy/status viewport', () => {
   assert.equal(isClipboardOnlyViewport(['copied to clipboard', 'new streamed response']), false)
 })
 
-test('arms native copy only after an unmodified text-selection drag', () => {
+test('arms native drag copy only after an unmodified text-selection drag', () => {
   const tracker = new NativeCopyGestureTracker()
 
   assert.equal(tracker.consumeSelection(), false)
@@ -111,6 +111,54 @@ test('arms native copy only after an unmodified text-selection drag', () => {
   tracker.onMouseDown(0, false, 10, 10)
   tracker.onMouseUp(0, 20, 10)
   assert.equal(tracker.consumeSelection(), true)
+})
+
+test('arms native copy for double/triple-click selections without mouse travel', () => {
+  for (const clickCount of [2, 3]) {
+    const tracker = new NativeCopyGestureTracker()
+    tracker.onMouseDown(0, false, 10, 10, clickCount)
+    tracker.onMouseUp(0, 10, 10)
+    tracker.onKeyDown('Control', false)
+    assert.equal(tracker.consumeSelection(), true)
+    assert.equal(tracker.consumeSelection(), false, 'copy authorization remains one-shot')
+  }
+})
+
+test('drag then double-click does not lose native copy authorization', () => {
+  let now = 100
+  const tracker = new NativeCopyGestureTracker(() => now)
+  tracker.onKeyDown('ArrowLeft', true)
+  now += NATIVE_KEYBOARD_SELECTION_MS + 1
+  tracker.onMouseDown(0, false, 10, 10)
+  tracker.onMouseUp(0, 60, 10)
+  for (const clickCount of [1, 2]) {
+    tracker.onMouseDown(0, false, 30, 10, clickCount)
+    tracker.onMouseUp(0, 30, 10)
+  }
+  tracker.onKeyDown('Control', false)
+  assert.equal(tracker.consumeSelection(), true, 'mouse selection replaces expired keyboard evidence')
+})
+
+test('multi-click evidence excludes Shift/xterm and non-left mouse gestures', () => {
+  for (const [button, shift] of [[0, true], [1, false], [2, false]] as const) {
+    const tracker = new NativeCopyGestureTracker()
+    tracker.onMouseDown(button, shift, 10, 10, 2)
+    tracker.onMouseUp(button, 10, 10)
+    assert.equal(tracker.consumeSelection(), false)
+  }
+})
+
+test('typing or a later single click clears multi-click evidence', () => {
+  const tracker = new NativeCopyGestureTracker()
+  tracker.onMouseDown(0, false, 10, 10, 2)
+  tracker.onMouseUp(0, 10, 10)
+  tracker.onKeyDown('x', false)
+  assert.equal(tracker.consumeSelection(), false)
+  tracker.onMouseDown(0, false, 10, 10, 3)
+  tracker.onMouseUp(0, 10, 10)
+  tracker.onMouseDown(0, false, 40, 10, 1)
+  tracker.onMouseUp(0, 40, 10)
+  assert.equal(tracker.consumeSelection(), false)
 })
 
 test('arms native copy after keyboard-driven TUI selection', () => {

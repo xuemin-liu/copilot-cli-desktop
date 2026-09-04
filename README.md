@@ -116,6 +116,9 @@ Run `npm run clipboard:smoke` for the automated native-copy → new-session →
 return regression in the real app and CLI. It uses the same disposable data
 and local mock model, and saves screenshots plus `result.json` under
 `test-results/clipboard-switch/` (no paid model requests).
+After building, run `node scripts/electron-side-chat-check.mjs --clipboard-multi-click`
+to test drag-select → double-click → Ctrl+C, including the physical Control-key
+sequence. Its screenshots and results are saved under `test-results/clipboard-multi-click/`.
 
 ## Permission presets
 

@@ -26,6 +26,7 @@ export async function runClipboardSwitchCheck() {
   await mkdir(artifacts, { recursive: true })
   const screenshot = async (name) => writeFile(join(artifacts, `${name}.png`), (await window.webContents.capturePage()).toPNG())
   const originalClipboard = clipboard.readText()
+  const multiClick = process.env.DESKTOP_UI_COPY_MULTI_CLICK === '1'
   let copied = ''
   try {
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
@@ -56,9 +57,23 @@ export async function runClipboardSwitchCheck() {
       await delay(20)
     }
     window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: selection.endX, y: selection.y })
+    if (multiClick) {
+      // Copilot still owns a selection after these clicks, but the desktop
+      // used to forget it and silently reject the Ctrl+C clipboard response.
+      for (const clickCount of [1, 2]) {
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount, x: selection.x + 100, y: selection.y })
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount, x: selection.x + 100, y: selection.y })
+        await delay(60)
+      }
+    }
+    await delay(300)
+    await screenshot('01-selected')
+    // Exercise a physical modifier sequence, not just C with a modifier bit.
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Control' })
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: ['control'] })
     window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: ['control'] })
-    copied = await until(() => clipboard.readText().includes('desktop-side-chat-42') && clipboard.readText(), 'native selection copied via OSC 52')
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Control' })
+    copied = await until(() => clipboard.readText() !== originalClipboard && clipboard.readText().includes('desktop-side-chat-42') && clipboard.readText(), 'native selection copied via OSC 52')
     await delay(2300)
     await screenshot('02-after-copy')
     const afterCopy = await text()
@@ -74,6 +89,7 @@ export async function runClipboardSwitchCheck() {
     const result = {
       sourceSessionId: source.lastSessionId,
       cli: finalState.resolution.version,
+      selectionGesture: multiClick ? 'drag-then-double-click' : 'drag',
       copiedMarker: copied.includes('desktop-side-chat-42'),
       beforeSwitchRetained: afterCopy.includes('desktop-side-chat-42'),
       afterReturnRetained: afterReturn.includes('desktop-side-chat-42'),
@@ -82,7 +98,7 @@ export async function runClipboardSwitchCheck() {
       otherStillRunning: finalState.tabs.find((tab) => tab.id === other.id)?.status === 'running',
       activeTabIsSide: finalState.activeTabId === side.id,
     }
-    result.passed = result.beforeSwitchRetained && result.afterReturnRetained && result.parentStillRunning && result.otherStillRunning && result.independentSessionIds && result.activeTabIsSide
+    result.passed = result.copiedMarker && result.beforeSwitchRetained && result.afterReturnRetained && result.parentStillRunning && result.otherStillRunning && result.independentSessionIds && result.activeTabIsSide
     await writeFile(join(artifacts, 'result.json'), JSON.stringify(result, null, 2))
     console.log('[clipboard-switch]', JSON.stringify(result))
     assert.ok(result.beforeSwitchRetained, 'Conversation disappeared immediately after copy')

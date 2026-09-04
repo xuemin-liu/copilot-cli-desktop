@@ -60,9 +60,11 @@ if (process.versions.electron) {
       env.DESKTOP_UI_PERMISSION_CHECK = '1'
       env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'permissions')
     }
-    if (process.argv.includes('--clipboard-switch')) {
+    if (process.argv.includes('--clipboard-switch') || process.argv.includes('--clipboard-multi-click')) {
       env.DESKTOP_UI_CLIPBOARD_CHECK = '1'
-      env.DESKTOP_UI_CHECK_ARTIFACTS = process.env.DESKTOP_UI_CHECK_ARTIFACTS || join(process.cwd(), 'test-results', 'clipboard-switch')
+      const multiClick = process.argv.includes('--clipboard-multi-click')
+      env.DESKTOP_UI_COPY_MULTI_CLICK = multiClick ? '1' : '0'
+      env.DESKTOP_UI_CHECK_ARTIFACTS = process.env.DESKTOP_UI_CHECK_ARTIFACTS || join(process.cwd(), 'test-results', multiClick ? 'clipboard-multi-click' : 'clipboard-switch')
     }
     // Trust only this newly-created disposable fixture, never a user folder.
     await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace],

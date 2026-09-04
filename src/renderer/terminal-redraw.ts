@@ -59,7 +59,7 @@ export function isClipboardOnlyViewport(lines: string[]): boolean {
 }
 
 /**
- * Tracks the mouse drag that precedes Copilot's native copy command. This lets
+ * Tracks the mouse selection that precedes Copilot's native copy command. This lets
  * Ctrl+C remain an immediate interrupt when no selection was made, while still
  * arming synchronized output before a selected-text copy reaches the PTY.
  */
@@ -70,7 +70,7 @@ export class NativeCopyGestureTracker {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  onMouseDown(button: number, shiftKey: boolean, x: number, y: number): void {
+  onMouseDown(button: number, shiftKey: boolean, x: number, y: number, clickCount = 1): void {
     if (button !== 0) return
     if (shiftKey) {
       this.dragOrigin = null
@@ -78,7 +78,10 @@ export class NativeCopyGestureTracker {
       return
     }
     this.dragOrigin = { x, y }
-    this.selectionPending = false
+    // Double/triple-clicks select text in the native TUI without any drag.
+    // A preceding click clears the old evidence, so record the new selection
+    // from the DOM click count rather than relying on mouse travel alone.
+    this.selectionPending = clickCount >= 2
     this.keyboardSelectionExpiresAt = 0
   }
 
