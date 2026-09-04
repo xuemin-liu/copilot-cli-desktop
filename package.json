@@ -44,7 +44,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@xterm/xterm": "6.0.0",
-    "electron": "43.4.1",
+    "electron": "44.1.1",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
