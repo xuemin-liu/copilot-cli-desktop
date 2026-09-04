@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import test from 'node:test'
 import { PtySession } from './pty-session.js'
+import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 
 class FakePty extends EventEmitter implements PtyLike {
@@ -41,6 +42,25 @@ class FakePty extends EventEmitter implements PtyLike {
 function fakeSpawnPty(pty: FakePty): SpawnPtyFn {
   return () => pty
 }
+
+test('stop waits for permission drain after the PTY has already exited', async (context) => {
+  let release!: () => void
+  const drained = new Promise<void>((resolve) => { release = resolve })
+  context.mock.method(SessionPermissionMonitor.prototype, 'start', async () => {})
+  context.mock.method(SessionPermissionMonitor.prototype, 'finish', () => drained)
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work',
+    spawnPty: fakeSpawnPty(pty), sessionId: 'drain-test', monitorSessionPermissions: true })
+  await session.start()
+  pty.emit('exit', { exitCode: 0 })
+  let stopped = false
+  const stopping = session.stop().then(() => { stopped = true })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(stopped, false)
+  release()
+  await stopping
+  assert.equal(stopped, true)
+})
 
 test('start() transitions to running and spawns with the given file/args/cwd', async () => {
   const pty = new FakePty()
@@ -94,10 +114,13 @@ test('legacy sessions can opt into bounded session-id banner discovery', async (
     file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), discoverSessionIdFromOutput: true,
   })
   await session.start()
+  const discovered: string[] = []
+  session.on('session-id', (id: string) => discovered.push(id))
   pty.emit('data', 'Resume this session with copilot --res')
   assert.equal(session.lastSessionId, null)
   pty.emit('data', 'ume=work-session-9\n')
   assert.equal(session.lastSessionId, 'work-session-9')
+  assert.deepEqual(discovered, ['work-session-9'])
 })
 
 test('approval-needed stays up across ordinary output until an explicit transition', async () => {
@@ -156,7 +179,9 @@ test('unexpected exit with a nonzero code marks the session crashed and emits a 
   session.on('desktop-event', (event: { type: string; message?: string }) => {
     if (event.type === 'session-crashed') crashMessage = event.message ?? null
   })
+  const exited = once(session, 'exit')
   pty.emit('exit', { exitCode: 1, signal: undefined })
+  await exited
   assert.equal(session.status, 'crashed')
   assert.match(crashMessage ?? '', /unexpectedly/)
 })
@@ -165,7 +190,9 @@ test('a clean exit with code 0 marks the session completed', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
   await session.start()
+  const exited = once(session, 'exit')
   pty.emit('exit', { exitCode: 0, signal: undefined })
+  await exited
   assert.equal(session.status, 'completed')
   assert.equal(pty.disposed, 1)
 })

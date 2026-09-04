@@ -215,7 +215,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       void window.copilotDesktop.showTerminalContextMenu(terminal.getSelection())
     }
     const handleMouseDown = (event: MouseEvent): void => {
-      nativeCopyGesture.onMouseDown(event.button, event.shiftKey, event.clientX, event.clientY)
+      nativeCopyGesture.onMouseDown(event.button, event.shiftKey, event.clientX, event.clientY, event.detail)
       if (event.button === 2 && !terminal.hasSelection()) {
         // Right-click is Copilot's explicit native copy command, unlike the
         // ambiguous Ctrl+C interrupt. Arm it unconditionally so coalesced or

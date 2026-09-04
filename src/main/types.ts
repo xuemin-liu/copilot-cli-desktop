@@ -1,4 +1,5 @@
 import type { PermissionPreset } from './permission-presets.js'
+import type { SessionPermissionMode } from './permission-modes.js'
 import type { ResumeMode } from './resume-args.js'
 import type { SessionLaunchConfig } from './session-launch.js'
 
@@ -14,6 +15,9 @@ export type SessionLifecycleStatus =
 export interface RestoredTab {
   title: string
   lastSessionId: string | null
+  /** Session-owned launch bundle. Missing in config files written by older releases. */
+  sessionPermissionPreset?: PermissionPreset
+  sessionPermissionMode?: SessionPermissionMode
   sideChat?: true
   sideParentSessionId?: string
 }
@@ -37,8 +41,10 @@ export interface DesktopSessionTab {
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null
-  /** Permission preset captured when this local Copilot process was launched; unknown for remote connections. */
-  launchedPermissionPreset: PermissionPreset | null
+  /** Launch-time permission bundle copied from the profile when this session was created. */
+  sessionPermissionPreset: PermissionPreset | null
+  /** Native Copilot approval mode observed from this session's structured event log. */
+  sessionPermissionMode: SessionPermissionMode | null
   permissionWarning: string | null
   remote: boolean
   /** Restricted fork; preserved even when its parent tab is closed. */

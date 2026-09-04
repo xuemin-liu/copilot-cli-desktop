@@ -1,8 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { windowsSystemExecutable } from './resolve-copilot.js'
 import { detectApprovalPrompt, extractSessionId } from './approval-heuristic.js'
+import { copilotSessionRoot } from './session-fork.js'
+import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 
@@ -26,6 +29,7 @@ export interface PtySessionOptions {
   forceKillTimeoutMs?: number
   sessionId?: string | null
   discoverSessionIdFromOutput?: boolean
+  monitorSessionPermissions?: boolean
 }
 
 export interface PtySessionExit {
@@ -50,6 +54,10 @@ export class PtySession extends EventEmitter {
   private pendingLine = ''
   private heuristicBuffer = ''
   private lastKnownSessionId: string | null
+  private permissionMonitor: SessionPermissionMonitor | null = null
+  private exitHandled = false
+  private exitCompletion: Promise<void> | null = null
+  private permissionDrain: Promise<void> | null = null
 
   constructor(options: PtySessionOptions) {
     super()
@@ -125,19 +133,60 @@ export class PtySession extends EventEmitter {
       this.pendingLine = this.pendingLine.slice(MAX_LINE_CHARS)
     }
     this.emit('log', text)
+    this.permissionMonitor?.notifyActivity()
+  }
+
+  private reportPermissionMonitorError(error: unknown): void {
+    this.emit('permission-monitor-error', String(error))
+  }
+
+  private async attachPermissionMonitor(sessionId: string): Promise<void> {
+    if (this.options.monitorSessionPermissions !== true) return
+    this.permissionMonitor?.stop()
+    const environment = { ...process.env, ...this.options.env }
+    const monitor = new SessionPermissionMonitor(
+      join(copilotSessionRoot(environment), sessionId, 'events.jsonl'),
+      (mode) => this.emit('permission-mode', mode),
+      5_000,
+      (message) => this.emit('permission-monitor-error', message),
+    )
+    this.permissionMonitor = monitor
+    try {
+      await monitor.start()
+    } catch (error) {
+      if (this.permissionMonitor === monitor) this.permissionMonitor = null
+      monitor.stop()
+      this.reportPermissionMonitorError(error)
+    }
+  }
+
+  private drainPermissionMonitor(): Promise<void> {
+    if (this.permissionDrain) return this.permissionDrain
+    const monitor = this.permissionMonitor
+    this.permissionMonitor = null
+    return this.permissionDrain = monitor
+      ? monitor.finish().catch((error) => this.reportPermissionMonitorError(error))
+      : Promise.resolve()
   }
 
   async start(): Promise<void> {
     if (this.pty) throw new Error('This session has already started')
     this.setStatus('starting')
+    if (this.lastKnownSessionId) await this.attachPermissionMonitor(this.lastKnownSessionId)
     const spawnCols = this.options.cols
     const spawnRows = this.options.rows
-    const pty = await this.options.spawnPty(this.options.file, this.options.args, {
-      cwd: this.options.cwd,
-      env: { ...process.env, ...this.options.env },
-      cols: spawnCols,
-      rows: spawnRows,
-    })
+    let pty: PtyLike
+    try {
+      pty = await this.options.spawnPty(this.options.file, this.options.args, {
+        cwd: this.options.cwd,
+        env: { ...process.env, ...this.options.env },
+        cols: spawnCols,
+        rows: spawnRows,
+      })
+    } catch (error) {
+      await this.drainPermissionMonitor()
+      throw error
+    }
     this.pty = pty
     // A resize() that arrives while spawnPty() is still resolving updates
     // this.options (so a later restart still reads the latest size) but has
@@ -156,7 +205,12 @@ export class PtySession extends EventEmitter {
       // adjacent reads rather than treating transport chunks as message lines.
       this.heuristicBuffer = `${this.heuristicBuffer}${data}`.slice(-MAX_HEURISTIC_CHARS)
       if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromOutput === true) {
-        this.lastKnownSessionId = extractSessionId(this.heuristicBuffer)
+        const discoveredSessionId = extractSessionId(this.heuristicBuffer)
+        if (discoveredSessionId) {
+          this.lastKnownSessionId = discoveredSessionId
+          this.emit('session-id', discoveredSessionId)
+          void this.attachPermissionMonitor(discoveredSessionId)
+        }
       }
       if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {
         this.setStatus('approval-needed')
@@ -172,22 +226,26 @@ export class PtySession extends EventEmitter {
     })
 
     pty.onExit(({ exitCode, signal }) => {
+      if (this.exitHandled) return
+      this.exitHandled = true
       this.pty = null
-      const expected = this.stopping
-      if (!expected) {
-        if (exitCode === 0) {
-          this.setStatus('completed')
-          this.emit('desktop-event', { type: 'session-completed' })
-        } else {
-          this.setStatus('crashed')
-          this.emit('desktop-event', {
-            type: 'session-crashed',
-            message: `copilot exited unexpectedly (code ${exitCode}, signal ${String(signal ?? 'none')})`,
-          })
-        }
-      }
-      this.emit('exit', { exitCode, signal, expected } satisfies PtySessionExit)
       pty.dispose?.()
+      const expected = this.stopping
+      this.exitCompletion = this.drainPermissionMonitor().then(() => {
+        if (!expected) {
+          if (exitCode === 0) {
+            this.setStatus('completed')
+            this.emit('desktop-event', { type: 'session-completed' })
+          } else {
+            this.setStatus('crashed')
+            this.emit('desktop-event', {
+              type: 'session-crashed',
+              message: `copilot exited unexpectedly (code ${exitCode}, signal ${String(signal ?? 'none')})`,
+            })
+          }
+        }
+        this.emit('exit', { exitCode, signal, expected } satisfies PtySessionExit)
+      })
     })
 
     this.setStatus('running')
@@ -213,15 +271,14 @@ export class PtySession extends EventEmitter {
   async stop(): Promise<void> {
     const pty = this.pty
     if (!pty) {
+      await this.exitCompletion
+      await this.drainPermissionMonitor()
       this.setStatus('completed')
       return
     }
     this.stopping = true
     this.setStatus('stopping')
-    const exited = new Promise<void>((resolve) => {
-      const done = (): void => resolve()
-      pty.onExit(done)
-    })
+    const exited = new Promise<void>((resolve) => this.once('exit', resolve))
 
     if (process.platform === 'win32' && pty.pid) {
       try {
@@ -248,6 +305,9 @@ export class PtySession extends EventEmitter {
         pty.dispose?.()
       }
     }
+    // Even a backend that never acknowledges kill must release its monitor.
+    await this.drainPermissionMonitor()
+    await this.exitCompletion
   }
 
 }

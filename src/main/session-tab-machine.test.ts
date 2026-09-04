@@ -19,12 +19,13 @@ import {
 
 function createTab(
   state: TabsState,
-  input: Omit<NewTabInput, 'cliVersion' | 'launchedPermissionPreset' | 'permissionWarning' | 'remote'>,
+  input: Omit<NewTabInput, 'cliVersion' | 'sessionPermissionPreset' | 'permissionWarning' | 'remote'>,
 ): TabsState {
   return createTabState(state, {
     ...input,
     cliVersion: '1.0.80',
-    launchedPermissionPreset: 'default',
+    sessionPermissionPreset: 'default',
+    sessionPermissionMode: null,
     permissionWarning: null,
     remote: false,
   })
@@ -42,7 +43,8 @@ test('createTab adds a starting tab and makes it active', () => {
     status: 'starting',
     processId: null,
     cliVersion: '1.0.80',
-    launchedPermissionPreset: 'default',
+    sessionPermissionPreset: 'default',
+    sessionPermissionMode: null,
     permissionWarning: null,
     remote: false,
     lastActivityAt: 123,
@@ -119,13 +121,15 @@ test('setTabLaunchConfig updates only the matching tab\'s permission fields', ()
   state = createTab(state, { id: 'b', title: 'B', workspaceProfileId: 'ws-1' })
   state = setTabLaunchConfig(state, 'a', {
     cliVersion: '1.0.82',
-    launchedPermissionPreset: 'full-auto',
+    sessionPermissionPreset: 'full-auto',
+    sessionPermissionMode: 'allow-all',
     permissionWarning: 'be careful',
   })
   assert.equal(state.tabs[0]?.cliVersion, '1.0.82')
-  assert.equal(state.tabs[0]?.launchedPermissionPreset, 'full-auto')
+  assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-auto')
+  assert.equal(state.tabs[0]?.sessionPermissionMode, 'allow-all')
   assert.equal(state.tabs[0]?.permissionWarning, 'be careful')
-  assert.equal(state.tabs[1]?.launchedPermissionPreset, 'default')
+  assert.equal(state.tabs[1]?.sessionPermissionPreset, 'default')
   assert.equal(state.tabs[1]?.cliVersion, '1.0.80')
   assert.equal(state.tabs[1]?.permissionWarning, null)
 })

@@ -1,4 +1,5 @@
 import type { PermissionPreset } from './permission-presets.js'
+import type { SessionPermissionMode } from './permission-modes.js'
 import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
 
 export const MAX_SESSION_TABS = 20
@@ -15,7 +16,8 @@ export interface NewTabInput {
   title: string
   workspaceProfileId: string
   cliVersion: string | null
-  launchedPermissionPreset: PermissionPreset | null
+  sessionPermissionPreset: PermissionPreset | null
+  sessionPermissionMode?: SessionPermissionMode | null
   permissionWarning: string | null
   remote: boolean
   lastSessionId?: string | null
@@ -40,7 +42,8 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     status: 'starting',
     processId: null,
     cliVersion: input.cliVersion,
-    launchedPermissionPreset: input.launchedPermissionPreset,
+    sessionPermissionPreset: input.sessionPermissionPreset,
+    sessionPermissionMode: input.sessionPermissionMode ?? null,
     permissionWarning: input.permissionWarning,
     remote: input.remote,
     lastActivityAt: input.lastActivityAt ?? Date.now(),
@@ -103,14 +106,14 @@ export function setTabSessionId(state: TabsState, tabId: string, lastSessionId: 
   }
 }
 
-/** Refreshes the launch-time permission fields after a restart rebuilds a
- * tab's underlying process with the workspace profile's current settings. */
+/** Refreshes process metadata after a restart while preserving session-owned settings. */
 export function setTabLaunchConfig(
   state: TabsState,
   tabId: string,
   config: {
     cliVersion: string | null
-    launchedPermissionPreset: PermissionPreset | null
+    sessionPermissionPreset: PermissionPreset | null
+    sessionPermissionMode: SessionPermissionMode | null
     permissionWarning: string | null
     canFork?: boolean
   },
@@ -118,6 +121,19 @@ export function setTabLaunchConfig(
   return {
     ...state,
     tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, ...config } : tab)),
+  }
+}
+
+export function setTabPermissionMode(
+  state: TabsState,
+  tabId: string,
+  sessionPermissionMode: SessionPermissionMode,
+): TabsState {
+  return {
+    ...state,
+    tabs: state.tabs.map((tab) => (
+      tab.id === tabId ? { ...tab, sessionPermissionMode, lastActivityAt: Date.now() } : tab
+    )),
   }
 }
 

@@ -116,14 +116,17 @@ Run `npm run clipboard:smoke` for the automated native-copy → new-session →
 return regression in the real app and CLI. It uses the same disposable data
 and local mock model, and saves screenshots plus `result.json` under
 `test-results/clipboard-switch/` (no paid model requests).
+After building, run `node scripts/electron-side-chat-check.mjs --clipboard-multi-click`
+to test drag-select → double-click → Ctrl+C, including the physical Control-key
+sequence. Its screenshots and results are saved under `test-results/clipboard-multi-click/`.
 
 ## Permission presets
 
-`copilot` has no single named permission-mode enum. It exposes flags instead:
-`--available-tools`, `--excluded-tools`, `--allow-tool`, `--deny-tool`,
-`--allow-all-tools` (`/yolo`), `--allow-url`, and `--add-dir` (trust a
-directory permanently). This app maps five presets
-onto that flag surface, set per workspace profile in Settings:
+Copilot CLI exposes the runtime modes `manual`, `assisted`, and `allow-all`,
+plus launch-time flags such as `--available-tools`, `--allow-all-tools`, and
+`--add-dir`. This app maps five startup presets onto that surface. A workspace
+profile supplies the default only when a new session is created; every tab
+then owns and persists its permission independently:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
@@ -132,6 +135,18 @@ onto that flag surface, set per workspace profile in Settings:
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
 | Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
+
+Inside an existing terminal, permission changes made through Copilot's direct
+commands, history recall, completion, or permission picker update that
+session's approval-mode badge without changing its profile. The desktop reads
+Copilot's structured `session.permissions_changed` records rather than parsing
+terminal prose. Restarting or restoring a tab reapplies its original launch
+flags; Copilot restores its own durable runtime approval mode. Observed mode
+changes never add `--allow-all` to a session's startup flags. Full auto and Full
+access startup flags remain enabled even when the native runtime override is
+removed; the badge shows this baseline. The profile default applies only to new
+sessions. A Restricted session or side chat can change its approval mode, but
+its launch-time read/search tool allowlist remains visible in the badge.
 
 See `src/main/permission-presets.ts`.
 
@@ -238,9 +253,9 @@ approval-needed, session-completed, and session-crashed (also toggleable);
 clicking one focuses the window and the relevant tab.
 
 Workspace profiles are keyed by normalized folder path and remember a name,
-permission preset, default resume mode, launch profile, and the last set of
-open tabs (title + deterministic session id on current Copilot versions) to
-restore next time that profile is activated.
+startup permission, default resume mode, launch profile, and the last set of
+open tabs (title + deterministic session id + session-owned permission on
+current Copilot versions) to restore next time that profile is activated.
 
 ## Background CLI
 
