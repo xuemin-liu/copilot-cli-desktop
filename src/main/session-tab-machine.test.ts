@@ -25,6 +25,7 @@ function createTab(
     ...input,
     cliVersion: '1.0.80',
     sessionPermissionPreset: 'default',
+    sessionPermissionMode: null,
     permissionWarning: null,
     remote: false,
   })
@@ -43,6 +44,7 @@ test('createTab adds a starting tab and makes it active', () => {
     processId: null,
     cliVersion: '1.0.80',
     sessionPermissionPreset: 'default',
+    sessionPermissionMode: null,
     permissionWarning: null,
     remote: false,
     lastActivityAt: 123,
@@ -120,10 +122,12 @@ test('setTabLaunchConfig updates only the matching tab\'s permission fields', ()
   state = setTabLaunchConfig(state, 'a', {
     cliVersion: '1.0.82',
     sessionPermissionPreset: 'full-auto',
+    sessionPermissionMode: 'allow-all',
     permissionWarning: 'be careful',
   })
   assert.equal(state.tabs[0]?.cliVersion, '1.0.82')
   assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-auto')
+  assert.equal(state.tabs[0]?.sessionPermissionMode, 'allow-all')
   assert.equal(state.tabs[0]?.permissionWarning, 'be careful')
   assert.equal(state.tabs[1]?.sessionPermissionPreset, 'default')
   assert.equal(state.tabs[1]?.cliVersion, '1.0.80')

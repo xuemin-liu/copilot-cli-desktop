@@ -119,29 +119,28 @@ and local mock model, and saves screenshots plus `result.json` under
 
 ## Permission presets
 
-Copilot CLI exposes the runtime modes `default`, `assisted`, and `allow-all`,
+Copilot CLI exposes the runtime modes `manual`, `assisted`, and `allow-all`,
 plus launch-time flags such as `--available-tools`, `--allow-all-tools`, and
-`--add-dir`. This app maps six startup presets onto that surface. A workspace
+`--add-dir`. This app maps five startup presets onto that surface. A workspace
 profile supplies the default only when a new session is created; every tab
 then owns and persists its permission independently:
 
 | Preset | Flags applied | Behavior |
 | --- | --- | --- |
 | Copilot default | (none) | Uses Copilot CLI's configured `defaultPermissionMode`. A normal installation prompts for mutating actions, but an upstream allow-all setting remains allow-all. |
-| Assisted approval | `--assisted-approval` | Permission prompts include Copilot's LLM safety recommendation. |
 | Restricted | `--available-tools=view,glob,grep,ask_user` | Only explicit read/search/interaction tools are visible to the model. Shell, write, web, MCP, skill, memory, and delegated-agent tools are excluded. |
 | Trusted directory | `--add-dir <workspace>` | The workspace is trusted, but mutating actions still prompt individually. |
 | Full auto | `--allow-all-tools` | Every tool call is approved automatically. Use only for fully-trusted workspaces. |
 | Full access | `--allow-all` | Enables Copilot's broadest documented approval mode. Use only in an isolated, fully-trusted environment. |
 
-Inside an existing terminal, `/permissions default`, `/permissions assisted`,
-and `/permissions allow-all` (including `/allow-all` and `/yolo`) update that
-session's permission badge without changing its profile. If a session began
-with an app-defined launch restriction that Copilot cannot undo in place, the
-desktop transparently relaunches the same tab and resumes the same Copilot
-session with the requested native mode. Restarting or restoring a tab keeps
-its session permission; the profile default continues to apply only to new
-sessions. Restricted side chats remain restricted.
+Inside an existing terminal, permission changes made through Copilot's direct
+commands, history recall, completion, or permission picker update that
+session's approval-mode badge without changing its profile. The desktop reads
+Copilot's structured `session.permissions_changed` records rather than parsing
+terminal prose. Restarting or restoring a tab keeps its launch restriction and
+last observed approval mode; the profile default continues to apply only to
+new sessions. A Restricted session or side chat can change its approval mode,
+but its launch-time read/search tool allowlist remains visible in the badge.
 
 See `src/main/permission-presets.ts`.
 

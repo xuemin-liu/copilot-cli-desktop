@@ -75,24 +75,6 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
-test('write() reports direct runtime permission commands submitted by the user', async () => {
-  const pty = new FakePty()
-  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
-  await session.start()
-  const modes: string[] = []
-  session.on('permission-command', (mode: string) => modes.push(mode))
-
-  for (const char of '/permissions assisted') session.write(char)
-  session.write('\r')
-  session.write('/permissions show\r')
-  session.write('/yolo\r')
-
-  assert.deepEqual(modes, [])
-  pty.emit('data', 'Auto approval is now enabled. Permission requests include a recommendation. '
-    + 'All permissions are now enabled. Tool requests are automatically approved.')
-  assert.deepEqual(modes, ['assisted', 'allow-all'])
-})
-
 test('heuristics reassemble text split across pty chunks without trusting session IDs by default', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
@@ -112,10 +94,13 @@ test('legacy sessions can opt into bounded session-id banner discovery', async (
     file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty), discoverSessionIdFromOutput: true,
   })
   await session.start()
+  const discovered: string[] = []
+  session.on('session-id', (id: string) => discovered.push(id))
   pty.emit('data', 'Resume this session with copilot --res')
   assert.equal(session.lastSessionId, null)
   pty.emit('data', 'ume=work-session-9\n')
   assert.equal(session.lastSessionId, 'work-session-9')
+  assert.deepEqual(discovered, ['work-session-9'])
 })
 
 test('approval-needed stays up across ordinary output until an explicit transition', async () => {

@@ -118,8 +118,8 @@ test('side-chat restrictions and parent session survive config persistence', asy
     const profile = activateWorkspaceProfile(config, 'C:\\work\\side-chat')
     profile.permissionPreset = 'full-access'
     profile.tabs = [
-      { title: 'Main', lastSessionId: 'source', sessionPermissionPreset: 'assisted' },
-      { title: 'Side', lastSessionId: 'fork', sessionPermissionPreset: 'read-only', sideChat: true, sideParentSessionId: 'source' },
+      { title: 'Main', lastSessionId: 'source', sessionPermissionPreset: 'default', sessionPermissionMode: 'assisted' },
+      { title: 'Side', lastSessionId: 'fork', sessionPermissionPreset: 'read-only', sessionPermissionMode: 'manual', sideChat: true, sideParentSessionId: 'source' },
     ]
     await writeDesktopConfig(filename, config)
     assert.deepEqual((await readDesktopConfig(filename)).profiles[0]?.tabs, profile.tabs)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -29,6 +29,8 @@ interface Harness {
  */
 async function fixture(action: (harness: Harness, directory: string) => Promise<void>): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'desktop-lifecycle-unit-'))
+  const previousCopilotHome = process.env.COPILOT_HOME
+  process.env.COPILOT_HOME = directory
   let harness: Harness | undefined
   try {
     const mainPath = fileURLToPath(new URL('./main.js', import.meta.url))
@@ -95,6 +97,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await action(harness, directory)
   } finally {
     await harness?.cleanup()
+    if (previousCopilotHome === undefined) delete process.env.COPILOT_HOME
+    else process.env.COPILOT_HOME = previousCopilotHome
     await rm(directory, { recursive: true, force: true })
   }
 }
@@ -256,6 +260,7 @@ test('restored sessions use their persisted permission instead of the current pr
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)
     profile.permissionPreset = 'read-only'
+    profile.defaultResumeMode = 'new'
     profile.tabs = [{ title: 'Existing', lastSessionId: SOURCE, sessionPermissionPreset: 'full-access' }]
 
     await harness.restore()
@@ -267,23 +272,43 @@ test('restored sessions use their persisted permission instead of the current pr
   })
 })
 
-test('terminal permission command updates only the session and relaunches immutable restricted flags', async () => {
+test('structured permission events update only the session and restart preserves its launch bundle plus mode', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)
     profile.permissionPreset = 'read-only'
+    profile.defaultResumeMode = 'new'
     const opened = await harness.createMain()
     const tabId = opened.activeTabId!
 
-    await harness.request('desktop:write-tab', tabId, '/permissions allow-all\r')
-    harness.spawns[0]!.emitData('All permissions are now enabled. Tool, path, and URL requests will be automatically approved.')
-    await new Promise((resolve) => setImmediate(resolve))
-    const state = await harness.request('desktop:get-state')
+    const sessionId = opened.tabs[0]!.lastSessionId!
+    const sessionDirectory = join(directory, 'session-state', sessionId)
+    await mkdir(sessionDirectory, { recursive: true })
+    await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"mode":"allow-all"}}\n')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const changed = await harness.request('desktop:get-state')
 
     assert.equal(profile.permissionPreset, 'read-only')
-    assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-access')
+    assert.equal(changed.tabs[0]?.sessionPermissionPreset, 'read-only')
+    assert.equal(changed.tabs[0]?.sessionPermissionMode, 'allow-all')
+    assert.equal(harness.spawns.length, 1)
+
+    const restarted = await harness.request('desktop:restart-tab', tabId)
+    assert.equal(restarted.tabs[0]?.lastSessionId, sessionId)
+    assert.equal(restarted.tabs[0]?.sessionPermissionPreset, 'read-only')
+    assert.equal(restarted.tabs[0]?.sessionPermissionMode, 'allow-all')
     assert.equal(harness.spawns.length, 2)
-    assert.ok(harness.spawns[0]!.written.includes('/permissions allow-all\r'))
     assert.ok(harness.spawns[1]!.args.includes('--allow-all'))
-    assert.ok(!harness.spawns[1]!.args.some((arg) => arg.startsWith('--available-tools=')))
+    assert.ok(harness.spawns[1]!.args.some((arg) => arg.startsWith('--available-tools=')))
+  })
+})
+
+test('remote tabs are never persisted as restorable local sessions', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    capabilities.remoteSessions = true
+    const state = await harness.request('desktop:connect-remote-session', 'remote-session-1')
+    assert.equal(state.tabs[0]?.remote, true)
+    assert.equal(state.tabs[0]?.sessionPermissionPreset, null)
+    assert.deepEqual(profile.tabs, [])
   })
 })

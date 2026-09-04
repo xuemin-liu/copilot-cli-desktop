@@ -1,11 +1,10 @@
-/** Workspace-profile defaults and the effective permission carried by a tab.
- * Copilot's native runtime modes are default, assisted, and allow-all. The
- * remaining presets are launch-time bundles supplied by the desktop app. */
-export type PermissionPreset = 'default' | 'assisted' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
+import type { SessionPermissionMode } from './permission-modes.js'
+
+/** Launch-time permission bundle supplied by a workspace profile. */
+export type PermissionPreset = 'default' | 'read-only' | 'trusted-directory' | 'full-auto' | 'full-access'
 
 export const PERMISSION_PRESETS: readonly PermissionPreset[] = [
   'default',
-  'assisted',
   'read-only',
   'trusted-directory',
   'full-auto',
@@ -26,12 +25,6 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
       'Applies no desktop permission override. Copilot CLI uses its configured defaultPermissionMode '
       + '(normally manual, but it may be assisted or allow-all).',
   },
-  'assisted': {
-    id: 'assisted',
-    label: 'Assisted approval',
-    description:
-      'Copilot asks before sensitive actions and includes an LLM safety recommendation with each permission request.',
-  },
   'read-only': {
     id: 'read-only',
     label: 'Restricted (explicit read/search allowlist)',
@@ -50,7 +43,7 @@ export const PERMISSION_PRESET_INFO: Readonly<Record<PermissionPreset, Permissio
     id: 'full-auto',
     label: 'Full auto (--allow-all-tools)',
     description:
-      'All tool calls, including shell commands and file edits, are approved automatically ("/yolo"). '
+      'All tool calls, including shell commands and file edits, are approved automatically. '
       + 'Use only for workspaces you fully trust.',
   },
   'full-access': {
@@ -78,27 +71,34 @@ export function buildPermissionArgs(
   preset: PermissionPreset,
   workspacePath: string,
   capabilities: { toolAllowlist: boolean },
+  sessionMode: SessionPermissionMode | null = null,
 ): string[] {
+  let args: string[]
   switch (preset) {
     case 'default':
-      return []
-    case 'assisted':
-      return ['--assisted-approval']
+      args = []
+      break
     case 'read-only':
-      return capabilities.toolAllowlist
+      args = capabilities.toolAllowlist
         ? ['--available-tools=view,glob,grep,ask_user']
         : ['--deny-tool=write', '--deny-tool=shell']
+      break
     case 'trusted-directory':
-      return ['--add-dir', workspacePath]
+      args = ['--add-dir', workspacePath]
+      break
     case 'full-auto':
-      return ['--allow-all-tools']
+      args = sessionMode ? [] : ['--allow-all-tools']
+      break
     case 'full-access':
-      return ['--allow-all']
+      args = sessionMode ? [] : ['--allow-all']
+      break
     default: {
       const exhaustive: never = preset
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)
     }
   }
+  if (sessionMode === 'allow-all') args.push('--allow-all')
+  return args
 }
 
 export function permissionCompatibilityWarning(

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
+import { isSessionPermissionMode } from './permission-modes.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
 import { DEFAULT_SESSION_LAUNCH_CONFIG, normalizeSessionLaunchConfig } from './session-launch.js'
@@ -127,6 +128,9 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
       lastSessionId,
       ...(isPermissionPreset(tab.sessionPermissionPreset)
         ? { sessionPermissionPreset: tab.sessionPermissionPreset }
+        : {}),
+      ...(lastSessionId && isSessionPermissionMode(tab.sessionPermissionMode)
+        ? { sessionPermissionMode: tab.sessionPermissionMode }
         : {}),
       ...(tab.sideChat === true ? {
         sideChat: true as const,

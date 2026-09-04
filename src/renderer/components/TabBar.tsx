@@ -56,7 +56,7 @@ export function TabBar({ tabs, installedCliVersion, activeTabId, canOpenTab, onA
                 type="button"
                 className="tab-restart"
                 aria-label={`Restart ${tab.title}`}
-                title="Restart this session — applies any settings changed since it started, keeping the same conversation"
+                title="Restart this session with its saved session settings, keeping the same conversation"
                 disabled={busy}
                 onClick={(event) => {
                   event.stopPropagation()

@@ -1,4 +1,5 @@
 import type { PermissionPreset } from './permission-presets.js'
+import type { SessionPermissionMode } from './permission-modes.js'
 import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
 
 export const MAX_SESSION_TABS = 20
@@ -16,6 +17,7 @@ export interface NewTabInput {
   workspaceProfileId: string
   cliVersion: string | null
   sessionPermissionPreset: PermissionPreset | null
+  sessionPermissionMode?: SessionPermissionMode | null
   permissionWarning: string | null
   remote: boolean
   lastSessionId?: string | null
@@ -41,6 +43,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     processId: null,
     cliVersion: input.cliVersion,
     sessionPermissionPreset: input.sessionPermissionPreset,
+    sessionPermissionMode: input.sessionPermissionMode ?? null,
     permissionWarning: input.permissionWarning,
     remote: input.remote,
     lastActivityAt: input.lastActivityAt ?? Date.now(),
@@ -110,6 +113,7 @@ export function setTabLaunchConfig(
   config: {
     cliVersion: string | null
     sessionPermissionPreset: PermissionPreset | null
+    sessionPermissionMode: SessionPermissionMode | null
     permissionWarning: string | null
     canFork?: boolean
   },
@@ -120,16 +124,15 @@ export function setTabLaunchConfig(
   }
 }
 
-export function setTabPermissionPreset(
+export function setTabPermissionMode(
   state: TabsState,
   tabId: string,
-  sessionPermissionPreset: PermissionPreset | null,
-  permissionWarning: string | null,
+  sessionPermissionMode: SessionPermissionMode,
 ): TabsState {
   return {
     ...state,
     tabs: state.tabs.map((tab) => (
-      tab.id === tabId ? { ...tab, sessionPermissionPreset, permissionWarning, lastActivityAt: Date.now() } : tab
+      tab.id === tabId ? { ...tab, sessionPermissionMode, lastActivityAt: Date.now() } : tab
     )),
   }
 }
