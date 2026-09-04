@@ -44,7 +44,11 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
   const watchdog = process.platform === 'win32' && child.pid
     ? startWindowsProcessWatchdog(child.pid)
     : null
-  child.onExit(() => watchdog?.release())
+  let exited = false
+  child.onExit(() => {
+    exited = true
+    watchdog?.release()
+  })
   let disposed = false
   return {
     pid: child.pid,
@@ -63,7 +67,9 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
       if (disposed) return
       disposed = true
       watchdog?.release()
-      try { child.kill() } catch { /* The process may already have exited. */ }
+      if (!exited) {
+        try { child.kill() } catch { /* The process may already have exited. */ }
+      }
     },
   }
 }

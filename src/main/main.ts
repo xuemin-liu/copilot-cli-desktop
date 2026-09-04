@@ -821,7 +821,7 @@ function finalizeSessionArgs(
     ...launchArgs,
     ...(plan.connectSessionId
       ? []
-      : buildPermissionArgs(plan.permissionPreset, plan.cwd, plan.permissionCapabilities, freshSession)),
+      : buildPermissionArgs(plan.permissionPreset, plan.cwd, plan.permissionCapabilities)),
     ...plan.secretArgs,
   ]
   return { args, deterministicSessionId }

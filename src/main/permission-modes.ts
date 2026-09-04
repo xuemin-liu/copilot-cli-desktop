@@ -23,6 +23,12 @@ export function describeSessionPermission(
       ? 'full-access'
       : mode ?? preset
   if (!mode) return { label: PERMISSION_PRESET_INFO[preset].label, tone }
+  if (preset === 'full-access') return {
+    label: 'Full computer access · Startup flags remain enabled', tone: 'full-access',
+  }
+  if (preset === 'full-auto' && mode !== 'allow-all') return {
+    label: `Tools auto-approved · ${mode === 'manual' ? 'Manual' : 'Assisted'} path/URL approval`, tone: 'full-auto',
+  }
   const modeLabel = SESSION_PERMISSION_MODE_INFO[mode].label
   if (preset === 'read-only') return { label: `Restricted tools · ${modeLabel}`, tone }
   if (preset === 'trusted-directory') return { label: `Trusted directory · ${modeLabel}`, tone }

@@ -63,14 +63,13 @@ export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
 /**
  * Build the `copilot` CLI launch flags for a permission preset. `workspacePath`
  * must be an absolute, already-resolved path — this function does not resolve
- * or validate it. Mode-establishing flags are supplied only for a fresh
- * session; on resume Copilot restores its durable runtime mode itself.
+ * or validate it. These are the session's fixed launch baseline, independent
+ * of the runtime override that Copilot restores from its event log.
  */
 export function buildPermissionArgs(
   preset: PermissionPreset,
   workspacePath: string,
   capabilities: { toolAllowlist: boolean },
-  freshSession = true,
 ): string[] {
   switch (preset) {
     case 'default':
@@ -82,9 +81,9 @@ export function buildPermissionArgs(
     case 'trusted-directory':
       return ['--add-dir', workspacePath]
     case 'full-auto':
-      return freshSession ? ['--allow-all-tools'] : []
+      return ['--allow-all-tools']
     case 'full-access':
-      return freshSession ? ['--allow-all'] : []
+      return ['--allow-all']
     default: {
       const exhaustive: never = preset
       throw new Error(`Unknown permission preset: ${String(exhaustive)}`)

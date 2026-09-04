@@ -45,15 +45,15 @@ test('buildPermissionArgs: full-access disables tool, path, and URL verification
 
 test('resumed sessions replay only additive launch bundles and let Copilot restore runtime mode', () => {
   assert.deepEqual(
-    buildPermissionArgs('trusted-directory', 'C:\\work\\project', MODERN_CAPABILITIES, false),
+    buildPermissionArgs('trusted-directory', 'C:\\work\\project', MODERN_CAPABILITIES),
     ['--add-dir', 'C:\\work\\project'],
   )
   assert.deepEqual(
-    buildPermissionArgs('read-only', 'C:\\work\\project', MODERN_CAPABILITIES, false),
+    buildPermissionArgs('read-only', 'C:\\work\\project', MODERN_CAPABILITIES),
     ['--available-tools=view,glob,grep,ask_user'],
   )
-  assert.deepEqual(buildPermissionArgs('full-access', 'C:\\work\\project', MODERN_CAPABILITIES, false), [])
-  assert.deepEqual(buildPermissionArgs('full-auto', 'C:\\work\\project', MODERN_CAPABILITIES, false), [])
+  assert.deepEqual(buildPermissionArgs('full-access', 'C:\\work\\project', MODERN_CAPABILITIES), ['--allow-all'])
+  assert.deepEqual(buildPermissionArgs('full-auto', 'C:\\work\\project', MODERN_CAPABILITIES), ['--allow-all-tools'])
 })
 
 test('legacy restricted mode explains its weaker compatibility guarantee', () => {

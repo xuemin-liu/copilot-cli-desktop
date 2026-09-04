@@ -180,7 +180,7 @@ test('restored side chats remain restricted under a full-access autopilot worksp
     await harness.restore()
     const state = await harness.request('desktop:get-state')
     assert.equal(state.tabs.length, 2)
-    assert.ok(!harness.spawns[0]!.args.includes('--allow-all'), 'resumed main session restores its own runtime mode')
+    assert.ok(harness.spawns[0]!.args.includes('--allow-all'), 'resume preserves the original startup baseline')
     assertRestricted(harness.spawns[1]!.args)
     assert.equal(state.tabs[1]!.sideParentTabId, state.tabs[0]!.id)
     assert.equal(state.tabs[1]!.sessionPermissionPreset, 'read-only')
@@ -284,7 +284,7 @@ test('restored sessions use their persisted permission instead of the current pr
     await harness.restore()
     const state = await harness.request('desktop:get-state')
 
-    assert.ok(!harness.spawns[0]!.args.includes('--allow-all'))
+    assert.ok(harness.spawns[0]!.args.includes('--allow-all'))
     assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--available-tools=')))
     assert.equal(state.tabs[0]?.sessionPermissionPreset, 'full-access')
   })

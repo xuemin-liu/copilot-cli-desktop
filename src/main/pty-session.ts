@@ -56,6 +56,8 @@ export class PtySession extends EventEmitter {
   private lastKnownSessionId: string | null
   private permissionMonitor: SessionPermissionMonitor | null = null
   private exitHandled = false
+  private exitCompletion: Promise<void> | null = null
+  private permissionDrain: Promise<void> | null = null
 
   constructor(options: PtySessionOptions) {
     super()
@@ -158,17 +160,13 @@ export class PtySession extends EventEmitter {
     }
   }
 
-  private async drainPermissionMonitor(): Promise<void> {
+  private drainPermissionMonitor(): Promise<void> {
+    if (this.permissionDrain) return this.permissionDrain
     const monitor = this.permissionMonitor
     this.permissionMonitor = null
-    if (!monitor) return
-    try {
-      await monitor.poll()
-    } catch (error) {
-      this.reportPermissionMonitorError(error)
-    } finally {
-      monitor.stop()
-    }
+    return this.permissionDrain = monitor
+      ? monitor.finish().catch((error) => this.reportPermissionMonitorError(error))
+      : Promise.resolve()
   }
 
   async start(): Promise<void> {
@@ -232,8 +230,8 @@ export class PtySession extends EventEmitter {
       this.exitHandled = true
       this.pty = null
       pty.dispose?.()
-      void this.drainPermissionMonitor().finally(() => {
-        const expected = this.stopping
+      const expected = this.stopping
+      this.exitCompletion = this.drainPermissionMonitor().then(() => {
         if (!expected) {
           if (exitCode === 0) {
             this.setStatus('completed')
@@ -273,6 +271,7 @@ export class PtySession extends EventEmitter {
   async stop(): Promise<void> {
     const pty = this.pty
     if (!pty) {
+      await this.exitCompletion
       await this.drainPermissionMonitor()
       this.setStatus('completed')
       return
@@ -306,6 +305,9 @@ export class PtySession extends EventEmitter {
         pty.dispose?.()
       }
     }
+    // Even a backend that never acknowledges kill must release its monitor.
+    await this.drainPermissionMonitor()
+    await this.exitCompletion
   }
 
 }

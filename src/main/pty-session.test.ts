@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import test from 'node:test'
 import { PtySession } from './pty-session.js'
+import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 
 class FakePty extends EventEmitter implements PtyLike {
@@ -41,6 +42,25 @@ class FakePty extends EventEmitter implements PtyLike {
 function fakeSpawnPty(pty: FakePty): SpawnPtyFn {
   return () => pty
 }
+
+test('stop waits for permission drain after the PTY has already exited', async (context) => {
+  let release!: () => void
+  const drained = new Promise<void>((resolve) => { release = resolve })
+  context.mock.method(SessionPermissionMonitor.prototype, 'start', async () => {})
+  context.mock.method(SessionPermissionMonitor.prototype, 'finish', () => drained)
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work',
+    spawnPty: fakeSpawnPty(pty), sessionId: 'drain-test', monitorSessionPermissions: true })
+  await session.start()
+  pty.emit('exit', { exitCode: 0 })
+  let stopped = false
+  const stopping = session.stop().then(() => { stopped = true })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(stopped, false)
+  release()
+  await stopping
+  assert.equal(stopped, true)
+})
 
 test('start() transitions to running and spawns with the given file/args/cwd', async () => {
   const pty = new FakePty()

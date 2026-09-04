@@ -32,6 +32,12 @@ test('permission mode parser reports unknown permission payloads only', () => {
 })
 
 test('permission description keeps restriction tone while including runtime mode', () => {
+  assert.deepEqual(describeSessionPermission('full-access', 'manual'), {
+    label: 'Full computer access · Startup flags remain enabled', tone: 'full-access',
+  })
+  assert.deepEqual(describeSessionPermission('full-auto', 'manual'), {
+    label: 'Tools auto-approved · Manual path/URL approval', tone: 'full-auto',
+  })
   assert.deepEqual(describeSessionPermission('read-only', 'manual'), {
     label: 'Restricted tools · Manual approval',
     tone: 'read-only',
