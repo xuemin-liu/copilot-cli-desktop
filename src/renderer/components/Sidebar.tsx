@@ -299,7 +299,7 @@ export function Sidebar({
           </button>
         )}
         {!collapsed && groupMode === 'list' && profiles.length > 0 && (
-          <section className="workspace-group workspace-group-active">
+          <section className="workspace-group">
             <div className="workspace-sessions workspace-sessions-flat" aria-label="All sessions">
               {orderTabs(tabs.filter((tab) => {
                 if (!normalizedQuery) return true
@@ -317,9 +317,8 @@ export function Sidebar({
             : allProfileTabs
           const profileTabs = orderTabs(filteredProfileTabs)
           if (normalizedQuery && !profileMatches && profileTabs.length === 0) return null
-          const active = profile.id === activeProfileId
           return (
-            <section key={profile.id} className={`workspace-group${active ? ' workspace-group-active' : ''}`}>
+            <section key={profile.id} className="workspace-group">
               {workspaceRow(profile)}
               {profileTabs.length > 0 && (
                 <div className="workspace-sessions" aria-label={`${profile.name} sessions`}>

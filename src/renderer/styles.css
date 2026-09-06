@@ -255,7 +255,6 @@ button:disabled {
 .sidebar-collapsed .new-session-button span:last-child,
 .sidebar-collapsed .sidebar-section-heading > span,
 .sidebar-collapsed .workspace-name,
-.sidebar-collapsed .workspace-sessions,
 .sidebar-collapsed .sidebar-access span:last-child,
 .sidebar-collapsed .sidebar-settings span:last-child {
   display: none;
@@ -298,6 +297,8 @@ button:disabled {
 
 .sidebar-session-row { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: center; min-width: 0; }
 .sidebar-session-actions-toggle { width: 20px; opacity: 0; }
+.sidebar-collapsed .sidebar-session-row { grid-template-columns: minmax(0, 1fr); position: relative; }
+.sidebar-collapsed .sidebar-session-actions-toggle { position: absolute; right: 0; top: 4px; width: 16px; }
 .sidebar-session-row:hover .sidebar-session-actions-toggle,
 .sidebar-session-row:focus-within .sidebar-session-actions-toggle,
 .sidebar-session-actions-toggle[aria-expanded="true"] { opacity: 1; }
@@ -323,7 +324,7 @@ button:disabled {
 .sidebar-session-compact .sidebar-status-dot {
   position: absolute;
   top: 4px;
-  right: 4px;
+  left: 4px;
 }
 
 .sidebar-collapsed .sidebar-search {
