@@ -38,7 +38,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
       style={{ gridTemplateColumns: side ? `minmax(0, ${split}fr) 6px minmax(0, ${100 - split}fr)` : 'minmax(0, 1fr)' }}>
       {tabs.length === 0 && (
         <div className="empty-state">
-          <p>No session tabs are open.</p>
+          <p>No sessions are open.</p>
           <button type="button" onClick={onCreate}>Start a session</button>
         </div>
       )}
@@ -57,15 +57,20 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}</span>
               {tab.sideChat ? (
-                <>
-                  <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
-                  <button type="button" onClick={() => onClose(tab.id)} aria-label={`Close side chat ${tab.title}`} title="Close side chat — keep the main session running">×</button>
-                </>
+                <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && (
-                <button type="button" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
-                  title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this tab' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
+                <button type="button" className="session-fork" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
+                  title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
                   onClick={() => onFork(tab)}>Fork into side chat</button>
               )}
+              {!tab.remote && (
+                <button type="button" className="icon-button session-restart" disabled={busy} onClick={() => onRestart(tab.id)}
+                  aria-label={`Restart ${tab.title}`}
+                  title="Restart this session with its saved settings, keeping the same conversation">↻</button>
+              )}
+              <button type="button" className="icon-button session-close" onClick={() => onClose(tab.id)}
+                aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
+                title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
             </header>
             <div className="session-terminal">
               <TerminalPane tabId={tab.id} active={visible} focused={focused} sessionProcessId={tab.processId} />

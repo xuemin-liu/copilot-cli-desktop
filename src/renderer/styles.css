@@ -255,7 +255,6 @@ button:disabled {
 .sidebar-collapsed .new-session-button span:last-child,
 .sidebar-collapsed .sidebar-section-heading > span,
 .sidebar-collapsed .workspace-name,
-.sidebar-collapsed .workspace-sessions,
 .sidebar-collapsed .sidebar-access span:last-child,
 .sidebar-collapsed .sidebar-settings span:last-child {
   display: none;
@@ -288,6 +287,44 @@ button:disabled {
 
 .sidebar-collapsed .workspace-list {
   padding-top: 10px;
+}
+
+.sidebar-compact-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-session-row { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: center; min-width: 0; }
+.sidebar-session-actions-toggle { width: 20px; opacity: 0; }
+.sidebar-collapsed .sidebar-session-row { grid-template-columns: minmax(0, 1fr); position: relative; }
+.sidebar-collapsed .sidebar-session-actions-toggle { position: absolute; right: 0; top: 4px; width: 16px; }
+.sidebar-session-row:hover .sidebar-session-actions-toggle,
+.sidebar-session-row:focus-within .sidebar-session-actions-toggle,
+.sidebar-session-actions-toggle[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .sidebar-session-actions-toggle { opacity: 1; } }
+.sidebar-session-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.sidebar-collapsed .sidebar-session-actions { flex-direction: column; align-items: center; }
+.workspace-row[aria-current="true"] { background: #2b2e35; }
+.session-restart:hover:not(:disabled) { color: #4f88ff; }
+.session-close:hover { color: #f85149; }
+
+.sidebar-session.sidebar-session-compact {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  min-height: 36px;
+  padding: 6px;
+}
+
+.sidebar-session-compact .sidebar-session-title {
+  text-align: center;
+}
+
+.sidebar-session-compact .sidebar-status-dot {
+  position: absolute;
+  top: 4px;
+  left: 4px;
 }
 
 .sidebar-collapsed .sidebar-search {
@@ -350,8 +387,7 @@ button:disabled {
   font-weight: 650;
 }
 
-.workspace-row:hover,
-.workspace-group-active > .workspace-row {
+.workspace-row:hover {
   background: #23262e;
 }
 
@@ -437,130 +473,12 @@ button:disabled {
   background: #0b0e14;
 }
 
-.tab-bar {
-  min-height: 45px;
-  display: flex;
-  align-items: stretch;
-  gap: 5px;
-  padding: 5px 8px 0;
-  border-bottom: 1px solid #292d35;
-  background: #11141b;
-  overflow-x: auto;
-}
-
-.tab-group {
-  min-width: 150px;
-  max-width: 260px;
-  display: flex;
-  align-items: center;
-  padding: 0 4px 0 0;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 9px 9px 0 0;
-  background: #181b23;
-}
-
-.tab-active {
-  border-color: #303640;
-  background: #20242d;
-}
-
-/* The tab role owns selection; the restart/close buttons are its siblings
-   (not descendants) so assistive tech never has to reach through a
-   role="tab" element — which can be flattened to presentation-only — to
-   find them. */
-.tab {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 0 0 11px;
-  cursor: pointer;
-}
-
-.tab-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
 .tab-status-starting { background: #929baa; }
 .tab-status-running { background: #4f88ff; box-shadow: 0 0 0 3px rgb(79 136 255 / 12%); }
 .tab-status-approval-needed { background: #ffb84d; box-shadow: 0 0 0 3px rgb(255 184 77 / 12%); }
 .tab-status-stopping { background: #929baa; }
 .tab-status-completed { background: #20c9a6; }
 .tab-status-crashed { background: #ff6873; }
-
-.tab-title {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: #c9d0db;
-  font-size: 11px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cli-version-badge {
-  flex-shrink: 0;
-  padding: 2px 5px;
-  border: 1px solid rgb(255 184 77 / 45%);
-  border-radius: 999px;
-  color: #ffca79;
-  background: rgb(255 184 77 / 10%);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.tab-restart {
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  border: none;
-  color: #858e9e;
-  padding: 0;
-  font-size: 13px;
-}
-
-.tab-restart:hover {
-  color: #4f88ff;
-  background: transparent;
-}
-
-.tab-restart:disabled {
-  color: #4a4f59;
-  cursor: default;
-}
-
-.tab-close {
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  border: none;
-  color: #858e9e;
-  padding: 0;
-  font-size: 14px;
-}
-
-.tab-close:hover {
-  color: #f85149;
-  background: transparent;
-}
-
-.tab-new {
-  width: 34px;
-  min-width: 34px;
-  margin-bottom: 0;
-  padding: 0;
-  border-radius: 8px 8px 0 0;
-  background: #1b1e26;
-  font-size: 18px;
-}
 
 .terminal-area {
   position: relative;
@@ -812,7 +730,7 @@ button:disabled {
 .session-pane-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-height: 38px;
   padding: 5px 10px;
   background: #151923;
@@ -822,7 +740,9 @@ button:disabled {
 .session-pane-focused .session-pane-header { border-bottom-color: #4f88ff; }
 .session-pane-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-pane-header button { padding: 4px 8px; font-size: 12px; }
-.side-chat-badge { color: #91c8bc; font-size: 11px; white-space: nowrap; }
+.session-pane-header .icon-button { flex: 0 0 28px; padding: 0; font-size: 17px; }
+.session-fork { min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-chat-badge { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: #91c8bc; font-size: 11px; white-space: nowrap; }
 .session-terminal { flex: 1; position: relative; min-height: 0; }
 .side-chat-divider { grid-column: 2; grid-row: 1; background: #292d35; cursor: col-resize; touch-action: none; }
 .side-chat-divider:hover, .side-chat-divider:focus-visible { background: #4f88ff; outline: none; }

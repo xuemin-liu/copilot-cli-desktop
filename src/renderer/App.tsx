@@ -3,7 +3,6 @@ import type { FormEvent, JSX } from 'react'
 import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
-import { TabBar } from './components/TabBar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 
@@ -148,6 +147,8 @@ export function App(): JSX.Element {
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
         onRenameTab={requestTabRename}
+        onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
+        onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
         onCreateTab={() => handleOperation(window.copilotDesktop.createTab())}
         onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
@@ -181,17 +182,6 @@ export function App(): JSX.Element {
           </div>
         ) : (
           <>
-          <TabBar
-            tabs={state.tabs}
-            installedCliVersion={state.resolution?.version ?? null}
-            activeTabId={state.activeTabId}
-            canOpenTab={canOpenTab}
-            onActivate={(tabId) => void window.copilotDesktop.activateTab(tabId)}
-            onRename={requestTabRename}
-            onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
-            onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
-            onCreate={() => handleOperation(window.copilotDesktop.createTab())}
-          />
           {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
