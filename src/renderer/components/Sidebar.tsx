@@ -97,7 +97,7 @@ export function Sidebar({
   const orderTabs = (items: DesktopSessionTab[]): DesktopSessionTab[] => orderMode === 'last-updated'
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
-  const sessionButton = (tab: DesktopSessionTab, workspaceName?: string): JSX.Element => {
+  const sessionButton = (tab: DesktopSessionTab, workspaceName?: string, compactIndex?: number): JSX.Element => {
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
@@ -105,16 +105,18 @@ export function Sidebar({
     return <button
       key={tab.id}
       type="button"
-      className={`sidebar-session${tab.id === activeTabId ? ' sidebar-session-active' : ''}`}
+      className={`sidebar-session${compactIndex !== undefined ? ' sidebar-session-compact' : ''}${tab.id === activeTabId ? ' sidebar-session-active' : ''}`}
+      aria-label={`${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`}
+      aria-current={tab.id === activeTabId ? 'true' : undefined}
       title={`${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`}
       onClick={() => onActivateTab(tab.id)}
       onDoubleClick={() => onRenameTab(tab.id, tab.title)}
     >
       <span className={`sidebar-status-dot tab-status-${tab.status}`} aria-hidden="true" />
-      <span className="sidebar-session-title">{tab.title}</span>
-      <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
+      <span className="sidebar-session-title">{compactIndex !== undefined ? compactIndex + 1 : tab.title}</span>
+      {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
         {outdatedCli ? 'Old CLI' : STATUS_LABEL[tab.status]}
-      </span>
+      </span>}
     </button>
   }
 
@@ -135,7 +137,7 @@ export function Sidebar({
         </button>
       </div>
 
-      <button type="button" className="new-session-button" disabled={!canOpenTab && activeProfileId !== null} onClick={startSession}>
+      <button type="button" className="new-session-button" aria-label="New Session" title="New session (Ctrl+T)" disabled={!canOpenTab && activeProfileId !== null} onClick={startSession}>
         <span aria-hidden="true">✦</span>
         <span>New Session</span>
       </button>
@@ -249,12 +251,17 @@ export function Sidebar({
       )}
 
       <div className="workspace-list">
+        {collapsed && (
+          <nav className="sidebar-compact-sessions" aria-label="All sessions">
+            {tabs.map((tab, index) => sessionButton(tab, profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name, index))}
+          </nav>
+        )}
         {profiles.length === 0 && (
           <button type="button" className="workspace-empty" onClick={onSelectWorkspace}>
             Choose a project folder to begin
           </button>
         )}
-        {groupMode === 'list' && profiles.length > 0 && (
+        {!collapsed && groupMode === 'list' && profiles.length > 0 && (
           <section className="workspace-group workspace-group-active">
             <div className="workspace-sessions workspace-sessions-flat" aria-label="All sessions">
               {orderTabs(tabs.filter((tab) => {
@@ -265,7 +272,7 @@ export function Sidebar({
             </div>
           </section>
         )}
-        {groupMode === 'workspace' && profiles.map((profile) => {
+        {!collapsed && groupMode === 'workspace' && profiles.map((profile) => {
           const allProfileTabs = tabs.filter((tab) => tab.workspaceProfileId === profile.id)
           const profileMatches = `${profile.name}\n${profile.path}`.toLowerCase().includes(normalizedQuery)
           const filteredProfileTabs = normalizedQuery && !profileMatches
@@ -323,7 +330,7 @@ export function Sidebar({
           <span>{PERMISSION_PRESET_INFO[configuredOnly].label} applies to newly created sessions</span>
         </div>
       ) : null}
-      <button type="button" className="sidebar-settings" onClick={onOpenSettings}>
+      <button type="button" className="sidebar-settings" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
         <span aria-hidden="true">⚙</span>
         <span>Settings</span>
       </button>

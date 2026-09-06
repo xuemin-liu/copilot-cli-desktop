@@ -290,6 +290,30 @@ button:disabled {
   padding-top: 10px;
 }
 
+.sidebar-compact-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-session.sidebar-session-compact {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  min-height: 36px;
+  padding: 6px;
+}
+
+.sidebar-session-compact .sidebar-session-title {
+  text-align: center;
+}
+
+.sidebar-session-compact .sidebar-status-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
 .sidebar-collapsed .sidebar-search {
   display: none;
 }
@@ -437,130 +461,12 @@ button:disabled {
   background: #0b0e14;
 }
 
-.tab-bar {
-  min-height: 45px;
-  display: flex;
-  align-items: stretch;
-  gap: 5px;
-  padding: 5px 8px 0;
-  border-bottom: 1px solid #292d35;
-  background: #11141b;
-  overflow-x: auto;
-}
-
-.tab-group {
-  min-width: 150px;
-  max-width: 260px;
-  display: flex;
-  align-items: center;
-  padding: 0 4px 0 0;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 9px 9px 0 0;
-  background: #181b23;
-}
-
-.tab-active {
-  border-color: #303640;
-  background: #20242d;
-}
-
-/* The tab role owns selection; the restart/close buttons are its siblings
-   (not descendants) so assistive tech never has to reach through a
-   role="tab" element — which can be flattened to presentation-only — to
-   find them. */
-.tab {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 0 0 11px;
-  cursor: pointer;
-}
-
-.tab-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
 .tab-status-starting { background: #929baa; }
 .tab-status-running { background: #4f88ff; box-shadow: 0 0 0 3px rgb(79 136 255 / 12%); }
 .tab-status-approval-needed { background: #ffb84d; box-shadow: 0 0 0 3px rgb(255 184 77 / 12%); }
 .tab-status-stopping { background: #929baa; }
 .tab-status-completed { background: #20c9a6; }
 .tab-status-crashed { background: #ff6873; }
-
-.tab-title {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: #c9d0db;
-  font-size: 11px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cli-version-badge {
-  flex-shrink: 0;
-  padding: 2px 5px;
-  border: 1px solid rgb(255 184 77 / 45%);
-  border-radius: 999px;
-  color: #ffca79;
-  background: rgb(255 184 77 / 10%);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.tab-restart {
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  border: none;
-  color: #858e9e;
-  padding: 0;
-  font-size: 13px;
-}
-
-.tab-restart:hover {
-  color: #4f88ff;
-  background: transparent;
-}
-
-.tab-restart:disabled {
-  color: #4a4f59;
-  cursor: default;
-}
-
-.tab-close {
-  width: 24px;
-  height: 24px;
-  background: transparent;
-  border: none;
-  color: #858e9e;
-  padding: 0;
-  font-size: 14px;
-}
-
-.tab-close:hover {
-  color: #f85149;
-  background: transparent;
-}
-
-.tab-new {
-  width: 34px;
-  min-width: 34px;
-  margin-bottom: 0;
-  padding: 0;
-  border-radius: 8px 8px 0 0;
-  background: #1b1e26;
-  font-size: 18px;
-}
 
 .terminal-area {
   position: relative;
@@ -811,6 +717,7 @@ button:disabled {
 .session-pane-visible { display: flex; }
 .session-pane-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-height: 38px;
