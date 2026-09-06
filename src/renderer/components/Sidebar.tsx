@@ -43,6 +43,8 @@ export interface SidebarProps {
   onActivateProfile: (profileId: string) => void
   onActivateTab: (tabId: string) => void
   onRenameTab: (tabId: string, currentTitle: string) => void
+  onCloseTab: (tabId: string) => void
+  onRestartTab: (tabId: string) => void
   onCreateTab: () => void
   onCreateTabWithAttachments: () => void
   onResumePicker: () => void
@@ -63,6 +65,8 @@ export function Sidebar({
   onActivateProfile,
   onActivateTab,
   onRenameTab,
+  onCloseTab,
+  onRestartTab,
   onCreateTab,
   onCreateTabWithAttachments,
   onResumePicker,
@@ -97,18 +101,24 @@ export function Sidebar({
   const orderTabs = (items: DesktopSessionTab[]): DesktopSessionTab[] => orderMode === 'last-updated'
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
+  const workspaceName = (tab: DesktopSessionTab): string | undefined => profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name
+  const compactTabs = groupMode === 'workspace'
+    ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
+    : orderTabs(tabs)
   const sessionButton = (tab: DesktopSessionTab, workspaceName?: string, compactIndex?: number): JSX.Element => {
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
-    return <button
-      key={tab.id}
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const busy = tab.status === 'starting' || tab.status === 'stopping'
+    return <div key={tab.id} className="sidebar-session-row">
+    <button
       type="button"
       className={`sidebar-session${compactIndex !== undefined ? ' sidebar-session-compact' : ''}${tab.id === activeTabId ? ' sidebar-session-active' : ''}`}
-      aria-label={`${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`}
+      aria-label={label}
       aria-current={tab.id === activeTabId ? 'true' : undefined}
-      title={`${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`}
+      title={label}
       onClick={() => onActivateTab(tab.id)}
       onDoubleClick={() => onRenameTab(tab.id, tab.title)}
     >
@@ -118,6 +128,16 @@ export function Sidebar({
         {outdatedCli ? 'Old CLI' : STATUS_LABEL[tab.status]}
       </span>}
     </button>
+    <details className="sidebar-session-actions">
+      <summary aria-label={`Actions for ${tab.title}`} title={`Actions for ${tab.title}`}>⋯</summary>
+      <div>
+        {!tab.remote && <button type="button" className="icon-button session-restart" disabled={busy}
+          aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => onRestartTab(tab.id)}>↻</button>}
+        <button type="button" className="icon-button session-close" aria-label={`Close ${tab.title}`}
+          title="Close session" onClick={() => onCloseTab(tab.id)}>×</button>
+      </div>
+    </details>
+    </div>
   }
 
   return (
@@ -252,8 +272,16 @@ export function Sidebar({
 
       <div className="workspace-list">
         {collapsed && (
+          <nav aria-label="Workspaces">
+            {profiles.map((profile) => <button key={profile.id} type="button" className="workspace-row"
+              aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
+              aria-current={profile.id === activeProfileId ? 'true' : undefined}
+              onClick={() => onActivateProfile(profile.id)}><span className="folder-icon" aria-hidden="true">▱</span></button>)}
+          </nav>
+        )}
+        {collapsed && (
           <nav className="sidebar-compact-sessions" aria-label="All sessions">
-            {tabs.map((tab, index) => sessionButton(tab, profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name, index))}
+            {compactTabs.map((tab, index) => sessionButton(tab, workspaceName(tab), index))}
           </nav>
         )}
         {profiles.length === 0 && (
@@ -268,7 +296,7 @@ export function Sidebar({
                 if (!normalizedQuery) return true
                 const profile = profiles.find((item) => item.id === tab.workspaceProfileId)
                 return `${tab.title}\n${profile?.name ?? ''}\n${profile?.path ?? ''}`.toLowerCase().includes(normalizedQuery)
-              })).map((tab) => sessionButton(tab, profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name))}
+              })).map((tab) => sessionButton(tab, workspaceName(tab)))}
             </div>
           </section>
         )}

@@ -57,20 +57,18 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}</span>
               {tab.sideChat ? (
-                <>
-                  <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
-                </>
+                <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && (
-                <button type="button" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
+                <button type="button" className="session-fork" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
                   title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
                   onClick={() => onFork(tab)}>Fork into side chat</button>
               )}
               {!tab.remote && (
-                <button type="button" disabled={busy} onClick={() => onRestart(tab.id)}
+                <button type="button" className="icon-button session-restart" disabled={busy} onClick={() => onRestart(tab.id)}
                   aria-label={`Restart ${tab.title}`}
                   title="Restart this session with its saved settings, keeping the same conversation">↻</button>
               )}
-              <button type="button" onClick={() => onClose(tab.id)}
+              <button type="button" className="icon-button session-close" onClick={() => onClose(tab.id)}
                 aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
             </header>

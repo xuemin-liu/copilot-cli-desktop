@@ -147,6 +147,8 @@ export function App(): JSX.Element {
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
         onRenameTab={requestTabRename}
+        onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
+        onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
         onCreateTab={() => handleOperation(window.copilotDesktop.createTab())}
         onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
