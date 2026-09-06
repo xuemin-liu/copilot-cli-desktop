@@ -76,6 +76,7 @@ export function Sidebar({
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [viewOpen, setViewOpen] = useState(false)
+  const [openActionsTabId, setOpenActionsTabId] = useState<string | null>(null)
   const [groupMode, setGroupMode] = useState<'workspace' | 'list'>(() => readSidebarPreference('sidebar-group-mode') === 'list' ? 'list' : 'workspace')
   const [orderMode, setOrderMode] = useState<'manual' | 'last-updated'>(() => readSidebarPreference('sidebar-order-mode') === 'last-updated' ? 'last-updated' : 'manual')
   const normalizedQuery = query.trim().toLowerCase()
@@ -102,6 +103,15 @@ export function Sidebar({
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
   const workspaceName = (tab: DesktopSessionTab): string | undefined => profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name
+  const workspaceRow = (profile: WorkspaceProfile): JSX.Element => (
+    <button key={profile.id} type="button" className="workspace-row"
+      aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
+      aria-current={profile.id === activeProfileId ? 'true' : undefined}
+      onClick={() => onActivateProfile(profile.id)}>
+      <span className="folder-icon" aria-hidden="true">▱</span>
+      <span className="workspace-name">{profile.name}</span>
+    </button>
+  )
   const compactTabs = groupMode === 'workspace'
     ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
     : orderTabs(tabs)
@@ -128,15 +138,17 @@ export function Sidebar({
         {outdatedCli ? 'Old CLI' : STATUS_LABEL[tab.status]}
       </span>}
     </button>
-    <details className="sidebar-session-actions">
-      <summary aria-label={`Actions for ${tab.title}`} title={`Actions for ${tab.title}`}>⋯</summary>
-      <div>
+    <button type="button" className="icon-button sidebar-session-actions-toggle"
+      aria-label={`Actions for ${tab.title}`} title={`Actions for ${tab.title}`}
+      aria-expanded={openActionsTabId === tab.id}
+      onClick={() => setOpenActionsTabId((current) => current === tab.id ? null : tab.id)}>⋯</button>
+    {openActionsTabId === tab.id && <div className="sidebar-session-actions" role="group" aria-label={`Actions for ${tab.title}`}>
         {!tab.remote && <button type="button" className="icon-button session-restart" disabled={busy}
-          aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => onRestartTab(tab.id)}>↻</button>}
-        <button type="button" className="icon-button session-close" aria-label={`Close ${tab.title}`}
-          title="Close session" onClick={() => onCloseTab(tab.id)}>×</button>
-      </div>
-    </details>
+          aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => { setOpenActionsTabId(null); onRestartTab(tab.id) }}>↻</button>}
+        <button type="button" className="icon-button session-close" aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
+          title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}
+          onClick={() => { setOpenActionsTabId(null); onCloseTab(tab.id) }}>×</button>
+      </div>}
     </div>
   }
 
@@ -271,12 +283,9 @@ export function Sidebar({
       )}
 
       <div className="workspace-list">
-        {collapsed && (
+        {(collapsed || groupMode === 'list') && (
           <nav aria-label="Workspaces">
-            {profiles.map((profile) => <button key={profile.id} type="button" className="workspace-row"
-              aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
-              aria-current={profile.id === activeProfileId ? 'true' : undefined}
-              onClick={() => onActivateProfile(profile.id)}><span className="folder-icon" aria-hidden="true">▱</span></button>)}
+            {profiles.map(workspaceRow)}
           </nav>
         )}
         {collapsed && (
@@ -311,16 +320,7 @@ export function Sidebar({
           const active = profile.id === activeProfileId
           return (
             <section key={profile.id} className={`workspace-group${active ? ' workspace-group-active' : ''}`}>
-              <button
-                type="button"
-                className="workspace-row"
-                title={profile.path}
-                aria-current={active ? 'true' : undefined}
-                onClick={() => onActivateProfile(profile.id)}
-              >
-                <span className="folder-icon" aria-hidden="true">▱</span>
-                <span className="workspace-name">{profile.name}</span>
-              </button>
+              {workspaceRow(profile)}
               {profileTabs.length > 0 && (
                 <div className="workspace-sessions" aria-label={`${profile.name} sessions`}>
                   {profileTabs.map((tab) => sessionButton(tab))}

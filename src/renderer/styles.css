@@ -296,12 +296,14 @@ button:disabled {
   gap: 6px;
 }
 
-.sidebar-session-row { min-width: 0; }
-.sidebar-session-actions summary { cursor: pointer; list-style: none; text-align: right; color: #9ca4b3; padding: 0 8px; }
-.sidebar-session-actions summary:hover { color: white; }
-.sidebar-session-actions > div { display: flex; justify-content: flex-end; }
-.sidebar-collapsed .sidebar-session-actions summary { text-align: center; }
-.sidebar-collapsed .sidebar-session-actions > div { flex-direction: column; align-items: center; }
+.sidebar-session-row { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: center; min-width: 0; }
+.sidebar-session-actions-toggle { width: 20px; opacity: 0; }
+.sidebar-session-row:hover .sidebar-session-actions-toggle,
+.sidebar-session-row:focus-within .sidebar-session-actions-toggle,
+.sidebar-session-actions-toggle[aria-expanded="true"] { opacity: 1; }
+@media (hover: none) { .sidebar-session-actions-toggle { opacity: 1; } }
+.sidebar-session-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.sidebar-collapsed .sidebar-session-actions { flex-direction: column; align-items: center; }
 .workspace-row[aria-current="true"] { background: #2b2e35; }
 .session-restart:hover:not(:disabled) { color: #4f88ff; }
 .session-close:hover { color: #f85149; }
@@ -384,8 +386,7 @@ button:disabled {
   font-weight: 650;
 }
 
-.workspace-row:hover,
-.workspace-group-active > .workspace-row {
+.workspace-row:hover {
   background: #23262e;
 }
 
