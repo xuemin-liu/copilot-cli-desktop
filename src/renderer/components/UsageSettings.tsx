@@ -35,8 +35,10 @@ export function UsageSettings(): JSX.Element {
     }
     setReport(null)
     void load()
-    const timer = setInterval(() => void load(), 30_000)
-    return () => { active = false; clearInterval(timer) }
+    const visibleLoad = (): void => { if (!document.hidden) void load() }
+    const timer = setInterval(visibleLoad, 30_000)
+    document.addEventListener('visibilitychange', visibleLoad)
+    return () => { active = false; clearInterval(timer); document.removeEventListener('visibilitychange', visibleLoad) }
   }, [month, scope])
   const run = async (action: () => Promise<unknown>, success: string): Promise<void> => {
     setBusy(true); setMessage('')

@@ -18,6 +18,13 @@ interface Harness {
   restore(): Promise<void>
   beginQuit(): boolean
   configureUsageStop(stop: () => Promise<void>): void
+  configureUpdate(stop: () => Promise<void>, install: () => void): void
+  configureBlockedConfig(work: Promise<void>): void
+  configureMaintenance(): void
+  maintenanceCalls: string[]
+  maintain(operation: 'install' | 'update'): Promise<void>
+  maintenanceStatus(): string
+  requestSettings(name: string): Promise<void>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
@@ -46,6 +53,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
       `,
       'electron-updater': 'export default { autoUpdater: null };',
+      './copilot-maintenance.js': `
+        export const maintenanceCalls = [];
+        export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
+        export async function installCopilotCli() { maintenanceCalls.push('install'); return ''; }
+        export async function updateCopilotCli() { maintenanceCalls.push('update'); return ''; }
+      `,
       './node-pty-backend.js': `
         export const spawns = [];
         export async function spawnNodePty(file, args, options) {
@@ -74,22 +87,37 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const bundle = await build({
       stdin: { contents: source + `
         import { spawns } from './node-pty-backend.js';
+        import { maintenanceCalls } from './copilot-maintenance.js';
+        const diagnosticWrites = [];
+        const originalWriteAppLog = writeAppLog;
+        writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           spawns,
+          maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForActiveProfile,
           beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
-          configureUsageStop(stop) { usageService = { stop }; },
+          configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
+          configureBlockedConfig(work) { configWriteQueue = work; },
+          configureUpdate(stop, install) { usageService = { stop }; updateController = { snapshot: { canInstall: true }, install }; },
+          configureMaintenance() {
+            usageService = { flush: async () => { throw new Error('usage unavailable'); }, collect: async () => { throw new Error('backup disk full'); } };
+            state.resolution = { kind: 'direct', command: 'inert', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null };
+            retryResolution = async () => { maintenanceCalls.push('retry-resolution'); return snapshot(); };
+          },
+          maintain: maintainCopilotCli,
+          maintenanceStatus: () => copilotMaintenance.status,
+          requestSettings: (name) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
-          async cleanup() { await stopAllSessions(); await configWriteQueue; },
+          async cleanup() { await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })
@@ -120,6 +148,49 @@ test('repeated quit requests wait for the usage backup even with no running sess
     assert.equal(harness.beginQuit(), false)
   })
 })
+
+test('desktop updater cannot spawn its installer before usage shutdown completes', async () => fixture(async (harness) => {
+  const calls: string[] = []
+  let finish!: () => void
+  let entered!: () => void
+  const began = new Promise<void>((resolve) => { entered = resolve })
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  let saveConfig!: () => void
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { saveConfig = resolve }))
+  harness.configureUpdate(async () => { calls.push('usage-start'); entered(); await pending; calls.push('usage-done') }, () => calls.push('installer'))
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.deepEqual(calls, [])
+  saveConfig()
+  await began
+  assert.deepEqual(calls, ['usage-start'])
+  finish(); await installing
+  assert.deepEqual(calls, ['usage-start', 'usage-done', 'installer'])
+}))
+
+test('usage failures neither block CLI maintenance nor misreport a successful CLI update', async () => fixture(async (harness) => {
+  harness.configureMaintenance()
+  await harness.maintain('install')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+  await harness.maintain('update')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+  assert.deepEqual(harness.maintenanceCalls, ['install', 'retry-resolution', 'update', 'retry-resolution'])
+}))
+
+test('overall quit deadline releases repeated exit requests despite a stuck config write', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finish!: () => void
+  harness.configureUsageStop(async () => {})
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { finish = resolve }))
+  try {
+    assert.equal(harness.beginQuit(), true)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), true)
+    t.mock.timers.tick(30_001)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), false)
+  } finally { finish(); t.mock.timers.reset() }
+}))
 
 function configure(harness: Harness, directory: string) {
   const profile = createWorkspaceProfile(directory, 'default')

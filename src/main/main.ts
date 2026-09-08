@@ -114,9 +114,20 @@ import {
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService } from './usage-service.js'
+import { withShutdownDeadline } from './shutdown-deadline.js'
 
 let usageService: UsageService | null = null
 let usageQuitCleanupComplete = false
+
+function startUsageCollection(): void {
+  usageService = new UsageService(join(app.getPath('userData'), 'usage.sqlite'), process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'),
+    (message) => { void writeAppLog(`Usage: ${message}`).catch(() => {}) })
+}
+
+async function bestEffortUsage(work: Promise<unknown> | undefined): Promise<void> {
+  try { await withShutdownDeadline(work ?? Promise.resolve(), 15_000) }
+  catch (error) { void writeAppLog(`Usage maintenance failed: ${String(error)}`).catch(() => {}) }
+}
 import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
@@ -1441,11 +1452,11 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
     message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
   }
   try {
-    if (usageService) await usageService.flush()
+    await bestEffortUsage(usageService?.flush())
     const output = operation === 'install'
       ? await installCopilotCli()
       : await updateCopilotCli(current!)
-    if (usageService) await usageService.collect()
+    await bestEffortUsage(usageService?.collect())
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -2118,11 +2129,17 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   refreshMenus()
   try {
     await stopAllSessions()
+    await withShutdownDeadline(configWriteQueue, 15_000)
+    // electron-updater spawns the installer before emitting before-quit. Finish usage first.
+    const service = usageService
+    usageService = null
+    await service?.stop().catch((error) => { void writeAppLog(`Usage before desktop update failed: ${String(error)}`).catch(() => {}) })
     explicitQuitRequested = true
     try {
       updateController.install()
     } catch (error) {
       explicitQuitRequested = false
+      startUsageCollection()
       throw error
     }
   } catch (error) {
@@ -2263,8 +2280,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
-    usageService = new UsageService(join(app.getPath('userData'), 'usage.sqlite'), process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'),
-      (message) => { void writeAppLog(`Usage: ${message}`).catch(() => {}) })
+    startUsageCollection()
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
@@ -2284,6 +2300,7 @@ if (!app.requestSingleInstanceLock()) {
       if (installInProgress && update.status === 'error') {
         installInProgress = false
         explicitQuitRequested = false
+        if (!usageService && !quittingAllSessions) startUsageCollection()
         refreshMenus()
       }
       broadcastUpdateState(update)
@@ -2352,10 +2369,14 @@ app.on('before-quit', (event) => {
   // reading configWriteQueue here (after those synchronous handlers have
   // already re-chained it) and awaiting it ensures Electron does not exit
   // before that last write actually lands on disk.
-  void stopAllSessions()
+  const service = usageService
+  void withShutdownDeadline(stopAllSessions()
     .then(() => configWriteQueue)
-    .finally(async () => { const service = usageService; usageService = null; await service?.stop() })
-    .catch((error) => writeAppLog(`Shutdown cleanup failed: ${String(error)}`))
+    .finally(async () => { usageService = null; await service?.stop() }))
+    .catch((error) => {
+      void writeAppLog(`Shutdown cleanup failed: ${String(error)}`).catch(() => {})
+      void service?.abort().catch(() => {})
+    })
     .finally(() => { usageQuitCleanupComplete = true; app.quit() })
 })
 

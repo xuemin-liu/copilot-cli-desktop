@@ -18,7 +18,13 @@ that Copilot already deleted, remote-only usage, or usage on other computers.
 The ledger uses SQLite transactions with full synchronization in a dedicated worker.
 Verified SQLite backups retain 30 daily and 12 monthly copies under `usage-backups/`.
 Updates and normal shutdown finish collection and refresh backups with a bounded wait.
+The desktop installer starts after the usage worker has stopped. Overall shutdown
+has a 30-second deadline; committed usage is retained if final cleanup cannot finish.
+Slow queued requests do not consume another operation's timeout, and failed workers
+are replaced automatically. Invalid source rows are skipped with a visible warning
+so later requests continue to be collected. History files are streamed incrementally.
 Corruption recovers from a verified backup while preserving the damaged originals;
+temporary lock or access failures leave the current ledger in place and are retried.
 future database versions fail closed rather than being reset. **Export backup** saves
 a portable copy to another folder. **Restore backup** merges records without deleting
 newer saved usage. Keep an export outside the app-data directory to protect against

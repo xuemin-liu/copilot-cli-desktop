@@ -1,13 +1,26 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, appendFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { scanSessionHistory, SessionHistoryValidationError } from './session-history.js'
+import { scanSessionHistory, visitSessionHistoryLines, SessionHistoryValidationError } from './session-history.js'
 
 const ID = '11111111-1111-4111-8111-111111111111'
 const start = JSON.stringify({ type: 'session.start', data: { sessionId: ID } }) + '\n'
+
+test('shared history visitor tails complete records and retries a partial final line', () => fixture(async (directory) => {
+  const path = join(directory, 'events.jsonl')
+  await writeFile(path, start + 'partial')
+  const first: string[] = []
+  const cursor = await visitSessionHistoryLines(path, (line) => first.push(line), { allowPartial: true })
+  assert.equal(first.length, 1)
+  await appendFile(path, ' completed\nnext\n')
+  const next: string[] = []
+  await visitSessionHistoryLines(path, (line) => next.push(line), { offset: cursor.completeBytes, allowPartial: true })
+  assert.deepEqual(next, ['partial completed', 'next'])
+  await assert.rejects(visitSessionHistoryLines(directory, () => {}), /regular file/)
+}))
 async function fixture(action: (directory: string) => Promise<void>): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'desktop-history-unit-'))
   try { await action(directory) }

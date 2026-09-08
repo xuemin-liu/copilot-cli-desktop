@@ -15,20 +15,27 @@ export class SessionHistoryValidationError extends Error {
  * A snapshot captures a fixed byte boundary and drops only the final partial
  * record; validation of a completed child rejects an incomplete final record.
  */
-export async function scanSessionHistory(path: string, sessionId: string, snapshotPath?: string): Promise<{ digest: string; messages: number }> {
+export async function visitSessionHistoryLines(
+  path: string,
+  visit: (line: string) => void,
+  options: { snapshotPath?: string; allowPartial?: boolean; allowEmpty?: boolean; offset?: number } = {},
+): Promise<{ completeBytes: number; size: number }> {
+  const { snapshotPath } = options
   const info = await lstat(path)
   if (!info.isFile()) throw new SessionHistoryValidationError('History must be a regular file')
   const input = await open(path, 'r')
   let output: Awaited<ReturnType<typeof open>> | undefined
   try {
-    const { size } = await input.stat()
-    if (!size || size > MAX_HISTORY_BYTES) throw new SessionHistoryValidationError('History must contain saved records and be no larger than 128 MiB')
+    const openedInfo = await input.stat()
+    if (!openedInfo.isFile()) throw new SessionHistoryValidationError('History must be a regular file')
+    const { size } = openedInfo
+    if ((!size && !options.allowEmpty) || size > MAX_HISTORY_BYTES) throw new SessionHistoryValidationError('History must contain saved records and be no larger than 128 MiB')
+    const offset = options.offset ?? 0
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > size || (snapshotPath && offset)) throw new SessionHistoryValidationError('Invalid history offset')
+    if (offset === size && options.allowEmpty) return { completeBytes: offset, size }
     if (snapshotPath) output = await open(snapshotPath, 'wx')
-    const hash = createHash('sha256')
-    let messages = 0
-    let hasStart = false
-    let completeBytes = 0
-    let bytesRead = 0
+    let completeBytes = offset
+    let bytesRead = offset
     let parts: Buffer[] = []
     let recordBytes = 0
     const append = (part: Buffer): void => {
@@ -38,7 +45,7 @@ export async function scanSessionHistory(path: string, sessionId: string, snapsh
     }
     // Let async iteration observe stream-close failures too. The outer
     // finally still covers failures before stream creation and is idempotent.
-    const stream = input.createReadStream({ autoClose: true, start: 0, end: size - 1, highWaterMark: 64 * 1024 })
+    const stream = input.createReadStream({ autoClose: true, start: offset, end: size - 1, highWaterMark: 64 * 1024 })
     try {
       for await (const chunk of stream) {
         const buffer = chunk as Buffer
@@ -47,19 +54,7 @@ export async function scanSessionHistory(path: string, sessionId: string, snapsh
         for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
           append(buffer.subarray(start, end))
           const line = Buffer.concat(parts, recordBytes).toString('utf8').trim()
-          if (line) {
-            let event: { type?: string; data?: { sessionId?: string; content?: unknown } }
-            try {
-              event = JSON.parse(line)
-              if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error()
-            } catch { throw new SessionHistoryValidationError('History contains a malformed saved record') }
-            if (event.type === 'session.start' && event.data?.sessionId === sessionId) hasStart = true
-            if (event.type === 'user.message' || event.type === 'assistant.message') {
-              // The delimiter is unambiguous: JSON escapes embedded newlines.
-              hash.update(JSON.stringify([event.type, event.data?.content]) + '\n')
-              messages++
-            }
-          }
+          if (line) visit(line)
           parts = []
           recordBytes = 0
           start = end + 1
@@ -70,12 +65,31 @@ export async function scanSessionHistory(path: string, sessionId: string, snapsh
         await setImmediate()
       }
     } finally { stream.destroy() }
-    if (!snapshotPath && recordBytes) throw new SessionHistoryValidationError('Fork history ends with an incomplete record')
-    if (!hasStart) throw new SessionHistoryValidationError('History has no matching session start record')
+    if (!snapshotPath && !options.allowPartial && recordBytes) throw new SessionHistoryValidationError('Fork history ends with an incomplete record')
     if (output) await output.truncate(completeBytes)
-    return { digest: hash.digest('hex'), messages }
+    return { completeBytes, size }
   } finally {
     try { await output?.close() }
     finally { await input.close() }
   }
+}
+
+export async function scanSessionHistory(path: string, sessionId: string, snapshotPath?: string): Promise<{ digest: string; messages: number }> {
+  const hash = createHash('sha256')
+  let messages = 0
+  let hasStart = false
+  await visitSessionHistoryLines(path, (line) => {
+    let event: { type?: string; data?: { sessionId?: string; content?: unknown } }
+    try {
+      event = JSON.parse(line)
+      if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error()
+    } catch { throw new SessionHistoryValidationError('History contains a malformed saved record') }
+    if (event.type === 'session.start' && event.data?.sessionId === sessionId) hasStart = true
+    if (event.type === 'user.message' || event.type === 'assistant.message') {
+      hash.update(JSON.stringify([event.type, event.data?.content]) + '\n')
+      messages++
+    }
+  }, snapshotPath ? { snapshotPath } : {})
+  if (!hasStart) throw new SessionHistoryValidationError('History has no matching session start record')
+  return { digest: hash.digest('hex'), messages }
 }

@@ -5,6 +5,73 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { UsageService } from './usage-service.js'
+import { EventEmitter } from 'node:events'
+
+class TestWorker extends EventEmitter {
+  sent: Array<{ id: number; method: string }> = []
+  terminated = false
+  postMessage(message: { id: number; method: string }): void {
+    this.sent.push(message)
+    this.emit('message', { id: message.id, type: 'started' })
+  }
+  async terminate(): Promise<number> { this.terminated = true; this.emit('exit', 1); return 1 }
+  ready(): void { this.emit('message', { type: 'ready' }) }
+  finish(): void {
+    const active = this.sent.at(-1)!
+    this.emit('message', { id: active.id, result: active.method === 'report' ? { warnings: [], totals: { input: 50 } } : undefined })
+  }
+}
+
+test('queued usage calls receive a full execution budget after the active call completes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker, executionTimeoutMs: 100, startupTimeoutMs: 1000 })
+  try {
+    worker.ready()
+    const first = service.report('2026-09', 'all')
+    const second = service.report('2026-08', 'all')
+    t.mock.timers.tick(90); worker.finish()
+    t.mock.timers.tick(90); worker.finish()
+    assert.equal((await first).totals.input, 50)
+    t.mock.timers.tick(90); worker.finish()
+    assert.equal((await second).totals.input, 50)
+    assert.equal(worker.terminated, false)
+  } finally { await service.abort() }
+})
+
+test('a timed-out worker is replaced; only its active call fails and queued work survives', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const workers: TestWorker[] = []
+  const service = new UsageService('unused', 'unused', () => {}, {
+    createWorker: () => { const worker = new TestWorker(); workers.push(worker); return worker }, executionTimeoutMs: 100, startupTimeoutMs: 1000,
+  })
+  try {
+    workers[0]!.ready()
+    const failed = assert.rejects(service.collect(), /timed out/)
+    const queued = service.report('2026-09', 'all')
+    t.mock.timers.tick(101)
+    await failed
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(workers[0]!.terminated, true)
+    assert.equal(workers.length, 2)
+    workers[1]!.ready(); workers[1]!.finish()
+    assert.equal((await queued).totals.input, 50)
+    const later = service.collect()
+    workers[1]!.finish()
+    await later
+  } finally { await service.abort() }
+})
+
+test('service shutdown has an overall deadline even while queued behind an unfinished operation', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker, executionTimeoutMs: 1000, shutdownTimeoutMs: 100 })
+  worker.ready()
+  const stopped = assert.rejects(service.stop(), /deadline/)
+  t.mock.timers.tick(101)
+  await stopped
+  assert.equal(worker.terminated, true)
+})
 
 test('worker collects, exports, merges and shuts down with committed usage', async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-worker-test-'))

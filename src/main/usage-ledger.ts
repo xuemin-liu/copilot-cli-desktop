@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, lstatSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope } from './usage-types.js'
+import { visitSessionHistoryLines } from './session-history.js'
 
 type Row = Record<string, unknown>
 interface Sample extends UsageCounts {
@@ -41,14 +42,35 @@ function add(target: UsageCounts, source: UsageCounts): void {
     if (!Number.isSafeInteger(target[key])) throw new Error('Usage total exceeds supported integer precision')
   }
 }
-export function validateUsageDatabase(path: string): void {
+export class UsageDatabaseCorruptionError extends Error {}
+export class UsageDatabaseVersionError extends Error {}
+export function isTransientUsageError(error: unknown): boolean {
+  const value = error as { errcode?: number; code?: string }
+  return [5, 6, 10, 14].includes((value?.errcode ?? -1) & 255) || ['EBUSY', 'EACCES', 'EPERM'].includes(value?.code ?? '')
+}
+function confirmedCorruption(error: unknown): boolean {
+  return error instanceof UsageDatabaseCorruptionError || [11, 26].includes(((error as { errcode?: number })?.errcode ?? -1) & 255)
+}
+/** Returns false only for an interrupted, empty initialization. Backups must be initialized. */
+export function validateUsageDatabase(path: string, allowEmpty = false): boolean {
   const db = new DatabaseSync(path, { readOnly: true })
   try {
-    if (db.prepare('PRAGMA integrity_check').get()?.integrity_check !== 'ok') throw new Error('Usage database integrity check failed')
-    if (db.prepare('PRAGMA user_version').get()?.user_version !== 1) throw new Error('Unsupported usage database version')
-    db.prepare('SELECT key, payload FROM samples LIMIT 0').all()
-    db.prepare('SELECT session, fork FROM app_sessions LIMIT 0').all()
-    db.prepare('SELECT key, value FROM metadata LIMIT 0').all()
+    db.exec('PRAGMA busy_timeout=1500')
+    if (db.prepare('PRAGMA integrity_check').all().some((row) => row.integrity_check !== 'ok')) throw new UsageDatabaseCorruptionError('Usage database integrity check failed')
+    const version = Number(db.prepare('PRAGMA user_version').get()?.user_version)
+    if (version > 1) throw new UsageDatabaseVersionError('Unsupported usage database version')
+    const empty = version === 0 && db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()?.n === 0
+    if (empty && allowEmpty) return false
+    if (version !== 1) throw new UsageDatabaseCorruptionError('Usage database initialization is incomplete')
+    try {
+      db.prepare('SELECT key, payload FROM samples LIMIT 0').all()
+      db.prepare('SELECT session, fork FROM app_sessions LIMIT 0').all()
+      db.prepare('SELECT key, value FROM metadata LIMIT 0').all()
+    } catch (error) {
+      if ((error as { errcode?: number }).errcode !== 1) throw error
+      throw new UsageDatabaseCorruptionError('Usage database schema is incomplete')
+    }
+    return true
   } finally { db.close() }
 }
 
@@ -57,9 +79,9 @@ export function recoverUsageDatabase(path: string, backup: string): void {
   if (resolve(path).toLowerCase() === resolve(backup).toLowerCase()) throw new Error('Select a separate usage backup')
   validateUsageDatabase(backup)
   const temporary = `${path}.${randomUUID()}.recovered`
-  const source = new DatabaseSync(backup, { readOnly: true })
-  try { source.prepare('VACUUM INTO ?').run(temporary) } finally { source.close() }
   try {
+    const source = new DatabaseSync(backup, { readOnly: true })
+    try { source.prepare('VACUUM INTO ?').run(temporary) } finally { source.close() }
     validateUsageDatabase(temporary)
     const suffix = `.corrupt-${Date.now()}`
     for (const extension of ['', '-wal', '-shm']) {
@@ -74,17 +96,28 @@ export class UsageLedger {
   private db: DatabaseSync
   private warnings: string[] = []
   private recoveryWarning: string | null = null
-  private historySignatures = new Map<string, string>()
+  private historySignatures = new Map<string, { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] }>()
+  private cachedSamples: Sample[] | null = null
+  private monthCache = { zone: '', values: new Map<string, string>() }
   private sourceProgress = new Map<string, { fingerprint: string; cursor: number; first: string; last: string; occurrences: Map<string, number> }>()
   readonly backupDirectory: string
 
   constructor(readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.backupDirectory = join(dirname(path), 'usage-backups')
+    this.cleanInterruptedCopies()
+    if (!existsSync(path) && this.backups().length) {
+      const candidate = this.backups().find((file) => { try { validateUsageDatabase(file); return true } catch { return false } })
+      if (!candidate) throw new UsageDatabaseCorruptionError('Usage ledger is missing and no valid backup is available; existing files were preserved')
+      recoverUsageDatabase(path, candidate)
+      this.recoveryWarning = 'Recovered a missing usage ledger from a verified backup. Usage since that backup may be missing.'
+    }
     if (existsSync(path)) {
-      try { validateUsageDatabase(path) } catch (error) {
-        // Future schemas belong to a newer app: never roll them back automatically.
-        if (String(error).includes('Unsupported usage database version')) throw error
+      try {
+        if (!validateUsageDatabase(path, true) && this.backups().length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
+      } catch (error) {
+        // Lock, permission and I/O errors do not prove data corruption. Leave the ledger in place.
+        if (!confirmedCorruption(error)) throw error
         const candidate = this.backups().find((file) => { try { validateUsageDatabase(file); return true } catch { return false } })
         if (!candidate) throw new Error('Usage database is damaged. Original files preserved; restore a valid usage backup.')
         recoverUsageDatabase(path, candidate)
@@ -92,15 +125,31 @@ export class UsageLedger {
       }
     }
     this.db = new DatabaseSync(path)
-    this.db.exec(`PRAGMA busy_timeout=1500; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;
+    try { this.db.exec(`PRAGMA busy_timeout=1500; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS samples (key TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS app_sessions (session TEXT PRIMARY KEY, fork INTEGER NOT NULL DEFAULT 0);
-      PRAGMA user_version=1; COMMIT;`)
+      CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
+      PRAGMA user_version=1; COMMIT;`) } catch (error) { this.db.close(); throw error }
     if (!this.meta('timezone')) this.setMeta('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
     if (this.recoveryWarning) this.setMeta('recoveryWarning', this.recoveryWarning)
   }
   close(): void { this.db.close() }
+  private cleanInterruptedCopies(): void {
+    // A new worker starts only after the previous one exits. Restrict cleanup to our exact temporary names.
+    const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+    for (const directory of [dirname(this.path), this.backupDirectory]) {
+      if (!existsSync(directory)) continue
+      const pattern = directory === this.backupDirectory
+        ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${uuid}\\.tmp$`, 'i')
+        : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${uuid}\\.restore$`, 'i')
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isFile() && pattern.test(entry.name)) {
+          try { unlinkSync(join(directory, entry.name)) } catch { /* An AV lock can be retried on the next worker start. */ }
+        }
+      }
+    }
+  }
   private meta(key: string): string | null { return (this.db.prepare('SELECT value FROM metadata WHERE key=?').get(key)?.value as string | undefined) ?? null }
   private setMeta(key: string, value: string): void { this.db.prepare('INSERT OR REPLACE INTO metadata VALUES (?,?)').run(key, value) }
   private transaction(action: () => void): void {
@@ -111,11 +160,18 @@ export class UsageLedger {
       throw error
     }
   }
-  private save(sample: Sample): void { this.db.prepare('INSERT OR IGNORE INTO samples VALUES (?,?)').run(sample.key, JSON.stringify(sample)) }
+  private save(sample: Sample): void {
+    if (sample.kind === 'shutdown') sample = { ...sample, key: `shutdown:${sample.session}:${this.shutdownIdentity(sample)}` }
+    if (this.db.prepare('INSERT OR IGNORE INTO samples VALUES (?,?)').run(sample.key, JSON.stringify(sample)).changes) this.cachedSamples = null
+  }
+  private shutdownIdentity(sample: Sample): string {
+    const value = Object.fromEntries(COUNT_KEYS.map((key) => [key, sample[key]]))
+    return hash({ at: sample.at, model: sample.model, start: sample.start, value })
+  }
   associate(session: string, fork = false): void {
     this.db.prepare('INSERT INTO app_sessions VALUES (?,?) ON CONFLICT(session) DO UPDATE SET fork=max(fork,excluded.fork)').run(session, fork ? 1 : 0)
   }
-  collect(home: string): void {
+  async collect(home: string): Promise<void> {
     this.warnings = []
     this.setMeta('sourcePath', join(home, 'session-store.db'))
     let successful = false
@@ -127,7 +183,7 @@ export class UsageLedger {
         if (!entry.isDirectory() || !/^[\da-f-]{36}$/i.test(entry.name)) continue
         const path = join(root, entry.name, 'events.jsonl')
         if (!existsSync(path)) continue
-        try { this.importHistory(path, entry.name) }
+        try { await this.importHistory(path, entry.name) }
         catch (error) { this.warnings.push(`Some shutdown history could not be imported: ${String(error)}`) }
       }
     }
@@ -162,15 +218,22 @@ export class UsageLedger {
         if (!rows.length) break
         this.transaction(() => {
           for (const row of rows) {
+            cursor = number(row.id)
+            last = hash(row)
+            let value: UsageCounts
+            let at: string
+            try { value = counts(row); at = timestamp(row.created_at) }
+            catch (error) {
+              this.db.prepare('INSERT OR REPLACE INTO rejected_usage VALUES (?,?)').run(hash({ path, id: row.id, row }), String(error).slice(0, 300))
+              continue
+            }
             const identity = Object.fromEntries([...REQUIRED, 'turn_index', 'agent_id', 'parent_tool_call_id'].filter((key) => key !== 'id').map((key) => [key, row[key] ?? null]))
             const digest = hash(identity)
             const occurrence = (occurrences.get(digest) ?? 0) + 1
             occurrences.set(digest, occurrence)
             const sample: Sample = { key: `request:${digest}:${occurrence}`, session: String(row.session_id), model: String(row.model),
-              at: timestamp(row.created_at), start: null, kind: 'request', ...counts(row) }
+              at, start: null, kind: 'request', ...value }
             this.save(sample)
-            cursor = number(row.id)
-            last = hash(row)
           }
           this.setMeta('sourceProgress', JSON.stringify({ path, cursor, schema: sourceVersion }))
         })
@@ -178,34 +241,39 @@ export class UsageLedger {
       this.sourceProgress.set(path, { fingerprint, cursor, first, last, occurrences })
     } finally { source.close() }
   }
-  private importHistory(path: string, session: string): void {
-    const info = statSync(path)
+  private async importHistory(path: string, session: string): Promise<void> {
+    const info = lstatSync(path)
+    if (!info.isFile()) throw new Error('History must be a regular file')
     const signature = `${info.size}:${info.mtimeMs}`
-    if (this.historySignatures.get(path) === signature) return
-    if (info.size > 128 * 1024 * 1024) throw new Error('History exceeds 128 MiB import limit')
-    const content = readFileSync(path, 'utf8')
-    const lines = content.slice(0, content.lastIndexOf('\n') + 1).split('\n')
+    const identity = `${info.dev}:${info.ino}:${info.birthtimeMs}`
+    const previous = this.historySignatures.get(path)
+    if (previous?.signature === signature && previous.identity === identity) { this.warnings.push(...previous.warnings); return }
+    const appended = previous && previous.identity === identity && info.size > previous.size
     const samples: Sample[] = []
-    let start: string | null = null
-    for (const line of lines) {
-      if (!line.trim()) continue
-      if (Buffer.byteLength(line) > 8 * 1024 * 1024) throw new Error('History record exceeds 8 MiB import limit')
-      const event = JSON.parse(line) as { type: string; timestamp: unknown; data: Record<string, any> }
-      if (event.type === 'session.start') start = timestamp(event.data.startTime ?? event.timestamp)
-      if (event.type !== 'session.shutdown') continue
-      const at = timestamp(event.timestamp)
-      for (const [model, metrics] of Object.entries(event.data.modelMetrics ?? {}) as Array<[string, Record<string, any>]>) {
-        if (!metrics.usage) continue
-        const usage = metrics.usage
-        const value = counts({ input_tokens: usage.inputTokens, output_tokens: usage.outputTokens,
-          cache_read_tokens: usage.cacheReadTokens, cache_write_tokens: usage.cacheWriteTokens, reasoning_tokens: usage.reasoningTokens })
-        // Copied shutdown events in forks share this identity, even if Copilot rewrites event IDs.
-        const key = `shutdown:${hash({ at, model, start, value })}`
-        samples.push({ key, session, model, at, start, kind: 'shutdown', ...value })
-      }
-    }
-    this.transaction(() => { for (const sample of samples) this.save(sample) })
-    this.historySignatures.set(path, signature)
+    const warnings: string[] = appended ? [...previous.warnings] : []
+    let start: string | null = appended ? previous.start : null
+    const flush = (): void => { this.transaction(() => { for (const sample of samples) this.save(sample) }); samples.length = 0 }
+    const result = await visitSessionHistoryLines(path, (line) => {
+      if (!/"type"\s*:\s*"session\.(?:start|shutdown)"/.test(line)) return
+      try {
+        const event = JSON.parse(line) as { type: string; timestamp: unknown; data: Record<string, any> }
+        if (event.type === 'session.start') start = timestamp(event.data.startTime ?? event.timestamp)
+        if (event.type !== 'session.shutdown') return
+        const at = timestamp(event.timestamp)
+        for (const [model, metrics] of Object.entries(event.data.modelMetrics ?? {}) as Array<[string, Record<string, any>]>) {
+          if (!metrics.usage) continue
+          const usage = metrics.usage
+          const value = counts({ input_tokens: usage.inputTokens, output_tokens: usage.outputTokens,
+            cache_read_tokens: usage.cacheReadTokens, cache_write_tokens: usage.cacheWriteTokens, reasoning_tokens: usage.reasoningTokens })
+          const key = `shutdown:${session}:${hash({ at, model, start, value })}`
+          samples.push({ key, session, model, at, start, kind: 'shutdown', ...value })
+        }
+      } catch (error) { if (warnings.length < 10) warnings.push(`Skipped invalid shutdown record: ${String(error)}`) }
+      if (samples.length >= 500) flush()
+    }, { allowPartial: true, allowEmpty: true, offset: appended ? previous.offset : 0 })
+    flush()
+    this.warnings.push(...warnings)
+    this.historySignatures.set(path, { signature, identity, size: result.size, offset: result.completeBytes, start, warnings })
   }
   private backups(): string[] {
     if (!existsSync(this.backupDirectory)) return []
@@ -244,9 +312,9 @@ export class UsageLedger {
     validateUsageDatabase(path)
     // Freeze the selected backup before rotation: it may itself be today's daily backup.
     const frozen = `${this.path}.${randomUUID()}.restore`
-    const selected = new DatabaseSync(path, { readOnly: true })
-    try { selected.prepare('VACUUM INTO ?').run(frozen) } finally { selected.close() }
     try {
+      const selected = new DatabaseSync(path, { readOnly: true })
+      try { selected.prepare('VACUUM INTO ?').run(frozen) } finally { selected.close() }
       this.backup(true)
       const source = new DatabaseSync(frozen, { readOnly: true })
       try {
@@ -262,7 +330,7 @@ export class UsageLedger {
           for (const row of source.prepare('SELECT session, fork FROM app_sessions').iterate()) this.associate(String(row.session), row.fork === 1)
         })
       } finally { source.close() }
-    } finally { unlinkSync(frozen) }
+    } finally { if (existsSync(frozen)) unlinkSync(frozen) }
     this.historySignatures.clear()
     this.sourceProgress.clear()
     this.backup(true)
@@ -272,17 +340,37 @@ export class UsageLedger {
     const zone = timezone ?? this.meta('timezone') ?? 'UTC'
     const formatter = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: '2-digit' })
     if (timezone) this.setMeta('timezone', zone)
+    if (this.monthCache.zone !== zone) this.monthCache = { zone, values: new Map() }
     const monthOf = (at: string): string => {
+      const cached = this.monthCache.values.get(at)
+      if (cached) return cached
       const parts = formatter.formatToParts(new Date(at))
-      return `${parts.find((p) => p.type === 'year')!.value}-${parts.find((p) => p.type === 'month')!.value}`
+      const value = `${parts.find((p) => p.type === 'year')!.value}-${parts.find((p) => p.type === 'month')!.value}`
+      this.monthCache.values.set(at, value)
+      return value
     }
     const appSessions = new Map(this.db.prepare('SELECT session,fork FROM app_sessions').all().map((row) => [String(row.session), row.fork === 1]))
-    const samples = this.db.prepare('SELECT payload FROM samples').all().map((row) => JSON.parse(String(row.payload)) as Sample)
+    const samples = this.cachedSamples ??= this.db.prepare('SELECT payload FROM samples').all().map((row) => JSON.parse(String(row.payload)) as Sample)
     const selected = samples.filter((sample) => scope === 'all' || appSessions.has(sample.session))
     const requests = selected.filter((sample) => sample.kind === 'request')
+    const requestGroups = new Map<string, Sample[]>()
+    const groupKey = (sample: Sample): string => JSON.stringify([sample.session, sample.model])
+    for (const sample of requests) {
+      const key = groupKey(sample)
+      const group = requestGroups.get(key) ?? []
+      group.push(sample)
+      requestGroups.set(key, group)
+    }
+    for (const group of requestGroups.values()) group.sort((a, b) => a.at.localeCompare(b.at))
     const snapshots = new Map<string, Sample[]>()
+    const seenSnapshots = new Set<string>()
     for (const sample of selected.filter((sample) => sample.kind === 'shutdown')) {
-      const key = `${sample.session}:${sample.model}`
+      // Also deduplicate legacy keys against newly imported per-session keys. Known forks are
+      // excluded below, never allowed to claim the original's record based on directory order.
+      const identity = `${sample.session}:${this.shutdownIdentity(sample)}`
+      if (seenSnapshots.has(identity)) continue
+      seenSnapshots.add(identity)
+      const key = groupKey(sample)
       const group = snapshots.get(key) ?? []
       group.push(sample)
       snapshots.set(key, group)
@@ -291,6 +379,11 @@ export class UsageLedger {
     const models = new Map<string, UsageGroup>(), sessions = new Map<string, UsageGroup>()
     const months = new Set<string>([month])
     const warnings = new Set<string>(JSON.parse(this.meta('warnings') ?? '[]') as string[])
+    const rejected = Number(this.db.prepare('SELECT count(*) AS n FROM rejected_usage').get()?.n)
+    if (rejected) {
+      const reasons = this.db.prepare('SELECT DISTINCT reason FROM rejected_usage LIMIT 3').all().map((row) => row.reason).join('; ')
+      warnings.add(`${rejected} invalid source usage row(s) were skipped; later rows are still collected. ${reasons}`)
+    }
     const recoveryWarning = this.meta('recoveryWarning')
     if (recoveryWarning) warnings.add(recoveryWarning)
     warnings.add('Recorded usage may be incomplete where Copilot history was lost before collection. App scope includes whole sessions observed in the app, including usage outside the app.')
@@ -308,13 +401,15 @@ export class UsageLedger {
       }
     }
     for (const request of requests) include(request, request, false)
-    for (const group of snapshots.values()) {
+    for (const [key, group] of snapshots) {
       group.sort((a,b) => a.at.localeCompare(b.at))
+      const groupRequests = requestGroups.get(key) ?? []
+      let requestIndex = 0
       let previous: Sample | undefined
       for (const snapshot of group) {
         if (appSessions.get(snapshot.session)) { warnings.add('Shutdown fallback is excluded for known forks because inherited counters cannot be safely attributed. Request records are retained.'); continue }
         const known = emptyUsage()
-        for (const request of requests) if (request.session === snapshot.session && request.model === snapshot.model && request.at <= snapshot.at && (!previous || request.at > previous.at)) add(known, request)
+        while (requestIndex < groupRequests.length && groupRequests[requestIndex]!.at <= snapshot.at) add(known, groupRequests[requestIndex++]!)
         const interval = emptyUsage()
         for (const key of COUNT_KEYS) interval[key] = snapshot[key] - (previous?.[key] ?? 0)
         const start = previous?.at ?? snapshot.start
