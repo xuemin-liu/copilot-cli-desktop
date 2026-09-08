@@ -128,6 +128,7 @@ function recoverUpdateAttempt(): void {
   if (preparingUpdate) { updatePreparationFailed = true; return }
   installInProgress = false
   explicitQuitRequested = false
+  usageService?.resumeCollection()
   updateController?.installationDidNotQuit()
   refreshMenus()
 }
@@ -900,7 +901,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
       const tab = tabsState.tabs.find((candidate) => candidate.id === id)
       if (!tab?.remote) usageService?.associate(session.lastSessionId, tab?.sideChat === true)
     }
-    if (usageService) observe(usageService.collect(), 'Could not collect final session usage')
+    if (usageService && !preparingUpdate) observe(usageService.collect(), 'Could not collect final session usage')
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -1816,7 +1817,7 @@ function scheduleAutomaticUpdateCheck(delayMs = 15_000): void {
   if (!desktopConfig.automaticUpdateChecks || !updateController) return
   updateCheckTimer = setTimeout(() => {
     updateCheckTimer = null
-    const operation = updateController?.snapshot.canCheck ? updateController.check() : Promise.resolve()
+    const operation = !installInProgress && updateController?.snapshot.canCheck ? updateController.check() : Promise.resolve()
     void operation.catch((error) => writeAppLog(`Automatic update check failed: ${String(error)}`))
       .finally(() => scheduleAutomaticUpdateCheck(6 * 60 * 60 * 1_000))
   }, delayMs)
@@ -2127,11 +2128,13 @@ ipcMain.handle('desktop-settings:update-provider', async (event, provider: unkno
 })
 ipcMain.handle('desktop-settings:check-for-updates', async (event) => {
   assertTrustedSettingsSender(event)
+  if (installInProgress) throw new Error('An update installation is already in progress')
   await updateController?.check()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:download-update', async (event) => {
   assertTrustedSettingsSender(event)
+  if (installInProgress) throw new Error('An update installation is already in progress')
   await updateController?.download()
   return settingsSnapshot()
 })
@@ -2145,10 +2148,11 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   updatePreparationFailed = false
   refreshMenus()
   try {
+    usageService?.pauseCollection()
     await withShutdownDeadline(stopAllSessions().then(() => configWriteQueue))
     // Flush before the installer can launch, retaining the service until before-quit.
     // A failed or no-op installer therefore never requires a second database owner.
-    await bestEffortUsage(usageService?.flush())
+    await withShutdownDeadline(usageService?.flush() ?? Promise.resolve())
     preparingUpdate = false
     if (quittingAllSessions) return
     if (updatePreparationFailed) throw new Error('The updater failed while preparing installation')
@@ -2363,7 +2367,6 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('before-quit', (event) => {
-  clearTimeout(updateQuitTimer)
   explicitQuitRequested = true
   if (closePromptWindow && !closePromptWindow.isDestroyed()) {
     event.preventDefault()
@@ -2374,6 +2377,7 @@ app.on('before-quit', (event) => {
     if (!usageQuitCleanupComplete) event.preventDefault()
     return
   }
+  clearTimeout(updateQuitTimer)
   if (managedTabs.size === 0 && !usageService) return
   event.preventDefault()
   quittingAllSessions = true

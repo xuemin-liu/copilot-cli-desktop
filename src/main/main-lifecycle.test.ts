@@ -21,6 +21,7 @@ interface Harness {
   configureUpdate(stop: () => Promise<void>, install: () => void): void
   updateError(): void
   updateBusy(): boolean
+  configureClosePrompt(): void
   configureBlockedConfig(work: Promise<void>): void
   configureMaintenance(): void
   maintenanceCalls: string[]
@@ -104,7 +105,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
           configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
           configureBlockedConfig(work) { configWriteQueue = work; },
-          configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
+          configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
+          configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; },
           updateError: recoverUpdateAttempt,
           updateBusy: () => installInProgress,
           configureMaintenance() {
@@ -216,15 +218,37 @@ test('a no-op installer releases the admission lock without stopping collection'
   assert.equal(flushes, 2)
 }))
 
-test('a stuck pre-install flush cannot block the installer indefinitely', async (t) => fixture(async (harness) => {
+test('a stuck pre-install flush returns an error without launching an unprotected installer', async (t) => fixture(async (harness) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let installed = false
   harness.configureUpdate(() => new Promise(() => {}), () => { installed = true })
-  const installing = harness.requestSettings('desktop-settings:install-update')
+  const installing = assert.rejects(harness.requestSettings('desktop-settings:install-update'), /deadline/)
   await new Promise<void>((resolve) => setImmediate(resolve))
-  t.mock.timers.tick(15_001)
+  t.mock.timers.tick(30_001)
   await installing
-  assert.equal(installed, true)
+  assert.equal(installed, false)
+  assert.equal(harness.updateBusy(), false)
+}))
+
+test('check and download requests cannot interfere with update preparation', async () => fixture(async (harness) => {
+  let finish!: () => void
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  harness.configureUpdate(() => pending, () => {})
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await assert.rejects(harness.requestSettings('desktop-settings:check-for-updates'), /already in progress/)
+  await assert.rejects(harness.requestSettings('desktop-settings:download-update'), /already in progress/)
+  finish(); await installing
+}))
+
+test('a close prompt cannot cancel the updater no-quit watchdog', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  harness.configureUpdate(async () => {}, () => {})
+  await harness.requestSettings('desktop-settings:install-update')
+  harness.configureClosePrompt()
+  assert.equal(harness.beginQuit(), true)
+  assert.equal(harness.updateBusy(), true)
+  t.mock.timers.tick(10_001)
+  assert.equal(harness.updateBusy(), false)
 }))
 
 test('usage failures neither block CLI maintenance nor misreport a successful CLI update', async () => fixture(async (harness) => {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { DatabaseSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, lstatSync, renameSync, statSync, unlinkSync } from 'node:fs'
+import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { existsSync, mkdirSync, readdirSync, lstatSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope } from './usage-types.js'
 import { visitSessionHistoryLines } from './session-history.js'
@@ -76,24 +76,47 @@ export function validateUsageDatabase(path: string, allowEmpty = false): boolean
 
 /** Recovery is explicit or uses a verified local backup; originals are always retained. */
 export function recoverUsageDatabase(path: string, backup: string): void {
+  const journal = `${path}.recovery-pending`
+  if (existsSync(journal)) throw new Error(`An interrupted usage recovery requires file-access repair. Original file locations are recorded in ${journal}; no files were replaced.`)
   if (resolve(path).toLowerCase() === resolve(backup).toLowerCase()) throw new Error('Select a separate usage backup')
   validateUsageDatabase(backup)
   const temporary = `${path}.${randomUUID()}.recovered`
+  const moved: Array<[string, string]> = []
+  let retainRecovery = false
+  let journalCreated = false
   try {
     const source = new DatabaseSync(backup, { readOnly: true })
     try { source.prepare('VACUUM INTO ?').run(temporary) } finally { source.close() }
     validateUsageDatabase(temporary)
-    const suffix = `.corrupt-${Date.now()}`
-    for (const extension of ['', '-wal', '-shm']) {
-      if (existsSync(path + extension)) renameSync(path + extension, path + suffix + extension)
+    const suffix = `.corrupt-${Date.now()}-${randomUUID()}`
+    writeFileSync(journal, JSON.stringify({ path, temporary, originals: ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension]) }), { flag: 'wx', flush: true })
+    journalCreated = true
+    // Move sidecars first so an access failure cannot strand them beside a new ledger.
+    for (const extension of ['-wal', '-shm', '']) {
+      if (existsSync(path + extension)) {
+        renameSync(path + extension, path + suffix + extension)
+        moved.push([path + extension, path + suffix + extension])
+      }
     }
     renameSync(temporary, path)
-  } finally { if (existsSync(temporary)) unlinkSync(temporary) }
+  } catch (error) {
+    for (const [original, parked] of moved.reverse()) {
+      try { renameSync(parked, original) } catch { retainRecovery = true }
+    }
+    if (retainRecovery) throw new Error(`Usage recovery could not roll back all original files. Preserved originals and recovery copy at ${temporary}; resolve file access before retrying.`, { cause: error })
+    throw error
+  } finally {
+    if (!retainRecovery) {
+      if (journalCreated) unlinkSync(journal)
+      if (existsSync(temporary)) unlinkSync(temporary)
+    }
+  }
 }
 
 /** Owned only by the usage worker. No writes are made to Copilot's source store. */
 export class UsageLedger {
   private db: DatabaseSync
+  private statements = new Map<string, StatementSync>()
   private warnings: string[] = []
   private recoveryWarning: string | null = null
   private historySignatures = new Map<string, { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] }>()
@@ -103,8 +126,10 @@ export class UsageLedger {
 
   constructor(readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
+    if (existsSync(`${path}.recovery-pending`)) throw new Error(`An interrupted usage recovery requires file-access repair. See ${path}.recovery-pending; original files and recovery copies were preserved.`)
     this.backupDirectory = join(dirname(path), 'usage-backups')
     this.cleanInterruptedCopies()
+    const missing = !existsSync(path)
     if (existsSync(path)) {
       try {
         if (!validateUsageDatabase(path, true) && this.backups().length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
@@ -124,7 +149,15 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS app_sessions (session TEXT PRIMARY KEY, fork INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
-      PRAGMA user_version=1; COMMIT;`) } catch (error) { this.db.close(); throw error }
+      PRAGMA user_version=1;`)
+      if (missing && existsSync(this.backupDirectory)) {
+        // Commit this guard with initialization. A crash must never leave a fresh
+        // ledger allowed to rotate restore points belonging to the missing one.
+        this.setMeta('preservedBackups', `${this.backupDirectory}-preserved-${randomUUID()}`)
+        this.setMeta('preserveBackupsPending', '1')
+      }
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.close(); throw error }
     try {
       if (!this.meta('timezone')) this.setMeta('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
       if (this.recoveryWarning) this.setMeta('recoveryWarning', this.recoveryWarning)
@@ -136,7 +169,12 @@ export class UsageLedger {
       })
     } catch (error) { this.db.close(); throw error }
   }
-  close(): void { this.db.close() }
+  close(): void { this.statements.clear(); this.db.close() }
+  private stmt(sql: string): StatementSync {
+    let statement = this.statements.get(sql)
+    if (!statement) { statement = this.db.prepare(sql); this.statements.set(sql, statement) }
+    return statement
+  }
   private cleanInterruptedCopies(): void {
     // A new worker starts only after the previous one exits. Restrict cleanup to our exact temporary names.
     const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
@@ -144,7 +182,7 @@ export class UsageLedger {
       if (!existsSync(directory)) continue
       const pattern = directory === this.backupDirectory
         ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${uuid}\\.tmp$`, 'i')
-        : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${uuid}\\.restore$`, 'i')
+        : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${uuid}\\.(?:restore|recovered)$`, 'i')
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         if (entry.isFile() && pattern.test(entry.name)) {
           try { unlinkSync(join(directory, entry.name)) } catch { /* An AV lock can be retried on the next worker start. */ }
@@ -152,8 +190,8 @@ export class UsageLedger {
       }
     }
   }
-  private meta(key: string): string | null { return (this.db.prepare('SELECT value FROM metadata WHERE key=?').get(key)?.value as string | undefined) ?? null }
-  private setMeta(key: string, value: string): void { this.db.prepare('INSERT OR REPLACE INTO metadata VALUES (?,?)').run(key, value) }
+  private meta(key: string): string | null { return (this.stmt('SELECT value FROM metadata WHERE key=?').get(key)?.value as string | undefined) ?? null }
+  private setMeta(key: string, value: string): void { this.stmt('INSERT OR REPLACE INTO metadata VALUES (?,?)').run(key, value) }
   private transaction(action: () => void): void {
     this.db.exec('BEGIN IMMEDIATE')
     try { action(); this.db.exec('COMMIT') } catch (error) {
@@ -164,14 +202,14 @@ export class UsageLedger {
   }
   private save(sample: Sample): void {
     if (sample.kind === 'shutdown') sample = { ...sample, key: `shutdown:${sample.session}:${this.shutdownIdentity(sample)}` }
-    if (this.db.prepare('INSERT OR IGNORE INTO samples VALUES (?,?)').run(sample.key, JSON.stringify(sample)).changes) this.cachedSamples = null
+    if (this.stmt('INSERT OR IGNORE INTO samples VALUES (?,?)').run(sample.key, JSON.stringify(sample)).changes) this.cachedSamples = null
   }
   private shutdownIdentity(sample: Sample): string {
     const value = Object.fromEntries(COUNT_KEYS.map((key) => [key, sample[key]]))
     return hash({ at: sample.at, model: sample.model, start: sample.start, value })
   }
   associate(session: string, fork = false): void {
-    this.db.prepare('INSERT INTO app_sessions VALUES (?,?) ON CONFLICT(session) DO UPDATE SET fork=max(fork,excluded.fork)').run(session, fork ? 1 : 0)
+    this.stmt('INSERT INTO app_sessions VALUES (?,?) ON CONFLICT(session) DO UPDATE SET fork=max(fork,excluded.fork)').run(session, fork ? 1 : 0)
   }
   async collect(home: string): Promise<void> {
     this.warnings = []
@@ -201,6 +239,8 @@ export class UsageLedger {
       if (REQUIRED.some((name) => !columns.has(name))) throw new Error('Unsupported Copilot usage schema; required columns are missing')
       const optional = ['turn_index', 'agent_id', 'parent_tool_call_id', 'reasoning_tokens'].filter((name) => columns.has(name))
       const fields = [...REQUIRED, ...optional].join(',')
+      const rowById = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`)
+      const nextRows = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id>? ORDER BY id LIMIT 500`)
       const sourceVersion = source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get()
         ? source.prepare('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1').get()?.version
         : source.prepare('PRAGMA user_version').get()?.user_version
@@ -213,12 +253,12 @@ export class UsageLedger {
       const progressKey = `sourceProgress:${sourceKey}`
       const progress = JSON.parse(this.meta(progressKey) ?? 'null') as { fingerprint: string; cursor: number; first: string; last: string } | null
       const unchanged = progress && progress.fingerprint === fingerprint && progress.first === first
-        && hash(source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`).get(progress.cursor) ?? null) === progress.last
+        && hash(rowById.get(progress.cursor) ?? null) === progress.last
       let cursor = unchanged ? progress.cursor : 0
       let last = unchanged ? progress.last : hash(null)
       if (!unchanged) this.transaction(() => {
-        this.db.prepare('DELETE FROM source_occurrences WHERE source=?').run(sourceKey)
-        this.db.prepare('DELETE FROM rejected_usage WHERE key LIKE ?').run(`${sourceKey}:%`)
+        this.stmt('DELETE FROM source_occurrences WHERE source=?').run(sourceKey)
+        this.stmt('DELETE FROM rejected_usage WHERE key LIKE ?').run(`${sourceKey}:%`)
         this.setMeta(progressKey, JSON.stringify({ fingerprint, cursor, first, last }))
       })
       const importRow = (row: Row): void => {
@@ -227,32 +267,32 @@ export class UsageLedger {
         let at: string
         try { value = counts(row); at = timestamp(row.created_at) }
         catch (error) {
-          this.db.prepare(`INSERT INTO rejected_usage VALUES (?,?) ON CONFLICT(key)
+          this.stmt(`INSERT INTO rejected_usage VALUES (?,?) ON CONFLICT(key)
             DO UPDATE SET reason=excluded.reason WHERE reason!=excluded.reason`).run(rejectionKey, String(error).slice(0, 300))
           return
         }
         const identity = Object.fromEntries([...REQUIRED, 'turn_index', 'agent_id', 'parent_tool_call_id'].filter((key) => key !== 'id').map((key) => [key, row[key] ?? null]))
         const digest = hash(identity)
-        const occurrence = Number(this.db.prepare(`INSERT INTO source_occurrences VALUES (?,?,1)
+        const occurrence = Number(this.stmt(`INSERT INTO source_occurrences VALUES (?,?,1)
           ON CONFLICT(source,digest) DO UPDATE SET count=count+1 RETURNING count`).get(sourceKey, digest)!.count)
         this.save({ key: `request:${digest}:${occurrence}`, session: String(row.session_id), model: String(row.model), at, start: null, kind: 'request', ...value })
-        this.db.prepare('DELETE FROM rejected_usage WHERE key=?').run(rejectionKey)
+        this.stmt('DELETE FROM rejected_usage WHERE key=?').run(rejectionKey)
       }
       // Retry a rotating bounded batch so a large invalid backlog cannot starve new records.
       const retryKey = `rejectedCursor:${sourceKey}`
-      const pending = this.db.prepare('SELECT key FROM rejected_usage WHERE key LIKE ? AND key>? ORDER BY key LIMIT 500')
+      const pending = this.stmt('SELECT key FROM rejected_usage WHERE key LIKE ? AND key>? ORDER BY key LIMIT 500')
       let rejectedRows = pending.all(`${sourceKey}:%`, unchanged ? this.meta(retryKey) ?? '' : '')
       if (!rejectedRows.length) rejectedRows = pending.all(`${sourceKey}:%`, '')
       if (rejectedRows.length) this.transaction(() => {
         for (const rejected of rejectedRows) {
-          const row = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`).get(Number(String(rejected.key).slice(sourceKey.length + 1)))
+          const row = rowById.get(Number(String(rejected.key).slice(sourceKey.length + 1)))
           if (row) importRow(row)
-          else this.db.prepare('DELETE FROM rejected_usage WHERE key=?').run(String(rejected.key))
+          else this.stmt('DELETE FROM rejected_usage WHERE key=?').run(String(rejected.key))
         }
         this.setMeta(retryKey, String(rejectedRows.at(-1)!.key))
       })
       while (true) {
-        const rows = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id>? ORDER BY id LIMIT 500`).all(cursor)
+        const rows = nextRows.all(cursor)
         if (!rows.length) break
         this.transaction(() => {
           for (const row of rows) {
@@ -277,13 +317,16 @@ export class UsageLedger {
     const samples: Sample[] = []
     const warnings: string[] = appended ? [...previous.warnings] : []
     let start: string | null = appended ? previous.start : null
+    let lastCheckpoint = appended ? previous.offset : 0
     const checkpoint = (offset: number, complete = false): void => {
+      if (!complete && samples.length < 500 && offset - lastCheckpoint < 4 * 1024 * 1024) return
       const progress = { signature: complete ? signature : '', identity, size: complete ? info.size : offset, offset, start, warnings }
       this.transaction(() => {
         for (const sample of samples) this.save(sample)
         this.setMeta(progressKey, JSON.stringify(progress))
       })
       samples.length = 0
+      lastCheckpoint = offset
       this.historySignatures.set(path, progress)
     }
     const result = await visitSessionHistoryLines(path, (line) => {
@@ -319,12 +362,20 @@ export class UsageLedger {
     // Never copy a live WAL database with filesystem copyFile.
     const temporary = `${destination}.${randomUUID()}.tmp`
     try {
-      this.db.prepare('VACUUM INTO ?').run(temporary)
+      this.stmt('VACUUM INTO ?').run(temporary)
       validateUsageDatabase(temporary)
       renameSync(temporary, destination)
     } finally { if (existsSync(temporary)) unlinkSync(temporary) }
   }
   backup(force = false, now = new Date()): void {
+    if (this.meta('preserveBackupsPending') === '1') {
+      const preserved = this.meta('preservedBackups')!
+      // An atomic directory rename preserves every earlier restore point, including
+      // unreadable/future-version copies. If it fails, no backup is overwritten.
+      if (!existsSync(preserved) && existsSync(this.backupDirectory)) renameSync(this.backupDirectory, preserved)
+      mkdirSync(this.backupDirectory, { recursive: true })
+      this.setMeta('preserveBackupsPending', '0')
+    }
     mkdirSync(this.backupDirectory, { recursive: true })
     const day = now.toISOString().slice(0, 10)
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
@@ -363,7 +414,6 @@ export class UsageLedger {
         })
       } finally { source.close() }
     } finally { if (existsSync(frozen)) unlinkSync(frozen) }
-    this.historySignatures.clear()
     this.backup(true)
   }
   report(month: string, scope: UsageScope = 'all', timezone?: string): UsageReport {
@@ -380,8 +430,8 @@ export class UsageLedger {
       this.monthCache.values.set(at, value)
       return value
     }
-    const appSessions = new Map(this.db.prepare('SELECT session,fork FROM app_sessions').all().map((row) => [String(row.session), row.fork === 1]))
-    const samples = this.cachedSamples ??= this.db.prepare('SELECT payload FROM samples').all().map((row) => JSON.parse(String(row.payload)) as Sample)
+    const appSessions = new Map(this.stmt('SELECT session,fork FROM app_sessions').all().map((row) => [String(row.session), row.fork === 1]))
+    const samples = this.cachedSamples ??= this.stmt('SELECT payload FROM samples').all().map((row) => JSON.parse(String(row.payload)) as Sample)
     const selected = samples.filter((sample) => scope === 'all' || appSessions.has(sample.session))
     const requests = selected.filter((sample) => sample.kind === 'request')
     const requestGroups = new Map<string, Sample[]>()
@@ -410,13 +460,16 @@ export class UsageLedger {
     const models = new Map<string, UsageGroup>(), sessions = new Map<string, UsageGroup>()
     const months = new Set<string>([month])
     const warnings = new Set<string>(JSON.parse(this.meta('warnings') ?? '[]') as string[])
-    const rejected = Number(this.db.prepare('SELECT count(*) AS n FROM rejected_usage').get()?.n)
+    const activeSource = `${hash(this.meta('sourcePath') ?? '')}:%`
+    const rejected = Number(this.stmt('SELECT count(*) AS n FROM rejected_usage WHERE key LIKE ?').get(activeSource)?.n)
     if (rejected) {
-      const reasons = this.db.prepare('SELECT DISTINCT reason FROM rejected_usage LIMIT 3').all().map((row) => row.reason).join('; ')
+      const reasons = this.stmt('SELECT DISTINCT reason FROM rejected_usage WHERE key LIKE ? LIMIT 3').all(activeSource).map((row) => row.reason).join('; ')
       warnings.add(`${rejected} invalid source usage row(s) were skipped; later rows are still collected. ${reasons}`)
     }
     const recoveryWarning = this.meta('recoveryWarning')
     if (recoveryWarning) warnings.add(recoveryWarning)
+    const preserved = this.meta('preservedBackups')
+    if (preserved) warnings.add(`The usage ledger was missing. Earlier usage may be absent from these totals. Use Restore backup to recover earlier records from ${this.meta('preserveBackupsPending') === '1' ? this.backupDirectory : preserved}. These backups are protected from rotation.`)
     warnings.add('Recorded usage may be incomplete where Copilot history was lost before collection. App scope includes whole sessions observed in the app, including usage outside the app.')
     const include = (sample: Sample, value: UsageCounts, reconciled: boolean): void => {
       const sampleMonth = monthOf(sample.at)

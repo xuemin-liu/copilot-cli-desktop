@@ -41,9 +41,13 @@ export class UsageService {
   private collecting: Promise<void> | null = null
   private followupCollection: Promise<void> | null = null
   private lastCollectionError: string | null = null
+  private paused = false
+  private pauseVersion = 0
+  private preparedForQuit = false
+  private flushing: Promise<void> | null = null
 
   constructor(private readonly path: string, private readonly home: string, private readonly diagnostic: (message: string) => void, private readonly options: ServiceOptions = {}) {
-    this.timer = setInterval(() => { void this.collect().catch((error) => diagnostic(String(error))) }, 30_000)
+    this.timer = setInterval(() => { if (!this.paused) void this.collect().catch((error) => diagnostic(String(error))) }, 30_000)
     this.timer.unref()
     void this.collect().catch((error) => diagnostic(String(error)))
   }
@@ -124,12 +128,14 @@ export class UsageService {
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
     if (this.unavailable) return Promise.reject(this.unavailable)
     if (this.closed || (this.stopping && method !== 'flush')) return Promise.reject(new Error('Usage service is stopping'))
+    if (['collect', 'associate', 'restore', 'export'].includes(method)) this.preparedForQuit = false
     return new Promise((resolve, reject) => {
       this.queue.push({ id: ++this.sequence, method, args, resolve, reject })
       this.pump()
     })
   }
   collect(): Promise<void> {
+    if (this.paused) return this.flushing ?? Promise.reject(new Error('Usage collection is paused for update installation'))
     if (this.collecting) {
       return this.followupCollection ??= this.collecting.catch(() => {}).then(() => {
         this.followupCollection = null
@@ -150,17 +156,38 @@ export class UsageService {
   }
   exportTo(path: string): Promise<void> { return this.call('export', path) }
   restoreFrom(path: string): Promise<void> { return this.call('restore', path) }
+  pauseCollection(): void {
+    this.paused = true
+    this.pauseVersion++
+    this.preparedForQuit = false
+    // A flush requested before session shutdown cannot cover its final records.
+    this.flushing = null
+  }
+  resumeCollection(): void { this.paused = false; this.preparedForQuit = false }
   flush(): Promise<void> {
-    return this.call<void>('flush').then(() => { this.lastCollectionError = null }, (error: unknown) => {
+    if (this.paused && this.flushing) return this.flushing
+    // The flush includes a new scan. Join unsent collections to its result rather
+    // than doing redundant scans/backups before the operation the caller needs.
+    const superseded = this.queue.filter((request) => request.method === 'collect')
+    this.queue = this.queue.filter((request) => request.method !== 'collect')
+    const pauseVersion = this.pauseVersion
+    const work = this.call<void>('flush').then(() => {
+      this.lastCollectionError = null
+      this.preparedForQuit = this.paused && pauseVersion === this.pauseVersion && !this.queue.length && !this.active
+    }, (error: unknown) => {
       this.lastCollectionError = String(error); throw error
-    })
+    }).finally(() => { if (this.flushing === work) this.flushing = null })
+    this.flushing = work
+    for (const request of superseded) void work.then(() => request.resolve(undefined), (error: Error) => request.reject(error))
+    return work
   }
   stop(): Promise<void> {
     return this.stopPromise ??= (async () => {
       this.stopping = true
       clearInterval(this.timer)
       try {
-        await withShutdownDeadline(this.flush().finally(() => this.terminate()), this.options.shutdownTimeoutMs ?? 15_000)
+        const finalFlush = this.preparedForQuit ? Promise.resolve() : this.flush()
+        await withShutdownDeadline(finalFlush.finally(() => this.terminate()), this.options.shutdownTimeoutMs ?? 15_000)
       } finally { void this.terminate().catch(() => {}) }
     })()
   }

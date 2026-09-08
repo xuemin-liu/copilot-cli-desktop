@@ -4,6 +4,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readdirSync, readFileSync, copyFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { UsageLedger, recoverUsageDatabase } from './usage-ledger.js'
 
 const SESSION = '12345678-1234-1234-1234-123456789012'
@@ -240,11 +242,11 @@ test('interrupted request batches resume from a durable cursor without recountin
 
 test('history progress commits at chunk boundaries and survives an interrupted scan', () => fixture(async ({ ledger, home, path, shutdown }) => {
   const history = join(home, 'session-state', SESSION, 'events.jsonl')
-  appendFileSync(history, (JSON.stringify({ type: 'assistant.message', data: { content: 'x'.repeat(1000) } }) + '\n').repeat(200))
+  appendFileSync(history, (JSON.stringify({ type: 'assistant.message', data: { content: 'x'.repeat(1000) } }) + '\n').repeat(9000))
   shutdown('2026-08-27T00:00:00Z', 200)
   const setMeta = ledger['setMeta'].bind(ledger)
   ledger['setMeta'] = (key, value) => {
-    if (key.startsWith('historyProgress:') && JSON.parse(value).offset > 65_536) throw new Error('simulated interruption')
+    if (key.startsWith('historyProgress:') && JSON.parse(value).offset > 5 * 1024 * 1024) throw new Error('simulated interruption')
     setMeta(key, value)
   }
   await ledger.collect(home)
@@ -257,6 +259,96 @@ test('history progress commits at chunk boundaries and survives an interrupted s
     assert.equal(reopened.report('2026-08', 'all', 'UTC').totals.input, 150)
     assert.doesNotMatch(reopened.report('2026-08').warnings.join(' '), /simulated interruption/)
   } finally { reopened.close() }
+}))
+
+test('a missing ledger preserves old restore points across forced backups and restart', () => fixture(async ({ ledger, path, home, request }) => {
+  request(); await ledger.collect(home); ledger.backup(true); ledger.close(); rmSync(path)
+  const originals = readdirSync(ledger.backupDirectory).map((name) => [name, readFileSync(join(ledger.backupDirectory, name))] as const)
+  const fresh = new UsageLedger(path)
+  assert.match(fresh.report('2026-09').warnings.join(' '), /ledger was missing/)
+  fresh.backup(true)
+  const preserved = fresh['meta']('preservedBackups')!
+  fresh.close()
+  const reopened = new UsageLedger(path)
+  try {
+    reopened.backup(true, new Date('2026-10-01T00:00:00Z'))
+    for (const [name, bytes] of originals) assert.deepEqual(readFileSync(join(preserved, name)), bytes)
+    reopened.restoreFrom(join(preserved, originals[0]![0]))
+    assert.equal(reopened.report('2026-09').totals.input, 50)
+  } finally { reopened.close() }
+}))
+
+test('failed restore renames roll back every completed move', async (t) => fixture(async ({ ledger, path, root, home, request }) => {
+  request(); await ledger.collect(home)
+  const backup = join(root, 'export.sqlite')
+  ledger.exportTo(backup); ledger.close()
+  const bytes = readFileSync(path)
+  const rename = fs.renameSync
+  for (const failure of ['-wal', '-shm', '', 'install']) {
+    writeFileSync(path + '-wal', 'original wal'); writeFileSync(path + '-shm', 'original shm')
+    t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+      if (failure === 'install' ? String(from).endsWith('.recovered') : String(from) === path + failure) throw Object.assign(new Error('access denied'), { code: 'EPERM' })
+      rename(from, to)
+    })
+    syncBuiltinESMExports()
+    try { assert.throws(() => recoverUsageDatabase(path, backup), /access denied/) }
+    finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+    assert.deepEqual(readFileSync(path), bytes)
+    assert.equal(readFileSync(path + '-wal', 'utf8'), 'original wal')
+    assert.equal(readFileSync(path + '-shm', 'utf8'), 'original shm')
+    assert.ok(!readdirSync(join(path, '..')).some((name) => /recovered|recovery-pending|corrupt-/.test(name)))
+  }
+}))
+
+test('an interrupted restore blocks initialization and retains its recovery copy', () => fixture(async ({ ledger, path }) => {
+  ledger.close(); rmSync(path)
+  const copy = `${path}.11111111-1111-4111-8111-111111111111.recovered`
+  writeFileSync(copy, 'recovery evidence')
+  writeFileSync(`${path}.recovery-pending`, '{}')
+  assert.throws(() => new UsageLedger(path), /interrupted usage recovery/)
+  assert.equal(readFileSync(copy, 'utf8'), 'recovery evidence')
+}))
+
+test('rejection warnings follow the current source path', () => fixture(async ({ ledger, home, root, source, request }) => {
+  request(); source.exec('UPDATE assistant_usage_events SET input_tokens=NULL')
+  await ledger.collect(home)
+  assert.match(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+  const alternate = join(root, 'other-home'); mkdirSync(alternate)
+  await ledger.collect(alternate)
+  assert.doesNotMatch(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+  await ledger.collect(home)
+  assert.match(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+}))
+
+test('timing-only source updates do not invalidate durable import progress', () => fixture(async ({ ledger, home, source, request }) => {
+  source.exec('ALTER TABLE assistant_usage_events ADD COLUMN duration_ms INTEGER; ALTER TABLE assistant_usage_events ADD COLUMN time_to_first_token_ms INTEGER; ALTER TABLE assistant_usage_events ADD COLUMN output_ttft_ms INTEGER')
+  request(); await ledger.collect(home)
+  ledger['save'] = () => assert.fail('timing fields must not cause a reimport')
+  source.exec('UPDATE assistant_usage_events SET duration_ms=200,time_to_first_token_ms=10,output_ttft_ms=20')
+  await ledger.collect(home)
+  assert.doesNotMatch(ledger.report('2026-09').warnings.join(' '), /reimport/)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 1)
+}))
+
+test('backfill compiles statements by query rather than by source row', async (t) => fixture(async ({ ledger, home, request }) => {
+  for (let index = 0; index < 1000; index++) request()
+  let compiled = 0
+  const prepare = DatabaseSync.prototype.prepare
+  t.mock.method(DatabaseSync.prototype, 'prepare', function (this: DatabaseSync, sql: string) { compiled++; return prepare.call(this, sql) })
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 1000)
+  assert.ok(compiled < 50, `Compiled ${compiled} statements for 1000 rows`)
+}))
+
+test('large history scans checkpoint by progress rather than every input chunk', () => fixture(async ({ ledger, home }) => {
+  appendFileSync(join(home, 'session-state', SESSION, 'events.jsonl'), (JSON.stringify({ type: 'assistant.message', data: { content: 'x'.repeat(1000) } }) + '\n').repeat(10_000))
+  let checkpoints = 0
+  const setMeta = ledger['setMeta'].bind(ledger)
+  ledger['setMeta'] = (key, value) => { if (key.startsWith('historyProgress:')) checkpoints++; setMeta(key, value) }
+  await ledger.collect(home)
+  assert.ok(checkpoints >= 2 && checkpoints <= 4, `Unexpected checkpoint count: ${checkpoints}`)
+  await ledger.collect(home)
+  assert.ok(checkpoints <= 4, 'unchanged history should not be read again')
 }))
 
 test('missing ledgers start fresh even when old backups use a future schema', () => fixture(async ({ ledger, path }) => {

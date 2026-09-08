@@ -143,6 +143,50 @@ test('a failed flush remains visible in subsequent reports', async () => {
   } finally { await service.abort() }
 })
 
+test('a paused update flush replaces queued collection and stop reuses the completed backup', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    // The startup collect is still unsent while the worker starts.
+    service.pauseCollection()
+    const flushed = service.flush()
+    worker.ready()
+    assert.deepEqual(worker.sent.map((request) => request.method), ['flush'])
+    worker.finish(); await flushed
+    await service.stop()
+    assert.deepEqual(worker.sent.map((request) => request.method), ['flush'])
+    assert.equal(worker.terminated, true)
+  } finally { await service.abort() }
+})
+
+test('a flush started before update preparation cannot skip the final backup', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish()
+    const oldFlush = service.flush()
+    service.pauseCollection()
+    worker.finish(); await oldFlush
+    const stopped = service.stop()
+    assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 2)
+    worker.finish(); await stopped
+  } finally { await service.abort() }
+})
+
+test('writes after a prepared flush require a fresh shutdown backup', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish()
+    service.pauseCollection()
+    const flushed = service.flush(); worker.finish(); await flushed
+    service.associate('session', false); worker.finish()
+    const stopped = service.stop()
+    assert.equal(worker.sent.at(-1)?.method, 'flush')
+    worker.finish(); await stopped
+  } finally { await service.abort() }
+})
+
 test('worker collects, exports, merges and shuts down with committed usage', async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-worker-test-'))
   const home = join(root, 'copilot'), path = join(root, 'app', 'usage.sqlite')
@@ -188,8 +232,12 @@ test('worker flush makes one backup pair and export makes only its requested cop
     const { DatabaseSync } = require('node:sqlite');
     const prepare = DatabaseSync.prototype.prepare;
     DatabaseSync.prototype.prepare = function(sql) {
-      if (sql === 'VACUUM INTO ?') parentPort.postMessage({ type: 'vacuum' });
-      return prepare.call(this, sql);
+      const statement = prepare.call(this, sql);
+      if (sql === 'VACUUM INTO ?') {
+        const run = statement.run;
+        statement.run = function(...args) { parentPort.postMessage({ type: 'vacuum' }); return run.apply(this, args); };
+      }
+      return statement;
     };
     import(${JSON.stringify(new URL('./usage-worker.js', import.meta.url).href)});
   `, { eval: true, workerData: { path: join(root, 'usage.sqlite'), home: root } })
