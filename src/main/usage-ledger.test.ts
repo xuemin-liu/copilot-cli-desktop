@@ -183,6 +183,106 @@ test('invalid rows do not prevent later usage from being collected and warnings 
   assert.match(ledger.report('2026-09').warnings.join(' '), /1 invalid source usage row/)
 }))
 
+test('incomplete rows are retried by ID and their warning clears after repair or deletion', () => fixture(async ({ ledger, home, request, source }) => {
+  request(); request(); request()
+  source.exec('UPDATE assistant_usage_events SET input_tokens=NULL WHERE id=2')
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 2)
+  source.exec('UPDATE assistant_usage_events SET output_tokens=NULL WHERE id=2')
+  await ledger.collect(home)
+  assert.match(ledger.report('2026-09').warnings.join(' '), /1 invalid source usage row/)
+  source.exec('UPDATE assistant_usage_events SET input_tokens=100,output_tokens=20 WHERE id=2')
+  await ledger.collect(home); await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 3)
+  assert.doesNotMatch(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+  request(); request()
+  source.exec('UPDATE assistant_usage_events SET input_tokens=NULL WHERE id=4')
+  await ledger.collect(home)
+  source.exec('DELETE FROM assistant_usage_events WHERE id=4')
+  await ledger.collect(home)
+  assert.doesNotMatch(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+}))
+
+test('a large rejected backlog is retried in bounded batches without starving new requests', () => fixture(async ({ ledger, home, request, source }) => {
+  for (let index = 0; index < 602; index++) request()
+  source.exec('UPDATE assistant_usage_events SET input_tokens=NULL WHERE id BETWEEN 2 AND 601')
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 2)
+  source.exec('UPDATE assistant_usage_events SET input_tokens=100 WHERE id BETWEEN 2 AND 601')
+  request('2026-09-09T00:00:00Z')
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 503)
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 603)
+  assert.doesNotMatch(ledger.report('2026-09').warnings.join(' '), /invalid source usage row/)
+}))
+
+test('interrupted request batches resume from a durable cursor without recounting duplicates', () => fixture(async ({ ledger, home, request, path }) => {
+  for (let index = 0; index < 601; index++) request()
+  const originalSave = ledger['save'].bind(ledger)
+  let saved = 0
+  ledger['save'] = (sample) => { if (++saved > 500) throw new Error('simulated interruption'); originalSave(sample) }
+  await ledger.collect(home)
+  assert.equal(ledger.report('2026-09').models[0]?.requests, 500)
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    let resumed = 0
+    const save = reopened['save'].bind(reopened)
+    reopened['save'] = (sample) => { resumed++; save(sample) }
+    await reopened.collect(home)
+    assert.equal(resumed, 101)
+    assert.equal(reopened.report('2026-09').models[0]?.requests, 601)
+    await reopened.collect(home)
+    assert.equal(resumed, 101)
+  } finally { reopened.close() }
+}))
+
+test('history progress commits at chunk boundaries and survives an interrupted scan', () => fixture(async ({ ledger, home, path, shutdown }) => {
+  const history = join(home, 'session-state', SESSION, 'events.jsonl')
+  appendFileSync(history, (JSON.stringify({ type: 'assistant.message', data: { content: 'x'.repeat(1000) } }) + '\n').repeat(200))
+  shutdown('2026-08-27T00:00:00Z', 200)
+  const setMeta = ledger['setMeta'].bind(ledger)
+  ledger['setMeta'] = (key, value) => {
+    if (key.startsWith('historyProgress:') && JSON.parse(value).offset > 65_536) throw new Error('simulated interruption')
+    setMeta(key, value)
+  }
+  await ledger.collect(home)
+  const progress = ledger['db'].prepare("SELECT value FROM metadata WHERE key LIKE 'historyProgress:%'").get()
+  assert.ok(JSON.parse(String(progress?.value)).offset > 0)
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    await reopened.collect(home)
+    assert.equal(reopened.report('2026-08', 'all', 'UTC').totals.input, 150)
+    assert.doesNotMatch(reopened.report('2026-08').warnings.join(' '), /simulated interruption/)
+  } finally { reopened.close() }
+}))
+
+test('missing ledgers start fresh even when old backups use a future schema', () => fixture(async ({ ledger, path }) => {
+  ledger.backup(true); ledger.close(); rmSync(path)
+  for (const name of readdirSync(ledger.backupDirectory)) {
+    const backup = new DatabaseSync(join(ledger.backupDirectory, name))
+    backup.exec('PRAGMA user_version=999'); backup.close()
+  }
+  const fresh = new UsageLedger(path)
+  try { assert.equal(fresh.report('2026-09').totals.input, 0) } finally { fresh.close() }
+}))
+
+test('explicit recovery preserves an unavailable directory and restores a verified ledger', () => fixture(async ({ ledger, path, root, home, request }) => {
+  request(); await ledger.collect(home)
+  const backup = join(root, 'export.sqlite')
+  ledger.exportTo(backup); ledger.close(); rmSync(path); mkdirSync(path)
+  writeFileSync(join(path, 'keep.txt'), 'original')
+  recoverUsageDatabase(path, backup)
+  const recovered = new UsageLedger(path)
+  try {
+    assert.equal(recovered.report('2026-09').totals.input, 50)
+    const original = readdirSync(join(path, '..')).find((name) => name.startsWith('usage.sqlite.corrupt-'))!
+    assert.equal(readFileSync(join(path, '..', original, 'keep.txt'), 'utf8'), 'original')
+  } finally { recovered.close() }
+}))
+
 test('source and copied fork shutdowns retain original attribution regardless of directory order', () => fixture(async ({ ledger, home, shutdown }) => {
   shutdown('2026-08-27T00:00:00Z', 200)
   for (const fork of ['00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff']) {
@@ -213,7 +313,7 @@ test('empty initialization is recoverable, including an empty file with a valid 
   try { assert.equal(recovered.report('2026-09').totals.input, 50) } finally { recovered.close() }
   rmSync(path)
   const missing = new UsageLedger(path)
-  try { assert.equal(missing.report('2026-09').totals.input, 50) } finally { missing.close() }
+  try { assert.equal(missing.report('2026-09').totals.input, 0) } finally { missing.close() }
 }))
 
 test('transient validation errors preserve the healthy ledger instead of installing an older backup', async (t) => fixture(async ({ ledger, path, home, request }) => {

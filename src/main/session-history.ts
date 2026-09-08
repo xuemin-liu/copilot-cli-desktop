@@ -18,7 +18,7 @@ export class SessionHistoryValidationError extends Error {
 export async function visitSessionHistoryLines(
   path: string,
   visit: (line: string) => void,
-  options: { snapshotPath?: string; allowPartial?: boolean; allowEmpty?: boolean; offset?: number } = {},
+  options: { snapshotPath?: string; allowPartial?: boolean; allowEmpty?: boolean; offset?: number; checkpoint?: (completeBytes: number) => void } = {},
 ): Promise<{ completeBytes: number; size: number }> {
   const { snapshotPath } = options
   const info = await lstat(path)
@@ -62,6 +62,7 @@ export async function visitSessionHistoryLines(
         }
         append(buffer.subarray(start))
         bytesRead += buffer.length
+        options.checkpoint?.(completeBytes)
         await setImmediate()
       }
     } finally { stream.destroy() }

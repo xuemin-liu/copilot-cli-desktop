@@ -33,10 +33,13 @@ export class UsageService {
   private operationTimer: NodeJS.Timeout | undefined
   private restarting: Promise<void> | null = null
   private restartAttempts = 0
+  private unavailable: Error | null = null
+  private termination: Promise<void> | null = null
   private closed = false
   private stopping = false
   private stopPromise: Promise<void> | null = null
   private collecting: Promise<void> | null = null
+  private followupCollection: Promise<void> | null = null
   private lastCollectionError: string | null = null
 
   constructor(private readonly path: string, private readonly home: string, private readonly diagnostic: (message: string) => void, private readonly options: ServiceOptions = {}) {
@@ -66,9 +69,11 @@ export class UsageService {
       clearTimeout(this.operationTimer)
       const request = this.active
       this.active = null
-      this.restartAttempts = 0
       if (message.error) request.reject(new Error(message.error))
-      else request.resolve(message.result)
+      else {
+        if (request.method === 'collect' || request.method === 'flush') this.restartAttempts = 0
+        request.resolve(message.result)
+      }
       this.pump()
     })
     worker.on('error', (error: Error) => this.recycle(worker, error))
@@ -83,20 +88,29 @@ export class UsageService {
     this.active?.reject(error)
     this.active = null
     this.diagnostic(String(error))
-    // Avoid endless bootstrap failures. A future collection will make a fresh attempt.
+    // Stop automatic retries after repeated failures; restarting the app retries safely.
     if (++this.restartAttempts >= 3) {
+      this.unavailable = new Error('Usage worker repeatedly failed; restart the app to retry. ' + error.message)
+      clearInterval(this.timer)
       for (const request of this.queue.splice(0)) request.reject(error)
-      this.restartAttempts = 0
     }
-    this.restarting = worker.terminate().then(() => {}, () => {}).finally(() => {
+    this.restarting = withShutdownDeadline(worker.terminate(), this.options.shutdownTimeoutMs ?? 15_000).catch((failure: Error) => {
+      this.unavailable = new Error('Usage worker could not stop; restart the app to retry. ' + failure.message)
+      clearInterval(this.timer)
+      for (const request of this.queue.splice(0)) request.reject(this.unavailable)
+    }).finally(() => {
       this.restarting = null
       this.pump()
     })
   }
   private pump(): void {
-    if (this.closed || this.active || this.restarting || !this.queue.length) return
+    if (this.closed || this.unavailable || this.active || this.restarting || !this.queue.length) return
     if (!this.worker) {
-      try { this.startWorker() } catch (error) { for (const request of this.queue.splice(0)) request.reject(error as Error) }
+      try { this.startWorker() } catch (error) {
+        this.unavailable = error as Error
+        clearInterval(this.timer)
+        for (const request of this.queue.splice(0)) request.reject(this.unavailable)
+      }
       return
     }
     if (!this.ready) return
@@ -108,6 +122,7 @@ export class UsageService {
     catch (error) { this.recycle(worker, error as Error) }
   }
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
+    if (this.unavailable) return Promise.reject(this.unavailable)
     if (this.closed || (this.stopping && method !== 'flush')) return Promise.reject(new Error('Usage service is stopping'))
     return new Promise((resolve, reject) => {
       this.queue.push({ id: ++this.sequence, method, args, resolve, reject })
@@ -115,7 +130,13 @@ export class UsageService {
     })
   }
   collect(): Promise<void> {
-    return this.collecting ??= this.call<void>('collect')
+    if (this.collecting) {
+      return this.followupCollection ??= this.collecting.catch(() => {}).then(() => {
+        this.followupCollection = null
+        return this.collect()
+      })
+    }
+    return this.collecting = this.call<void>('collect')
       .then(() => { this.lastCollectionError = null }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
       .finally(() => { this.collecting = null })
   }
@@ -129,16 +150,25 @@ export class UsageService {
   }
   exportTo(path: string): Promise<void> { return this.call('export', path) }
   restoreFrom(path: string): Promise<void> { return this.call('restore', path) }
-  flush(): Promise<void> { return this.call('flush') }
+  flush(): Promise<void> {
+    return this.call<void>('flush').then(() => { this.lastCollectionError = null }, (error: unknown) => {
+      this.lastCollectionError = String(error); throw error
+    })
+  }
   stop(): Promise<void> {
     return this.stopPromise ??= (async () => {
       this.stopping = true
       clearInterval(this.timer)
-      try { await withShutdownDeadline(this.flush(), this.options.shutdownTimeoutMs ?? 15_000) }
-      finally { await this.abort() }
+      try {
+        await withShutdownDeadline(this.flush().finally(() => this.terminate()), this.options.shutdownTimeoutMs ?? 15_000)
+      } finally { void this.terminate().catch(() => {}) }
     })()
   }
-  async abort(): Promise<void> {
+  abort(): Promise<void> {
+    return withShutdownDeadline(this.terminate(), this.options.shutdownTimeoutMs ?? 15_000)
+  }
+  private terminate(): Promise<void> {
+    if (this.termination) return this.termination
     this.closed = true
     clearInterval(this.timer)
     clearTimeout(this.startupTimer)
@@ -149,7 +179,6 @@ export class UsageService {
     for (const request of this.queue.splice(0)) request.reject(error)
     const worker = this.worker
     this.worker = null
-    await worker?.terminate()
-    await this.restarting
+    return this.termination = Promise.all([worker?.terminate(), this.restarting]).then(() => {})
   }
 }

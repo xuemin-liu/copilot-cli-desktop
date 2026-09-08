@@ -46,7 +46,7 @@ export class UsageDatabaseCorruptionError extends Error {}
 export class UsageDatabaseVersionError extends Error {}
 export function isTransientUsageError(error: unknown): boolean {
   const value = error as { errcode?: number; code?: string }
-  return [5, 6, 10, 14].includes((value?.errcode ?? -1) & 255) || ['EBUSY', 'EACCES', 'EPERM'].includes(value?.code ?? '')
+  return [5, 6, 8, 10, 14].includes((value?.errcode ?? -1) & 255) || ['EBUSY', 'EACCES', 'EPERM'].includes(value?.code ?? '')
 }
 function confirmedCorruption(error: unknown): boolean {
   return error instanceof UsageDatabaseCorruptionError || [11, 26].includes(((error as { errcode?: number })?.errcode ?? -1) & 255)
@@ -99,19 +99,12 @@ export class UsageLedger {
   private historySignatures = new Map<string, { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] }>()
   private cachedSamples: Sample[] | null = null
   private monthCache = { zone: '', values: new Map<string, string>() }
-  private sourceProgress = new Map<string, { fingerprint: string; cursor: number; first: string; last: string; occurrences: Map<string, number> }>()
   readonly backupDirectory: string
 
   constructor(readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.backupDirectory = join(dirname(path), 'usage-backups')
     this.cleanInterruptedCopies()
-    if (!existsSync(path) && this.backups().length) {
-      const candidate = this.backups().find((file) => { try { validateUsageDatabase(file); return true } catch { return false } })
-      if (!candidate) throw new UsageDatabaseCorruptionError('Usage ledger is missing and no valid backup is available; existing files were preserved')
-      recoverUsageDatabase(path, candidate)
-      this.recoveryWarning = 'Recovered a missing usage ledger from a verified backup. Usage since that backup may be missing.'
-    }
     if (existsSync(path)) {
       try {
         if (!validateUsageDatabase(path, true) && this.backups().length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
@@ -130,9 +123,18 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS app_sessions (session TEXT PRIMARY KEY, fork INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
       PRAGMA user_version=1; COMMIT;`) } catch (error) { this.db.close(); throw error }
-    if (!this.meta('timezone')) this.setMeta('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
-    if (this.recoveryWarning) this.setMeta('recoveryWarning', this.recoveryWarning)
+    try {
+      if (!this.meta('timezone')) this.setMeta('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
+      if (this.recoveryWarning) this.setMeta('recoveryWarning', this.recoveryWarning)
+      // Old rejection keys encoded row content and cannot be retried. The new durable
+      // checkpoints start with a full scan and replace those obsolete diagnostics.
+      if (!this.meta('retryableRejections')) this.transaction(() => {
+        this.db.exec('DELETE FROM rejected_usage')
+        this.setMeta('retryableRejections', '1')
+      })
+    } catch (error) { this.db.close(); throw error }
   }
   close(): void { this.db.close() }
   private cleanInterruptedCopies(): void {
@@ -202,17 +204,53 @@ export class UsageLedger {
       const sourceVersion = source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get()
         ? source.prepare('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1').get()?.version
         : source.prepare('PRAGMA user_version').get()?.user_version
-      // Startup always reconciles the full source. During this process, validate the file identity and
-      // first/cursor rows before resuming a bounded scan; recreated stores cannot hide behind reused IDs.
+      // Checkpoints and occurrence counts commit with each batch. Validate the file
+      // and boundary rows on every resume so recreated stores cannot hide behind reused IDs.
       const info = statSync(path)
       const fingerprint = `${info.dev}:${info.ino}:${info.birthtimeMs}:${fields}`
       const first = hash(source.prepare(`SELECT ${fields} FROM assistant_usage_events ORDER BY id LIMIT 1`).get() ?? null)
-      const progress = this.sourceProgress.get(path)
+      const sourceKey = hash(path)
+      const progressKey = `sourceProgress:${sourceKey}`
+      const progress = JSON.parse(this.meta(progressKey) ?? 'null') as { fingerprint: string; cursor: number; first: string; last: string } | null
       const unchanged = progress && progress.fingerprint === fingerprint && progress.first === first
         && hash(source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`).get(progress.cursor) ?? null) === progress.last
-      const occurrences = new Map(unchanged ? progress.occurrences : [])
       let cursor = unchanged ? progress.cursor : 0
       let last = unchanged ? progress.last : hash(null)
+      if (!unchanged) this.transaction(() => {
+        this.db.prepare('DELETE FROM source_occurrences WHERE source=?').run(sourceKey)
+        this.db.prepare('DELETE FROM rejected_usage WHERE key LIKE ?').run(`${sourceKey}:%`)
+        this.setMeta(progressKey, JSON.stringify({ fingerprint, cursor, first, last }))
+      })
+      const importRow = (row: Row): void => {
+        const rejectionKey = `${sourceKey}:${number(row.id)}`
+        let value: UsageCounts
+        let at: string
+        try { value = counts(row); at = timestamp(row.created_at) }
+        catch (error) {
+          this.db.prepare(`INSERT INTO rejected_usage VALUES (?,?) ON CONFLICT(key)
+            DO UPDATE SET reason=excluded.reason WHERE reason!=excluded.reason`).run(rejectionKey, String(error).slice(0, 300))
+          return
+        }
+        const identity = Object.fromEntries([...REQUIRED, 'turn_index', 'agent_id', 'parent_tool_call_id'].filter((key) => key !== 'id').map((key) => [key, row[key] ?? null]))
+        const digest = hash(identity)
+        const occurrence = Number(this.db.prepare(`INSERT INTO source_occurrences VALUES (?,?,1)
+          ON CONFLICT(source,digest) DO UPDATE SET count=count+1 RETURNING count`).get(sourceKey, digest)!.count)
+        this.save({ key: `request:${digest}:${occurrence}`, session: String(row.session_id), model: String(row.model), at, start: null, kind: 'request', ...value })
+        this.db.prepare('DELETE FROM rejected_usage WHERE key=?').run(rejectionKey)
+      }
+      // Retry a rotating bounded batch so a large invalid backlog cannot starve new records.
+      const retryKey = `rejectedCursor:${sourceKey}`
+      const pending = this.db.prepare('SELECT key FROM rejected_usage WHERE key LIKE ? AND key>? ORDER BY key LIMIT 500')
+      let rejectedRows = pending.all(`${sourceKey}:%`, unchanged ? this.meta(retryKey) ?? '' : '')
+      if (!rejectedRows.length) rejectedRows = pending.all(`${sourceKey}:%`, '')
+      if (rejectedRows.length) this.transaction(() => {
+        for (const rejected of rejectedRows) {
+          const row = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`).get(Number(String(rejected.key).slice(sourceKey.length + 1)))
+          if (row) importRow(row)
+          else this.db.prepare('DELETE FROM rejected_usage WHERE key=?').run(String(rejected.key))
+        }
+        this.setMeta(retryKey, String(rejectedRows.at(-1)!.key))
+      })
       while (true) {
         const rows = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id>? ORDER BY id LIMIT 500`).all(cursor)
         if (!rows.length) break
@@ -220,25 +258,11 @@ export class UsageLedger {
           for (const row of rows) {
             cursor = number(row.id)
             last = hash(row)
-            let value: UsageCounts
-            let at: string
-            try { value = counts(row); at = timestamp(row.created_at) }
-            catch (error) {
-              this.db.prepare('INSERT OR REPLACE INTO rejected_usage VALUES (?,?)').run(hash({ path, id: row.id, row }), String(error).slice(0, 300))
-              continue
-            }
-            const identity = Object.fromEntries([...REQUIRED, 'turn_index', 'agent_id', 'parent_tool_call_id'].filter((key) => key !== 'id').map((key) => [key, row[key] ?? null]))
-            const digest = hash(identity)
-            const occurrence = (occurrences.get(digest) ?? 0) + 1
-            occurrences.set(digest, occurrence)
-            const sample: Sample = { key: `request:${digest}:${occurrence}`, session: String(row.session_id), model: String(row.model),
-              at, start: null, kind: 'request', ...value }
-            this.save(sample)
+            importRow(row)
           }
-          this.setMeta('sourceProgress', JSON.stringify({ path, cursor, schema: sourceVersion }))
+          this.setMeta(progressKey, JSON.stringify({ fingerprint, cursor, first, last, schema: sourceVersion }))
         })
       }
-      this.sourceProgress.set(path, { fingerprint, cursor, first, last, occurrences })
     } finally { source.close() }
   }
   private async importHistory(path: string, session: string): Promise<void> {
@@ -246,13 +270,22 @@ export class UsageLedger {
     if (!info.isFile()) throw new Error('History must be a regular file')
     const signature = `${info.size}:${info.mtimeMs}`
     const identity = `${info.dev}:${info.ino}:${info.birthtimeMs}`
-    const previous = this.historySignatures.get(path)
+    const progressKey = `historyProgress:${hash(path)}`
+    const previous = this.historySignatures.get(path) ?? JSON.parse(this.meta(progressKey) ?? 'null') as { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] } | null
     if (previous?.signature === signature && previous.identity === identity) { this.warnings.push(...previous.warnings); return }
-    const appended = previous && previous.identity === identity && info.size > previous.size
+    const appended = previous && previous.identity === identity && (info.size > previous.size || (info.size === previous.size && previous.signature === ''))
     const samples: Sample[] = []
     const warnings: string[] = appended ? [...previous.warnings] : []
     let start: string | null = appended ? previous.start : null
-    const flush = (): void => { this.transaction(() => { for (const sample of samples) this.save(sample) }); samples.length = 0 }
+    const checkpoint = (offset: number, complete = false): void => {
+      const progress = { signature: complete ? signature : '', identity, size: complete ? info.size : offset, offset, start, warnings }
+      this.transaction(() => {
+        for (const sample of samples) this.save(sample)
+        this.setMeta(progressKey, JSON.stringify(progress))
+      })
+      samples.length = 0
+      this.historySignatures.set(path, progress)
+    }
     const result = await visitSessionHistoryLines(path, (line) => {
       if (!/"type"\s*:\s*"session\.(?:start|shutdown)"/.test(line)) return
       try {
@@ -269,9 +302,8 @@ export class UsageLedger {
           samples.push({ key, session, model, at, start, kind: 'shutdown', ...value })
         }
       } catch (error) { if (warnings.length < 10) warnings.push(`Skipped invalid shutdown record: ${String(error)}`) }
-      if (samples.length >= 500) flush()
-    }, { allowPartial: true, allowEmpty: true, offset: appended ? previous.offset : 0 })
-    flush()
+    }, { allowPartial: true, allowEmpty: true, offset: appended ? previous.offset : 0, checkpoint })
+    checkpoint(result.completeBytes, true)
     this.warnings.push(...warnings)
     this.historySignatures.set(path, { signature, identity, size: result.size, offset: result.completeBytes, start, warnings })
   }
@@ -332,7 +364,6 @@ export class UsageLedger {
       } finally { source.close() }
     } finally { if (existsSync(frozen)) unlinkSync(frozen) }
     this.historySignatures.clear()
-    this.sourceProgress.clear()
     this.backup(true)
   }
   report(month: string, scope: UsageScope = 'all', timezone?: string): UsageReport {

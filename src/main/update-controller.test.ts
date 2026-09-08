@@ -73,6 +73,16 @@ test('an available update can be downloaded and then installed', async () => {
   assert.deepEqual(adapter.installCalls, [[false, true]])
 })
 
+test('an installer that does not quit returns to a recoverable update state', () => {
+  const adapter = new FakeUpdateAdapter()
+  const controller = new DesktopUpdateController(adapter, '0.1.0')
+  adapter.emit('update-downloaded', { version: '0.2.0' })
+  controller.install(); controller.installationDidNotQuit()
+  assert.equal(controller.snapshot.status, 'error')
+  assert.equal(controller.snapshot.canCheck, true)
+  assert.match(controller.snapshot.message, /did not close/)
+})
+
 test('install() throws when nothing has been downloaded', () => {
   const adapter = new FakeUpdateAdapter()
   const controller = new DesktopUpdateController(adapter, '0.1.0')

@@ -155,6 +155,10 @@ export class DesktopUpdateController extends EventEmitter {
     return this.snapshot
   }
 
+  installationDidNotQuit(): void {
+    if (this.stateValue.status === 'installing') this.setState('error', 'The installer did not close the app. Check for updates to retry.')
+  }
+
   install(): void {
     if (!this.updater || this.stateValue.status !== 'downloaded') {
       throw new Error('No downloaded update is ready to install')

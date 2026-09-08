@@ -14,10 +14,10 @@ async function openLedger(): Promise<UsageLedger> {
     }
   }
 }
-async function collect(): Promise<void> {
+async function collect(backup: 'daily' | 'forced' | 'none' = 'daily'): Promise<void> {
   const value = await openLedger()
   await value.collect(home)
-  value.backup()
+  if (backup !== 'none') value.backup(backup === 'forced')
 }
 let queue = Promise.resolve()
 parentPort!.on('message', (message: { id: number; method: string; args: unknown[] }) => {
@@ -26,7 +26,10 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown[
     try {
       let recovered = false
       try { await openLedger() } catch (error) {
-        if (message.method !== 'restore' || error instanceof UsageDatabaseVersionError || isTransientUsageError(error)) throw error
+        // Never replace a locked or future-version ledger. Explicit restore may replace an
+        // unavailable path after retries, retaining originals; permission failures still surface.
+        const sqliteCode = ((error as { errcode?: number }).errcode ?? -1) & 255
+        if (message.method !== 'restore' || error instanceof UsageDatabaseVersionError || [5, 6].includes(sqliteCode) || (error as { code?: string }).code === 'EBUSY') throw error
         recoverUsageDatabase(path, message.args[0] as string)
         ledger = new UsageLedger(path)
         recovered = true
@@ -36,9 +39,9 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown[
         case 'collect': await collect(); break
         case 'report': result = ledger!.report(message.args[0] as string, message.args[1] as UsageScope, message.args[2] as string | undefined); break
         case 'associate': ledger!.associate(message.args[0] as string, message.args[1] as boolean); break
-        case 'export': await collect(); ledger!.exportTo(message.args[0] as string); break
+        case 'export': await collect('none'); ledger!.exportTo(message.args[0] as string); break
         case 'restore': if (!recovered) ledger!.restoreFrom(message.args[0] as string); await collect(); break
-        case 'flush': await collect(); ledger!.backup(true); break
+        case 'flush': await collect('forced'); break
         default: throw new Error('Unknown usage operation')
       }
       parentPort!.postMessage({ id: message.id, result })

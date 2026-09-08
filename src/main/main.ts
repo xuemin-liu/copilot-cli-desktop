@@ -118,8 +118,22 @@ import { withShutdownDeadline } from './shutdown-deadline.js'
 
 let usageService: UsageService | null = null
 let usageQuitCleanupComplete = false
+let preparingUpdate = false
+let updatePreparationFailed = false
+let updateQuitTimer: NodeJS.Timeout | undefined
+
+function recoverUpdateAttempt(): void {
+  if (quittingAllSessions) return
+  clearTimeout(updateQuitTimer)
+  if (preparingUpdate) { updatePreparationFailed = true; return }
+  installInProgress = false
+  explicitQuitRequested = false
+  updateController?.installationDidNotQuit()
+  refreshMenus()
+}
 
 function startUsageCollection(): void {
+  if (usageService || quittingAllSessions) return
   usageService = new UsageService(join(app.getPath('userData'), 'usage.sqlite'), process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'),
     (message) => { void writeAppLog(`Usage: ${message}`).catch(() => {}) })
 }
@@ -2124,27 +2138,28 @@ ipcMain.handle('desktop-settings:download-update', async (event) => {
 ipcMain.handle('desktop-settings:install-update', async (event) => {
   assertTrustedSettingsSender(event)
   if (installInProgress) throw new Error('An update installation is already in progress')
+  if (quittingAllSessions || explicitQuitRequested) throw new Error('The app is shutting down')
   if (!updateController?.snapshot.canInstall) throw new Error('No downloaded update is ready to install')
   installInProgress = true
+  preparingUpdate = true
+  updatePreparationFailed = false
   refreshMenus()
   try {
-    await stopAllSessions()
-    await withShutdownDeadline(configWriteQueue, 15_000)
-    // electron-updater spawns the installer before emitting before-quit. Finish usage first.
-    const service = usageService
-    usageService = null
-    await service?.stop().catch((error) => { void writeAppLog(`Usage before desktop update failed: ${String(error)}`).catch(() => {}) })
+    await withShutdownDeadline(stopAllSessions().then(() => configWriteQueue))
+    // Flush before the installer can launch, retaining the service until before-quit.
+    // A failed or no-op installer therefore never requires a second database owner.
+    await bestEffortUsage(usageService?.flush())
+    preparingUpdate = false
+    if (quittingAllSessions) return
+    if (updatePreparationFailed) throw new Error('The updater failed while preparing installation')
     explicitQuitRequested = true
-    try {
-      updateController.install()
-    } catch (error) {
-      explicitQuitRequested = false
-      startUsageCollection()
-      throw error
-    }
+    // quitAndInstall can return without quitting or emitting an error.
+    updateQuitTimer = setTimeout(recoverUpdateAttempt, 10_000)
+    updateQuitTimer.unref()
+    updateController.install()
   } catch (error) {
-    installInProgress = false
-    refreshMenus()
+    preparingUpdate = false
+    recoverUpdateAttempt()
     throw error
   }
 })
@@ -2298,10 +2313,7 @@ if (!app.requestSingleInstanceLock()) {
     )
     updateController.on('state-changed', (update: DesktopUpdateState) => {
       if (installInProgress && update.status === 'error') {
-        installInProgress = false
-        explicitQuitRequested = false
-        if (!usageService && !quittingAllSessions) startUsageCollection()
-        refreshMenus()
+        recoverUpdateAttempt()
       }
       broadcastUpdateState(update)
       if (update.status === 'available') {
@@ -2351,6 +2363,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on('before-quit', (event) => {
+  clearTimeout(updateQuitTimer)
   explicitQuitRequested = true
   if (closePromptWindow && !closePromptWindow.isDestroyed()) {
     event.preventDefault()
