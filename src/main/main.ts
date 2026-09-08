@@ -113,12 +113,22 @@ import {
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
+import { UsageService } from './usage-service.js'
+
+let usageService: UsageService | null = null
+let usageQuitCleanupComplete = false
 import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
 const BACKGROUND_START_ARGUMENT = '--background'
 const PACKAGE_SMOKE_ENVIRONMENT = 'COPILOT_DESKTOP_PACKAGE_SMOKE'
 const PACKAGE_SMOKE_READY_MARKER = '[package-smoke] renderer-ready'
+// Packaged smoke runs must never read/write the user's normal desktop profile.
+if (app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1') {
+  const isolatedDirectory = app.commandLine.getSwitchValue('user-data-dir')
+  if (!isolatedDirectory) throw new Error('Packaged smoke requires an isolated user-data-dir')
+  app.setPath('userData', resolve(isolatedDirectory))
+}
 const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
@@ -848,6 +858,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('session-id', (sessionId: string) => {
     if (managedTabs.get(id)?.session !== session) return
     tabsState = setTabSessionId(tabsState, id, sessionId)
+    const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+    if (!tab?.remote) usageService?.associate(sessionId, tab?.sideChat === true)
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -860,7 +872,10 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('exit', (exit: PtySessionExit) => {
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
+      const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+      if (!tab?.remote) usageService?.associate(session.lastSessionId, tab?.sideChat === true)
     }
+    if (usageService) observe(usageService.collect(), 'Could not collect final session usage')
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -927,6 +942,7 @@ async function createSessionTab(
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
+  if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
@@ -1425,9 +1441,11 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
     message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
   }
   try {
+    if (usageService) await usageService.flush()
     const output = operation === 'install'
       ? await installCopilotCli()
       : await updateCopilotCli(current!)
+    if (usageService) await usageService.collect()
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -2211,6 +2229,32 @@ ipcMain.handle('desktop-settings:open-copilot-config', async (event) => {
   if (error) throw new Error(error)
 })
 
+ipcMain.handle('desktop-settings:usage-report', async (event, month: unknown, scope: unknown, timezone: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof month !== 'string' || (scope !== 'all' && scope !== 'app') || (timezone !== undefined && (typeof timezone !== 'string' || timezone.length > 100))) throw new Error('Invalid usage query')
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  return usageService.report(month, scope, timezone)
+})
+ipcMain.handle('desktop-settings:usage-refresh', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  await usageService.collect()
+})
+ipcMain.handle('desktop-settings:usage-export', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  const result = await dialog.showSaveDialog({ title: 'Export usage backup', defaultPath: `copilot-usage-${new Date().toISOString().slice(0,10)}.sqlite`, filters: [{ name: 'Usage database', extensions: ['sqlite'] }] })
+  if (!result.canceled && result.filePath) await usageService.exportTo(result.filePath)
+  return !result.canceled
+})
+ipcMain.handle('desktop-settings:usage-restore', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  const result = await dialog.showOpenDialog({ title: 'Restore usage backup (merge with saved usage)', properties: ['openFile'], filters: [{ name: 'Usage database', extensions: ['sqlite'] }] })
+  if (!result.canceled && result.filePaths[0]) await usageService.restoreFrom(result.filePaths[0])
+  return !result.canceled
+})
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -2219,6 +2263,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
+    usageService = new UsageService(join(app.getPath('userData'), 'usage.sqlite'), process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'),
+      (message) => { void writeAppLog(`Usage: ${message}`).catch(() => {}) })
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
@@ -2257,8 +2303,17 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow = createWindow(!startHidden, packageSmokeTest
       ? {
         didFinishLoad: () => {
-          process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
-          setTimeout(() => app.exit(0), 250)
+          // Loading the renderer alone cannot detect a worker missing from app.asar.
+          void (async () => {
+            await usageService?.collect()
+            await usageService?.stop()
+            usageService = null
+            process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
+            setTimeout(() => app.exit(0), 250)
+          })().catch((error) => {
+            process.stderr.write(`[package-smoke] usage-worker-failed: ${String(error)}\n`)
+            app.exit(1)
+          })
         },
         didFailLoad: (description) => {
           process.stderr.write(`[package-smoke] renderer-load-failed: ${description}\n`)
@@ -2285,7 +2340,11 @@ app.on('before-quit', (event) => {
     quitAfterClosePrompt = true
     return
   }
-  if (quittingAllSessions || managedTabs.size === 0) return
+  if (quittingAllSessions) {
+    if (!usageQuitCleanupComplete) event.preventDefault()
+    return
+  }
+  if (managedTabs.size === 0 && !usageService) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via
@@ -2295,8 +2354,9 @@ app.on('before-quit', (event) => {
   // before that last write actually lands on disk.
   void stopAllSessions()
     .then(() => configWriteQueue)
+    .finally(async () => { const service = usageService; usageService = null; await service?.stop() })
     .catch((error) => writeAppLog(`Shutdown cleanup failed: ${String(error)}`))
-    .finally(() => app.quit())
+    .finally(() => { usageQuitCleanupComplete = true; app.quit() })
 })
 
 app.on('will-quit', () => {

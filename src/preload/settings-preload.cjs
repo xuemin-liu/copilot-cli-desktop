@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktopSettings', {
+  usageReport: (month, scope, timezone) => ipcRenderer.invoke('desktop-settings:usage-report', month, scope, timezone),
+  refreshUsage: () => ipcRenderer.invoke('desktop-settings:usage-refresh'),
+  exportUsage: () => ipcRenderer.invoke('desktop-settings:usage-export'),
+  restoreUsage: () => ipcRenderer.invoke('desktop-settings:usage-restore'),
   get: () => ipcRenderer.invoke('desktop-settings:get'),
   updatePreferences: (preferences) => ipcRenderer.invoke('desktop-settings:update-preferences', preferences),
   setLaunchAtLogin: (enabled) => ipcRenderer.invoke('desktop-settings:set-launch-at-login', enabled),

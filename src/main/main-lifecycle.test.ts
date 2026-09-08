@@ -16,7 +16,8 @@ interface Harness {
   createMain(): Promise<DesktopState>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
   restore(): Promise<void>
-  beginQuit(): void
+  beginQuit(): boolean
+  configureUsageStop(stop: () => Promise<void>): void
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
@@ -80,7 +81,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           createMain: () => createSessionTab(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForActiveProfile,
-          beginQuit: () => app.emit('before-quit', { preventDefault() {} }),
+          beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
+          configureUsageStop(stop) { usageService = { stop }; },
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
           async cleanup() { await stopAllSessions(); await configWriteQueue; },
         };
@@ -102,6 +104,22 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('repeated quit requests wait for the usage backup even with no running sessions', async () => {
+  await fixture(async (harness) => {
+    let finish!: () => void
+    let entered!: () => void
+    const stopping = new Promise<void>((resolve) => { entered = resolve })
+    const pending = new Promise<void>((resolve) => { finish = resolve })
+    harness.configureUsageStop(async () => { entered(); await pending })
+    assert.equal(harness.beginQuit(), true)
+    await stopping
+    assert.equal(harness.beginQuit(), true)
+    finish()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), false)
+  })
+})
 
 function configure(harness: Harness, directory: string) {
   const profile = createWorkspaceProfile(directory, 'default')

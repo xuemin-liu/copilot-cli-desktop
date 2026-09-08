@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -18,6 +19,12 @@ async function main(): Promise<void> {
 
   const executable = resolve(process.argv[2] ?? 'release/win-unpacked/Copilot CLI Desktop.exe')
   const isolatedUserData = await mkdtemp(join(tmpdir(), 'copilot-desktop-package-smoke-'))
+  const isolatedCopilotHome = join(isolatedUserData, 'copilot')
+  await mkdir(isolatedCopilotHome)
+  const source = new DatabaseSync(join(isolatedCopilotHome, 'session-store.db'))
+  source.exec(`CREATE TABLE assistant_usage_events(id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
+    INSERT INTO assistant_usage_events VALUES(1,'package-smoke','model',100,20,40,10,'2026-09-08T00:00:00Z')`)
+  source.close()
   let stopped = false
   let stderr = ''
   let signalRendererReady!: () => void
@@ -28,6 +35,7 @@ async function main(): Promise<void> {
     env: {
       ...process.env,
       ELECTRON_ENABLE_LOGGING: '1',
+      COPILOT_HOME: isolatedCopilotHome,
       [PACKAGE_SMOKE_ENVIRONMENT]: '1',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -70,7 +78,13 @@ async function main(): Promise<void> {
       throw new Error(`Unable to launch ${basename(executable)}: ${outcome.error.message}`)
     }
     if (outcome.kind === 'ready') {
-      console.log(`[package-smoke] ${basename(executable)} loaded its renderer successfully.`)
+      const ledger = new DatabaseSync(join(isolatedUserData, 'usage.sqlite'), { readOnly: true })
+      try {
+        const samples = ledger.prepare('SELECT payload FROM samples').all()
+        if (samples.length !== 1 || JSON.parse(String(samples[0]!.payload)).input !== 50) throw new Error('Packaged usage worker failed to retain its fixture')
+        if (!ledger.prepare("SELECT value FROM metadata WHERE key='lastBackup'").get()) throw new Error('Packaged usage backup did not complete')
+      } finally { ledger.close() }
+      console.log(`[package-smoke] ${basename(executable)} loaded its renderer, collected usage and verified a backup successfully.`)
       return
     }
     if (outcome.code !== 0) {
