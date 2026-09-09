@@ -15,6 +15,7 @@ interface Sample extends UsageCounts {
   start: string | null
   kind: 'request' | 'shutdown'
 }
+type PendingSample = Sample | (Omit<Sample, 'key' | 'kind'> & { kind: 'shutdown' })
 interface HistoryProgress {
   signature: string
   identity: string
@@ -59,6 +60,23 @@ export function isTransientUsageError(error: unknown): boolean {
 function confirmedCorruption(error: unknown): boolean {
   return error instanceof UsageDatabaseCorruptionError || [11, 26].includes(((error as { errcode?: number })?.errcode ?? -1) & 255)
 }
+function backupFailureWarning(error: unknown): string {
+  const value = error as { code?: unknown; errcode?: unknown }
+  const sqliteCode = typeof value?.errcode === 'number' ? value.errcode & 255 : null
+  const code = sqliteCode !== null ? `SQLITE_${sqliteCode}`
+    : typeof value?.code === 'string' && /^[A-Z0-9_]{1,48}$/.test(value.code) ? value.code : 'UNKNOWN'
+  const reason: Record<string, string> = {
+    EPERM: 'Access to the backup file was denied.', EACCES: 'Access to the backup file was denied.',
+    EBUSY: 'The backup file is in use.', SQLITE_5: 'The backup file is in use.', SQLITE_6: 'The backup file is in use.',
+    ENOSPC: 'There is not enough disk space.', SQLITE_13: 'There is not enough disk space.',
+    ENOENT: 'The backup location is unavailable.', ENOTDIR: 'The backup location is unavailable.',
+    SQLITE_14: 'The backup location is unavailable.', SQLITE_8: 'The backup location is read-only.',
+    EIO: 'The backup storage reported an I/O error.', SQLITE_10: 'The backup storage reported an I/O error.',
+  }
+  // Do not persist raw exception text: it can contain private paths, changing
+  // temporary UUIDs, and arbitrarily long messages. Fixed reasons stay stable.
+  return `Usage is committed, but the backup refresh failed (${code}): ${reason[code] ?? 'The backup could not be written.'}`
+}
 /** Returns false only for an interrupted, empty initialization. Backups must be initialized. */
 export function validateUsageDatabase(path: string, allowEmpty = false): boolean {
   const db = new DatabaseSync(path, { readOnly: true })
@@ -91,7 +109,7 @@ function recoveryPlan(path: string, suffix: string, temporary: string) {
   return { path, temporary, originals: ['-wal', '-shm', ''].map((extension): [string, string] => [path + extension, path + suffix + extension]) }
 }
 function installRecovery(plan: ReturnType<typeof recoveryPlan>): void {
-  validateUsageDatabase(plan.temporary)
+  // Both callers validate the copy before entering this mutation-only step.
   // Move sidecars first so an access failure cannot strand them beside a new ledger.
   for (const [original, parked] of plan.originals) {
     if (!existsSync(original)) continue
@@ -225,11 +243,11 @@ export class UsageLedger {
     for (const directory of [dirname(this.path), this.backupDirectory]) {
       if (!existsSync(directory)) continue
       const pattern = directory === this.backupDirectory
-        ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${UUID}\\.tmp$`, 'i')
+        ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${UUID}\\.tmp(?:-journal)?$`, 'i')
         : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${UUID}\\.(?:restore|recovered)$`, 'i')
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         if (entry.isFile() && pattern.test(entry.name)) {
-          try { unlinkSync(join(directory, entry.name)) } catch { /* An AV lock can be retried on the next worker start. */ }
+          removeRecoveryArtifact(join(directory, entry.name))
         }
       }
     }
@@ -244,11 +262,11 @@ export class UsageLedger {
       throw error
     }
   }
-  private save(sample: Sample): void {
-    if (sample.kind === 'shutdown') sample = { ...sample, key: `shutdown:${sample.session}:${this.shutdownIdentity(sample)}` }
-    if (this.stmt('INSERT OR IGNORE INTO samples VALUES (?,?)').run(sample.key, JSON.stringify(sample)).changes) this.cachedSamples = null
+  private save(sample: PendingSample): void {
+    const saved = sample.kind === 'shutdown' ? { ...sample, key: `shutdown:${sample.session}:${this.shutdownIdentity(sample)}` } : sample
+    if (this.stmt('INSERT OR IGNORE INTO samples VALUES (?,?)').run(saved.key, JSON.stringify(saved)).changes) this.cachedSamples = null
   }
-  private shutdownIdentity(sample: Sample): string {
+  private shutdownIdentity(sample: Omit<Sample, 'key'>): string {
     const value = Object.fromEntries(COUNT_KEYS.map((key) => [key, sample[key]]))
     return hash({ at: sample.at, model: sample.model, start: sample.start, value })
   }
@@ -285,9 +303,6 @@ export class UsageLedger {
       const fields = [...REQUIRED, ...optional].join(',')
       const rowById = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id=?`)
       const nextRows = source.prepare(`SELECT ${fields} FROM assistant_usage_events WHERE id>? ORDER BY id LIMIT 500`)
-      const sourceVersion = source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get()
-        ? source.prepare('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1').get()?.version
-        : source.prepare('PRAGMA user_version').get()?.user_version
       // Checkpoints and occurrence counts commit with each batch. Validate the file
       // and boundary rows on every resume so recreated stores cannot hide behind reused IDs.
       const info = statSync(path)
@@ -344,7 +359,7 @@ export class UsageLedger {
             last = hash(row)
             importRow(row)
           }
-          this.setMeta(progressKey, JSON.stringify({ fingerprint, cursor, first, last, schema: sourceVersion }))
+          this.setMeta(progressKey, JSON.stringify({ fingerprint, cursor, first, last }))
         })
       }
     } finally { source.close() }
@@ -359,7 +374,7 @@ export class UsageLedger {
     if (previous?.signature === signature && previous.identity === identity) { this.warnings.push(...previous.warnings); return }
     const previousSize = previous?.signature ? Number(previous.signature.split(':')[0]) : previous?.offset
     const appended = previous && previous.identity === identity && (info.size > previousSize! || (info.size === previousSize && previous.signature === ''))
-    const samples: Sample[] = []
+    const samples: PendingSample[] = []
     const warnings: string[] = appended ? [...previous.warnings] : []
     let start: string | null = appended ? previous.start : null
     let lastCheckpoint = appended ? previous.offset : 0
@@ -385,8 +400,7 @@ export class UsageLedger {
           const usage = metrics.usage
           const value = counts({ input_tokens: usage.inputTokens, output_tokens: usage.outputTokens,
             cache_read_tokens: usage.cacheReadTokens, cache_write_tokens: usage.cacheWriteTokens, reasoning_tokens: usage.reasoningTokens })
-          const key = `shutdown:${session}:${hash({ at, model, start, value })}`
-          samples.push({ key, session, model, at, start, kind: 'shutdown', ...value })
+          samples.push({ session, model, at, start, kind: 'shutdown', ...value })
         }
       } catch (error) { if (warnings.length < 10) warnings.push(`Skipped invalid shutdown record: ${String(error)}`) }
     }, { allowPartial: true, allowEmpty: true, offset: appended ? previous.offset : 0, checkpoint })
@@ -420,17 +434,19 @@ export class UsageLedger {
       this.stmt('VACUUM INTO ?').run(temporary)
       // Retry state belongs to this live ledger, not to a portable snapshot.
       const copy = new DatabaseSync(temporary)
-      try { copy.exec("DELETE FROM metadata WHERE key IN ('backupStale','backupLastAttempt')") } finally { copy.close() }
+      // This unpublished copy is disposable on interruption. Avoid rollback
+      // sidecars in arbitrary export folders; validate before publishing it.
+      try { copy.exec("PRAGMA busy_timeout=1500; PRAGMA journal_mode=OFF; DELETE FROM metadata WHERE key IN ('backupStale','backupLastAttempt')") } finally { copy.close() }
       validateUsageDatabase(temporary)
       renameWithRetry(temporary, destination)
-    } finally { removeRecoveryArtifact(temporary) }
+    } finally { removeRecoveryArtifact(temporary); removeRecoveryArtifact(`${temporary}-journal`) }
   }
   backup(force = false, now = new Date()): void {
     const day = now.toISOString().slice(0, 10)
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
     const stale = this.backupWarning()
     const elapsed = now.getTime() - Date.parse(this.meta('backupLastAttempt') ?? '')
-    if (!force && stale && elapsed >= 0 && elapsed < 10 * 60_000) return
+    if (!force && stale && elapsed < 10 * 60_000) return
     if (force || stale || !existsSync(daily)) {
       // Persist before touching backup files so interruptions and worker restarts
       // retain the warning and force a retry even when today's backup exists.
@@ -444,7 +460,7 @@ export class UsageLedger {
         this.setMeta('lastBackup', now.toISOString())
         this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
       } catch (error) {
-        this.setMeta('backupStale', `Usage is committed, but the backup refresh failed: ${String(error)}`)
+        this.setMeta('backupStale', backupFailureWarning(error))
         throw error
       }
       // Only rotate after both replacement backups have passed integrity validation.
@@ -455,6 +471,9 @@ export class UsageLedger {
     }
   }
   backupWarning(): string | null { return this.meta('backupStale') }
+  tryBackup(force = false): void {
+    try { this.backup(force) } catch (error) { if (!this.backupWarning()) throw error }
+  }
   restoreFrom(path: string): void {
     if (resolve(path).toLowerCase() === resolve(this.path).toLowerCase()) throw new Error('Select a backup rather than the active usage database')
     validateUsageDatabase(path)
@@ -463,7 +482,7 @@ export class UsageLedger {
     try {
       const selected = new DatabaseSync(path, { readOnly: true })
       try { selected.prepare('VACUUM INTO ?').run(frozen) } finally { selected.close() }
-      this.backup(true)
+      this.tryBackup(true)
       const source = new DatabaseSync(frozen, { readOnly: true })
       try {
         this.transaction(() => {
@@ -480,7 +499,7 @@ export class UsageLedger {
         })
       } finally { source.close() }
     } finally { removeRecoveryArtifact(frozen) }
-    this.backup(true)
+    this.tryBackup(true)
   }
   report(month: string, scope: UsageScope = 'all', timezone?: string): UsageReport {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('Invalid usage month')

@@ -1,7 +1,7 @@
 // Exercises the production worker in the installed Electron runtime without starting a model or showing a window.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,14 +20,10 @@ async function runElectronCheck() {
   await app.whenReady()
   let service
   try {
-    const { DatabaseSync } = await import('node:sqlite')
+    const { seedSourceStore } = await import('../dist/scripts/usage-source-fixture.js')
     const { UsageService } = await import('../dist/src/main/usage-service.js')
     const home = join(root, 'copilot'), path = join(root, 'usage.sqlite')
-    await mkdir(home)
-    const source = new DatabaseSync(join(home, 'session-store.db'))
-    source.exec(`PRAGMA journal_mode=WAL; CREATE TABLE assistant_usage_events(id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
-      INSERT INTO assistant_usage_events VALUES(1,'session','model',100,20,40,10,'2026-09-08T00:00:00Z');`)
-    source.close()
+    seedSourceStore(home)
     service = new UsageService(path, home, console.error)
     await service.collect()
     assert.equal((await service.report('2026-09', 'all', 'UTC')).totals.input, 50)

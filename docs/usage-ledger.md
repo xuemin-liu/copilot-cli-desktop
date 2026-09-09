@@ -28,8 +28,10 @@ across restarts. Routine retries happen at most once per 10 minutes; update and
 quit flushes can retry immediately. Portable copies exclude local retry state.
 
 **Export backup** saves a portable copy to another folder. **Restore backup**
-merges valid records without deleting newer saved usage. Keep an export outside
-the app-data directory to protect against loss of that entire directory.
+merges valid records without deleting newer saved usage. A committed restore remains
+successful if its backup refresh fails; the backup warning stays visible for retry.
+Keep an export outside the app-data directory to protect against loss of that entire
+directory.
 
 ## Recovery
 

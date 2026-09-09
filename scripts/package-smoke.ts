@@ -1,10 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { windowsSystemExecutable } from '../src/main/resolve-copilot.js'
+import { seedSourceStore } from './usage-source-fixture.js'
 
 const execFileAsync = promisify(execFile)
 const PACKAGE_SMOKE_ENVIRONMENT = 'COPILOT_DESKTOP_PACKAGE_SMOKE'
@@ -20,11 +21,7 @@ async function main(): Promise<void> {
   const executable = resolve(process.argv[2] ?? 'release/win-unpacked/Copilot CLI Desktop.exe')
   const isolatedUserData = await mkdtemp(join(tmpdir(), 'copilot-desktop-package-smoke-'))
   const isolatedCopilotHome = join(isolatedUserData, 'copilot')
-  await mkdir(isolatedCopilotHome)
-  const source = new DatabaseSync(join(isolatedCopilotHome, 'session-store.db'))
-  source.exec(`CREATE TABLE assistant_usage_events(id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
-    INSERT INTO assistant_usage_events VALUES(1,'package-smoke','model',100,20,40,10,'2026-09-08T00:00:00Z')`)
-  source.close()
+  seedSourceStore(isolatedCopilotHome, 'package-smoke')
   let stopped = false
   let stderr = ''
   let signalRendererReady!: () => void

@@ -88,6 +88,27 @@ test('backup restore merges older records without losing newer usage or duplicat
   assert.throws(() => ledger.restoreFrom(path), /active usage database/)
 }))
 
+test('backup-only failures before or after restore do not misreport a committed merge', async (t) => {
+  for (const phase of ['before', 'after', 'both']) await fixture(async ({ ledger, home, request, root }) => {
+    request(); await ledger.collect(home)
+    const backup = join(root, 'selected.sqlite'); ledger.exportTo(backup)
+    ledger['db'].exec('DELETE FROM samples')
+    let calls = 0
+    const publish = ledger.exportTo.bind(ledger)
+    t.mock.method(ledger, 'exportTo', (destination: string) => {
+      calls++
+      if (phase === 'both' || calls === (phase === 'before' ? 1 : 3)) throw Object.assign(new Error('backup volume full'), { code: 'ENOSPC' })
+      publish(destination)
+    })
+    try {
+      ledger.restoreFrom(backup)
+      assert.equal(ledger.report('2026-09').totals.input, 50)
+      if (phase === 'before') assert.equal(ledger.backupWarning(), null, 'the successful post-merge backup clears the earlier failure')
+      else assert.match(ledger.backupWarning()!, /not enough disk space/)
+    } finally { t.mock.restoreAll() }
+  })
+})
+
 test('corruption restores a verified backup and preserves original damaged files', () => fixture(async ({ ledger, home, request, path }) => {
   request(); await ledger.collect(home); ledger.backup(true); ledger.close()
   writeFileSync(path, 'damaged')
@@ -198,6 +219,8 @@ test('failed forced backups persist across restart and retry despite an existing
     assert.match(reopened.report('2026-09').warnings.join(' '), /backup refresh failed/)
     const exported = t.mock.method(reopened, 'exportTo', () => { throw new Error('still locked') })
     await reopened.collect(home)
+    reopened.backup(false, new Date(now.getTime() - 60_000))
+    assert.equal(exported.mock.callCount(), 0, 'a clock rollback must not bypass the retry bound')
     for (let seconds = 30; seconds < 600; seconds += 30) reopened.backup(false, new Date(now.getTime() + seconds * 1000))
     assert.equal(exported.mock.callCount(), 0, 'routine retries must remain throttled after restart')
     assert.throws(() => reopened.backup(false, new Date(now.getTime() + 600_000)), /still locked/)
@@ -213,6 +236,25 @@ test('failed forced backups persist across restart and retry despite an existing
       } finally { backup.close() }
     }
   } finally { reopened.close() }
+}))
+
+test('backup warnings are bounded and stable across publish errors with different temporary paths', async (t) => fixture(async ({ ledger, root }) => {
+  const attempted: string[] = []
+  t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+    attempted.push(String(from))
+    throw Object.assign(new Error(`publish blocked: rename '${from}' -> '${to}' ${'private detail '.repeat(1000)}`), { code: 'EPERM' })
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => ledger.backup(true), /publish blocked/)
+    const first = ledger.backupWarning()!
+    assert.throws(() => ledger.backup(true), /publish blocked/)
+    assert.equal(ledger.backupWarning(), first)
+    assert.equal(new Set(attempted).size, 2)
+    assert.ok(first.length < 200)
+    assert.match(first, /EPERM.*denied/)
+    assert.ok(!first.includes(root) && !first.includes('.tmp') && !first.includes('private detail'))
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
 test('locked retention files do not mark fresh backups stale or cause repeated copies', async (t) => fixture(async ({ ledger }) => {
@@ -729,19 +771,49 @@ test('transient validation errors preserve the healthy ledger instead of install
   try { assert.equal(reopened.report('2026-09').models[0]?.requests, 2) } finally { reopened.close() }
 }))
 
-test('only owned incomplete backup copies are removed when a worker restarts', () => fixture(async ({ ledger, path }) => {
+test('owned incomplete backup copies and journals retry cleanup while unrelated files survive', async (t) => fixture(async ({ ledger, path }) => {
   ledger.backup(true); ledger.close()
   const uuid = '11111111-1111-4111-8111-111111111111'
   const abandoned = join(ledger.backupDirectory, `daily-2026-09-08.sqlite.${uuid}.tmp`)
   writeFileSync(abandoned, 'incomplete')
+  writeFileSync(abandoned + '-journal', 'interrupted journal')
   writeFileSync(`${path}.${uuid}.restore`, 'incomplete')
   writeFileSync(join(ledger.backupDirectory, 'unrelated.tmp'), 'keep')
+  writeFileSync(join(ledger.backupDirectory, 'unrelated.tmp-journal'), 'keep journal')
+  const attempts = new Map<string, number>()
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    const name = String(file)
+    attempts.set(name, (attempts.get(name) ?? 0) + 1)
+    if (name.startsWith(abandoned) && attempts.get(name)! <= 2) throw Object.assign(new Error('transient lock'), { code: 'EPERM' })
+    unlink(file)
+  })
+  syncBuiltinESMExports()
   const reopened = new UsageLedger(path)
   try {
     assert.ok(!readdirSync(ledger.backupDirectory).includes(`daily-2026-09-08.sqlite.${uuid}.tmp`))
     assert.ok(!readdirSync(join(path, '..')).some((file) => file.endsWith('.restore')))
     assert.equal(readFileSync(join(ledger.backupDirectory, 'unrelated.tmp'), 'utf8'), 'keep')
-  } finally { reopened.close() }
+    assert.equal(readFileSync(join(ledger.backupDirectory, 'unrelated.tmp-journal'), 'utf8'), 'keep journal')
+    assert.ok(!fs.existsSync(abandoned + '-journal'))
+    assert.equal(attempts.get(abandoned), 3)
+    assert.equal(attempts.get(abandoned + '-journal'), 3)
+  } finally { reopened.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
+test('a failed manual export removes its own temporary journal from the selected folder', async (t) => fixture(async ({ ledger, root }) => {
+  const folder = join(root, 'external-export'); mkdirSync(folder)
+  const destination = join(folder, 'selected.sqlite')
+  writeFileSync(join(folder, 'unrelated.tmp-journal'), 'keep')
+  t.mock.method(fs, 'renameSync', (from: fs.PathLike) => {
+    writeFileSync(String(from) + '-journal', 'interrupted write')
+    throw new Error('publish failed')
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => ledger.exportTo(destination), /publish failed/)
+    assert.deepEqual(readdirSync(folder), ['unrelated.tmp-journal'])
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
 test('history import rejects non-files and continues after malformed usage records', () => fixture(async ({ ledger, home, shutdown }) => {

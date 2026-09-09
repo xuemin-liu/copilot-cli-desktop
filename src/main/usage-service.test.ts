@@ -8,6 +8,7 @@ import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { EventEmitter } from 'node:events'
 import { Worker } from 'node:worker_threads'
 import { UsageLedger } from './usage-ledger.js'
+import { seedSourceStore } from '../../scripts/usage-source-fixture.js'
 
 class TestWorker extends EventEmitter {
   sent: Array<{ id: number; method: string }> = []
@@ -281,11 +282,7 @@ test('unavailable-worker errors take precedence over update admission errors', a
 test('worker collects, exports, merges and shuts down with committed usage', async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-worker-test-'))
   const home = join(root, 'copilot'), path = join(root, 'app', 'usage.sqlite')
-  await mkdir(home)
-  const source = new DatabaseSync(join(home, 'session-store.db'))
-  source.exec(`CREATE TABLE assistant_usage_events (id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
-    INSERT INTO assistant_usage_events VALUES(1,'session','model',100,20,40,10,'2026-09-08T00:00:00Z')`)
-  source.close()
+  seedSourceStore(home)
   const diagnostics: string[] = []
   const service = new UsageService(path, home, (message) => diagnostics.push(message))
   try {
@@ -306,10 +303,7 @@ test('worker collects, exports, merges and shuts down with committed usage', asy
 test('periodic and forced backup failures share one durable report warning and log each failure transition once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-backup-failure-'))
   const path = join(root, 'usage.sqlite')
-  const source = new DatabaseSync(join(root, 'session-store.db'))
-  source.exec(`CREATE TABLE assistant_usage_events (id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
-    INSERT INTO assistant_usage_events VALUES(1,'session','model',100,20,40,10,'2026-09-08T00:00:00Z')`)
-  source.close()
+  seedSourceStore(root)
   await writeFile(join(root, 'usage-backups'), 'backup directory unavailable')
   const diagnostics: string[] = []
   const service = new UsageService(path, root, (message) => diagnostics.push(message))
@@ -326,6 +320,24 @@ test('periodic and forced backup failures share one durable report warning and l
     await rm(join(root, 'usage-backups'))
     await service.flush()
     assert.doesNotMatch((await service.report('2026-09', 'all')).warnings.join(' '), /backup refresh/)
+  } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('worker restore succeeds and collects new source rows when both backup refreshes fail', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'usage-restore-backup-failure-'))
+  const path = join(root, 'usage.sqlite'), backup = join(root, 'selected.sqlite')
+  seedSourceStore(root)
+  const service = new UsageService(path, root, () => {})
+  try {
+    await service.collect(); await service.exportTo(backup)
+    await rm(join(root, 'usage-backups'), { recursive: true })
+    await writeFile(join(root, 'usage-backups'), 'backup location unavailable')
+    const source = new DatabaseSync(join(root, 'session-store.db'))
+    try { source.exec('INSERT INTO assistant_usage_events SELECT 2,session_id,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,created_at FROM assistant_usage_events WHERE id=1') } finally { source.close() }
+    await service.restoreFrom(backup)
+    const report = await service.report('2026-09', 'all')
+    assert.equal(report.totals.input, 100, 'restore must run its follow-up collection')
+    assert.equal(report.warnings.filter((warning) => warning.includes('backup refresh failed')).length, 1)
   } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
 })
 

@@ -17,10 +17,7 @@ async function openLedger(): Promise<UsageLedger> {
 async function collect(backup: 'daily' | 'forced' | 'none' = 'daily'): Promise<UsageFlushResult> {
   const value = await openLedger()
   await value.collect(home)
-  if (backup !== 'none') {
-    try { value.backup(backup === 'forced') }
-    catch (error) { if (!value.backupWarning()) throw error }
-  }
+  if (backup !== 'none') value.tryBackup(backup === 'forced')
   return { backupWarning: value.backupWarning() }
 }
 let queue = Promise.resolve()
