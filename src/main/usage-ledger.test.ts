@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { UsageLedger, recoverUsageDatabase } from './usage-ledger.js'
+import { UsageLedger, recoverUsageDatabase, replayUsageRecovery } from './usage-ledger.js'
 
 const SESSION = '12345678-1234-1234-1234-123456789012'
 async function fixture(action: (f: { root: string; home: string; path: string; source: DatabaseSync; ledger: UsageLedger; request: (at?: string, input?: number) => void; shutdown: (at: string, input: number) => void }) => Promise<void>): Promise<void> {
@@ -174,6 +174,70 @@ test('backup rotation keeps the promised daily and monthly retention', () => fix
   assert.equal(readdirSync(ledger.backupDirectory).filter((file) => file.startsWith('monthly-')).length, 12)
 }))
 
+test('retention ignores daily and monthly prefixes in ancestor directory names', () => fixture(async ({ root }) => {
+  const nested = new UsageLedger(join(root, 'daily-build', 'monthly-data', 'usage.sqlite'))
+  try {
+    for (let index = 0; index < 40; index++) nested.backup(true, new Date(Date.UTC(2026, 0, index + 1)))
+    for (let index = 0; index < 15; index++) nested.backup(true, new Date(Date.UTC(2026, index, 1)))
+    const files = readdirSync(nested.backupDirectory)
+    assert.equal(files.filter((file) => file.startsWith('daily-')).length, 30)
+    assert.equal(files.filter((file) => file.startsWith('monthly-')).length, 12)
+  } finally { nested.close() }
+}))
+
+test('failed forced backups persist across restart and retry despite an existing daily copy', async (t) => fixture(async ({ ledger, home, request, path }) => {
+  request(); await ledger.collect(home); ledger.backup(true)
+  request(); await ledger.collect(home)
+  t.mock.method(ledger, 'exportTo', () => { throw new Error('backup locked') })
+  assert.throws(() => ledger.backup(true), /backup locked/)
+  assert.match(ledger.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    assert.match(reopened.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+    const exported = t.mock.method(reopened, 'exportTo', () => { throw new Error('still locked') })
+    await reopened.collect(home)
+    assert.throws(() => reopened.backup(), /still locked/)
+    assert.equal(exported.mock.callCount(), 1)
+    t.mock.restoreAll()
+    reopened.backup()
+    assert.doesNotMatch(reopened.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+    for (const file of readdirSync(reopened.backupDirectory)) {
+      const backup = new DatabaseSync(join(reopened.backupDirectory, file), { readOnly: true })
+      try { assert.equal(backup.prepare('SELECT count(*) AS n FROM samples').get()?.n, 2) } finally { backup.close() }
+    }
+  } finally { reopened.close() }
+}))
+
+test('locked restore-copy cleanup does not mask the merge or skip its backup', async (t) => fixture(async ({ ledger, home, request, root }) => {
+  request(); await ledger.collect(home)
+  const backup = join(root, 'export.sqlite'); ledger.exportTo(backup)
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    if (String(file).endsWith('.restore')) throw Object.assign(new Error('cleanup locked'), { code: 'EPERM' })
+    unlink(file)
+  })
+  syncBuiltinESMExports()
+  const backups = t.mock.method(ledger, 'backup', ledger.backup.bind(ledger))
+  try {
+    ledger.restoreFrom(backup)
+    assert.equal(ledger.report('2026-09').totals.input, 50)
+    assert.equal(backups.mock.callCount(), 2)
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
+test('export cleanup preserves the original export error when its temporary is locked', async (t) => fixture(async ({ ledger, root }) => {
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'renameSync', () => { throw new Error('export destination unavailable') })
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    if (String(file).endsWith('.tmp')) throw Object.assign(new Error('cleanup locked'), { code: 'EPERM' })
+    unlink(file)
+  })
+  syncBuiltinESMExports()
+  try { assert.throws(() => ledger.exportTo(join(root, 'export.sqlite')), /export destination unavailable/) }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
 test('invalid rows do not prevent later usage from being collected and warnings persist', () => fixture(async ({ ledger, home, request, source }) => {
   request(); request('2026-09-09T00:00:00Z'); request('2026-09-10T00:00:00Z')
   source.exec('UPDATE assistant_usage_events SET input_tokens=NULL WHERE id=2')
@@ -280,13 +344,13 @@ test('a missing ledger preserves old restore points across forced backups and re
   } finally { reopened.close() }
 }))
 
-test('failed restore renames roll back every completed move', async (t) => fixture(async ({ ledger, path, root, home, request }) => {
+test('failed restore renames retain originals and use startup replay for every boundary', async (t) => {
+  for (const failure of ['-wal', '-shm', '', 'install']) await fixture(async ({ ledger, path, root, home, request }) => {
   request(); await ledger.collect(home)
   const backup = join(root, 'export.sqlite')
   ledger.exportTo(backup); ledger.close()
   const bytes = readFileSync(path)
   const rename = fs.renameSync
-  for (const failure of ['-wal', '-shm', '', 'install']) {
     writeFileSync(path + '-wal', 'original wal'); writeFileSync(path + '-shm', 'original shm')
     t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
       if (failure === 'install' ? String(from).endsWith('.recovered') : String(from) === path + failure) throw Object.assign(new Error('access denied'), { code: 'EPERM' })
@@ -295,12 +359,17 @@ test('failed restore renames roll back every completed move', async (t) => fixtu
     syncBuiltinESMExports()
     try { assert.throws(() => recoverUsageDatabase(path, backup), /access denied/) }
     finally { t.mock.restoreAll(); syncBuiltinESMExports() }
-    assert.deepEqual(readFileSync(path), bytes)
-    assert.equal(readFileSync(path + '-wal', 'utf8'), 'original wal')
-    assert.equal(readFileSync(path + '-shm', 'utf8'), 'original shm')
-    assert.ok(!readdirSync(join(path, '..')).some((name) => /recovered|recovery-pending|corrupt-/.test(name)))
-  }
-}))
+    const journal = JSON.parse(readFileSync(`${path}.recovery-pending`, 'utf8')) as { originals: [string, string][] }
+    for (const [original, parked] of journal.originals) {
+      const expected = original.endsWith('-wal') ? Buffer.from('original wal') : original.endsWith('-shm') ? Buffer.from('original shm') : bytes
+      assert.deepEqual(readFileSync(fs.existsSync(original) ? original : parked), expected)
+    }
+    replayUsageRecovery(path)
+    assert.ok(!fs.existsSync(`${path}.recovery-pending`))
+    const reopened = new UsageLedger(path)
+    try { assert.equal(reopened.report('2026-09').totals.input, 50) } finally { reopened.close() }
+  })
+})
 
 test('an invalid recovery journal preserves all evidence and never moves arbitrary files', () => fixture(async ({ ledger, path }) => {
   ledger.close(); rmSync(path)
@@ -325,9 +394,9 @@ test('startup completes recovery at every interrupted rename boundary', async ()
     if (completed === 4) fs.renameSync(temporary, path)
     const reopened = new UsageLedger(path)
     try {
-      assert.equal(reopened.report('2026-09').models[0]?.requests, 1)
+      assert.equal(reopened.report('2026-09').models[0]?.requests, completed === 0 ? 2 : 1)
       assert.ok(!fs.existsSync(`${path}.recovery-pending`))
-      assert.equal(readFileSync(path + suffix + '-wal', 'utf8'), 'old wal')
+      if (completed > 0) assert.equal(readFileSync(path + suffix + '-wal', 'utf8'), 'old wal')
     } finally { reopened.close() }
   })
 })
@@ -343,12 +412,55 @@ test('a locked recovery journal does not turn a completed restore into a failure
   syncBuiltinESMExports()
   try {
     recoverUsageDatabase(path, backup)
+    // A stale journal that cannot be unlinked must not block a new explicit restore.
+    recoverUsageDatabase(path, backup)
     const reopened = new UsageLedger(path)
     try { assert.equal(reopened.report('2026-09').totals.input, 50) } finally { reopened.close() }
   } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
   const retried = new UsageLedger(path)
   retried.close()
   assert.ok(!fs.existsSync(`${path}.recovery-pending`))
+}))
+
+test('a truncated unstarted recovery copy cannot block the intact ledger or explicit restore', () => fixture(async ({ ledger, path, root, home, request }) => {
+  request(); await ledger.collect(home)
+  const backup = join(root, 'export.sqlite'); ledger.exportTo(backup)
+  request(); await ledger.collect(home); ledger.close()
+  const temporary = `${path}.11111111-1111-4111-8111-111111111111.recovered`
+  const suffix = '.corrupt-1-22222222-2222-4222-8222-222222222222'
+  const journal = { path, temporary, originals: ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension]) }
+  writeFileSync(temporary, 'truncated copy')
+  writeFileSync(`${path}.recovery-pending`, JSON.stringify(journal))
+  const reopened = new UsageLedger(path)
+  try { assert.equal(reopened.report('2026-09').models[0]?.requests, 2) } finally { reopened.close() }
+  writeFileSync(temporary, 'truncated copy')
+  writeFileSync(`${path}.recovery-pending`, JSON.stringify(journal))
+  recoverUsageDatabase(path, backup)
+  const restored = new UsageLedger(path)
+  try { assert.equal(restored.report('2026-09').models[0]?.requests, 1) } finally { restored.close() }
+}))
+
+test('a stale completed journal never rolls corrupt originals back after ledger deletion', async (t) => fixture(async ({ ledger, path, root, home, request }) => {
+  request(); await ledger.collect(home); ledger.backup(true)
+  const backup = join(root, 'export.sqlite'); ledger.exportTo(backup); ledger.close()
+  writeFileSync(path, 'corrupt original')
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    if (String(file).endsWith('.recovery-pending')) throw new Error('permanent journal cleanup failure')
+    unlink(file)
+  })
+  syncBuiltinESMExports()
+  try {
+    recoverUsageDatabase(path, backup)
+    rmSync(path)
+    const reopened = new UsageLedger(path)
+    try {
+      assert.equal(reopened.report('2026-09').totals.input, 0)
+      assert.match(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
+    } finally { reopened.close() }
+    const parked = readdirSync(join(path, '..')).find((name) => /^usage\.sqlite\.corrupt-/.test(name))!
+    assert.equal(readFileSync(join(path, '..', parked), 'utf8'), 'corrupt original')
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
 test('locked old backup files require no directory moves and remain recovery candidates', async (t) => fixture(async ({ ledger, path, home, request }) => {

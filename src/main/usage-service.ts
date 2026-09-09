@@ -21,6 +21,9 @@ interface ServiceOptions {
   shutdownTimeoutMs?: number
 }
 
+/** No worker work can be admitted; optional maintenance may proceed without it. */
+export class UsageServiceUnavailableError extends Error {}
+
 /** Main-side queue: only the active operation has a deadline. Unsent calls survive worker replacement. */
 export class UsageService {
   private worker: UsageWorker | null = null
@@ -35,7 +38,7 @@ export class UsageService {
   private restartAttempts = 0
   private unavailable: Error | null = null
   private termination: Promise<void> | null = null
-  private state: 'running' | 'paused' | 'stopping' | 'closed' | 'unavailable' = 'running'
+  private state: 'running' | 'paused' | 'stopping' | 'closed' = 'running'
   private stopPromise: Promise<void> | null = null
   private collecting: Promise<void> | null = null
   private followupCollection: Promise<void> | null = null
@@ -92,14 +95,12 @@ export class UsageService {
     this.diagnostic(String(error))
     // Stop automatic retries after repeated failures; restarting the app retries safely.
     if (++this.restartAttempts >= 3) {
-      this.unavailable = new Error('Usage worker repeatedly failed; restart the app to retry. ' + error.message)
-      this.state = 'unavailable'
+      this.unavailable = new UsageServiceUnavailableError('Usage worker repeatedly failed; restart the app to retry. ' + error.message)
       clearInterval(this.timer)
       for (const request of this.queue.splice(0)) request.reject(error)
     }
     this.restarting = withShutdownDeadline(worker.terminate(), this.options.shutdownTimeoutMs ?? 15_000).catch((failure: Error) => {
-      this.unavailable = new Error('Usage worker could not stop; restart the app to retry. ' + failure.message)
-      this.state = 'unavailable'
+      this.unavailable = new UsageServiceUnavailableError('Usage worker could not stop; restart the app to retry. ' + failure.message)
       clearInterval(this.timer)
       for (const request of this.queue.splice(0)) request.reject(this.unavailable)
     }).finally(() => {
@@ -111,8 +112,7 @@ export class UsageService {
     if (this.state === 'closed' || this.unavailable || this.active || this.restarting || !this.queue.length) return
     if (!this.worker) {
       try { this.startWorker() } catch (error) {
-        this.unavailable = error as Error
-        this.state = 'unavailable'
+        this.unavailable = new UsageServiceUnavailableError(String(error), { cause: error })
         clearInterval(this.timer)
         for (const request of this.queue.splice(0)) request.reject(this.unavailable)
       }
@@ -128,7 +128,7 @@ export class UsageService {
   }
   private admissionError(method: string, args: unknown[] = []): Error | null {
     if (this.unavailable) return this.unavailable
-    if (this.state === 'closed' || (this.state === 'stopping' && method !== 'flush')) return new Error('Usage service is stopping')
+    if (this.state === 'closed' || (this.state === 'stopping' && method !== 'flush')) return new UsageServiceUnavailableError('Usage service is stopping')
     if (this.state === 'paused' && method !== 'flush' && !(method === 'report' && args[2] === undefined)) return new Error('Usage writes are paused for update installation')
     return null
   }
@@ -167,7 +167,8 @@ export class UsageService {
   exportTo(path: string): Promise<void> { return this.call('export', path) }
   restoreFrom(path: string): Promise<void> { return this.call('restore', path) }
   pauseCollection(): void {
-    const error = this.admissionError('flush')
+    const error = this.admissionError('pause')
+    if (this.state === 'paused' && !this.unavailable) return
     if (error) throw error
     if (this.state === 'running') this.state = 'paused'
   }
@@ -186,7 +187,7 @@ export class UsageService {
       backupWarning = result?.backupWarning ?? null
       this.lastCollectionError = backupWarning
       if (this.lastCollectionError) this.diagnostic(this.lastCollectionError)
-      this.lastFlushedVersion = version
+      this.lastFlushedVersion = backupWarning ? -1 : version
     }, (error: unknown) => {
       this.lastCollectionError = String(error); throw error
     }).finally(() => { if (this.flushing?.promise === work) this.flushing = null })

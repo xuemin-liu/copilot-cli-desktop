@@ -20,9 +20,11 @@ Verified SQLite backups retain 30 daily and 12 monthly copies per ledger generat
 under `usage-backups/`. Earlier generations remain discoverable for recovery.
 Updates and normal shutdown finish collection and refresh backups with a bounded wait.
 The desktop installer waits for collected usage to commit, with writes paused after
-sessions stop. Backup-only failures produce a warning without blocking installation.
+sessions stop. Backup-only failures produce a warning without blocking installation
+and get another backup attempt during quit. An already unavailable usage worker is
+logged and does not block desktop updates; failures from a live collector still do.
 A timeout leaves the update available to retry; retries reuse the pending flush when
-the source has not changed. Quit reuses the result when no usage or timezone write
+the source has not changed. Quit reuses a successful backup when no usage or timezone write
 has occurred. Read-only reports do not require another backup. The same collector stays
 available if installation fails or does nothing, and stops during quit. Overall shutdown
 has a 30-second deadline; committed usage is retained if final cleanup cannot finish.
@@ -38,9 +40,11 @@ fresh in a new backup generation, without moving or rotating earlier copies. An 
 backup directory does not trigger a missing-data warning. Use **Restore backup** to
 recover earlier records and clear the warning. Legacy `usage-backups-preserved-*`
 folders remain recovery candidates too; historical generations are retained until
-manually removed. Failed restore renames are retried and rolled back; valid interrupted
-recovery journals replay at startup, and transient journal-cleanup locks do not hide
-a successful restore. **Export backup** saves
+manually removed. Failed restore renames retain originals and a durable recovery copy
+for startup replay. Stale journals leave an intact ledger in place and never restore
+corrupt originals after a later ledger deletion. Cleanup locks do not hide a successful
+restore. Failed backup refreshes remain visible across restarts and retry even when
+today's backup already exists. **Export backup** saves
 a portable copy to another folder. **Restore backup** merges records without deleting
 newer saved usage. Keep an export outside the app-data directory to protect against
 loss of that entire directory. No prompt contents or credentials are stored in the ledger.

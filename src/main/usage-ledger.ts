@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, lstatSync, statSync, unlinkSync, writeFileSync, readFileSync, type Dirent } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, lstatSync, statSync, unlinkSync, writeFileSync, readFileSync, openSync, fsyncSync, closeSync, type Dirent } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope } from './usage-types.js'
 import { visitSessionHistoryLines } from './session-history.js'
@@ -80,44 +80,40 @@ function removeRecoveryArtifact(path: string): void {
   try { retryFileOperationSync(() => { if (existsSync(path)) unlinkSync(path) }) } catch { /* Replay/cleanup retries next startup without masking a completed recovery. */ }
 }
 
+function recoveryPlan(path: string, suffix: string, temporary: string) {
+  return { path, temporary, originals: ['-wal', '-shm', ''].map((extension): [string, string] => [path + extension, path + suffix + extension]) }
+}
+function installRecovery(plan: ReturnType<typeof recoveryPlan>): void {
+  validateUsageDatabase(plan.temporary)
+  // Move sidecars first so an access failure cannot strand them beside a new ledger.
+  for (const [original, parked] of plan.originals) {
+    if (!existsSync(original)) continue
+    if (existsSync(parked)) throw new Error('Ambiguous usage recovery files; originals were preserved')
+    renameWithRetry(original, parked)
+  }
+  renameWithRetry(plan.temporary, plan.path)
+  removeRecoveryArtifact(`${plan.path}.recovery-pending`)
+}
+
 /** Finish an interrupted restore using only validated, owned journal paths. */
 export function replayUsageRecovery(path: string): void {
   const journal = `${path}.recovery-pending`
   if (!existsSync(journal)) return
   const record = JSON.parse(readFileSync(journal, 'utf8')) as { path?: unknown; temporary?: unknown; originals?: unknown }
-  const normalized = resolve(path)
   if (record.path !== path || typeof record.temporary !== 'string' || !record.temporary.startsWith(path + '.')
     || !new RegExp(`^${UUID}\\.recovered$`, 'i').test(record.temporary.slice(path.length + 1))
     || !Array.isArray(record.originals) || record.originals.length !== 3) throw new Error('Invalid usage recovery journal; files were preserved')
-  const pairs = record.originals as Array<[string, string]>
-  let suffix: string | undefined
-  for (const [index, extension] of ['-wal', '-shm', ''].entries()) {
-    const pair = pairs[index]
-    if (!Array.isArray(pair) || pair.length !== 2 || pair[0] !== path + extension || typeof pair[1] !== 'string') throw new Error('Invalid usage recovery journal paths')
-    const tail = pair[1].slice(path.length)
-    const currentSuffix = extension ? tail.slice(0, -extension.length) : tail
-    if (resolve(pair[0]) !== normalized + extension || !pair[1].startsWith(path) || !tail.endsWith(extension)
-      || !new RegExp(`^\\.corrupt-\\d+-${UUID}$`, 'i').test(currentSuffix) || (suffix && suffix !== currentSuffix)) throw new Error('Invalid usage recovery journal paths')
-    suffix = currentSuffix
-  }
-  // Missing temporary + present main file means installation or rollback already
-  // completed. Leave the current ledger in place, even if cleanup was AV-locked.
-  if (existsSync(record.temporary)) {
-    validateUsageDatabase(record.temporary)
-    for (const [original, parked] of pairs) {
-      if (!existsSync(original)) continue
-      if (existsSync(parked)) throw new Error('Ambiguous usage recovery files; originals were preserved')
-      renameWithRetry(original, parked)
-    }
-    renameWithRetry(record.temporary, path)
-  } else if (!existsSync(path)) {
-    for (const [original, parked] of [...pairs].reverse()) {
-      if (!existsSync(parked)) continue
-      if (existsSync(original)) throw new Error('Ambiguous usage recovery files; originals were preserved')
-      renameWithRetry(parked, original)
-    }
-    if (!existsSync(path)) throw new Error('Usage recovery files are unavailable; original journal was preserved')
-  }
+  const mainPair: unknown = record.originals[2]
+  if (!Array.isArray(mainPair) || typeof mainPair[1] !== 'string' || !mainPair[1].startsWith(path)) throw new Error('Invalid usage recovery journal paths')
+  const suffix = mainPair[1].slice(path.length)
+  const plan = recoveryPlan(path, suffix, record.temporary)
+  if (!new RegExp(`^\\.corrupt-\\d+-${UUID}$`, 'i').test(suffix)
+    || JSON.stringify(record.originals) !== JSON.stringify(plan.originals)) throw new Error('Invalid usage recovery journal paths')
+  // No moves means the original is intact, even if the pre-install copy was
+  // truncated. A missing copy means installation already finished: never restore
+  // parked (possibly corrupt) files over a current ledger or a later deletion.
+  const untouched = existsSync(path) && !plan.originals.some(([, parked]) => existsSync(parked))
+  if (existsSync(plan.temporary) && !untouched) installRecovery(plan)
   removeRecoveryArtifact(record.temporary)
   removeRecoveryArtifact(journal)
 }
@@ -129,35 +125,23 @@ export function recoverUsageDatabase(path: string, backup: string): void {
   if (resolve(path).toLowerCase() === resolve(backup).toLowerCase()) throw new Error('Select a separate usage backup')
   validateUsageDatabase(backup)
   const temporary = `${path}.${randomUUID()}.recovered`
-  const moved: Array<[string, string]> = []
-  let retainRecovery = false
   let journalCreated = false
   try {
     const source = new DatabaseSync(backup, { readOnly: true })
     try { source.prepare('VACUUM INTO ?').run(temporary) } finally { source.close() }
     validateUsageDatabase(temporary)
+    const copy = openSync(temporary, 'r+')
+    try { fsyncSync(copy) } finally { closeSync(copy) }
     const suffix = `.corrupt-${Date.now()}-${randomUUID()}`
-    writeFileSync(journal, JSON.stringify({ path, temporary, originals: ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension]) }), { flag: 'wx', flush: true })
+    const plan = recoveryPlan(path, suffix, temporary)
+    // Replay above has settled any previous plan, including a journal whose
+    // cleanup was locked. Replacing that stale journal is safe.
+    writeFileSync(journal, JSON.stringify(plan), { flag: 'w', flush: true })
     journalCreated = true
-    // Move sidecars first so an access failure cannot strand them beside a new ledger.
-    for (const extension of ['-wal', '-shm', '']) {
-      if (existsSync(path + extension)) {
-        renameWithRetry(path + extension, path + suffix + extension)
-        moved.push([path + extension, path + suffix + extension])
-      }
-    }
-    renameWithRetry(temporary, path)
-  } catch (error) {
-    for (const [original, parked] of moved.reverse()) {
-      try { renameWithRetry(parked, original) } catch { retainRecovery = true }
-    }
-    if (retainRecovery) throw new Error(`Usage recovery could not roll back all original files. Preserved originals and recovery copy at ${temporary}; resolve file access before retrying.`, { cause: error })
-    throw error
+    installRecovery(plan)
   } finally {
-    if (!retainRecovery) {
-      removeRecoveryArtifact(temporary)
-      if (journalCreated) removeRecoveryArtifact(journal)
-    }
+    // Once journaled, leave failures for the same replay path used after a crash.
+    if (!journalCreated) removeRecoveryArtifact(temporary)
   }
 }
 
@@ -229,12 +213,11 @@ export class UsageLedger {
   private cleanInterruptedCopies(): void {
     if (existsSync(`${this.path}.recovery-pending`)) return
     // A new worker starts only after the previous one exits. Restrict cleanup to our exact temporary names.
-    const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
     for (const directory of [dirname(this.path), this.backupDirectory]) {
       if (!existsSync(directory)) continue
       const pattern = directory === this.backupDirectory
-        ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${uuid}\\.tmp$`, 'i')
-        : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${uuid}\\.(?:restore|recovered)$`, 'i')
+        ? new RegExp(`^(?:daily-\\d{4}-\\d{2}-\\d{2}|monthly-\\d{4}-\\d{2})\\.sqlite\\.${UUID}\\.tmp$`, 'i')
+        : new RegExp(`^${basename(this.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${UUID}\\.(?:restore|recovered)$`, 'i')
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         if (entry.isFile() && pattern.test(entry.name)) {
           try { unlinkSync(join(directory, entry.name)) } catch { /* An AV lock can be retried on the next worker start. */ }
@@ -430,21 +413,26 @@ export class UsageLedger {
       this.stmt('VACUUM INTO ?').run(temporary)
       validateUsageDatabase(temporary)
       renameWithRetry(temporary, destination)
-    } finally { if (existsSync(temporary)) unlinkSync(temporary) }
+    } finally { removeRecoveryArtifact(temporary) }
   }
   backup(force = false, now = new Date()): void {
-    mkdirSync(this.backupDirectory, { recursive: true })
     const day = now.toISOString().slice(0, 10)
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
-    if (force || !existsSync(daily)) {
+    if (force || this.meta('backupStale') || !existsSync(daily)) {
+      // Persist before touching backup files so interruptions and worker restarts
+      // retain the warning and force a retry even when today's backup exists.
+      this.setMeta('backupStale', '1')
+      mkdirSync(this.backupDirectory, { recursive: true })
       this.exportTo(daily)
       const monthly = join(this.backupDirectory, `monthly-${day.slice(0, 7)}.sqlite`)
       this.exportTo(monthly)
       this.setMeta('lastBackup', now.toISOString())
       // Only rotate after both replacement backups have passed integrity validation.
+      const backups = this.backups()
       for (const [prefix, keep] of [['daily-', 30], ['monthly-', 12]] as const) {
-        for (const file of this.backups().filter((path) => path.includes(prefix)).slice(keep)) unlinkSync(file)
+        for (const file of backups.filter((path) => basename(path).startsWith(prefix)).slice(keep)) unlinkSync(file)
       }
+      this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
     }
   }
   restoreFrom(path: string): void {
@@ -471,7 +459,7 @@ export class UsageLedger {
           this.stmt("DELETE FROM metadata WHERE key IN ('missingLedgerWarning','recoveryWarning')").run()
         })
       } finally { source.close() }
-    } finally { if (existsSync(frozen)) unlinkSync(frozen) }
+    } finally { removeRecoveryArtifact(frozen) }
     this.backup(true)
   }
   report(month: string, scope: UsageScope = 'all', timezone?: string): UsageReport {
@@ -518,6 +506,7 @@ export class UsageLedger {
     const models = new Map<string, UsageGroup>(), sessions = new Map<string, UsageGroup>()
     const months = new Set<string>([month])
     const warnings = new Set<string>(JSON.parse(this.meta('warnings') ?? '[]') as string[])
+    if (this.meta('backupStale')) warnings.add('Usage is committed, but the backup refresh is pending. Collection will retry the backup; existing backups may be stale.')
     const activeSource = `${hash(this.meta('sourcePath') ?? '')}:%`
     const rejected = Number(this.stmt('SELECT count(*) AS n FROM rejected_usage WHERE key LIKE ?').get(activeSource)?.n)
     if (rejected) {

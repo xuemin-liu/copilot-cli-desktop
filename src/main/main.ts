@@ -113,7 +113,7 @@ import {
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
-import { UsageService } from './usage-service.js'
+import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 
 let usageService: UsageService | null = null
@@ -505,8 +505,8 @@ async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void
   broadcastSettingsPreferences()
 }
 
-function finishClosePrompt(window: BrowserWindow): void {
-  if (closePromptWindow !== window) return
+function finishClosePrompt(window: BrowserWindow, owner: AbortController | null): void {
+  if (closePromptWindow !== window || closePromptAbort !== owner) return
   closePromptWindow = null
   closePromptAbort = null
   const shouldResumeQuit = quitAfterClosePrompt && explicitQuitRequested
@@ -582,7 +582,7 @@ async function promptForWindowClose(window: BrowserWindow): Promise<void> {
       await writeAppLog(`Close dialog failed: ${String(error)}`).catch(() => {})
     }
   } finally {
-    finishClosePrompt(window)
+    finishClosePrompt(window, abort)
   }
 }
 
@@ -1685,7 +1685,7 @@ function createWindow(
     observe(promptForWindowClose(window), 'Could not show close confirmation')
   })
   window.on('closed', () => {
-    finishClosePrompt(window)
+    finishClosePrompt(window, closePromptAbort)
     mainWindow = null
   })
   observe(window.loadFile(rendererPath('index.html')), 'Could not load application window')
@@ -2162,10 +2162,16 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   refreshMenus()
   try {
     await withShutdownDeadline(stopAllSessions().then(() => configWriteQueue))
-    usageService?.pauseCollection()
+    if (quittingAllSessions) { preparingUpdate = false; return }
     // Flush before the installer can launch, retaining the service until before-quit.
     // A failed or no-op installer therefore never requires a second database owner.
-    await withShutdownDeadline(usageService?.flush() ?? Promise.resolve())
+    try {
+      usageService?.pauseCollection()
+      await withShutdownDeadline(usageService?.flush() ?? Promise.resolve())
+    } catch (error) {
+      if (!(error instanceof UsageServiceUnavailableError)) throw error
+      await writeAppLog(`Usage unavailable during update preparation: ${String(error)}`).catch(() => {})
+    }
     preparingUpdate = false
     if (quittingAllSessions) return
     if (updatePreparationFailed) throw new Error('The updater failed while preparing installation')
@@ -2178,6 +2184,7 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   } catch (error) {
     preparingUpdate = false
     recoverUpdateAttempt()
+    if (quittingAllSessions) return
     throw error
   }
 })

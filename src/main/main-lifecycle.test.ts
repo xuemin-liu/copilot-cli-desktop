@@ -19,10 +19,14 @@ interface Harness {
   beginQuit(): boolean
   configureUsageStop(stop: () => Promise<void>): void
   configureUpdate(stop: () => Promise<void>, install: () => void): void
+  configureUsageUnavailable(phase: 'pause' | 'flush'): void
   updateError(): void
   updateBusy(): boolean
   configureClosePrompt(): void
   closePromptDismissed(): boolean
+  promptClose(window: { isDestroyed(): boolean }, result: Promise<{ response: number }>): Promise<void>
+  dismissClosePrompt(): void
+  quitPendingOnPrompt(): boolean
   configureBlockedConfig(work: Promise<void>): void
   configureMaintenance(): void
   maintenanceCalls: string[]
@@ -107,8 +111,16 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
           configureBlockedConfig(work) { configWriteQueue = work; },
           configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {}, noteSourceChanged() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
+          configureUsageUnavailable(phase) {
+            const error = new UsageServiceUnavailableError('Usage worker repeatedly failed');
+            if (phase === 'pause') usageService.pauseCollection = () => { throw error; };
+            else usageService.flush = async () => { throw error; };
+          },
           configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; closePromptAbort = new AbortController(); },
           closePromptDismissed: () => closePromptWindow === null,
+          promptClose(window, result) { dialog.showMessageBox = () => result; return promptForWindowClose(window); },
+          dismissClosePrompt: dismissClosePromptForUpdate,
+          quitPendingOnPrompt: () => quitAfterClosePrompt,
           updateError: recoverUpdateAttempt,
           updateBusy: () => installInProgress,
           configureMaintenance() {
@@ -174,6 +186,50 @@ test('desktop updater cannot spawn its installer before usage flush completes', 
   assert.deepEqual(calls, ['usage-start'])
   finish(); await installing
   assert.deepEqual(calls, ['usage-start', 'usage-done', 'installer'])
+}))
+
+test('an unavailable usage worker cannot permanently block desktop updates', async () => {
+  for (const phase of ['pause', 'flush'] as const) await fixture(async (harness) => {
+    let installed = false
+    harness.configureUpdate(async () => {}, () => { installed = true })
+    harness.configureUsageUnavailable(phase)
+    await harness.requestSettings('desktop-settings:install-update')
+    assert.equal(installed, true)
+  })
+})
+
+test('a live collector failure still prevents update installation', async () => fixture(async (harness) => {
+  harness.configureUpdate(async () => { throw new Error('source collection failed') }, () => assert.fail('installer must not start'))
+  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /source collection failed/)
+  assert.equal(harness.updateBusy(), false)
+}))
+
+test('quit during config persistence cancels update preparation quietly', async () => fixture(async (harness) => {
+  let save!: () => void
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { save = resolve }))
+  harness.configureUpdate(async () => {}, () => assert.fail('installer must not start'))
+  harness.configureUsageUnavailable('pause')
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(harness.beginQuit(), true)
+  save(); await installing
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}))
+
+test('a dismissed dialog settling late cannot clear a newer prompt on the same window', async () => fixture(async (harness) => {
+  const window = { isDestroyed: () => false }
+  let finishFirst!: (result: { response: number }) => void
+  let finishSecond!: (result: { response: number }) => void
+  const first = harness.promptClose(window, new Promise((resolve) => { finishFirst = resolve }))
+  harness.dismissClosePrompt()
+  const second = harness.promptClose(window, new Promise((resolve) => { finishSecond = resolve }))
+  assert.equal(harness.beginQuit(), true)
+  finishFirst({ response: 1 }); await first
+  assert.equal(harness.closePromptDismissed(), false)
+  assert.equal(harness.quitPendingOnPrompt(), true)
+  finishSecond({ response: 1 }); await second
+  assert.equal(harness.closePromptDismissed(), true)
+  assert.equal(harness.quitPendingOnPrompt(), false)
 }))
 
 test('quit during update preparation waits for the shared collector and cancels installation', async () => fixture(async (harness) => {

@@ -4,7 +4,7 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { UsageService } from './usage-service.js'
+import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { EventEmitter } from 'node:events'
 import { Worker } from 'node:worker_threads'
 import { UsageLedger } from './usage-ledger.js'
@@ -18,9 +18,9 @@ class TestWorker extends EventEmitter {
   }
   async terminate(): Promise<number> { this.terminated = true; this.emit('exit', 1); return 1 }
   ready(): void { this.emit('message', { type: 'ready' }) }
-  finish(): void {
+  finish(result?: unknown): void {
     const active = this.sent.at(-1)!
-    this.emit('message', { id: active.id, result: active.method === 'report' ? { warnings: [], totals: { input: 50 } } : undefined })
+    this.emit('message', { id: active.id, result: result ?? (active.method === 'report' ? { warnings: [], totals: { input: 50 } } : { backupWarning: null }) })
   }
 }
 
@@ -171,6 +171,33 @@ test('a flush started before update preparation cannot skip the final backup', a
     const stopped = service.stop()
     assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 2)
     worker.finish(); await stopped
+  } finally { await service.abort() }
+})
+
+test('shutdown retries a paused flush whose backup failed without losing its diagnostic', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    service.pauseCollection()
+    const flushed = service.flush(); worker.ready()
+    worker.finish({ backupWarning: 'backup file locked' }); await flushed
+    const report = service.report('2026-09', 'all'); worker.finish()
+    assert.match((await report).warnings.join(' '), /backup file locked/)
+    const stopped = service.stop()
+    assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 2)
+    worker.finish(); await stopped
+  } finally { await service.abort() }
+})
+
+test('pause rejects stopping and closed services instead of silently succeeding', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish()
+    const stopped = service.stop()
+    assert.throws(() => service.pauseCollection(), UsageServiceUnavailableError)
+    worker.finish(); await stopped
+    assert.throws(() => service.pauseCollection(), UsageServiceUnavailableError)
   } finally { await service.abort() }
 })
 
