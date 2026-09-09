@@ -16,7 +16,23 @@ interface Harness {
   createMain(): Promise<DesktopState>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
   restore(): Promise<void>
-  beginQuit(): void
+  beginQuit(): boolean
+  configureUsageStop(stop: () => Promise<void>): void
+  configureUpdate(stop: () => Promise<void>, install: () => void): void
+  configureUsageUnavailable(phase: 'pause' | 'flush'): void
+  updateError(): void
+  updateBusy(): boolean
+  configureClosePrompt(): void
+  closePromptDismissed(): boolean
+  promptClose(window: { isDestroyed(): boolean }, result: Promise<{ response: number }>): Promise<void>
+  dismissClosePrompt(): void
+  quitPendingOnPrompt(): boolean
+  configureBlockedConfig(work: Promise<void>): void
+  configureMaintenance(): void
+  maintenanceCalls: string[]
+  maintain(operation: 'install' | 'update'): Promise<void>
+  maintenanceStatus(): string
+  requestSettings(name: string): Promise<void>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
@@ -45,6 +61,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
       `,
       'electron-updater': 'export default { autoUpdater: null };',
+      './copilot-maintenance.js': `
+        export const maintenanceCalls = [];
+        export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
+        export async function installCopilotCli() { maintenanceCalls.push('install'); return ''; }
+        export async function updateCopilotCli() { maintenanceCalls.push('update'); return ''; }
+      `,
       './node-pty-backend.js': `
         export const spawns = [];
         export async function spawnNodePty(file, args, options) {
@@ -73,21 +95,49 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const bundle = await build({
       stdin: { contents: source + `
         import { spawns } from './node-pty-backend.js';
+        import { maintenanceCalls } from './copilot-maintenance.js';
+        const diagnosticWrites = [];
+        const originalWriteAppLog = writeAppLog;
+        writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           spawns,
+          maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForActiveProfile,
-          beginQuit: () => app.emit('before-quit', { preventDefault() {} }),
+          beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
+          configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
+          configureBlockedConfig(work) { configWriteQueue = work; },
+          configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {}, noteSourceChanged() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
+          configureUsageUnavailable(phase) {
+            const error = new UsageServiceUnavailableError('Usage worker repeatedly failed');
+            if (phase === 'pause') usageService.pauseCollection = () => { throw error; };
+            else usageService.flush = async () => { throw error; };
+          },
+          configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; closePromptAbort = new AbortController(); },
+          closePromptDismissed: () => closePromptWindow === null,
+          promptClose(window, result) { dialog.showMessageBox = () => result; return promptForWindowClose(window); },
+          dismissClosePrompt: dismissClosePromptForUpdate,
+          quitPendingOnPrompt: () => quitAfterClosePrompt,
+          updateError: recoverUpdateAttempt,
+          updateBusy: () => installInProgress,
+          configureMaintenance() {
+            usageService = { flush: async () => { throw new Error('usage unavailable'); }, collect: async () => { throw new Error('backup disk full'); } };
+            state.resolution = { kind: 'direct', command: 'inert', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null };
+            retryResolution = async () => { maintenanceCalls.push('retry-resolution'); return snapshot(); };
+          },
+          maintain: maintainCopilotCli,
+          maintenanceStatus: () => copilotMaintenance.status,
+          requestSettings: (name) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
-          async cleanup() { await stopAllSessions(); await configWriteQueue; },
+          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })
@@ -102,6 +152,190 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('repeated quit requests wait for the usage backup even with no running sessions', async () => {
+  await fixture(async (harness) => {
+    let finish!: () => void
+    let entered!: () => void
+    const stopping = new Promise<void>((resolve) => { entered = resolve })
+    const pending = new Promise<void>((resolve) => { finish = resolve })
+    harness.configureUsageStop(async () => { entered(); await pending })
+    assert.equal(harness.beginQuit(), true)
+    await stopping
+    assert.equal(harness.beginQuit(), true)
+    finish()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), false)
+  })
+})
+
+test('desktop updater cannot spawn its installer before usage flush completes', async () => fixture(async (harness) => {
+  const calls: string[] = []
+  let finish!: () => void
+  let entered!: () => void
+  const began = new Promise<void>((resolve) => { entered = resolve })
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  let saveConfig!: () => void
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { saveConfig = resolve }))
+  harness.configureUpdate(async () => { calls.push('usage-start'); entered(); await pending; calls.push('usage-done') }, () => calls.push('installer'))
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.deepEqual(calls, [])
+  saveConfig()
+  await began
+  assert.deepEqual(calls, ['usage-start'])
+  finish(); await installing
+  assert.deepEqual(calls, ['usage-start', 'usage-done', 'installer'])
+}))
+
+test('an unavailable usage worker cannot permanently block desktop updates', async () => {
+  for (const phase of ['pause', 'flush'] as const) await fixture(async (harness) => {
+    let installed = false
+    harness.configureUpdate(async () => {}, () => { installed = true })
+    harness.configureUsageUnavailable(phase)
+    await harness.requestSettings('desktop-settings:install-update')
+    assert.equal(installed, true)
+  })
+})
+
+test('a live collector failure still prevents update installation', async () => fixture(async (harness) => {
+  harness.configureUpdate(async () => { throw new Error('source collection failed') }, () => assert.fail('installer must not start'))
+  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /source collection failed/)
+  assert.equal(harness.updateBusy(), false)
+}))
+
+test('quit during config persistence cancels update preparation quietly', async () => fixture(async (harness) => {
+  let save!: () => void
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { save = resolve }))
+  harness.configureUpdate(async () => {}, () => assert.fail('installer must not start'))
+  harness.configureUsageUnavailable('pause')
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(harness.beginQuit(), true)
+  save(); await installing
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}))
+
+test('a dismissed dialog settling late cannot clear a newer prompt on the same window', async () => fixture(async (harness) => {
+  const window = { isDestroyed: () => false }
+  let finishFirst!: (result: { response: number }) => void
+  let finishSecond!: (result: { response: number }) => void
+  const first = harness.promptClose(window, new Promise((resolve) => { finishFirst = resolve }))
+  harness.dismissClosePrompt()
+  const second = harness.promptClose(window, new Promise((resolve) => { finishSecond = resolve }))
+  assert.equal(harness.beginQuit(), true)
+  finishFirst({ response: 1 }); await first
+  assert.equal(harness.closePromptDismissed(), false)
+  assert.equal(harness.quitPendingOnPrompt(), true)
+  finishSecond({ response: 1 }); await second
+  assert.equal(harness.closePromptDismissed(), true)
+  assert.equal(harness.quitPendingOnPrompt(), false)
+}))
+
+test('quit during update preparation waits for the shared collector and cancels installation', async () => fixture(async (harness) => {
+  let finish!: () => void
+  let entered!: () => void
+  const began = new Promise<void>((resolve) => { entered = resolve })
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  let installed = false
+  harness.configureUpdate(async () => { entered(); await pending }, () => { installed = true })
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await began
+  assert.equal(harness.beginQuit(), true)
+  harness.updateError()
+  assert.equal(harness.beginQuit(), true)
+  finish(); await installing
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(installed, false)
+  assert.equal(harness.beginQuit(), false)
+}))
+
+test('updater errors during a flush retain the install interlock until preparation settles', async () => fixture(async (harness) => {
+  let finish!: () => void
+  let entered!: () => void
+  const began = new Promise<void>((resolve) => { entered = resolve })
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  harness.configureUpdate(async () => { entered(); await pending }, () => assert.fail('installer must not start'))
+  const installing = assert.rejects(harness.requestSettings('desktop-settings:install-update'), /failed while preparing/)
+  await began; harness.updateError()
+  assert.equal(harness.updateBusy(), true)
+  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
+  finish(); await installing
+  assert.equal(harness.updateBusy(), false)
+}))
+
+test('a no-op installer releases the admission lock without stopping collection', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let flushes = 0
+  harness.configureUpdate(async () => { flushes++ }, () => {})
+  await harness.requestSettings('desktop-settings:install-update')
+  assert.equal(harness.updateBusy(), true)
+  t.mock.timers.tick(10_001)
+  assert.equal(harness.updateBusy(), false)
+  await harness.requestSettings('desktop-settings:install-update')
+  assert.equal(flushes, 2)
+}))
+
+test('a stuck pre-install flush returns an error without launching an unprotected installer', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let installed = false
+  harness.configureUpdate(() => new Promise(() => {}), () => { installed = true })
+  const installing = assert.rejects(harness.requestSettings('desktop-settings:install-update'), /deadline/)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  t.mock.timers.tick(30_001)
+  await installing
+  assert.equal(installed, false)
+  assert.equal(harness.updateBusy(), false)
+}))
+
+test('check and download requests cannot interfere with update preparation', async () => fixture(async (harness) => {
+  let finish!: () => void
+  const pending = new Promise<void>((resolve) => { finish = resolve })
+  harness.configureUpdate(() => pending, () => {})
+  const installing = harness.requestSettings('desktop-settings:install-update')
+  await assert.rejects(harness.requestSettings('desktop-settings:check-for-updates'), /already in progress/)
+  await assert.rejects(harness.requestSettings('desktop-settings:download-update'), /already in progress/)
+  finish(); await installing
+}))
+
+test('an updater quit dismisses the close prompt and cannot be mistaken for a failed install', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  harness.configureUpdate(async () => {}, () => {})
+  await harness.requestSettings('desktop-settings:install-update')
+  harness.configureClosePrompt()
+  assert.equal(harness.beginQuit(), true)
+  assert.equal(harness.closePromptDismissed(), true)
+  assert.equal(harness.updateBusy(), true)
+  t.mock.timers.tick(10_001)
+  assert.equal(harness.updateBusy(), true)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(harness.beginQuit(), false)
+  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
+}))
+
+test('usage failures neither block CLI maintenance nor misreport a successful CLI update', async () => fixture(async (harness) => {
+  harness.configureMaintenance()
+  await harness.maintain('install')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+  await harness.maintain('update')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+  assert.deepEqual(harness.maintenanceCalls, ['install', 'retry-resolution', 'update', 'retry-resolution'])
+}))
+
+test('overall quit deadline releases repeated exit requests despite a stuck config write', async (t) => fixture(async (harness) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let finish!: () => void
+  harness.configureUsageStop(async () => {})
+  harness.configureBlockedConfig(new Promise<void>((resolve) => { finish = resolve }))
+  try {
+    assert.equal(harness.beginQuit(), true)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), true)
+    t.mock.timers.tick(30_001)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(harness.beginQuit(), false)
+  } finally { finish(); t.mock.timers.reset() }
+}))
 
 function configure(harness: Harness, directory: string) {
   const profile = createWorkspaceProfile(directory, 'default')

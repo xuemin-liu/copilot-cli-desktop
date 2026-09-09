@@ -16,6 +16,10 @@ handle, only input/output/resize events.
 
 ## Features
 
+- **Monthly token usage** in Settings counts local request tokens and saves collected
+  totals in the app-data directory, independently of session history and software updates.
+  Updates and quit commit collected usage with a bounded wait; verified backups and
+  export/restore help recover saved records. See [usage coverage and recovery](docs/usage-ledger.md).
 - Resolves the `copilot` binary (PATH, legacy GitHub CLI-managed location,
   then a compatible `gh copilot --` installation), and shows a recovery dashboard with install/retry actions
   and a copyable diagnostic summary when it cannot be found.

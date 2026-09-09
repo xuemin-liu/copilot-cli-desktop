@@ -84,6 +84,10 @@ export interface DesktopSettingsSnapshot extends DesktopPreferences {
 }
 
 export interface CopilotDesktopSettingsBridge {
+  usageReport(month: string, scope: import('../main/usage-types.js').UsageScope, timezone?: string): Promise<import('../main/usage-types.js').UsageReport>
+  refreshUsage(): Promise<void>
+  exportUsage(): Promise<boolean>
+  restoreUsage(): Promise<boolean>
   get(): Promise<DesktopSettingsSnapshot>
   updatePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopSettingsSnapshot>
   setLaunchAtLogin(enabled: boolean): Promise<DesktopSettingsSnapshot>

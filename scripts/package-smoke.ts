@@ -1,9 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { windowsSystemExecutable } from '../src/main/resolve-copilot.js'
+import { seedSourceStore } from './usage-source-fixture.js'
 
 const execFileAsync = promisify(execFile)
 const PACKAGE_SMOKE_ENVIRONMENT = 'COPILOT_DESKTOP_PACKAGE_SMOKE'
@@ -18,6 +20,8 @@ async function main(): Promise<void> {
 
   const executable = resolve(process.argv[2] ?? 'release/win-unpacked/Copilot CLI Desktop.exe')
   const isolatedUserData = await mkdtemp(join(tmpdir(), 'copilot-desktop-package-smoke-'))
+  const isolatedCopilotHome = join(isolatedUserData, 'copilot')
+  seedSourceStore(isolatedCopilotHome, 'package-smoke')
   let stopped = false
   let stderr = ''
   let signalRendererReady!: () => void
@@ -28,6 +32,7 @@ async function main(): Promise<void> {
     env: {
       ...process.env,
       ELECTRON_ENABLE_LOGGING: '1',
+      COPILOT_HOME: isolatedCopilotHome,
       [PACKAGE_SMOKE_ENVIRONMENT]: '1',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -70,7 +75,13 @@ async function main(): Promise<void> {
       throw new Error(`Unable to launch ${basename(executable)}: ${outcome.error.message}`)
     }
     if (outcome.kind === 'ready') {
-      console.log(`[package-smoke] ${basename(executable)} loaded its renderer successfully.`)
+      const ledger = new DatabaseSync(join(isolatedUserData, 'usage.sqlite'), { readOnly: true })
+      try {
+        const samples = ledger.prepare('SELECT payload FROM samples').all()
+        if (samples.length !== 1 || JSON.parse(String(samples[0]!.payload)).input !== 50) throw new Error('Packaged usage worker failed to retain its fixture')
+        if (!ledger.prepare("SELECT value FROM metadata WHERE key='lastBackup'").get()) throw new Error('Packaged usage backup did not complete')
+      } finally { ledger.close() }
+      console.log(`[package-smoke] ${basename(executable)} loaded its renderer, collected usage and verified a backup successfully.`)
       return
     }
     if (outcome.code !== 0) {

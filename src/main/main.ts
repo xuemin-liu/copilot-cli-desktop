@@ -113,12 +113,48 @@ import {
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
+import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
+import { withShutdownDeadline } from './shutdown-deadline.js'
+
+let usageService: UsageService | null = null
+let usageQuitCleanupComplete = false
+let preparingUpdate = false
+let updatePreparationFailed = false
+let updateQuitTimer: NodeJS.Timeout | undefined
+
+function recoverUpdateAttempt(): void {
+  if (quittingAllSessions) return
+  clearTimeout(updateQuitTimer)
+  if (preparingUpdate) { updatePreparationFailed = true; return }
+  installInProgress = false
+  explicitQuitRequested = false
+  usageService?.resumeCollection()
+  updateController?.installationDidNotQuit()
+  refreshMenus()
+}
+
+function startUsageCollection(): void {
+  if (usageService || quittingAllSessions) return
+  usageService = new UsageService(join(app.getPath('userData'), 'usage.sqlite'), process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'),
+    (message) => { void writeAppLog(`Usage: ${message}`).catch(() => {}) })
+}
+
+async function bestEffortUsage(work: Promise<unknown> | undefined): Promise<void> {
+  try { await withShutdownDeadline(work ?? Promise.resolve(), 15_000) }
+  catch (error) { void writeAppLog(`Usage maintenance failed: ${String(error)}`).catch(() => {}) }
+}
 import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
 const BACKGROUND_START_ARGUMENT = '--background'
 const PACKAGE_SMOKE_ENVIRONMENT = 'COPILOT_DESKTOP_PACKAGE_SMOKE'
 const PACKAGE_SMOKE_READY_MARKER = '[package-smoke] renderer-ready'
+// Packaged smoke runs must never read/write the user's normal desktop profile.
+if (app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1') {
+  const isolatedDirectory = app.commandLine.getSwitchValue('user-data-dir')
+  if (!isolatedDirectory) throw new Error('Packaged smoke requires an isolated user-data-dir')
+  app.setPath('userData', resolve(isolatedDirectory))
+}
 const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
@@ -140,6 +176,7 @@ let quittingAllSessions = false
 let explicitQuitRequested = false
 let trayHintShown = false
 let closePromptWindow: BrowserWindow | null = null
+let closePromptAbort: AbortController | null = null
 let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
@@ -468,23 +505,34 @@ async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void
   broadcastSettingsPreferences()
 }
 
-function finishClosePrompt(window: BrowserWindow): void {
-  if (closePromptWindow !== window) return
+function finishClosePrompt(window: BrowserWindow, owner: AbortController | null): void {
+  if (closePromptWindow !== window || closePromptAbort !== owner) return
   closePromptWindow = null
+  closePromptAbort = null
   const shouldResumeQuit = quitAfterClosePrompt && explicitQuitRequested
   quitAfterClosePrompt = false
   if (shouldResumeQuit) setImmediate(() => app.quit())
 }
 
+function dismissClosePromptForUpdate(): void {
+  closePromptAbort?.abort()
+  closePromptAbort = null
+  closePromptWindow = null
+  quitAfterClosePrompt = false
+}
+
 async function promptForWindowClose(window: BrowserWindow): Promise<void> {
   if (closePromptWindow || window.isDestroyed()) return
   closePromptWindow = window
+  const abort = new AbortController()
+  closePromptAbort = abort
   try {
     const canMinimizeToTray = tray !== null && !tray.isDestroyed()
     const buttons = canMinimizeToTray
       ? ['Exit application', 'Minimize to tray', 'Cancel']
       : ['Exit application', 'Cancel']
     const result = await dialog.showMessageBox(window, {
+      signal: abort.signal,
       type: 'question',
       title: 'Close Copilot CLI Desktop',
       message: 'What should happen when this window closes?',
@@ -534,7 +582,7 @@ async function promptForWindowClose(window: BrowserWindow): Promise<void> {
       await writeAppLog(`Close dialog failed: ${String(error)}`).catch(() => {})
     }
   } finally {
-    finishClosePrompt(window)
+    finishClosePrompt(window, abort)
   }
 }
 
@@ -848,6 +896,8 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('session-id', (sessionId: string) => {
     if (managedTabs.get(id)?.session !== session) return
     tabsState = setTabSessionId(tabsState, id, sessionId)
+    const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+    if (!tab?.remote) usageService?.associate(sessionId, tab?.sideChat === true)
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -858,9 +908,13 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
+    usageService?.noteSourceChanged()
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
+      const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+      if (!tab?.remote) usageService?.associate(session.lastSessionId, tab?.sideChat === true)
     }
+    if (usageService && !preparingUpdate) observe(usageService.collect(), 'Could not collect final session usage')
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -927,6 +981,7 @@ async function createSessionTab(
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
+  if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
@@ -1425,9 +1480,11 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
     message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
   }
   try {
+    await bestEffortUsage(usageService?.flush())
     const output = operation === 'install'
       ? await installCopilotCli()
       : await updateCopilotCli(current!)
+    await bestEffortUsage(usageService?.collect())
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
       throw new Error('The command completed, but Copilot CLI still could not be resolved')
@@ -1628,7 +1685,7 @@ function createWindow(
     observe(promptForWindowClose(window), 'Could not show close confirmation')
   })
   window.on('closed', () => {
-    finishClosePrompt(window)
+    finishClosePrompt(window, closePromptAbort)
     mainWindow = null
   })
   observe(window.loadFile(rendererPath('index.html')), 'Could not load application window')
@@ -1773,7 +1830,7 @@ function scheduleAutomaticUpdateCheck(delayMs = 15_000): void {
   if (!desktopConfig.automaticUpdateChecks || !updateController) return
   updateCheckTimer = setTimeout(() => {
     updateCheckTimer = null
-    const operation = updateController?.snapshot.canCheck ? updateController.check() : Promise.resolve()
+    const operation = !installInProgress && updateController?.snapshot.canCheck ? updateController.check() : Promise.resolve()
     void operation.catch((error) => writeAppLog(`Automatic update check failed: ${String(error)}`))
       .finally(() => scheduleAutomaticUpdateCheck(6 * 60 * 60 * 1_000))
   }, delayMs)
@@ -2084,32 +2141,50 @@ ipcMain.handle('desktop-settings:update-provider', async (event, provider: unkno
 })
 ipcMain.handle('desktop-settings:check-for-updates', async (event) => {
   assertTrustedSettingsSender(event)
+  if (installInProgress) throw new Error('An update installation is already in progress')
   await updateController?.check()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:download-update', async (event) => {
   assertTrustedSettingsSender(event)
+  if (installInProgress) throw new Error('An update installation is already in progress')
   await updateController?.download()
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:install-update', async (event) => {
   assertTrustedSettingsSender(event)
   if (installInProgress) throw new Error('An update installation is already in progress')
+  if (quittingAllSessions || explicitQuitRequested) throw new Error('The app is shutting down')
   if (!updateController?.snapshot.canInstall) throw new Error('No downloaded update is ready to install')
   installInProgress = true
+  preparingUpdate = true
+  updatePreparationFailed = false
   refreshMenus()
   try {
-    await stopAllSessions()
-    explicitQuitRequested = true
+    await withShutdownDeadline(stopAllSessions().then(() => configWriteQueue))
+    if (quittingAllSessions) { preparingUpdate = false; return }
+    // Flush before the installer can launch, retaining the service until before-quit.
+    // A failed or no-op installer therefore never requires a second database owner.
     try {
-      updateController.install()
+      usageService?.pauseCollection()
+      await withShutdownDeadline(usageService?.flush() ?? Promise.resolve())
     } catch (error) {
-      explicitQuitRequested = false
-      throw error
+      if (!(error instanceof UsageServiceUnavailableError)) throw error
+      await writeAppLog(`Usage unavailable during update preparation: ${String(error)}`).catch(() => {})
     }
+    preparingUpdate = false
+    if (quittingAllSessions) return
+    if (updatePreparationFailed) throw new Error('The updater failed while preparing installation')
+    explicitQuitRequested = true
+    dismissClosePromptForUpdate()
+    // quitAndInstall can return without quitting or emitting an error.
+    updateQuitTimer = setTimeout(recoverUpdateAttempt, 10_000)
+    updateQuitTimer.unref()
+    updateController.install()
   } catch (error) {
-    installInProgress = false
-    refreshMenus()
+    preparingUpdate = false
+    recoverUpdateAttempt()
+    if (quittingAllSessions) return
     throw error
   }
 })
@@ -2211,6 +2286,32 @@ ipcMain.handle('desktop-settings:open-copilot-config', async (event) => {
   if (error) throw new Error(error)
 })
 
+ipcMain.handle('desktop-settings:usage-report', async (event, month: unknown, scope: unknown, timezone: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof month !== 'string' || (scope !== 'all' && scope !== 'app') || (timezone !== undefined && (typeof timezone !== 'string' || timezone.length > 100))) throw new Error('Invalid usage query')
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  return usageService.report(month, scope, timezone)
+})
+ipcMain.handle('desktop-settings:usage-refresh', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  await usageService.collect()
+})
+ipcMain.handle('desktop-settings:usage-export', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  const result = await dialog.showSaveDialog({ title: 'Export usage backup', defaultPath: `copilot-usage-${new Date().toISOString().slice(0,10)}.sqlite`, filters: [{ name: 'Usage database', extensions: ['sqlite'] }] })
+  if (!result.canceled && result.filePath) await usageService.exportTo(result.filePath)
+  return !result.canceled
+})
+ipcMain.handle('desktop-settings:usage-restore', async (event) => {
+  assertTrustedSettingsSender(event)
+  if (!usageService) throw new Error('Usage collection is unavailable')
+  const result = await dialog.showOpenDialog({ title: 'Restore usage backup (merge with saved usage)', properties: ['openFile'], filters: [{ name: 'Usage database', extensions: ['sqlite'] }] })
+  if (!result.canceled && result.filePaths[0]) await usageService.restoreFrom(result.filePaths[0])
+  return !result.canceled
+})
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -2219,6 +2320,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
+    startUsageCollection()
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
@@ -2236,9 +2338,7 @@ if (!app.requestSingleInstanceLock()) {
     )
     updateController.on('state-changed', (update: DesktopUpdateState) => {
       if (installInProgress && update.status === 'error') {
-        installInProgress = false
-        explicitQuitRequested = false
-        refreshMenus()
+        recoverUpdateAttempt()
       }
       broadcastUpdateState(update)
       if (update.status === 'available') {
@@ -2257,8 +2357,17 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow = createWindow(!startHidden, packageSmokeTest
       ? {
         didFinishLoad: () => {
-          process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
-          setTimeout(() => app.exit(0), 250)
+          // Loading the renderer alone cannot detect a worker missing from app.asar.
+          void (async () => {
+            await usageService?.collect()
+            await usageService?.stop()
+            usageService = null
+            process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
+            setTimeout(() => app.exit(0), 250)
+          })().catch((error) => {
+            process.stderr.write(`[package-smoke] usage-worker-failed: ${String(error)}\n`)
+            app.exit(1)
+          })
         },
         didFailLoad: (description) => {
           process.stderr.write(`[package-smoke] renderer-load-failed: ${description}\n`)
@@ -2280,12 +2389,18 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', (event) => {
   explicitQuitRequested = true
+  if (installInProgress && !preparingUpdate) dismissClosePromptForUpdate()
   if (closePromptWindow && !closePromptWindow.isDestroyed()) {
     event.preventDefault()
     quitAfterClosePrompt = true
     return
   }
-  if (quittingAllSessions || managedTabs.size === 0) return
+  if (quittingAllSessions) {
+    if (!usageQuitCleanupComplete) event.preventDefault()
+    return
+  }
+  clearTimeout(updateQuitTimer)
+  if (managedTabs.size === 0 && !usageService) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via
@@ -2293,10 +2408,15 @@ app.on('before-quit', (event) => {
   // reading configWriteQueue here (after those synchronous handlers have
   // already re-chained it) and awaiting it ensures Electron does not exit
   // before that last write actually lands on disk.
-  void stopAllSessions()
+  const service = usageService
+  void withShutdownDeadline(stopAllSessions()
     .then(() => configWriteQueue)
-    .catch((error) => writeAppLog(`Shutdown cleanup failed: ${String(error)}`))
-    .finally(() => app.quit())
+    .finally(async () => { usageService = null; await service?.stop() }))
+    .catch((error) => {
+      void writeAppLog(`Shutdown cleanup failed: ${String(error)}`).catch(() => {})
+      void service?.abort().catch(() => {})
+    })
+    .finally(() => { usageQuitCleanupComplete = true; app.quit() })
 })
 
 app.on('will-quit', () => {

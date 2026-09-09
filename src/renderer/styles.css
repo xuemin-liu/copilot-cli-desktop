@@ -707,6 +707,7 @@ button:disabled {
 .settings-app select,
 .settings-app input[type="text"],
 .settings-app input[type="number"],
+.settings-app input[type="month"],
 .settings-app input[type="url"],
 .settings-app input[type="password"] {
   min-height: 34px;
@@ -933,3 +934,14 @@ button:disabled {
   color: #6b7280;
   font-size: 11px;
 }
+/* Monthly usage shares the settings typography and stays scrollable on narrow windows. */
+.usage-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.usage-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 16px 0; }
+.usage-cards .settings-card { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.usage-cards strong { font-size: 22px; font-variant-numeric: tabular-nums; }
+.usage-warning { color: #b7c0cf; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.usage-breakdown { margin: 12px 0; }
+.usage-table-scroll { overflow-x: auto; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0; }
+.usage-table th, .usage-table td { padding: 8px; text-align: right; border-bottom: 1px solid #333; font-variant-numeric: tabular-nums; }
+.usage-table th:first-child { text-align: left; max-width: 220px; overflow-wrap: anywhere; }
