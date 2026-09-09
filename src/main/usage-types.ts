@@ -15,7 +15,6 @@ export interface UsageGroup extends UsageCounts {
 export interface UsageReport {
   month: string
   timezone: string
-  months: string[]
   totals: UsageCounts
   models: UsageGroup[]
   sessions: UsageGroup[]

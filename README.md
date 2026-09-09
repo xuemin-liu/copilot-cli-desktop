@@ -1,54 +1,5 @@
 # Copilot CLI Desktop
 
-Monthly token usage is available in **Settings → Monthly token usage**. The desktop
-app collects local Copilot request records every 30 seconds while open, at startup,
-and on session exit. It saves them in `usage.sqlite` under the existing Electron
-user-data directory, outside the installation, Copilot history, and pruned logs.
-Deleting a session or updating the app does not remove collected usage.
-
-Input is displayed as uncached input with separate cache-read and cache-write
-buckets. Gross input already includes cache tokens. Reported reasoning is shown
-separately and is not added to totals because its overlap with output is unverified.
-Shutdown snapshots fill gaps provisionally; increments spanning months remain
-unallocated. Missing histories, unknown fork ancestry, and unsupported CLI formats
-are disclosed. App scope means whole sessions observed in the desktop, not guaranteed
-app-only requests or account-wide billing. Collection cannot recover unobserved data
-that Copilot already deleted, remote-only usage, or usage on other computers.
-
-The ledger uses SQLite transactions with full synchronization in a dedicated worker.
-Verified SQLite backups retain 30 daily and 12 monthly copies per ledger generation
-under `usage-backups/`. Earlier generations remain discoverable for recovery.
-Updates and normal shutdown finish collection and refresh backups with a bounded wait.
-The desktop installer waits for collected usage to commit, with writes paused after
-sessions stop. Backup-only failures produce a warning without blocking installation
-and get another backup attempt during quit. An already unavailable usage worker is
-logged and does not block desktop updates; failures from a live collector still do.
-A timeout leaves the update available to retry; retries reuse the pending flush when
-the source has not changed. Quit reuses a successful backup when no usage or timezone write
-has occurred. Read-only reports do not require another backup. The same collector stays
-available if installation fails or does nothing, and stops during quit. Overall shutdown
-has a 30-second deadline; committed usage is retained if final cleanup cannot finish.
-Slow queued requests do not consume another operation's timeout, and failed workers
-are replaced automatically, with committed request and history checkpoints retained.
-After three consecutive worker failures, restart the app to retry collection.
-Incomplete source rows are retried while later requests continue to be collected;
-their warnings clear when corrected. History files are streamed incrementally.
-Corruption recovers from a verified backup while preserving the damaged originals;
-temporary lock or access failures leave the current ledger in place and are retried.
-Future database versions fail closed rather than being reset. A missing ledger starts
-fresh in a new backup generation, without moving or rotating earlier copies. An empty
-backup directory does not trigger a missing-data warning. Use **Restore backup** to
-recover earlier records and clear the warning. Legacy `usage-backups-preserved-*`
-folders remain recovery candidates too; historical generations are retained until
-manually removed. Failed restore renames retain originals and a durable recovery copy
-for startup replay. Stale journals leave an intact ledger in place and never restore
-corrupt originals after a later ledger deletion. Cleanup locks do not hide a successful
-restore. Failed backup refreshes remain visible across restarts and retry even when
-today's backup already exists. **Export backup** saves
-a portable copy to another folder. **Restore backup** merges records without deleting
-newer saved usage. Keep an export outside the app-data directory to protect against
-loss of that entire directory. No prompt contents or credentials are stored in the ledger.
-
 A Windows-first Electron desktop shell and background CLI for the
 [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`).
 
@@ -65,6 +16,10 @@ handle, only input/output/resize events.
 
 ## Features
 
+- **Monthly token usage** in Settings counts local request tokens and saves collected
+  totals in the app-data directory, independently of session history and software updates.
+  Updates and quit commit collected usage with a bounded wait; verified backups and
+  export/restore help recover saved records. See [usage coverage and recovery](docs/usage-ledger.md).
 - Resolves the `copilot` binary (PATH, legacy GitHub CLI-managed location,
   then a compatible `gh copilot --` installation), and shows a recovery dashboard with install/retry actions
   and a copyable diagnostic summary when it cannot be found.

@@ -15,6 +15,13 @@ interface Sample extends UsageCounts {
   start: string | null
   kind: 'request' | 'shutdown'
 }
+interface HistoryProgress {
+  signature: string
+  identity: string
+  offset: number
+  start: string | null
+  warnings: string[]
+}
 const COUNT_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'] as const
 const REQUIRED = ['id', 'session_id', 'model', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'created_at']
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -109,11 +116,22 @@ export function replayUsageRecovery(path: string): void {
   const plan = recoveryPlan(path, suffix, record.temporary)
   if (!new RegExp(`^\\.corrupt-\\d+-${UUID}$`, 'i').test(suffix)
     || JSON.stringify(record.originals) !== JSON.stringify(plan.originals)) throw new Error('Invalid usage recovery journal paths')
-  // No moves means the original is intact, even if the pre-install copy was
-  // truncated. A missing copy means installation already finished: never restore
-  // parked (possibly corrupt) files over a current ledger or a later deletion.
-  const untouched = existsSync(path) && !plan.originals.some(([, parked]) => existsSync(parked))
-  if (existsSync(plan.temporary) && !untouched) installRecovery(plan)
+  // A valid durable copy records the user's restore choice, even before the
+  // first move. A damaged copy can only be abandoned after originals are intact.
+  if (existsSync(plan.temporary)) {
+    let damaged = false
+    try { validateUsageDatabase(plan.temporary) }
+    catch (error) { if (!confirmedCorruption(error)) throw error; damaged = true }
+    if (damaged) {
+      for (const [original, parked] of [...plan.originals].reverse()) {
+        if (!existsSync(parked)) continue
+        if (existsSync(original)) throw new Error('Ambiguous usage recovery files; originals were preserved')
+        renameWithRetry(parked, original)
+      }
+    } else installRecovery(plan)
+  }
+  // Missing copy means installation already finished; never roll parked corrupt
+  // originals over a current ledger or a later deletion.
   removeRecoveryArtifact(record.temporary)
   removeRecoveryArtifact(journal)
 }
@@ -151,7 +169,6 @@ export class UsageLedger {
   private statements = new Map<string, StatementSync>()
   private warnings: string[] = []
   private recoveryWarning: string | null = null
-  private historySignatures = new Map<string, { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] }>()
   private cachedSamples: Sample[] | null = null
   private monthCache = { zone: '', values: new Map<string, string>() }
   readonly backupDirectory: string
@@ -184,9 +201,7 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
       PRAGMA user_version=1;`)
       if (missing && this.backups(true).length) this.setMeta('missingLedgerWarning', '1')
-      if (this.meta('preservedBackups')) this.setMeta('missingLedgerWarning', '1')
       if (!this.meta('backupGeneration')) this.setMeta('backupGeneration', `generation-${randomUUID()}`)
-      this.stmt("DELETE FROM metadata WHERE key IN ('preservedBackups','preserveBackupsPending')").run()
       this.db.exec('COMMIT')
     } catch (error) { this.db.close(); throw error }
     try {
@@ -196,12 +211,6 @@ export class UsageLedger {
       if (!new RegExp(`^generation-${UUID}$`, 'i').test(generation)) throw new Error('Invalid usage backup generation')
       this.backupDirectory = join(this.backupRoot, generation)
       this.cleanInterruptedCopies()
-      // Old rejection keys encoded row content and cannot be retried. The new durable
-      // checkpoints start with a full scan and replace those obsolete diagnostics.
-      if (!this.meta('retryableRejections')) this.transaction(() => {
-        this.db.exec('DELETE FROM rejected_usage')
-        this.setMeta('retryableRejections', '1')
-      })
     } catch (error) { this.db.close(); throw error }
   }
   close(): void { this.statements.clear(); this.db.close() }
@@ -346,23 +355,23 @@ export class UsageLedger {
     const signature = `${info.size}:${info.mtimeMs}`
     const identity = `${info.dev}:${info.ino}:${info.birthtimeMs}`
     const progressKey = `historyProgress:${hash(path)}`
-    const previous = this.historySignatures.get(path) ?? JSON.parse(this.meta(progressKey) ?? 'null') as { signature: string; identity: string; size: number; offset: number; start: string | null; warnings: string[] } | null
+    const previous = JSON.parse(this.meta(progressKey) ?? 'null') as HistoryProgress | null
     if (previous?.signature === signature && previous.identity === identity) { this.warnings.push(...previous.warnings); return }
-    const appended = previous && previous.identity === identity && (info.size > previous.size || (info.size === previous.size && previous.signature === ''))
+    const previousSize = previous?.signature ? Number(previous.signature.split(':')[0]) : previous?.offset
+    const appended = previous && previous.identity === identity && (info.size > previousSize! || (info.size === previousSize && previous.signature === ''))
     const samples: Sample[] = []
     const warnings: string[] = appended ? [...previous.warnings] : []
     let start: string | null = appended ? previous.start : null
     let lastCheckpoint = appended ? previous.offset : 0
     const checkpoint = (offset: number, complete = false): void => {
       if (!complete && samples.length < 500 && offset - lastCheckpoint < 4 * 1024 * 1024) return
-      const progress = { signature: complete ? signature : '', identity, size: complete ? info.size : offset, offset, start, warnings }
+      const progress: HistoryProgress = { signature: complete ? signature : '', identity, offset, start, warnings }
       this.transaction(() => {
         for (const sample of samples) this.save(sample)
         this.setMeta(progressKey, JSON.stringify(progress))
       })
       samples.length = 0
       lastCheckpoint = offset
-      this.historySignatures.set(path, progress)
     }
     const result = await visitSessionHistoryLines(path, (line) => {
       if (!/"type"\s*:\s*"session\.(?:start|shutdown)"/.test(line)) return
@@ -383,7 +392,6 @@ export class UsageLedger {
     }, { allowPartial: true, allowEmpty: true, offset: appended ? previous.offset : 0, checkpoint })
     checkpoint(result.completeBytes, true)
     this.warnings.push(...warnings)
-    this.historySignatures.set(path, { signature, identity, size: result.size, offset: result.completeBytes, start, warnings })
   }
   private backups(allGenerations = false): string[] {
     const directories = new Set([this.backupDirectory])
@@ -393,11 +401,10 @@ export class UsageLedger {
     if (allGenerations) {
       directories.add(this.backupRoot)
       for (const entry of entries(this.backupRoot)) if (entry.isDirectory() && new RegExp(`^generation-${UUID}$`, 'i').test(entry.name)) directories.add(join(this.backupRoot, entry.name))
-      for (const entry of entries(dirname(this.path))) if (entry.isDirectory() && new RegExp(`^usage-backups-preserved-${UUID}$`, 'i').test(entry.name)) directories.add(join(dirname(this.path), entry.name))
     }
     const files: Array<{ path: string; modified: number }> = []
     for (const directory of directories) for (const entry of entries(directory)) {
-      if (!entry.isFile() || !/^(daily|monthly|manual)-.*\.sqlite$/.test(entry.name)) continue
+      if (!entry.isFile() || !/^(daily|monthly)-.*\.sqlite$/.test(entry.name)) continue
       const path = join(directory, entry.name)
       try { files.push({ path, modified: statSync(path).mtimeMs }) } catch { /* Unavailable candidates can be retried on the next recovery. */ }
     }
@@ -411,6 +418,9 @@ export class UsageLedger {
     const temporary = `${destination}.${randomUUID()}.tmp`
     try {
       this.stmt('VACUUM INTO ?').run(temporary)
+      // Retry state belongs to this live ledger, not to a portable snapshot.
+      const copy = new DatabaseSync(temporary)
+      try { copy.exec("DELETE FROM metadata WHERE key IN ('backupStale','backupLastAttempt')") } finally { copy.close() }
       validateUsageDatabase(temporary)
       renameWithRetry(temporary, destination)
     } finally { removeRecoveryArtifact(temporary) }
@@ -418,23 +428,33 @@ export class UsageLedger {
   backup(force = false, now = new Date()): void {
     const day = now.toISOString().slice(0, 10)
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
-    if (force || this.meta('backupStale') || !existsSync(daily)) {
+    const stale = this.backupWarning()
+    const elapsed = now.getTime() - Date.parse(this.meta('backupLastAttempt') ?? '')
+    if (!force && stale && elapsed >= 0 && elapsed < 10 * 60_000) return
+    if (force || stale || !existsSync(daily)) {
       // Persist before touching backup files so interruptions and worker restarts
       // retain the warning and force a retry even when today's backup exists.
-      this.setMeta('backupStale', '1')
-      mkdirSync(this.backupDirectory, { recursive: true })
-      this.exportTo(daily)
-      const monthly = join(this.backupDirectory, `monthly-${day.slice(0, 7)}.sqlite`)
-      this.exportTo(monthly)
-      this.setMeta('lastBackup', now.toISOString())
+      this.setMeta('backupStale', 'Usage is committed, but the backup refresh is pending. Collection will retry the backup.')
+      this.setMeta('backupLastAttempt', now.toISOString())
+      try {
+        mkdirSync(this.backupDirectory, { recursive: true })
+        this.exportTo(daily)
+        const monthly = join(this.backupDirectory, `monthly-${day.slice(0, 7)}.sqlite`)
+        this.exportTo(monthly)
+        this.setMeta('lastBackup', now.toISOString())
+        this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
+      } catch (error) {
+        this.setMeta('backupStale', `Usage is committed, but the backup refresh failed: ${String(error)}`)
+        throw error
+      }
       // Only rotate after both replacement backups have passed integrity validation.
       const backups = this.backups()
       for (const [prefix, keep] of [['daily-', 30], ['monthly-', 12]] as const) {
-        for (const file of backups.filter((path) => basename(path).startsWith(prefix)).slice(keep)) unlinkSync(file)
+        for (const file of backups.filter((path) => basename(path).startsWith(prefix)).slice(keep)) removeRecoveryArtifact(file)
       }
-      this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
     }
   }
+  backupWarning(): string | null { return this.meta('backupStale') }
   restoreFrom(path: string): void {
     if (resolve(path).toLowerCase() === resolve(this.path).toLowerCase()) throw new Error('Select a backup rather than the active usage database')
     validateUsageDatabase(path)
@@ -504,9 +524,9 @@ export class UsageLedger {
     }
     const totals = emptyUsage(), unallocated = emptyUsage()
     const models = new Map<string, UsageGroup>(), sessions = new Map<string, UsageGroup>()
-    const months = new Set<string>([month])
     const warnings = new Set<string>(JSON.parse(this.meta('warnings') ?? '[]') as string[])
-    if (this.meta('backupStale')) warnings.add('Usage is committed, but the backup refresh is pending. Collection will retry the backup; existing backups may be stale.')
+    const backupWarning = this.backupWarning()
+    if (backupWarning) warnings.add(backupWarning)
     const activeSource = `${hash(this.meta('sourcePath') ?? '')}:%`
     const rejected = Number(this.stmt('SELECT count(*) AS n FROM rejected_usage WHERE key LIKE ?').get(activeSource)?.n)
     if (rejected) {
@@ -515,11 +535,10 @@ export class UsageLedger {
     }
     const recoveryWarning = this.meta('recoveryWarning')
     if (recoveryWarning) warnings.add(recoveryWarning)
-    if (this.meta('missingLedgerWarning') === '1') warnings.add(`The usage ledger was missing. Earlier usage may be absent from these totals. Use Restore backup to recover records from earlier generations under ${this.backupRoot} or sibling usage-backups-preserved folders. Earlier generations are retained without rotation.`)
+    if (this.meta('missingLedgerWarning') === '1') warnings.add(`The usage ledger was missing. Earlier usage may be absent from these totals. Use Restore backup to recover records from earlier generations under ${this.backupRoot}. Earlier generations are retained without rotation.`)
     warnings.add('Recorded usage may be incomplete where Copilot history was lost before collection. App scope includes whole sessions observed in the app, including usage outside the app.')
     const include = (sample: Sample, value: UsageCounts, reconciled: boolean): void => {
       const sampleMonth = monthOf(sample.at)
-      months.add(sampleMonth)
       if (sampleMonth !== month) return
       add(totals, value)
       for (const [map, name] of [[models, sample.model], [sessions, sample.session]] as const) {
@@ -556,7 +575,7 @@ export class UsageLedger {
       }
     }
     const sort = (values: Iterable<UsageGroup>): UsageGroup[] => [...values].sort((a,b) => (b.input + b.output + b.cacheRead + b.cacheWrite) - (a.input + a.output + a.cacheRead + a.cacheWrite))
-    return { month, timezone: zone, months: [...months].sort().reverse(), totals, unallocated,
+    return { month, timezone: zone, totals, unallocated,
       models: sort(models.values()), sessions: sort(sessions.values()), warnings: [...warnings],
       lastCollected: this.meta('lastCollected'), lastBackup: this.meta('lastBackup'), databasePath: this.path }
   }

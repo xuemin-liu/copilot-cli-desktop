@@ -14,10 +14,14 @@ async function openLedger(): Promise<UsageLedger> {
     }
   }
 }
-async function collect(backup: 'daily' | 'none' = 'daily'): Promise<void> {
+async function collect(backup: 'daily' | 'forced' | 'none' = 'daily'): Promise<UsageFlushResult> {
   const value = await openLedger()
   await value.collect(home)
-  if (backup !== 'none') value.backup()
+  if (backup !== 'none') {
+    try { value.backup(backup === 'forced') }
+    catch (error) { if (!value.backupWarning()) throw error }
+  }
+  return { backupWarning: value.backupWarning() }
 }
 let queue = Promise.resolve()
 parentPort!.on('message', (message: { id: number; method: string; args: unknown[] }) => {
@@ -36,18 +40,12 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown[
       }
       let result: unknown
       switch (message.method) {
-        case 'collect': await collect(); break
+        case 'collect': result = await collect(); break
         case 'report': result = ledger!.report(message.args[0] as string, message.args[1] as UsageScope, message.args[2] as string | undefined); break
         case 'associate': ledger!.associate(message.args[0] as string, message.args[1] as boolean); break
         case 'export': await collect('none'); ledger!.exportTo(message.args[0] as string); break
         case 'restore': if (!recovered) ledger!.restoreFrom(message.args[0] as string); await collect(); break
-        case 'flush': {
-          await collect('none')
-          let backupWarning: string | null = null
-          try { ledger!.backup(true) } catch (error) { backupWarning = `Usage is committed, but the backup refresh failed: ${String(error)}` }
-          result = { backupWarning } satisfies UsageFlushResult
-          break
-        }
+        case 'flush': result = await collect('forced'); break
         default: throw new Error('Unknown usage operation')
       }
       parentPort!.postMessage({ id: message.id, result })

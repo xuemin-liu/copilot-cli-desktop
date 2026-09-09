@@ -186,27 +186,72 @@ test('retention ignores daily and monthly prefixes in ancestor directory names',
 }))
 
 test('failed forced backups persist across restart and retry despite an existing daily copy', async (t) => fixture(async ({ ledger, home, request, path }) => {
-  request(); await ledger.collect(home); ledger.backup(true)
+  const now = new Date('2026-09-08T12:00:00Z')
+  request(); await ledger.collect(home); ledger.backup(true, now)
   request(); await ledger.collect(home)
   t.mock.method(ledger, 'exportTo', () => { throw new Error('backup locked') })
-  assert.throws(() => ledger.backup(true), /backup locked/)
-  assert.match(ledger.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+  assert.throws(() => ledger.backup(true, now), /backup locked/)
+  assert.match(ledger.report('2026-09').warnings.join(' '), /backup refresh failed/)
   ledger.close()
   const reopened = new UsageLedger(path)
   try {
-    assert.match(reopened.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+    assert.match(reopened.report('2026-09').warnings.join(' '), /backup refresh failed/)
     const exported = t.mock.method(reopened, 'exportTo', () => { throw new Error('still locked') })
     await reopened.collect(home)
-    assert.throws(() => reopened.backup(), /still locked/)
+    for (let seconds = 30; seconds < 600; seconds += 30) reopened.backup(false, new Date(now.getTime() + seconds * 1000))
+    assert.equal(exported.mock.callCount(), 0, 'routine retries must remain throttled after restart')
+    assert.throws(() => reopened.backup(false, new Date(now.getTime() + 600_000)), /still locked/)
     assert.equal(exported.mock.callCount(), 1)
     t.mock.restoreAll()
-    reopened.backup()
-    assert.doesNotMatch(reopened.report('2026-09').warnings.join(' '), /backup refresh is pending/)
+    reopened.backup(true, new Date(now.getTime() + 600_001))
+    assert.doesNotMatch(reopened.report('2026-09').warnings.join(' '), /backup refresh/)
     for (const file of readdirSync(reopened.backupDirectory)) {
       const backup = new DatabaseSync(join(reopened.backupDirectory, file), { readOnly: true })
-      try { assert.equal(backup.prepare('SELECT count(*) AS n FROM samples').get()?.n, 2) } finally { backup.close() }
+      try {
+        assert.equal(backup.prepare('SELECT count(*) AS n FROM samples').get()?.n, 2)
+        assert.equal(backup.prepare("SELECT count(*) AS n FROM metadata WHERE key IN ('backupStale','backupLastAttempt')").get()?.n, 0)
+      } finally { backup.close() }
     }
   } finally { reopened.close() }
+}))
+
+test('locked retention files do not mark fresh backups stale or cause repeated copies', async (t) => fixture(async ({ ledger }) => {
+  const now = new Date('2026-09-08T12:00:00Z')
+  ledger.backup(true, now)
+  const daily = join(ledger.backupDirectory, 'daily-2026-09-08.sqlite')
+  const oldest = join(ledger.backupDirectory, 'daily-2020-01-01.sqlite')
+  for (let day = 1; day <= 30; day++) {
+    const file = join(ledger.backupDirectory, `daily-2020-01-${String(day).padStart(2, '0')}.sqlite`)
+    copyFileSync(daily, file)
+    fs.utimesSync(file, day, day)
+  }
+  const unlink = fs.unlinkSync
+  const exported = t.mock.method(ledger, 'exportTo', ledger.exportTo.bind(ledger))
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    if (String(file) === oldest) throw Object.assign(new Error('retention locked'), { code: 'EPERM' })
+    unlink(file)
+  })
+  syncBuiltinESMExports()
+  try {
+    ledger.backup(true, now)
+    assert.equal(ledger.backupWarning(), null)
+    for (let seconds = 30; seconds < 600; seconds += 30) ledger.backup(false, new Date(now.getTime() + seconds * 1000))
+    assert.equal(exported.mock.callCount(), 2)
+    assert.equal(readdirSync(ledger.backupDirectory).filter((file) => file.startsWith('daily-')).length, 31)
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+  ledger.backup(true, now)
+  assert.equal(readdirSync(ledger.backupDirectory).filter((file) => file.startsWith('daily-')).length, 30)
+}))
+
+test('recovering a backup does not inherit the original ledger backup attempt state', () => fixture(async ({ ledger, path, home, request }) => {
+  request(); await ledger.collect(home); ledger.backup(true); ledger.close()
+  writeFileSync(path, 'corrupt original')
+  const recovered = new UsageLedger(path)
+  try {
+    assert.equal(recovered.report('2026-09').totals.input, 50)
+    assert.match(recovered.report('2026-09').warnings.join(' '), /Recovered usage/)
+    assert.doesNotMatch(recovered.report('2026-09').warnings.join(' '), /backup refresh/)
+  } finally { recovered.close() }
 }))
 
 test('locked restore-copy cleanup does not mask the merge or skip its backup', async (t) => fixture(async ({ ledger, home, request, root }) => {
@@ -394,9 +439,9 @@ test('startup completes recovery at every interrupted rename boundary', async ()
     if (completed === 4) fs.renameSync(temporary, path)
     const reopened = new UsageLedger(path)
     try {
-      assert.equal(reopened.report('2026-09').models[0]?.requests, completed === 0 ? 2 : 1)
+      assert.equal(reopened.report('2026-09').models[0]?.requests, 1)
       assert.ok(!fs.existsSync(`${path}.recovery-pending`))
-      if (completed > 0) assert.equal(readFileSync(path + suffix + '-wal', 'utf8'), 'old wal')
+      assert.equal(readFileSync(path + suffix + '-wal', 'utf8'), 'old wal')
     } finally { reopened.close() }
   })
 })
@@ -438,6 +483,43 @@ test('a truncated unstarted recovery copy cannot block the intact ledger or expl
   recoverUsageDatabase(path, backup)
   const restored = new UsageLedger(path)
   try { assert.equal(restored.report('2026-09').models[0]?.requests, 1) } finally { restored.close() }
+}))
+
+test('a damaged recovery copy restores parked originals at every move boundary and permits retry', async () => {
+  for (let completed = 1; completed <= 3; completed++) await fixture(async ({ ledger, path, root, home, request }) => {
+    request(); await ledger.collect(home)
+    const backup = join(root, 'chosen.sqlite'); ledger.exportTo(backup)
+    request(); await ledger.collect(home); ledger.close()
+    writeFileSync(path + '-wal', 'old wal'); writeFileSync(path + '-shm', 'old shm')
+    const originalBytes = ['', '-wal', '-shm'].map((suffix) => [path + suffix, readFileSync(path + suffix)] as const)
+    const temporary = `${path}.11111111-1111-4111-8111-111111111111.recovered`
+    const suffix = '.corrupt-1-22222222-2222-4222-8222-222222222222'
+    const originals = ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension])
+    writeFileSync(`${path}.recovery-pending`, JSON.stringify({ path, temporary, originals }))
+    writeFileSync(temporary, 'damaged after journaling')
+    for (const [from, to] of originals.slice(0, completed)) fs.renameSync(from!, to!)
+    replayUsageRecovery(path)
+    for (const [file, bytes] of originalBytes) assert.deepEqual(readFileSync(file), bytes)
+    const reopened = new UsageLedger(path)
+    try { assert.equal(reopened.report('2026-09').models[0]?.requests, 2) } finally { reopened.close() }
+    recoverUsageDatabase(path, backup)
+    const restored = new UsageLedger(path)
+    try { assert.equal(restored.report('2026-09').models[0]?.requests, 1) } finally { restored.close() }
+  })
+})
+
+test('damaged-copy rollback preserves evidence when an original path is ambiguous', () => fixture(async ({ ledger, path }) => {
+  ledger.close()
+  const bytes = readFileSync(path)
+  const temporary = `${path}.11111111-1111-4111-8111-111111111111.recovered`
+  const suffix = '.corrupt-1-22222222-2222-4222-8222-222222222222'
+  const originals = ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension])
+  writeFileSync(temporary, 'damaged copy'); writeFileSync(path + suffix, 'parked original')
+  writeFileSync(`${path}.recovery-pending`, JSON.stringify({ path, temporary, originals }))
+  assert.throws(() => replayUsageRecovery(path), /Ambiguous usage recovery/)
+  assert.deepEqual(readFileSync(path), bytes)
+  assert.equal(readFileSync(path + suffix, 'utf8'), 'parked original')
+  assert.ok(fs.existsSync(temporary) && fs.existsSync(`${path}.recovery-pending`))
 }))
 
 test('a stale completed journal never rolls corrupt originals back after ledger deletion', async (t) => fixture(async ({ ledger, path, root, home, request }) => {
@@ -541,6 +623,33 @@ test('large history scans checkpoint by progress rather than every input chunk',
   assert.ok(checkpoints >= 2 && checkpoints <= 4, `Unexpected checkpoint count: ${checkpoints}`)
   await ledger.collect(home)
   assert.ok(checkpoints <= 4, 'unchanged history should not be read again')
+}))
+
+test('history growth between lstat and open resumes from the same durable checkpoint before and after restart', async (t) => fixture(async ({ ledger, home, path, shutdown }) => {
+  const history = join(home, 'session-state', SESSION, 'events.jsonl')
+  shutdown('2026-09-08T00:00:00Z', 100)
+  const lstat = fs.lstatSync
+  let grew = false
+  t.mock.method(fs, 'lstatSync', (file: fs.PathLike, options?: any) => {
+    const info = lstat(file, options)
+    if (String(file) === history && !grew) { grew = true; shutdown('2026-09-09T00:00:00Z', 200) }
+    return info
+  })
+  syncBuiltinESMExports()
+  try { await ledger.collect(home) } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+  assert.equal(grew, true)
+  let reimported = 0
+  const save = ledger['save'].bind(ledger)
+  ledger['save'] = (sample) => { reimported++; save(sample) }
+  await ledger.collect(home)
+  assert.equal(reimported, 0, 'growth already read by the first scan must not trigger a full rescan')
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    reopened['save'] = () => { reimported++ }
+    await reopened.collect(home)
+    assert.equal(reimported, 0)
+  } finally { reopened.close() }
 }))
 
 test('missing ledgers start fresh even when old backups use a future schema', () => fixture(async ({ ledger, path }) => {

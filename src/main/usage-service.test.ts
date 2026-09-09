@@ -176,13 +176,15 @@ test('a flush started before update preparation cannot skip the final backup', a
 
 test('shutdown retries a paused flush whose backup failed without losing its diagnostic', async () => {
   const worker = new TestWorker()
-  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  const diagnostics: string[] = []
+  const service = new UsageService('unused', 'unused', (message) => diagnostics.push(message), { createWorker: () => worker })
   try {
     service.pauseCollection()
     const flushed = service.flush(); worker.ready()
     worker.finish({ backupWarning: 'backup file locked' }); await flushed
-    const report = service.report('2026-09', 'all'); worker.finish()
-    assert.match((await report).warnings.join(' '), /backup file locked/)
+    const report = service.report('2026-09', 'all'); worker.finish({ warnings: ['backup file locked'], totals: { input: 50 } })
+    assert.deepEqual((await report).warnings, ['backup file locked'])
+    assert.deepEqual(diagnostics, ['backup file locked'])
     const stopped = service.stop()
     assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 2)
     worker.finish(); await stopped
@@ -301,7 +303,7 @@ test('worker collects, exports, merges and shuts down with committed usage', asy
   }
 })
 
-test('committed collection survives a backup failure and flush returns a visible warning', async () => {
+test('periodic and forced backup failures share one durable report warning and log each failure transition once', async () => {
   const root = await mkdtemp(join(tmpdir(), 'usage-backup-failure-'))
   const path = join(root, 'usage.sqlite')
   const source = new DatabaseSync(join(root, 'session-store.db'))
@@ -312,11 +314,18 @@ test('committed collection survives a backup failure and flush returns a visible
   const diagnostics: string[] = []
   const service = new UsageService(path, root, (message) => diagnostics.push(message))
   try {
-    await service.flush()
+    await service.collect()
     const report = await service.report('2026-09', 'all')
     assert.equal(report.totals.input, 50)
     assert.match(report.warnings.join(' '), /Usage is committed, but the backup refresh failed/)
-    assert.ok(diagnostics.some((message) => message.includes('Usage is committed')))
+    assert.equal(report.warnings.filter((warning) => warning.includes('backup refresh')).length, 1)
+    assert.equal(diagnostics.filter((message) => message.includes('Usage is committed')).length, 1)
+    await service.collect(); await service.flush()
+    assert.equal(diagnostics.filter((message) => message.includes('Usage is committed')).length, 1)
+    assert.equal((await service.report('2026-09', 'all')).warnings.filter((warning) => warning.includes('backup refresh')).length, 1)
+    await rm(join(root, 'usage-backups'))
+    await service.flush()
+    assert.doesNotMatch((await service.report('2026-09', 'all')).warnings.join(' '), /backup refresh/)
   } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
 })
 

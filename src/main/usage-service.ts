@@ -43,6 +43,7 @@ export class UsageService {
   private collecting: Promise<void> | null = null
   private followupCollection: Promise<void> | null = null
   private lastCollectionError: string | null = null
+  private lastBackupWarning: string | null = null
   private writeVersion = 0
   private lastFlushedVersion = -1
   private flushing: { version: number; promise: Promise<void> } | null = null
@@ -150,9 +151,18 @@ export class UsageService {
         return this.collect()
       })
     }
-    return this.collecting = this.call<UsageFlushResult | undefined>('collect')
-      .then((result) => { this.lastCollectionError = result?.backupWarning ?? null }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
+    return this.collecting = this.runCollection('collect').then(() => {})
       .finally(() => { this.collecting = null })
+  }
+  private runCollection(method: 'collect' | 'flush'): Promise<UsageFlushResult> {
+    return this.call<UsageFlushResult | undefined>(method).then((result) => {
+      const backupWarning = result?.backupWarning ?? null
+      this.lastCollectionError = null
+      // The ledger supplies the durable report warning; log only transitions here.
+      if (backupWarning && backupWarning !== this.lastBackupWarning) this.diagnostic(backupWarning)
+      this.lastBackupWarning = backupWarning
+      return { backupWarning }
+    }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
   }
   async report(month: string, scope: UsageScope, timezone?: string): Promise<UsageReport> {
     const report = await this.call<UsageReport>('report', month, scope, timezone)
@@ -183,13 +193,11 @@ export class UsageService {
     this.queue = this.queue.filter((request) => request.method !== 'collect')
     const version = this.writeVersion
     let backupWarning: string | null = null
-    const work = this.call<UsageFlushResult | undefined>('flush').then((result) => {
-      backupWarning = result?.backupWarning ?? null
-      this.lastCollectionError = backupWarning
-      if (this.lastCollectionError) this.diagnostic(this.lastCollectionError)
+    const work = this.runCollection('flush').then((result) => {
+      backupWarning = result.backupWarning
       this.lastFlushedVersion = backupWarning ? -1 : version
     }, (error: unknown) => {
-      this.lastCollectionError = String(error); throw error
+      this.lastFlushedVersion = -1; throw error
     }).finally(() => { if (this.flushing?.promise === work) this.flushing = null })
     this.flushing = { version, promise: work }
     for (const request of superseded) void work.then(() => request.resolve({ backupWarning }), (error: Error) => request.reject(error))

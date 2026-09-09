@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 const report = {
-  month: '2026-09', timezone: 'America/Chicago', months: ['2026-09', '2026-08'],
+  month: '2026-09', timezone: 'America/Chicago',
   totals: { input: 29567, output: 1717, cacheRead: 145915, cacheWrite: 40272, reasoning: 570 },
   unallocated: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
   models: [{ name: 'Example model', input: 29567, output: 1717, cacheRead: 145915, cacheWrite: 40272, reasoning: 570, requests: 7, source: 'requests' }],
