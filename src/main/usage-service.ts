@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads'
 import { withShutdownDeadline } from './shutdown-deadline.js'
-import type { UsageReport, UsageScope } from './usage-types.js'
+import type { UsageReport, UsageScope, UsageFlushResult } from './usage-types.js'
 
 export interface UsageWorker {
   on(event: string, listener: (...args: any[]) => void): unknown
@@ -35,19 +35,17 @@ export class UsageService {
   private restartAttempts = 0
   private unavailable: Error | null = null
   private termination: Promise<void> | null = null
-  private closed = false
-  private stopping = false
+  private state: 'running' | 'paused' | 'stopping' | 'closed' | 'unavailable' = 'running'
   private stopPromise: Promise<void> | null = null
   private collecting: Promise<void> | null = null
   private followupCollection: Promise<void> | null = null
   private lastCollectionError: string | null = null
-  private paused = false
-  private pauseVersion = 0
-  private preparedForQuit = false
-  private flushing: Promise<void> | null = null
+  private writeVersion = 0
+  private lastFlushedVersion = -1
+  private flushing: { version: number; promise: Promise<void> } | null = null
 
   constructor(private readonly path: string, private readonly home: string, private readonly diagnostic: (message: string) => void, private readonly options: ServiceOptions = {}) {
-    this.timer = setInterval(() => { if (!this.paused) void this.collect().catch((error) => diagnostic(String(error))) }, 30_000)
+    this.timer = setInterval(() => { if (this.state === 'running' && !this.flushing) void this.collect().catch((error) => diagnostic(String(error))) }, 30_000)
     this.timer.unref()
     void this.collect().catch((error) => diagnostic(String(error)))
   }
@@ -95,11 +93,13 @@ export class UsageService {
     // Stop automatic retries after repeated failures; restarting the app retries safely.
     if (++this.restartAttempts >= 3) {
       this.unavailable = new Error('Usage worker repeatedly failed; restart the app to retry. ' + error.message)
+      this.state = 'unavailable'
       clearInterval(this.timer)
       for (const request of this.queue.splice(0)) request.reject(error)
     }
     this.restarting = withShutdownDeadline(worker.terminate(), this.options.shutdownTimeoutMs ?? 15_000).catch((failure: Error) => {
       this.unavailable = new Error('Usage worker could not stop; restart the app to retry. ' + failure.message)
+      this.state = 'unavailable'
       clearInterval(this.timer)
       for (const request of this.queue.splice(0)) request.reject(this.unavailable)
     }).finally(() => {
@@ -108,10 +108,11 @@ export class UsageService {
     })
   }
   private pump(): void {
-    if (this.closed || this.unavailable || this.active || this.restarting || !this.queue.length) return
+    if (this.state === 'closed' || this.unavailable || this.active || this.restarting || !this.queue.length) return
     if (!this.worker) {
       try { this.startWorker() } catch (error) {
         this.unavailable = error as Error
+        this.state = 'unavailable'
         clearInterval(this.timer)
         for (const request of this.queue.splice(0)) request.reject(this.unavailable)
       }
@@ -125,25 +126,32 @@ export class UsageService {
     try { worker.postMessage({ id: this.active.id, method: this.active.method, args: this.active.args }) }
     catch (error) { this.recycle(worker, error as Error) }
   }
+  private admissionError(method: string, args: unknown[] = []): Error | null {
+    if (this.unavailable) return this.unavailable
+    if (this.state === 'closed' || (this.state === 'stopping' && method !== 'flush')) return new Error('Usage service is stopping')
+    if (this.state === 'paused' && method !== 'flush' && !(method === 'report' && args[2] === undefined)) return new Error('Usage writes are paused for update installation')
+    return null
+  }
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
-    if (this.unavailable) return Promise.reject(this.unavailable)
-    if (this.closed || (this.stopping && method !== 'flush')) return Promise.reject(new Error('Usage service is stopping'))
-    if (['collect', 'associate', 'restore', 'export'].includes(method)) this.preparedForQuit = false
+    const error = this.admissionError(method, args)
+    if (error) return Promise.reject(error)
+    if (['collect', 'associate', 'restore', 'export'].includes(method) || (method === 'report' && args[2] !== undefined)) this.writeVersion++
     return new Promise((resolve, reject) => {
       this.queue.push({ id: ++this.sequence, method, args, resolve, reject })
       this.pump()
     })
   }
   collect(): Promise<void> {
-    if (this.paused) return this.flushing ?? Promise.reject(new Error('Usage collection is paused for update installation'))
+    const error = this.admissionError('collect')
+    if (error) return Promise.reject(error)
     if (this.collecting) {
       return this.followupCollection ??= this.collecting.catch(() => {}).then(() => {
         this.followupCollection = null
         return this.collect()
       })
     }
-    return this.collecting = this.call<void>('collect')
-      .then(() => { this.lastCollectionError = null }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
+    return this.collecting = this.call<UsageFlushResult | undefined>('collect')
+      .then((result) => { this.lastCollectionError = result?.backupWarning ?? null }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
       .finally(() => { this.collecting = null })
   }
   async report(month: string, scope: UsageScope, timezone?: string): Promise<UsageReport> {
@@ -154,39 +162,45 @@ export class UsageService {
   associate(session: string, fork: boolean): void {
     void this.call('associate', session, fork).catch((error) => this.diagnostic(String(error)))
   }
+  /** External session shutdown changes the source even if no ledger request was queued. */
+  noteSourceChanged(): void { if (this.state !== 'closed') this.writeVersion++ }
   exportTo(path: string): Promise<void> { return this.call('export', path) }
   restoreFrom(path: string): Promise<void> { return this.call('restore', path) }
   pauseCollection(): void {
-    this.paused = true
-    this.pauseVersion++
-    this.preparedForQuit = false
-    // A flush requested before session shutdown cannot cover its final records.
-    this.flushing = null
+    const error = this.admissionError('flush')
+    if (error) throw error
+    if (this.state === 'running') this.state = 'paused'
   }
-  resumeCollection(): void { this.paused = false; this.preparedForQuit = false }
+  resumeCollection(): void { if (this.state === 'paused') this.state = 'running' }
   flush(): Promise<void> {
-    if (this.paused && this.flushing) return this.flushing
+    const error = this.admissionError('flush')
+    if (error) return Promise.reject(error)
+    if (this.flushing?.version === this.writeVersion) return this.flushing.promise
     // The flush includes a new scan. Join unsent collections to its result rather
     // than doing redundant scans/backups before the operation the caller needs.
     const superseded = this.queue.filter((request) => request.method === 'collect')
     this.queue = this.queue.filter((request) => request.method !== 'collect')
-    const pauseVersion = this.pauseVersion
-    const work = this.call<void>('flush').then(() => {
-      this.lastCollectionError = null
-      this.preparedForQuit = this.paused && pauseVersion === this.pauseVersion && !this.queue.length && !this.active
+    const version = this.writeVersion
+    let backupWarning: string | null = null
+    const work = this.call<UsageFlushResult | undefined>('flush').then((result) => {
+      backupWarning = result?.backupWarning ?? null
+      this.lastCollectionError = backupWarning
+      if (this.lastCollectionError) this.diagnostic(this.lastCollectionError)
+      this.lastFlushedVersion = version
     }, (error: unknown) => {
       this.lastCollectionError = String(error); throw error
-    }).finally(() => { if (this.flushing === work) this.flushing = null })
-    this.flushing = work
-    for (const request of superseded) void work.then(() => request.resolve(undefined), (error: Error) => request.reject(error))
+    }).finally(() => { if (this.flushing?.promise === work) this.flushing = null })
+    this.flushing = { version, promise: work }
+    for (const request of superseded) void work.then(() => request.resolve({ backupWarning }), (error: Error) => request.reject(error))
     return work
   }
   stop(): Promise<void> {
     return this.stopPromise ??= (async () => {
-      this.stopping = true
+      const alreadyFlushed = this.state === 'paused' && this.lastFlushedVersion === this.writeVersion
+      this.state = 'stopping'
       clearInterval(this.timer)
       try {
-        const finalFlush = this.preparedForQuit ? Promise.resolve() : this.flush()
+        const finalFlush = alreadyFlushed ? Promise.resolve() : this.flush()
         await withShutdownDeadline(finalFlush.finally(() => this.terminate()), this.options.shutdownTimeoutMs ?? 15_000)
       } finally { void this.terminate().catch(() => {}) }
     })()
@@ -196,7 +210,7 @@ export class UsageService {
   }
   private terminate(): Promise<void> {
     if (this.termination) return this.termination
-    this.closed = true
+    this.state = 'closed'
     clearInterval(this.timer)
     clearTimeout(this.startupTimer)
     clearTimeout(this.operationTimer)

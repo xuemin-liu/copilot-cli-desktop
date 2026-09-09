@@ -1,7 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import { setTimeout } from 'node:timers/promises'
 import { UsageLedger, UsageDatabaseVersionError, recoverUsageDatabase, isTransientUsageError } from './usage-ledger.js'
-import type { UsageScope } from './usage-types.js'
+import type { UsageScope, UsageFlushResult } from './usage-types.js'
 
 const { path, home } = workerData as { path: string; home: string }
 let ledger: UsageLedger | null = null
@@ -14,10 +14,10 @@ async function openLedger(): Promise<UsageLedger> {
     }
   }
 }
-async function collect(backup: 'daily' | 'forced' | 'none' = 'daily'): Promise<void> {
+async function collect(backup: 'daily' | 'none' = 'daily'): Promise<void> {
   const value = await openLedger()
   await value.collect(home)
-  if (backup !== 'none') value.backup(backup === 'forced')
+  if (backup !== 'none') value.backup()
 }
 let queue = Promise.resolve()
 parentPort!.on('message', (message: { id: number; method: string; args: unknown[] }) => {
@@ -41,7 +41,13 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown[
         case 'associate': ledger!.associate(message.args[0] as string, message.args[1] as boolean); break
         case 'export': await collect('none'); ledger!.exportTo(message.args[0] as string); break
         case 'restore': if (!recovered) ledger!.restoreFrom(message.args[0] as string); await collect(); break
-        case 'flush': await collect('forced'); break
+        case 'flush': {
+          await collect('none')
+          let backupWarning: string | null = null
+          try { ledger!.backup(true) } catch (error) { backupWarning = `Usage is committed, but the backup refresh failed: ${String(error)}` }
+          result = { backupWarning } satisfies UsageFlushResult
+          break
+        }
         default: throw new Error('Unknown usage operation')
       }
       parentPort!.postMessage({ id: message.id, result })

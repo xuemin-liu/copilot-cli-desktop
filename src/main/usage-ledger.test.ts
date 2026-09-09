@@ -267,7 +267,8 @@ test('a missing ledger preserves old restore points across forced backups and re
   const fresh = new UsageLedger(path)
   assert.match(fresh.report('2026-09').warnings.join(' '), /ledger was missing/)
   fresh.backup(true)
-  const preserved = fresh['meta']('preservedBackups')!
+  const preserved = ledger.backupDirectory
+  assert.notEqual(fresh.backupDirectory, preserved)
   fresh.close()
   const reopened = new UsageLedger(path)
   try {
@@ -275,6 +276,7 @@ test('a missing ledger preserves old restore points across forced backups and re
     for (const [name, bytes] of originals) assert.deepEqual(readFileSync(join(preserved, name)), bytes)
     reopened.restoreFrom(join(preserved, originals[0]![0]))
     assert.equal(reopened.report('2026-09').totals.input, 50)
+    assert.doesNotMatch(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
   } finally { reopened.close() }
 }))
 
@@ -300,13 +302,91 @@ test('failed restore renames roll back every completed move', async (t) => fixtu
   }
 }))
 
-test('an interrupted restore blocks initialization and retains its recovery copy', () => fixture(async ({ ledger, path }) => {
+test('an invalid recovery journal preserves all evidence and never moves arbitrary files', () => fixture(async ({ ledger, path }) => {
   ledger.close(); rmSync(path)
   const copy = `${path}.11111111-1111-4111-8111-111111111111.recovered`
   writeFileSync(copy, 'recovery evidence')
   writeFileSync(`${path}.recovery-pending`, '{}')
-  assert.throws(() => new UsageLedger(path), /interrupted usage recovery/)
+  assert.throws(() => new UsageLedger(path), /Invalid usage recovery journal/)
   assert.equal(readFileSync(copy, 'utf8'), 'recovery evidence')
+}))
+
+test('startup completes recovery at every interrupted rename boundary', async () => {
+  for (let completed = 0; completed <= 4; completed++) await fixture(async ({ ledger, path, home, request }) => {
+    request(); await ledger.collect(home)
+    const temporary = `${path}.11111111-1111-4111-8111-111111111111.recovered`
+    ledger.exportTo(temporary)
+    request(); await ledger.collect(home); ledger.close()
+    writeFileSync(path + '-wal', 'old wal'); writeFileSync(path + '-shm', 'old shm')
+    const suffix = '.corrupt-1-22222222-2222-4222-8222-222222222222'
+    const originals = ['-wal', '-shm', ''].map((extension) => [path + extension, path + suffix + extension])
+    writeFileSync(`${path}.recovery-pending`, JSON.stringify({ path, temporary, originals }))
+    for (const [from, to] of originals.slice(0, Math.min(completed, 3))) fs.renameSync(from!, to!)
+    if (completed === 4) fs.renameSync(temporary, path)
+    const reopened = new UsageLedger(path)
+    try {
+      assert.equal(reopened.report('2026-09').models[0]?.requests, 1)
+      assert.ok(!fs.existsSync(`${path}.recovery-pending`))
+      assert.equal(readFileSync(path + suffix + '-wal', 'utf8'), 'old wal')
+    } finally { reopened.close() }
+  })
+})
+
+test('a locked recovery journal does not turn a completed restore into a failure', async (t) => fixture(async ({ ledger, path, root, home, request }) => {
+  request(); await ledger.collect(home)
+  const backup = join(root, 'export.sqlite'); ledger.exportTo(backup); ledger.close()
+  const unlink = fs.unlinkSync
+  t.mock.method(fs, 'unlinkSync', (file: fs.PathLike) => {
+    if (String(file).endsWith('.recovery-pending')) throw Object.assign(new Error('journal locked'), { code: 'EPERM' })
+    unlink(file)
+  })
+  syncBuiltinESMExports()
+  try {
+    recoverUsageDatabase(path, backup)
+    const reopened = new UsageLedger(path)
+    try { assert.equal(reopened.report('2026-09').totals.input, 50) } finally { reopened.close() }
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+  const retried = new UsageLedger(path)
+  retried.close()
+  assert.ok(!fs.existsSync(`${path}.recovery-pending`))
+}))
+
+test('locked old backup files require no directory moves and remain recovery candidates', async (t) => fixture(async ({ ledger, path, home, request }) => {
+  request(); await ledger.collect(home); ledger.backup(true); ledger.close(); rmSync(path)
+  const previous = ledger.backupDirectory
+  const rename = fs.renameSync
+  t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+    if (String(from) === previous || String(from) === join(path, '..', 'usage-backups') || String(from).startsWith(previous + '\\')) throw Object.assign(new Error('old backups locked'), { code: 'EPERM' })
+    rename(from, to)
+  })
+  syncBuiltinESMExports()
+  const fresh = new UsageLedger(path)
+  try { fresh.backup(true); assert.notEqual(fresh.backupDirectory, previous) }
+  finally { fresh.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+  // A corrupt current generation can still recover from an older generation.
+  for (const name of readdirSync(fresh.backupDirectory)) writeFileSync(join(fresh.backupDirectory, name), 'bad backup')
+  writeFileSync(path, 'bad ledger')
+  const recovered = new UsageLedger(path)
+  try { assert.equal(recovered.report('2026-09').totals.input, 50) } finally { recovered.close() }
+}))
+
+test('an empty backup root does not claim that usage was lost', () => fixture(async ({ ledger, path }) => {
+  ledger.close(); rmSync(path)
+  mkdirSync(join(path, '..', 'usage-backups'), { recursive: true })
+  const fresh = new UsageLedger(path)
+  try { assert.doesNotMatch(fresh.report('2026-09').warnings.join(' '), /ledger was missing/) } finally { fresh.close() }
+}))
+
+test('backup publication retries transient Windows rename locks', async (t) => fixture(async ({ ledger, root }) => {
+  const rename = fs.renameSync
+  let attempts = 0
+  t.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+    if (++attempts < 3) throw Object.assign(new Error('AV lock'), { code: 'EPERM' })
+    rename(from, to)
+  })
+  syncBuiltinESMExports()
+  try { ledger.exportTo(join(root, 'export.sqlite')); assert.equal(attempts, 3) }
+  finally { t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
 test('rejection warnings follow the current source path', () => fixture(async ({ ledger, home, root, source, request }) => {

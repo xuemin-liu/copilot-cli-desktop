@@ -176,6 +176,7 @@ let quittingAllSessions = false
 let explicitQuitRequested = false
 let trayHintShown = false
 let closePromptWindow: BrowserWindow | null = null
+let closePromptAbort: AbortController | null = null
 let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
@@ -507,20 +508,31 @@ async function rememberCloseBehavior(closeBehavior: CloseBehavior): Promise<void
 function finishClosePrompt(window: BrowserWindow): void {
   if (closePromptWindow !== window) return
   closePromptWindow = null
+  closePromptAbort = null
   const shouldResumeQuit = quitAfterClosePrompt && explicitQuitRequested
   quitAfterClosePrompt = false
   if (shouldResumeQuit) setImmediate(() => app.quit())
 }
 
+function dismissClosePromptForUpdate(): void {
+  closePromptAbort?.abort()
+  closePromptAbort = null
+  closePromptWindow = null
+  quitAfterClosePrompt = false
+}
+
 async function promptForWindowClose(window: BrowserWindow): Promise<void> {
   if (closePromptWindow || window.isDestroyed()) return
   closePromptWindow = window
+  const abort = new AbortController()
+  closePromptAbort = abort
   try {
     const canMinimizeToTray = tray !== null && !tray.isDestroyed()
     const buttons = canMinimizeToTray
       ? ['Exit application', 'Minimize to tray', 'Cancel']
       : ['Exit application', 'Cancel']
     const result = await dialog.showMessageBox(window, {
+      signal: abort.signal,
       type: 'question',
       title: 'Close Copilot CLI Desktop',
       message: 'What should happen when this window closes?',
@@ -896,6 +908,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
+    usageService?.noteSourceChanged()
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
       const tab = tabsState.tabs.find((candidate) => candidate.id === id)
@@ -2148,8 +2161,8 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
   updatePreparationFailed = false
   refreshMenus()
   try {
-    usageService?.pauseCollection()
     await withShutdownDeadline(stopAllSessions().then(() => configWriteQueue))
+    usageService?.pauseCollection()
     // Flush before the installer can launch, retaining the service until before-quit.
     // A failed or no-op installer therefore never requires a second database owner.
     await withShutdownDeadline(usageService?.flush() ?? Promise.resolve())
@@ -2157,6 +2170,7 @@ ipcMain.handle('desktop-settings:install-update', async (event) => {
     if (quittingAllSessions) return
     if (updatePreparationFailed) throw new Error('The updater failed while preparing installation')
     explicitQuitRequested = true
+    dismissClosePromptForUpdate()
     // quitAndInstall can return without quitting or emitting an error.
     updateQuitTimer = setTimeout(recoverUpdateAttempt, 10_000)
     updateQuitTimer.unref()
@@ -2368,6 +2382,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', (event) => {
   explicitQuitRequested = true
+  if (installInProgress && !preparingUpdate) dismissClosePromptForUpdate()
   if (closePromptWindow && !closePromptWindow.isDestroyed()) {
     event.preventDefault()
     quitAfterClosePrompt = true

@@ -1,8 +1,23 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { renameSync } from 'node:fs'
 
 const RETRYABLE_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM'])
+
+/** Worker-only synchronous equivalent for SQLite backup publication/recovery. */
+export function retryFileOperationSync<T>(operation: () => T): T {
+  for (let attempt = 0; ; attempt++) {
+    try { return operation() } catch (error) {
+      if (!RETRYABLE_RENAME_CODES.has((error as NodeJS.ErrnoException).code ?? '') || attempt >= 4) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1))
+    }
+  }
+}
+
+export function renameWithRetry(from: string, to: string): void {
+  retryFileOperationSync(() => renameSync(from, to))
+}
 
 /** Atomically replace a UTF-8 file, retrying transient Windows rename locks. */
 export async function writeFileAtomic(filename: string, contents: string, mode = 0o600): Promise<void> {

@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import { existsSync, mkdirSync, readdirSync, lstatSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, lstatSync, statSync, unlinkSync, writeFileSync, readFileSync, type Dirent } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope } from './usage-types.js'
 import { visitSessionHistoryLines } from './session-history.js'
+import { renameWithRetry, retryFileOperationSync } from './atomic-file.js'
 
 type Row = Record<string, unknown>
 interface Sample extends UsageCounts {
@@ -74,10 +75,57 @@ export function validateUsageDatabase(path: string, allowEmpty = false): boolean
   } finally { db.close() }
 }
 
+const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+function removeRecoveryArtifact(path: string): void {
+  try { retryFileOperationSync(() => { if (existsSync(path)) unlinkSync(path) }) } catch { /* Replay/cleanup retries next startup without masking a completed recovery. */ }
+}
+
+/** Finish an interrupted restore using only validated, owned journal paths. */
+export function replayUsageRecovery(path: string): void {
+  const journal = `${path}.recovery-pending`
+  if (!existsSync(journal)) return
+  const record = JSON.parse(readFileSync(journal, 'utf8')) as { path?: unknown; temporary?: unknown; originals?: unknown }
+  const normalized = resolve(path)
+  if (record.path !== path || typeof record.temporary !== 'string' || !record.temporary.startsWith(path + '.')
+    || !new RegExp(`^${UUID}\\.recovered$`, 'i').test(record.temporary.slice(path.length + 1))
+    || !Array.isArray(record.originals) || record.originals.length !== 3) throw new Error('Invalid usage recovery journal; files were preserved')
+  const pairs = record.originals as Array<[string, string]>
+  let suffix: string | undefined
+  for (const [index, extension] of ['-wal', '-shm', ''].entries()) {
+    const pair = pairs[index]
+    if (!Array.isArray(pair) || pair.length !== 2 || pair[0] !== path + extension || typeof pair[1] !== 'string') throw new Error('Invalid usage recovery journal paths')
+    const tail = pair[1].slice(path.length)
+    const currentSuffix = extension ? tail.slice(0, -extension.length) : tail
+    if (resolve(pair[0]) !== normalized + extension || !pair[1].startsWith(path) || !tail.endsWith(extension)
+      || !new RegExp(`^\\.corrupt-\\d+-${UUID}$`, 'i').test(currentSuffix) || (suffix && suffix !== currentSuffix)) throw new Error('Invalid usage recovery journal paths')
+    suffix = currentSuffix
+  }
+  // Missing temporary + present main file means installation or rollback already
+  // completed. Leave the current ledger in place, even if cleanup was AV-locked.
+  if (existsSync(record.temporary)) {
+    validateUsageDatabase(record.temporary)
+    for (const [original, parked] of pairs) {
+      if (!existsSync(original)) continue
+      if (existsSync(parked)) throw new Error('Ambiguous usage recovery files; originals were preserved')
+      renameWithRetry(original, parked)
+    }
+    renameWithRetry(record.temporary, path)
+  } else if (!existsSync(path)) {
+    for (const [original, parked] of [...pairs].reverse()) {
+      if (!existsSync(parked)) continue
+      if (existsSync(original)) throw new Error('Ambiguous usage recovery files; originals were preserved')
+      renameWithRetry(parked, original)
+    }
+    if (!existsSync(path)) throw new Error('Usage recovery files are unavailable; original journal was preserved')
+  }
+  removeRecoveryArtifact(record.temporary)
+  removeRecoveryArtifact(journal)
+}
+
 /** Recovery is explicit or uses a verified local backup; originals are always retained. */
 export function recoverUsageDatabase(path: string, backup: string): void {
   const journal = `${path}.recovery-pending`
-  if (existsSync(journal)) throw new Error(`An interrupted usage recovery requires file-access repair. Original file locations are recorded in ${journal}; no files were replaced.`)
+  replayUsageRecovery(path)
   if (resolve(path).toLowerCase() === resolve(backup).toLowerCase()) throw new Error('Select a separate usage backup')
   validateUsageDatabase(backup)
   const temporary = `${path}.${randomUUID()}.recovered`
@@ -94,21 +142,21 @@ export function recoverUsageDatabase(path: string, backup: string): void {
     // Move sidecars first so an access failure cannot strand them beside a new ledger.
     for (const extension of ['-wal', '-shm', '']) {
       if (existsSync(path + extension)) {
-        renameSync(path + extension, path + suffix + extension)
+        renameWithRetry(path + extension, path + suffix + extension)
         moved.push([path + extension, path + suffix + extension])
       }
     }
-    renameSync(temporary, path)
+    renameWithRetry(temporary, path)
   } catch (error) {
     for (const [original, parked] of moved.reverse()) {
-      try { renameSync(parked, original) } catch { retainRecovery = true }
+      try { renameWithRetry(parked, original) } catch { retainRecovery = true }
     }
     if (retainRecovery) throw new Error(`Usage recovery could not roll back all original files. Preserved originals and recovery copy at ${temporary}; resolve file access before retrying.`, { cause: error })
     throw error
   } finally {
     if (!retainRecovery) {
-      if (journalCreated) unlinkSync(journal)
-      if (existsSync(temporary)) unlinkSync(temporary)
+      removeRecoveryArtifact(temporary)
+      if (journalCreated) removeRecoveryArtifact(journal)
     }
   }
 }
@@ -123,20 +171,21 @@ export class UsageLedger {
   private cachedSamples: Sample[] | null = null
   private monthCache = { zone: '', values: new Map<string, string>() }
   readonly backupDirectory: string
+  private readonly backupRoot: string
 
   constructor(readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
-    if (existsSync(`${path}.recovery-pending`)) throw new Error(`An interrupted usage recovery requires file-access repair. See ${path}.recovery-pending; original files and recovery copies were preserved.`)
-    this.backupDirectory = join(dirname(path), 'usage-backups')
-    this.cleanInterruptedCopies()
+    replayUsageRecovery(path)
+    this.backupRoot = join(dirname(path), 'usage-backups')
+    this.backupDirectory = this.backupRoot
     const missing = !existsSync(path)
     if (existsSync(path)) {
       try {
-        if (!validateUsageDatabase(path, true) && this.backups().length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
+        if (!validateUsageDatabase(path, true) && this.backups(true).length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
       } catch (error) {
         // Lock, permission and I/O errors do not prove data corruption. Leave the ledger in place.
         if (!confirmedCorruption(error)) throw error
-        const candidate = this.backups().find((file) => { try { validateUsageDatabase(file); return true } catch { return false } })
+        const candidate = this.backups(true).find((file) => { try { validateUsageDatabase(file); return true } catch { return false } })
         if (!candidate) throw new Error('Usage database is damaged. Original files preserved; restore a valid usage backup.')
         recoverUsageDatabase(path, candidate)
         this.recoveryWarning = 'Recovered usage from a verified backup. Original damaged files were preserved; usage since that backup may be missing.'
@@ -150,17 +199,19 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
       PRAGMA user_version=1;`)
-      if (missing && existsSync(this.backupDirectory)) {
-        // Commit this guard with initialization. A crash must never leave a fresh
-        // ledger allowed to rotate restore points belonging to the missing one.
-        this.setMeta('preservedBackups', `${this.backupDirectory}-preserved-${randomUUID()}`)
-        this.setMeta('preserveBackupsPending', '1')
-      }
+      if (missing && this.backups(true).length) this.setMeta('missingLedgerWarning', '1')
+      if (this.meta('preservedBackups')) this.setMeta('missingLedgerWarning', '1')
+      if (!this.meta('backupGeneration')) this.setMeta('backupGeneration', `generation-${randomUUID()}`)
+      this.stmt("DELETE FROM metadata WHERE key IN ('preservedBackups','preserveBackupsPending')").run()
       this.db.exec('COMMIT')
     } catch (error) { this.db.close(); throw error }
     try {
       if (!this.meta('timezone')) this.setMeta('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
       if (this.recoveryWarning) this.setMeta('recoveryWarning', this.recoveryWarning)
+      const generation = this.meta('backupGeneration')!
+      if (!new RegExp(`^generation-${UUID}$`, 'i').test(generation)) throw new Error('Invalid usage backup generation')
+      this.backupDirectory = join(this.backupRoot, generation)
+      this.cleanInterruptedCopies()
       // Old rejection keys encoded row content and cannot be retried. The new durable
       // checkpoints start with a full scan and replace those obsolete diagnostics.
       if (!this.meta('retryableRejections')) this.transaction(() => {
@@ -176,6 +227,7 @@ export class UsageLedger {
     return statement
   }
   private cleanInterruptedCopies(): void {
+    if (existsSync(`${this.path}.recovery-pending`)) return
     // A new worker starts only after the previous one exits. Restrict cleanup to our exact temporary names.
     const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
     for (const directory of [dirname(this.path), this.backupDirectory]) {
@@ -350,10 +402,23 @@ export class UsageLedger {
     this.warnings.push(...warnings)
     this.historySignatures.set(path, { signature, identity, size: result.size, offset: result.completeBytes, start, warnings })
   }
-  private backups(): string[] {
-    if (!existsSync(this.backupDirectory)) return []
-    return readdirSync(this.backupDirectory).filter((name) => /^(daily|monthly|manual)-.*\.sqlite$/.test(name))
-      .map((name) => join(this.backupDirectory, name)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)
+  private backups(allGenerations = false): string[] {
+    const directories = new Set([this.backupDirectory])
+    const entries = (directory: string): Dirent[] => {
+      try { return readdirSync(directory, { withFileTypes: true }) } catch { return [] }
+    }
+    if (allGenerations) {
+      directories.add(this.backupRoot)
+      for (const entry of entries(this.backupRoot)) if (entry.isDirectory() && new RegExp(`^generation-${UUID}$`, 'i').test(entry.name)) directories.add(join(this.backupRoot, entry.name))
+      for (const entry of entries(dirname(this.path))) if (entry.isDirectory() && new RegExp(`^usage-backups-preserved-${UUID}$`, 'i').test(entry.name)) directories.add(join(dirname(this.path), entry.name))
+    }
+    const files: Array<{ path: string; modified: number }> = []
+    for (const directory of directories) for (const entry of entries(directory)) {
+      if (!entry.isFile() || !/^(daily|monthly|manual)-.*\.sqlite$/.test(entry.name)) continue
+      const path = join(directory, entry.name)
+      try { files.push({ path, modified: statSync(path).mtimeMs }) } catch { /* Unavailable candidates can be retried on the next recovery. */ }
+    }
+    return files.sort((a, b) => b.modified - a.modified).map((file) => file.path)
   }
   exportTo(destination: string): void {
     const normalized = resolve(destination).toLowerCase()
@@ -364,18 +429,10 @@ export class UsageLedger {
     try {
       this.stmt('VACUUM INTO ?').run(temporary)
       validateUsageDatabase(temporary)
-      renameSync(temporary, destination)
+      renameWithRetry(temporary, destination)
     } finally { if (existsSync(temporary)) unlinkSync(temporary) }
   }
   backup(force = false, now = new Date()): void {
-    if (this.meta('preserveBackupsPending') === '1') {
-      const preserved = this.meta('preservedBackups')!
-      // An atomic directory rename preserves every earlier restore point, including
-      // unreadable/future-version copies. If it fails, no backup is overwritten.
-      if (!existsSync(preserved) && existsSync(this.backupDirectory)) renameSync(this.backupDirectory, preserved)
-      mkdirSync(this.backupDirectory, { recursive: true })
-      this.setMeta('preserveBackupsPending', '0')
-    }
     mkdirSync(this.backupDirectory, { recursive: true })
     const day = now.toISOString().slice(0, 10)
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
@@ -411,6 +468,7 @@ export class UsageLedger {
             this.save(sample)
           }
           for (const row of source.prepare('SELECT session, fork FROM app_sessions').iterate()) this.associate(String(row.session), row.fork === 1)
+          this.stmt("DELETE FROM metadata WHERE key IN ('missingLedgerWarning','recoveryWarning')").run()
         })
       } finally { source.close() }
     } finally { if (existsSync(frozen)) unlinkSync(frozen) }
@@ -468,8 +526,7 @@ export class UsageLedger {
     }
     const recoveryWarning = this.meta('recoveryWarning')
     if (recoveryWarning) warnings.add(recoveryWarning)
-    const preserved = this.meta('preservedBackups')
-    if (preserved) warnings.add(`The usage ledger was missing. Earlier usage may be absent from these totals. Use Restore backup to recover earlier records from ${this.meta('preserveBackupsPending') === '1' ? this.backupDirectory : preserved}. These backups are protected from rotation.`)
+    if (this.meta('missingLedgerWarning') === '1') warnings.add(`The usage ledger was missing. Earlier usage may be absent from these totals. Use Restore backup to recover records from earlier generations under ${this.backupRoot} or sibling usage-backups-preserved folders. Earlier generations are retained without rotation.`)
     warnings.add('Recorded usage may be incomplete where Copilot history was lost before collection. App scope includes whole sessions observed in the app, including usage outside the app.')
     const include = (sample: Sample, value: UsageCounts, reconciled: boolean): void => {
       const sampleMonth = monthOf(sample.at)

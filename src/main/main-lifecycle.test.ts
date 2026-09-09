@@ -22,6 +22,7 @@ interface Harness {
   updateError(): void
   updateBusy(): boolean
   configureClosePrompt(): void
+  closePromptDismissed(): boolean
   configureBlockedConfig(work: Promise<void>): void
   configureMaintenance(): void
   maintenanceCalls: string[]
@@ -105,8 +106,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
           configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
           configureBlockedConfig(work) { configWriteQueue = work; },
-          configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
-          configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; },
+          configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {}, noteSourceChanged() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
+          configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; closePromptAbort = new AbortController(); },
+          closePromptDismissed: () => closePromptWindow === null,
           updateError: recoverUpdateAttempt,
           updateBusy: () => installInProgress,
           configureMaintenance() {
@@ -240,15 +242,19 @@ test('check and download requests cannot interfere with update preparation', asy
   finish(); await installing
 }))
 
-test('a close prompt cannot cancel the updater no-quit watchdog', async (t) => fixture(async (harness) => {
+test('an updater quit dismisses the close prompt and cannot be mistaken for a failed install', async (t) => fixture(async (harness) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   harness.configureUpdate(async () => {}, () => {})
   await harness.requestSettings('desktop-settings:install-update')
   harness.configureClosePrompt()
   assert.equal(harness.beginQuit(), true)
+  assert.equal(harness.closePromptDismissed(), true)
   assert.equal(harness.updateBusy(), true)
   t.mock.timers.tick(10_001)
-  assert.equal(harness.updateBusy(), false)
+  assert.equal(harness.updateBusy(), true)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(harness.beginQuit(), false)
+  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
 }))
 
 test('usage failures neither block CLI maintenance nor misreport a successful CLI update', async () => fixture(async (harness) => {

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -165,6 +165,7 @@ test('a flush started before update preparation cannot skip the final backup', a
   try {
     worker.ready(); worker.finish()
     const oldFlush = service.flush()
+    service.noteSourceChanged()
     service.pauseCollection()
     worker.finish(); await oldFlush
     const stopped = service.stop()
@@ -180,10 +181,71 @@ test('writes after a prepared flush require a fresh shutdown backup', async () =
     worker.ready(); worker.finish()
     service.pauseCollection()
     const flushed = service.flush(); worker.finish(); await flushed
+    service.resumeCollection()
     service.associate('session', false); worker.finish()
+    service.pauseCollection()
     const stopped = service.stop()
     assert.equal(worker.sent.at(-1)?.method, 'flush')
     worker.finish(); await stopped
+  } finally { await service.abort() }
+})
+
+test('read-only reports queued behind a flush do not trigger another shutdown backup', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish(); service.pauseCollection()
+    const flushed = service.flush()
+    const report = service.report('2026-09', 'all')
+    worker.finish(); await flushed
+    assert.equal(worker.sent.at(-1)?.method, 'report')
+    worker.finish(); await report
+    await service.stop()
+    assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 1)
+  } finally { await service.abort() }
+})
+
+test('timezone writes invalidate a completed flush and are rejected while paused', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish(); service.pauseCollection()
+    const flushed = service.flush(); worker.finish(); await flushed
+    await assert.rejects(service.report('2026-09', 'all', 'UTC'), /writes are paused/)
+    await assert.rejects(service.exportTo('unused'), /writes are paused/)
+    await assert.rejects(service.restoreFrom('unused'), /writes are paused/)
+    service.resumeCollection()
+    const report = service.report('2026-09', 'all', 'UTC'); worker.finish(); await report
+    service.pauseCollection()
+    const stopped = service.stop(); worker.finish(); await stopped
+    assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 2)
+  } finally { await service.abort() }
+})
+
+test('retrying update preparation reuses the active flush until source writes change', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  try {
+    worker.ready(); worker.finish(); service.pauseCollection()
+    const first = service.flush()
+    service.resumeCollection()
+    t.mock.timers.tick(30_001)
+    service.pauseCollection()
+    const retry = service.flush()
+    assert.equal(first, retry)
+    assert.equal(worker.sent.filter((request) => request.method === 'flush').length, 1)
+    worker.finish(); await retry
+    await service.stop()
+  } finally { await service.abort() }
+})
+
+test('unavailable-worker errors take precedence over update admission errors', async () => {
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => { throw new Error('worker missing; restart the app') } })
+  try {
+    assert.throws(() => service.pauseCollection(), /worker missing/)
+    await assert.rejects(service.collect(), /worker missing/)
+    await assert.rejects(service.flush(), /worker missing/)
   } finally { await service.abort() }
 })
 
@@ -210,6 +272,25 @@ test('worker collects, exports, merges and shuts down with committed usage', asy
     await service.stop()
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('committed collection survives a backup failure and flush returns a visible warning', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'usage-backup-failure-'))
+  const path = join(root, 'usage.sqlite')
+  const source = new DatabaseSync(join(root, 'session-store.db'))
+  source.exec(`CREATE TABLE assistant_usage_events (id INTEGER PRIMARY KEY,session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,created_at TEXT);
+    INSERT INTO assistant_usage_events VALUES(1,'session','model',100,20,40,10,'2026-09-08T00:00:00Z')`)
+  source.close()
+  await writeFile(join(root, 'usage-backups'), 'backup directory unavailable')
+  const diagnostics: string[] = []
+  const service = new UsageService(path, root, (message) => diagnostics.push(message))
+  try {
+    await service.flush()
+    const report = await service.report('2026-09', 'all')
+    assert.equal(report.totals.input, 50)
+    assert.match(report.warnings.join(' '), /Usage is committed, but the backup refresh failed/)
+    assert.ok(diagnostics.some((message) => message.includes('Usage is committed')))
+  } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('explicit worker restore recovers an unopenable ledger after bounded retries', async () => {

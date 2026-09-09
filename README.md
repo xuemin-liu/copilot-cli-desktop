@@ -16,11 +16,14 @@ app-only requests or account-wide billing. Collection cannot recover unobserved 
 that Copilot already deleted, remote-only usage, or usage on other computers.
 
 The ledger uses SQLite transactions with full synchronization in a dedicated worker.
-Verified SQLite backups retain 30 daily and 12 monthly copies under `usage-backups/`.
+Verified SQLite backups retain 30 daily and 12 monthly copies per ledger generation
+under `usage-backups/`. Earlier generations remain discoverable for recovery.
 Updates and normal shutdown finish collection and refresh backups with a bounded wait.
-The desktop installer starts only after a successful usage flush, with collection
-paused during preparation. A timeout leaves the update uninstalled and available to retry.
-Quit reuses that backup if no usage operation has changed the ledger. The same collector stays
+The desktop installer waits for collected usage to commit, with writes paused after
+sessions stop. Backup-only failures produce a warning without blocking installation.
+A timeout leaves the update available to retry; retries reuse the pending flush when
+the source has not changed. Quit reuses the result when no usage or timezone write
+has occurred. Read-only reports do not require another backup. The same collector stays
 available if installation fails or does nothing, and stops during quit. Overall shutdown
 has a 30-second deadline; committed usage is retained if final cleanup cannot finish.
 Slow queued requests do not consume another operation's timeout, and failed workers
@@ -31,10 +34,13 @@ their warnings clear when corrected. History files are streamed incrementally.
 Corruption recovers from a verified backup while preserving the damaged originals;
 temporary lock or access failures leave the current ledger in place and are retried.
 Future database versions fail closed rather than being reset. A missing ledger starts
-fresh with a warning; earlier backups are moved to a separate `usage-backups-preserved-*`
-folder before new backups can rotate them. Use **Restore backup** to recover those records.
-Failed restore renames are rolled back. An interrupted recovery preserves a journal and
-blocks further writes until file access is repaired. **Export backup** saves
+fresh in a new backup generation, without moving or rotating earlier copies. An empty
+backup directory does not trigger a missing-data warning. Use **Restore backup** to
+recover earlier records and clear the warning. Legacy `usage-backups-preserved-*`
+folders remain recovery candidates too; historical generations are retained until
+manually removed. Failed restore renames are retried and rolled back; valid interrupted
+recovery journals replay at startup, and transient journal-cleanup locks do not hide
+a successful restore. **Export backup** saves
 a portable copy to another folder. **Restore backup** merges records without deleting
 newer saved usage. Keep an export outside the app-data directory to protect against
 loss of that entire directory. No prompt contents or credentials are stored in the ledger.
