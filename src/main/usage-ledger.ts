@@ -187,7 +187,6 @@ export class UsageLedger {
   private statements = new Map<string, StatementSync>()
   private warnings: string[] = []
   private recoveryWarning: string | null = null
-  private backupDiagnostic: string | null = null
   private cachedSamples: Sample[] | null = null
   private monthCache = { zone: '', values: new Map<string, string>() }
   readonly backupDirectory: string
@@ -423,7 +422,9 @@ export class UsageLedger {
     }
   }
   private hasAnyBackup(): boolean {
-    for (const _path of this.backupFiles(true)) return true
+    for (const path of this.backupFiles(true)) {
+      try { statSync(path); return true } catch { /* Match the recovery candidate filter, stopping on the first accessible file. */ }
+    }
     return false
   }
   private backups(allGenerations = false): string[] {
@@ -461,7 +462,6 @@ export class UsageLedger {
       // retain the warning and force a retry even when today's backup exists.
       this.setMeta('backupStale', 'Usage is committed, but the backup refresh is pending. Collection will retry the backup.')
       this.setMeta('backupLastAttempt', now.toISOString())
-      this.backupDiagnostic = null
       try {
         mkdirSync(this.backupDirectory, { recursive: true })
         this.exportTo(daily)
@@ -470,9 +470,6 @@ export class UsageLedger {
         this.setMeta('lastBackup', now.toISOString())
         this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
       } catch (error) {
-        // Keep detailed exceptions only in memory for the app log, never in the
-        // portable ledger or user-facing report. Bound unusually large messages.
-        this.backupDiagnostic = (error instanceof Error ? error.stack ?? String(error) : String(error)).slice(0, 8000)
         this.setMeta('backupStale', backupFailureWarning(error))
         throw error
       }
@@ -485,10 +482,16 @@ export class UsageLedger {
   }
   backupWarning(): string | null { return this.meta('backupStale') }
   tryBackup(force = false): UsageFlushResult {
-    try { this.backup(force) } catch (error) { if (!this.backupWarning()) throw error }
-    return { backupWarning: this.backupWarning(), backupDiagnostic: this.backupDiagnostic }
+    let backupDiagnostic: string | null = null
+    try { this.backup(force) } catch (error) {
+      if (!this.backupWarning()) throw error
+      // Detail belongs only to this attempt, including failures while writing
+      // retry metadata. Skipped/successful calls must not resend an old stack.
+      backupDiagnostic = (error instanceof Error ? error.stack ?? String(error) : String(error)).slice(0, 8000)
+    }
+    return { backupWarning: this.backupWarning(), backupDiagnostic }
   }
-  restoreFrom(path: string): void {
+  restoreFrom(path: string): UsageFlushResult {
     if (resolve(path).toLowerCase() === resolve(this.path).toLowerCase()) throw new Error('Select a backup rather than the active usage database')
     validateUsageDatabase(path)
     // Freeze the selected backup before rotation: it may itself be today's daily backup.
@@ -513,7 +516,7 @@ export class UsageLedger {
         })
       } finally { source.close() }
     } finally { removeRecoveryArtifact(frozen) }
-    this.tryBackup(true)
+    return this.tryBackup(true)
   }
   report(month: string, scope: UsageScope = 'all', timezone?: string): UsageReport {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('Invalid usage month')

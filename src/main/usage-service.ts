@@ -168,7 +168,12 @@ export class UsageService {
       }
       this.lastBackupWarning = backupWarning
       return { backupWarning, backupDiagnostic }
-    }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
+    }, (error: unknown) => {
+      // Restore admission and file-selection errors belong to that action, not
+      // to the background collector. Preserve any genuine collection failure.
+      if (method !== 'restore') this.lastCollectionError = String(error)
+      throw error
+    })
   }
   async report(month: string, scope: UsageScope, timezone?: string): Promise<UsageReport> {
     const report = await this.call<UsageReport>('report', month, scope, timezone)

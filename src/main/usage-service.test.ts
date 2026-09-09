@@ -144,6 +144,37 @@ test('a failed flush remains visible in subsequent reports', async () => {
   } finally { await service.abort() }
 })
 
+test('restore admission and selection failures do not create or replace collection warnings', async () => {
+  const worker = new TestWorker()
+  const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
+  const report = async () => {
+    const result = service.report('2026-09', 'all'); worker.finish(); return result
+  }
+  const rejectRestore = async () => {
+    const rejected = assert.rejects(service.restoreFrom('invalid.sqlite'), /Invalid selected backup/)
+    worker.emit('message', { id: worker.sent.at(-1)!.id, error: 'Invalid selected backup' })
+    await rejected
+  }
+  try {
+    worker.ready(); worker.finish()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    service.pauseCollection()
+    await assert.rejects(service.restoreFrom('unused'), /writes are paused/)
+    assert.deepEqual((await report()).warnings, [])
+    service.resumeCollection()
+    await rejectRestore()
+    assert.deepEqual((await report()).warnings, [])
+    const failed = assert.rejects(service.flush(), /genuine collection failure/)
+    worker.emit('message', { id: worker.sent.at(-1)!.id, error: 'genuine collection failure' })
+    await failed; await rejectRestore()
+    const warning = (await report()).warnings.join(' ')
+    assert.match(warning, /genuine collection failure/)
+    assert.doesNotMatch(warning, /Invalid selected backup/)
+    const restored = service.restoreFrom('valid.sqlite'); worker.finish(); await restored
+    assert.deepEqual((await report()).warnings, [])
+  } finally { await service.abort() }
+})
+
 test('a paused update flush replaces queued collection and stop reuses the completed backup', async () => {
   const worker = new TestWorker()
   const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
@@ -352,7 +383,8 @@ test('worker restore succeeds and collects new source rows when both backup refr
   const root = await mkdtemp(join(tmpdir(), 'usage-restore-backup-failure-'))
   const path = join(root, 'usage.sqlite'), backup = join(root, 'selected.sqlite')
   seedSourceStore(root)
-  const service = new UsageService(path, root, () => {})
+  const diagnostics: string[] = []
+  const service = new UsageService(path, root, (message) => diagnostics.push(message))
   try {
     await service.collect(); await service.exportTo(backup)
     await rm(join(root, 'usage-backups'), { recursive: true })
@@ -363,6 +395,10 @@ test('worker restore succeeds and collects new source rows when both backup refr
     const report = await service.report('2026-09', 'all')
     assert.equal(report.totals.input, 100, 'restore must run its follow-up collection')
     assert.equal(report.warnings.filter((warning) => warning.includes('backup refresh failed')).length, 1)
+    assert.equal(diagnostics.length, 1)
+    assert.ok(diagnostics[0]!.includes(root), 'restore retains its own raw diagnostic through the throttled follow-up scan')
+    await service.collect()
+    assert.equal(diagnostics.length, 1)
   } finally { await service.stop(); await rm(root, { recursive: true, force: true }) }
 })
 

@@ -41,7 +41,15 @@ parentPort!.on('message', (message: { id: number; method: string; args: unknown[
         case 'report': result = ledger!.report(message.args[0] as string, message.args[1] as UsageScope, message.args[2] as string | undefined); break
         case 'associate': ledger!.associate(message.args[0] as string, message.args[1] as boolean); break
         case 'export': await collect('none'); ledger!.exportTo(message.args[0] as string); break
-        case 'restore': if (!recovered) ledger!.restoreFrom(message.args[0] as string); result = await collect(); break
+        case 'restore': {
+          const restored = recovered ? null : ledger!.restoreFrom(message.args[0] as string)
+          const collected = await collect()
+          // Follow-up collection can skip a throttled backup. Keep this restore's
+          // detail only while its warning is still current, without caching it.
+          result = { ...collected, backupDiagnostic: collected.backupDiagnostic ??
+            (restored && restored.backupWarning === collected.backupWarning ? restored.backupDiagnostic : null) }
+          break
+        }
         case 'flush': result = await collect('forced'); break
         default: throw new Error('Unknown usage operation')
       }

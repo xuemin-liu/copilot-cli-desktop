@@ -265,6 +265,7 @@ test('unmapped backup errors retain diagnostic detail in memory but never in the
   assert.match(result.backupDiagnostic!, /TypeError: unmapped-filter-driver-diagnostic/)
   assert.ok(!ledger.report('2026-09').warnings.join(' ').includes(marker))
   assert.ok(!JSON.stringify(ledger['db'].prepare('SELECT * FROM metadata').all()).includes(marker))
+  assert.equal(ledger.tryBackup().backupDiagnostic, null, 'a throttled call must not resend the previous stack')
   ledger.close()
   const reopened = new UsageLedger(path)
   try {
@@ -272,6 +273,22 @@ test('unmapped backup errors retain diagnostic detail in memory but never in the
     assert.equal(deferred.backupWarning, result.backupWarning)
     assert.equal(deferred.backupDiagnostic, null)
   } finally { reopened.close() }
+}))
+
+test('backup diagnostics describe early metadata failures and clear on success or a skipped backup', async (t) => fixture(async ({ ledger }) => {
+  t.mock.method(ledger, 'exportTo', () => { throw new Error('old publication failure') })
+  assert.match(ledger.tryBackup(true).backupDiagnostic!, /old publication failure/)
+  const setMeta = ledger['setMeta'].bind(ledger)
+  t.mock.method(ledger as unknown as { setMeta: typeof setMeta }, 'setMeta', (key: string, value: string) => {
+    if (key === 'backupLastAttempt') throw Object.assign(new Error('current metadata busy'), { errcode: 5 })
+    setMeta(key, value)
+  })
+  const failed = ledger.tryBackup(true)
+  assert.match(failed.backupDiagnostic!, /current metadata busy/)
+  assert.doesNotMatch(failed.backupDiagnostic!, /old publication failure/)
+  t.mock.restoreAll()
+  assert.deepEqual(ledger.tryBackup(true), { backupWarning: null, backupDiagnostic: null })
+  assert.deepEqual(ledger.tryBackup(), { backupWarning: null, backupDiagnostic: null })
 }))
 
 test('a far-future backup timestamp permits one fresh retry and then resumes the normal interval', async (t) => fixture(async ({ ledger, path }) => {
@@ -291,7 +308,7 @@ test('a far-future backup timestamp permits one fresh retry and then resumes the
   } finally { reopened.close() }
 }))
 
-test('a missing ledger checks backup existence without statting or sorting generation files', async (t) => fixture(async ({ ledger, path }) => {
+test('a missing ledger stops checking backups at the first accessible file', async (t) => fixture(async ({ ledger, path }) => {
   ledger.backup(true); ledger.close(); rmSync(path)
   const stat = fs.statSync
   let backupStats = 0
@@ -304,7 +321,24 @@ test('a missing ledger checks backup existence without statting or sorting gener
   try {
     reopened = new UsageLedger(path)
     assert.match(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
-    assert.equal(backupStats, 0)
+    assert.equal(backupStats, 1)
+  } finally { reopened?.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
+test('an empty ledger initializes when all listed backup candidates are inaccessible', async (t) => fixture(async ({ ledger, path }) => {
+  ledger.backup(true); ledger.close(); writeFileSync(path, '')
+  const stat = fs.statSync
+  const originalBackups = readdirSync(ledger.backupDirectory)
+  t.mock.method(fs, 'statSync', (file: fs.PathLike, options?: any) => {
+    if (String(file).startsWith(ledger.backupDirectory)) throw Object.assign(new Error('backup temporarily unavailable'), { code: 'EACCES' })
+    return stat(file, options)
+  })
+  syncBuiltinESMExports()
+  let reopened: UsageLedger | undefined
+  try {
+    reopened = new UsageLedger(path)
+    assert.equal(reopened.report('2026-09').totals.input, 0)
+    assert.deepEqual(readdirSync(ledger.backupDirectory), originalBackups)
   } finally { reopened?.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
