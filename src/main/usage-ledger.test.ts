@@ -257,6 +257,57 @@ test('backup warnings are bounded and stable across publish errors with differen
   } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
 }))
 
+test('unmapped backup errors retain diagnostic detail in memory but never in the ledger report or metadata', async (t) => fixture(async ({ ledger, path }) => {
+  const marker = 'unmapped-filter-driver-diagnostic'
+  t.mock.method(ledger, 'exportTo', () => { throw new TypeError(marker) })
+  const result = ledger.tryBackup(true)
+  assert.match(result.backupWarning!, /UNKNOWN/)
+  assert.match(result.backupDiagnostic!, /TypeError: unmapped-filter-driver-diagnostic/)
+  assert.ok(!ledger.report('2026-09').warnings.join(' ').includes(marker))
+  assert.ok(!JSON.stringify(ledger['db'].prepare('SELECT * FROM metadata').all()).includes(marker))
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    const deferred = reopened.tryBackup()
+    assert.equal(deferred.backupWarning, result.backupWarning)
+    assert.equal(deferred.backupDiagnostic, null)
+  } finally { reopened.close() }
+}))
+
+test('a far-future backup timestamp permits one fresh retry and then resumes the normal interval', async (t) => fixture(async ({ ledger, path }) => {
+  const now = new Date('2026-09-08T12:00:00Z')
+  const future = new Date('2027-09-08T12:00:00Z')
+  t.mock.method(ledger, 'exportTo', () => { throw new Error('backup unavailable') })
+  assert.throws(() => ledger.backup(true, future), /backup unavailable/)
+  ledger.close()
+  const reopened = new UsageLedger(path)
+  try {
+    const attempted = t.mock.method(reopened, 'exportTo', () => { throw new Error('backup still unavailable') })
+    assert.throws(() => reopened.backup(false, now), /backup still unavailable/)
+    for (let seconds = 30; seconds < 600; seconds += 30) reopened.backup(false, new Date(now.getTime() + seconds * 1000))
+    assert.equal(attempted.mock.callCount(), 1)
+    assert.throws(() => reopened.backup(false, new Date(now.getTime() + 600_000)), /backup still unavailable/)
+    assert.equal(attempted.mock.callCount(), 2)
+  } finally { reopened.close() }
+}))
+
+test('a missing ledger checks backup existence without statting or sorting generation files', async (t) => fixture(async ({ ledger, path }) => {
+  ledger.backup(true); ledger.close(); rmSync(path)
+  const stat = fs.statSync
+  let backupStats = 0
+  t.mock.method(fs, 'statSync', (file: fs.PathLike, options?: any) => {
+    if (String(file).includes('usage-backups')) backupStats++
+    return stat(file, options)
+  })
+  syncBuiltinESMExports()
+  let reopened: UsageLedger | undefined
+  try {
+    reopened = new UsageLedger(path)
+    assert.match(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
+    assert.equal(backupStats, 0)
+  } finally { reopened?.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
 test('locked retention files do not mark fresh backups stale or cause repeated copies', async (t) => fixture(async ({ ledger }) => {
   const now = new Date('2026-09-08T12:00:00Z')
   ledger.backup(true, now)

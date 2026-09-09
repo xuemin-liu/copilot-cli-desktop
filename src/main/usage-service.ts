@@ -44,6 +44,7 @@ export class UsageService {
   private followupCollection: Promise<void> | null = null
   private lastCollectionError: string | null = null
   private lastBackupWarning: string | null = null
+  private loggedBackupDetail = false
   private writeVersion = 0
   private lastFlushedVersion = -1
   private flushing: { version: number; promise: Promise<void> } | null = null
@@ -154,14 +155,19 @@ export class UsageService {
     return this.collecting = this.runCollection('collect').then(() => {})
       .finally(() => { this.collecting = null })
   }
-  private runCollection(method: 'collect' | 'flush'): Promise<UsageFlushResult> {
-    return this.call<UsageFlushResult | undefined>(method).then((result) => {
+  private runCollection(method: 'collect' | 'flush' | 'restore', ...args: unknown[]): Promise<UsageFlushResult> {
+    return this.call<UsageFlushResult | undefined>(method, ...args).then((result) => {
       const backupWarning = result?.backupWarning ?? null
+      const backupDiagnostic = result?.backupDiagnostic ?? null
       this.lastCollectionError = null
       // The ledger supplies the durable report warning; log only transitions here.
-      if (backupWarning && backupWarning !== this.lastBackupWarning) this.diagnostic(backupWarning)
+      if (backupWarning !== this.lastBackupWarning) this.loggedBackupDetail = false
+      if (backupWarning && (backupWarning !== this.lastBackupWarning || (backupDiagnostic && !this.loggedBackupDetail))) {
+        this.diagnostic(backupDiagnostic ? `${backupWarning}\n${backupDiagnostic}` : backupWarning)
+        this.loggedBackupDetail = !!backupDiagnostic
+      }
       this.lastBackupWarning = backupWarning
-      return { backupWarning }
+      return { backupWarning, backupDiagnostic }
     }, (error: unknown) => { this.lastCollectionError = String(error); throw error })
   }
   async report(month: string, scope: UsageScope, timezone?: string): Promise<UsageReport> {
@@ -175,7 +181,7 @@ export class UsageService {
   /** External session shutdown changes the source even if no ledger request was queued. */
   noteSourceChanged(): void { if (this.state !== 'closed') this.writeVersion++ }
   exportTo(path: string): Promise<void> { return this.call('export', path) }
-  restoreFrom(path: string): Promise<void> { return this.call('restore', path) }
+  restoreFrom(path: string): Promise<void> { return this.runCollection('restore', path).then(() => {}) }
   pauseCollection(): void {
     const error = this.admissionError('pause')
     if (this.state === 'paused' && !this.unavailable) return

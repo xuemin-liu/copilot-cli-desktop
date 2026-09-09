@@ -26,5 +26,5 @@ export interface UsageReport {
 }
 
 export type UsageScope = 'all' | 'app'
-export interface UsageFlushResult { backupWarning: string | null }
+export interface UsageFlushResult { backupWarning: string | null; backupDiagnostic: string | null }
 export const emptyUsage = (): UsageCounts => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 })

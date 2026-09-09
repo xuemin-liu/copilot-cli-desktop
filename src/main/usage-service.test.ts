@@ -192,6 +192,29 @@ test('shutdown retries a paused flush whose backup failed without losing its dia
   } finally { await service.abort() }
 })
 
+test('backup diagnostics gain raw detail once and ignore changing temporary paths until recovery', async () => {
+  const worker = new TestWorker()
+  const diagnostics: string[] = []
+  const service = new UsageService('unused', 'unused', (message) => diagnostics.push(message), { createWorker: () => worker })
+  const backupWarning = 'Usage is committed, but the backup refresh failed (UNKNOWN): The backup could not be written.'
+  try {
+    // A restart can initially know only the persisted warning during the retry interval.
+    service.pauseCollection()
+    let flushed = service.flush(); worker.ready(); worker.finish({ backupWarning, backupDiagnostic: null }); await flushed
+    assert.deepEqual(diagnostics, [backupWarning])
+    flushed = service.flush(); worker.finish({ backupWarning, backupDiagnostic: 'TypeError: driver failed at first-uuid.tmp' }); await flushed
+    flushed = service.flush(); worker.finish({ backupWarning, backupDiagnostic: 'TypeError: driver failed at second-uuid.tmp' }); await flushed
+    assert.equal(diagnostics.length, 2)
+    assert.match(diagnostics[1]!, /TypeError: driver failed at first-uuid.tmp/)
+    const report = service.report('2026-09', 'all'); worker.finish({ warnings: [backupWarning], totals: { input: 50 } })
+    assert.deepEqual((await report).warnings, [backupWarning])
+    flushed = service.flush(); worker.finish({ backupWarning: null, backupDiagnostic: null }); await flushed
+    flushed = service.flush(); worker.finish({ backupWarning, backupDiagnostic: 'TypeError: driver failed again' }); await flushed
+    assert.equal(diagnostics.length, 3)
+    assert.match(diagnostics[2]!, /failed again/)
+  } finally { await service.abort() }
+})
+
 test('pause rejects stopping and closed services instead of silently succeeding', async () => {
   const worker = new TestWorker()
   const service = new UsageService('unused', 'unused', () => {}, { createWorker: () => worker })
@@ -314,6 +337,8 @@ test('periodic and forced backup failures share one durable report warning and l
     assert.match(report.warnings.join(' '), /Usage is committed, but the backup refresh failed/)
     assert.equal(report.warnings.filter((warning) => warning.includes('backup refresh')).length, 1)
     assert.equal(diagnostics.filter((message) => message.includes('Usage is committed')).length, 1)
+    assert.ok(diagnostics.some((message) => message.includes(root)), 'the app log retains the raw filesystem diagnostic')
+    assert.ok(!report.warnings.find((warning) => warning.includes('backup refresh'))!.includes(root))
     await service.collect(); await service.flush()
     assert.equal(diagnostics.filter((message) => message.includes('Usage is committed')).length, 1)
     assert.equal((await service.report('2026-09', 'all')).warnings.filter((warning) => warning.includes('backup refresh')).length, 1)

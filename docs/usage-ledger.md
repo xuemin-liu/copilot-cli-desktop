@@ -59,3 +59,9 @@ forced worker stop, although records not collected before the deadline may be
 missing. Repeated worker failures stop automatic replacement until the app
 restarts. Portable exports remain the protection against losing the entire
 app-data directory.
+
+## Verification
+
+Run `npm run usage:check` to build and exercise the production usage worker in
+Electron, including backup creation and restart after source-history deletion.
+The check uses temporary data and does not start a model or show a window.

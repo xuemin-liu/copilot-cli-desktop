@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { existsSync, mkdirSync, readdirSync, lstatSync, statSync, unlinkSync, writeFileSync, readFileSync, openSync, fsyncSync, closeSync, type Dirent } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope } from './usage-types.js'
+import { emptyUsage, type UsageCounts, type UsageGroup, type UsageReport, type UsageScope, type UsageFlushResult } from './usage-types.js'
 import { visitSessionHistoryLines } from './session-history.js'
 import { renameWithRetry, retryFileOperationSync } from './atomic-file.js'
 
@@ -187,6 +187,7 @@ export class UsageLedger {
   private statements = new Map<string, StatementSync>()
   private warnings: string[] = []
   private recoveryWarning: string | null = null
+  private backupDiagnostic: string | null = null
   private cachedSamples: Sample[] | null = null
   private monthCache = { zone: '', values: new Map<string, string>() }
   readonly backupDirectory: string
@@ -200,7 +201,7 @@ export class UsageLedger {
     const missing = !existsSync(path)
     if (existsSync(path)) {
       try {
-        if (!validateUsageDatabase(path, true) && this.backups(true).length) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
+        if (!validateUsageDatabase(path, true) && this.hasAnyBackup()) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
       } catch (error) {
         // Lock, permission and I/O errors do not prove data corruption. Leave the ledger in place.
         if (!confirmedCorruption(error)) throw error
@@ -218,7 +219,7 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
       PRAGMA user_version=1;`)
-      if (missing && this.backups(true).length) this.setMeta('missingLedgerWarning', '1')
+      if (missing && this.hasAnyBackup()) this.setMeta('missingLedgerWarning', '1')
       if (!this.meta('backupGeneration')) this.setMeta('backupGeneration', `generation-${randomUUID()}`)
       this.db.exec('COMMIT')
     } catch (error) { this.db.close(); throw error }
@@ -407,7 +408,7 @@ export class UsageLedger {
     checkpoint(result.completeBytes, true)
     this.warnings.push(...warnings)
   }
-  private backups(allGenerations = false): string[] {
+  private *backupFiles(allGenerations = false): Generator<string> {
     const directories = new Set([this.backupDirectory])
     const entries = (directory: string): Dirent[] => {
       try { return readdirSync(directory, { withFileTypes: true }) } catch { return [] }
@@ -416,10 +417,18 @@ export class UsageLedger {
       directories.add(this.backupRoot)
       for (const entry of entries(this.backupRoot)) if (entry.isDirectory() && new RegExp(`^generation-${UUID}$`, 'i').test(entry.name)) directories.add(join(this.backupRoot, entry.name))
     }
-    const files: Array<{ path: string; modified: number }> = []
     for (const directory of directories) for (const entry of entries(directory)) {
       if (!entry.isFile() || !/^(daily|monthly)-.*\.sqlite$/.test(entry.name)) continue
-      const path = join(directory, entry.name)
+      yield join(directory, entry.name)
+    }
+  }
+  private hasAnyBackup(): boolean {
+    for (const _path of this.backupFiles(true)) return true
+    return false
+  }
+  private backups(allGenerations = false): string[] {
+    const files: Array<{ path: string; modified: number }> = []
+    for (const path of this.backupFiles(allGenerations)) {
       try { files.push({ path, modified: statSync(path).mtimeMs }) } catch { /* Unavailable candidates can be retried on the next recovery. */ }
     }
     return files.sort((a, b) => b.modified - a.modified).map((file) => file.path)
@@ -446,12 +455,13 @@ export class UsageLedger {
     const daily = join(this.backupDirectory, `daily-${day}.sqlite`)
     const stale = this.backupWarning()
     const elapsed = now.getTime() - Date.parse(this.meta('backupLastAttempt') ?? '')
-    if (!force && stale && elapsed < 10 * 60_000) return
+    if (!force && stale && Math.abs(elapsed) < 10 * 60_000) return
     if (force || stale || !existsSync(daily)) {
       // Persist before touching backup files so interruptions and worker restarts
       // retain the warning and force a retry even when today's backup exists.
       this.setMeta('backupStale', 'Usage is committed, but the backup refresh is pending. Collection will retry the backup.')
       this.setMeta('backupLastAttempt', now.toISOString())
+      this.backupDiagnostic = null
       try {
         mkdirSync(this.backupDirectory, { recursive: true })
         this.exportTo(daily)
@@ -460,6 +470,9 @@ export class UsageLedger {
         this.setMeta('lastBackup', now.toISOString())
         this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
       } catch (error) {
+        // Keep detailed exceptions only in memory for the app log, never in the
+        // portable ledger or user-facing report. Bound unusually large messages.
+        this.backupDiagnostic = (error instanceof Error ? error.stack ?? String(error) : String(error)).slice(0, 8000)
         this.setMeta('backupStale', backupFailureWarning(error))
         throw error
       }
@@ -471,8 +484,9 @@ export class UsageLedger {
     }
   }
   backupWarning(): string | null { return this.meta('backupStale') }
-  tryBackup(force = false): void {
+  tryBackup(force = false): UsageFlushResult {
     try { this.backup(force) } catch (error) { if (!this.backupWarning()) throw error }
+    return { backupWarning: this.backupWarning(), backupDiagnostic: this.backupDiagnostic }
   }
   restoreFrom(path: string): void {
     if (resolve(path).toLowerCase() === resolve(this.path).toLowerCase()) throw new Error('Select a backup rather than the active usage database')
