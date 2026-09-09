@@ -291,6 +291,22 @@ test('backup diagnostics describe early metadata failures and clear on success o
   assert.deepEqual(ledger.tryBackup(), { backupWarning: null, backupDiagnostic: null })
 }))
 
+test('a failed warning write preserves the original backup exception and diagnostic', async (t) => fixture(async ({ ledger }) => {
+  const original = Object.assign(new Error('original export destination is full'), { code: 'ENOSPC' })
+  const secondary = Object.assign(new Error('secondary warning metadata is full'), { errcode: 13 })
+  t.mock.method(ledger, 'exportTo', () => { throw original })
+  const setMeta = ledger['setMeta'].bind(ledger)
+  t.mock.method(ledger as unknown as { setMeta: typeof setMeta }, 'setMeta', (key: string, value: string) => {
+    if (key === 'backupStale' && value.includes('refresh failed')) throw secondary
+    setMeta(key, value)
+  })
+  assert.throws(() => ledger.backup(true), (error) => error === original)
+  const result = ledger.tryBackup(true)
+  assert.match(result.backupWarning!, /refresh is pending/)
+  assert.match(result.backupDiagnostic!, /original export destination is full/)
+  assert.doesNotMatch(result.backupDiagnostic!, /secondary warning metadata/)
+}))
+
 test('a far-future backup timestamp permits one fresh retry and then resumes the normal interval', async (t) => fixture(async ({ ledger, path }) => {
   const now = new Date('2026-09-08T12:00:00Z')
   const future = new Date('2027-09-08T12:00:00Z')
@@ -308,7 +324,7 @@ test('a far-future backup timestamp permits one fresh retry and then resumes the
   } finally { reopened.close() }
 }))
 
-test('a missing ledger stops checking backups at the first accessible file', async (t) => fixture(async ({ ledger, path }) => {
+test('a missing ledger records its recovery hint from listed backups without probing their accessibility', async (t) => fixture(async ({ ledger, path }) => {
   ledger.backup(true); ledger.close(); rmSync(path)
   const stat = fs.statSync
   let backupStats = 0
@@ -321,8 +337,32 @@ test('a missing ledger stops checking backups at the first accessible file', asy
   try {
     reopened = new UsageLedger(path)
     assert.match(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
-    assert.equal(backupStats, 1)
+    assert.equal(backupStats, 0)
   } finally { reopened?.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+}))
+
+test('a missing-ledger hint survives inaccessible backups and later restarts until restore', async (t) => fixture(async ({ ledger, path, home, request }) => {
+  request(); await ledger.collect(home); ledger.backup(true); ledger.close(); rmSync(path)
+  const selected = join(ledger.backupDirectory, readdirSync(ledger.backupDirectory).find((file) => file.startsWith('daily-'))!)
+  const stat = fs.statSync
+  t.mock.method(fs, 'statSync', (file: fs.PathLike, options?: any) => {
+    if (String(file).startsWith(ledger.backupDirectory)) throw Object.assign(new Error('backup held by scanner'), { code: 'EBUSY' })
+    return stat(file, options)
+  })
+  syncBuiltinESMExports()
+  let fresh: UsageLedger | undefined
+  try {
+    fresh = new UsageLedger(path)
+    assert.equal(fresh.report('2026-09').totals.input, 0)
+    assert.match(fresh.report('2026-09').warnings.join(' '), /ledger was missing/)
+  } finally { fresh?.close(); t.mock.restoreAll(); syncBuiltinESMExports() }
+  const reopened = new UsageLedger(path)
+  try {
+    assert.match(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
+    reopened.restoreFrom(selected)
+    assert.equal(reopened.report('2026-09').totals.input, 50)
+    assert.doesNotMatch(reopened.report('2026-09').warnings.join(' '), /ledger was missing/)
+  } finally { reopened.close() }
 }))
 
 test('an empty ledger initializes when all listed backup candidates are inaccessible', async (t) => fixture(async ({ ledger, path }) => {

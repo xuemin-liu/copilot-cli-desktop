@@ -200,7 +200,7 @@ export class UsageLedger {
     const missing = !existsSync(path)
     if (existsSync(path)) {
       try {
-        if (!validateUsageDatabase(path, true) && this.hasAnyBackup()) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
+        if (!validateUsageDatabase(path, true) && this.hasAnyBackup(true)) throw new UsageDatabaseCorruptionError('Empty ledger has existing backups')
       } catch (error) {
         // Lock, permission and I/O errors do not prove data corruption. Leave the ledger in place.
         if (!confirmedCorruption(error)) throw error
@@ -218,6 +218,7 @@ export class UsageLedger {
       CREATE TABLE IF NOT EXISTS rejected_usage (key TEXT PRIMARY KEY, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_occurrences (source TEXT, digest TEXT, count INTEGER NOT NULL, PRIMARY KEY(source,digest));
       PRAGMA user_version=1;`)
+      // A listed backup warrants this durable hint even while access is blocked.
       if (missing && this.hasAnyBackup()) this.setMeta('missingLedgerWarning', '1')
       if (!this.meta('backupGeneration')) this.setMeta('backupGeneration', `generation-${randomUUID()}`)
       this.db.exec('COMMIT')
@@ -421,8 +422,9 @@ export class UsageLedger {
       yield join(directory, entry.name)
     }
   }
-  private hasAnyBackup(): boolean {
+  private hasAnyBackup(requireAccessible = false): boolean {
     for (const path of this.backupFiles(true)) {
+      if (!requireAccessible) return true
       try { statSync(path); return true } catch { /* Match the recovery candidate filter, stopping on the first accessible file. */ }
     }
     return false
@@ -470,7 +472,7 @@ export class UsageLedger {
         this.setMeta('lastBackup', now.toISOString())
         this.stmt("DELETE FROM metadata WHERE key='backupStale'").run()
       } catch (error) {
-        this.setMeta('backupStale', backupFailureWarning(error))
+        try { this.setMeta('backupStale', backupFailureWarning(error)) } catch { /* Warning persistence must not replace the original backup failure. */ }
         throw error
       }
       // Only rotate after both replacement backups have passed integrity validation.
