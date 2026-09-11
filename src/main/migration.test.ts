@@ -41,6 +41,75 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
   return { promise, resolve, reject }
 }
 
+test('bookkeeping scan failures do not change committed import outcomes and can be refreshed away', async (t) => {
+  for (const failAllScans of [false, true]) {
+    const { root, target } = await fixture(t)
+    const zip = join(root, 'knowledge.zip')
+    await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
+    let scans = 0, failing = true
+    const service = migrationService(target, { listBackups: async (path) => {
+      scans++
+      if (failing && (failAllScans || scans === 3)) throw new Error('bookkeeping scan failed')
+      return listMigrationBackups(path)
+    } })
+    await service.open(zip)
+    const result = await service.apply((await service.preview({ ...choices, categories: ['knowledge'] })).id)
+    assert.equal(await readFile(join(target.copilot, 'copilot-instructions.md'), 'utf8'), 'after')
+    assert.equal(jsonObject(await readFile(join(result.backup!, 'journal.json'))).status, 'complete')
+    assert.equal(service.status().lastImport?.status, 'completed')
+    assert.ok(result.warnings.some((warning) => warning.includes('bookkeeping scan failed')))
+    assert.ok(service.status().warnings.some((warning) => warning.includes('bookkeeping scan failed')))
+    failing = false
+    const refreshed = await service.refreshBackups()
+    assert.equal(refreshed.lastImport?.status, 'completed')
+    assert.deepEqual(refreshed.warnings, [])
+    assert.equal(refreshed.backups.length, 1)
+  }
+})
+
+test('backup listing errors preserve successful deletions and the original deletion failure', async (t) => {
+  const { target } = await fixture(t)
+  const directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  let failing = false
+  const service = migrationService(target, { listBackups: async (path) => {
+    if (failing) throw new Error('bookkeeping scan failed')
+    return listMigrationBackups(path)
+  } })
+  await put(join(directory, 'usage-before.sqlite'), 'snapshot')
+  let backup = (await service.refreshBackups()).backups[0]!
+  failing = true
+  const deleted = await service.deleteBackup(backup.id, backup.token)
+  await assert.rejects(readdir(directory), /ENOENT/)
+  assert.ok(deleted.warnings.some((warning) => warning.includes('bookkeeping scan failed')))
+  failing = false
+  await put(join(directory, 'usage-before.sqlite'), 'snapshot')
+  backup = (await service.refreshBackups()).backups[0]!
+  await put(join(directory, 'usage-before.sqlite'), 'changed snapshot')
+  failing = true
+  await assert.rejects(service.deleteBackup(backup.id, backup.token), /Backup changed/)
+  assert.equal(await readFile(join(directory, 'usage-before.sqlite'), 'utf8'), 'changed snapshot')
+})
+
+test('recovery and dismissal retain their outcomes when backup bookkeeping fails', async (t) => {
+  for (const dismiss of [false, true]) {
+    const { target } = await fixture(t)
+    const directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+    const destination = join(target.copilot, 'copilot-instructions.md')
+    await put(destination, 'after'); await put(join(directory, '0.bak'), 'before')
+    await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'needs-attention', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
+    const service = migrationService(target, { listBackups: async () => { throw new Error('bookkeeping scan failed') } })
+    const report = await recoverMigrationReport(target.desktop, false, false)
+    service.recoveryIssues = report.issues; service.recoveryJournals = report.journals
+    const journal = report.journals[0]!
+    const status = dismiss ? await service.dismissRecovery(journal.id, journal.sha256) : await service.recover()
+    assert.deepEqual(status.recoveryIssues, [])
+    assert.ok(status.warnings.some((warning) => warning.includes('bookkeeping scan failed')))
+    assert.equal(await readFile(destination, 'utf8'), dismiss ? 'after' : 'before')
+    if (dismiss) assert.ok((await readdir(directory)).some((name) => name.startsWith('journal.dismissed-')))
+    else assert.equal(jsonObject(await readFile(join(directory, 'journal.json'))).status, 'rolled-back')
+  }
+})
+
 test('initial and overlapping backup status requests wait for the latest scan to publish', async (t) => {
   const { target } = await fixture(t)
   const first = deferred<Awaited<ReturnType<typeof listMigrationBackups>>>()

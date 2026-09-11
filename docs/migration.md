@@ -111,6 +111,9 @@ If cancellation leaves a snapshot
 running, the result reports its possible location and asks you to check that it
 finished before relying on the copy. Status polling uses the loaded cache and
 keeps only one automatic request in flight; failed initial scans can be retried.
+If a backup-list refresh fails after an import, recovery, dismissal, or deletion,
+the operation keeps its actual outcome and Settings shows a refresh warning.
+Use **Refresh backup list** to retry; a successful refresh clears that warning.
 The acknowledgement box applies to the complete displayed journal set and resets
 when a journal is added, removed, or changed, even if two journals have identical contents.
 

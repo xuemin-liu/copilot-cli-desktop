@@ -36,6 +36,7 @@ export class MigrationService {
   private latestBackupList: Promise<void> | null = null
   private warnings: string[] = []
   private backupWarnings: string[] = []
+  private backupRefreshWarning: { sequence: number; message: string } | null = null
   private pendingSnapshots = new Set<string>()
   private currentProgress: MigrationProgress = { phase: 'Idle', completed: 0, total: 0 }
   private abort: AbortController | null = null
@@ -46,7 +47,7 @@ export class MigrationService {
     deps.roots = { copilot: resolve(deps.roots.copilot), agentSkills: resolve(deps.roots.agentSkills), desktop: resolve(deps.roots.desktop) }
   }
   cancel(): void { this.abort?.abort() }
-  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings] } }
+  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings, ...(this.backupRefreshWarning ? [this.backupRefreshWarning.message] : [])] } }
   loadBackups(): Promise<void> {
     const sequence = ++this.backupListSequence
     this.backupListFailed = false
@@ -54,6 +55,7 @@ export class MigrationService {
       if (sequence > this.publishedBackupSequence) {
         this.publishedBackupSequence = sequence
         this.backups = listed.backups; this.backupWarnings = listed.warnings; this.backupsLoaded = true
+        if (sequence >= (this.backupRefreshWarning?.sequence ?? 0)) this.backupRefreshWarning = null
       }
     }).catch((error) => {
       if (sequence === this.backupListSequence) this.backupListFailed = true
@@ -79,11 +81,20 @@ export class MigrationService {
     }
   }
   async refreshBackups(): Promise<MigrationStatus> { await this.loadBackups(); return this.status() }
+  private async refreshBackupBookkeeping(): Promise<string[]> {
+    const scan = this.loadBackups(), sequence = this.backupListSequence
+    try { await scan; return [] }
+    catch (error) {
+      const message = `Could not refresh retained backups; the list may be stale. Refresh the backup list to retry: ${String(error)}`
+      if (sequence >= this.publishedBackupSequence && sequence >= (this.backupRefreshWarning?.sequence ?? 0)) this.backupRefreshWarning = { sequence, message }
+      return [message]
+    }
+  }
   async deleteBackup(id: string, token: string): Promise<MigrationStatus> {
     await this.run('Deleting selected backup', async () => {
       if (!this.backups.some((backup) => backup.id === id && backup.token === token)) throw new Error('Refresh and review the backup list first')
       if ([...this.pendingSnapshots].some((path) => path.startsWith(join(this.deps.roots.desktop, 'migration-backups', id).replaceAll('\\', '/') + '/'))) throw new Error('Wait for the usage snapshot to finish before deleting its backup')
-      try { await deleteMigrationBackup(this.deps.roots.desktop, id, token) } finally { await this.loadBackups() }
+      try { await deleteMigrationBackup(this.deps.roots.desktop, id, token) } finally { await this.refreshBackupBookkeeping() }
     })
     return this.status()
   }
@@ -96,7 +107,7 @@ export class MigrationService {
       if (key.startsWith(join(this.deps.roots.desktop, 'migration-backups').replaceAll('\\', '/') + '/')) {
         // Bookkeeping must not extend the cancellable snapshot or replace its error.
         // A late snapshot still updates the list after cancellation.
-        void Promise.resolve().then(() => this.loadBackups()).then(() => this.deps.progress(this.currentProgress)).catch(() => {})
+        void this.refreshBackupBookkeeping().then(() => this.deps.progress(this.currentProgress)).catch(() => {})
       }
     }
   }
@@ -123,7 +134,7 @@ export class MigrationService {
       catch (error) { warnings.push(`Files on disk retain their transaction outcome, but Desktop could not refresh its state. Restart before changing settings: ${String(error)}`) }
     }
     if (recoverPending) this.warnings = warnings
-    await this.loadBackups()
+    await this.refreshBackupBookkeeping()
     return warnings
   }
   async dismissRecovery(id: string, sha256: string): Promise<MigrationStatus> {
@@ -281,7 +292,7 @@ export class MigrationService {
             result.warnings.push('Usage records merged successfully.')
           } catch { result.warnings.push('Files imported, but usage merge did not complete. Retry via Monthly token usage → Restore backup using usage/usage.sqlite from the archive.') }
         }
-        await this.loadBackups()
+        result.warnings.push(...await this.refreshBackupBookkeeping())
         this.lastImport = { status: 'completed', message: 'Import completed. Review the result and any warnings below.', result }
         return result
       } catch (error) {
