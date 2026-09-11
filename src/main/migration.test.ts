@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import yazl from 'yazl'
 import { DEFAULT_DESKTOP_CONFIG, normalizeDesktopConfig, readDesktopConfig, workspaceProfileId } from './desktop-config.js'
-import { applyMigrationImport, planMigrationImport, recoverMigrationImports } from './migration-import.js'
+import { applyMigrationImport, planMigrationImport, recoverMigrationReport } from './migration-import.js'
 import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableSettings, safeRelative } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
 import { MigrationService } from './migration-service.js'
@@ -34,6 +34,120 @@ function migrationService(roots: MigrationRoots, overrides: Partial<ConstructorP
     exportUsage: async (path) => put(path, 'snapshot'), restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {}, ...overrides })
 }
 
+test('tool JSON serialization removes comments and shadowed duplicate secrets on both export and import', async (t) => {
+  const { source, target } = await fixture(t)
+  const samples = ['{ "env": { // "GITHUB_TOKEN": "LEAK_COMMENT"\n "API_KEY":"${API_KEY}" }}', '{"env":{"GITHUB_TOKEN":"LEAK_DUPLICATE"},"env":{"API_KEY":"${API_KEY}"}}']
+  for (const [index, text] of samples.entries()) await put(join(source.copilot, `hooks/${index}.jsonc`), text)
+  const files = await collectMigration(source, manifest(), new Set(['tools']))
+  assert.ok(files.every((file) => !file.data.includes('LEAK_')))
+  const raw = archive(...samples.map((text, index) => fileEntry(`copilot/hooks/${index}.jsonc`, 'tools', Buffer.from(text))))
+  await applyMigrationImport(await planMigrationImport(raw, target, {}, choices), target)
+  for (let index = 0; index < samples.length; index++) assert.ok(!(await readFile(join(target.copilot, `hooks/${index}.jsonc`), 'utf8')).includes('LEAK_'))
+})
+
+test('absent optional paths are quiet while unavailable selected workspaces are reported', async (t) => {
+  const { source, root } = await fixture(t)
+  const repo = join(root, 'repo'); await put(join(repo, 'AGENTS.md'), 'project')
+  await put(join(source.copilot, 'skills/example/SKILL.md'), 'skill')
+  const info = manifest(); info.projects = [{ id: 'aaaaaaaaaaaaaaaa', name: 'repo', sourcePath: repo }]
+  await collectMigration(source, info, new Set(choices.categories))
+  assert.deepEqual(info.warnings, [])
+  info.projects.push({ id: 'bbbbbbbbbbbbbbbb', name: 'missing', sourcePath: join(root, 'disconnected') })
+  await collectMigration(source, info, new Set(choices.categories))
+  assert.equal(info.warnings.length, 1)
+  assert.match(info.warnings[0]!, /disconnected/)
+})
+
+test('post-commit reload failure is a success warning and preconditions preserve the last import outcome', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'input.zip'), destination = join(target.copilot, 'copilot-instructions.md')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('committed'))])
+  let reloads = 0, idle = true
+  const service = migrationService(target, { assertIdle: async () => { if (!idle) throw new Error('session open') }, reloaded: async () => { if (++reloads === 2) throw new Error('EBUSY refresh') } })
+  await assert.rejects(service.apply('stale'), /preview/)
+  assert.equal(service.status().lastImport, null)
+  await service.open(zip)
+  let preview = await service.preview(choices)
+  idle = false
+  await assert.rejects(service.apply(preview.id), /session open/)
+  assert.equal(service.status().lastImport, null)
+  idle = true
+  const result = await service.apply(preview.id)
+  assert.equal(await readFile(destination, 'utf8'), 'committed')
+  assert.equal(service.status().lastImport?.status, 'completed')
+  assert.ok(result.warnings.some((warning) => warning.includes('EBUSY refresh')))
+  const previous = service.status().lastImport
+  preview = await service.preview(choices); idle = false
+  await assert.rejects(service.apply(preview.id), /session open/)
+  assert.deepEqual(service.status().lastImport, previous)
+})
+
+test('cancellation outcome uses the transaction rollback result even when the following reload fails', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'input.zip')
+  await writeMigrationArchive(zip, manifest(), ['a', 'b'].map((name) => fileEntry(`copilot/instructions/${name}.md`, 'knowledge', Buffer.from(name))))
+  let reloads = 0
+  const service = migrationService(target, { progress: (value) => { if (value.completed === 1) service.cancel() }, reloaded: async () => { if (++reloads === 2) throw new Error('reload unavailable') } })
+  await service.open(zip)
+  await assert.rejects(service.apply((await service.preview(choices)).id), /abort/i)
+  assert.equal(service.status().lastImport?.status, 'cancelled')
+  assert.match(service.status().lastImport!.message, /rolled back/)
+  assert.ok(service.status().warnings.some((warning) => warning.includes('reload unavailable')))
+  await assert.rejects(readFile(join(target.copilot, 'instructions/a.md')), /ENOENT/)
+})
+
+test('dismissal is nonexclusive, leaves other pending targets untouched, and exposes preserved backups for explicit deletion', async (t) => {
+  const { target } = await fixture(t)
+  const id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', directory = join(target.desktop, 'migration-backups', id)
+  const other = join(target.desktop, 'migration-backups', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+  const destination = join(target.copilot, 'copilot-instructions.md')
+  await put(destination, 'after')
+  await put(join(directory, 'journal.json'), '{unreadable JSON}')
+  await put(join(directory, '0.bak'), 'PRIVATE_BACKUP')
+  await put(join(other, '0.bak'), 'before')
+  await put(join(other, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
+  const report = await recoverMigrationReport(target.desktop, false, false)
+  const service = migrationService(target, { assertIdle: async () => { throw new Error('active session') }, reloaded: async () => { throw new Error('must not reload') } })
+  service.recoveryIssues = report.issues; service.recoveryJournals = report.journals
+  const journal = report.journals.find((entry) => entry.id === id)!
+  await service.dismissRecovery(id, journal.sha256)
+  assert.equal(await readFile(destination, 'utf8'), 'after')
+  assert.equal(service.status().exclusive, false)
+  const backup = service.status().backups.find((entry) => entry.id === id)!
+  assert.equal(backup.status, 'dismissed')
+  assert.equal(await readFile(join(directory, '0.bak'), 'utf8'), 'PRIVATE_BACKUP')
+  assert.ok(!service.status().backups.some((entry) => entry.id.startsWith('bbbb')))
+  await assert.rejects(service.deleteBackup(id, 'stale'), /review the backup list/)
+  await put(join(directory, '0.bak'), 'PRIVATE_BACKUP changed')
+  await assert.rejects(service.deleteBackup(id, backup.token), /Backup changed/)
+  await service.refreshBackups()
+  await service.deleteBackup(id, service.status().backups.find((entry) => entry.id === id)!.token)
+  await assert.rejects(readdir(directory), /ENOENT/)
+  assert.equal(await readFile(destination, 'utf8'), 'after')
+  assert.ok((await readdir(other)).includes('0.bak'))
+})
+
+test('retained-backup deletion waits for a cancelled usage snapshot that is still writing', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('committed')), fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  let entered!: () => void, finish!: () => void, written!: () => void
+  const began = new Promise<void>((resolve) => { entered = resolve })
+  const gate = new Promise<void>((resolve) => { finish = resolve })
+  const done = new Promise<void>((resolve) => { written = resolve })
+  const service = migrationService(target, { exportUsage: async (path) => { entered(); await gate; await put(path, 'late usage snapshot'); written() } })
+  await service.open(zip)
+  const work = service.apply((await service.preview({ ...choices, categories: ['knowledge', 'usage'] })).id)
+  await began; service.cancel(); await work
+  await service.refreshBackups()
+  let backup = service.status().backups[0]!
+  await assert.rejects(service.deleteBackup(backup.id, backup.token), /Wait for the usage snapshot/)
+  finish(); await done; await new Promise<void>((resolve) => setImmediate(resolve))
+  await service.refreshBackups(); backup = service.status().backups[0]!
+  await service.deleteBackup(backup.id, backup.token)
+  assert.equal(await readFile(join(target.copilot, 'copilot-instructions.md'), 'utf8'), 'committed')
+})
+
 test('partially unreadable project and personal trees publish no partial replacement groups', async (t) => {
   const { root, source, target } = await fixture(t)
   const repo = join(root, 'repo'), destination = join(root, 'mapped')
@@ -42,6 +156,7 @@ test('partially unreadable project and personal trees publish no partial replace
   for (const path of paths) {
     await put(join(path, 'deploy/SKILL.md'), 'readable')
     await put(join(path, 'deploy/scripts/run.cmd'), 'hidden')
+    if (!path.endsWith('extensions')) for (const sibling of ['alpha', 'gamma']) await put(join(path, `${sibling}/SKILL.md`), sibling)
   }
   await put(join(source.copilot, 'copilot-instructions.md'), 'readable guidance')
   const info = manifest(); info.projects = [{ id: 'aaaaaaaaaaaaaaaa', name: 'repo', sourcePath: repo }]
@@ -50,6 +165,8 @@ test('partially unreadable project and personal trees publish no partial replace
     return readdir(path, { withFileTypes: true })
   })
   assert.ok(!files.some((file) => file.path.includes('deploy')))
+  assert.equal(files.filter((file) => file.path.endsWith('alpha/SKILL.md')).length, 3)
+  assert.equal(files.filter((file) => file.path.endsWith('gamma/SKILL.md')).length, 3)
   assert.ok(files.some((file) => file.path.endsWith('copilot-instructions.md')))
   for (const path of paths) assert.ok(info.warnings.some((warning) => warning.includes(path) && warning.includes('entire')))
   await put(join(destination, '.github/skills/deploy/scripts/run.cmd'), 'keep destination')
@@ -190,14 +307,18 @@ test('provider replacements retain the destination endpoint and unselected field
   assert.deepEqual((await readDesktopConfig(join(target.desktop, 'desktop.json'))).provider, { type: 'openai', baseUrl: 'https://local.test/v1', model: 'new', offline: true })
 })
 
-test('opaque JSON assets round trip unchanged while exact CLI and tool configurations are filtered', async (t) => {
+test('opaque assets retain bytes while parseable tool assets retain values', async (t) => {
   const { source, target } = await fixture(t)
   const assets = { 'skills/demo/settings.json': '{"arbitrary":true}', 'extensions/demo/settings.json': '[1,2]', 'extensions/demo/scalar.json': 'false', 'hooks/settings.json': '{not json}', 'skills/demo/ref.json': '{"TOKEN":"private asset"}' }
   for (const [path, bytes] of Object.entries(assets)) await put(join(source.copilot, path), bytes)
   await put(join(source.copilot, 'settings.json'), '{"model":"allowed","arbitrary":true}')
   const files = await collectMigration(source, manifest(), new Set(choices.categories))
   await applyMigrationImport(await planMigrationImport(archive(...files), target, {}, choices), target)
-  for (const [path, bytes] of Object.entries(assets)) assert.equal(await readFile(join(target.copilot, path), 'utf8'), bytes)
+  for (const [path, bytes] of Object.entries(assets)) {
+    const imported = await readFile(join(target.copilot, path), 'utf8')
+    if (path.startsWith('extensions/')) assert.deepEqual(JSON.parse(imported), JSON.parse(bytes))
+    else assert.equal(imported, bytes)
+  }
   assert.deepEqual(jsonObject(await readFile(join(target.copilot, 'settings.json'))), { model: 'allowed' })
 })
 
@@ -271,17 +392,17 @@ test('recovery reports corrupt journals and missing backups without preventing s
   const destination = join(target.copilot, 'copilot-instructions.md')
   const directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
   await put(join(directory, 'journal.json'), '{broken')
-  assert.match((await recoverMigrationImports(target.desktop)).join(), /needs attention/)
+  assert.match((await recoverMigrationReport(target.desktop)).issues.join(), /needs attention/)
   await put(destination, 'after')
   await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
-  assert.match((await recoverMigrationImports(target.desktop)).join(), /missing or damaged/)
+  assert.match((await recoverMigrationReport(target.desktop)).issues.join(), /missing or damaged/)
   await put(join(directory, '0.bak'), 'before')
-  assert.equal((await recoverMigrationImports(target.desktop)).length, 1)
-  assert.deepEqual(await recoverMigrationImports(target.desktop, true), [])
+  assert.equal((await recoverMigrationReport(target.desktop)).issues.length, 1)
+  assert.deepEqual((await recoverMigrationReport(target.desktop, true)).issues, [])
   assert.equal(await readFile(destination, 'utf8'), 'before')
   const redirected = join(root, 'redirected'), empty = join(root, 'empty')
   await mkdir(empty); await symlink(empty, redirected, 'junction')
-  assert.deepEqual(await recoverMigrationImports(redirected), [])
+  assert.deepEqual((await recoverMigrationReport(redirected)).issues, [])
 })
 
 test('writer checks use authenticated daemon state and ignore stale process identities', async () => {
@@ -406,7 +527,7 @@ test('cancellation during application rolls back changed and newly added files',
   await assert.rejects(applyMigrationImport(plan, target, abort.signal, () => abort.abort()), /abort/i)
   assert.equal(await readFile(join(target.copilot, 'copilot-instructions.md'), 'utf8'), 'original')
   await assert.rejects(readFile(join(target.copilot, 'instructions/new.instructions.md')), /ENOENT/)
-  await recoverMigrationImports(target.desktop)
+  await recoverMigrationReport(target.desktop)
 })
 
 test('startup recovery rolls back an interrupted write and retains evidence', async (t) => {
@@ -416,7 +537,7 @@ test('startup recovery rolls back an interrupted write and retains evidence', as
   await put(destination, 'after')
   await put(join(directory, '0.bak'), 'before')
   await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
-  await recoverMigrationImports(target.desktop)
+  await recoverMigrationReport(target.desktop)
   assert.equal(await readFile(destination, 'utf8'), 'before')
   assert.equal(jsonObject(await readFile(join(directory, 'journal.json'))).status, 'rolled-back')
 })
@@ -428,9 +549,9 @@ test('recovery refuses to overwrite changes made after interruption', async (t) 
   await put(destination, 'third party')
   await put(join(directory, '0.bak'), 'before')
   await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
-  assert.match((await recoverMigrationImports(target.desktop)).join('\n'), /destination changed/)
+  assert.match((await recoverMigrationReport(target.desktop)).issues.join('\n'), /destination changed/)
   assert.equal(jsonObject(await readFile(join(directory, 'journal.json'))).status, 'needs-attention')
-  assert.match((await recoverMigrationImports(target.desktop)).join('\n'), /destination changed/)
+  assert.match((await recoverMigrationReport(target.desktop)).issues.join('\n'), /destination changed/)
   assert.equal(await readFile(destination, 'utf8'), 'third party')
 })
 

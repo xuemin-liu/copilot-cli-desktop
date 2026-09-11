@@ -95,6 +95,8 @@ export interface CopilotDesktopSettingsBridge {
   migrationStatus(): Promise<MigrationStatus>
   migrationRecover(): Promise<MigrationStatus>
   migrationDismissRecovery(id: string, sha256: string): Promise<MigrationStatus>
+  migrationBackups(): Promise<MigrationStatus>
+  migrationDeleteBackup(id: string, token: string): Promise<MigrationStatus>
   onMigrationProgress(listener: (progress: MigrationProgress) => void): () => void
   usageReport(month: string, scope: import('../main/usage-types.js').UsageScope, timezone?: string): Promise<import('../main/usage-types.js').UsageReport>
   refreshUsage(): Promise<void>

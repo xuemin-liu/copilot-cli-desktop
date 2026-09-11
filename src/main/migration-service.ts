@@ -4,7 +4,8 @@ import { join, resolve } from 'node:path'
 import { readDesktopConfig } from './desktop-config.js'
 import { collectMigration, fileEntry, jsonBytes, jsonObject, optionalRead, sanitize, type MigrationFile } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
-import { applyMigrationImport, dismissMigrationJournal, planMigrationImport, recoverMigrationReport, type ImportPlan } from './migration-import.js'
+import { applyMigrationImport, dismissMigrationJournal, MigrationImportFailure, planMigrationImport, recoverMigrationReport, type ImportPlan } from './migration-import.js'
+import { deleteMigrationBackup, listMigrationBackups } from './migration-backups.js'
 import { MIGRATION_CATEGORIES, type MigrationChoices, type MigrationInventory, type MigrationManifest, type MigrationOutcome, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult, type MigrationRoots, type MigrationSelection, type MigrationStatus } from './migration-types.js'
 import { writeFileAtomic } from './atomic-file.js'
 
@@ -26,6 +27,10 @@ export class MigrationService {
   recoveryIssues: string[] = []
   recoveryJournals: MigrationRecoveryJournal[] = []
   private lastImport: MigrationOutcome | null = null
+  private backups: MigrationStatus['backups'] = []
+  private warnings: string[] = []
+  private backupWarnings: string[] = []
+  private pendingSnapshots = new Set<string>()
   private currentProgress: MigrationProgress = { phase: 'Idle', completed: 0, total: 0 }
   private abort: AbortController | null = null
   private archive: MigrationArchive | null = null
@@ -35,7 +40,26 @@ export class MigrationService {
     deps.roots = { copilot: resolve(deps.roots.copilot), agentSkills: resolve(deps.roots.agentSkills), desktop: resolve(deps.roots.desktop) }
   }
   cancel(): void { this.abort?.abort() }
-  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport } }
+  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings] } }
+  async loadBackups(): Promise<void> {
+    const listed = await listMigrationBackups(this.deps.roots.desktop)
+    this.backups = listed.backups
+    this.backupWarnings = listed.warnings
+  }
+  async refreshBackups(): Promise<MigrationStatus> { await this.run('Listing retained backups', async () => this.loadBackups()); return this.status() }
+  async deleteBackup(id: string, token: string): Promise<MigrationStatus> {
+    await this.run('Deleting selected backup', async () => {
+      if (!this.backups.some((backup) => backup.id === id && backup.token === token)) throw new Error('Refresh and review the backup list first')
+      if ([...this.pendingSnapshots].some((path) => path.startsWith(join(this.deps.roots.desktop, 'migration-backups', id).replaceAll('\\', '/') + '/'))) throw new Error('Wait for the usage snapshot to finish before deleting its backup')
+      try { await deleteMigrationBackup(this.deps.roots.desktop, id, token) } finally { await this.loadBackups() }
+    })
+    return this.status()
+  }
+  private async exportUsage(path: string): Promise<void> {
+    const key = path.replaceAll('\\', '/')
+    this.pendingSnapshots.add(key)
+    try { await this.deps.exportUsage(path) } finally { this.pendingSnapshots.delete(key) }
+  }
   private progress(value: MigrationProgress): void { this.currentProgress = value; this.deps.progress(value) }
   private async acquire(signal: AbortSignal): Promise<void> {
     await this.deps.assertIdle()
@@ -50,19 +74,25 @@ export class MigrationService {
     })
     return this.status()
   }
-  private async refreshRecovery(retry = false): Promise<void> {
-    try {
-      const report = await recoverMigrationReport(this.deps.roots.desktop, retry)
-      this.recoveryIssues = report.issues; this.recoveryJournals = report.journals
-    } finally { await this.deps.reloaded() }
+  private async refreshRecovery(retry = false, recoverPending = true): Promise<string[]> {
+    const report = await recoverMigrationReport(this.deps.roots.desktop, retry, recoverPending)
+    this.recoveryIssues = report.issues; this.recoveryJournals = report.journals
+    const warnings: string[] = []
+    if (recoverPending) {
+      try { await this.deps.reloaded() }
+      catch (error) { warnings.push(`Files on disk retain their transaction outcome, but Desktop could not refresh its state. Restart before changing settings: ${String(error)}`) }
+    }
+    if (recoverPending) this.warnings = warnings
+    await this.loadBackups()
+    return warnings
   }
   async dismissRecovery(id: string, sha256: string): Promise<MigrationStatus> {
     await this.run('Dismissing inspected recovery journal', async (signal) => {
-      await this.acquire(signal)
+      signal.throwIfAborted()
       if (!this.recoveryJournals.some((journal) => journal.id === id && journal.sha256 === sha256)) throw new Error('Review the recovery journal in Settings first')
       await dismissMigrationJournal(this.deps.roots.desktop, id, sha256)
       this.plan = null
-      await this.refreshRecovery()
+      await this.refreshRecovery(false, false)
     })
     return this.status()
   }
@@ -132,7 +162,7 @@ export class MigrationService {
       if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest, signal))
       if (selection.categories.includes('usage')) await cancellable(this.withScratch(async (directory) => {
         const usage = join(directory, 'usage.sqlite')
-        await this.deps.exportUsage(usage)
+        await this.exportUsage(usage)
         signal.throwIfAborted()
         files.push(fileEntry('usage/usage.sqlite', 'usage', (await optionalRead(usage))!))
       }), signal)
@@ -171,27 +201,28 @@ export class MigrationService {
   }
   async apply(id: string): Promise<MigrationResult> {
     return this.run('Importing files', async (signal) => {
+      if (!this.plan || this.plan.preview.id !== id) throw new Error('Refresh the import preview')
+      await this.acquire(signal)
+      const recoveryWarnings = await this.refreshRecovery()
+      if (this.recoveryIssues.length) throw new Error('Resolve migration recovery issues in Settings before importing again.')
+      if (recoveryWarnings.length) throw new Error(recoveryWarnings.join('\n'))
+      const plan = this.plan
+      this.plan = null
       try {
-        if (!this.plan || this.plan.preview.id !== id) throw new Error('Refresh the import preview')
-        await this.acquire(signal)
-        await this.refreshRecovery()
-        if (this.recoveryIssues.length) throw new Error('Resolve migration recovery issues in Settings before importing again.')
-        const plan = this.plan
-        this.plan = null
         let result: MigrationResult
         try { result = await applyMigrationImport(plan, this.deps.roots, signal, (completed, total) => this.progress({ phase: 'Importing files', completed, total })) }
         catch (error) {
-          await this.refreshRecovery().catch((reloadError) => { throw new Error(`${String(error)}. Could not reload recovered settings: ${String(reloadError)}`, { cause: error }) })
+          await this.refreshRecovery().catch((reloadError) => { this.warnings.push(`Could not inspect recovery: ${String(reloadError)}`) })
           throw error
         }
-        await this.refreshRecovery()
+        result.warnings.push(...await this.refreshRecovery().catch((error) => [`Could not inspect recovery after the committed import: ${String(error)}`]))
         if (plan.usage) {
           // Usage merge is deliberately separate from the file transaction.
           try {
             signal.throwIfAborted()
             const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
             await mkdir(backupRoot, { recursive: true, mode: 0o700 })
-            await cancellable(this.deps.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
+            await cancellable(this.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
             signal.throwIfAborted()
             result.backup = backupRoot
             await this.withScratch(async (directory) => {
@@ -207,8 +238,9 @@ export class MigrationService {
         this.lastImport = { status: 'completed', message: 'Import completed. Review the result and any warnings below.', result }
         return result
       } catch (error) {
-        const cancelled = signal.aborted && this.recoveryIssues.length === 0
-        this.lastImport = { status: cancelled ? 'cancelled' : 'failed', message: cancelled ? `Import cancelled; uncommitted file changes were rolled back. ${String(error)}` : `Import failed: ${String(error)}`, result: null }
+        const cancelled = signal.aborted && (!(error instanceof MigrationImportFailure) || error.rollbackComplete)
+        const detail = error instanceof MigrationImportFailure && error.rollbackComplete ? 'Uncommitted file changes were rolled back.' : 'Review the current files and recovery details.'
+        this.lastImport = { status: cancelled ? 'cancelled' : 'failed', message: `${cancelled ? 'Import cancelled' : 'Import failed'}. ${detail} ${String(error)}`, result: null }
         throw error
       }
     })

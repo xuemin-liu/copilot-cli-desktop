@@ -58,15 +58,18 @@ removed. `${NAME}` and `${env:NAME}` references are preserved. Arbitrary Markdow
 or scripts and skill assets can still contain secrets. CLI settings use an
 allowlist. Parseable JSON/JSONC in MCP/LSP, hooks, and extensions receives secret
 filtering and structured path remapping without the settings allowlist; arrays
-and scalars are supported. Unparseable tool assets are preserved byte for byte
+and scalars are supported. Parseable tool files are always serialized after
+filtering so comments and shadowed duplicate keys cannot retain secrets.
+Unparseable tool assets are preserved byte for byte
 with an explicit review warning. The ZIP is not encrypted and should be private.
 
 Links and junctions are unsupported. Limits are 64 MiB per file, 256 MiB total
 uncompressed archive data, and 10,000 files. Directory traversal is also bounded.
 Large data sets and unsupported files produce errors or explicit omission notes.
-An unavailable source path is omitted in full, including any files already read
-from it, so an incomplete skill cannot replace a complete destination directory.
-Reconnect the drive or restore read access before exporting omitted items.
+An unavailable skill or agent is omitted as a complete group while readable
+sibling groups remain included. Missing optional paths are silent; an unavailable
+selected workspace or a file disappearing during a group scan produces a warning.
+Restore read access before exporting omitted items.
 
 ## Conflicts and recovery
 
@@ -88,11 +91,21 @@ To retain the current destination instead, inspect the backup directory, check
 the acknowledgement box, and choose **Keep current files and dismiss this recovery**.
 The journal is renamed to `journal.dismissed-<id>.json`; destination files and
 backups are preserved, and further imports are allowed once all issues are resolved.
+Dismissal only renames the inspected journal and does not require stopping sessions
+or run recovery against other files. **Retained migration backups** lists completed,
+rolled-back, dismissed, and abandoned preparation backups. They can contain
+unencrypted credentials. Use **Delete backup…**, then **Permanently delete this backup**
+when that recovery copy is no longer needed. Current settings remain unchanged;
+unresolved recovery journals and active migration writes cannot be deleted this way.
 Closing Settings cancels its migration operation; reopening Settings shows any
 operation still finishing and retains access to Cancel. The last import outcome,
 including cancellation, rollback, and skipped usage, remains visible when Settings
 is reopened during the same app run. A usage merge already
 committing must finish before cancellation takes effect.
+Rejected preconditions do not replace the last import result. If an import commits
+but Desktop cannot refresh its state, the result remains completed with a warning
+to restart before changing settings. Busy state is reconciled periodically while
+an operation is displayed, so a missed completion event cannot strand the panel.
 
 Usage merge is a separate step with its own pre-import backup. A usage failure
 does not undo a successful file import; the completion report explains how to
@@ -112,6 +125,9 @@ scripted native file dialogs and the real controller check; it saves screenshots
 The controller check authenticates this installation's background controller;
 if the probe fails but its saved PID is still alive, migration waits for the
 controller to stop or respond. It does not scan machine-wide process names.
+The error identifies the saved state file when a PID may have been reused. After
+verifying that the controller and its Copilot child have stopped, move that stale
+file aside and retry; do not terminate an unrelated process based on its PID alone.
 Close external CLI sessions yourself.
 Export snapshot checks and import destination fingerprints detect concurrent file
 changes. Reviewing inventory or an import preview does not block terminal input.

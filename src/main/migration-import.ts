@@ -5,7 +5,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { MAX_PROFILES, normalizeDesktopConfig, workspaceProfileId } from './desktop-config.js'
 import { normalizeSessionLaunchConfig } from './session-launch.js'
-import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, isToolJsonPath, jsonBytes, jsonObject, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize, transformToolJson } from './migration-inventory.js'
+import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, isToolJsonPath, jsonBytes, jsonObject, migrationAssetGroup, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize, transformToolJson } from './migration-inventory.js'
 import type { MigrationArchive } from './migration-archive.js'
 import type { MigrationChange, MigrationChoices, MigrationPreview, MigrationRecoveryJournal, MigrationResult, MigrationRoots } from './migration-types.js'
 
@@ -57,11 +57,6 @@ async function directoryHash(root: string): Promise<string> {
   try { await lstat(root) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; exists = false }
   return digest(jsonBytes({ exists, files: [...files].map(([path, data]) => [relative(root, path), digest(data)]) }))
 }
-function groupPath(path: string): string | null {
-  const match = /^(copilot\/(?:skills|agents)|agents-home\/skills|projects\/[a-f0-9]{16}\/(?:\.github\/(?:skills|agents)|\.agents\/skills|\.claude\/skills))\/([^/]+)(?:\/|$)/.exec(path)
-  // Single-file agents conflict individually; directory assets conflict as a unit.
-  return match && path.startsWith(`${match[1]}/${match[2]}/`) ? `${match[1]}/${match[2]}` : null
-}
 
 function mapStructuredPaths(value: unknown, archive: MigrationArchive, mappings: Record<string, string>, warnings: string[], key = '', depth = 0): unknown {
   if (depth > 40) throw new Error('Configuration nesting exceeds migration limit')
@@ -104,7 +99,7 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
     if (targets.has(normalizedTarget)) throw new Error('Multiple archive entries map to the same destination')
     targets.add(normalizedTarget)
     if (file.path.includes('/.github/hooks/') && !selected.has('tools')) { plan.preview.warnings.push('Project hooks require Tools selection.'); continue }
-    const group = groupPath(file.path)
+    const group = migrationAssetGroup(file.path)
     if (group) {
       if (groups.has(group)) continue
       groups.add(group)
@@ -220,10 +215,7 @@ async function rollback(directory: string, journal: Journal): Promise<void> {
   journal.status = 'rolled-back'
   await durableWrite(join(directory, 'journal.json'), jsonBytes(journal))
 }
-export async function recoverMigrationImports(desktopRoot: string, retry = false): Promise<string[]> {
-  return (await recoverMigrationReport(desktopRoot, retry)).issues
-}
-export async function recoverMigrationReport(desktopRoot: string, retry = false): Promise<{ issues: string[]; journals: MigrationRecoveryJournal[] }> {
+export async function recoverMigrationReport(desktopRoot: string, retry = false, recoverPending = true): Promise<{ issues: string[]; journals: MigrationRecoveryJournal[] }> {
   const root = join(desktopRoot, 'migration-backups')
   const issues: string[] = []
   const journals: MigrationRecoveryJournal[] = []
@@ -256,7 +248,7 @@ export async function recoverMigrationReport(desktopRoot: string, retry = false)
         || parsed.writes.some((w) => !w || typeof w.target !== 'string' || !isAbsolute(w.target) || [w.before, w.after].some((hash) => hash !== null && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))))
         || !Array.isArray(parsed.roots) || parsed.roots.some((value) => typeof value !== 'string' || !isAbsolute(value))) throw new Error('Invalid migration recovery journal')
       journal = parsed
-      if (journal.status === 'needs-attention' && !retry) {
+      if ((journal.status === 'needs-attention' && !retry) || (journal.status === 'pending' && !recoverPending)) {
         await recordIssue(name, directory, `${directory}: ${journal.error ?? 'Recovery needs attention; inspect the backups before retrying.'}`)
       } else if (journal.status === 'pending' || journal.status === 'needs-attention') await rollback(directory, journal)
     } catch (error) {
@@ -268,6 +260,9 @@ export async function recoverMigrationReport(desktopRoot: string, retry = false)
     }
   }
   return report
+}
+export class MigrationImportFailure extends Error {
+  constructor(message: string, cause: unknown, readonly rollbackComplete: boolean) { super(message, { cause }) }
 }
 /** Acknowledgement preserves both current destination files and all evidence. */
 export async function dismissMigrationJournal(desktopRoot: string, id: string, sha256: string): Promise<void> {
@@ -314,9 +309,9 @@ export async function applyMigrationImport(plan: ImportPlan, roots: MigrationRoo
       catch (recoveryError) {
         journal.status = 'needs-attention'; journal.error = String(recoveryError)
         await durableWrite(join(directory, 'journal.json'), jsonBytes(journal)).catch(() => {})
-        throw new Error(`Import failed: ${String(error)}. Rollback needs attention: ${String(recoveryError)}. Backups: ${directory}`, { cause: error })
+        throw new MigrationImportFailure(`Import failed: ${String(error)}. Rollback needs attention: ${String(recoveryError)}. Backups: ${directory}`, error, false)
       }
-      throw error
+      throw new MigrationImportFailure(String(error), error, true)
     }
   }
   return { imported: plan.writes.length, skipped: plan.preview.changes.filter((change) => change.action === 'keep').length, backup: plan.writes.length ? directory : null, warnings: [...plan.preview.warnings] }

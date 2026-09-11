@@ -26,8 +26,15 @@ if (!process.versions.electron) {
 async function runElectronCheck() {
   const { app, BrowserWindow, dialog, shell, ipcMain } = await import('electron')
   let statusRequests = 0
+  let releaseInitialStatus
+  const initialStatusGate = new Promise((ok) => { releaseInitialStatus = ok })
   const handle = ipcMain.handle.bind(ipcMain)
-  ipcMain.handle = (channel, listener) => handle(channel, channel === 'desktop-settings:migration-status' ? (...args) => { statusRequests++; return listener(...args) } : listener)
+  ipcMain.handle = (channel, listener) => handle(channel, channel === 'desktop-settings:migration-status' ? async (...args) => {
+    const initial = ++statusRequests === 1
+    const value = await listener(...args)
+    if (initial) await initialStatusGate
+    return value
+  } : listener)
   dialog.showErrorBox = (title, content) => { console.error(title, content); app.exit(1) }
   const root = process.env.MIGRATION_CHECK_ROOT, output = process.env.MIGRATION_CHECK_OUTPUT
   assert.ok(root && output)
@@ -66,10 +73,15 @@ async function runElectronCheck() {
     settings.webContents.setBackgroundThrottling(false)
     const evaluate = (code) => settings.webContents.executeJavaScript(code)
     await waitFor(() => evaluate('Boolean(document.querySelector("#migration-title"))'))
+    await waitFor(() => statusRequests > 0)
+    settings.webContents.send('desktop-settings:migration-progress', { phase: 'Progress while mounting', completed: 1, total: 2 })
+    await waitFor(() => evaluate(`document.body.textContent.includes('Progress while mounting')`))
+    releaseInitialStatus()
     const click = async (text) => {
       await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(text)}); if (!button || button.disabled) throw Error('Button unavailable'); button.click(); })()`)
     }
     await waitFor(() => evaluate(`document.body.textContent.includes('An interrupted import needs attention')`))
+    await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Retry recovery' && !b.disabled)`))
     await click('Retry recovery')
     await waitFor(async () => JSON.parse(await readFile(join(damagedJournal, 'journal.json'), 'utf8')).status === 'rolled-back')
     assert.equal(await readFile(instructions, 'utf8'), 'Migration UI fixture')
@@ -78,11 +90,13 @@ async function runElectronCheck() {
     await click('Keep current files and dismiss this recovery')
     await waitFor(() => evaluate(`!document.body.textContent.includes('An interrupted import needs attention')`))
     assert.ok((await (await import('node:fs/promises')).readdir(corruptJournal)).some((name) => name.startsWith('journal.dismissed-')))
+    await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === 'Delete backup…' && b.parentElement.textContent.includes(${JSON.stringify(corruptJournal)})); if (!button) throw Error('Dismissed backup not listed'); button.closest('details').open = true; button.click(); })()`)
+    await click('Permanently delete this backup')
+    await waitFor(async () => { try { await readFile(join(corruptJournal, 'journal.json')); return false } catch { return !(await (await import('node:fs/promises')).readdir(join(root, 'desktop', 'migration-backups'))).includes('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb') } })
     const baselineRequests = statusRequests
     for (let i = 1; i <= 5000; i++) settings.webContents.send('desktop-settings:migration-progress', { phase: 'Progress fixture', completed: i, total: 5000 })
     await waitFor(() => evaluate(`document.body.textContent.includes('Progress fixture 5000/5000')`))
-    assert.equal(statusRequests, baselineRequests, 'progress events must not trigger status invokes')
-    settings.webContents.send('desktop-settings:migration-progress', { phase: 'Idle', completed: 0, total: 0 })
+    assert.ok(statusRequests - baselineRequests <= 2, 'progress events must not trigger per-file status invokes')
     await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Review export files' && !b.disabled)`))
     await evaluate(`(() => { const section=document.querySelector('#migration-title').closest('section'); for (const label of section.querySelectorAll('fieldset label')) { const input=label.querySelector('input'); if(input?.checked && !label.textContent.includes('CLI settings') && !label.textContent.includes('Personal instructions')) input.click(); } })()`)
     await click('Review export files')
@@ -126,7 +140,7 @@ async function runElectronCheck() {
     releaseSnapshot()
     UsageService.prototype.exportTo = originalExport
     await waitFor(async () => !(await (await import('node:fs/promises')).readdir(join(root, 'desktop'))).some((name) => name.startsWith('migration-staging-')))
-    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'real recovery retry', 'inspected recovery dismissal', '5000 progress events without status invokes', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'close cancels stalled snapshot', 'reopened Settings status and last import'] }, null, 2))
+    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'mount status survives progress', 'real recovery retry', 'inspected recovery dismissal', 'explicit retained-backup deletion', '5000 progress events with bounded polling', 'missed Idle reconciled automatically', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'close cancels stalled snapshot', 'reopened Settings status and last import'] }, null, 2))
     console.log('[migration-check] Production Settings export, conflict preview and import passed.')
     clearTimeout(timeout); app.quit()
   } catch (error) {

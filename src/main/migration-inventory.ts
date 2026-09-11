@@ -130,8 +130,12 @@ export function transformToolJson(data: Buffer, path: string, warnings: string[]
     return data
   }
   const transformed = transform(value)
-  // Preserve formatting/comments when no semantic changes are necessary.
-  return JSON.stringify(value) === JSON.stringify(transformed) ? data : jsonBytes(transformed)
+  // Always serialize: comments and shadowed duplicate keys were not sanitized.
+  return jsonBytes(transformed)
+}
+export function migrationAssetGroup(path: string): string | null {
+  const match = /^(copilot\/(?:skills|agents)|agents-home\/skills|projects\/[a-f0-9]{16}\/(?:\.github\/(?:skills|agents)|\.agents\/skills|\.claude\/skills))\/([^/]+)(?:\/|$)/.exec(path)
+  return match && path.startsWith(`${match[1]}/${match[2]}/`) ? `${match[1]}/${match[2]}` : null
 }
 export function isUnavailableMigrationPath(error: unknown): boolean { return ['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') }
 export async function collectMigration(roots: MigrationRoots, manifest: MigrationManifest, categories: ReadonlySet<MigrationCategory>, signal?: AbortSignal,
@@ -151,10 +155,14 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
       if (!isUnavailableMigrationPath(error)) throw error
       // Never publish a partial asset group: replacement deletes absent files.
       files.splice(start); total = bytes
-      manifest.warnings.push(`Skipped entire unavailable path: ${path}. Reconnect the drive or restore read access, then review again.`)
+      manifest.warnings.push(`Skipped entire unavailable path: ${path}. Restore access to this path, then review again.`)
     }
   }
-  const collectPath = (source: string, archive: string, category: MigrationCategory): Promise<void> => tolerate(source, () => walk(source, archive, category))
+  const collectPath = (source: string, archive: string, category: MigrationCategory): Promise<void> => tolerate(source, async () => {
+    // Optional roots may never have existed. Disappearance after discovery is different.
+    try { await lstat(source) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    await walk(source, archive, category)
+  })
   async function walk(source: string, archive: string, category: MigrationCategory): Promise<void> {
     signal?.throwIfAborted()
     if (++visited > 20_000 || archive.split('/').length > 40) throw new Error('Migration directory scan limit exceeded')
@@ -162,7 +170,11 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     let info
     info = await lstat(source)
     if (info.isDirectory()) {
-      for (const child of (await readDirectory(source)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) await walk(join(source, child.name), `${archive}/${child.name}`, category)
+      for (const child of (await readDirectory(source)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+        const childSource = join(source, child.name), childArchive = `${archive}/${child.name}`
+        if (migrationAssetGroup(`${childArchive}/`) === childArchive) await tolerate(childSource, () => walk(childSource, childArchive, category))
+        else await walk(childSource, childArchive, category)
+      }
     } else {
       let data = await optionalRead(source)
       if (!data) throw Object.assign(new Error(`Source disappeared: ${source}`), { code: 'ENOENT' })

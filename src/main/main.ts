@@ -2381,6 +2381,15 @@ ipcMain.handle('desktop-settings:migration-dismiss-recovery', (event, id: unknow
   if (typeof id !== 'string' || typeof sha256 !== 'string') throw new Error('Invalid recovery journal selection')
   return getMigrationService().dismissRecovery(id, sha256)
 })
+ipcMain.handle('desktop-settings:migration-backups', (event) => {
+  assertTrustedSettingsSender(event, true)
+  return getMigrationService().refreshBackups()
+})
+ipcMain.handle('desktop-settings:migration-delete-backup', (event, id: unknown, token: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string' || typeof token !== 'string') throw new Error('Invalid backup selection')
+  return getMigrationService().deleteBackup(id, token)
+})
 
 function checkMigrationIdle(): void {
   if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before exporting or importing. Tray sessions also count.')
@@ -2421,6 +2430,7 @@ if (!app.requestSingleInstanceLock()) {
     })
     migrationService.recoveryIssues = recovery.issues
     migrationService.recoveryJournals = recovery.journals
+    await migrationService.loadBackups()
     for (const issue of recovery.issues) void writeAppLog(issue)
     startUsageCollection()
     state.desktopVersion = app.getVersion()

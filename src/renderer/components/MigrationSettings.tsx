@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
-import { DEFAULT_MIGRATION_CATEGORIES, MIGRATION_CATEGORIES, type MigrationCategory, type MigrationInventory, type MigrationOutcome, type MigrationPreview, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult } from '../../main/migration-types.js'
+import { DEFAULT_MIGRATION_CATEGORIES, MIGRATION_CATEGORIES, type MigrationBackup, type MigrationCategory, type MigrationInventory, type MigrationOutcome, type MigrationPreview, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult } from '../../main/migration-types.js'
 import type { CopilotDesktopSettingsBridge, DesktopSettingsSnapshot } from '../global.js'
 
 const LABELS: Record<MigrationCategory, string> = {
@@ -23,7 +23,10 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const [serverBusy, setServerBusy] = useState(false)
   const [recoveryIssues, setRecoveryIssues] = useState<string[]>([])
   const [recoveryJournals, setRecoveryJournals] = useState<MigrationRecoveryJournal[]>([])
-  const [inspectedRecovery, setInspectedRecovery] = useState(false)
+  const [inspectedRecovery, setInspectedRecovery] = useState<string[]>([])
+  const [backups, setBackups] = useState<MigrationBackup[]>([])
+  const [backupToDelete, setBackupToDelete] = useState<string | null>(null)
+  const [statusWarnings, setStatusWarnings] = useState<string[]>([])
   const [lastImport, setLastImport] = useState<MigrationOutcome | null>(null)
   const busy = localBusy || serverBusy
   const [progress, setProgress] = useState<MigrationProgress | null>(null)
@@ -32,19 +35,27 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   useEffect(() => {
     let mounted = true
     let revision = 0
-    const refresh = (): void => { const requestedRevision = revision; void bridge.migrationStatus().then((status) => {
-      if (mounted && requestedRevision === revision) {
-        setServerBusy(status.busy); setProgress(status.progress); setRecoveryIssues(status.recoveryIssues)
-        setRecoveryJournals(status.recoveryJournals); setLastImport(status.lastImport); setInspectedRecovery(false)
+    let requestSequence = 0, appliedSequence = 0
+    let operationBusy = false
+    const refresh = (): void => { const requestedRevision = revision, sequence = ++requestSequence; void bridge.migrationStatus().then((status) => {
+      if (mounted && sequence >= appliedSequence) {
+        appliedSequence = sequence
+        setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals); setLastImport(status.lastImport)
+        setBackups(status.backups); setStatusWarnings(status.warnings)
+        if (requestedRevision === revision) {
+          operationBusy = status.busy; setServerBusy(status.busy); setProgress(status.progress)
+        }
       }
     }).catch((error) => { if (mounted) setMessage(String(error)) }) }
     const unsubscribe = bridge.onMigrationProgress((value) => {
       revision++
-      setProgress(value); setServerBusy(value.phase !== 'Idle')
+      operationBusy = value.phase !== 'Idle'
+      setProgress(value); setServerBusy(operationBusy)
       if (value.phase === 'Idle') refresh()
     })
     refresh()
-    return () => { mounted = false; unsubscribe() }
+    const timer = setInterval(() => { if (operationBusy) refresh() }, 2000)
+    return () => { mounted = false; clearInterval(timer); unsubscribe() }
   }, [bridge])
   const key = JSON.stringify({ categories, projectIds })
   const run = async (fn: () => Promise<void>): Promise<void> => {
@@ -61,17 +72,30 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
       <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationRecover(); setRecoveryIssues(status.recoveryIssues); onSaved(await bridge.get()) })}>Retry recovery</button>
       {recoveryJournals.length > 0 && <>
         <p>If you want to keep the current files instead, inspect the backups and acknowledge the incomplete recovery. This stops retries and preserves the journal and backups.</p>
-        <label><input type="checkbox" disabled={busy} checked={inspectedRecovery} onChange={(event) => setInspectedRecovery(event.target.checked)} />I inspected these recovery backups and want to keep the current files.</label>
+        <label><input type="checkbox" disabled={busy} checked={recoveryJournals.every((journal) => inspectedRecovery.includes(journal.sha256))} onChange={(event) => setInspectedRecovery(event.target.checked ? recoveryJournals.map((journal) => journal.sha256) : [])} />I inspected these recovery backups and want to keep the current files.</label>
         {recoveryJournals.map((journal) => <div key={journal.id}>
           <p className="profile-path">{journal.path}</p>
-          <button disabled={busy || !inspectedRecovery} onClick={() => void run(async () => {
+          <button disabled={busy || !inspectedRecovery.includes(journal.sha256)} onClick={() => void run(async () => {
             const status = await bridge.migrationDismissRecovery(journal.id, journal.sha256)
-            setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals); setInspectedRecovery(false)
+            setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals)
             setPreview(null); setReviewed(false); onSaved(await bridge.get())
           })}>Keep current files and dismiss this recovery</button>
         </div>)}
       </>}
     </div>}
+    <details className="settings-card">
+      <summary>Retained migration backups ({backups.length})</summary>
+      <p>These local backups can contain unencrypted credentials and private files. Keep them until you no longer need recovery. Deleting a backup permanently removes that copy and leaves current settings unchanged.</p>
+      <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationBackups(); setBackups(status.backups) })}>Refresh backup list</button>
+      {backups.map((backup) => <div key={backup.id}>
+        <p className="profile-path">{backup.status} · {backup.path} · {(backup.bytes / 1024).toFixed(1)} KiB</p>
+        {backupToDelete === backup.token ? <>
+          <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationDeleteBackup(backup.id, backup.token); setBackups(status.backups); setBackupToDelete(null) })}>Permanently delete this backup</button>
+          <button onClick={() => setBackupToDelete(null)}>Keep backup</button>
+        </> : <button disabled={busy} onClick={() => setBackupToDelete(backup.token)}>Delete backup…</button>}
+      </div>)}
+    </details>
+    {statusWarnings.length > 0 && <ul role="status" className="settings-warning">{statusWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
     <p>Move your Copilot setup to another Windows computer using one ZIP file. Choose what to include, then review the destination changes before importing.</p>
     <p className="settings-disclaimer">Close all Desktop and external Copilot sessions before exporting or importing. Stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts. Closing Settings cancels migration; reopen Settings to see the import outcome, including rollback or skipped usage.</p>
     <fieldset disabled={busy} className="settings-card">
