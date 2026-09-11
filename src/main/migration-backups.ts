@@ -3,6 +3,10 @@ import { join } from 'node:path'
 import { assertNoLinks, digest, jsonBytes, optionalRead } from './migration-inventory.js'
 import type { MigrationBackup } from './migration-types.js'
 
+// Only debris produced by our atomic writer/SQLite snapshot publication is removable.
+const BACKUP_FILE = '(?:\\d+\\.bak|journal\\.json|journal\\.dismissed-[0-9a-f-]{36}\\.json|usage-before\\.sqlite)'
+const BACKUP_ENTRY = new RegExp(`^(?:${BACKUP_FILE}|${BACKUP_FILE}\\.\\d+\\.[0-9a-f-]{36}\\.tmp(?:-journal)?|usage-before\\.sqlite\\.[0-9a-f-]{36}\\.tmp(?:-journal)?|usage-before\\.sqlite-journal)$`)
+
 async function inspectBackup(root: string, id: string): Promise<MigrationBackup | null> {
   if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('Invalid backup selection')
   const path = join(root, 'migration-backups', id)
@@ -15,18 +19,18 @@ async function inspectBackup(root: string, id: string): Promise<MigrationBackup 
     if (parsed.version !== 1 || !['complete', 'rolled-back'].includes(parsed.status ?? '')) return null
     status = parsed.status as MigrationBackup['status']
   } else if (names.some((name) => /^journal\.dismissed-[0-9a-f-]{36}\.json$/.test(name))) status = 'dismissed'
-  else if (names.length) status = 'prepared' // Uncommitted preparation or a separate usage snapshot.
-  else return null
+  else if (names.includes('usage-before.sqlite')) status = 'usage-snapshot'
+  else status = names.length ? 'incomplete' : 'empty'
   const metadata: unknown[] = []
   let bytes = 0
   for (const name of names) {
-    if (!/^(?:\d+\.bak|journal\.json|journal\.dismissed-[0-9a-f-]{36}\.json|usage-before\.sqlite)$/.test(name)) throw new Error(`Unexpected backup entry; inspect manually: ${join(path, name)}`)
+    if (!BACKUP_ENTRY.test(name)) throw new Error(`Unexpected backup entry; inspect manually: ${join(path, name)}`)
     const info = await lstat(join(path, name))
     if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Unsupported backup entry: ${join(path, name)}`)
     bytes += info.size
     metadata.push([name, info.size, info.mtimeMs, info.ino])
   }
-  return { id, path, status, bytes, token: digest(jsonBytes(metadata)) }
+  return { id, path, status, bytes, token: digest(jsonBytes({ id, metadata })) }
 }
 export async function listMigrationBackups(root: string): Promise<{ backups: MigrationBackup[]; warnings: string[] }> {
   const backups: MigrationBackup[] = [], warnings: string[] = []
@@ -39,12 +43,12 @@ export async function listMigrationBackups(root: string): Promise<{ backups: Mig
   }
   return { backups, warnings }
 }
-export async function deleteMigrationBackup(root: string, id: string, token: string): Promise<void> {
+export async function deleteMigrationBackup(root: string, id: string, token: string, removeDirectory = rmdir): Promise<void> {
   const backup = await inspectBackup(root, id)
   if (!backup || backup.token !== token) throw new Error('Backup changed or still needs recovery; refresh the backup list before deleting it')
   // Flat, validated files only. Delete the journal last so partial cleanup stays visible.
   const names = (await readdir(backup.path)).sort((a, b) => Number(a.startsWith('journal')) - Number(b.startsWith('journal')))
   if ((await inspectBackup(root, id))?.token !== token) throw new Error('Backup changed; refresh the backup list')
   for (const name of names) { await assertNoLinks(join(backup.path, name)); await rm(join(backup.path, name)) }
-  await rmdir(backup.path)
+  await removeDirectory(backup.path)
 }

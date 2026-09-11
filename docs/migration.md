@@ -97,6 +97,20 @@ rolled-back, dismissed, and abandoned preparation backups. They can contain
 unencrypted credentials. Use **Delete backup…**, then **Permanently delete this backup**
 when that recovery copy is no longer needed. Current settings remain unchanged;
 unresolved recovery journals and active migration writes cannot be deleted this way.
+Known atomic-write and SQLite temporary files are included in cleanup. An empty
+folder left by an interrupted cleanup stays listed so deletion can be retried.
+Pre-merge usage snapshots have their own label, separate from incomplete backup
+preparation: deleting one removes that copy of the previous usage records.
+The backup list is loaded when Settings requests it, and can be refreshed while
+an export or import runs. Sizes and deletion tokens refresh after usage snapshots finish.
+The acknowledgement box applies to the complete displayed journal set and resets
+when a journal is added, removed, or changed, even if two journals have identical contents.
+
+Dismissal does not run recovery against other journals. A pending journal can
+remain visible until Retry recovery or the next import attempts its rollback;
+it is not permanently blocked by dismissal. A Desktop refresh warning remains
+until an actual refresh succeeds, because listing or dismissing backups does
+not refresh Desktop's in-memory settings.
 Closing Settings cancels its migration operation; reopening Settings shows any
 operation still finishing and retains access to Cancel. The last import outcome,
 including cancellation, rollback, and skipped usage, remains visible when Settings

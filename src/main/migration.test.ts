@@ -11,6 +11,7 @@ import { applyMigrationImport, planMigrationImport, recoverMigrationReport } fro
 import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableSettings, safeRelative } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
 import { MigrationService } from './migration-service.js'
+import { listMigrationBackups } from './migration-backups.js'
 import { assertMigrationWritersStopped } from './migration-writers.js'
 import { CREDENTIAL_NAMES, SENSITIVE_ENVIRONMENT_NAME } from './secure-credentials.js'
 import type { DaemonState } from '../cli/runtime-state.js'
@@ -33,6 +34,69 @@ function migrationService(roots: MigrationRoots, overrides: Partial<ConstructorP
   return new MigrationService({ roots, appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
     exportUsage: async (path) => put(path, 'snapshot'), restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {}, ...overrides })
 }
+
+test('usage-inclusive and usage-only imports publish final backup sizes and tokens before returning', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('new')), fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  for (const categories of [['knowledge', 'usage'], ['usage']] as const) {
+    const service = migrationService(target)
+    await service.open(zip)
+    const result = await service.apply((await service.preview({ ...choices, categories: [...categories] })).id)
+    const listed = service.status().backups.find((backup) => backup.path === result.backup)!
+    const disk = (await listMigrationBackups(target.desktop)).backups.find((backup) => backup.path === result.backup)!
+    assert.equal(listed.bytes, disk.bytes)
+    assert.equal(listed.token, disk.token)
+    if (categories.length === 1) assert.equal(listed.status, 'usage-snapshot')
+    await service.deleteBackup(listed.id, listed.token)
+  }
+})
+
+test('backup listing is lazy and does not take the operation lock or alter active progress', async (t) => {
+  const { target } = await fixture(t)
+  const path = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  await mkdir(path, { recursive: true }); await put(join(path, 'usage-before.sqlite'), 'usage')
+  let entered!: () => void
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  const progress: string[] = []
+  const service = migrationService(target, { progress: (value) => progress.push(value.phase), plugins: async () => { entered(); return new Promise(() => {}) } })
+  assert.deepEqual(service.status().backups, [])
+  await service.ensureBackups()
+  assert.equal(service.status().backups.length, 1)
+  const inventory = service.inventory({ categories: ['plugins'], projectIds: [] })
+  await started
+  const before = service.status().progress
+  const events = [...progress]
+  await service.refreshBackups()
+  assert.equal(service.status().busy, true)
+  assert.deepEqual(service.status().progress, before)
+  assert.deepEqual(progress, events)
+  service.cancel(); await assert.rejects(inventory, /abort/i)
+})
+
+test('dismissing a journal does not prevent apply from automatically recovering another pending journal', async (t) => {
+  const { root, target } = await fixture(t)
+  const a = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  const b = join(target.desktop, 'migration-backups', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+  const destination = join(target.copilot, 'instructions/recovered.md')
+  await put(join(a, 'journal.json'), '{invalid journal}')
+  await put(destination, 'after'); await put(join(b, '0.bak'), 'before')
+  await put(join(b, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
+  const service = migrationService(target)
+  const report = await recoverMigrationReport(target.desktop, false, false)
+  service.recoveryIssues = report.issues; service.recoveryJournals = report.journals
+  const journal = report.journals.find((entry) => entry.path === a)!
+  await service.dismissRecovery(journal.id, journal.sha256)
+  assert.equal(await readFile(destination, 'utf8'), 'after')
+  assert.equal(service.status().recoveryIssues.length, 1)
+  const zip = join(root, 'input.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('imported'))])
+  await service.open(zip)
+  await service.apply((await service.preview(choices)).id)
+  assert.equal(await readFile(destination, 'utf8'), 'before')
+  assert.deepEqual(service.status().recoveryIssues, [])
+  assert.equal(service.status().lastImport?.status, 'completed')
+})
 
 test('tool JSON serialization removes comments and shadowed duplicate secrets on both export and import', async (t) => {
   const { source, target } = await fixture(t)

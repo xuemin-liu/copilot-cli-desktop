@@ -7,6 +7,10 @@ const LABELS: Record<MigrationCategory, string> = {
   settings: 'CLI settings', knowledge: 'Personal instructions', skills: 'Skills and agents', desktop: 'Desktop preferences and workspaces',
   tools: 'Tools, hooks, and extensions (can execute commands)', projects: 'Selected project instructions and skills', plugins: 'Plugin inventory', usage: 'Token usage records',
 }
+const BACKUP_LABELS: Record<MigrationBackup['status'], string> = {
+  complete: 'Completed import backup', 'rolled-back': 'Rolled-back import backup', dismissed: 'Dismissed recovery backup',
+  'usage-snapshot': 'Pre-merge usage snapshot', incomplete: 'Incomplete backup preparation', empty: 'Empty backup folder — cleanup can be retried',
+}
 export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSettingsSnapshot) => void }): JSX.Element {
   const bridge = window.copilotDesktopSettings
   const [categories, setCategories] = useState<MigrationCategory[]>([...DEFAULT_MIGRATION_CATEGORIES])
@@ -23,9 +27,14 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const [serverBusy, setServerBusy] = useState(false)
   const [recoveryIssues, setRecoveryIssues] = useState<string[]>([])
   const [recoveryJournals, setRecoveryJournals] = useState<MigrationRecoveryJournal[]>([])
-  const [inspectedRecovery, setInspectedRecovery] = useState<string[]>([])
+  const [inspectedRecovery, setInspectedRecovery] = useState<string | null>(null)
+  const recoveryKey = JSON.stringify(recoveryJournals.map(({ id, sha256 }) => [id, sha256]).sort((a, b) => a[0]!.localeCompare(b[0]!)))
+  const recoveryAcknowledged = recoveryJournals.length > 0 && inspectedRecovery === recoveryKey
+  useEffect(() => setInspectedRecovery(null), [recoveryKey])
   const [backups, setBackups] = useState<MigrationBackup[]>([])
   const [backupToDelete, setBackupToDelete] = useState<string | null>(null)
+  const [backupListBusy, setBackupListBusy] = useState(false)
+  const [backupListMessage, setBackupListMessage] = useState('')
   const [statusWarnings, setStatusWarnings] = useState<string[]>([])
   const [lastImport, setLastImport] = useState<MigrationOutcome | null>(null)
   const busy = localBusy || serverBusy
@@ -72,10 +81,10 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
       <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationRecover(); setRecoveryIssues(status.recoveryIssues); onSaved(await bridge.get()) })}>Retry recovery</button>
       {recoveryJournals.length > 0 && <>
         <p>If you want to keep the current files instead, inspect the backups and acknowledge the incomplete recovery. This stops retries and preserves the journal and backups.</p>
-        <label><input type="checkbox" disabled={busy} checked={recoveryJournals.every((journal) => inspectedRecovery.includes(journal.sha256))} onChange={(event) => setInspectedRecovery(event.target.checked ? recoveryJournals.map((journal) => journal.sha256) : [])} />I inspected these recovery backups and want to keep the current files.</label>
+        <label><input type="checkbox" disabled={busy} checked={recoveryAcknowledged} onChange={(event) => setInspectedRecovery(event.target.checked ? recoveryKey : null)} />I inspected these recovery backups and want to keep the current files.</label>
         {recoveryJournals.map((journal) => <div key={journal.id}>
           <p className="profile-path">{journal.path}</p>
-          <button disabled={busy || !inspectedRecovery.includes(journal.sha256)} onClick={() => void run(async () => {
+          <button disabled={busy || !recoveryAcknowledged} onClick={() => void run(async () => {
             const status = await bridge.migrationDismissRecovery(journal.id, journal.sha256)
             setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals)
             setPreview(null); setReviewed(false); onSaved(await bridge.get())
@@ -85,10 +94,14 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
     </div>}
     <details className="settings-card">
       <summary>Retained migration backups ({backups.length})</summary>
-      <p>These local backups can contain unencrypted credentials and private files. Keep them until you no longer need recovery. Deleting a backup permanently removes that copy and leaves current settings unchanged.</p>
-      <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationBackups(); setBackups(status.backups) })}>Refresh backup list</button>
+      <p>These local backups can contain unencrypted credentials and private files. Keep them until you no longer need recovery. Deleting a backup permanently removes that copy, including any snapshot of your previous usage records, and leaves current settings unchanged.</p>
+      <button disabled={backupListBusy} onClick={() => {
+        setBackupListBusy(true); setBackupListMessage('')
+        void bridge.migrationBackups().then((status) => setBackups(status.backups)).catch((error) => setBackupListMessage(String(error))).finally(() => setBackupListBusy(false))
+      }}>Refresh backup list</button>
+      {backupListMessage && <p role="status">{backupListMessage}</p>}
       {backups.map((backup) => <div key={backup.id}>
-        <p className="profile-path">{backup.status} · {backup.path} · {(backup.bytes / 1024).toFixed(1)} KiB</p>
+        <p className="profile-path">{BACKUP_LABELS[backup.status]} · {backup.path} · {(backup.bytes / 1024).toFixed(1)} KiB</p>
         {backupToDelete === backup.token ? <>
           <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationDeleteBackup(backup.id, backup.token); setBackups(status.backups); setBackupToDelete(null) })}>Permanently delete this backup</button>
           <button onClick={() => setBackupToDelete(null)}>Keep backup</button>

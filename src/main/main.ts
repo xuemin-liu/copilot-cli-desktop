@@ -2368,8 +2368,9 @@ ipcMain.handle('desktop-settings:migration-cancel', (event) => {
   assertTrustedSettingsSender(event, true)
   getMigrationService().cancel()
 })
-ipcMain.handle('desktop-settings:migration-status', (event) => {
+ipcMain.handle('desktop-settings:migration-status', async (event) => {
   assertTrustedSettingsSender(event, true)
+  await getMigrationService().ensureBackups()
   return getMigrationService().status()
 })
 ipcMain.handle('desktop-settings:migration-recover', (event) => {
@@ -2430,7 +2431,6 @@ if (!app.requestSingleInstanceLock()) {
     })
     migrationService.recoveryIssues = recovery.issues
     migrationService.recoveryJournals = recovery.journals
-    await migrationService.loadBackups()
     for (const issue of recovery.issues) void writeAppLog(issue)
     startUsageCollection()
     state.desktopVersion = app.getVersion()
