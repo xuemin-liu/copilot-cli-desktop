@@ -3,6 +3,7 @@ import { lstat, readdir, readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { parse, type ParseError } from 'jsonc-parser'
 import { readDesktopConfig } from './desktop-config.js'
+import { SENSITIVE_ENVIRONMENT_NAME } from './secure-credentials.js'
 import type { MigrationCategory, MigrationEntry, MigrationManifest, MigrationRoots } from './migration-types.js'
 
 export const MAX_MIGRATION_FILE = 64 * 1024 * 1024
@@ -58,9 +59,9 @@ const SETTINGS = new Set(['model', 'theme', 'banner', 'autoUpdate', 'autoUpdates
   'sandbox.userPolicy.deniedPaths', 'scrollbar', 'shellShortcut', 'showTimestamps', 'showTipsOnStartup', 'statusLine',
   'stayInAutopilot', 'stream', 'subagents.agents', 'subagents.disabledSubagents', 'subagents.maxConcurrency', 'subagents.maxDepth',
   'tabs.enabled', 'tabs.hide', 'tabs.sort', 'terminalProgress', 'toolSearch', 'updateTerminalTitle', 'worktreeBaseRef'])
-export const permissionSetting = (key: string): boolean => /permission|allowed|denied|trusted|sandbox|bypass|remote|autopilot/i.test(key)
+export const permissionSetting = (key: string): boolean => /permission|allowed|denied|trusted|sandbox|bypass|remote|autopilot/i.test(key) || ['askUser', 'continueOnAutoMode'].includes(key)
 export const executableSetting = (key: string): boolean => ['hooks', 'disableAllHooks', 'enabledPlugins', 'extraKnownMarketplaces', 'statusLine', 'powershellFlags', 'bashEnv', 'enabledMcpServers'].includes(key)
-const secretKey = /token|secret|password|passwd|authorization|credential|api.?key|base.?url/i
+const secretKey = new RegExp(`${SENSITIVE_ENVIRONMENT_NAME.source}|base.?url`, 'i')
 function reference(value: unknown): boolean { return typeof value === 'string' && /^\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$/.test(value) }
 export function sanitize(value: unknown, warnings: string[], depth = 0): unknown {
   if (depth > 40) throw new Error('Configuration nesting exceeds migration limit')
@@ -117,7 +118,11 @@ export function fileEntry(path: string, category: MigrationCategory, data: Buffe
 }
 export const PROJECT_FILES = ['.github/copilot-instructions.md', '.github/instructions', '.github/skills', '.github/agents',
   '.github/hooks', '.github/copilot/settings.json', 'AGENTS.md', '.agents/skills', '.claude/skills']
-export async function collectMigration(roots: MigrationRoots, manifest: MigrationManifest, categories: ReadonlySet<MigrationCategory>, signal?: AbortSignal): Promise<MigrationFile[]> {
+export const isCliSettingsPath = (path: string): boolean => path === 'copilot/settings.json' || /^projects\/[a-f0-9]{16}\/\.github\/copilot\/settings\.json$/.test(path)
+export const isToolConfigPath = (path: string): boolean => ['copilot/mcp-config.json', 'copilot/lsp-config.json'].includes(path)
+export function isUnavailableMigrationPath(error: unknown): boolean { return ['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') }
+export async function collectMigration(roots: MigrationRoots, manifest: MigrationManifest, categories: ReadonlySet<MigrationCategory>, signal?: AbortSignal,
+  readProjectDirectory = (path: string) => readdir(path, { withFileTypes: true })): Promise<MigrationFile[]> {
   const files: MigrationFile[] = []
   let total = 0
   let visited = 0
@@ -137,8 +142,10 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     } else {
       let data = await optionalRead(source)
       if (!data) return
-      if (archive.endsWith('/settings.json')) data = portableSettings(data, manifest.warnings, categories.has('tools'))
-      else if (/\.(json|jsonc)$/.test(archive) && category === 'tools') data = jsonBytes(sanitize(jsonObject(data), manifest.warnings))
+      try {
+        if (isCliSettingsPath(archive)) data = portableSettings(data, manifest.warnings, categories.has('tools'))
+        else if (isToolConfigPath(archive)) data = jsonBytes(sanitize(jsonObject(data), manifest.warnings))
+      } catch { throw new Error(`Invalid migration configuration: ${source}`) }
       add(fileEntry(archive, category, data))
     }
   }
@@ -156,19 +163,26 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
   if (categories.has('projects')) for (const project of manifest.projects) {
     for (const path of PROJECT_FILES) {
       if (path === '.github/hooks' && !categories.has('tools')) continue
-      await walk(join(project.sourcePath, path), `projects/${project.id}/${path}`, 'projects')
+      const source = join(project.sourcePath, path)
+      try { await walk(source, `projects/${project.id}/${path}`, 'projects') }
+      catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable project path: ${source}`) }
     }
     // Traverse names only, never follow links or walk repository internals/dependencies.
     let visited = 0
     async function instructions(root: string, relative: string, depth: number): Promise<void> {
       signal?.throwIfAborted()
       if (++visited > 20_000 || depth > 30) { manifest.warnings.push(`Nested AGENTS.md scan limit reached in ${project.name}.`); return }
-      await assertNoLinks(root)
-      for (const entry of await readdir(root, { withFileTypes: true })) {
+      let entries
+      try { await assertNoLinks(root); entries = await readProjectDirectory(root) }
+      catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable instruction directory: ${root}`); return }
+      for (const entry of entries) {
         if (entry.isSymbolicLink() || ['.git', 'node_modules', '.github', '.agents', '.claude', 'dist', 'build', 'release', '.venv'].includes(entry.name)) continue
         const rel = relative ? `${relative}/${entry.name}` : entry.name
         if (entry.isDirectory()) await instructions(join(root, entry.name), rel, depth + 1)
-        else if (entry.name === 'AGENTS.md' && relative) await walk(join(root, entry.name), `projects/${project.id}/${rel}`, 'projects')
+        else if (entry.name === 'AGENTS.md' && relative) {
+          try { await walk(join(root, entry.name), `projects/${project.id}/${rel}`, 'projects') }
+          catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable instruction file: ${join(root, entry.name)}`) }
+        }
       }
     }
     await instructions(project.sourcePath, '', 0)

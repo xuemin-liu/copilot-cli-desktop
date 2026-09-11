@@ -5,7 +5,7 @@ import { readDesktopConfig } from './desktop-config.js'
 import { collectMigration, fileEntry, jsonBytes, jsonObject, optionalRead, sanitize, type MigrationFile } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
 import { applyMigrationImport, planMigrationImport, recoverMigrationImports, type ImportPlan } from './migration-import.js'
-import { MIGRATION_CATEGORIES, type MigrationChoices, type MigrationInventory, type MigrationManifest, type MigrationProgress, type MigrationResult, type MigrationRoots, type MigrationSelection } from './migration-types.js'
+import { MIGRATION_CATEGORIES, type MigrationChoices, type MigrationInventory, type MigrationManifest, type MigrationProgress, type MigrationResult, type MigrationRoots, type MigrationSelection, type MigrationStatus } from './migration-types.js'
 import { writeFileAtomic } from './atomic-file.js'
 
 interface MigrationDependencies {
@@ -13,7 +13,8 @@ interface MigrationDependencies {
   appVersion: string
   cliVersion: () => string | null
   assertIdle: () => Promise<void>
-  plugins: () => Promise<unknown>
+  checkIdle?: () => void
+  plugins: (signal: AbortSignal) => Promise<unknown>
   exportUsage: (path: string) => Promise<void>
   restoreUsage: (path: string) => Promise<void>
   progress: (value: MigrationProgress) => void
@@ -21,6 +22,9 @@ interface MigrationDependencies {
 }
 export class MigrationService {
   busy = false
+  exclusive = false
+  recoveryIssues: string[] = []
+  private currentProgress: MigrationProgress = { phase: 'Idle', completed: 0, total: 0 }
   private abort: AbortController | null = null
   private archive: MigrationArchive | null = null
   private plan: ImportPlan | null = null
@@ -29,13 +33,29 @@ export class MigrationService {
     deps.roots = { copilot: resolve(deps.roots.copilot), agentSkills: resolve(deps.roots.agentSkills), desktop: resolve(deps.roots.desktop) }
   }
   cancel(): void { this.abort?.abort() }
+  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues] } }
+  private progress(value: MigrationProgress): void { this.currentProgress = value; this.deps.progress(value) }
+  private async acquire(signal: AbortSignal): Promise<void> {
+    await this.deps.assertIdle()
+    signal.throwIfAborted()
+    this.deps.checkIdle?.()
+    this.exclusive = true
+  }
+  async recover(): Promise<MigrationStatus> {
+    await this.run('Recovering interrupted imports', async (signal) => {
+      await this.acquire(signal)
+      this.recoveryIssues = await recoverMigrationImports(this.deps.roots.desktop, true)
+      await this.deps.reloaded()
+    })
+    return this.status()
+  }
   private async run<T>(phase: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.busy) throw new Error('Another migration operation is running')
     this.busy = true
     this.abort = new AbortController()
-    this.deps.progress({ phase, completed: 0, total: 0 })
+    this.progress({ phase, completed: 0, total: 0 })
     try { return await operation(this.abort.signal) }
-    finally { this.abort = null; this.busy = false; this.deps.progress({ phase: 'Idle', completed: 0, total: 0 }) }
+    finally { this.abort = null; this.busy = false; this.exclusive = false; this.progress({ phase: 'Idle', completed: 0, total: 0 }) }
   }
   private async manifest(): Promise<MigrationManifest> {
     await optionalRead(join(this.deps.roots.desktop, 'desktop.json'))
@@ -52,16 +72,16 @@ export class MigrationService {
       // Profiles need all source path labels, while repository traversal is explicitly selected.
       manifest.projects = allProjects.filter((p) => selection.projectIds.includes(p.id))
       const files = await collectMigration(this.deps.roots, manifest, new Set(selection.categories), signal)
-      if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest))
+      if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest, signal))
       if (selection.categories.includes('usage')) manifest.warnings.push('Usage snapshot size is determined during export.')
       return { roots: this.deps.roots, entries: files.map(({ data: _data, ...entry }) => entry), projects: allProjects, warnings: manifest.warnings }
     })
   }
-  private async pluginInventory(manifest: MigrationManifest): Promise<MigrationFile> {
+  private async pluginInventory(manifest: MigrationManifest, signal: AbortSignal): Promise<MigrationFile> {
     // Project known identifier/source fields only; never copy opaque resource output.
     const records: { name: string; source: string; version: string }[] = []
     try {
-      const raw = await this.deps.plugins()
+      const raw = await cancellable(this.deps.plugins(signal), signal)
       const warnings: string[] = []
       const cleaned = sanitize(raw, warnings)
       function visit(value: unknown, depth: number): void {
@@ -78,13 +98,13 @@ export class MigrationService {
       }
       visit(cleaned, 0)
       if (!records.length) manifest.warnings.push('No supported plugin inventory was discovered. Reinstall plugins manually in Copilot extensions.')
-    } catch { manifest.warnings.push('Plugin inventory unavailable; reconnect or install Copilot CLI, then refresh.') }
+    } catch { signal.throwIfAborted(); manifest.warnings.push('Plugin inventory unavailable; reconnect or install Copilot CLI, then refresh.') }
     return fileEntry('plugins/inventory.json', 'plugins', jsonBytes({ plugins: records }))
   }
   async export(path: string, selection: MigrationSelection): Promise<void> {
     validateSelection(selection)
     await this.run('Exporting archive', async (signal) => {
-      await this.deps.assertIdle()
+      await this.acquire(signal)
       const manifest = await this.manifest(), projects = manifest.projects
       manifest.projects = projects.filter((p) => selection.projectIds.includes(p.id))
       const files = await collectMigration(this.deps.roots, manifest, new Set(selection.categories), signal)
@@ -92,12 +112,13 @@ export class MigrationService {
       const check = await collectMigration(this.deps.roots, manifest, new Set(selection.categories), signal)
       if (JSON.stringify(files.map(({ path: name, sha256 }) => [name, sha256])) !== JSON.stringify(check.map(({ path: name, sha256 }) => [name, sha256]))) throw new Error('Source files changed during export. Review files and retry.')
       manifest.projects = projects
-      if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest))
-      if (selection.categories.includes('usage')) await this.withScratch(async (directory) => {
+      if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest, signal))
+      if (selection.categories.includes('usage')) await cancellable(this.withScratch(async (directory) => {
         const usage = join(directory, 'usage.sqlite')
         await this.deps.exportUsage(usage)
+        signal.throwIfAborted()
         files.push(fileEntry('usage/usage.sqlite', 'usage', (await optionalRead(usage))!))
-      })
+      }), signal)
       await writeMigrationArchive(path, manifest, files, signal)
     })
   }
@@ -134,11 +155,12 @@ export class MigrationService {
   async apply(id: string): Promise<MigrationResult> {
     return this.run('Importing files', async (signal) => {
       if (!this.plan || this.plan.preview.id !== id) throw new Error('Refresh the import preview')
-      await this.deps.assertIdle()
-      await recoverMigrationImports(this.deps.roots.desktop)
+      await this.acquire(signal)
+      this.recoveryIssues = await recoverMigrationImports(this.deps.roots.desktop)
+      if (this.recoveryIssues.length) throw new Error('Resolve migration recovery issues in Settings before importing again.')
       const plan = this.plan
       this.plan = null
-      const result = await applyMigrationImport(plan, this.deps.roots, signal, (completed, total) => this.deps.progress({ phase: 'Importing files', completed, total }))
+      const result = await applyMigrationImport(plan, this.deps.roots, signal, (completed, total) => this.progress({ phase: 'Importing files', completed, total }))
       await this.deps.reloaded()
       if (plan.usage) {
         // Usage merge is deliberately separate from the file transaction.
@@ -146,11 +168,14 @@ export class MigrationService {
           signal.throwIfAborted()
           const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
           await mkdir(backupRoot, { recursive: true, mode: 0o700 })
-          await this.deps.exportUsage(join(backupRoot, 'usage-before.sqlite'))
+          await cancellable(this.deps.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
+          signal.throwIfAborted()
           result.backup = backupRoot
           await this.withScratch(async (directory) => {
             const path = join(directory, 'usage.sqlite')
             await writeFileAtomic(path, plan.usage!)
+            signal.throwIfAborted()
+            this.progress({ phase: 'Committing usage merge (finishes before cancellation)', completed: 0, total: 0 })
             await this.deps.restoreUsage(path)
           })
           result.warnings.push('Usage records merged successfully.')
@@ -164,6 +189,16 @@ export class MigrationService {
     await mkdir(path, { recursive: true, mode: 0o700 })
     try { return await fn(path) } finally { await rm(path, { recursive: true, force: true }) }
   }
+}
+/** A cancelled snapshot may finish writing only its private scratch directory.
+ * Its owner retains cleanup until completion; never remove a live worker's files. */
+function cancellable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = (): void => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+    if (signal.aborted) abort()
+  })
 }
 function validateSelection(value: MigrationSelection): void {
   if (!value || !Array.isArray(value.categories) || value.categories.some((category) => !MIGRATION_CATEGORIES.includes(category))

@@ -19,11 +19,22 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const [replace, setReplace] = useState<string[]>([])
   const [permissions, setPermissions] = useState(false)
   const [reviewed, setReviewed] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const [localBusy, setBusy] = useState(false)
+  const [serverBusy, setServerBusy] = useState(false)
+  const [recoveryIssues, setRecoveryIssues] = useState<string[]>([])
+  const busy = localBusy || serverBusy
   const [progress, setProgress] = useState<MigrationProgress | null>(null)
   const [message, setMessage] = useState('')
   const [result, setResult] = useState<MigrationResult | null>(null)
-  useEffect(() => bridge.onMigrationProgress(setProgress), [bridge])
+  useEffect(() => {
+    let mounted = true
+    const refresh = (): void => { void bridge.migrationStatus().then((status) => {
+      if (mounted) { setServerBusy(status.busy); setProgress(status.progress); setRecoveryIssues(status.recoveryIssues) }
+    }).catch((error) => { if (mounted) setMessage(String(error)) }) }
+    const unsubscribe = bridge.onMigrationProgress(() => refresh())
+    refresh()
+    return () => { mounted = false; unsubscribe() }
+  }, [bridge])
   const key = JSON.stringify({ categories, projectIds })
   const run = async (fn: () => Promise<void>): Promise<void> => {
     setBusy(true); setMessage('')
@@ -33,6 +44,11 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const toggle = <T,>(items: T[], item: T): T[] => items.includes(item) ? items.filter((value) => value !== item) : [...items, item]
   return <section aria-labelledby="migration-title">
     <h2 id="migration-title">Migration</h2>
+    {recoveryIssues.length > 0 && <div className="settings-warning" role="alert">
+      <p>An interrupted import needs attention. Your backups are preserved. Inspect the listed files before retrying recovery.</p>
+      <ul>{recoveryIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
+      <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationRecover(); setRecoveryIssues(status.recoveryIssues); onSaved(await bridge.get()) })}>Retry recovery</button>
+    </div>}
     <p>Move your Copilot setup to another Windows computer using one ZIP file. Choose what to include, then review the destination changes before importing.</p>
     <p className="settings-disclaimer">Close all Desktop and external Copilot sessions before exporting or importing. Stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts.</p>
     <fieldset disabled={busy} className="settings-card">

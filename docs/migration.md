@@ -55,7 +55,9 @@ process state, and update caches are excluded. Reconnect GitHub, MCP services,
 and provider credentials on the destination. Recognized structured secret fields,
 literal environment/header values, and URL credentials/query parameters are
 removed. `${NAME}` and `${env:NAME}` references are preserved. Arbitrary Markdown
-or scripts can still contain secrets: the ZIP is not encrypted and should be
+or scripts, and arbitrary JSON assets inside skills, hooks, and extensions can
+still contain secrets. Only known CLI settings and MCP/LSP configuration files
+receive structured filtering; assets are preserved byte for byte. The ZIP is not encrypted and should be
 treated as private.
 
 Links and junctions are unsupported. Limits are 64 MiB per file, 256 MiB total
@@ -75,6 +77,12 @@ the location shown after import. Failed or cancelled file transactions roll back
 startup recovers unfinished transactions before loading settings. Backups remain
 available after success. If files were modified externally after a crash, recovery
 stops and reports the backup location instead of overwriting those modifications.
+Recovery errors do not prevent startup. Settings → Migration lists unresolved
+journals and provides Retry recovery after you inspect and repair the affected
+files. Journals marked as needing attention are not retried automatically.
+Closing Settings cancels its migration operation; reopening Settings shows any
+operation still finishing and retains access to Cancel. A usage merge already
+committing must finish before cancellation takes effect.
 
 Usage merge is a separate step with its own pre-import backup. A usage failure
 does not undo a successful file import; the completion report explains how to
@@ -87,6 +95,12 @@ separate and occurs only when its individual install button is clicked.
 concurrent changes, cancellation and recovery. `pnpm migration:smoke` exercises
 two isolated homes and the real usage worker. `pnpm migration:check` exercises
 the production Settings renderer, preload and IPC with disposable files and
-scripted native file dialogs and a stubbed external-process probe; it saves screenshots and a result under
+scripted native file dialogs and the real controller check; it saves screenshots and a result under
 `test-results/migration/`. It starts no model sessions or stops user processes.
 `pnpm pack:win` verifies the packaged runtime.
+
+The controller check authenticates this installation's background controller;
+it does not scan machine-wide process names. Close external CLI sessions yourself.
+Export snapshot checks and import destination fingerprints detect concurrent file
+changes. Reviewing inventory or an import preview does not block terminal input.
+Both migration smoke and Settings integration checks run in Windows CI.

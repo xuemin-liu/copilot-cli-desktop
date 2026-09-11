@@ -121,6 +121,7 @@ import { assertMigrationWritersStopped } from './migration-writers.js'
 import type { MigrationChoices, MigrationSelection } from './migration-types.js'
 
 let migrationService: MigrationService | null = null
+let pendingSessionCreations = 0
 
 let usageService: UsageService | null = null
 let usageQuitCleanupComplete = false
@@ -240,7 +241,7 @@ function queueTabTransition<T>(tabId: string, fn: () => Promise<T>): Promise<T> 
  * be raced by one that slips into the per-tab queue just ahead of it (a
  * pointless spawn immediately followed by stopAllSessions killing it). */
 function shuttingDown(): boolean {
-  return installInProgress || quittingAllSessions || explicitQuitRequested || migrationService?.busy === true
+  return installInProgress || quittingAllSessions || explicitQuitRequested || migrationService?.exclusive === true
 }
 
 /** The in-flight restart promise for a tab, if any. A rapid double-click (two
@@ -302,15 +303,15 @@ function settingsUrl(): string {
   return pathToFileURL(rendererPath('settings.html')).href
 }
 
-function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
-  if (migrationService?.busy) throw new Error('Wait for migration to finish or cancel it in Settings')
+function assertTrustedIpcSender(event: IpcMainInvokeEvent, migration = false): void {
+  if (!migration && migrationService?.exclusive) throw new Error('Wait for migration to finish or cancel it in Settings')
   if (!isLauncherShellUrl(event.senderFrame?.url, shellUrl())) {
     throw new Error('Desktop IPC request rejected from an untrusted renderer')
   }
 }
 
 function assertTrustedSettingsSender(event: IpcMainInvokeEvent, migration = false): void {
-  if (!migration && migrationService?.busy) throw new Error('Wait for migration to finish or cancel it')
+  if (!migration && migrationService?.exclusive) throw new Error('Wait for migration to finish or cancel it')
   if (!isLauncherShellUrl(event.senderFrame?.url, settingsUrl())) {
     throw new Error('Settings IPC request rejected from an untrusted renderer')
   }
@@ -970,7 +971,10 @@ async function createSessionTab(
     ? { ...profile, permissionPreset: sessionPermissionPreset }
     : profile
   const sessionPermissionMode = connectSessionId || sideOptions.sideChat ? null : sessionPermissionModeOverride
-  const plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  pendingSessionCreations++
+  let plan: Awaited<ReturnType<typeof buildSessionSpawnPlan>>
+  try { plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle) }
+  finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
@@ -1402,7 +1406,7 @@ async function probeCopilotResolution(): Promise<{ resolution: CopilotResolution
  * native updater may replace the on-disk CLI at session start; existing PTYs
  * keep their captured version while future sessions use the refreshed one. */
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
-  if (migrationService?.busy) return false
+  if (migrationService?.exclusive) return false
   const previousVersion = state.resolution?.version ?? null
   const probe = await probeCopilotResolution()
   const next = probe.resolution
@@ -1733,7 +1737,7 @@ async function showSettingsWindow(): Promise<void> {
   })
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
-    if (settingsWindow === window) settingsWindow = null
+    if (settingsWindow === window) { migrationService?.cancel(); settingsWindow = null }
   })
   await window.loadFile(rendererPath('settings.html'))
 }
@@ -1942,7 +1946,7 @@ ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
   return managedTabs.get(tabId)?.session.recentOutputText ?? ''
 })
 ipcMain.handle('desktop:open-settings', (event) => {
-  assertTrustedIpcSender(event)
+  assertTrustedIpcSender(event, true)
   return showSettingsWindow()
 })
 ipcMain.handle('desktop:show-session-log', (event, tabId: unknown) => {
@@ -2033,7 +2037,7 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
 
 // --- IPC: settings window ----------------------------------------------
 ipcMain.handle('desktop-settings:get', (event) => {
-  assertTrustedSettingsSender(event)
+  assertTrustedSettingsSender(event, true)
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
@@ -2364,6 +2368,19 @@ ipcMain.handle('desktop-settings:migration-cancel', (event) => {
   assertTrustedSettingsSender(event, true)
   getMigrationService().cancel()
 })
+ipcMain.handle('desktop-settings:migration-status', (event) => {
+  assertTrustedSettingsSender(event, true)
+  return getMigrationService().status()
+})
+ipcMain.handle('desktop-settings:migration-recover', (event) => {
+  assertTrustedSettingsSender(event, true)
+  return getMigrationService().recover()
+})
+
+function checkMigrationIdle(): void {
+  if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before exporting or importing. Tray sessions also count.')
+  if (installInProgress || copilotMaintenance.status === 'running' || copilotResources.status === 'loading') throw new Error('Wait for updates and resource operations to finish')
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -2373,18 +2390,18 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
-    await recoverMigrationImports(app.getPath('userData'))
+    const recoveryIssues = await recoverMigrationImports(app.getPath('userData'))
     migrationService = new MigrationService({
       roots: { copilot: process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'), agentSkills: join(app.getPath('home'), '.agents', 'skills'), desktop: app.getPath('userData') },
       appVersion: app.getVersion(), cliVersion: () => state.resolution?.version ?? null,
       assertIdle: async () => {
-        if (managedTabs.size || tabTransitionQueue.size) throw new Error('Close every Desktop session before exporting or importing. Tray sessions also count.')
-        if (installInProgress || copilotMaintenance.status === 'running' || copilotResources.status === 'loading') throw new Error('Wait for updates and resource operations to finish')
+        checkMigrationIdle()
         await configWriteQueue
         await assertMigrationWritersStopped()
       },
-      plugins: async () => {
-        const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], { env: resourceCopilotEnvironment() })
+      checkIdle: checkMigrationIdle,
+      plugins: async (signal) => {
+        const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], { env: resourceCopilotEnvironment(), signal })
         return JSON.parse(result.stdout) as unknown
       },
       exportUsage: async (path) => { if (!usageService) throw new Error('Usage unavailable'); await usageService.exportTo(path) },
@@ -2397,6 +2414,8 @@ if (!app.requestSingleInstanceLock()) {
         syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
       },
     })
+    migrationService.recoveryIssues = recoveryIssues
+    for (const issue of recoveryIssues) void writeAppLog(issue)
     startUsageCollection()
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))

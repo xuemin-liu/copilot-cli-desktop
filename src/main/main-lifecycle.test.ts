@@ -12,6 +12,9 @@ import type { DesktopState, WorkspaceProfile } from './types.js'
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
+  configureMigration(busy: boolean, exclusive: boolean): void
+  blockSpawnPlan(work: Promise<void>): void
+  checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
@@ -35,7 +38,7 @@ interface Harness {
   requestSettings(name: string): Promise<void>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
-  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
+  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -64,7 +67,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // Migration is exercised through its own integration tests. Keep new archive
       // dependencies out of this temporary, dependency-free lifecycle bundle.
       './migration-service.js': 'export class MigrationService {}',
-      './migration-import.js': 'export async function recoverMigrationImports() {}',
+      './migration-import.js': 'export async function recoverMigrationImports() { return [] }',
       './migration-writers.js': 'export async function assertMigrationWritersStopped() {}',
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];
@@ -77,9 +80,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export async function spawnNodePty(file, args, options) {
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, env: options.env, stopped: false, written: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, env: options.env, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
-          return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize() {},
+          return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
         }
       `,
@@ -105,6 +108,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         const originalWriteAppLog = writeAppLog;
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
+          configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
+          blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
+          checkMigrationIdle,
           spawns,
           maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
@@ -157,6 +163,23 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('migration discovery preserves pending sessions, typing and resize while export admission counts pending creation', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  let release!: () => void
+  harness.blockSpawnPlan(new Promise<void>((resolve) => { release = resolve }))
+  const pending = harness.createMain()
+  harness.configureMigration(true, false)
+  assert.throws(() => harness.checkMigrationIdle(), /Close every Desktop session/)
+  release()
+  const state = await pending
+  await harness.request('desktop:write-tab', state.activeTabId, 'typing during inventory')
+  await harness.request('desktop:resize-tab', state.activeTabId, 91, 37)
+  assert.ok(harness.spawns[0]!.written.includes('typing during inventory'))
+  assert.deepEqual(harness.spawns[0]!.resized.at(-1), [91, 37])
+  assert.equal(harness.spawns[0]!.stopped, false)
+}))
 
 test('repeated quit requests wait for the usage backup even with no running sessions', async () => {
   await fixture(async (harness) => {

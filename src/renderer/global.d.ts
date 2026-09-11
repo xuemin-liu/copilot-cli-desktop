@@ -10,7 +10,7 @@ import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
-import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection } from '../main/migration-types.js'
+import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
   tabId: string
@@ -92,6 +92,8 @@ export interface CopilotDesktopSettingsBridge {
   migrationPreview(choices: MigrationChoices): Promise<MigrationPreview>
   migrationApply(id: string): Promise<MigrationResult>
   migrationCancel(): Promise<void>
+  migrationStatus(): Promise<MigrationStatus>
+  migrationRecover(): Promise<MigrationStatus>
   onMigrationProgress(listener: (progress: MigrationProgress) => void): () => void
   usageReport(month: string, scope: import('../main/usage-types.js').UsageScope, timezone?: string): Promise<import('../main/usage-types.js').UsageReport>
   refreshUsage(): Promise<void>

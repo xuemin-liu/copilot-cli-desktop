@@ -48,3 +48,4 @@ export interface MigrationPreview {
 }
 export interface MigrationResult { imported: number; skipped: number; backup: string | null; warnings: string[] }
 export interface MigrationProgress { phase: string; completed: number; total: number }
+export interface MigrationStatus { busy: boolean; exclusive: boolean; progress: MigrationProgress; recoveryIssues: string[] }

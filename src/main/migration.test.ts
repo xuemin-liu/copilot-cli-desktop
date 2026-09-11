@@ -6,11 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import yazl from 'yazl'
-import { DEFAULT_DESKTOP_CONFIG, readDesktopConfig, workspaceProfileId } from './desktop-config.js'
+import { DEFAULT_DESKTOP_CONFIG, normalizeDesktopConfig, readDesktopConfig, workspaceProfileId } from './desktop-config.js'
 import { applyMigrationImport, planMigrationImport, recoverMigrationImports } from './migration-import.js'
 import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableSettings, safeRelative } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
 import { MigrationService } from './migration-service.js'
+import { assertMigrationWritersStopped } from './migration-writers.js'
+import { CREDENTIAL_NAMES, SENSITIVE_ENVIRONMENT_NAME } from './secure-credentials.js'
+import type { DaemonState } from '../cli/runtime-state.js'
 import type { MigrationChoices, MigrationManifest, MigrationRoots } from './migration-types.js'
 
 const choices: MigrationChoices = { categories: ['settings', 'knowledge', 'skills', 'desktop', 'projects', 'tools'], replace: [], allowPermissions: false }
@@ -25,6 +28,145 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }): Promise
 }
 async function put(path: string, data: string | Buffer): Promise<void> { await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, data) }
 const archive = (...files: MigrationArchive['files']): MigrationArchive => ({ manifest: manifest(), files })
+
+test('provider replacements retain the destination endpoint and unselected fields', async (t) => {
+  const { target } = await fixture(t)
+  await put(join(target.desktop, 'desktop.json'), jsonBytes({ provider: { type: 'openai', baseUrl: 'https://local.test/v1', model: 'old', offline: true } }))
+  const data = archive(fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ provider: { model: 'new', baseUrl: 'https://imported.test/SECRET' } })))
+  const plan = await planMigrationImport(data, target, {}, { ...choices, replace: ['desktop/preferences.json#provider.model'] })
+  assert.deepEqual(plan.preview.changes.map((c) => c.id), ['desktop/preferences.json#provider.model'])
+  await applyMigrationImport(plan, target)
+  assert.deepEqual((await readDesktopConfig(join(target.desktop, 'desktop.json'))).provider, { type: 'openai', baseUrl: 'https://local.test/v1', model: 'new', offline: true })
+})
+
+test('opaque JSON assets round trip unchanged while exact CLI and tool configurations are filtered', async (t) => {
+  const { source, target } = await fixture(t)
+  const assets = { 'skills/demo/settings.json': '{"arbitrary":true}', 'extensions/demo/settings.json': '[1,2]', 'extensions/demo/scalar.json': 'false', 'hooks/settings.json': '{not json}', 'skills/demo/ref.json': '{"TOKEN":"private asset"}' }
+  for (const [path, bytes] of Object.entries(assets)) await put(join(source.copilot, path), bytes)
+  await put(join(source.copilot, 'settings.json'), '{"model":"allowed","arbitrary":true}')
+  const files = await collectMigration(source, manifest(), new Set(choices.categories))
+  await applyMigrationImport(await planMigrationImport(archive(...files), target, {}, choices), target)
+  for (const [path, bytes] of Object.entries(assets)) assert.equal(await readFile(join(target.copilot, path), 'utf8'), bytes)
+  assert.deepEqual(jsonObject(await readFile(join(target.copilot, 'settings.json'))), { model: 'allowed' })
+})
+
+test('all credential-vault key families are removed from tool definitions but references survive', async (t) => {
+  const { source, target } = await fixture(t)
+  const keys = [...CREDENTIAL_NAMES, 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'PRIVATE_KEY', 'ACCESS_KEY', 'SIGNING_KEY', 'AUTH', 'AUTHORIZATION', 'PASSWORD', 'CLIENT_SECRET']
+  for (const key of keys.filter((key) => key !== 'COPILOT_PROVIDER_BASE_URL')) assert.ok(SENSITIVE_ENVIRONMENT_NAME.test(key), key)
+  const env = Object.fromEntries(keys.map((key) => [key, 'literal-secret']))
+  await put(join(source.copilot, 'mcp-config.json'), jsonBytes({ mcpServers: { demo: { ...env, command: 'node', PUBLIC_MODE: 'enabled', env: { ...env, REF_API_KEY: '${API_KEY}' } } } }))
+  const files = await collectMigration(source, manifest(), new Set(['tools']))
+  assert.ok(!files[0]!.data.includes('literal-secret'))
+  await applyMigrationImport(await planMigrationImport(archive(...files), target, {}, choices), target)
+  assert.deepEqual(JSON.parse(await readFile(join(target.copilot, 'mcp-config.json'), 'utf8')).mcpServers.demo, { command: 'node', PUBLIC_MODE: 'enabled', env: { REF_API_KEY: '${API_KEY}' } })
+})
+
+test('unavailable projects and denied nested directories warn and retain readable inventory', async (t) => {
+  const { root, source } = await fixture(t)
+  const repo = join(root, 'repo'), denied = join(repo, 'denied')
+  await mkdir(denied, { recursive: true }); await put(join(repo, 'readable/AGENTS.md'), 'keep')
+  const info = manifest()
+  info.projects = [{ id: 'aaaaaaaaaaaaaaaa', name: 'missing', sourcePath: join(root, 'disconnected') }, { id: 'bbbbbbbbbbbbbbbb', name: 'repo', sourcePath: repo }]
+  const files = await collectMigration(source, info, new Set(['projects']), undefined, async (path) => {
+    if (path === denied) throw Object.assign(new Error('Denied'), { code: 'EACCES' })
+    return readdir(path, { withFileTypes: true })
+  })
+  assert.ok(files.some((f) => f.path.endsWith('readable/AGENTS.md')))
+  assert.ok(info.warnings.some((w) => w.includes(denied)))
+  assert.ok(info.warnings.some((w) => w.includes('disconnected')))
+})
+
+test('normalized profile previews match writes and repeat as identical without staging files', async (t) => {
+  const { root, target } = await fixture(t)
+  const workspace = join(root, 'repo'); await mkdir(workspace)
+  const id = 'aaaaaaaaaaaaaaaa'
+  const data = archive(fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ profiles: [{ path: 'C:\\old', name: `  ${'x'.repeat(130)}  `, permissionPreset: 'invalid' }] })))
+  data.manifest.projects = [{ id, sourcePath: 'C:\\old', name: 'project' }]
+  const plan = await planMigrationImport(data, target, { [id]: workspace }, { ...choices, allowPermissions: true })
+  assert.deepEqual(await readdir(target.desktop), [])
+  const normalized = normalizeDesktopConfig({ profiles: [{ path: workspace, name: 'x'.repeat(100), permissionPreset: 'default', defaultResumeMode: 'new' }] })
+  assert.ok(plan.preview.changes[0]!.detail.includes(JSON.stringify(normalized.profiles[0])))
+  await applyMigrationImport(plan, target)
+  const saved = JSON.parse(await readFile(join(target.desktop, 'desktop.json'), 'utf8'))
+  saved.profiles[0] = Object.fromEntries(Object.entries(saved.profiles[0]).reverse())
+  await put(join(target.desktop, 'desktop.json'), jsonBytes(saved))
+  const repeat = await planMigrationImport(data, target, { [id]: workspace }, { ...choices, allowPermissions: true })
+  assert.equal(repeat.writes.length, 0)
+  assert.equal(repeat.preview.changes[0]!.status, 'Identical')
+})
+
+test('permission opt-in controls CLI prompting settings and workspace execution choices', async (t) => {
+  const { root, target } = await fixture(t)
+  const workspace = join(root, 'repo'); await mkdir(workspace)
+  const id = 'aaaaaaaaaaaaaaaa'
+  const settings = { askUser: false, continueOnAutoMode: true, defaultPermissionMode: 'autopilot' }
+  const data = archive(fileEntry('copilot/settings.json', 'settings', jsonBytes(settings)), fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ profiles: [{ path: 'C:\\old', name: 'repo', permissionPreset: 'full-access', launch: { mode: 'autopilot', remoteControl: 'enable', remoteExport: 'enable' } }] })))
+  data.manifest.projects = [{ id, sourcePath: 'C:\\old', name: 'repo' }]
+  for (const allowPermissions of [false, true]) {
+    const plan = await planMigrationImport(data, target, { [id]: workspace }, { ...choices, allowPermissions })
+    const settingWrite = plan.writes.find((w) => w.target.endsWith('settings.json'))
+    assert.deepEqual(settingWrite ? jsonObject(settingWrite.data!) : {}, allowPermissions ? settings : {})
+    const desktop = normalizeDesktopConfig(jsonObject(plan.writes.find((w) => w.target.endsWith('desktop.json'))!.data!))
+    assert.equal(desktop.profiles[0]!.permissionPreset, allowPermissions ? 'full-access' : 'default')
+    assert.equal(desktop.profiles[0]!.launch.mode, allowPermissions ? 'autopilot' : 'interactive')
+    assert.equal(desktop.profiles[0]!.launch.remoteControl, allowPermissions ? 'enable' : 'inherit')
+    assert.equal(desktop.profiles[0]!.launch.remoteExport, allowPermissions ? 'enable' : 'inherit')
+  }
+})
+
+test('recovery reports corrupt journals and missing backups without preventing startup', async (t) => {
+  const { target, root } = await fixture(t)
+  const destination = join(target.copilot, 'copilot-instructions.md')
+  const directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  await put(join(directory, 'journal.json'), '{broken')
+  assert.match((await recoverMigrationImports(target.desktop)).join(), /needs attention/)
+  await put(destination, 'after')
+  await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
+  assert.match((await recoverMigrationImports(target.desktop)).join(), /missing or damaged/)
+  await put(join(directory, '0.bak'), 'before')
+  assert.equal((await recoverMigrationImports(target.desktop)).length, 1)
+  assert.deepEqual(await recoverMigrationImports(target.desktop, true), [])
+  assert.equal(await readFile(destination, 'utf8'), 'before')
+  const redirected = join(root, 'redirected'), empty = join(root, 'empty')
+  await mkdir(empty); await symlink(empty, redirected, 'junction')
+  assert.deepEqual(await recoverMigrationImports(redirected), [])
+})
+
+test('writer checks use authenticated daemon state and ignore stale process identities', async () => {
+  const state = { pid: process.pid } as DaemonState
+  let queried = false
+  await assertMigrationWritersStopped({ readState: async () => null, isAlive: async () => { queried = true; return true } })
+  assert.equal(queried, false)
+  await assertMigrationWritersStopped({ readState: async () => state, isAlive: async (candidate) => { assert.equal(candidate, state); return false } })
+  await assert.rejects(assertMigrationWritersStopped({ readState: async () => state, isAlive: async () => true }), /background controller/)
+})
+
+test('read-only operations remain nonexclusive and cancellation releases stalled inventory and usage snapshots', async (t) => {
+  const { root, source } = await fixture(t)
+  let started!: () => void, finish!: () => void
+  let ready = new Promise<void>((resolve) => { started = resolve })
+  const service = new MigrationService({ roots: source, appVersion: 'test', cliVersion: () => null, assertIdle: async () => {},
+    plugins: async () => { started(); return new Promise(() => {}) },
+    exportUsage: async (path) => { started(); await new Promise<void>((resolve) => { finish = resolve }); await put(path, 'late snapshot') },
+    restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {} })
+  const inventory = service.inventory({ categories: ['plugins'], projectIds: [] })
+  await ready
+  assert.equal(service.status().busy, true); assert.equal(service.status().exclusive, false)
+  service.cancel(); await assert.rejects(inventory, /abort/i)
+  assert.equal(service.status().busy, false)
+  ready = new Promise<void>((resolve) => { started = resolve })
+  const exporting = service.export(join(root, 'cancelled.zip'), { categories: ['usage'], projectIds: [] })
+  await ready
+  assert.equal(service.status().exclusive, true)
+  service.cancel(); await assert.rejects(exporting, /abort/i)
+  assert.equal(service.status().busy, false)
+  await assert.rejects(readFile(join(root, 'cancelled.zip')), /ENOENT/)
+  assert.ok((await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')))
+  finish()
+  for (let i = 0; i < 100 && (await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')); i++) await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.ok(!(await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')))
+})
 
 test('round trip uses independent CLI and agent roots, strips structured credentials and preserves binary skill assets', async (t) => {
   const { root, source, target } = await fixture(t)
@@ -134,7 +276,9 @@ test('recovery refuses to overwrite changes made after interruption', async (t) 
   await put(destination, 'third party')
   await put(join(directory, '0.bak'), 'before')
   await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.copilot], writes: [{ target: destination, before: digest(Buffer.from('before')), after: digest(Buffer.from('after')) }] }))
-  await assert.rejects(recoverMigrationImports(target.desktop), /destination changed/)
+  assert.match((await recoverMigrationImports(target.desktop)).join('\n'), /destination changed/)
+  assert.equal(jsonObject(await readFile(join(directory, 'journal.json'))).status, 'needs-attention')
+  assert.match((await recoverMigrationImports(target.desktop)).join('\n'), /destination changed/)
   assert.equal(await readFile(destination, 'utf8'), 'third party')
 })
 

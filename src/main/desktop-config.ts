@@ -152,10 +152,15 @@ export async function readDesktopConfig(
     parsed = JSON.parse(await readFile(filename, 'utf8')) as unknown
   } catch (error) {
     if (!isMissingPath(error) && !(error instanceof SyntaxError)) throw error
-    return { ...DEFAULT_DESKTOP_CONFIG }
+    return normalizeDesktopConfig(null)
   }
+  return normalizeDesktopConfig(parsed, reportMigration)
+}
+
+/** Shared, side-effect-free normalization for startup and migration previews. */
+export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (message: string) => void): DesktopConfig {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { ...DEFAULT_DESKTOP_CONFIG }
+    return structuredClone(DEFAULT_DESKTOP_CONFIG)
   }
   const value = parsed as Record<string, unknown>
   const profiles: WorkspaceProfile[] = []

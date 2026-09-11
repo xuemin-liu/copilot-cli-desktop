@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
   migrationPreview: (choices) => ipcRenderer.invoke('desktop-settings:migration-preview', choices),
   migrationApply: (id) => ipcRenderer.invoke('desktop-settings:migration-apply', id),
   migrationCancel: () => ipcRenderer.invoke('desktop-settings:migration-cancel'),
+  migrationStatus: () => ipcRenderer.invoke('desktop-settings:migration-status'),
+  migrationRecover: () => ipcRenderer.invoke('desktop-settings:migration-recover'),
   onMigrationProgress: (listener) => {
     const handler = (_event, progress) => listener(progress)
     ipcRenderer.on('desktop-settings:migration-progress', handler)

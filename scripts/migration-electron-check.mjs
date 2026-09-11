@@ -2,7 +2,6 @@
 // file dialogs select disposable fixture paths; no user data or model calls.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -38,15 +37,10 @@ async function runElectronCheck() {
   shell.showItemInFolder = () => {}
   await writeFile(join(root, 'copilot', 'settings.json'), '{"model":"migration-model","theme":"dim"}')
   await writeFile(join(root, 'copilot', 'copilot-instructions.md'), 'Migration UI fixture')
-  // Other tasks may have live Copilot processes. Stub only that OS boundary in
-  // a disposable main-module copy; all session checks, IPC and file logic remain.
-  const mainSource = new URL('../dist/src/main/main.js', import.meta.url)
-  const mainFixture = new URL(`../dist/src/main/migration-ui-${randomUUID()}.js`, import.meta.url)
-  const source = await readFile(mainSource, 'utf8')
-  const writerImport = "import { assertMigrationWritersStopped } from './migration-writers.js';"
-  assert.ok(source.includes(writerImport))
-  await writeFile(mainFixture, source.replace(writerImport, 'const assertMigrationWritersStopped = async () => {};'))
-  try { await import(mainFixture.href) } finally { await rm(mainFixture, { force: true }) }
+  const damagedJournal = join(root, 'desktop', 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  await mkdir(damagedJournal, { recursive: true })
+  await writeFile(join(damagedJournal, 'journal.json'), '{damaged fixture')
+  await import('../dist/src/main/main.js')
   console.log('[migration-check] Application loaded; waiting for Settings.')
   const timeout = setTimeout(() => { console.error('Migration UI check timed out'); app.exit(1) }, 90_000)
   async function waitFor(fn) {
@@ -64,6 +58,10 @@ async function runElectronCheck() {
     const click = async (text) => {
       await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(text)}); if (!button || button.disabled) throw Error('Button unavailable'); button.click(); })()`)
     }
+    await waitFor(() => evaluate(`document.body.textContent.includes('An interrupted import needs attention')`))
+    await rm(join(damagedJournal, 'journal.json'))
+    await click('Retry recovery')
+    await waitFor(() => evaluate(`!document.body.textContent.includes('An interrupted import needs attention')`))
     await evaluate(`(() => { const section=document.querySelector('#migration-title').closest('section'); for (const label of section.querySelectorAll('fieldset label')) { const input=label.querySelector('input'); if(input?.checked && !label.textContent.includes('CLI settings') && !label.textContent.includes('Personal instructions')) input.click(); } })()`)
     await click('Review export files')
     await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Export ZIP…' && !b.disabled)`))
@@ -86,7 +84,26 @@ async function runElectronCheck() {
     await click('Import selected')
     await waitFor(() => evaluate(`document.body.textContent.includes('Import completed')`))
     assert.equal(JSON.parse(await readFile(join(root, 'copilot', 'settings.json'), 'utf8')).model, 'migration-model')
-    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['real settings renderer', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback'] }, null, 2))
+    const { UsageService } = await import('../dist/src/main/usage-service.js')
+    const originalExport = UsageService.prototype.exportTo
+    let releaseSnapshot, snapshotStarted
+    const started = new Promise((ok) => { snapshotStarted = ok })
+    const stalled = new Promise((ok) => { releaseSnapshot = ok })
+    UsageService.prototype.exportTo = async function (path) { snapshotStarted(); await stalled; return originalExport.call(this, path) }
+    await evaluate(`void window.copilotDesktopSettings.migrationExport({categories:['usage'],projectIds:[]}).catch(() => {})`)
+    await started
+    assert.equal((await evaluate('window.copilotDesktopSettings.migrationStatus()')).busy, true)
+    const closed = new Promise((ok) => settings.once('closed', ok))
+    settings.close()
+    await closed
+    await main.webContents.executeJavaScript('window.copilotDesktop.openSettings()')
+    const reopened = await waitFor(() => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/settings.html')))
+    await waitFor(() => reopened.webContents.executeJavaScript('Boolean(document.querySelector("#migration-title"))'))
+    await waitFor(async () => !(await reopened.webContents.executeJavaScript('window.copilotDesktopSettings.migrationStatus()')).busy)
+    releaseSnapshot()
+    UsageService.prototype.exportTo = originalExport
+    await waitFor(async () => !(await (await import('node:fs/promises')).readdir(join(root, 'desktop'))).some((name) => name.startsWith('migration-staging-')))
+    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'recovery retry', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'close cancels stalled snapshot', 'reopened Settings status'] }, null, 2))
     console.log('[migration-check] Production Settings export, conflict preview and import passed.')
     clearTimeout(timeout); app.quit()
   } catch (error) {

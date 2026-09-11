@@ -27,7 +27,7 @@ export function isCredentialName(value: unknown): value is CredentialName {
   return typeof value === 'string' && (CREDENTIAL_NAMES as readonly string[]).includes(value)
 }
 
-const SENSITIVE_ENVIRONMENT_NAME = /(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIALS?|AUTHORIZATION)/i
+export const SENSITIVE_ENVIRONMENT_NAME = /(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|SIGNING_?KEY|CREDENTIALS?|AUTHORIZATION|^AUTH$)/i
 
 export function sensitiveEnvironmentNames(environment: NodeJS.ProcessEnv): string[] {
   return Object.keys(environment)

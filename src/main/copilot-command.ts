@@ -30,6 +30,7 @@ export async function runCopilotCommand(
     timeout?: number | undefined
     cwd?: string | undefined
     env?: NodeJS.ProcessEnv | undefined
+    signal?: AbortSignal | undefined
   } = {},
 ): Promise<CopilotCommandResult> {
   if (resolution.version === null) throw new Error('Copilot CLI is not installed')
@@ -43,6 +44,7 @@ export async function runCopilotCommand(
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
       ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     },
   )
   return { stdout: result.stdout, stderr: result.stderr }

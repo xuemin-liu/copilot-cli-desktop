@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { lstat, mkdir, open, readdir, rm } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
-import { MAX_PROFILES, readDesktopConfig, workspaceProfileId } from './desktop-config.js'
+import { MAX_PROFILES, normalizeDesktopConfig, workspaceProfileId } from './desktop-config.js'
 import { normalizeSessionLaunchConfig } from './session-launch.js'
-import { assertNoLinks, digest, executableSetting, jsonBytes, jsonObject, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize } from './migration-inventory.js'
+import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, jsonBytes, jsonObject, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize } from './migration-inventory.js'
 import type { MigrationArchive } from './migration-archive.js'
 import type { MigrationChange, MigrationChoices, MigrationPreview, MigrationResult, MigrationRoots } from './migration-types.js'
 
@@ -80,8 +81,8 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
   const selected = new Set(choices.categories), replace = new Set(choices.replace)
   const groups = new Set<string>()
   const targets = new Set<string>()
-  const addChange = (id: string, path: string, category: MigrationChange['category'], before: Buffer | null, after: Buffer, detail = ''): boolean => {
-    const identical = before !== null && digest(before) === digest(after)
+  const addChange = (id: string, path: string, category: MigrationChange['category'], before: Buffer | null, after: Buffer, detail = '', structured = false): boolean => {
+    const identical = before !== null && (structured ? isDeepStrictEqual(JSON.parse(before.toString('utf8')), JSON.parse(after.toString('utf8'))) : digest(before) === digest(after))
     const action = !identical && (before === null || replace.has(id)) ? 'import' : 'keep'
     plan.preview.changes.push({ id, path, category, status: identical ? 'Identical' : before === null ? 'Add' : 'Conflict', action, detail })
     return action === 'import'
@@ -135,49 +136,57 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
     plan.fingerprints.set(target, before === null ? null : digest(before))
     if (file.category === 'desktop') {
       const changeStart = plan.preview.changes.length
-      const incoming = jsonObject(file.data)
-      const current = before ? jsonObject(before) : {}
+      const rawIncoming = jsonObject(file.data)
+      const incoming = normalizeDesktopConfig(rawIncoming)
+      const current = normalizeDesktopConfig(before ? jsonObject(before) : null)
       const merged = { ...current }
-      for (const key of ['closeBehavior', 'trayEnabled', 'notifications', 'automaticUpdateChecks', 'provider']) {
-        if (!(key in incoming)) continue
-        const value = key === 'provider' ? sanitize(incoming[key], plan.preview.warnings) : incoming[key]
-        if (addChange(`${file.path}#${key}`, `${target} → ${key}`, 'desktop', key in current ? jsonBytes(current[key]) : null, jsonBytes(value), `Incoming: ${JSON.stringify(value).slice(0, 1000)}`)) merged[key] = value
+      for (const key of ['closeBehavior', 'trayEnabled', 'notifications', 'automaticUpdateChecks'] as const) {
+        if (!(key in rawIncoming)) continue
+        const value = incoming[key]
+        if (addChange(`${file.path}#${key}`, `${target} → ${key}`, 'desktop', before ? jsonBytes(current[key]) : null, jsonBytes(value), `Incoming: ${JSON.stringify(value)}`, true)) Object.assign(merged, { [key]: value })
       }
+      merged.provider = { ...current.provider }
+      if (rawIncoming.provider && typeof rawIncoming.provider === 'object') for (const key of ['type', 'model', 'offline'] as const) {
+        if (!(key in rawIncoming.provider)) continue
+        const value = incoming.provider[key]
+        if (addChange(`${file.path}#provider.${key}`, `${target} → provider.${key}`, 'desktop', before ? jsonBytes(current.provider[key]) : null, jsonBytes(value), `Incoming: ${JSON.stringify(value)}`, true)) Object.assign(merged.provider, { [key]: value })
+      }
+      if (merged.provider.type !== 'github' && !merged.provider.baseUrl) plan.preview.warnings.push('Configure a provider base URL on this computer before starting a custom-provider session.')
       // Shortcuts and OS integration stay on this computer's existing setting.
       const profiles = Array.isArray(current.profiles) ? [...current.profiles] : []
-      if (Array.isArray(incoming.profiles)) for (const value of incoming.profiles) {
+      if (Array.isArray(rawIncoming.profiles)) for (const value of rawIncoming.profiles) {
         if (!value || typeof value !== 'object') continue
         const profile = value as Record<string, unknown>
         const project = archive.manifest.projects.find((p) => p.sourcePath === profile.path)
         const mapped = project ? mappings[project.id] : undefined
         if (!mapped) { plan.preview.warnings.push('An unmapped Desktop workspace profile was skipped.'); continue }
         const id = workspaceProfileId(mapped)
-        const index = profiles.findIndex((candidate) => candidate && typeof candidate === 'object' && workspaceProfileId(String((candidate as Record<string, unknown>).path)) === id)
+        const index = profiles.findIndex((candidate) => candidate.id === id)
         const launch = normalizeSessionLaunchConfig(profile.launch)
         if (!choices.allowPermissions) { launch.mode = 'interactive'; launch.remoteControl = 'inherit'; launch.remoteExport = 'inherit' }
-        const next = { name: profile.name, path: mapped, id, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch, tabs: [] }
-        if (addChange(`${file.path}#profile:${project!.id}`, mapped, 'desktop', index < 0 ? null : jsonBytes(profiles[index]), jsonBytes(next), 'History is unavailable: tabs are not restored. Permission and remote/autopilot choices require the permission checkbox.')) {
+        const next = normalizeDesktopConfig({ profiles: [{ name: profile.name, path: mapped, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch, tabs: [] }] }).profiles[0]!
+        if (addChange(`${file.path}#profile:${project!.id}`, mapped, 'desktop', index < 0 ? null : jsonBytes(profiles[index]), jsonBytes(next), `Incoming profile: ${JSON.stringify(next)}. History is unavailable; tabs are not restored.`, true)) {
           if (index < 0) { if (profiles.length >= MAX_PROFILES) throw new Error('Destination already has 20 workspace profiles'); profiles.push(next) } else profiles[index] = next
         }
       }
       merged.profiles = profiles
       // Normalize with the same parser as startup without introducing temporary source files.
       if (plan.preview.changes.slice(changeStart).some((change) => change.action === 'import')) {
-        const normalized = await normalizeProjection(roots.desktop, merged)
+        const normalized = normalizeDesktopConfig(merged)
         const data = jsonBytes(normalized)
         if (!before || digest(before) !== digest(data)) plan.writes.push({ target, before: before === null ? null : digest(before), data })
       }
-    } else if (file.path.endsWith('/settings.json')) {
+    } else if (isCliSettingsPath(file.path)) {
       const incoming = mapStructuredPaths(jsonObject(portableSettings(file.data, plan.preview.warnings, selected.has('tools'))), archive, mappings, plan.preview.warnings) as Record<string, unknown>
       const current = before ? jsonObject(before) : {}
       const merged = { ...current }
       for (const [key, value] of Object.entries(incoming)) {
         if (permissionSetting(key) && !choices.allowPermissions || executableSetting(key) && !selected.has('tools')) { plan.preview.warnings.push(`Skipped setting requiring selection: ${key}`); continue }
-        if (addChange(`${file.path}#${key}`, `${target} → ${key}`, file.category, key in current ? jsonBytes(current[key]) : null, jsonBytes(value), `${permissionSetting(key) ? 'Permission setting. ' : ''}Incoming: ${JSON.stringify(value).slice(0, 1000)}`)) merged[key] = value
+        if (addChange(`${file.path}#${key}`, `${target} → ${key}`, file.category, key in current ? jsonBytes(current[key]) : null, jsonBytes(value), `${permissionSetting(key) ? 'Permission setting. ' : ''}Incoming: ${JSON.stringify(value).slice(0, 1000)}`, true)) merged[key] = value
       }
       if (JSON.stringify(merged) !== JSON.stringify(current)) plan.writes.push({ target, before: before === null ? null : digest(before), data: jsonBytes(merged) })
     } else {
-      const data = file.category === 'tools' && /\.jsonc?$/.test(file.path) ? jsonBytes(mapStructuredPaths(sanitize(jsonObject(file.data), plan.preview.warnings), archive, mappings, plan.preview.warnings)) : file.data
+      const data = isToolConfigPath(file.path) ? jsonBytes(mapStructuredPaths(sanitize(jsonObject(file.data), plan.preview.warnings), archive, mappings, plan.preview.warnings)) : file.data
       if (addChange(file.path, target, file.category, before, data, file.category === 'tools' ? 'Review commands and local dependencies before starting Copilot.' : '')) plan.writes.push({ target, before: before === null ? null : digest(before), data })
     }
   }
@@ -186,15 +195,7 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
   return plan
 }
 
-async function normalizeProjection(root: string, value: unknown): Promise<Awaited<ReturnType<typeof readDesktopConfig>>> {
-  // Parser reuse; scratch state is local, private, and never an import destination.
-  const temporary = join(root, `migration-normalize-${randomUUID()}.json`)
-  await assertNoLinks(temporary)
-  try { await writeFileAtomic(temporary, jsonBytes(value)); return await readDesktopConfig(temporary) }
-  finally { await rm(temporary, { force: true }) }
-}
-
-interface Journal { version: 1; status: 'pending' | 'complete' | 'rolled-back'; roots: string[]; writes: { target: string; before: string | null; after: string | null }[] }
+interface Journal { version: 1; status: 'pending' | 'complete' | 'rolled-back' | 'needs-attention'; error?: string; roots: string[]; writes: { target: string; before: string | null; after: string | null }[] }
 async function durableWrite(path: string, data: Buffer): Promise<void> {
   await assertNoLinks(path)
   await writeFileAtomic(path, data)
@@ -218,19 +219,42 @@ async function rollback(directory: string, journal: Journal): Promise<void> {
   journal.status = 'rolled-back'
   await durableWrite(join(directory, 'journal.json'), jsonBytes(journal))
 }
-export async function recoverMigrationImports(desktopRoot: string): Promise<void> {
+export async function recoverMigrationImports(desktopRoot: string, retry = false): Promise<string[]> {
   const root = join(desktopRoot, 'migration-backups')
-  await assertNoLinks(root)
+  const issues: string[] = []
   let names: string[]
-  try { names = await readdir(root) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+  try {
+    names = await readdir(root)
+    await assertNoLinks(root)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return issues
+    return [`Migration recovery needs attention at ${root}: ${String(error)}`]
+  }
   for (const name of names) {
     if (!/^[0-9a-f-]{36}$/.test(name)) continue
-    const directory = join(root, name), data = await optionalRead(join(directory, 'journal.json'))
-    if (!data) continue // Backup preparation never touched a destination.
-    const journal = JSON.parse(data.toString('utf8')) as Journal
-    if (journal.version !== 1 || !Array.isArray(journal.writes) || journal.writes.length > 20_000 || !Array.isArray(journal.roots) || journal.roots.some((value) => typeof value !== 'string' || !isAbsolute(value))) throw new Error('Invalid migration recovery journal')
-    if (journal.status === 'pending') await rollback(directory, journal)
+    const directory = join(root, name)
+    let journal: Journal | undefined
+    try {
+      const data = await optionalRead(join(directory, 'journal.json'))
+      if (!data) continue
+      const parsed = JSON.parse(data.toString('utf8')) as Journal
+      if (!parsed || parsed.version !== 1 || !['pending', 'complete', 'rolled-back', 'needs-attention'].includes(parsed.status)
+        || !Array.isArray(parsed.writes) || parsed.writes.length > 20_000
+        || parsed.writes.some((w) => !w || typeof w.target !== 'string' || !isAbsolute(w.target) || [w.before, w.after].some((hash) => hash !== null && (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash))))
+        || !Array.isArray(parsed.roots) || parsed.roots.some((value) => typeof value !== 'string' || !isAbsolute(value))) throw new Error('Invalid migration recovery journal')
+      journal = parsed
+      if (journal.status === 'needs-attention' && !retry) {
+        issues.push(`${directory}: ${journal.error ?? 'Recovery needs attention; inspect the backups before retrying.'}`)
+      } else if (journal.status === 'pending' || journal.status === 'needs-attention') await rollback(directory, journal)
+    } catch (error) {
+      issues.push(`Migration recovery needs attention at ${directory}: ${String(error)}`)
+      if (journal) {
+        journal.status = 'needs-attention'; journal.error = String(error)
+        await durableWrite(join(directory, 'journal.json'), jsonBytes(journal)).catch(() => {})
+      }
+    }
   }
+  return issues
 }
 export async function applyMigrationImport(plan: ImportPlan, roots: MigrationRoots, signal?: AbortSignal, progress?: (completed: number, total: number) => void): Promise<MigrationResult> {
   for (const [path, hash] of plan.fingerprints) if (await fingerprint(path) !== hash) throw new Error('Destination changed; refresh the import preview')
