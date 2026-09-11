@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rm, rmdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { readDesktopConfig } from './desktop-config.js'
 import { collectMigration, fileEntry, jsonBytes, jsonObject, optionalRead, sanitize, type MigrationFile } from './migration-inventory.js'
@@ -32,6 +32,7 @@ export class MigrationService {
   private backupsLoaded = false
   private backupListFailed = false
   private backupListSequence = 0
+  private publishedBackupSequence = 0
   private latestBackupList: Promise<void> | null = null
   private warnings: string[] = []
   private backupWarnings: string[] = []
@@ -50,28 +51,31 @@ export class MigrationService {
     const sequence = ++this.backupListSequence
     this.backupListFailed = false
     this.latestBackupList = Promise.resolve().then(() => (this.deps.listBackups ?? listMigrationBackups)(this.deps.roots.desktop)).then((listed) => {
-      if (sequence === this.backupListSequence) {
+      if (sequence > this.publishedBackupSequence) {
+        this.publishedBackupSequence = sequence
         this.backups = listed.backups; this.backupWarnings = listed.warnings; this.backupsLoaded = true
       }
     }).catch((error) => {
       if (sequence === this.backupListSequence) this.backupListFailed = true
       throw error
     })
-    return this.waitForBackups()
+    // Each explicit scan reports its own outcome, including a superseded failure.
+    return this.latestBackupList
   }
   async ensureBackups(): Promise<void> {
     if (this.backupsLoaded) return
-    if (!this.latestBackupList || this.backupListFailed) return this.loadBackups()
-    await this.waitForBackups()
+    const pending = !this.latestBackupList || this.backupListFailed ? this.loadBackups() : this.latestBackupList
+    await this.waitForBackups(pending)
   }
-  private async waitForBackups(): Promise<void> {
-    // A newer scan can supersede the one this caller originally awaited.
-    // Do not return cached/empty status until the newest scan has published.
+  private async waitForBackups(pending: Promise<void>): Promise<void> {
+    // Initial status waits for the latest requested scan. Explicit refreshes
+    // await only their own scan, and subsequent status reads use the cache.
     for (;;) {
-      const pending = this.latestBackupList
       try { await pending }
       catch (error) { if (pending === this.latestBackupList) throw error }
       if (pending === this.latestBackupList) return
+      if (!this.latestBackupList) throw new Error('Backup scan was not initialized')
+      pending = this.latestBackupList
     }
   }
   async refreshBackups(): Promise<MigrationStatus> { await this.loadBackups(); return this.status() }
@@ -263,6 +267,7 @@ export class MigrationService {
               result.backup = backupRoot
             } catch (error) {
               if (signal.aborted && error === signal.reason) result.warnings.push(`Usage snapshot may still finish in ${backupRoot}. Check retained backups before relying on this copy.`)
+              else if (!result.backup) await rmdir(backupRoot).catch(() => {}) // Empty new folders only; preserve partial files and existing backups.
               throw error
             }
             signal.throwIfAborted()

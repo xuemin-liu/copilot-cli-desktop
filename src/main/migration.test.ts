@@ -34,10 +34,11 @@ function migrationService(roots: MigrationRoots, overrides: Partial<ConstructorP
   return new MigrationService({ roots, appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
     exportUsage: async (path) => put(path, 'snapshot'), restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {}, ...overrides })
 }
-function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 test('initial and overlapping backup status requests wait for the latest scan to publish', async (t) => {
@@ -83,17 +84,65 @@ test('failed initial backup scans can be retried and cached status does not wait
   assert.deepEqual(service.status().warnings, ['fresh'])
 })
 
-test('failed usage-only snapshots are not advertised as recovery backups', async (t) => {
+test('overlapping explicit scans report their own outcomes and older results cannot replace newer data', async (t) => {
+  const { target } = await fixture(t)
+  const gates = Array.from({ length: 5 }, () => deferred<Awaited<ReturnType<typeof listMigrationBackups>>>())
+  let scans = 0
+  const service = migrationService(target, { listBackups: () => gates[scans++]!.promise })
+  const first = new Error('first scan failed'), third = new Error('third scan failed')
+  const outcomes = Promise.allSettled([service.refreshBackups(), service.refreshBackups(), service.refreshBackups()])
+  gates[1]!.resolve({ backups: [], warnings: ['second scan succeeded'] })
+  gates[2]!.reject(third); gates[0]!.reject(first)
+  const results = await outcomes
+  assert.equal(results[0]!.status, 'rejected')
+  assert.equal((results[0] as PromiseRejectedResult).reason, first)
+  assert.equal(results[1]!.status, 'fulfilled')
+  assert.equal(results[2]!.status, 'rejected')
+  assert.equal((results[2] as PromiseRejectedResult).reason, third)
+  assert.deepEqual(service.status().warnings, ['second scan succeeded'])
+  const older = service.refreshBackups(), newer = service.refreshBackups()
+  gates[4]!.resolve({ backups: [], warnings: ['newest'] })
+  await newer
+  gates[3]!.resolve({ backups: [], warnings: ['older'] })
+  await older
+  assert.deepEqual(service.status().warnings, ['newest'])
+})
+
+test('repeated failed usage-only snapshots leave no empty recovery folders', async (t) => {
   const { root, target } = await fixture(t)
   const zip = join(root, 'usage.zip')
   await writeMigrationArchive(zip, manifest(), [fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
   const service = migrationService(target, { exportUsage: async () => { throw new Error('disk full') } })
   await service.open(zip)
-  const result = await service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
-  assert.equal(result.backup, null)
-  assert.ok(result.warnings.some((warning) => warning.includes('merge did not complete')))
-  assert.ok(!result.warnings.some((warning) => warning.includes('may still finish')))
-  assert.ok(service.status().backups.every((backup) => backup.status === 'empty'))
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const result = await service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+    assert.equal(result.backup, null)
+    assert.ok(result.warnings.some((warning) => warning.includes('merge did not complete')))
+    assert.ok(!result.warnings.some((warning) => warning.includes('may still finish')))
+    assert.deepEqual(service.status().backups, [])
+    assert.deepEqual(await readdir(join(target.desktop, 'migration-backups')), [])
+  }
+})
+
+test('failed snapshot cleanup preserves partial files and existing file recovery backups', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('new')), fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  let partialPath = ''
+  const service = migrationService(target, { exportUsage: async (path) => {
+    partialPath = `${path}.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.tmp`
+    await put(partialPath, 'partial snapshot'); throw new Error('snapshot failed')
+  } })
+  await service.open(zip)
+  const usageOnly = await service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+  assert.equal(usageOnly.backup, null)
+  assert.equal(await readFile(partialPath, 'utf8'), 'partial snapshot')
+  assert.equal(service.status().backups.length, 1)
+  assert.equal(service.status().backups[0]!.status, 'incomplete')
+  const withFiles = await service.apply((await service.preview({ ...choices, categories: ['knowledge', 'usage'] })).id)
+  assert.ok(withFiles.backup)
+  assert.equal(JSON.parse(await readFile(join(withFiles.backup, 'journal.json'), 'utf8')).status, 'complete')
+  assert.equal(await readFile(partialPath, 'utf8'), 'partial snapshot')
 })
 
 test('cancelled usage-only snapshots report a possible location without claiming a completed backup', async (t) => {
@@ -115,6 +164,7 @@ test('cancelled usage-only snapshots report a possible location without claiming
     const result = await work
     assert.equal(result.backup, null)
     assert.ok(result.warnings.some((warning) => warning.includes('may still finish') && warning.includes(join(snapshotPath, '..'))))
+    assert.deepEqual(await readdir(join(snapshotPath, '..')), [], 'the detached worker must retain its destination folder')
   } finally {
     gate.resolve(); await work.catch(() => {})
     if (snapshotPath) await finished.promise

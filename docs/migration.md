@@ -105,7 +105,9 @@ The backup list is loaded when Settings requests it, and can be refreshed while
 an export or import runs. Sizes and deletion tokens refresh after usage snapshots finish.
 Refreshing also updates inspection warnings. Older status replies cannot replace
 a newer list, and snapshot bookkeeping does not delay the usage merge. Failed
-snapshots are not labeled as recovery backups. If cancellation leaves a snapshot
+snapshots are not labeled as recovery backups. Their newly created folders are
+removed only when empty; partial files and existing recovery backups are preserved.
+If cancellation leaves a snapshot
 running, the result reports its possible location and asks you to check that it
 finished before relying on the copy. Status polling uses the loaded cache and
 keeps only one automatic request in flight; failed initial scans can be retried.
