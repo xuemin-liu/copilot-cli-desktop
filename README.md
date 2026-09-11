@@ -16,6 +16,11 @@ handle, only input/output/resize events.
 
 ## Features
 
+- **Export and import your setup** from Settings → Migration: move CLI settings,
+  instructions, skills, Desktop profiles, and optional project files and usage in
+  one ZIP, with conflict previews, workspace mapping, and recovery backups.
+  Windows-to-Windows; history migration is not yet supported. See
+  [migration and recovery](docs/migration.md).
 - **Monthly token usage** in Settings counts local request tokens and saves collected
   totals in the app-data directory, independently of session history and software updates.
   Updates and quit commit collected usage with a bounded wait; verified backups and

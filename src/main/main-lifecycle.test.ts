@@ -61,6 +61,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
       `,
       'electron-updater': 'export default { autoUpdater: null };',
+      // Migration is exercised through its own integration tests. Keep new archive
+      // dependencies out of this temporary, dependency-free lifecycle bundle.
+      './migration-service.js': 'export class MigrationService {}',
+      './migration-import.js': 'export async function recoverMigrationImports() {}',
+      './migration-writers.js': 'export async function assertMigrationWritersStopped() {}',
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];
         export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
@@ -137,7 +142,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })
