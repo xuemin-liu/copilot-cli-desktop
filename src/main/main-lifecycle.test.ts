@@ -67,7 +67,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // Migration is exercised through its own integration tests. Keep new archive
       // dependencies out of this temporary, dependency-free lifecycle bundle.
       './migration-service.js': 'export class MigrationService {}',
-      './migration-import.js': 'export async function recoverMigrationImports() { return [] }',
+      './migration-import.js': 'export async function recoverMigrationReport() { return { issues: [], journals: [] } }',
       './migration-writers.js': 'export async function assertMigrationWritersStopped() {}',
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];

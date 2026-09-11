@@ -55,14 +55,18 @@ process state, and update caches are excluded. Reconnect GitHub, MCP services,
 and provider credentials on the destination. Recognized structured secret fields,
 literal environment/header values, and URL credentials/query parameters are
 removed. `${NAME}` and `${env:NAME}` references are preserved. Arbitrary Markdown
-or scripts, and arbitrary JSON assets inside skills, hooks, and extensions can
-still contain secrets. Only known CLI settings and MCP/LSP configuration files
-receive structured filtering; assets are preserved byte for byte. The ZIP is not encrypted and should be
-treated as private.
+or scripts and skill assets can still contain secrets. CLI settings use an
+allowlist. Parseable JSON/JSONC in MCP/LSP, hooks, and extensions receives secret
+filtering and structured path remapping without the settings allowlist; arrays
+and scalars are supported. Unparseable tool assets are preserved byte for byte
+with an explicit review warning. The ZIP is not encrypted and should be private.
 
 Links and junctions are unsupported. Limits are 64 MiB per file, 256 MiB total
 uncompressed archive data, and 10,000 files. Directory traversal is also bounded.
 Large data sets and unsupported files produce errors or explicit omission notes.
+An unavailable source path is omitted in full, including any files already read
+from it, so an incomplete skill cannot replace a complete destination directory.
+Reconnect the drive or restore read access before exporting omitted items.
 
 ## Conflicts and recovery
 
@@ -80,8 +84,14 @@ stops and reports the backup location instead of overwriting those modifications
 Recovery errors do not prevent startup. Settings → Migration lists unresolved
 journals and provides Retry recovery after you inspect and repair the affected
 files. Journals marked as needing attention are not retried automatically.
+To retain the current destination instead, inspect the backup directory, check
+the acknowledgement box, and choose **Keep current files and dismiss this recovery**.
+The journal is renamed to `journal.dismissed-<id>.json`; destination files and
+backups are preserved, and further imports are allowed once all issues are resolved.
 Closing Settings cancels its migration operation; reopening Settings shows any
-operation still finishing and retains access to Cancel. A usage merge already
+operation still finishing and retains access to Cancel. The last import outcome,
+including cancellation, rollback, and skipped usage, remains visible when Settings
+is reopened during the same app run. A usage merge already
 committing must finish before cancellation takes effect.
 
 Usage merge is a separate step with its own pre-import backup. A usage failure
@@ -100,7 +110,9 @@ scripted native file dialogs and the real controller check; it saves screenshots
 `pnpm pack:win` verifies the packaged runtime.
 
 The controller check authenticates this installation's background controller;
-it does not scan machine-wide process names. Close external CLI sessions yourself.
+if the probe fails but its saved PID is still alive, migration waits for the
+controller to stop or respond. It does not scan machine-wide process names.
+Close external CLI sessions yourself.
 Export snapshot checks and import destination fingerprints detect concurrent file
 changes. Reviewing inventory or an import preview does not block terminal input.
 Both migration smoke and Settings integration checks run in Windows CI.

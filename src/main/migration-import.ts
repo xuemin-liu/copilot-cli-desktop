@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { lstat, mkdir, open, readdir, rm } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { MAX_PROFILES, normalizeDesktopConfig, workspaceProfileId } from './desktop-config.js'
 import { normalizeSessionLaunchConfig } from './session-launch.js'
-import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, jsonBytes, jsonObject, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize } from './migration-inventory.js'
+import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, isToolJsonPath, jsonBytes, jsonObject, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize, transformToolJson } from './migration-inventory.js'
 import type { MigrationArchive } from './migration-archive.js'
-import type { MigrationChange, MigrationChoices, MigrationPreview, MigrationResult, MigrationRoots } from './migration-types.js'
+import type { MigrationChange, MigrationChoices, MigrationPreview, MigrationRecoveryJournal, MigrationResult, MigrationRoots } from './migration-types.js'
 
 interface Write { target: string; before: string | null; data: Buffer | null }
 export interface ImportPlan { preview: MigrationPreview; writes: Write[]; fingerprints: Map<string, string | null>; directoryFingerprints: Map<string, string>; usage: Buffer | null }
@@ -186,7 +186,8 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
       }
       if (JSON.stringify(merged) !== JSON.stringify(current)) plan.writes.push({ target, before: before === null ? null : digest(before), data: jsonBytes(merged) })
     } else {
-      const data = isToolConfigPath(file.path) ? jsonBytes(mapStructuredPaths(sanitize(jsonObject(file.data), plan.preview.warnings), archive, mappings, plan.preview.warnings)) : file.data
+      const transform = (value: unknown): unknown => mapStructuredPaths(sanitize(value, plan.preview.warnings), archive, mappings, plan.preview.warnings)
+      const data = isToolConfigPath(file.path) ? jsonBytes(transform(jsonObject(file.data))) : isToolJsonPath(file.path) ? transformToolJson(file.data, file.path, plan.preview.warnings, transform) : file.data
       if (addChange(file.path, target, file.category, before, data, file.category === 'tools' ? 'Review commands and local dependencies before starting Copilot.' : '')) plan.writes.push({ target, before: before === null ? null : digest(before), data })
     }
   }
@@ -220,15 +221,27 @@ async function rollback(directory: string, journal: Journal): Promise<void> {
   await durableWrite(join(directory, 'journal.json'), jsonBytes(journal))
 }
 export async function recoverMigrationImports(desktopRoot: string, retry = false): Promise<string[]> {
+  return (await recoverMigrationReport(desktopRoot, retry)).issues
+}
+export async function recoverMigrationReport(desktopRoot: string, retry = false): Promise<{ issues: string[]; journals: MigrationRecoveryJournal[] }> {
   const root = join(desktopRoot, 'migration-backups')
   const issues: string[] = []
+  const journals: MigrationRecoveryJournal[] = []
+  const report = { issues, journals }
+  async function recordIssue(id: string, directory: string, message: string): Promise<void> {
+    issues.push(message)
+    // Only readable journals can be acknowledged, bound to the reviewed bytes.
+    const data = await optionalRead(join(directory, 'journal.json')).catch(() => null)
+    if (data) journals.push({ id, path: directory, sha256: digest(data) })
+  }
   let names: string[]
   try {
     names = await readdir(root)
     await assertNoLinks(root)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return issues
-    return [`Migration recovery needs attention at ${root}: ${String(error)}`]
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return report
+    issues.push(`Migration recovery needs attention at ${root}: ${String(error)}`)
+    return report
   }
   for (const name of names) {
     if (!/^[0-9a-f-]{36}$/.test(name)) continue
@@ -244,17 +257,25 @@ export async function recoverMigrationImports(desktopRoot: string, retry = false
         || !Array.isArray(parsed.roots) || parsed.roots.some((value) => typeof value !== 'string' || !isAbsolute(value))) throw new Error('Invalid migration recovery journal')
       journal = parsed
       if (journal.status === 'needs-attention' && !retry) {
-        issues.push(`${directory}: ${journal.error ?? 'Recovery needs attention; inspect the backups before retrying.'}`)
+        await recordIssue(name, directory, `${directory}: ${journal.error ?? 'Recovery needs attention; inspect the backups before retrying.'}`)
       } else if (journal.status === 'pending' || journal.status === 'needs-attention') await rollback(directory, journal)
     } catch (error) {
-      issues.push(`Migration recovery needs attention at ${directory}: ${String(error)}`)
       if (journal) {
         journal.status = 'needs-attention'; journal.error = String(error)
         await durableWrite(join(directory, 'journal.json'), jsonBytes(journal)).catch(() => {})
       }
+      await recordIssue(name, directory, `Migration recovery needs attention at ${directory}: ${String(error)}`)
     }
   }
-  return issues
+  return report
+}
+/** Acknowledgement preserves both current destination files and all evidence. */
+export async function dismissMigrationJournal(desktopRoot: string, id: string, sha256: string): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/.test(id) || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid recovery journal selection')
+  const source = join(desktopRoot, 'migration-backups', id, 'journal.json')
+  await assertNoLinks(source)
+  if (await fingerprint(source) !== sha256) throw new Error('Recovery journal changed; use Retry recovery to refresh it before dismissing it')
+  await rename(source, join(desktopRoot, 'migration-backups', id, `journal.dismissed-${randomUUID()}.json`))
 }
 export async function applyMigrationImport(plan: ImportPlan, roots: MigrationRoots, signal?: AbortSignal, progress?: (completed: number, total: number) => void): Promise<MigrationResult> {
   for (const [path, hash] of plan.fingerprints) if (await fingerprint(path) !== hash) throw new Error('Destination changed; refresh the import preview')
@@ -288,7 +309,15 @@ export async function applyMigrationImport(plan: ImportPlan, roots: MigrationRoo
       }
       journal.status = 'complete'
       await durableWrite(join(directory, 'journal.json'), jsonBytes(journal))
-    } catch (error) { await rollback(directory, journal); throw error }
+    } catch (error) {
+      try { await rollback(directory, journal) }
+      catch (recoveryError) {
+        journal.status = 'needs-attention'; journal.error = String(recoveryError)
+        await durableWrite(join(directory, 'journal.json'), jsonBytes(journal)).catch(() => {})
+        throw new Error(`Import failed: ${String(error)}. Rollback needs attention: ${String(recoveryError)}. Backups: ${directory}`, { cause: error })
+      }
+      throw error
+    }
   }
   return { imported: plan.writes.length, skipped: plan.preview.changes.filter((change) => change.action === 'keep').length, backup: plan.writes.length ? directory : null, warnings: [...plan.preview.warnings] }
 }

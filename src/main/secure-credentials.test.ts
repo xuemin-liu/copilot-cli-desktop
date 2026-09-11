@@ -5,10 +5,20 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   SecureCredentialStore,
+  SENSITIVE_ENVIRONMENT_NAME,
   secretEnvArgs,
   withoutSensitiveEnvironment,
   type EncryptionProvider,
 } from './secure-credentials.js'
+
+test('helper environment filtering covers signing/auth secrets without stripping author or scope metadata', () => {
+  const secrets = ['AUTH', 'auth', 'SIGNING_KEY', 'SIGNINGKEY', 'api-key', 'api.key', 'x-api-key']
+  const ordinary = ['AUTHOR', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'OAUTH_SCOPE']
+  for (const key of secrets) assert.equal(SENSITIVE_ENVIRONMENT_NAME.test(key), true, key)
+  for (const key of ordinary) assert.equal(SENSITIVE_ENVIRONMENT_NAME.test(key), false, key)
+  const environment = Object.fromEntries([...secrets, ...ordinary].map((key) => [key, 'value']))
+  assert.deepEqual(withoutSensitiveEnvironment(environment), Object.fromEntries(ordinary.map((key) => [key, 'value'])))
+})
 
 function fakeEncryption(available = true): EncryptionProvider {
   return {

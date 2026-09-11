@@ -4,8 +4,8 @@ import { join, resolve } from 'node:path'
 import { readDesktopConfig } from './desktop-config.js'
 import { collectMigration, fileEntry, jsonBytes, jsonObject, optionalRead, sanitize, type MigrationFile } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
-import { applyMigrationImport, planMigrationImport, recoverMigrationImports, type ImportPlan } from './migration-import.js'
-import { MIGRATION_CATEGORIES, type MigrationChoices, type MigrationInventory, type MigrationManifest, type MigrationProgress, type MigrationResult, type MigrationRoots, type MigrationSelection, type MigrationStatus } from './migration-types.js'
+import { applyMigrationImport, dismissMigrationJournal, planMigrationImport, recoverMigrationReport, type ImportPlan } from './migration-import.js'
+import { MIGRATION_CATEGORIES, type MigrationChoices, type MigrationInventory, type MigrationManifest, type MigrationOutcome, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult, type MigrationRoots, type MigrationSelection, type MigrationStatus } from './migration-types.js'
 import { writeFileAtomic } from './atomic-file.js'
 
 interface MigrationDependencies {
@@ -24,6 +24,8 @@ export class MigrationService {
   busy = false
   exclusive = false
   recoveryIssues: string[] = []
+  recoveryJournals: MigrationRecoveryJournal[] = []
+  private lastImport: MigrationOutcome | null = null
   private currentProgress: MigrationProgress = { phase: 'Idle', completed: 0, total: 0 }
   private abort: AbortController | null = null
   private archive: MigrationArchive | null = null
@@ -33,7 +35,7 @@ export class MigrationService {
     deps.roots = { copilot: resolve(deps.roots.copilot), agentSkills: resolve(deps.roots.agentSkills), desktop: resolve(deps.roots.desktop) }
   }
   cancel(): void { this.abort?.abort() }
-  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues] } }
+  status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport } }
   private progress(value: MigrationProgress): void { this.currentProgress = value; this.deps.progress(value) }
   private async acquire(signal: AbortSignal): Promise<void> {
     await this.deps.assertIdle()
@@ -44,8 +46,23 @@ export class MigrationService {
   async recover(): Promise<MigrationStatus> {
     await this.run('Recovering interrupted imports', async (signal) => {
       await this.acquire(signal)
-      this.recoveryIssues = await recoverMigrationImports(this.deps.roots.desktop, true)
-      await this.deps.reloaded()
+      await this.refreshRecovery(true)
+    })
+    return this.status()
+  }
+  private async refreshRecovery(retry = false): Promise<void> {
+    try {
+      const report = await recoverMigrationReport(this.deps.roots.desktop, retry)
+      this.recoveryIssues = report.issues; this.recoveryJournals = report.journals
+    } finally { await this.deps.reloaded() }
+  }
+  async dismissRecovery(id: string, sha256: string): Promise<MigrationStatus> {
+    await this.run('Dismissing inspected recovery journal', async (signal) => {
+      await this.acquire(signal)
+      if (!this.recoveryJournals.some((journal) => journal.id === id && journal.sha256 === sha256)) throw new Error('Review the recovery journal in Settings first')
+      await dismissMigrationJournal(this.deps.roots.desktop, id, sha256)
+      this.plan = null
+      await this.refreshRecovery()
     })
     return this.status()
   }
@@ -154,34 +171,46 @@ export class MigrationService {
   }
   async apply(id: string): Promise<MigrationResult> {
     return this.run('Importing files', async (signal) => {
-      if (!this.plan || this.plan.preview.id !== id) throw new Error('Refresh the import preview')
-      await this.acquire(signal)
-      this.recoveryIssues = await recoverMigrationImports(this.deps.roots.desktop)
-      if (this.recoveryIssues.length) throw new Error('Resolve migration recovery issues in Settings before importing again.')
-      const plan = this.plan
-      this.plan = null
-      const result = await applyMigrationImport(plan, this.deps.roots, signal, (completed, total) => this.progress({ phase: 'Importing files', completed, total }))
-      await this.deps.reloaded()
-      if (plan.usage) {
-        // Usage merge is deliberately separate from the file transaction.
-        try {
-          signal.throwIfAborted()
-          const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
-          await mkdir(backupRoot, { recursive: true, mode: 0o700 })
-          await cancellable(this.deps.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
-          signal.throwIfAborted()
-          result.backup = backupRoot
-          await this.withScratch(async (directory) => {
-            const path = join(directory, 'usage.sqlite')
-            await writeFileAtomic(path, plan.usage!)
+      try {
+        if (!this.plan || this.plan.preview.id !== id) throw new Error('Refresh the import preview')
+        await this.acquire(signal)
+        await this.refreshRecovery()
+        if (this.recoveryIssues.length) throw new Error('Resolve migration recovery issues in Settings before importing again.')
+        const plan = this.plan
+        this.plan = null
+        let result: MigrationResult
+        try { result = await applyMigrationImport(plan, this.deps.roots, signal, (completed, total) => this.progress({ phase: 'Importing files', completed, total })) }
+        catch (error) {
+          await this.refreshRecovery().catch((reloadError) => { throw new Error(`${String(error)}. Could not reload recovered settings: ${String(reloadError)}`, { cause: error }) })
+          throw error
+        }
+        await this.refreshRecovery()
+        if (plan.usage) {
+          // Usage merge is deliberately separate from the file transaction.
+          try {
             signal.throwIfAborted()
-            this.progress({ phase: 'Committing usage merge (finishes before cancellation)', completed: 0, total: 0 })
-            await this.deps.restoreUsage(path)
-          })
-          result.warnings.push('Usage records merged successfully.')
-        } catch { result.warnings.push('Files imported, but usage merge did not complete. Retry via Monthly token usage → Restore backup using usage/usage.sqlite from the archive.') }
+            const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
+            await mkdir(backupRoot, { recursive: true, mode: 0o700 })
+            await cancellable(this.deps.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
+            signal.throwIfAborted()
+            result.backup = backupRoot
+            await this.withScratch(async (directory) => {
+              const path = join(directory, 'usage.sqlite')
+              await writeFileAtomic(path, plan.usage!)
+              signal.throwIfAborted()
+              this.progress({ phase: 'Committing usage merge (finishes before cancellation)', completed: 0, total: 0 })
+              await this.deps.restoreUsage(path)
+            })
+            result.warnings.push('Usage records merged successfully.')
+          } catch { result.warnings.push('Files imported, but usage merge did not complete. Retry via Monthly token usage → Restore backup using usage/usage.sqlite from the archive.') }
+        }
+        this.lastImport = { status: 'completed', message: 'Import completed. Review the result and any warnings below.', result }
+        return result
+      } catch (error) {
+        const cancelled = signal.aborted && this.recoveryIssues.length === 0
+        this.lastImport = { status: cancelled ? 'cancelled' : 'failed', message: cancelled ? `Import cancelled; uncommitted file changes were rolled back. ${String(error)}` : `Import failed: ${String(error)}`, result: null }
+        throw error
       }
-      return result
     })
   }
   private async withScratch<T>(fn: (path: string) => Promise<T>): Promise<T> {

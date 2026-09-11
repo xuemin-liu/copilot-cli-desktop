@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
-import { createWriteStream } from 'node:fs'
+import { createWriteStream, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -29,6 +29,157 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }): Promise
 async function put(path: string, data: string | Buffer): Promise<void> { await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, data) }
 const archive = (...files: MigrationArchive['files']): MigrationArchive => ({ manifest: manifest(), files })
 
+function migrationService(roots: MigrationRoots, overrides: Partial<ConstructorParameters<typeof MigrationService>[0]> = {}): MigrationService {
+  return new MigrationService({ roots, appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
+    exportUsage: async (path) => put(path, 'snapshot'), restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {}, ...overrides })
+}
+
+test('partially unreadable project and personal trees publish no partial replacement groups', async (t) => {
+  const { root, source, target } = await fixture(t)
+  const repo = join(root, 'repo'), destination = join(root, 'mapped')
+  await mkdir(destination)
+  const paths = [join(repo, '.github/skills'), join(source.copilot, 'skills'), join(source.agentSkills), join(source.copilot, 'extensions')]
+  for (const path of paths) {
+    await put(join(path, 'deploy/SKILL.md'), 'readable')
+    await put(join(path, 'deploy/scripts/run.cmd'), 'hidden')
+  }
+  await put(join(source.copilot, 'copilot-instructions.md'), 'readable guidance')
+  const info = manifest(); info.projects = [{ id: 'aaaaaaaaaaaaaaaa', name: 'repo', sourcePath: repo }]
+  const files = await collectMigration(source, info, new Set(choices.categories), undefined, async (path) => {
+    if (path.endsWith('scripts')) throw Object.assign(new Error('Denied'), { code: 'EACCES' })
+    return readdir(path, { withFileTypes: true })
+  })
+  assert.ok(!files.some((file) => file.path.includes('deploy')))
+  assert.ok(files.some((file) => file.path.endsWith('copilot-instructions.md')))
+  for (const path of paths) assert.ok(info.warnings.some((warning) => warning.includes(path) && warning.includes('entire')))
+  await put(join(destination, '.github/skills/deploy/scripts/run.cmd'), 'keep destination')
+  const loaded = { manifest: info, files }
+  const plan = await planMigrationImport(loaded, target, { aaaaaaaaaaaaaaaa: destination }, { ...choices, replace: ['projects/aaaaaaaaaaaaaaaa/.github/skills/deploy'] })
+  await applyMigrationImport(plan, target)
+  assert.equal(await readFile(join(destination, '.github/skills/deploy/scripts/run.cmd'), 'utf8'), 'keep destination')
+})
+
+test('parseable hook and extension JSON strips secrets and maps commands without applying the settings allowlist', async (t) => {
+  const { root, source, target } = await fixture(t)
+  const old = join(root, 'old'), mapped = join(root, 'mapped'); await mkdir(mapped)
+  const payload = { hooks: { preToolUse: [{ command: join(old, 'tools/check.cmd'), env: { GITHUB_TOKEN: 'literal-secret', API_KEY: '${API_KEY}' } }] }, 'api-key': 'literal-secret', arbitrary: 42 }
+  for (const path of ['hooks/hooks.json', 'extensions/vendor/settings.jsonc']) await put(join(source.copilot, path), jsonBytes(payload))
+  await put(join(source.copilot, 'extensions/vendor/list.json'), jsonBytes([payload]))
+  await put(join(source.copilot, 'hooks/broken.json'), '{not parseable}')
+  const info = manifest(); info.projects = [{ id: 'aaaaaaaaaaaaaaaa', sourcePath: old, name: 'repo' }]
+  const files = await collectMigration(source, info, new Set(['tools']))
+  assert.ok(!files.some((file) => file.data.includes('literal-secret')))
+  const plan = await planMigrationImport({ manifest: info, files }, target, { aaaaaaaaaaaaaaaa: mapped }, choices)
+  assert.ok(plan.preview.warnings.some((warning) => warning.includes('Required tool command:') && warning.includes('check.cmd')))
+  assert.ok(plan.preview.warnings.some((warning) => warning.includes('Unparsed tool asset')))
+  await applyMigrationImport(plan, target)
+  const hook = JSON.parse(await readFile(join(target.copilot, 'hooks/hooks.json'), 'utf8'))
+  assert.equal(hook.arbitrary, 42)
+  assert.equal(hook.hooks.preToolUse[0].command, join(mapped, 'tools/check.cmd'))
+  assert.deepEqual(hook.hooks.preToolUse[0].env, { API_KEY: '${API_KEY}' })
+  assert.equal(await readFile(join(target.copilot, 'hooks/broken.json'), 'utf8'), '{not parseable}')
+  assert.deepEqual(JSON.parse(await readFile(join(target.copilot, 'extensions/vendor/list.json'), 'utf8')), [hook])
+})
+
+test('failed rollback preserves the original failure, surfaces recovery immediately, and permits inspected dismissal', async (t) => {
+  const { root, target } = await fixture(t)
+  const destination = join(target.copilot, 'copilot-instructions.md'), zip = join(root, 'input.zip')
+  await put(destination, 'before')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
+  let reloads = 0, fail = true
+  const service = migrationService(target, { reloaded: async () => { reloads++ }, progress: (progress) => {
+    if (fail && progress.completed === 1) { writeFileSync(destination, 'third party'); throw new Error('original import failure') }
+  } })
+  await service.open(zip)
+  const plan = await service.preview({ ...choices, replace: ['copilot/copilot-instructions.md'] })
+  await assert.rejects(service.apply(plan.id), (error: unknown) => {
+    assert.match(String(error), /original import failure.*Rollback needs attention/)
+    assert.match(String((error as Error).cause), /original import failure/)
+    return true
+  })
+  assert.equal(reloads, 2)
+  assert.equal(service.status().lastImport?.status, 'failed')
+  const journal = service.status().recoveryJournals[0]!
+  assert.equal(jsonObject(await readFile(join(journal.path, 'journal.json'))).status, 'needs-attention')
+  assert.equal(service.status().recoveryIssues.length, 1)
+  fail = false
+  const retryPlan = await service.preview(choices)
+  await assert.rejects(service.apply(retryPlan.id), /Resolve migration recovery/)
+  await assert.rejects(service.apply(retryPlan.id), /Resolve migration recovery/)
+  await assert.rejects(service.dismissRecovery(journal.id, '0'.repeat(64)), /Review the recovery journal/)
+  const reviewedJournal = await readFile(join(journal.path, 'journal.json'))
+  await put(join(journal.path, 'journal.json'), Buffer.concat([reviewedJournal, Buffer.from('\n')]))
+  await assert.rejects(service.dismissRecovery(journal.id, journal.sha256), /Recovery journal changed/)
+  await put(join(journal.path, 'journal.json'), reviewedJournal)
+  await service.dismissRecovery(journal.id, journal.sha256)
+  assert.deepEqual(service.status().recoveryIssues, [])
+  assert.equal(await readFile(destination, 'utf8'), 'third party')
+  assert.equal(await readFile(join(journal.path, '0.bak'), 'utf8'), 'before')
+  assert.ok((await readdir(journal.path)).some((name) => name.startsWith('journal.dismissed-')))
+  const fresh = await service.preview(choices)
+  await service.apply(fresh.id)
+})
+
+test('service retries real needs-attention recovery and reloads restored desktop preferences', async (t) => {
+  const { target } = await fixture(t)
+  const destination = join(target.desktop, 'desktop.json'), directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  const before = jsonBytes({ notifications: false }), after = jsonBytes({ notifications: true })
+  await put(destination, after); await put(join(directory, '0.bak'), before)
+  await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'needs-attention', roots: [target.desktop], writes: [{ target: destination, before: digest(before), after: digest(after) }] }))
+  let notifications = true
+  const service = migrationService(target, { reloaded: async () => { notifications = (await readDesktopConfig(destination)).notifications } })
+  const status = await service.recover()
+  assert.deepEqual(status.recoveryIssues, [])
+  assert.equal(notifications, false)
+  assert.equal(jsonObject(await readFile(join(directory, 'journal.json'))).status, 'rolled-back')
+})
+
+test('apply reloads recovery changes both before a blocked import and before stale-preview refusal', async (t) => {
+  const { root, target } = await fixture(t)
+  const destination = join(target.desktop, 'desktop.json'), zip = join(root, 'input.zip')
+  const before = jsonBytes({ notifications: false }), after = jsonBytes({ notifications: true })
+  await writeMigrationArchive(zip, manifest(), [fileEntry('desktop/preferences.json', 'desktop', before)])
+  for (const blocked of [false, true]) {
+    await put(destination, after)
+    let notifications = true
+    const service = migrationService(target, { reloaded: async () => { notifications = (await readDesktopConfig(destination)).notifications } })
+    await service.open(zip)
+    const plan = await service.preview({ ...choices, replace: ['desktop/preferences.json#notifications'] })
+    const directory = join(target.desktop, 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+    await put(join(directory, '0.bak'), before)
+    await put(join(directory, 'journal.json'), jsonBytes({ version: 1, status: 'pending', roots: [target.desktop], writes: [{ target: destination, before: digest(before), after: digest(after) }] }))
+    if (blocked) await put(join(target.desktop, 'migration-backups', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'journal.json'), '{bad journal}')
+    await assert.rejects(service.apply(plan.id), blocked ? /Resolve migration recovery/ : /Destination changed/)
+    assert.equal(notifications, false)
+  }
+})
+
+test('cancelled file imports and committed imports with skipped usage retain their outcome in service status', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'input.zip'), destination = join(target.copilot, 'copilot-instructions.md')
+  await put(destination, 'before')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after')), fileEntry('copilot/instructions/second.md', 'knowledge', Buffer.from('second')), fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  for (const afterCommit of [false, true]) {
+    let reloads = 0
+    const service = migrationService(target, { progress: (value) => { if (!afterCommit && value.completed === 1) service.cancel() },
+      reloaded: async () => { if (++reloads === 2 && afterCommit) service.cancel() }, restoreUsage: async () => { throw new Error('must not merge cancelled usage') } })
+    await service.open(zip)
+    const plan = await service.preview({ ...choices, categories: ['knowledge', 'usage'], replace: ['copilot/copilot-instructions.md'] })
+    if (!afterCommit) {
+      await assert.rejects(service.apply(plan.id), /abort/i)
+      assert.equal(await readFile(destination, 'utf8'), 'before')
+      assert.equal(service.status().lastImport?.status, 'cancelled')
+      assert.match(service.status().lastImport!.message, /rolled back/)
+    } else {
+      await service.apply(plan.id)
+      assert.equal(await readFile(destination, 'utf8'), 'after')
+      assert.equal(service.status().lastImport?.status, 'completed')
+      assert.ok(service.status().lastImport?.result?.warnings.some((warning) => warning.includes('usage merge did not complete')))
+    }
+    assert.equal(service.status().busy, false)
+  }
+})
+
 test('provider replacements retain the destination endpoint and unselected fields', async (t) => {
   const { target } = await fixture(t)
   await put(join(target.desktop, 'desktop.json'), jsonBytes({ provider: { type: 'openai', baseUrl: 'https://local.test/v1', model: 'old', offline: true } }))
@@ -52,7 +203,7 @@ test('opaque JSON assets round trip unchanged while exact CLI and tool configura
 
 test('all credential-vault key families are removed from tool definitions but references survive', async (t) => {
   const { source, target } = await fixture(t)
-  const keys = [...CREDENTIAL_NAMES, 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'PRIVATE_KEY', 'ACCESS_KEY', 'SIGNING_KEY', 'AUTH', 'AUTHORIZATION', 'PASSWORD', 'CLIENT_SECRET']
+  const keys = [...CREDENTIAL_NAMES, 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'api-key', 'api.key', 'x-api-key', 'api key', 'PRIVATE_KEY', 'ACCESS_KEY', 'SIGNING_KEY', 'AUTH', 'AUTHORIZATION', 'PASSWORD', 'CLIENT_SECRET']
   for (const key of keys.filter((key) => key !== 'COPILOT_PROVIDER_BASE_URL')) assert.ok(SENSITIVE_ENVIRONMENT_NAME.test(key), key)
   const env = Object.fromEntries(keys.map((key) => [key, 'literal-secret']))
   await put(join(source.copilot, 'mcp-config.json'), jsonBytes({ mcpServers: { demo: { ...env, command: 'node', PUBLIC_MODE: 'enabled', env: { ...env, REF_API_KEY: '${API_KEY}' } } } }))
@@ -136,10 +287,11 @@ test('recovery reports corrupt journals and missing backups without preventing s
 test('writer checks use authenticated daemon state and ignore stale process identities', async () => {
   const state = { pid: process.pid } as DaemonState
   let queried = false
-  await assertMigrationWritersStopped({ readState: async () => null, isAlive: async () => { queried = true; return true } })
+  await assertMigrationWritersStopped({ readState: async () => null, isAlive: async () => { queried = true; return true }, processAlive: () => false })
   assert.equal(queried, false)
-  await assertMigrationWritersStopped({ readState: async () => state, isAlive: async (candidate) => { assert.equal(candidate, state); return false } })
-  await assert.rejects(assertMigrationWritersStopped({ readState: async () => state, isAlive: async () => true }), /background controller/)
+  await assertMigrationWritersStopped({ readState: async () => state, isAlive: async (candidate) => { assert.equal(candidate, state); return false }, processAlive: () => false })
+  await assert.rejects(assertMigrationWritersStopped({ readState: async () => state, isAlive: async () => true, processAlive: () => false }), /background controller/)
+  await assert.rejects(assertMigrationWritersStopped({ readState: async () => state, isAlive: async () => false, processAlive: () => true }), /could not be verified/)
 })
 
 test('read-only operations remain nonexclusive and cancellation releases stalled inventory and usage snapshots', async (t) => {

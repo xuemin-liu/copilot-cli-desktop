@@ -2,6 +2,7 @@
 // file dialogs select disposable fixture paths; no user data or model calls.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -23,7 +24,10 @@ if (!process.versions.electron) {
 } else { void runElectronCheck() }
 
 async function runElectronCheck() {
-  const { app, BrowserWindow, dialog, shell } = await import('electron')
+  const { app, BrowserWindow, dialog, shell, ipcMain } = await import('electron')
+  let statusRequests = 0
+  const handle = ipcMain.handle.bind(ipcMain)
+  ipcMain.handle = (channel, listener) => handle(channel, channel === 'desktop-settings:migration-status' ? (...args) => { statusRequests++; return listener(...args) } : listener)
   dialog.showErrorBox = (title, content) => { console.error(title, content); app.exit(1) }
   const root = process.env.MIGRATION_CHECK_ROOT, output = process.env.MIGRATION_CHECK_OUTPUT
   assert.ok(root && output)
@@ -39,7 +43,14 @@ async function runElectronCheck() {
   await writeFile(join(root, 'copilot', 'copilot-instructions.md'), 'Migration UI fixture')
   const damagedJournal = join(root, 'desktop', 'migration-backups', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
   await mkdir(damagedJournal, { recursive: true })
-  await writeFile(join(damagedJournal, 'journal.json'), '{damaged fixture')
+  const instructions = join(root, 'copilot', 'copilot-instructions.md')
+  const hash = (text) => createHash('sha256').update(text).digest('hex')
+  await writeFile(instructions, 'interrupted import')
+  await writeFile(join(damagedJournal, '0.bak'), 'Migration UI fixture')
+  await writeFile(join(damagedJournal, 'journal.json'), JSON.stringify({ version: 1, status: 'needs-attention', roots: [join(root, 'copilot')], writes: [{ target: instructions, before: hash('Migration UI fixture'), after: hash('interrupted import') }] }))
+  const corruptJournal = join(root, 'desktop', 'migration-backups', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+  await mkdir(corruptJournal)
+  await writeFile(join(corruptJournal, 'journal.json'), '{damaged fixture')
   await import('../dist/src/main/main.js')
   console.log('[migration-check] Application loaded; waiting for Settings.')
   const timeout = setTimeout(() => { console.error('Migration UI check timed out'); app.exit(1) }, 90_000)
@@ -59,9 +70,20 @@ async function runElectronCheck() {
       await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(text)}); if (!button || button.disabled) throw Error('Button unavailable'); button.click(); })()`)
     }
     await waitFor(() => evaluate(`document.body.textContent.includes('An interrupted import needs attention')`))
-    await rm(join(damagedJournal, 'journal.json'))
     await click('Retry recovery')
+    await waitFor(async () => JSON.parse(await readFile(join(damagedJournal, 'journal.json'), 'utf8')).status === 'rolled-back')
+    assert.equal(await readFile(instructions, 'utf8'), 'Migration UI fixture')
+    await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Retry recovery' && !b.disabled)`))
+    await evaluate(`[...document.querySelectorAll('label')].find(l => l.textContent.includes('I inspected these recovery backups')).querySelector('input').click()`)
+    await click('Keep current files and dismiss this recovery')
     await waitFor(() => evaluate(`!document.body.textContent.includes('An interrupted import needs attention')`))
+    assert.ok((await (await import('node:fs/promises')).readdir(corruptJournal)).some((name) => name.startsWith('journal.dismissed-')))
+    const baselineRequests = statusRequests
+    for (let i = 1; i <= 5000; i++) settings.webContents.send('desktop-settings:migration-progress', { phase: 'Progress fixture', completed: i, total: 5000 })
+    await waitFor(() => evaluate(`document.body.textContent.includes('Progress fixture 5000/5000')`))
+    assert.equal(statusRequests, baselineRequests, 'progress events must not trigger status invokes')
+    settings.webContents.send('desktop-settings:migration-progress', { phase: 'Idle', completed: 0, total: 0 })
+    await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Review export files' && !b.disabled)`))
     await evaluate(`(() => { const section=document.querySelector('#migration-title').closest('section'); for (const label of section.querySelectorAll('fieldset label')) { const input=label.querySelector('input'); if(input?.checked && !label.textContent.includes('CLI settings') && !label.textContent.includes('Personal instructions')) input.click(); } })()`)
     await click('Review export files')
     await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Export ZIP…' && !b.disabled)`))
@@ -100,10 +122,11 @@ async function runElectronCheck() {
     const reopened = await waitFor(() => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/settings.html')))
     await waitFor(() => reopened.webContents.executeJavaScript('Boolean(document.querySelector("#migration-title"))'))
     await waitFor(async () => !(await reopened.webContents.executeJavaScript('window.copilotDesktopSettings.migrationStatus()')).busy)
+    await waitFor(() => reopened.webContents.executeJavaScript(`document.body.textContent.includes('Last import: completed')`))
     releaseSnapshot()
     UsageService.prototype.exportTo = originalExport
     await waitFor(async () => !(await (await import('node:fs/promises')).readdir(join(root, 'desktop'))).some((name) => name.startsWith('migration-staging-')))
-    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'recovery retry', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'close cancels stalled snapshot', 'reopened Settings status'] }, null, 2))
+    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'real recovery retry', 'inspected recovery dismissal', '5000 progress events without status invokes', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'close cancels stalled snapshot', 'reopened Settings status and last import'] }, null, 2))
     console.log('[migration-check] Production Settings export, conflict preview and import passed.')
     clearTimeout(timeout); app.quit()
   } catch (error) {

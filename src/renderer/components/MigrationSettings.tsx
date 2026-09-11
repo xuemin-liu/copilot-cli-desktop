@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
-import { DEFAULT_MIGRATION_CATEGORIES, MIGRATION_CATEGORIES, type MigrationCategory, type MigrationInventory, type MigrationPreview, type MigrationProgress, type MigrationResult } from '../../main/migration-types.js'
+import { DEFAULT_MIGRATION_CATEGORIES, MIGRATION_CATEGORIES, type MigrationCategory, type MigrationInventory, type MigrationOutcome, type MigrationPreview, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult } from '../../main/migration-types.js'
 import type { CopilotDesktopSettingsBridge, DesktopSettingsSnapshot } from '../global.js'
 
 const LABELS: Record<MigrationCategory, string> = {
@@ -22,16 +22,27 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const [localBusy, setBusy] = useState(false)
   const [serverBusy, setServerBusy] = useState(false)
   const [recoveryIssues, setRecoveryIssues] = useState<string[]>([])
+  const [recoveryJournals, setRecoveryJournals] = useState<MigrationRecoveryJournal[]>([])
+  const [inspectedRecovery, setInspectedRecovery] = useState(false)
+  const [lastImport, setLastImport] = useState<MigrationOutcome | null>(null)
   const busy = localBusy || serverBusy
   const [progress, setProgress] = useState<MigrationProgress | null>(null)
   const [message, setMessage] = useState('')
   const [result, setResult] = useState<MigrationResult | null>(null)
   useEffect(() => {
     let mounted = true
-    const refresh = (): void => { void bridge.migrationStatus().then((status) => {
-      if (mounted) { setServerBusy(status.busy); setProgress(status.progress); setRecoveryIssues(status.recoveryIssues) }
+    let revision = 0
+    const refresh = (): void => { const requestedRevision = revision; void bridge.migrationStatus().then((status) => {
+      if (mounted && requestedRevision === revision) {
+        setServerBusy(status.busy); setProgress(status.progress); setRecoveryIssues(status.recoveryIssues)
+        setRecoveryJournals(status.recoveryJournals); setLastImport(status.lastImport); setInspectedRecovery(false)
+      }
     }).catch((error) => { if (mounted) setMessage(String(error)) }) }
-    const unsubscribe = bridge.onMigrationProgress(() => refresh())
+    const unsubscribe = bridge.onMigrationProgress((value) => {
+      revision++
+      setProgress(value); setServerBusy(value.phase !== 'Idle')
+      if (value.phase === 'Idle') refresh()
+    })
     refresh()
     return () => { mounted = false; unsubscribe() }
   }, [bridge])
@@ -48,9 +59,21 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
       <p>An interrupted import needs attention. Your backups are preserved. Inspect the listed files before retrying recovery.</p>
       <ul>{recoveryIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
       <button disabled={busy} onClick={() => void run(async () => { const status = await bridge.migrationRecover(); setRecoveryIssues(status.recoveryIssues); onSaved(await bridge.get()) })}>Retry recovery</button>
+      {recoveryJournals.length > 0 && <>
+        <p>If you want to keep the current files instead, inspect the backups and acknowledge the incomplete recovery. This stops retries and preserves the journal and backups.</p>
+        <label><input type="checkbox" disabled={busy} checked={inspectedRecovery} onChange={(event) => setInspectedRecovery(event.target.checked)} />I inspected these recovery backups and want to keep the current files.</label>
+        {recoveryJournals.map((journal) => <div key={journal.id}>
+          <p className="profile-path">{journal.path}</p>
+          <button disabled={busy || !inspectedRecovery} onClick={() => void run(async () => {
+            const status = await bridge.migrationDismissRecovery(journal.id, journal.sha256)
+            setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals); setInspectedRecovery(false)
+            setPreview(null); setReviewed(false); onSaved(await bridge.get())
+          })}>Keep current files and dismiss this recovery</button>
+        </div>)}
+      </>}
     </div>}
     <p>Move your Copilot setup to another Windows computer using one ZIP file. Choose what to include, then review the destination changes before importing.</p>
-    <p className="settings-disclaimer">Close all Desktop and external Copilot sessions before exporting or importing. Stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts.</p>
+    <p className="settings-disclaimer">Close all Desktop and external Copilot sessions before exporting or importing. Stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts. Closing Settings cancels migration; reopen Settings to see the import outcome, including rollback or skipped usage.</p>
     <fieldset disabled={busy} className="settings-card">
       <legend>What to transfer</legend>
       <div className="settings-form-grid">
@@ -119,6 +142,14 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
     </div>
     {busy && <p role="status">{progress?.phase ?? 'Working…'}{progress && progress.total > 0 ? ` ${progress.completed}/${progress.total}` : ''} <button onClick={() => void bridge.migrationCancel()}>Cancel</button></p>}
     {message && <p role="status" className="settings-warning">{message}</p>}
+    {lastImport && !result && <div className="settings-card" role="status">
+      <h3>Last import: {lastImport.status}</h3><p>{lastImport.message}</p>
+      {lastImport.result && <>
+        <p>{lastImport.result.imported} file changes applied · {lastImport.result.skipped} items kept or skipped.</p>
+        {lastImport.result.backup && <p className="profile-path">Recovery backups: {lastImport.result.backup}</p>}
+        <ul>{lastImport.result.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+      </>}
+    </div>}
     {result && <div className="settings-card" role="status">
       <h3>Import completed</h3>
       <p>{result.imported} file changes applied · {result.skipped} items kept or skipped.</p>

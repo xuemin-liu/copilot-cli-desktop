@@ -120,9 +120,22 @@ export const PROJECT_FILES = ['.github/copilot-instructions.md', '.github/instru
   '.github/hooks', '.github/copilot/settings.json', 'AGENTS.md', '.agents/skills', '.claude/skills']
 export const isCliSettingsPath = (path: string): boolean => path === 'copilot/settings.json' || /^projects\/[a-f0-9]{16}\/\.github\/copilot\/settings\.json$/.test(path)
 export const isToolConfigPath = (path: string): boolean => ['copilot/mcp-config.json', 'copilot/lsp-config.json'].includes(path)
+export const isToolJsonPath = (path: string): boolean => /\.jsonc?$/i.test(path) && (/^copilot\/(?:hooks|extensions)\//.test(path) || /^projects\/[a-f0-9]{16}\/\.github\/hooks\//.test(path))
+/** Arrays and scalars are legitimate tool assets. Only syntax failures are opaque. */
+export function transformToolJson(data: Buffer, path: string, warnings: string[], transform: (value: unknown) => unknown): Buffer {
+  const errors: ParseError[] = []
+  const value: unknown = parse(data.toString('utf8'), errors, { allowTrailingComma: true })
+  if (errors.length || value === undefined) {
+    warnings.push(`Unparsed tool asset preserved without secret filtering or path remapping; review manually: ${path}`)
+    return data
+  }
+  const transformed = transform(value)
+  // Preserve formatting/comments when no semantic changes are necessary.
+  return JSON.stringify(value) === JSON.stringify(transformed) ? data : jsonBytes(transformed)
+}
 export function isUnavailableMigrationPath(error: unknown): boolean { return ['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') }
 export async function collectMigration(roots: MigrationRoots, manifest: MigrationManifest, categories: ReadonlySet<MigrationCategory>, signal?: AbortSignal,
-  readProjectDirectory = (path: string) => readdir(path, { withFileTypes: true })): Promise<MigrationFile[]> {
+  readDirectory = (path: string) => readdir(path, { withFileTypes: true })): Promise<MigrationFile[]> {
   const files: MigrationFile[] = []
   let total = 0
   let visited = 0
@@ -131,20 +144,32 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     if (files.length >= MAX_MIGRATION_ENTRIES || total > MAX_MIGRATION_BYTES) throw new Error('Migration exceeds 10,000 files or 256 MiB')
     files.push(file)
   }
+  async function tolerate(path: string, operation: () => Promise<void>): Promise<void> {
+    const start = files.length, bytes = total
+    try { await operation() }
+    catch (error) {
+      if (!isUnavailableMigrationPath(error)) throw error
+      // Never publish a partial asset group: replacement deletes absent files.
+      files.splice(start); total = bytes
+      manifest.warnings.push(`Skipped entire unavailable path: ${path}. Reconnect the drive or restore read access, then review again.`)
+    }
+  }
+  const collectPath = (source: string, archive: string, category: MigrationCategory): Promise<void> => tolerate(source, () => walk(source, archive, category))
   async function walk(source: string, archive: string, category: MigrationCategory): Promise<void> {
     signal?.throwIfAborted()
     if (++visited > 20_000 || archive.split('/').length > 40) throw new Error('Migration directory scan limit exceeded')
     await assertNoLinks(source)
     let info
-    try { info = await lstat(source) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    info = await lstat(source)
     if (info.isDirectory()) {
-      for (const child of (await readdir(source)).sort()) await walk(join(source, child), `${archive}/${child}`, category)
+      for (const child of (await readDirectory(source)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) await walk(join(source, child.name), `${archive}/${child.name}`, category)
     } else {
       let data = await optionalRead(source)
-      if (!data) return
+      if (!data) throw Object.assign(new Error(`Source disappeared: ${source}`), { code: 'ENOENT' })
       try {
         if (isCliSettingsPath(archive)) data = portableSettings(data, manifest.warnings, categories.has('tools'))
         else if (isToolConfigPath(archive)) data = jsonBytes(sanitize(jsonObject(data), manifest.warnings))
+        else if (isToolJsonPath(archive)) data = transformToolJson(data, archive, manifest.warnings, (value) => sanitize(value, manifest.warnings))
       } catch { throw new Error(`Invalid migration configuration: ${source}`) }
       add(fileEntry(archive, category, data))
     }
@@ -153,35 +178,33 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     const settings = await optionalRead(join(roots.copilot, 'settings.json')) ?? await optionalRead(join(roots.copilot, 'config.json'))
     if (settings) add(fileEntry('copilot/settings.json', 'settings', portableSettings(settings, manifest.warnings, categories.has('tools'))))
   }
-  if (categories.has('knowledge')) for (const path of ['copilot-instructions.md', 'instructions']) await walk(join(roots.copilot, path), `copilot/${path}`, 'knowledge')
+  if (categories.has('knowledge')) for (const path of ['copilot-instructions.md', 'instructions']) await collectPath(join(roots.copilot, path), `copilot/${path}`, 'knowledge')
   if (categories.has('skills')) {
-    for (const path of ['skills', 'agents']) await walk(join(roots.copilot, path), `copilot/${path}`, 'skills')
-    await walk(roots.agentSkills, 'agents-home/skills', 'skills')
+    for (const path of ['skills', 'agents']) await collectPath(join(roots.copilot, path), `copilot/${path}`, 'skills')
+    await collectPath(roots.agentSkills, 'agents-home/skills', 'skills')
   }
-  if (categories.has('tools')) for (const path of ['mcp-config.json', 'lsp-config.json', 'hooks', 'extensions']) await walk(join(roots.copilot, path), `copilot/${path}`, 'tools')
+  if (categories.has('tools')) for (const path of ['mcp-config.json', 'lsp-config.json', 'hooks', 'extensions']) await collectPath(join(roots.copilot, path), `copilot/${path}`, 'tools')
   if (categories.has('desktop')) add(fileEntry('desktop/preferences.json', 'desktop', await portableDesktop(join(roots.desktop, 'desktop.json'))))
   if (categories.has('projects')) for (const project of manifest.projects) {
     for (const path of PROJECT_FILES) {
       if (path === '.github/hooks' && !categories.has('tools')) continue
       const source = join(project.sourcePath, path)
-      try { await walk(source, `projects/${project.id}/${path}`, 'projects') }
-      catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable project path: ${source}`) }
+      await collectPath(source, `projects/${project.id}/${path}`, 'projects')
     }
     // Traverse names only, never follow links or walk repository internals/dependencies.
     let visited = 0
     async function instructions(root: string, relative: string, depth: number): Promise<void> {
       signal?.throwIfAborted()
       if (++visited > 20_000 || depth > 30) { manifest.warnings.push(`Nested AGENTS.md scan limit reached in ${project.name}.`); return }
-      let entries
-      try { await assertNoLinks(root); entries = await readProjectDirectory(root) }
-      catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable instruction directory: ${root}`); return }
+      let entries: Awaited<ReturnType<typeof readDirectory>> | undefined
+      await tolerate(root, async () => { await assertNoLinks(root); entries = await readDirectory(root) })
+      if (!entries) return
       for (const entry of entries) {
         if (entry.isSymbolicLink() || ['.git', 'node_modules', '.github', '.agents', '.claude', 'dist', 'build', 'release', '.venv'].includes(entry.name)) continue
         const rel = relative ? `${relative}/${entry.name}` : entry.name
         if (entry.isDirectory()) await instructions(join(root, entry.name), rel, depth + 1)
         else if (entry.name === 'AGENTS.md' && relative) {
-          try { await walk(join(root, entry.name), `projects/${project.id}/${rel}`, 'projects') }
-          catch (error) { if (!isUnavailableMigrationPath(error)) throw error; manifest.warnings.push(`Skipped unavailable instruction file: ${join(root, entry.name)}`) }
+          await collectPath(join(root, entry.name), `projects/${project.id}/${rel}`, 'projects')
         }
       }
     }

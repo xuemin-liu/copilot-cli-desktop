@@ -116,7 +116,7 @@ import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } 
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 import { MigrationService } from './migration-service.js'
-import { recoverMigrationImports } from './migration-import.js'
+import { recoverMigrationReport } from './migration-import.js'
 import { assertMigrationWritersStopped } from './migration-writers.js'
 import type { MigrationChoices, MigrationSelection } from './migration-types.js'
 
@@ -2376,6 +2376,11 @@ ipcMain.handle('desktop-settings:migration-recover', (event) => {
   assertTrustedSettingsSender(event, true)
   return getMigrationService().recover()
 })
+ipcMain.handle('desktop-settings:migration-dismiss-recovery', (event, id: unknown, sha256: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string' || typeof sha256 !== 'string') throw new Error('Invalid recovery journal selection')
+  return getMigrationService().dismissRecovery(id, sha256)
+})
 
 function checkMigrationIdle(): void {
   if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before exporting or importing. Tray sessions also count.')
@@ -2390,7 +2395,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
-    const recoveryIssues = await recoverMigrationImports(app.getPath('userData'))
+    const recovery = await recoverMigrationReport(app.getPath('userData'))
     migrationService = new MigrationService({
       roots: { copilot: process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'), agentSkills: join(app.getPath('home'), '.agents', 'skills'), desktop: app.getPath('userData') },
       appVersion: app.getVersion(), cliVersion: () => state.resolution?.version ?? null,
@@ -2414,8 +2419,9 @@ if (!app.requestSingleInstanceLock()) {
         syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
       },
     })
-    migrationService.recoveryIssues = recoveryIssues
-    for (const issue of recoveryIssues) void writeAppLog(issue)
+    migrationService.recoveryIssues = recovery.issues
+    migrationService.recoveryJournals = recovery.journals
+    for (const issue of recovery.issues) void writeAppLog(issue)
     startUsageCollection()
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))

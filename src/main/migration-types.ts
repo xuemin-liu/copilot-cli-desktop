@@ -48,4 +48,9 @@ export interface MigrationPreview {
 }
 export interface MigrationResult { imported: number; skipped: number; backup: string | null; warnings: string[] }
 export interface MigrationProgress { phase: string; completed: number; total: number }
-export interface MigrationStatus { busy: boolean; exclusive: boolean; progress: MigrationProgress; recoveryIssues: string[] }
+export interface MigrationRecoveryJournal { id: string; path: string; sha256: string }
+export interface MigrationOutcome { status: 'completed' | 'failed' | 'cancelled'; message: string; result: MigrationResult | null }
+export interface MigrationStatus {
+  busy: boolean; exclusive: boolean; progress: MigrationProgress; recoveryIssues: string[]
+  recoveryJournals: MigrationRecoveryJournal[]; lastImport: MigrationOutcome | null
+}
