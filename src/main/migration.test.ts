@@ -34,6 +34,54 @@ function migrationService(roots: MigrationRoots, overrides: Partial<ConstructorP
   return new MigrationService({ roots, appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
     exportUsage: async (path) => put(path, 'snapshot'), restoreUsage: async () => {}, progress: () => {}, reloaded: async () => {}, ...overrides })
 }
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+test('initial and overlapping backup status requests wait for the latest scan to publish', async (t) => {
+  const { target } = await fixture(t)
+  const first = deferred<Awaited<ReturnType<typeof listMigrationBackups>>>()
+  const second = deferred<Awaited<ReturnType<typeof listMigrationBackups>>>()
+  let scans = 0, initialFinished = false
+  const service = migrationService(target, { listBackups: () => ++scans === 1 ? first.promise : second.promise })
+  const initial = service.ensureBackups().then(() => { initialFinished = true })
+  const refreshed = service.refreshBackups()
+  first.resolve({ backups: [], warnings: ['stale warning'] })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(initialFinished, false)
+  const backup = { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', path: 'snapshot', status: 'usage-snapshot' as const, bytes: 1, token: 'fresh' }
+  second.resolve({ backups: [backup], warnings: ['current warning'] })
+  await initial
+  assert.deepEqual((await refreshed).backups, [backup])
+  assert.deepEqual(service.status().warnings, ['current warning'])
+  await service.ensureBackups()
+  assert.equal(scans, 2, 'cached status must not rescan')
+})
+
+test('backup bookkeeping does not delay the usage merge or turn cancellation into a failed snapshot', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  const scanGate = deferred(), mergeStarted = deferred()
+  let snapshotWritten = false
+  const service = migrationService(target, {
+    exportUsage: async (path) => { await put(path, 'snapshot'); snapshotWritten = true },
+    listBackups: async (path) => { if (snapshotWritten) await scanGate.promise; return listMigrationBackups(path) },
+    restoreUsage: async () => { mergeStarted.resolve() },
+  })
+  await service.open(zip)
+  const work = service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+  try {
+    await Promise.race([mergeStarted.promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('backup scan blocked usage merge')), 3000); timer.unref() })])
+    service.cancel()
+  } finally { scanGate.resolve() }
+  const result = await work
+  assert.equal(await readFile(join(result.backup!, 'usage-before.sqlite'), 'utf8'), 'snapshot')
+  assert.ok(result.warnings.includes('Usage records merged successfully.'))
+  assert.ok(!result.warnings.some((warning) => warning.includes('merge did not complete')))
+})
 
 test('usage-inclusive and usage-only imports publish final backup sizes and tokens before returning', async (t) => {
   const { root, target } = await fixture(t)

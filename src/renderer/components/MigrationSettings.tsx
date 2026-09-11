@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import { DEFAULT_MIGRATION_CATEGORIES, MIGRATION_CATEGORIES, type MigrationBackup, type MigrationCategory, type MigrationInventory, type MigrationOutcome, type MigrationPreview, type MigrationProgress, type MigrationRecoveryJournal, type MigrationResult } from '../../main/migration-types.js'
 import type { CopilotDesktopSettingsBridge, DesktopSettingsSnapshot } from '../global.js'
@@ -41,12 +41,15 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
   const [progress, setProgress] = useState<MigrationProgress | null>(null)
   const [message, setMessage] = useState('')
   const [result, setResult] = useState<MigrationResult | null>(null)
+  const refreshBackupList = useRef<() => Promise<void>>(async () => {})
   useEffect(() => {
     let mounted = true
     let revision = 0
     let requestSequence = 0, appliedSequence = 0
     let operationBusy = false
-    const refresh = (): void => { const requestedRevision = revision, sequence = ++requestSequence; void bridge.migrationStatus().then((status) => {
+    const refresh = async (scanBackups = false): Promise<void> => {
+      const requestedRevision = revision, sequence = ++requestSequence
+      const status = await (scanBackups ? bridge.migrationBackups() : bridge.migrationStatus())
       if (mounted && sequence >= appliedSequence) {
         appliedSequence = sequence
         setRecoveryIssues(status.recoveryIssues); setRecoveryJournals(status.recoveryJournals); setLastImport(status.lastImport)
@@ -55,15 +58,17 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
           operationBusy = status.busy; setServerBusy(status.busy); setProgress(status.progress)
         }
       }
-    }).catch((error) => { if (mounted) setMessage(String(error)) }) }
+    }
+    refreshBackupList.current = () => refresh(true)
+    const refreshStatus = (): void => { void refresh().catch((error) => { if (mounted) setMessage(String(error)) }) }
     const unsubscribe = bridge.onMigrationProgress((value) => {
       revision++
       operationBusy = value.phase !== 'Idle'
       setProgress(value); setServerBusy(operationBusy)
-      if (value.phase === 'Idle') refresh()
+      if (value.phase === 'Idle') refreshStatus()
     })
-    refresh()
-    const timer = setInterval(() => { if (operationBusy) refresh() }, 2000)
+    refreshStatus()
+    const timer = setInterval(() => { if (operationBusy) refreshStatus() }, 2000)
     return () => { mounted = false; clearInterval(timer); unsubscribe() }
   }, [bridge])
   const key = JSON.stringify({ categories, projectIds })
@@ -97,7 +102,7 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
       <p>These local backups can contain unencrypted credentials and private files. Keep them until you no longer need recovery. Deleting a backup permanently removes that copy, including any snapshot of your previous usage records, and leaves current settings unchanged.</p>
       <button disabled={backupListBusy} onClick={() => {
         setBackupListBusy(true); setBackupListMessage('')
-        void bridge.migrationBackups().then((status) => setBackups(status.backups)).catch((error) => setBackupListMessage(String(error))).finally(() => setBackupListBusy(false))
+        void refreshBackupList.current().catch((error) => setBackupListMessage(String(error))).finally(() => setBackupListBusy(false))
       }}>Refresh backup list</button>
       {backupListMessage && <p role="status">{backupListMessage}</p>}
       {backups.map((backup) => <div key={backup.id}>

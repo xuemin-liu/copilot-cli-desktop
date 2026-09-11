@@ -103,6 +103,9 @@ Pre-merge usage snapshots have their own label, separate from incomplete backup
 preparation: deleting one removes that copy of the previous usage records.
 The backup list is loaded when Settings requests it, and can be refreshed while
 an export or import runs. Sizes and deletion tokens refresh after usage snapshots finish.
+Refreshing also updates inspection warnings. Older status replies cannot replace
+a newer list, and snapshot bookkeeping does not delay the usage merge. The import
+result retains the backup folder location if usage is cancelled or fails.
 The acknowledgement box applies to the complete displayed journal set and resets
 when a journal is added, removed, or changed, even if two journals have identical contents.
 

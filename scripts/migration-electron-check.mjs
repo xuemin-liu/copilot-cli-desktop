@@ -26,6 +26,7 @@ if (!process.versions.electron) {
 async function runElectronCheck() {
   const { app, BrowserWindow, dialog, shell, ipcMain } = await import('electron')
   let statusRequests = 0
+  let holdNextStatus = false, statusCaptured, releaseHeldStatus
   let releaseInitialStatus
   const initialStatusGate = new Promise((ok) => { releaseInitialStatus = ok })
   const handle = ipcMain.handle.bind(ipcMain)
@@ -33,6 +34,10 @@ async function runElectronCheck() {
     const initial = ++statusRequests === 1
     const value = await listener(...args)
     if (initial) await initialStatusGate
+    if (holdNextStatus) {
+      holdNextStatus = false
+      await new Promise((ok) => { releaseHeldStatus = ok; statusCaptured() })
+    }
     return value
   } : listener)
   dialog.showErrorBox = (title, content) => { console.error(title, content); app.exit(1) }
@@ -105,6 +110,14 @@ async function runElectronCheck() {
     await evaluate(`(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === 'Delete backup…' && b.parentElement.textContent.includes(${JSON.stringify(corruptJournal)})); if (!button) throw Error('Dismissed backup not listed'); button.closest('details').open = true; button.click(); })()`)
     await click('Permanently delete this backup')
     await waitFor(async () => { try { await readFile(join(corruptJournal, 'journal.json')); return false } catch { return !(await (await import('node:fs/promises')).readdir(join(root, 'desktop', 'migration-backups'))).includes('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb') } })
+    // An idle refresh must publish new diagnostics and remove resolved ones.
+    const foreignFile = join(damagedJournal, 'foreign-refresh-fixture.txt')
+    await writeFile(foreignFile, 'preserve')
+    await click('Refresh backup list')
+    await waitFor(() => evaluate(`document.querySelector('.settings-warning[role="status"]')?.textContent.includes('foreign-refresh-fixture.txt') && [...document.querySelectorAll('button')].some(b => b.textContent === 'Refresh backup list' && !b.disabled)`))
+    await rm(foreignFile)
+    await click('Refresh backup list')
+    await waitFor(() => evaluate(`!document.body.textContent.includes('foreign-refresh-fixture.txt') && [...document.querySelectorAll('button')].some(b => b.textContent === 'Refresh backup list' && !b.disabled)`))
     const baselineRequests = statusRequests
     for (let i = 1; i <= 5000; i++) settings.webContents.send('desktop-settings:migration-progress', { phase: 'Progress fixture', completed: i, total: 5000 })
     await waitFor(() => evaluate(`document.body.textContent.includes('Progress fixture 5000/5000')`))
@@ -142,8 +155,18 @@ async function runElectronCheck() {
     await started
     assert.equal((await evaluate('window.copilotDesktopSettings.migrationStatus()')).busy, true)
     const beforeRefresh = await evaluate('window.copilotDesktopSettings.migrationStatus()')
+    const captured = new Promise((ok) => { statusCaptured = ok })
+    holdNextStatus = true
+    await captured // Hold an older poll reply until after the manual list refresh.
+    const addedBackup = join(root, 'desktop', 'migration-backups', 'dddddddd-dddd-dddd-dddd-dddddddddddd')
+    await mkdir(addedBackup)
+    await writeFile(join(addedBackup, 'usage-before.sqlite'), 'concurrent refresh fixture')
     await click('Refresh backup list')
-    await waitFor(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent === 'Refresh backup list' && !b.disabled)`))
+    await waitFor(() => evaluate(`document.body.textContent.includes(${JSON.stringify(addedBackup)}) && [...document.querySelectorAll('button')].some(b => b.textContent === 'Refresh backup list' && !b.disabled)`))
+    assert.equal(await evaluate(`[...document.querySelectorAll('details')].find(d => d.textContent.includes('Refresh backup list')).querySelector('[role="status"]')?.textContent ?? ''`), '')
+    releaseHeldStatus()
+    await evaluate(`new Promise(ok => requestAnimationFrame(() => requestAnimationFrame(ok)))`)
+    assert.equal(await evaluate(`document.body.textContent.includes(${JSON.stringify(addedBackup)})`), true, 'an older poll reply must not overwrite the refreshed backup list')
     assert.deepEqual((await evaluate('window.copilotDesktopSettings.migrationStatus()')).progress, beforeRefresh.progress)
     assert.equal((await evaluate('window.copilotDesktopSettings.migrationStatus()')).busy, true)
     const closed = new Promise((ok) => settings.once('closed', ok))

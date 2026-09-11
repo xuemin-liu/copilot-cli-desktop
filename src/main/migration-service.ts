@@ -20,6 +20,7 @@ interface MigrationDependencies {
   restoreUsage: (path: string) => Promise<void>
   progress: (value: MigrationProgress) => void
   reloaded: () => Promise<void>
+  listBackups?: typeof listMigrationBackups
 }
 export class MigrationService {
   busy = false
@@ -28,9 +29,8 @@ export class MigrationService {
   recoveryJournals: MigrationRecoveryJournal[] = []
   private lastImport: MigrationOutcome | null = null
   private backups: MigrationStatus['backups'] = []
-  private backupsLoaded = false
   private backupListSequence = 0
-  private initialBackupList: Promise<void> | null = null
+  private latestBackupList: Promise<void> | null = null
   private warnings: string[] = []
   private backupWarnings: string[] = []
   private pendingSnapshots = new Set<string>()
@@ -44,15 +44,24 @@ export class MigrationService {
   }
   cancel(): void { this.abort?.abort() }
   status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings] } }
-  async loadBackups(): Promise<void> {
+  loadBackups(): Promise<void> {
     const sequence = ++this.backupListSequence
-    const listed = await listMigrationBackups(this.deps.roots.desktop)
-    if (sequence === this.backupListSequence) {
-      this.backups = listed.backups; this.backupWarnings = listed.warnings; this.backupsLoaded = true
-    }
+    this.latestBackupList = (this.deps.listBackups ?? listMigrationBackups)(this.deps.roots.desktop).then((listed) => {
+      if (sequence === this.backupListSequence) {
+        this.backups = listed.backups; this.backupWarnings = listed.warnings
+      }
+    })
+    return this.ensureBackups()
   }
   async ensureBackups(): Promise<void> {
-    if (!this.backupsLoaded) await (this.initialBackupList ??= this.loadBackups().finally(() => { this.initialBackupList = null }))
+    if (!this.latestBackupList) return this.loadBackups()
+    // A newer scan can supersede the one this caller originally awaited.
+    // Do not return cached/empty status until the newest scan has published.
+    for (;;) {
+      const pending: Promise<void> = this.latestBackupList
+      await pending
+      if (pending === this.latestBackupList) return
+    }
   }
   async refreshBackups(): Promise<MigrationStatus> { await this.loadBackups(); return this.status() }
   async deleteBackup(id: string, token: string): Promise<MigrationStatus> {
@@ -70,9 +79,9 @@ export class MigrationService {
     finally {
       this.pendingSnapshots.delete(key)
       if (key.startsWith(join(this.deps.roots.desktop, 'migration-backups').replaceAll('\\', '/') + '/')) {
-        await this.loadBackups()
-        // A snapshot can finish after cancellation; publish the current phase unchanged.
-        this.deps.progress(this.currentProgress)
+        // Bookkeeping must not extend the cancellable snapshot or replace its error.
+        // A late snapshot still updates the list after cancellation.
+        void Promise.resolve().then(() => this.loadBackups()).then(() => this.deps.progress(this.currentProgress)).catch(() => {})
       }
     }
   }
@@ -238,9 +247,9 @@ export class MigrationService {
             signal.throwIfAborted()
             const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
             await mkdir(backupRoot, { recursive: true, mode: 0o700 })
+            result.backup = backupRoot
             await cancellable(this.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
             signal.throwIfAborted()
-            result.backup = backupRoot
             await this.withScratch(async (directory) => {
               const path = join(directory, 'usage.sqlite')
               await writeFileAtomic(path, plan.usage!)
