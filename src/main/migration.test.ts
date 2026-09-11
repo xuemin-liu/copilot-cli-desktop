@@ -743,6 +743,36 @@ test('read-only operations remain nonexclusive and cancellation releases stalled
   assert.ok(!(await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')))
 })
 
+test('asset membership changes during collection omit the whole group and preserve destination files', async (t) => {
+  for (const change of ['add', 'remove'] as const) {
+    const { source, target } = await fixture(t)
+    const group = join(source.copilot, 'skills/deploy')
+    await put(join(group, 'SKILL.md'), 'skill')
+    await put(join(group, 'scripts/run.cmd'), 'run')
+    await put(join(source.copilot, 'skills/stable/SKILL.md'), 'stable')
+    const destination = join(target.copilot, 'skills/deploy/scripts/run.cmd')
+    await put(destination, 'keep this complete copy')
+    let changed = false
+    const info = manifest()
+    const files = await collectMigration(source, info, new Set(['skills']), undefined, async (path) => {
+      const entries = await readdir(path, { withFileTypes: true })
+      if (!changed && path === join(group, 'scripts')) {
+        changed = true
+        if (change === 'add') await put(join(group, 'new-file.txt'), 'added during capture')
+        else await rm(join(group, 'SKILL.md'))
+      }
+      return entries
+    })
+    assert.ok(changed)
+    assert.ok(!files.some((file) => file.path.startsWith('copilot/skills/deploy/')))
+    assert.ok(files.some((file) => file.path === 'copilot/skills/stable/SKILL.md'))
+    assert.ok(info.warnings.some((warning) => warning.includes('Skipped entire changing asset group')))
+    const plan = await planMigrationImport({ manifest: info, files }, target, {}, { ...choices, categories: ['skills'], replace: ['copilot/skills/deploy'] })
+    await applyMigrationImport(plan, target)
+    assert.equal(await readFile(destination, 'utf8'), 'keep this complete copy')
+  }
+})
+
 test('export captures saved files without stopping sessions and later edits do not change the archive', async (t) => {
   const { root, source } = await fixture(t)
   const settings = join(source.copilot, 'settings.json'), skill = join(source.copilot, 'skills/example/SKILL.md')
@@ -761,10 +791,13 @@ test('export captures saved files without stopping sessions and later edits do n
     await Promise.race([started.promise, work.then(() => { throw new Error('snapshot did not start') })])
     assert.equal(service.status().exclusive, false)
     await put(settings, '{"model":"edited-later"}'); await put(skill, 'edited skill')
+    await put(join(source.copilot, 'skills/example/added-later.md'), 'belongs to the next snapshot')
   } finally { release.resolve(); await work }
   const snapshot = await readMigrationArchive(zip)
   assert.equal(jsonObject(snapshot.files.find((file) => file.path === 'copilot/settings.json')!.data).model, 'saved-at-export')
   assert.equal(snapshot.files.find((file) => file.path === 'copilot/skills/example/SKILL.md')!.data.toString(), 'captured skill')
+  assert.ok(!snapshot.files.some((file) => file.path.endsWith('added-later.md')))
+  assert.ok(!snapshot.manifest.warnings.some((warning) => warning.includes('changing asset group')))
   assert.equal(jsonObject(await readFile(settings)).model, 'edited-later')
   await service.open(zip)
   const preview = await service.preview({ ...choices, categories: ['settings'] })

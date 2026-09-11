@@ -16,9 +16,12 @@ if (!process.versions.electron) {
     const electron = (await import('electron')).default
     const env = { ...process.env, MIGRATION_CHECK_ROOT: root, MIGRATION_CHECK_OUTPUT: output, COPILOT_HOME: join(root, 'copilot'), COPILOT_DESKTOP_CLI_HOME: join(root, 'controller'), COPILOT_OFFLINE: 'true' }
     delete env.ELECTRON_RUN_AS_NODE
-    const child = spawn(electron, [fileURLToPath(import.meta.url), '--disable-gpu'], { env, stdio: 'inherit', windowsHide: true })
+    const child = spawn(electron, [fileURLToPath(import.meta.url), '--disable-gpu'], { env, stdio: ['ignore', 'inherit', 'pipe'], windowsHide: true })
+    let stderr = ''
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); process.stderr.write(chunk) })
     const code = await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', ok) })
     assert.equal(code, 0)
+    assert.ok(!stderr.includes("Error occurred in handler for 'desktop-settings:migration-export'"), 'closing Settings must not log an export handler error')
     assert.equal(JSON.parse(await readFile(join(output, 'result.json'), 'utf8')).passed, true)
   } finally { await rm(root, { recursive: true, force: true }) }
 } else { void runElectronCheck() }

@@ -100,7 +100,9 @@ conversations. Version 1 writes an ordinary ZIP; password protection is later.
 4. Export without stopping sessions or the background controller. Wait for queued
    Desktop settings saves, then capture each selected saved file into memory once.
    Keep each file's read-consistency check, but do not rescan the whole source or
-   reject an export because a captured file changes afterward. Use private staging
+   reject an export because a captured file changes afterward. Recheck member names
+   at each skill/agent group's capture boundary and omit the whole group with a
+   warning if membership changed while it was collected. Use private staging
    for the usage database snapshot and other temporary output.
    For history, require CLI writers to be stopped and take a consistent SQLite
    backup of `session-store.db`; never copy an active database without its

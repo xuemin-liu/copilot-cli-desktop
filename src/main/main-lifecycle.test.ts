@@ -15,7 +15,7 @@ const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   configureMigration(busy: boolean, exclusive: boolean): void
-  configureMigrationExport(service: MigrationService, path: string): void
+  configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   blockSpawnPlan(work: Promise<void>): void
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
@@ -38,7 +38,7 @@ interface Harness {
   maintenanceCalls: string[]
   maintain(operation: 'install' | 'update'): Promise<void>
   maintenanceStatus(): string
-  requestSettings(name: string, ...args: unknown[]): Promise<void>
+  requestSettings(name: string, ...args: unknown[]): Promise<unknown>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
@@ -108,11 +108,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { spawns } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         const diagnosticWrites = [];
+        let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
-          configureMigrationExport(service, path) { migrationService = service; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); shell.showItemInFolder = () => {}; },
+          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); shell.showItemInFolder = () => {}; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
@@ -145,7 +146,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           maintain: maintainCopilotCli,
           maintenanceStatus: () => copilotMaintenance.status,
-          requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }, ...args),
+          requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() }, sender: { isDestroyed: () => settingsSenderDestroyed } }, ...args),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
@@ -204,6 +205,22 @@ test('export IPC snapshots settings while a Desktop session stays open and accep
   await harness.request('desktop:write-tab', state.activeTabId, 'still running after export')
   assert.ok(harness.spawns[0]!.written.includes('still running after export'))
   assert.equal(harness.spawns[0]!.stopped, false)
+}))
+
+test('export IPC silences only expected cancellation from a destroyed Settings sender', async () => fixture(async (harness, directory) => {
+  for (const [destroyed, aborted] of [[true, true], [false, true], [true, false]]) {
+    const error = aborted ? new DOMException('Cancelled', 'AbortError') : new Error('export failed')
+    const service = new MigrationService({
+      roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {},
+      flushSettings: async () => { throw error }, plugins: async () => [], exportUsage: async () => {},
+      restoreUsage: async () => {}, reloaded: async () => {}, progress: () => {},
+    })
+    harness.configureMigrationExport(service, join(directory, 'snapshot.zip'), destroyed)
+    const request = harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
+    if (destroyed && aborted) assert.equal(await request, false)
+    else await assert.rejects(request, (actual) => actual === error)
+  }
 }))
 
 test('repeated quit requests wait for the usage backup even with no running sessions', async () => {

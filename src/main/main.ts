@@ -2337,7 +2337,11 @@ ipcMain.handle('desktop-settings:migration-export', async (event, selection: Mig
   assertTrustedSettingsSender(event, true)
   const result = await dialog.showSaveDialog({ title: 'Export Copilot migration archive', defaultPath: `copilot-migration-${new Date().toISOString().slice(0, 10)}.zip`, filters: [{ name: 'Migration archive', extensions: ['zip'] }] })
   if (result.canceled || !result.filePath) return false
-  await getMigrationService().export(result.filePath, selection)
+  try { await getMigrationService().export(result.filePath, selection) }
+  catch (error) {
+    if (error instanceof Error && error.name === 'AbortError' && event.sender.isDestroyed()) return false
+    throw error
+  }
   shell.showItemInFolder(result.filePath)
   return true
 })

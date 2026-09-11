@@ -14,6 +14,10 @@ Export works while Desktop, tray sessions, and the background controller keep
 running. It snapshots saved settings and files when export runs; later edits do
 not change the captured archive contents. Unsaved editor changes are not included.
 Each file is checked while being read to avoid capturing an incomplete write.
+Skill and agent groups also have their member names checked when that group's
+capture finishes. A group that changes during capture is omitted with an archive
+warning, so importing it cannot delete destination files based on a partial group.
+Files added after a group's capture belong to the next export.
 Optional usage data uses the usage service's database snapshot.
 
 Before **importing**, close Desktop and external Copilot sessions. Closing a tray

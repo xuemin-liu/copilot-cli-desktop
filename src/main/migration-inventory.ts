@@ -138,6 +138,7 @@ export function migrationAssetGroup(path: string): string | null {
   return match && path.startsWith(`${match[1]}/${match[2]}/`) ? `${match[1]}/${match[2]}` : null
 }
 export function isUnavailableMigrationPath(error: unknown): boolean { return ['ENOENT', 'ENOTDIR', 'EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '') }
+class ChangedAssetMembership extends Error {}
 export async function collectMigration(roots: MigrationRoots, manifest: MigrationManifest, categories: ReadonlySet<MigrationCategory>, signal?: AbortSignal,
   readDirectory = (path: string) => readdir(path, { withFileTypes: true })): Promise<MigrationFile[]> {
   const files: MigrationFile[] = []
@@ -152,6 +153,11 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     const start = files.length, bytes = total
     try { await operation() }
     catch (error) {
+      if (error instanceof ChangedAssetMembership) {
+        files.splice(start); total = bytes
+        manifest.warnings.push(`Skipped entire changing asset group: ${path}. Its file list changed while being captured; retry this group in a later export.`)
+        return
+      }
       if (!isUnavailableMigrationPath(error)) throw error
       // Never publish a partial asset group: replacement deletes absent files.
       files.splice(start); total = bytes
@@ -163,17 +169,31 @@ export async function collectMigration(roots: MigrationRoots, manifest: Migratio
     try { await lstat(source) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
     await walk(source, archive, category)
   })
-  async function walk(source: string, archive: string, category: MigrationCategory): Promise<void> {
+  const memberNames = (entries: Awaited<ReturnType<typeof readDirectory>>): string => JSON.stringify(entries.map((entry) => [entry.name, entry.isDirectory(), entry.isFile(), entry.isSymbolicLink()]).sort((a, b) => String(a[0]) < String(b[0]) ? -1 : String(a[0]) > String(b[0]) ? 1 : 0))
+  async function captureAsset(source: string, archive: string, category: MigrationCategory): Promise<void> {
+    const membership = new Map<string, string>()
+    await walk(source, archive, category, membership)
+    // Validate this group's capture boundary, not subsequent changes while the
+    // rest of the export runs. Only names/types are reread, never file contents.
+    for (const [directory, capturedNames] of membership) {
+      signal?.throwIfAborted()
+      await assertNoLinks(directory)
+      if (memberNames(await readDirectory(directory)) !== capturedNames) throw new ChangedAssetMembership(directory)
+    }
+  }
+  async function walk(source: string, archive: string, category: MigrationCategory, membership?: Map<string, string>): Promise<void> {
     signal?.throwIfAborted()
     if (++visited > 20_000 || archive.split('/').length > 40) throw new Error('Migration directory scan limit exceeded')
     await assertNoLinks(source)
     let info
     info = await lstat(source)
     if (info.isDirectory()) {
-      for (const child of (await readDirectory(source)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      const children = await readDirectory(source)
+      membership?.set(source, memberNames(children))
+      for (const child of children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
         const childSource = join(source, child.name), childArchive = `${archive}/${child.name}`
-        if (migrationAssetGroup(`${childArchive}/`) === childArchive) await tolerate(childSource, () => walk(childSource, childArchive, category))
-        else await walk(childSource, childArchive, category)
+        if (migrationAssetGroup(`${childArchive}/`) === childArchive) await tolerate(childSource, () => captureAsset(childSource, childArchive, category))
+        else await walk(childSource, childArchive, category, membership)
       }
     } else {
       let data = await optionalRead(source)
