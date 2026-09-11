@@ -15,6 +15,7 @@ interface MigrationDependencies {
   cliVersion: () => string | null
   assertIdle: () => Promise<void>
   checkIdle?: () => void
+  flushSettings?: () => Promise<void>
   plugins: (signal: AbortSignal) => Promise<unknown>
   exportUsage: (path: string) => Promise<void>
   restoreUsage: (path: string) => Promise<void>
@@ -202,13 +203,12 @@ export class MigrationService {
   async export(path: string, selection: MigrationSelection): Promise<void> {
     validateSelection(selection)
     await this.run('Exporting archive', async (signal) => {
-      await this.acquire(signal)
+      if (this.deps.flushSettings) await cancellable(this.deps.flushSettings(), signal)
+      signal.throwIfAborted()
       const manifest = await this.manifest(), projects = manifest.projects
       manifest.projects = projects.filter((p) => selection.projectIds.includes(p.id))
+      // Capture each selected file once. Later edits cannot alter these buffers.
       const files = await collectMigration(this.deps.roots, manifest, new Set(selection.categories), signal)
-      // A second inventory catches writes and added/removed assets during the snapshot.
-      const check = await collectMigration(this.deps.roots, manifest, new Set(selection.categories), signal)
-      if (JSON.stringify(files.map(({ path: name, sha256 }) => [name, sha256])) !== JSON.stringify(check.map(({ path: name, sha256 }) => [name, sha256]))) throw new Error('Source files changed during export. Review files and retry.')
       manifest.projects = projects
       if (selection.categories.includes('plugins')) files.push(await this.pluginInventory(manifest, signal))
       if (selection.categories.includes('usage')) await cancellable(this.withScratch(async (directory) => {

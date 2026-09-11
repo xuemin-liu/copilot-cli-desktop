@@ -131,7 +131,7 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
     </details>
     {statusWarnings.length > 0 && <ul role="status" className="settings-warning">{statusWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
     <p>Move your Copilot setup to another Windows computer using one ZIP file. Choose what to include, then review the destination changes before importing.</p>
-    <p className="settings-disclaimer">Close all Desktop and external Copilot sessions before exporting or importing. Stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts. Closing Settings cancels migration; reopen Settings to see the import outcome, including rollback or skipped usage.</p>
+    <p className="settings-disclaimer">Export saves a snapshot of your saved settings and files while sessions keep running. Before importing, close Desktop and external Copilot sessions and stop the background controller with <code>copilot-desktop stop</code>. Sign in and reconnect credentials on the new computer. Archives may contain private instructions and scripts. Closing Settings cancels migration; reopen Settings to see the import outcome, including rollback or skipped usage.</p>
     <fieldset disabled={busy} className="settings-card">
       <legend>What to transfer</legend>
       <div className="settings-form-grid">

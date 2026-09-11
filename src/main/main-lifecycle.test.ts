@@ -8,11 +8,14 @@ import { build } from 'esbuild'
 import { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, type DesktopConfig } from './desktop-config.js'
 import { EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from './copilot-command.js'
 import type { DesktopState, WorkspaceProfile } from './types.js'
+import { MigrationService } from './migration-service.js'
+import { readMigrationArchive } from './migration-archive.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   configureMigration(busy: boolean, exclusive: boolean): void
+  configureMigrationExport(service: MigrationService, path: string): void
   blockSpawnPlan(work: Promise<void>): void
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
@@ -35,7 +38,7 @@ interface Harness {
   maintenanceCalls: string[]
   maintain(operation: 'install' | 'update'): Promise<void>
   maintenanceStatus(): string
-  requestSettings(name: string): Promise<void>
+  requestSettings(name: string, ...args: unknown[]): Promise<void>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
@@ -109,6 +112,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
+          configureMigrationExport(service, path) { migrationService = service; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); shell.showItemInFolder = () => {}; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
@@ -141,7 +145,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           maintain: maintainCopilotCli,
           maintenanceStatus: () => copilotMaintenance.status,
-          requestSettings: (name) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }),
+          requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }, ...args),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
@@ -164,7 +168,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
   }
 }
 
-test('migration discovery preserves pending sessions, typing and resize while export admission counts pending creation', async () => fixture(async (harness, directory) => {
+test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   let release!: () => void
@@ -178,6 +182,27 @@ test('migration discovery preserves pending sessions, typing and resize while ex
   await harness.request('desktop:resize-tab', state.activeTabId, 91, 37)
   assert.ok(harness.spawns[0]!.written.includes('typing during inventory'))
   assert.deepEqual(harness.spawns[0]!.resized.at(-1), [91, 37])
+  assert.equal(harness.spawns[0]!.stopped, false)
+}))
+
+test('export IPC snapshots settings while a Desktop session stays open and accepts input', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  const state = await harness.createMain()
+  await writeFile(join(directory, 'settings.json'), '{"model":"live-session-model"}')
+  const zip = join(directory, 'snapshot.zip')
+  const service = new MigrationService({
+    roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+    appVersion: 'test', cliVersion: () => '1.0.82', assertIdle: async () => harness.checkMigrationIdle(),
+    plugins: async () => [], exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+    progress: () => { assert.equal(service.exclusive, false) },
+  })
+  harness.configureMigrationExport(service, zip)
+  assert.throws(() => harness.checkMigrationIdle(), /Close every Desktop session/)
+  await harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
+  assert.equal(JSON.parse((await readMigrationArchive(zip)).files.find((file) => file.path === 'copilot/settings.json')!.data.toString()).model, 'live-session-model')
+  await harness.request('desktop:write-tab', state.activeTabId, 'still running after export')
+  assert.ok(harness.spawns[0]!.written.includes('still running after export'))
   assert.equal(harness.spawns[0]!.stopped, false)
 }))
 

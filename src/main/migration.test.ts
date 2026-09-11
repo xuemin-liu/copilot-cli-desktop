@@ -733,7 +733,7 @@ test('read-only operations remain nonexclusive and cancellation releases stalled
   ready = new Promise<void>((resolve) => { started = resolve })
   const exporting = service.export(join(root, 'cancelled.zip'), { categories: ['usage'], projectIds: [] })
   await ready
-  assert.equal(service.status().exclusive, true)
+  assert.equal(service.status().exclusive, false)
   service.cancel(); await assert.rejects(exporting, /abort/i)
   assert.equal(service.status().busy, false)
   await assert.rejects(readFile(join(root, 'cancelled.zip')), /ENOENT/)
@@ -741,6 +741,34 @@ test('read-only operations remain nonexclusive and cancellation releases stalled
   finish()
   for (let i = 0; i < 100 && (await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')); i++) await new Promise((resolve) => setTimeout(resolve, 10))
   assert.ok(!(await readdir(source.desktop)).some((name) => name.startsWith('migration-staging-')))
+})
+
+test('export captures saved files without stopping sessions and later edits do not change the archive', async (t) => {
+  const { root, source } = await fixture(t)
+  const settings = join(source.copilot, 'settings.json'), skill = join(source.copilot, 'skills/example/SKILL.md')
+  await put(settings, '{"model":"before-save"}'); await put(skill, 'captured skill')
+  const started = deferred(), release = deferred()
+  const service = migrationService(source, {
+    assertIdle: async () => { throw new Error('sessions are running') },
+    checkIdle: () => { throw new Error('sessions are running') },
+    flushSettings: async () => { await put(settings, '{"model":"saved-at-export"}') },
+    exportUsage: async (path) => { started.resolve(); await release.promise; await put(path, 'usage snapshot') },
+  })
+  const zip = join(root, 'live-export.zip')
+  const work = service.export(zip, { categories: ['settings', 'skills', 'usage'], projectIds: [] })
+  void work.catch(() => {})
+  try {
+    await Promise.race([started.promise, work.then(() => { throw new Error('snapshot did not start') })])
+    assert.equal(service.status().exclusive, false)
+    await put(settings, '{"model":"edited-later"}'); await put(skill, 'edited skill')
+  } finally { release.resolve(); await work }
+  const snapshot = await readMigrationArchive(zip)
+  assert.equal(jsonObject(snapshot.files.find((file) => file.path === 'copilot/settings.json')!.data).model, 'saved-at-export')
+  assert.equal(snapshot.files.find((file) => file.path === 'copilot/skills/example/SKILL.md')!.data.toString(), 'captured skill')
+  assert.equal(jsonObject(await readFile(settings)).model, 'edited-later')
+  await service.open(zip)
+  const preview = await service.preview({ ...choices, categories: ['settings'] })
+  await assert.rejects(service.apply(preview.id), /sessions are running/)
 })
 
 test('round trip uses independent CLI and agent roots, strips structured credentials and preserves binary skill assets', async (t) => {

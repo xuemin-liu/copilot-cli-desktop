@@ -2393,7 +2393,7 @@ ipcMain.handle('desktop-settings:migration-delete-backup', (event, id: unknown, 
 })
 
 function checkMigrationIdle(): void {
-  if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before exporting or importing. Tray sessions also count.')
+  if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before importing or recovering migration data. Tray sessions also count.')
   if (installInProgress || copilotMaintenance.status === 'running' || copilotResources.status === 'loading') throw new Error('Wait for updates and resource operations to finish')
 }
 
@@ -2415,6 +2415,7 @@ if (!app.requestSingleInstanceLock()) {
         await assertMigrationWritersStopped()
       },
       checkIdle: checkMigrationIdle,
+      flushSettings: async () => { await configWriteQueue },
       plugins: async (signal) => {
         const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], { env: resourceCopilotEnvironment(), signal })
         return JSON.parse(result.stdout) as unknown

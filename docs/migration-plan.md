@@ -97,8 +97,11 @@ conversations. Version 1 writes an ordinary ZIP; password protection is later.
    tasks.
 3. Choose an output filename with the native save dialog, for example
    `copilot-migration-2026-09-11.zip`, matching the existing usage-export naming.
-4. Create a private staging directory. Snapshot selected files, detect concurrent
-   changes, and retry or fail affected categories rather than mixing versions.
+4. Export without stopping sessions or the background controller. Wait for queued
+   Desktop settings saves, then capture each selected saved file into memory once.
+   Keep each file's read-consistency check, but do not rescan the whole source or
+   reject an export because a captured file changes afterward. Use private staging
+   for the usage database snapshot and other temporary output.
    For history, require CLI writers to be stopped and take a consistent SQLite
    backup of `session-store.db`; never copy an active database without its
    committed WAL contents. Reuse the `session-fork.ts` snapshot approach, which

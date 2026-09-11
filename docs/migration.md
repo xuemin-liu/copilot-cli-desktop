@@ -10,10 +10,16 @@ workspace you want to keep to its folder on this computer. Click **Review import
 changes**, choose any replacements, review again, then click **Import selected**.
 Existing destination files are kept by default. Identical imports are skipped.
 
-Close all Desktop and external Copilot sessions before export/import. Closing a
-tray window does not stop its sessions. Stop the background controller with
-`copilot-desktop stop`. The app checks for local writers and blocks new sessions
-during migration. Avoid starting an external CLI until the operation finishes.
+Export works while Desktop, tray sessions, and the background controller keep
+running. It snapshots saved settings and files when export runs; later edits do
+not change the captured archive contents. Unsaved editor changes are not included.
+Each file is checked while being read to avoid capturing an incomplete write.
+Optional usage data uses the usage service's database snapshot.
+
+Before **importing**, close Desktop and external Copilot sessions. Closing a tray
+window does not stop its sessions. Stop the background controller with
+`copilot-desktop stop`. Import checks for local writers and blocks new sessions
+while it changes files. Avoid starting an external CLI until import finishes.
 
 ## Included data
 
@@ -147,13 +153,13 @@ scripted native file dialogs and the real controller check; it saves screenshots
 `test-results/migration/`. It starts no model sessions or stops user processes.
 `pnpm pack:win` verifies the packaged runtime.
 
-The controller check authenticates this installation's background controller;
-if the probe fails but its saved PID is still alive, migration waits for the
+The import controller check authenticates this installation's background controller;
+if the probe fails but its saved PID is still alive, import waits for the
 controller to stop or respond. It does not scan machine-wide process names.
 The error identifies the saved state file when a PID may have been reused. After
 verifying that the controller and its Copilot child have stopped, move that stale
 file aside and retry; do not terminate an unrelated process based on its PID alone.
-Close external CLI sessions yourself.
-Export snapshot checks and import destination fingerprints detect concurrent file
-changes. Reviewing inventory or an import preview does not block terminal input.
+Close external CLI sessions before importing.
+Export checks each file while reading it; import destination fingerprints detect
+changes after preview. Inventory, preview, and export do not block terminal input.
 Both migration smoke and Settings integration checks run in Windows CI.
