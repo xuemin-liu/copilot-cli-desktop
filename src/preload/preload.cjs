@@ -4,7 +4,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   getState: () => ipcRenderer.invoke('desktop:get-state'),
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
-  createTab: (resumeMode) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null),
+  createTab: (resumeMode, profileId) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId),
   createTabWithAttachments: () => ipcRenderer.invoke('desktop:create-tab-with-attachments'),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),

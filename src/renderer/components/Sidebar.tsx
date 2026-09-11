@@ -45,7 +45,7 @@ export interface SidebarProps {
   onRenameTab: (tabId: string, currentTitle: string) => void
   onCloseTab: (tabId: string) => void
   onRestartTab: (tabId: string) => void
-  onCreateTab: () => void
+  onCreateTab: (profileId: string) => void
   onCreateTabWithAttachments: () => void
   onResumePicker: () => void
   onConnectRemote: () => void
@@ -95,22 +95,23 @@ export function Sidebar({
   const displayedAccess = displayedPreset
     ? describeSessionPermission(displayedPreset, displayedMode)
     : null
-  const startSession = (): void => {
-    if (activeProfileId === null) onSelectWorkspace()
-    else onCreateTab()
-  }
   const orderTabs = (items: DesktopSessionTab[]): DesktopSessionTab[] => orderMode === 'last-updated'
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
   const workspaceName = (tab: DesktopSessionTab): string | undefined => profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name
   const workspaceRow = (profile: WorkspaceProfile): JSX.Element => (
-    <button key={profile.id} type="button" className="workspace-row"
-      aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
-      aria-current={profile.id === activeProfileId ? 'true' : undefined}
-      onClick={() => onActivateProfile(profile.id)}>
-      <span className="folder-icon" aria-hidden="true">▱</span>
-      <span className="workspace-name">{profile.name}</span>
-    </button>
+    <div key={profile.id} className="workspace-heading">
+      <button type="button" className="workspace-row"
+        aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
+        aria-current={profile.id === activeProfileId ? 'true' : undefined}
+        onClick={() => onActivateProfile(profile.id)}>
+        <span className="folder-icon" aria-hidden="true">▱</span>
+        <span className="workspace-name">{profile.name}</span>
+      </button>
+      <button type="button" className="icon-button workspace-new-session"
+        aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}`}
+        disabled={!canOpenTab} onClick={() => onCreateTab(profile.id)}>+</button>
+    </div>
   )
   const compactTabs = groupMode === 'workspace'
     ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
@@ -168,11 +169,6 @@ export function Sidebar({
           {collapsed ? '›' : '‹'}
         </button>
       </div>
-
-      <button type="button" className="new-session-button" aria-label="New Session" title="New session (Ctrl+T)" disabled={!canOpenTab && activeProfileId !== null} onClick={startSession}>
-        <span aria-hidden="true">✦</span>
-        <span>New Session</span>
-      </button>
 
       <div className="sidebar-section-heading">
         <span>Workspaces</span>

@@ -125,24 +125,6 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.new-session-button {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  margin: 10px 2px 22px;
-  border-color: #4c505a;
-  border-radius: 9px;
-  background: #373a42;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.new-session-button:hover {
-  background: #444851;
-}
-
 .sidebar-section-heading {
   min-height: 30px;
   display: flex;
@@ -252,7 +234,6 @@ button:disabled {
 .sidebar-collapsed .brand-mark,
 .sidebar-collapsed .brand-name,
 .sidebar-collapsed .brand-product,
-.sidebar-collapsed .new-session-button span:last-child,
 .sidebar-collapsed .sidebar-section-heading > span,
 .sidebar-collapsed .workspace-name,
 .sidebar-collapsed .sidebar-access span:last-child,
@@ -262,11 +243,6 @@ button:disabled {
 
 .sidebar-collapsed .sidebar-collapse-button {
   margin-left: 0;
-}
-
-.sidebar-collapsed .new-session-button {
-  margin-inline: 0;
-  padding: 0;
 }
 
 .sidebar-collapsed .sidebar-section-heading,
@@ -306,6 +282,11 @@ button:disabled {
 .sidebar-session-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .sidebar-collapsed .sidebar-session-actions { flex-direction: column; align-items: center; }
 .workspace-row[aria-current="true"] { background: #2b2e35; }
+.workspace-heading { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; }
+.workspace-new-session { width: 28px; height: 28px; font-size: 18px; }
+.workspace-heading .workspace-row { min-width: 0; }
+.sidebar-collapsed .workspace-heading { grid-template-columns: minmax(0, 1fr) 20px; }
+.sidebar-collapsed .workspace-new-session { width: 20px; }
 .session-restart:hover:not(:disabled) { color: #4f88ff; }
 .session-close:hover { color: #f85149; }
 
