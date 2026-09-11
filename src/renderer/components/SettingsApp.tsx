@@ -10,6 +10,7 @@ import type { SessionLaunchConfig } from '../../main/session-launch.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
+import { MigrationSettings } from './MigrationSettings.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
   value,
@@ -582,6 +583,7 @@ export function SettingsApp(): JSX.Element | null {
 
       <ProviderSettings provider={snapshot.provider} onSaved={refresh} />
       <UsageSettings />
+      <MigrationSettings onSaved={refresh} />
 
       <CopilotResourcesSettings snapshot={snapshot} onSaved={refresh} onMessage={showMessage} />
 

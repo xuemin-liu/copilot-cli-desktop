@@ -24,6 +24,17 @@ jobs:
         run: corepack pnpm typecheck
       - name: Unit tests
         run: corepack pnpm test
+      - name: Migration round-trip smoke test
+        run: corepack pnpm migration:smoke
+      - name: Migration Settings integration check
+        run: corepack pnpm migration:check
+      - name: Upload migration check evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: migration-check
+          path: test-results/migration/
+          if-no-files-found: warn
       - name: Best-effort live copilot smoke test
         run: corepack pnpm smoke
       - name: Best-effort background CLI smoke test

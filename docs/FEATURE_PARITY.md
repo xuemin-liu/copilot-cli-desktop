@@ -4,6 +4,10 @@ This document audits Copilot CLI Desktop against the sibling DeepSeek Harness De
 
 ## Desktop shell and navigation
 
+Settings also provides Windows setup migration through a ZIP archive, import
+previews, workspace mapping, and recovery backups. See [migration.md](migration.md)
+for supported categories and the separate history compatibility gate.
+
 | DeepSeek Harness capability | Copilot CLI Desktop equivalent | Status |
 | --- | --- | --- |
 | Persistent AI-tool sidebar | Copilot-branded sidebar with workspace groups and sessions | Equivalent |

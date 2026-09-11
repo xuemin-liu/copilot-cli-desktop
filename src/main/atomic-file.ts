@@ -20,7 +20,7 @@ export function renameWithRetry(from: string, to: string): void {
 }
 
 /** Atomically replace a UTF-8 file, retrying transient Windows rename locks. */
-export async function writeFileAtomic(filename: string, contents: string, mode = 0o600): Promise<void> {
+export async function writeFileAtomic(filename: string, contents: string | Buffer, mode = 0o600): Promise<void> {
   await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`
   try {

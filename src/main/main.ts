@@ -115,6 +115,13 @@ import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } 
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
+import { MigrationService } from './migration-service.js'
+import { recoverMigrationReport } from './migration-import.js'
+import { assertMigrationWritersStopped } from './migration-writers.js'
+import type { MigrationChoices, MigrationSelection } from './migration-types.js'
+
+let migrationService: MigrationService | null = null
+let pendingSessionCreations = 0
 
 let usageService: UsageService | null = null
 let usageQuitCleanupComplete = false
@@ -234,7 +241,7 @@ function queueTabTransition<T>(tabId: string, fn: () => Promise<T>): Promise<T> 
  * be raced by one that slips into the per-tab queue just ahead of it (a
  * pointless spawn immediately followed by stopAllSessions killing it). */
 function shuttingDown(): boolean {
-  return installInProgress || quittingAllSessions || explicitQuitRequested
+  return installInProgress || quittingAllSessions || explicitQuitRequested || migrationService?.exclusive === true
 }
 
 /** The in-flight restart promise for a tab, if any. A rapid double-click (two
@@ -296,13 +303,15 @@ function settingsUrl(): string {
   return pathToFileURL(rendererPath('settings.html')).href
 }
 
-function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
+function assertTrustedIpcSender(event: IpcMainInvokeEvent, migration = false): void {
+  if (!migration && migrationService?.exclusive) throw new Error('Wait for migration to finish or cancel it in Settings')
   if (!isLauncherShellUrl(event.senderFrame?.url, shellUrl())) {
     throw new Error('Desktop IPC request rejected from an untrusted renderer')
   }
 }
 
-function assertTrustedSettingsSender(event: IpcMainInvokeEvent): void {
+function assertTrustedSettingsSender(event: IpcMainInvokeEvent, migration = false): void {
+  if (!migration && migrationService?.exclusive) throw new Error('Wait for migration to finish or cancel it')
   if (!isLauncherShellUrl(event.senderFrame?.url, settingsUrl())) {
     throw new Error('Settings IPC request rejected from an untrusted renderer')
   }
@@ -962,7 +971,10 @@ async function createSessionTab(
     ? { ...profile, permissionPreset: sessionPermissionPreset }
     : profile
   const sessionPermissionMode = connectSessionId || sideOptions.sideChat ? null : sessionPermissionModeOverride
-  const plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+  pendingSessionCreations++
+  let plan: Awaited<ReturnType<typeof buildSessionSpawnPlan>>
+  try { plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle) }
+  finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
@@ -1394,6 +1406,7 @@ async function probeCopilotResolution(): Promise<{ resolution: CopilotResolution
  * native updater may replace the on-disk CLI at session start; existing PTYs
  * keep their captured version while future sessions use the refreshed one. */
 async function refreshCopilotResolutionIfChanged(): Promise<boolean> {
+  if (migrationService?.exclusive) return false
   const previousVersion = state.resolution?.version ?? null
   const probe = await probeCopilotResolution()
   const next = probe.resolution
@@ -1724,7 +1737,7 @@ async function showSettingsWindow(): Promise<void> {
   })
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
-    if (settingsWindow === window) settingsWindow = null
+    if (settingsWindow === window) { migrationService?.cancel(); settingsWindow = null }
   })
   await window.loadFile(rendererPath('settings.html'))
 }
@@ -1933,7 +1946,7 @@ ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
   return managedTabs.get(tabId)?.session.recentOutputText ?? ''
 })
 ipcMain.handle('desktop:open-settings', (event) => {
-  assertTrustedIpcSender(event)
+  assertTrustedIpcSender(event, true)
   return showSettingsWindow()
 })
 ipcMain.handle('desktop:show-session-log', (event, tabId: unknown) => {
@@ -2024,7 +2037,7 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
 
 // --- IPC: settings window ----------------------------------------------
 ipcMain.handle('desktop-settings:get', (event) => {
-  assertTrustedSettingsSender(event)
+  assertTrustedSettingsSender(event, true)
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:update-preferences', async (event, preferences: unknown) => {
@@ -2312,6 +2325,87 @@ ipcMain.handle('desktop-settings:usage-restore', async (event) => {
   return !result.canceled
 })
 
+function getMigrationService(): MigrationService {
+  if (!migrationService) throw new Error('Migration is not ready')
+  return migrationService
+}
+async function migrationRequest<T>(event: IpcMainInvokeEvent, operation: (service: MigrationService) => Promise<T>): Promise<T | null> {
+  const service = getMigrationService()
+  try { return await operation(service) }
+  catch (error) {
+    if (event.sender.isDestroyed() && service.isCancellation(error)) return null
+    throw error
+  }
+}
+ipcMain.handle('desktop-settings:migration-inventory', (event, selection: MigrationSelection) => {
+  assertTrustedSettingsSender(event, true)
+  return migrationRequest(event, (service) => service.inventory(selection))
+})
+ipcMain.handle('desktop-settings:migration-export', async (event, selection: MigrationSelection) => {
+  assertTrustedSettingsSender(event, true)
+  const result = await dialog.showSaveDialog({ title: 'Export Copilot migration archive', defaultPath: `copilot-migration-${new Date().toISOString().slice(0, 10)}.zip`, filters: [{ name: 'Migration archive', extensions: ['zip'] }] })
+  if (result.canceled || !result.filePath) return false
+  const exported = await migrationRequest(event, async (service) => { await service.export(result.filePath!, selection); return true })
+  if (!exported) return false
+  shell.showItemInFolder(result.filePath)
+  return true
+})
+ipcMain.handle('desktop-settings:migration-open', async (event) => {
+  assertTrustedSettingsSender(event, true)
+  const result = await dialog.showOpenDialog({ title: 'Select Copilot migration archive', properties: ['openFile'], filters: [{ name: 'Migration archive', extensions: ['zip'] }] })
+  if (result.canceled || !result.filePaths[0]) return null
+  return migrationRequest(event, (service) => service.open(result.filePaths[0]!))
+})
+ipcMain.handle('desktop-settings:migration-map', async (event, id: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string') throw new Error('Invalid project')
+  const result = await dialog.showOpenDialog({ title: 'Choose destination workspace', properties: ['openDirectory'] })
+  if (result.canceled || !result.filePaths[0]) return null
+  getMigrationService().mapProject(id, result.filePaths[0])
+  return result.filePaths[0]
+})
+ipcMain.handle('desktop-settings:migration-preview', (event, choices: MigrationChoices) => {
+  assertTrustedSettingsSender(event, true)
+  return migrationRequest(event, (service) => service.preview(choices))
+})
+ipcMain.handle('desktop-settings:migration-apply', (event, id: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string') throw new Error('Invalid import preview')
+  return migrationRequest(event, (service) => service.apply(id))
+})
+ipcMain.handle('desktop-settings:migration-cancel', (event) => {
+  assertTrustedSettingsSender(event, true)
+  getMigrationService().cancel()
+})
+ipcMain.handle('desktop-settings:migration-status', async (event) => {
+  assertTrustedSettingsSender(event, true)
+  await getMigrationService().ensureBackups()
+  return getMigrationService().status()
+})
+ipcMain.handle('desktop-settings:migration-recover', (event) => {
+  assertTrustedSettingsSender(event, true)
+  return migrationRequest(event, (service) => service.recover())
+})
+ipcMain.handle('desktop-settings:migration-dismiss-recovery', (event, id: unknown, sha256: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string' || typeof sha256 !== 'string') throw new Error('Invalid recovery journal selection')
+  return migrationRequest(event, (service) => service.dismissRecovery(id, sha256))
+})
+ipcMain.handle('desktop-settings:migration-backups', (event) => {
+  assertTrustedSettingsSender(event, true)
+  return getMigrationService().refreshBackups()
+})
+ipcMain.handle('desktop-settings:migration-delete-backup', (event, id: unknown, token: unknown) => {
+  assertTrustedSettingsSender(event, true)
+  if (typeof id !== 'string' || typeof token !== 'string') throw new Error('Invalid backup selection')
+  return migrationRequest(event, (service) => service.deleteBackup(id, token))
+})
+
+function checkMigrationIdle(): void {
+  if (managedTabs.size || tabTransitionQueue.size || pendingSessionCreations) throw new Error('Close every Desktop session before importing or recovering migration data. Tray sessions also count.')
+  if (installInProgress || copilotMaintenance.status === 'running' || copilotResources.status === 'loading') throw new Error('Wait for updates and resource operations to finish')
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -2320,6 +2414,34 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setName('Copilot CLI Desktop')
+    const recovery = await recoverMigrationReport(app.getPath('userData'))
+    migrationService = new MigrationService({
+      roots: { copilot: process.env.COPILOT_HOME || join(app.getPath('home'), '.copilot'), agentSkills: join(app.getPath('home'), '.agents', 'skills'), desktop: app.getPath('userData') },
+      appVersion: app.getVersion(), cliVersion: () => state.resolution?.version ?? null,
+      assertIdle: async () => {
+        checkMigrationIdle()
+        await configWriteQueue
+        await assertMigrationWritersStopped()
+      },
+      checkIdle: checkMigrationIdle,
+      flushSettings: async () => { await configWriteQueue },
+      plugins: async (signal) => {
+        const result = await runCopilotCommand(resolvedCopilot(), ['plugins', 'list', '--json'], { env: resourceCopilotEnvironment(), signal })
+        return JSON.parse(result.stdout) as unknown
+      },
+      exportUsage: async (path) => { if (!usageService) throw new Error('Usage unavailable'); await usageService.exportTo(path) },
+      restoreUsage: async (path) => { if (!usageService) throw new Error('Usage unavailable'); await usageService.restoreFrom(path) },
+      progress: (progress) => {
+        if (settingsWindow && !settingsWindow.isDestroyed() && isLauncherShellUrl(settingsWindow.webContents.getURL(), settingsUrl())) settingsWindow.webContents.send('desktop-settings:migration-progress', progress)
+      },
+      reloaded: async () => {
+        desktopConfig = await readDesktopConfig(configPath())
+        syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
+      },
+    })
+    migrationService.recoveryIssues = recovery.issues
+    migrationService.recoveryJournals = recovery.journals
+    for (const issue of recovery.issues) void writeAppLog(issue)
     startUsageCollection()
     state.desktopVersion = app.getVersion()
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))

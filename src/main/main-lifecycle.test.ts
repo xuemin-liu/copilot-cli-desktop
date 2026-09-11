@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -8,10 +9,18 @@ import { build } from 'esbuild'
 import { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, type DesktopConfig } from './desktop-config.js'
 import { EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from './copilot-command.js'
 import type { DesktopState, WorkspaceProfile } from './types.js'
+import { MigrationService } from './migration-service.js'
+import { readMigrationArchive, writeMigrationArchive } from './migration-archive.js'
+import { fileEntry } from './migration-inventory.js'
+import { MigrationImportFailure } from './migration-import.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
+  configureMigration(busy: boolean, exclusive: boolean): void
+  configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
+  blockSpawnPlan(work: Promise<void>): void
+  checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
@@ -32,10 +41,10 @@ interface Harness {
   maintenanceCalls: string[]
   maintain(operation: 'install' | 'update'): Promise<void>
   maintenanceStatus(): string
-  requestSettings(name: string): Promise<void>
+  requestSettings(name: string, ...args: unknown[]): Promise<unknown>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
-  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; emitData(data: string): void }[]
+  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -61,6 +70,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
       `,
       'electron-updater': 'export default { autoUpdater: null };',
+      // Migration is exercised through its own integration tests. Keep new archive
+      // dependencies out of this temporary, dependency-free lifecycle bundle.
+      './migration-service.js': 'export class MigrationService {}',
+      './migration-import.js': 'export async function recoverMigrationReport() { return { issues: [], journals: [] } }',
+      './migration-writers.js': 'export async function assertMigrationWritersStopped() {}',
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];
         export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
@@ -72,9 +86,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export async function spawnNodePty(file, args, options) {
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, env: options.env, stopped: false, written: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, env: options.env, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
-          return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize() {},
+          return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
         }
       `,
@@ -97,9 +111,14 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { spawns } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         const diagnosticWrites = [];
+        let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
+          configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
+          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); shell.showItemInFolder = () => {}; },
+          blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
+          checkMigrationIdle,
           spawns,
           maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
@@ -130,14 +149,14 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           maintain: maintainCopilotCli,
           maintenanceStatus: () => copilotMaintenance.status,
-          requestSettings: (name) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() } }),
+          requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() }, sender: { isDestroyed: () => settingsSenderDestroyed } }, ...args),
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })
@@ -152,6 +171,104 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  let release!: () => void
+  harness.blockSpawnPlan(new Promise<void>((resolve) => { release = resolve }))
+  const pending = harness.createMain()
+  harness.configureMigration(true, false)
+  assert.throws(() => harness.checkMigrationIdle(), /Close every Desktop session/)
+  release()
+  const state = await pending
+  await harness.request('desktop:write-tab', state.activeTabId, 'typing during inventory')
+  await harness.request('desktop:resize-tab', state.activeTabId, 91, 37)
+  assert.ok(harness.spawns[0]!.written.includes('typing during inventory'))
+  assert.deepEqual(harness.spawns[0]!.resized.at(-1), [91, 37])
+  assert.equal(harness.spawns[0]!.stopped, false)
+}))
+
+test('export IPC snapshots settings while a Desktop session stays open and accepts input', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  const state = await harness.createMain()
+  await writeFile(join(directory, 'settings.json'), '{"model":"live-session-model"}')
+  const zip = join(directory, 'snapshot.zip')
+  const service = new MigrationService({
+    roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+    appVersion: 'test', cliVersion: () => '1.0.82', assertIdle: async () => harness.checkMigrationIdle(),
+    plugins: async () => [], exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+    progress: () => { assert.equal(service.exclusive, false) },
+  })
+  harness.configureMigrationExport(service, zip)
+  assert.throws(() => harness.checkMigrationIdle(), /Close every Desktop session/)
+  await harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
+  assert.equal(JSON.parse((await readMigrationArchive(zip)).files.find((file) => file.path === 'copilot/settings.json')!.data.toString()).model, 'live-session-model')
+  await harness.request('desktop:write-tab', state.activeTabId, 'still running after export')
+  assert.ok(harness.spawns[0]!.written.includes('still running after export'))
+  assert.equal(harness.spawns[0]!.stopped, false)
+}))
+
+test('export IPC silences only expected cancellation from a destroyed Settings sender', async () => fixture(async (harness, directory) => {
+  for (const [destroyed, aborted] of [[true, true], [false, true], [true, false]]) {
+    const error = aborted ? new DOMException('Cancelled', 'AbortError') : new Error('export failed')
+    const service = new MigrationService({
+      roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {},
+      flushSettings: async () => { if (aborted) service.cancel(); throw error }, plugins: async () => [], exportUsage: async () => {},
+      restoreUsage: async () => {}, reloaded: async () => {}, progress: () => {},
+    })
+    harness.configureMigrationExport(service, join(directory, 'snapshot.zip'), destroyed)
+    const request = harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
+    if (destroyed && aborted) assert.equal(await request, false)
+    else await assert.rejects(request, (actual) => aborted ? service.isCancellation(actual) : actual === error)
+  }
+}))
+
+test('closed Settings cancellation is quiet for inventory, archive open and preview', async () => fixture(async (harness, directory) => {
+  const zip = join(directory, 'snapshot.zip')
+  await writeFile(join(directory, 'copilot-instructions.md'), 'before')
+  await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
+  for (const [channel, phase] of [['inventory', 'Discovering files'], ['open', 'Validating archive'], ['preview', 'Preparing import preview']]) {
+    let cancelling = false
+    const service = new MigrationService({
+      roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
+      exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+      progress: (value) => { if (cancelling && value.phase === phase) service.cancel() },
+    })
+    await service.open(zip)
+    harness.configureMigrationExport(service, zip, true)
+    cancelling = true
+    const args = channel === 'inventory' ? [{ categories: ['knowledge'], projectIds: [] }] : channel === 'preview' ? [{ categories: ['knowledge'], replace: [], allowPermissions: false }] : []
+    assert.equal(await harness.requestSettings(`desktop-settings:migration-${channel}`, ...args), null)
+    assert.equal(service.busy, false)
+  }
+}))
+
+test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', async () => fixture(async (harness, directory) => {
+  for (const [index, [destroyed, breakRollback]] of [[true, false], [true, true], [false, false]].entries()) {
+    const root = join(directory, String(index)); await mkdir(root)
+    const destination = join(root, 'copilot-instructions.md'), zip = join(root, 'snapshot.zip')
+    await writeFile(destination, 'before')
+    await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after')), fileEntry('copilot/instructions/second.md', 'knowledge', Buffer.from('second write'))])
+    const service = new MigrationService({
+      roots: { copilot: root, desktop: root, agentSkills: join(root, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
+      exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+      progress: (value) => { if (value.completed === 1) { if (breakRollback) writeFileSync(destination, 'external change'); service.cancel() } },
+    })
+    await service.open(zip)
+    const preview = await service.preview({ categories: ['knowledge'], replace: ['copilot/copilot-instructions.md'], allowPermissions: false })
+    harness.configureMigrationExport(service, zip, destroyed)
+    const request = harness.requestSettings('desktop-settings:migration-apply', preview.id)
+    if (destroyed && !breakRollback) assert.equal(await request, null)
+    else await assert.rejects(request, (error) => error instanceof MigrationImportFailure && service.isCancellation(error) === !breakRollback)
+    assert.equal(await readFile(destination, 'utf8'), breakRollback ? 'external change' : 'before')
+    assert.equal(service.status().lastImport?.status, breakRollback ? 'failed' : 'cancelled')
+  }
+}))
 
 test('repeated quit requests wait for the usage backup even with no running sessions', async () => {
   await fixture(async (harness) => {

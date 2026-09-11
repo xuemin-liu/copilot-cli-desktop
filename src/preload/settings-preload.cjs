@@ -1,6 +1,23 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktopSettings', {
+  migrationInventory: (selection) => ipcRenderer.invoke('desktop-settings:migration-inventory', selection),
+  migrationExport: (selection) => ipcRenderer.invoke('desktop-settings:migration-export', selection),
+  migrationOpen: () => ipcRenderer.invoke('desktop-settings:migration-open'),
+  migrationMap: (id) => ipcRenderer.invoke('desktop-settings:migration-map', id),
+  migrationPreview: (choices) => ipcRenderer.invoke('desktop-settings:migration-preview', choices),
+  migrationApply: (id) => ipcRenderer.invoke('desktop-settings:migration-apply', id),
+  migrationCancel: () => ipcRenderer.invoke('desktop-settings:migration-cancel'),
+  migrationStatus: () => ipcRenderer.invoke('desktop-settings:migration-status'),
+  migrationRecover: () => ipcRenderer.invoke('desktop-settings:migration-recover'),
+  migrationDismissRecovery: (id, sha256) => ipcRenderer.invoke('desktop-settings:migration-dismiss-recovery', id, sha256),
+  migrationBackups: () => ipcRenderer.invoke('desktop-settings:migration-backups'),
+  migrationDeleteBackup: (id, token) => ipcRenderer.invoke('desktop-settings:migration-delete-backup', id, token),
+  onMigrationProgress: (listener) => {
+    const handler = (_event, progress) => listener(progress)
+    ipcRenderer.on('desktop-settings:migration-progress', handler)
+    return () => ipcRenderer.removeListener('desktop-settings:migration-progress', handler)
+  },
   usageReport: (month, scope, timezone) => ipcRenderer.invoke('desktop-settings:usage-report', month, scope, timezone),
   refreshUsage: () => ipcRenderer.invoke('desktop-settings:usage-refresh'),
   exportUsage: () => ipcRenderer.invoke('desktop-settings:usage-export'),
