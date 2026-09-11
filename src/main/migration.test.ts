@@ -60,23 +60,94 @@ test('initial and overlapping backup status requests wait for the latest scan to
   assert.equal(scans, 2, 'cached status must not rescan')
 })
 
-test('backup bookkeeping does not delay the usage merge or turn cancellation into a failed snapshot', async (t) => {
+test('failed initial backup scans can be retried and cached status does not wait for a refresh', async (t) => {
+  const { target } = await fixture(t)
+  const gate = deferred<Awaited<ReturnType<typeof listMigrationBackups>>>()
+  let scans = 0
+  const service = migrationService(target, { listBackups: async () => {
+    if (++scans === 1) throw new Error('transient scan failure')
+    if (scans === 2) return { backups: [], warnings: ['cached'] }
+    return gate.promise
+  } })
+  await assert.rejects(service.ensureBackups(), /transient scan failure/)
+  await service.ensureBackups()
+  const refresh = service.refreshBackups()
+  let replied = false
+  const cached = service.ensureBackups().then(() => { replied = true })
+  try {
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(replied, true, 'polls must return the loaded cache during a slow refresh')
+    assert.deepEqual(service.status().warnings, ['cached'])
+  } finally { gate.resolve({ backups: [], warnings: ['fresh'] }); await Promise.all([refresh, cached]) }
+  assert.equal(scans, 3)
+  assert.deepEqual(service.status().warnings, ['fresh'])
+})
+
+test('failed usage-only snapshots are not advertised as recovery backups', async (t) => {
   const { root, target } = await fixture(t)
   const zip = join(root, 'usage.zip')
   await writeMigrationArchive(zip, manifest(), [fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
-  const scanGate = deferred(), mergeStarted = deferred()
+  const service = migrationService(target, { exportUsage: async () => { throw new Error('disk full') } })
+  await service.open(zip)
+  const result = await service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+  assert.equal(result.backup, null)
+  assert.ok(result.warnings.some((warning) => warning.includes('merge did not complete')))
+  assert.ok(!result.warnings.some((warning) => warning.includes('may still finish')))
+  assert.ok(service.status().backups.every((backup) => backup.status === 'empty'))
+})
+
+test('cancelled usage-only snapshots report a possible location without claiming a completed backup', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  const started = deferred(), gate = deferred(), finished = deferred()
+  let snapshotPath = ''
+  const service = migrationService(target, { exportUsage: async (path) => {
+    snapshotPath = path; started.resolve()
+    try { await gate.promise; await put(path, 'late snapshot') } finally { finished.resolve() }
+  } })
+  await service.open(zip)
+  const work = service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+  void work.catch(() => {})
+  try {
+    await Promise.race([started.promise, work.then(() => { throw new Error('snapshot did not start') })])
+    service.cancel()
+    const result = await work
+    assert.equal(result.backup, null)
+    assert.ok(result.warnings.some((warning) => warning.includes('may still finish') && warning.includes(join(snapshotPath, '..'))))
+  } finally {
+    gate.resolve(); await work.catch(() => {})
+    if (snapshotPath) await finished.promise
+    await service.refreshBackups()
+  }
+  assert.equal(await readFile(snapshotPath, 'utf8'), 'late snapshot')
+  assert.ok(service.status().backups.some((backup) => backup.status === 'usage-snapshot'))
+})
+
+test('backup bookkeeping does not delay the usage merge and cancellation waits for an active merge', async (t) => {
+  const { root, target } = await fixture(t)
+  const zip = join(root, 'usage.zip')
+  await writeMigrationArchive(zip, manifest(), [fileEntry('usage/usage.sqlite', 'usage', Buffer.from('usage'))])
+  const scanGate = deferred(), scanStarted = deferred(), mergeStarted = deferred(), mergeGate = deferred()
   let snapshotWritten = false
   const service = migrationService(target, {
     exportUsage: async (path) => { await put(path, 'snapshot'); snapshotWritten = true },
-    listBackups: async (path) => { if (snapshotWritten) await scanGate.promise; return listMigrationBackups(path) },
-    restoreUsage: async () => { mergeStarted.resolve() },
+    listBackups: async (path) => { if (snapshotWritten) { scanStarted.resolve(); await scanGate.promise }; return listMigrationBackups(path) },
+    restoreUsage: async () => { mergeStarted.resolve(); await mergeGate.promise },
   })
   await service.open(zip)
   const work = service.apply((await service.preview({ ...choices, categories: ['usage'] })).id)
+  void work.catch(() => {}) // Observe early failure while waiting on the test gates.
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await Promise.race([mergeStarted.promise, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('backup scan blocked usage merge')), 3000); timer.unref() })])
+    await Promise.race([scanStarted.promise, work.then(() => { throw new Error('snapshot scan never started') })])
+    await Promise.race([mergeStarted.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('backup scan blocked usage merge')), 10_000) })])
     service.cancel()
-  } finally { scanGate.resolve() }
+    assert.equal(service.busy, true, 'the merge must still be active when cancellation is requested')
+  } finally {
+    clearTimeout(timer); mergeGate.resolve(); scanGate.resolve()
+    await work.catch(() => {}) // Finish all fixture writes even when a gate times out.
+  }
   const result = await work
   assert.equal(await readFile(join(result.backup!, 'usage-before.sqlite'), 'utf8'), 'snapshot')
   assert.ok(result.warnings.includes('Usage records merged successfully.'))

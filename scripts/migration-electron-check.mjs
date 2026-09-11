@@ -66,9 +66,9 @@ async function runElectronCheck() {
   await import('../dist/src/main/main.js')
   console.log('[migration-check] Application loaded; waiting for Settings.')
   const timeout = setTimeout(() => { console.error('Migration UI check timed out'); app.exit(1) }, 90_000)
-  async function waitFor(fn) {
+  async function waitFor(fn, description = 'UI condition') {
     for (let i = 0; i < 200; i++) { const value = await fn(); if (value) return value; await new Promise((ok) => setTimeout(ok, 100)) }
-    throw new Error('UI condition not reached')
+    throw new Error(`${description} not reached`)
   }
   try {
     const main = await waitFor(() => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/index.html')))
@@ -157,16 +157,27 @@ async function runElectronCheck() {
     const beforeRefresh = await evaluate('window.copilotDesktopSettings.migrationStatus()')
     const captured = new Promise((ok) => { statusCaptured = ok })
     holdNextStatus = true
-    await captured // Hold an older poll reply until after the manual list refresh.
+    let pollCaptured = false
+    void captured.then(() => { pollCaptured = true })
+    await waitFor(() => pollCaptured, 'capture of the older status poll')
     const addedBackup = join(root, 'desktop', 'migration-backups', 'dddddddd-dddd-dddd-dddd-dddddddddddd')
     await mkdir(addedBackup)
     await writeFile(join(addedBackup, 'usage-before.sqlite'), 'concurrent refresh fixture')
     await click('Refresh backup list')
     await waitFor(() => evaluate(`document.body.textContent.includes(${JSON.stringify(addedBackup)}) && [...document.querySelectorAll('button')].some(b => b.textContent === 'Refresh backup list' && !b.disabled)`))
     assert.equal(await evaluate(`[...document.querySelectorAll('details')].find(d => d.textContent.includes('Refresh backup list')).querySelector('[role="status"]')?.textContent ?? ''`), '')
-    releaseHeldStatus()
+    // Only one automatic status request may be in flight. The next poll is
+    // therefore evidence that the renderer consumed the held reply. Hold that
+    // next response too so it cannot repair a stale list before we inspect it.
+    const releaseOlderStatus = releaseHeldStatus
+    let nextPollCaptured = false
+    statusCaptured = () => { nextPollCaptured = true }
+    holdNextStatus = true
+    releaseOlderStatus()
+    await waitFor(() => nextPollCaptured, 'poll after the renderer consumed the older reply')
     await evaluate(`new Promise(ok => requestAnimationFrame(() => requestAnimationFrame(ok)))`)
     assert.equal(await evaluate(`document.body.textContent.includes(${JSON.stringify(addedBackup)})`), true, 'an older poll reply must not overwrite the refreshed backup list')
+    releaseHeldStatus()
     assert.deepEqual((await evaluate('window.copilotDesktopSettings.migrationStatus()')).progress, beforeRefresh.progress)
     assert.equal((await evaluate('window.copilotDesktopSettings.migrationStatus()')).busy, true)
     const closed = new Promise((ok) => settings.once('closed', ok))

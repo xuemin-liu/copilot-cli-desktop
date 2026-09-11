@@ -29,6 +29,8 @@ export class MigrationService {
   recoveryJournals: MigrationRecoveryJournal[] = []
   private lastImport: MigrationOutcome | null = null
   private backups: MigrationStatus['backups'] = []
+  private backupsLoaded = false
+  private backupListFailed = false
   private backupListSequence = 0
   private latestBackupList: Promise<void> | null = null
   private warnings: string[] = []
@@ -46,20 +48,29 @@ export class MigrationService {
   status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings] } }
   loadBackups(): Promise<void> {
     const sequence = ++this.backupListSequence
-    this.latestBackupList = (this.deps.listBackups ?? listMigrationBackups)(this.deps.roots.desktop).then((listed) => {
+    this.backupListFailed = false
+    this.latestBackupList = Promise.resolve().then(() => (this.deps.listBackups ?? listMigrationBackups)(this.deps.roots.desktop)).then((listed) => {
       if (sequence === this.backupListSequence) {
-        this.backups = listed.backups; this.backupWarnings = listed.warnings
+        this.backups = listed.backups; this.backupWarnings = listed.warnings; this.backupsLoaded = true
       }
+    }).catch((error) => {
+      if (sequence === this.backupListSequence) this.backupListFailed = true
+      throw error
     })
-    return this.ensureBackups()
+    return this.waitForBackups()
   }
   async ensureBackups(): Promise<void> {
-    if (!this.latestBackupList) return this.loadBackups()
+    if (this.backupsLoaded) return
+    if (!this.latestBackupList || this.backupListFailed) return this.loadBackups()
+    await this.waitForBackups()
+  }
+  private async waitForBackups(): Promise<void> {
     // A newer scan can supersede the one this caller originally awaited.
     // Do not return cached/empty status until the newest scan has published.
     for (;;) {
-      const pending: Promise<void> = this.latestBackupList
-      await pending
+      const pending = this.latestBackupList
+      try { await pending }
+      catch (error) { if (pending === this.latestBackupList) throw error }
       if (pending === this.latestBackupList) return
     }
   }
@@ -247,8 +258,13 @@ export class MigrationService {
             signal.throwIfAborted()
             const backupRoot = result.backup ?? join(this.deps.roots.desktop, 'migration-backups', randomUUID())
             await mkdir(backupRoot, { recursive: true, mode: 0o700 })
-            result.backup = backupRoot
-            await cancellable(this.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
+            try {
+              await cancellable(this.exportUsage(join(backupRoot, 'usage-before.sqlite')), signal)
+              result.backup = backupRoot
+            } catch (error) {
+              if (signal.aborted && error === signal.reason) result.warnings.push(`Usage snapshot may still finish in ${backupRoot}. Check retained backups before relying on this copy.`)
+              throw error
+            }
             signal.throwIfAborted()
             await this.withScratch(async (directory) => {
               const path = join(directory, 'usage.sqlite')

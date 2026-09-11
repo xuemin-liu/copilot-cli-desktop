@@ -47,6 +47,7 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
     let revision = 0
     let requestSequence = 0, appliedSequence = 0
     let operationBusy = false
+    let statusPending = false, scanPending = false, refreshQueued = false
     const refresh = async (scanBackups = false): Promise<void> => {
       const requestedRevision = revision, sequence = ++requestSequence
       const status = await (scanBackups ? bridge.migrationBackups() : bridge.migrationStatus())
@@ -59,13 +60,28 @@ export function MigrationSettings({ onSaved }: { onSaved: (snapshot: DesktopSett
         }
       }
     }
-    refreshBackupList.current = () => refresh(true)
-    const refreshStatus = (): void => { void refresh().catch((error) => { if (mounted) setMessage(String(error)) }) }
+    const refreshStatus = (queue = false): void => {
+      if (!mounted) return
+      if (statusPending || scanPending) { refreshQueued ||= queue; return }
+      statusPending = true
+      void refresh().catch((error) => { if (mounted) setMessage(String(error)) }).finally(() => {
+        statusPending = false
+        if (refreshQueued) { refreshQueued = false; refreshStatus(true) }
+      })
+    }
+    refreshBackupList.current = async () => {
+      scanPending = true
+      try { await refresh(true) }
+      finally {
+        scanPending = false
+        if (refreshQueued) { refreshQueued = false; refreshStatus(true) }
+      }
+    }
     const unsubscribe = bridge.onMigrationProgress((value) => {
       revision++
       operationBusy = value.phase !== 'Idle'
       setProgress(value); setServerBusy(operationBusy)
-      if (value.phase === 'Idle') refreshStatus()
+      if (value.phase === 'Idle') refreshStatus(true)
     })
     refreshStatus()
     const timer = setInterval(() => { if (operationBusy) refreshStatus() }, 2000)
