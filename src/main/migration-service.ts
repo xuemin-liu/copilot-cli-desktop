@@ -41,6 +41,7 @@ export class MigrationService {
   private pendingSnapshots = new Set<string>()
   private currentProgress: MigrationProgress = { phase: 'Idle', completed: 0, total: 0 }
   private abort: AbortController | null = null
+  private cancelledErrors = new WeakSet<object>()
   private archive: MigrationArchive | null = null
   private plan: ImportPlan | null = null
   private mappings: Record<string, string> = Object.create(null) as Record<string, string>
@@ -48,6 +49,7 @@ export class MigrationService {
     deps.roots = { copilot: resolve(deps.roots.copilot), agentSkills: resolve(deps.roots.agentSkills), desktop: resolve(deps.roots.desktop) }
   }
   cancel(): void { this.abort?.abort() }
+  isCancellation(error: unknown): boolean { return typeof error === 'object' && error !== null && this.cancelledErrors.has(error) }
   status(): MigrationStatus { return { busy: this.busy, exclusive: this.exclusive, progress: this.currentProgress, recoveryIssues: [...this.recoveryIssues], recoveryJournals: [...this.recoveryJournals], lastImport: this.lastImport, backups: this.backups, warnings: [...this.warnings, ...this.backupWarnings, ...(this.backupRefreshWarning ? [this.backupRefreshWarning.message] : [])] } }
   loadBackups(): Promise<void> {
     const sequence = ++this.backupListSequence
@@ -152,8 +154,13 @@ export class MigrationService {
     if (this.busy) throw new Error('Another migration operation is running')
     this.busy = true
     this.abort = new AbortController()
+    const signal = this.abort.signal
     this.progress({ phase, completed: 0, total: 0 })
-    try { return await operation(this.abort.signal) }
+    try { return await operation(signal) }
+    catch (error) {
+      if (isMigrationCancellation(error, signal) && typeof error === 'object' && error !== null) this.cancelledErrors.add(error)
+      throw error
+    }
     finally { this.abort = null; this.busy = false; this.exclusive = false; this.progress({ phase: 'Idle', completed: 0, total: 0 }) }
   }
   private async manifest(): Promise<MigrationManifest> {
@@ -296,7 +303,7 @@ export class MigrationService {
         this.lastImport = { status: 'completed', message: 'Import completed. Review the result and any warnings below.', result }
         return result
       } catch (error) {
-        const cancelled = signal.aborted && (!(error instanceof MigrationImportFailure) || error.rollbackComplete)
+        const cancelled = isMigrationCancellation(error, signal)
         const detail = error instanceof MigrationImportFailure && error.rollbackComplete ? 'Uncommitted file changes were rolled back.' : 'Review the current files and recovery details.'
         this.lastImport = { status: cancelled ? 'cancelled' : 'failed', message: `${cancelled ? 'Import cancelled' : 'Import failed'}. ${detail} ${String(error)}`, result: null }
         throw error
@@ -308,6 +315,16 @@ export class MigrationService {
     await mkdir(path, { recursive: true, mode: 0o700 })
     try { return await fn(path) } finally { await rm(path, { recursive: true, force: true }) }
   }
+}
+/** Match the operation's actual abort reason through error wrappers. */
+function isMigrationCancellation(error: unknown, signal: AbortSignal): boolean {
+  if (!signal.aborted || (error instanceof MigrationImportFailure && !error.rollbackComplete)) return false
+  const seen = new Set<unknown>()
+  for (let cause = error; cause && !seen.has(cause); cause = cause instanceof Error ? cause.cause : null) {
+    if (cause === signal.reason) return true
+    seen.add(cause)
+  }
+  return false
 }
 /** A cancelled snapshot may finish writing only its private scratch directory.
  * Its owner retains cleanup until completion; never remove a live worker's files. */

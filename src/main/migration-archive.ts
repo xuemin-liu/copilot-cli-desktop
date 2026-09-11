@@ -17,7 +17,7 @@ export async function readMigrationArchive(path: string, signal?: AbortSignal): 
   const names = new Set<string>()
   let total = 0
   await new Promise<void>((ok, fail) => {
-    const abort = (): void => { zip.close(); fail(new Error('Migration cancelled')) }
+    const abort = (): void => { zip.close(); fail(signal!.reason) }
     const reject = (error: unknown): void => { signal?.removeEventListener('abort', abort); zip.close(); fail(error) }
     signal?.addEventListener('abort', abort, { once: true })
     zip.on('error', reject)

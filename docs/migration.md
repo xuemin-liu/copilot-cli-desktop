@@ -137,6 +137,9 @@ operation still finishing and retains access to Cancel. The last import outcome,
 including cancellation, rollback, and skipped usage, remains visible when Settings
 is reopened during the same app run. A usage merge already
 committing must finish before cancellation takes effect.
+Expected cancellation after Settings closes does not log an IPC handler error,
+including an interrupted import whose file changes were rolled back. Genuine
+failures and incomplete rollbacks still report errors.
 Rejected preconditions do not replace the last import result. If an import commits
 but Desktop cannot refresh its state, the result remains completed with a warning
 to restart before changing settings. Busy state is reconciled periodically while

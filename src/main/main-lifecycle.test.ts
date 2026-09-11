@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -9,7 +10,9 @@ import { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, type DesktopConfig } fr
 import { EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from './copilot-command.js'
 import type { DesktopState, WorkspaceProfile } from './types.js'
 import { MigrationService } from './migration-service.js'
-import { readMigrationArchive } from './migration-archive.js'
+import { readMigrationArchive, writeMigrationArchive } from './migration-archive.js'
+import { fileEntry } from './migration-inventory.js'
+import { MigrationImportFailure } from './migration-import.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
@@ -113,7 +116,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
-          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); shell.showItemInFolder = () => {}; },
+          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); shell.showItemInFolder = () => {}; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
@@ -213,13 +216,57 @@ test('export IPC silences only expected cancellation from a destroyed Settings s
     const service = new MigrationService({
       roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
       appVersion: 'test', cliVersion: () => null, assertIdle: async () => {},
-      flushSettings: async () => { throw error }, plugins: async () => [], exportUsage: async () => {},
+      flushSettings: async () => { if (aborted) service.cancel(); throw error }, plugins: async () => [], exportUsage: async () => {},
       restoreUsage: async () => {}, reloaded: async () => {}, progress: () => {},
     })
     harness.configureMigrationExport(service, join(directory, 'snapshot.zip'), destroyed)
     const request = harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
     if (destroyed && aborted) assert.equal(await request, false)
-    else await assert.rejects(request, (actual) => actual === error)
+    else await assert.rejects(request, (actual) => aborted ? service.isCancellation(actual) : actual === error)
+  }
+}))
+
+test('closed Settings cancellation is quiet for inventory, archive open and preview', async () => fixture(async (harness, directory) => {
+  const zip = join(directory, 'snapshot.zip')
+  await writeFile(join(directory, 'copilot-instructions.md'), 'before')
+  await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
+  for (const [channel, phase] of [['inventory', 'Discovering files'], ['open', 'Validating archive'], ['preview', 'Preparing import preview']]) {
+    let cancelling = false
+    const service = new MigrationService({
+      roots: { copilot: directory, desktop: directory, agentSkills: join(directory, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
+      exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+      progress: (value) => { if (cancelling && value.phase === phase) service.cancel() },
+    })
+    await service.open(zip)
+    harness.configureMigrationExport(service, zip, true)
+    cancelling = true
+    const args = channel === 'inventory' ? [{ categories: ['knowledge'], projectIds: [] }] : channel === 'preview' ? [{ categories: ['knowledge'], replace: [], allowPermissions: false }] : []
+    assert.equal(await harness.requestSettings(`desktop-settings:migration-${channel}`, ...args), null)
+    assert.equal(service.busy, false)
+  }
+}))
+
+test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', async () => fixture(async (harness, directory) => {
+  for (const [index, [destroyed, breakRollback]] of [[true, false], [true, true], [false, false]].entries()) {
+    const root = join(directory, String(index)); await mkdir(root)
+    const destination = join(root, 'copilot-instructions.md'), zip = join(root, 'snapshot.zip')
+    await writeFile(destination, 'before')
+    await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after')), fileEntry('copilot/instructions/second.md', 'knowledge', Buffer.from('second write'))])
+    const service = new MigrationService({
+      roots: { copilot: root, desktop: root, agentSkills: join(root, 'skills') },
+      appVersion: 'test', cliVersion: () => null, assertIdle: async () => {}, plugins: async () => [],
+      exportUsage: async () => {}, restoreUsage: async () => {}, reloaded: async () => {},
+      progress: (value) => { if (value.completed === 1) { if (breakRollback) writeFileSync(destination, 'external change'); service.cancel() } },
+    })
+    await service.open(zip)
+    const preview = await service.preview({ categories: ['knowledge'], replace: ['copilot/copilot-instructions.md'], allowPermissions: false })
+    harness.configureMigrationExport(service, zip, destroyed)
+    const request = harness.requestSettings('desktop-settings:migration-apply', preview.id)
+    if (destroyed && !breakRollback) assert.equal(await request, null)
+    else await assert.rejects(request, (error) => error instanceof MigrationImportFailure && service.isCancellation(error) === !breakRollback)
+    assert.equal(await readFile(destination, 'utf8'), breakRollback ? 'external change' : 'before')
+    assert.equal(service.status().lastImport?.status, breakRollback ? 'failed' : 'cancelled')
   }
 }))
 

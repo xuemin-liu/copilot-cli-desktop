@@ -21,7 +21,7 @@ if (!process.versions.electron) {
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); process.stderr.write(chunk) })
     const code = await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', ok) })
     assert.equal(code, 0)
-    assert.ok(!stderr.includes("Error occurred in handler for 'desktop-settings:migration-export'"), 'closing Settings must not log an export handler error')
+    assert.ok(!stderr.includes("Error occurred in handler for 'desktop-settings:migration-"), 'closing Settings must not log an expected migration handler error')
     assert.equal(JSON.parse(await readFile(join(output, 'result.json'), 'utf8')).passed, true)
   } finally { await rm(root, { recursive: true, force: true }) }
 } else { void runElectronCheck() }
@@ -194,7 +194,30 @@ async function runElectronCheck() {
     releaseSnapshot()
     UsageService.prototype.exportTo = originalExport
     await waitFor(async () => !(await (await import('node:fs/promises')).readdir(join(root, 'desktop'))).some((name) => name.startsWith('migration-staging-')))
-    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'mount status survives progress', 'real recovery retry', 'acknowledgement bound to all journal identities and hashes', 'inspected recovery dismissal', 'explicit retained-backup deletion', '5000 progress events with bounded polling', 'missed Idle reconciled automatically', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'backup refresh preserves active export progress', 'close cancels stalled snapshot', 'reopened Settings status and last import'] }, null, 2))
+    const beforeCancelledImport = '{"model":"before-cancelled-import","theme":"dim"}'
+    await writeFile(join(root, 'copilot', 'settings.json'), beforeCancelledImport)
+    await writeFile(instructions, 'before cancelled import instructions')
+    await reopened.webContents.executeJavaScript('window.copilotDesktopSettings.migrationOpen()')
+    const cancelPlan = await reopened.webContents.executeJavaScript(`window.copilotDesktopSettings.migrationPreview({categories:['settings','knowledge'],replace:['copilot/settings.json#model','copilot/copilot-instructions.md'],allowPermissions:false})`)
+    assert.equal(cancelPlan.changes.filter((change) => change.action === 'import').length, 2, 'cancel between two selected file writes')
+    const send = reopened.webContents.send.bind(reopened.webContents)
+    let closedDuringImport = false
+    reopened.webContents.send = (channel, ...args) => {
+      send(channel, ...args)
+      if (channel === 'desktop-settings:migration-progress' && args[0]?.phase === 'Importing files' && args[0]?.completed === 1) {
+        // Destroy synchronously at the write boundary; close() can wait for the
+        // renderer long enough for both writes to commit before cancellation.
+        closedDuringImport = true; reopened.destroy()
+      }
+    }
+    await reopened.webContents.executeJavaScript(`void window.copilotDesktopSettings.migrationApply(${JSON.stringify(cancelPlan.id)}).catch(() => {})`)
+    await waitFor(() => closedDuringImport && reopened.isDestroyed(), 'Settings closure during import writes')
+    await main.webContents.executeJavaScript('window.copilotDesktop.openSettings()')
+    const afterRollback = await waitFor(() => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('/settings.html')))
+    await waitFor(() => afterRollback.webContents.executeJavaScript(`document.body.textContent.includes('Last import: cancelled')`), 'retained cancellation after import rollback')
+    assert.equal(await readFile(join(root, 'copilot', 'settings.json'), 'utf8'), beforeCancelledImport)
+    assert.equal(await readFile(instructions, 'utf8'), 'before cancelled import instructions')
+    await writeFile(join(output, 'result.json'), JSON.stringify({ passed: true, checks: ['nonfatal startup recovery', 'mount status survives progress', 'real recovery retry', 'acknowledgement bound to all journal identities and hashes', 'inspected recovery dismissal', 'explicit retained-backup deletion', '5000 progress events with bounded polling', 'missed Idle reconciled automatically', 'real settings renderer', 'real writer check', 'export IPC', 'archive validation', 'conflict preview', 'selected replacement', 'import readback', 'backup refresh preserves active export progress', 'close cancels stalled snapshot', 'reopened Settings status and last import', 'close during import rolls back without migration IPC errors'] }, null, 2))
     console.log('[migration-check] Production Settings export, conflict preview and import passed.')
     clearTimeout(timeout); app.quit()
   } catch (error) {

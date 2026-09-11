@@ -2329,19 +2329,24 @@ function getMigrationService(): MigrationService {
   if (!migrationService) throw new Error('Migration is not ready')
   return migrationService
 }
+async function migrationRequest<T>(event: IpcMainInvokeEvent, operation: (service: MigrationService) => Promise<T>): Promise<T | null> {
+  const service = getMigrationService()
+  try { return await operation(service) }
+  catch (error) {
+    if (event.sender.isDestroyed() && service.isCancellation(error)) return null
+    throw error
+  }
+}
 ipcMain.handle('desktop-settings:migration-inventory', (event, selection: MigrationSelection) => {
   assertTrustedSettingsSender(event, true)
-  return getMigrationService().inventory(selection)
+  return migrationRequest(event, (service) => service.inventory(selection))
 })
 ipcMain.handle('desktop-settings:migration-export', async (event, selection: MigrationSelection) => {
   assertTrustedSettingsSender(event, true)
   const result = await dialog.showSaveDialog({ title: 'Export Copilot migration archive', defaultPath: `copilot-migration-${new Date().toISOString().slice(0, 10)}.zip`, filters: [{ name: 'Migration archive', extensions: ['zip'] }] })
   if (result.canceled || !result.filePath) return false
-  try { await getMigrationService().export(result.filePath, selection) }
-  catch (error) {
-    if (error instanceof Error && error.name === 'AbortError' && event.sender.isDestroyed()) return false
-    throw error
-  }
+  const exported = await migrationRequest(event, async (service) => { await service.export(result.filePath!, selection); return true })
+  if (!exported) return false
   shell.showItemInFolder(result.filePath)
   return true
 })
@@ -2349,7 +2354,7 @@ ipcMain.handle('desktop-settings:migration-open', async (event) => {
   assertTrustedSettingsSender(event, true)
   const result = await dialog.showOpenDialog({ title: 'Select Copilot migration archive', properties: ['openFile'], filters: [{ name: 'Migration archive', extensions: ['zip'] }] })
   if (result.canceled || !result.filePaths[0]) return null
-  return getMigrationService().open(result.filePaths[0])
+  return migrationRequest(event, (service) => service.open(result.filePaths[0]!))
 })
 ipcMain.handle('desktop-settings:migration-map', async (event, id: unknown) => {
   assertTrustedSettingsSender(event, true)
@@ -2361,12 +2366,12 @@ ipcMain.handle('desktop-settings:migration-map', async (event, id: unknown) => {
 })
 ipcMain.handle('desktop-settings:migration-preview', (event, choices: MigrationChoices) => {
   assertTrustedSettingsSender(event, true)
-  return getMigrationService().preview(choices)
+  return migrationRequest(event, (service) => service.preview(choices))
 })
 ipcMain.handle('desktop-settings:migration-apply', (event, id: unknown) => {
   assertTrustedSettingsSender(event, true)
   if (typeof id !== 'string') throw new Error('Invalid import preview')
-  return getMigrationService().apply(id)
+  return migrationRequest(event, (service) => service.apply(id))
 })
 ipcMain.handle('desktop-settings:migration-cancel', (event) => {
   assertTrustedSettingsSender(event, true)
@@ -2379,12 +2384,12 @@ ipcMain.handle('desktop-settings:migration-status', async (event) => {
 })
 ipcMain.handle('desktop-settings:migration-recover', (event) => {
   assertTrustedSettingsSender(event, true)
-  return getMigrationService().recover()
+  return migrationRequest(event, (service) => service.recover())
 })
 ipcMain.handle('desktop-settings:migration-dismiss-recovery', (event, id: unknown, sha256: unknown) => {
   assertTrustedSettingsSender(event, true)
   if (typeof id !== 'string' || typeof sha256 !== 'string') throw new Error('Invalid recovery journal selection')
-  return getMigrationService().dismissRecovery(id, sha256)
+  return migrationRequest(event, (service) => service.dismissRecovery(id, sha256))
 })
 ipcMain.handle('desktop-settings:migration-backups', (event) => {
   assertTrustedSettingsSender(event, true)
@@ -2393,7 +2398,7 @@ ipcMain.handle('desktop-settings:migration-backups', (event) => {
 ipcMain.handle('desktop-settings:migration-delete-backup', (event, id: unknown, token: unknown) => {
   assertTrustedSettingsSender(event, true)
   if (typeof id !== 'string' || typeof token !== 'string') throw new Error('Invalid backup selection')
-  return getMigrationService().deleteBackup(id, token)
+  return migrationRequest(event, (service) => service.deleteBackup(id, token))
 })
 
 function checkMigrationIdle(): void {
