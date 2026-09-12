@@ -111,7 +111,7 @@ import {
   touchTab,
   type TabsState,
 } from './session-tab-machine.js'
-import type { CopilotResolution, DesktopEvent, DesktopState, WorkspaceProfile } from './types.js'
+import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
@@ -207,6 +207,11 @@ interface ManagedTab {
 
 let tabsState: TabsState = EMPTY_TABS_STATE
 const managedTabs = new Map<string, ManagedTab>()
+// An unloaded profile is not an empty profile. Keep saved entries until their
+// replacement process starts successfully, including across failed attempts.
+const profilesWithSessionTabs = new Set<string>()
+const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
+const restoringTabIds = new Set<string>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
 
 // Serializes every operation that stops/replaces/removes a tab's managed
@@ -495,8 +500,9 @@ async function persistConfig(): Promise<void> {
  */
 function persistProfileTabs(): void {
   for (const profile of desktopConfig.profiles) {
+    if (!profilesWithSessionTabs.has(profile.id)) continue
     profile.tabs = tabsState.tabs
-      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote)
+      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !restoringTabIds.has(tab.id))
       .map((tab) => {
         const parentSessionId = tabsState.tabs.find((parent) => parent.id === tab.sideParentTabId)?.lastSessionId
         return {
@@ -509,7 +515,7 @@ function persistProfileTabs(): void {
           ...(tab.sideChat ? { sideChat: true as const } : {}),
           ...(parentSessionId ? { sideParentSessionId: parentSessionId } : {}),
         }
-      })
+      }).concat(unrestoredProfileTabs.get(profile.id) ?? [])
   }
   void persistConfig().catch((error) => void writeAppLog(`Failed to save session tabs: ${String(error)}`))
 }
@@ -1030,6 +1036,7 @@ async function createSessionTab(
   sideOptions: { sideChat?: true; sideParentTabId?: string } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
+  restoredCandidate: RestoredTab | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
@@ -1070,6 +1077,8 @@ async function createSessionTab(
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
+  profilesWithSessionTabs.add(profile.id)
+  if (restoredCandidate) restoringTabIds.add(id)
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
   const previousProfileId = desktopConfig.activeProfileId
   tabsState = createTab(tabsState, {
@@ -1104,6 +1113,7 @@ async function createSessionTab(
     scheduleCopilotResolutionRefresh()
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
+      restoringTabIds.delete(id)
       session.removeAllListeners()
       const wasActive = tabsState.activeTabId === id
       tabsState = closeTab(tabsState, id)
@@ -1119,6 +1129,12 @@ async function createSessionTab(
     refreshMenus()
     persistProfileTabs()
     throw error
+  }
+  restoringTabIds.delete(id)
+  if (restoredCandidate) {
+    const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(candidate => candidate !== restoredCandidate)
+    if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
+    else unrestoredProfileTabs.delete(profile.id)
   }
   persistProfileTabs()
   return snapshot()
@@ -1353,15 +1369,19 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   return restartPromise
 }
 
-async function restoreTabsForActiveProfile(): Promise<void> {
-  const profile = activeWorkspaceProfile(desktopConfig)
+async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopConfig)): Promise<void> {
   if (!profile || !state.resolution || state.resolution.version === null) return
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
-  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id)) return
+  if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id) && !unrestoredProfileTabs.get(profile.id)?.length) return
+  if (!unrestoredProfileTabs.has(profile.id)) {
+    unrestoredProfileTabs.set(profile.id, profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }])
+  }
   const operation = (async () => {
-    const restored: WorkspaceProfile['tabs'] = profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }]
+    // A parent that failed on a previous launch may follow its saved side chat.
+    const restored = [...unrestoredProfileTabs.get(profile.id)!].sort((a, b) => Number(!!a.sideParentSessionId) - Number(!!b.sideParentSessionId))
     for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
+      if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
       const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
       try {
         const parent = candidate.sideParentSessionId
@@ -1370,7 +1390,7 @@ async function restoreTabsForActiveProfile(): Promise<void> {
         await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
           ...(candidate.sideChat ? { sideChat: true as const } : {}),
           ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null)
+        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null, candidate)
       } catch (error) {
         await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
       }
@@ -1384,6 +1404,27 @@ async function restoreTabsForActiveProfile(): Promise<void> {
   } finally {
     if (pendingProfileRestores.get(profile.id) === operation) pendingProfileRestores.delete(profile.id)
   }
+}
+
+async function restoreSavedWorkspaceTabs(): Promise<void> {
+  const activeProfile = activeWorkspaceProfile(desktopConfig)
+  if (!activeProfile) return
+  const profiles = [activeProfile, ...desktopConfig.profiles.filter(profile => profile.id !== activeProfile.id)]
+    .filter(profile => profile.tabs.length > 0)
+  // Do not spend a saved session's slot on a fresh tab in an empty workspace.
+  if (!profiles.length) profiles.push(activeProfile)
+  await restoreTabsForProfile(profiles[0])
+  const activeTabId = tabsState.activeTabId
+  for (const profile of profiles.slice(1)) await restoreTabsForProfile(profile)
+  if (activeTabId && tabsState.tabs.some(tab => tab.id === activeTabId)) {
+    tabsState = activateTab(tabsState, activeTabId)
+  }
+  desktopConfig.activeProfileId = tabsState.tabs.find(tab => tab.id === tabsState.activeTabId)?.workspaceProfileId ?? activeProfile.id
+  syncWorkspaceState()
+  syncTabState()
+  persistProfileTabs()
+  broadcastState()
+  refreshMenus()
 }
 
 function observe(operation: Promise<unknown>, context: string): void {
@@ -1439,7 +1480,7 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
     if (firstProfileTab) {
       activateSessionTab(firstProfileTab.id)
     } else if (isCopilotResolved()) {
-      await restoreTabsForActiveProfile()
+      await restoreTabsForProfile()
     }
   }
   return snapshot()
@@ -1475,7 +1516,7 @@ async function retryResolution(): Promise<DesktopState> {
   broadcastState()
   broadcastCopilotSettingsState()
   if (state.resolution.version !== null && desktopConfig.activeProfileId && tabsState.tabs.length === 0) {
-    await restoreTabsForActiveProfile()
+    await restoreSavedWorkspaceTabs()
   }
   return snapshot()
 }
@@ -2563,6 +2604,8 @@ if (!app.requestSingleInstanceLock()) {
       },
       reloaded: async () => {
         desktopConfig = await readDesktopConfig(configPath())
+        profilesWithSessionTabs.clear()
+        unrestoredProfileTabs.clear()
         syncWorkspaceState(); broadcastState(); broadcastSettingsPreferences(); updateTrayVisibility()
       },
     })
