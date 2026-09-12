@@ -149,7 +149,7 @@ export function App(): JSX.Element {
         onRenameTab={requestTabRename}
         onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
         onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
-        onCreateTab={() => handleOperation(window.copilotDesktop.createTab())}
+        onCreateTab={(profileId) => handleOperation(window.copilotDesktop.createTab(null, profileId))}
         onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => handleOperation(window.copilotDesktop.createTab('picker'))}

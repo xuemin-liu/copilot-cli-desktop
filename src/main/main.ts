@@ -994,6 +994,7 @@ async function createSessionTab(
   })
   managedTabs.set(id, { session })
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
+  const previousProfileId = desktopConfig.activeProfileId
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
@@ -1007,6 +1008,8 @@ async function createSessionTab(
     ...sideOptions,
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
   })
+  desktopConfig.activeProfileId = profile.id
+  syncWorkspaceState()
   syncTabState()
   broadcastState()
   refreshMenus()
@@ -1025,11 +1028,19 @@ async function createSessionTab(
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
       session.removeAllListeners()
+      const wasActive = tabsState.activeTabId === id
       tabsState = closeTab(tabsState, id)
       managedTabs.delete(id)
+      if (wasActive) {
+        desktopConfig.activeProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId
+          ?? (desktopConfig.activeProfileId === profile.id ? previousProfileId : desktopConfig.activeProfileId)
+        syncWorkspaceState()
+      }
     }
     syncTabState()
     broadcastState()
+    refreshMenus()
+    persistProfileTabs()
     throw error
   }
   persistProfileTabs()
@@ -1885,10 +1896,14 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
-ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown) => {
+ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
-  return createSessionTab(undefined, override)
+  if (profileId === undefined) return createSessionTab(undefined, override)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
+  if (!profile) throw new Error('The selected workspace profile no longer exists')
+  return createSessionTab(profile, override)
 })
 ipcMain.handle('desktop:create-tab-with-attachments', (event) => {
   assertTrustedIpcSender(event)

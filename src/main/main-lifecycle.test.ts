@@ -20,6 +20,8 @@ interface Harness {
   configureMigration(busy: boolean, exclusive: boolean): void
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   blockSpawnPlan(work: Promise<void>): void
+  setNextSpawn(work: () => Promise<void>): void
+  flushConfig(): Promise<void>
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
@@ -44,7 +46,7 @@ interface Harness {
   requestSettings(name: string, ...args: unknown[]): Promise<unknown>
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
-  spawns: { args: string[]; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
+  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -83,10 +85,13 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `,
       './node-pty-backend.js': `
         export const spawns = [];
+        let nextSpawn;
+        export function setNextSpawn(work) { nextSpawn = work; }
         export async function spawnNodePty(file, args, options) {
+          const work = nextSpawn; nextSpawn = null; if (work) await work();
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, env: options.env, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, cwd: options.cwd, env: options.env, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
           return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
@@ -108,7 +113,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const source = await readFile(mainPath, 'utf8')
     const bundle = await build({
       stdin: { contents: source + `
-        import { spawns } from './node-pty-backend.js';
+        import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
@@ -120,6 +125,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
+          setNextSpawn,
+          flushConfig: () => configWriteQueue,
           maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
@@ -171,6 +178,60 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('workspace session creation targets an inactive profile without restoring its saved tabs', async () => fixture(async (harness, directory) => {
+  const first = createWorkspaceProfile(directory)
+  const targetPath = join(directory, 'second'); await mkdir(targetPath)
+  const second = createWorkspaceProfile(targetPath, 'read-only')
+  second.defaultResumeMode = 'continue'
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second], activeProfileId: first.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true })
+  const original = await harness.createMain()
+  second.tabs = [{ title: 'Saved session', lastSessionId: SOURCE }]
+  const state = await harness.request('desktop:create-tab', null, second.id)
+  assert.equal(harness.spawns.length, 2)
+  assert.equal(harness.spawns[1]!.cwd, targetPath)
+  assert.ok(harness.spawns[1]!.args.includes('--continue'))
+  assert.equal(harness.spawns[0]!.stopped, false)
+  assert.equal(state.activeProfileId, second.id)
+  const created = state.tabs.find((tab) => tab.id === state.activeTabId)!
+  assert.equal(created.workspaceProfileId, second.id)
+  assert.equal(created.sessionPermissionPreset, 'read-only')
+  assert.notEqual(created.lastSessionId, SOURCE)
+  assert.ok(state.tabs.some((tab) => tab.id === original.activeTabId))
+  for (const invalid of ['missing-profile', null, 42]) {
+    await assert.rejects(async () => harness.request('desktop:create-tab', 'new', invalid), /workspace profile/)
+  }
+  assert.equal(harness.spawns.length, 2)
+}))
+
+test('failed workspace starts restore consistent selection without overriding a newer session', async () => {
+  for (const scenario of ['no-tabs', 'existing-tab', 'newer-session']) await fixture(async (harness, directory) => {
+    const first = createWorkspaceProfile(directory)
+    const secondPath = join(directory, 'second'); await mkdir(secondPath)
+    const thirdPath = join(directory, 'third'); await mkdir(thirdPath)
+    const second = createWorkspaceProfile(secondPath), third = createWorkspaceProfile(thirdPath)
+    harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second, third], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+    const original = scenario === 'no-tabs' ? null : await harness.createMain()
+    let rejectSpawn!: (error: Error) => void, entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    harness.setNextSpawn(() => { entered(); return new Promise<void>((_resolve, reject) => { rejectSpawn = reject }) })
+    const failed = harness.request('desktop:create-tab', null, second.id)
+    const rejection = assert.rejects(failed, /workspace unavailable/)
+    await started
+    const newer = scenario === 'newer-session' ? await harness.request('desktop:create-tab', null, third.id) : null
+    rejectSpawn(new Error('workspace unavailable'))
+    await rejection
+    const state = await harness.request('desktop:get-state')
+    assert.equal(state.activeProfileId, newer ? third.id : first.id)
+    assert.equal(state.activeTabId, newer?.activeTabId ?? original?.activeTabId ?? null)
+    assert.ok(state.tabs.every((tab) => tab.workspaceProfileId !== second.id))
+    assert.ok(harness.spawns.every((spawn) => !spawn.stopped))
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8'))
+    assert.equal(saved.activeProfileId, state.activeProfileId)
+    assert.equal(saved.profiles.find((profile: WorkspaceProfile) => profile.id === second.id).tabs.length, 0)
+  })
+})
 
 test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)

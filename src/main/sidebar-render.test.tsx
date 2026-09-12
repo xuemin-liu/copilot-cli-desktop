@@ -140,7 +140,9 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
     />,
   )
 
-  assert.match(markup, /New Session/)
+  assert.match(markup, /aria-label="New session in copilot-cli-desktop"/)
+  assert.match(markup, /title="New session in copilot-cli-desktop \(Ctrl\+T\)"/)
+  assert.doesNotMatch(markup, /new-session-button/)
   assert.match(markup, /Workspaces/)
   assert.match(markup, /copilot-cli-desktop/)
   assert.match(markup, /Review pull request/)

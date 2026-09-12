@@ -12,7 +12,7 @@ for supported categories and the separate history compatibility gate.
 | --- | --- | --- |
 | Persistent AI-tool sidebar | Copilot-branded sidebar with workspace groups and sessions | Equivalent |
 | Collapsible sidebar rail | Sidebar collapse/expand control with a compact action rail | Equivalent |
-| New Session primary action | Starts a new PTY-backed Copilot CLI session | Equivalent |
+| New Session action | + beside each workspace starts a PTY-backed Copilot CLI session there using its default resume mode; Ctrl+T remains available | Equivalent |
 | Workspace list | Recent path-keyed workspace profiles | Equivalent |
 | Workspace/session search | Sidebar search filters names, paths, and live session titles | Equivalent |
 | Group/order view options | Workspace vs one-list grouping and manual vs last-activity ordering | Equivalent |
