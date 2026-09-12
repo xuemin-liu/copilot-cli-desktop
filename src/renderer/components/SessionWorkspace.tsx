@@ -13,6 +13,8 @@ interface SessionWorkspaceProps {
   onClose: (tabId: string) => void
   onRestart: (tabId: string) => void
   onCreate: () => void
+  poppedOutTabIds?: string[]
+  onPopOut?: (tabId: string) => void
 }
 
 function savedSplit(): number {
@@ -22,7 +24,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const areaRef = useRef<HTMLDivElement>(null)
@@ -56,6 +58,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
             <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}</span>
+              {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && (
@@ -73,7 +76,11 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
             </header>
             <div className="session-terminal">
-              <TerminalPane tabId={tab.id} active={visible} focused={focused} sessionProcessId={tab.processId} />
+              {poppedOutTabIds.includes(tab.id) ? (
+                <div className="empty-state"><p>This session is open in another window.</p>
+                  <button type="button" onClick={() => onActivate(tab.id)}>Show session window</button>
+                </div>
+              ) : <TerminalPane tabId={tab.id} active={visible} focused={focused} sessionProcessId={tab.processId} />}
               {tab.status === 'crashed' && !tab.remote && (
                 <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Restart this session</button>
               )}

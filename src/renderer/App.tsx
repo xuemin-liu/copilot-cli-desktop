@@ -4,6 +4,7 @@ import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
+import { SessionWindow } from './components/SessionWindow.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 
 const EMPTY_STATE: DesktopState = {
@@ -82,6 +83,14 @@ export function App(): JSX.Element {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = event.ctrlKey || event.metaKey
       if (!modifier) return
+      if (state.windowSessionId) {
+        if (event.key.toLowerCase() === 'w') {
+          event.preventDefault()
+          event.stopPropagation()
+          handleOperation(window.copilotDesktop.dockTab(state.windowSessionId))
+        }
+        return
+      }
       if (event.key.toLowerCase() === 't') {
         event.preventDefault()
         if (canOpenTab) handleOperation(window.copilotDesktop.createTab())
@@ -95,9 +104,17 @@ export function App(): JSX.Element {
         void window.copilotDesktop.openSettings()
       }
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [canOpenTab, state.activeTabId])
+    const capture = Boolean(state.windowSessionId)
+    window.addEventListener('keydown', handleKeyDown, capture)
+    return () => window.removeEventListener('keydown', handleKeyDown, capture)
+  }, [canOpenTab, state.activeTabId, state.windowSessionId])
+
+  if (state.windowSessionId) {
+    const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
+    return tab ? <SessionWindow tab={tab} error={operationError}
+      onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
+      onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
+  }
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
 
@@ -146,6 +163,7 @@ export function App(): JSX.Element {
         onSelectWorkspace={() => void window.copilotDesktop.selectWorkspace()}
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
+        onPopOutTab={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
         onRenameTab={requestTabRename}
         onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
         onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
@@ -184,6 +202,8 @@ export function App(): JSX.Element {
           <>
           {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            poppedOutTabIds={state.poppedOutTabIds ?? []}
+            onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}

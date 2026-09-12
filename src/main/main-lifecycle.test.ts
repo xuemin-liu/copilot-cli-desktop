@@ -17,6 +17,11 @@ import { MigrationImportFailure } from './migration-import.js'
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
+  createTestWindow(): void
+  refreshAppMenu(): void
+  quitCalls(): number
+  windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
+  requestIn(tabId: string, name: string, ...args: unknown[]): Promise<any>
   configureMigration(busy: boolean, exclusive: boolean): void
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   blockSpawnPlan(work: Promise<void>): void
@@ -64,11 +69,37 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const mocks: Record<string, string> = {
       electron: `
         import { EventEmitter } from 'node:events';
-        export const app = Object.assign(new EventEmitter(), { requestSingleInstanceLock: () => false, quit() {}, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)} });
+        export const app = Object.assign(new EventEmitter(), { quitCalls: 0, requestSingleInstanceLock: () => false, quit() { this.quitCalls++; }, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)} });
         const handlers = new Map();
         export const ipcMain = { handle: (name, handler) => handlers.set(name, handler), invoke: (name, ...args) => handlers.get(name)(...args) };
-        export const Menu = { getApplicationMenu: () => null };
-        export const BrowserWindow = class {};
+        const allWindows = []; let applicationMenu = null;
+        export const Menu = {
+          getApplicationMenu: () => applicationMenu,
+          buildFromTemplate: template => template,
+          setApplicationMenu(menu) { applicationMenu = menu; for (const window of allWindows) if (!window.destroyed) window.setMenu(menu); },
+        };
+        export const BrowserWindow = class extends EventEmitter {
+          destroyed = false; focused = 0; title = ''; messages = [];
+          constructor(options = {}) { super(); this.title = options.title || ''; allWindows.push(this); }
+          static getFocusedWindow() { return null; }
+          webContents = Object.assign(new EventEmitter(), {
+            getURL: () => this.url || '',
+            send: (channel, payload) => this.messages.push({ channel, payload }),
+            setWindowOpenHandler() {},
+            session: { setPermissionCheckHandler() {}, setPermissionRequestHandler() {} },
+          });
+          setMenu(menu) { this.menu = menu; } setTitle(title) { this.title = title; }
+          isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; }
+          show() {} focus() { this.focused++; this.emit('focus'); } restore() {}
+          async loadFile(path) {
+            this.url = (await import('node:url')).pathToFileURL(path).href;
+            let prevented = false;
+            this.emit('page-title-updated', { preventDefault() { prevented = true; } }, 'Copilot CLI Desktop');
+            if (!prevented) this.title = 'Copilot CLI Desktop';
+          }
+          close() { this.destroy(); }
+          destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
+        };
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
       `,
       'electron-updater': 'export default { autoUpdater: null };',
@@ -120,6 +151,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         const originalWriteAppLog = writeAppLog;
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
+          createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
+          refreshAppMenu: installApplicationMenu,
+          quitCalls: () => app.quitCalls,
+          windowFor: (tabId) => tabId ? sessionWindows.get(tabId) : mainWindow,
+          requestIn: (tabId, name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: sessionWindows.get(tabId).webContents }, ...args),
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); shell.showItemInFolder = () => {}; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
@@ -157,7 +193,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           maintain: maintainCopilotCli,
           maintenanceStatus: () => copilotMaintenance.status,
           requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() }, sender: { isDestroyed: () => settingsSenderDestroyed } }, ...args),
-          request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() } }, ...args),
+          request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
@@ -178,6 +214,115 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('pop-out transfers terminal ownership, focuses one window, and docks without stopping the CLI', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), notifications: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  harness.createTestWindow()
+  const initial = await harness.createMain()
+  const id = initial.activeTabId!
+  harness.spawns[0]!.emitData('before move\r\n')
+  const detached = await harness.request('desktop:pop-out-tab', id)
+  assert.deepEqual(detached.poppedOutTabIds, [id])
+  const window = harness.windowFor(id)
+  await harness.request('desktop:pop-out-tab', id)
+  assert.equal(harness.windowFor(id), window)
+  const focusCount = window.focused
+  await harness.request('desktop:activate-tab', id)
+  assert.equal(window.focused, focusCount + 1)
+  assert.equal((await harness.requestIn(id, 'desktop:get-state')).windowSessionId, id)
+  await harness.request('desktop:write-tab', id, 'stale main input')
+  await harness.request('desktop:resize-tab', id, 10, 10)
+  assert.deepEqual(harness.spawns[0]!.written, [])
+  assert.deepEqual(harness.spawns[0]!.resized, [])
+  await harness.requestIn(id, 'desktop:write-tab', id, 'popout input')
+  await harness.requestIn(id, 'desktop:resize-tab', id, 123, 45)
+  assert.deepEqual(harness.spawns[0]!.written, ['popout input'])
+  assert.deepEqual(harness.spawns[0]!.resized, [[123, 45]])
+  const previousMainMessages = harness.windowFor().messages.length
+  harness.spawns[0]!.emitData('during move\r\n')
+  assert.equal(harness.windowFor().messages.length, previousMainMessages)
+  assert.ok(window.messages.some(message => message.channel === 'desktop:tab-output' && message.payload.data.includes('during move')))
+  assert.match(await harness.requestIn(id, 'desktop:get-tab-backlog', id), /before move[\s\S]*during move/)
+  const replay = await harness.requestIn(id, 'desktop:get-tab-snapshot', id)
+  const output = window.messages.find(message => message.channel === 'desktop:tab-output')!
+  assert.equal(replay.sequence, output.payload.sequence)
+  assert.match(replay.data, /during move/)
+  await harness.request('desktop:rename-tab', id, 'Renamed pop-out')
+  assert.match(window.title, /Renamed pop-out/)
+  window.close()
+  assert.deepEqual((await harness.request('desktop:get-state')).poppedOutTabIds, [])
+  assert.equal(harness.spawns.length, 1)
+  assert.equal(harness.spawns[0]!.stopped, false)
+  await harness.request('desktop:write-tab', id, 'back in main')
+  assert.deepEqual(harness.spawns[0]!.written, ['popout input', 'back in main'])
+  await harness.request('desktop:pop-out-tab', id)
+  const quitCalls = harness.quitCalls()
+  harness.windowFor().close()
+  assert.equal(harness.quitCalls(), quitCalls + 1, 'closing main with auxiliary windows still requests app quit')
+}))
+
+test('multiple pop-outs isolate input and survive sibling close, restart, and renderer crash', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), notifications: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  harness.createTestWindow()
+  const first = (await harness.createMain()).activeTabId!
+  const second = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:pop-out-tab', first)
+  await harness.request('desktop:pop-out-tab', second)
+  const firstWindow = harness.windowFor(first)
+  const secondWindow = harness.windowFor(second)
+  await harness.requestIn(first, 'desktop:write-tab', second, 'wrong session')
+  assert.deepEqual(harness.spawns[1]!.written, [])
+  await harness.requestIn(second, 'desktop:restart-tab', second)
+  assert.equal(harness.windowFor(second), secondWindow)
+  assert.equal(harness.spawns[1]!.stopped, true)
+  assert.equal(harness.spawns[2]!.stopped, false)
+  await harness.request('desktop:close-tab', first)
+  assert.equal(firstWindow.destroyed, true)
+  assert.equal(secondWindow.destroyed, false)
+  assert.deepEqual((await harness.request('desktop:get-state')).poppedOutTabIds, [second])
+  secondWindow.webContents.emit('render-process-gone')
+  assert.deepEqual((await harness.request('desktop:get-state')).poppedOutTabIds, [])
+  assert.equal(harness.spawns[2]!.stopped, false)
+  await assert.rejects(async () => harness.request('desktop:pop-out-tab', first), /Unknown session/)
+  await harness.request('desktop:pop-out-tab', second)
+  const beforeQuit = harness.windowFor(second)
+  harness.beginQuit()
+  beforeQuit.close()
+  await harness.flushConfig()
+  assert.ok(harness.spawns.every(spawn => spawn.stopped))
+  await assert.rejects(async () => harness.request('desktop:pop-out-tab', second), /shutting down/)
+}))
+
+test('idle pop-outs retain their title, stay menu-free, and focus on workspace activation', async () => fixture(async (harness, directory) => {
+  const first = createWorkspaceProfile(directory)
+  const secondPath = join(directory, 'second'); await mkdir(secondPath)
+  const second = createWorkspaceProfile(secondPath)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), notifications: false, profiles: [first, second], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+  harness.createTestWindow()
+  harness.refreshAppMenu()
+  const firstId = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:rename-tab', firstId, 'Idle session title')
+  await harness.request('desktop:pop-out-tab', firstId)
+  const popout = harness.windowFor(firstId)
+  // Flush the mocked page load, which applies the HTML title unless prevented.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(popout.title, 'Idle session title — Copilot CLI Desktop')
+  assert.equal(popout.menu, null)
+  harness.refreshAppMenu()
+  assert.ok(harness.windowFor().menu)
+  assert.equal(popout.menu, null, 'global menu rebuilding must not restore pop-out accelerators')
+  await harness.request('desktop:create-tab', null, second.id)
+  const previousFocus = popout.focused
+  const switched = await harness.request('desktop:activate-profile', first.id)
+  assert.equal(popout.focused, previousFocus + 1)
+  assert.equal(switched.activeProfileId, first.id)
+  assert.equal(switched.activeTabId, firstId)
+  assert.equal(popout.menu, null)
+  assert.equal(harness.spawns.length, 2)
+  assert.ok(harness.spawns.every(spawn => !spawn.stopped))
+}))
 
 test('workspace session creation targets an inactive profile without restoring its saved tabs', async () => fixture(async (harness, directory) => {
   const first = createWorkspaceProfile(directory)

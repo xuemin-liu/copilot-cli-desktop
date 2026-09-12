@@ -13,6 +13,7 @@ import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copil
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
+  sequence: number
   tabId: string
   data: string
 }
@@ -31,12 +32,15 @@ export interface CopilotDesktopBridge {
   createTabWithAttachments(): Promise<DesktopState>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
+  popOutTab(tabId: string): Promise<DesktopState>
+  dockTab(tabId: string): Promise<DesktopState>
   renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
+  getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>
   copyText(text: string): Promise<void>

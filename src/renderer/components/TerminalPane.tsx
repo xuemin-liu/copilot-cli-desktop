@@ -3,6 +3,7 @@ import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
+import { TerminalReplay } from '../terminal-replay.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -280,25 +281,12 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
-    let backlogApplied = false
-    const bufferedLive: string[] = []
+    // Historic OSC 52 commands must not overwrite today's clipboard.
+    const replay = new TerminalReplay(data => terminal.write(stripOsc52Commands(data)), writePtyOutput)
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
-      if (payload.tabId !== tabId) return
-      if (!backlogApplied) {
-        bufferedLive.push(payload.data)
-        return
-      }
-      writePtyOutput(payload.data)
+      if (payload.tabId === tabId) replay.push(payload)
     })
-    void window.copilotDesktop.getTabBacklog(tabId).then((backlog) => {
-      // Backlog is terminal history, not a new command stream. Remove old OSC
-      // 52 writes so replay cannot overwrite today's clipboard or consume the
-      // first-live-copy recovery before the user copies anything in this pane.
-      if (backlog) terminal.write(stripOsc52Commands(backlog))
-      for (const chunk of bufferedLive) writePtyOutput(chunk)
-      bufferedLive.length = 0
-      backlogApplied = true
-    })
+    void window.copilotDesktop.getTabSnapshot(tabId).then(snapshot => replay.restore(snapshot))
 
     let fitFrame = 0
     const fitTerminal = (): void => {
@@ -318,6 +306,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     resizeObserver.observe(container)
 
     return () => {
+      replay.dispose()
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       window.clearTimeout(copyStatusTimer)
