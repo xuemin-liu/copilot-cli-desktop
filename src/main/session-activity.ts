@@ -13,31 +13,32 @@ export class SessionActivityTracker {
     this.finalResponse = false
   }
 
-  consume(line: string): SessionActivity | null {
+  /** undefined means unchanged; null explicitly clears unreliable activity. */
+  consume(line: string): SessionActivity | null | undefined {
     let event: { type?: unknown; agentId?: unknown; data?: { parentToolCallId?: unknown; turnId?: unknown; content?: unknown; toolRequests?: unknown } } | null
-    try { event = JSON.parse(line) } catch { return null }
-    if (!event || typeof event !== 'object' || event.agentId || event.data?.parentToolCallId) return null
+    try { event = JSON.parse(line) } catch { return undefined }
+    if (!event || typeof event !== 'object' || event.agentId || event.data?.parentToolCallId) return undefined
     const before = this.activity
     switch (event.type) {
       case 'assistant.turn_start':
-        if (typeof event.data?.turnId !== 'string') return null
+        if (typeof event.data?.turnId !== 'string') return undefined
         this.turnId = event.data.turnId
         this.finalResponse = false
         this.activity = 'working'
         break
       case 'assistant.message':
-        if (!this.turnId) return null
+        if (!this.turnId) return undefined
         this.finalResponse = typeof event.data?.content === 'string'
           && (Array.isArray(event.data.toolRequests) ? event.data.toolRequests.length === 0 : event.data.toolRequests === undefined)
         break
       case 'tool.execution_start':
-        if (!this.turnId) return null
+        if (!this.turnId) return undefined
         this.finalResponse = false
         this.activity = 'working'
         break
       case 'assistant.turn_end':
-        if (event.data?.turnId !== this.turnId || this.turnId === null) return null
-        if (this.finalResponse) this.activity = 'idle'
+        if (event.data?.turnId !== this.turnId || this.turnId === null) return undefined
+        this.activity = this.finalResponse ? 'idle' : null
         this.turnId = null
         this.finalResponse = false
         break
@@ -47,7 +48,7 @@ export class SessionActivityTracker {
         this.finalResponse = false
         break
     }
-    return this.activity !== before ? this.activity : null
+    return this.activity !== before ? this.activity : undefined
   }
 
   /** Historical unfinished work is not evidence that this process is working. */

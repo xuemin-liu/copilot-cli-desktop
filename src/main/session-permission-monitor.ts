@@ -134,7 +134,7 @@ export class SessionPermissionMonitor {
     for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
       const line = buffer.subarray(start, end).toString('utf8').trim()
       const activity = this.activity.consume(line)
-      if (!this.seeding && activity) this.onActivity(activity)
+      if (!this.seeding && activity !== undefined) this.onActivity(activity)
       const mode = parsePermissionChangedEvent(
         line,
         (payload) => this.onDiagnostic(`Unknown session.permissions_changed payload: ${JSON.stringify(payload)}`),
@@ -149,6 +149,9 @@ export class SessionPermissionMonitor {
     if (this.pending.length > MAX_PENDING_RECORD_BYTES) {
       this.pending = Buffer.alloc(0)
       this.discardPartialRecord = true
+      this.activity.reset()
+      if (!this.seeding) this.onActivity(null)
+      this.onDiagnostic(`Skipped session event exceeding ${MAX_PENDING_RECORD_BYTES} bytes; task activity is unknown`)
     }
   }
 }
