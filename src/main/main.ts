@@ -1374,14 +1374,24 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
   if (tabsState.tabs.some((tab) => tab.workspaceProfileId === profile.id) && !unrestoredProfileTabs.get(profile.id)?.length) return
-  if (!unrestoredProfileTabs.has(profile.id)) {
-    unrestoredProfileTabs.set(profile.id, profile.tabs.length > 0 ? [...profile.tabs] : [{ title: profile.name, lastSessionId: null }])
+  if (!unrestoredProfileTabs.has(profile.id) && profile.tabs.length > 0) {
+    unrestoredProfileTabs.set(profile.id, [...profile.tabs])
   }
   const operation = (async () => {
-    // A parent that failed on a previous launch may follow its saved side chat.
-    const restored = [...unrestoredProfileTabs.get(profile.id)!].sort((a, b) => Number(!!a.sideParentSessionId) - Number(!!b.sideParentSessionId))
-    for (const candidate of restored.slice(0, MAX_SESSION_TABS)) {
+    const restored = [...(unrestoredProfileTabs.get(profile.id) ?? [])]
+    // Move only a parent that follows its child; keep already adjacent pairs
+    // and all other saved tabs in their existing order.
+    for (let index = 0; index < restored.length; index++) {
+      const parentId = restored[index]!.sideParentSessionId
+      if (!parentId) continue
+      const parentIndex = restored.findIndex(tab => !tab.sideChat && tab.lastSessionId === parentId)
+      if (parentIndex > index) restored.splice(index, 0, ...restored.splice(parentIndex, 1))
+    }
+    // A fresh tab for an empty workspace is not a saved session to retain.
+    const candidates: (RestoredTab | null)[] = restored.length ? restored : [null]
+    for (const savedCandidate of candidates.slice(0, MAX_SESSION_TABS)) {
       if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
+      const candidate = savedCandidate ?? { title: profile.name, lastSessionId: null }
       const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
       try {
         const parent = candidate.sideParentSessionId
@@ -1390,7 +1400,7 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
         await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
           ...(candidate.sideChat ? { sideChat: true as const } : {}),
           ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null, candidate)
+        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null, savedCandidate)
       } catch (error) {
         await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
       }
@@ -1508,7 +1518,7 @@ async function updateWorkspaceProfile(
   broadcastState()
 }
 
-async function retryResolution(): Promise<DesktopState> {
+async function retryResolution(restoreAllWorkspaces = false): Promise<DesktopState> {
   const probe = await probeCopilotResolution()
   state.resolution = probe.resolution
   copilotResolutionRefreshFailureState = EMPTY_RESOLUTION_REFRESH_FAILURE_STATE
@@ -1516,7 +1526,8 @@ async function retryResolution(): Promise<DesktopState> {
   broadcastState()
   broadcastCopilotSettingsState()
   if (state.resolution.version !== null && desktopConfig.activeProfileId && tabsState.tabs.length === 0) {
-    await restoreSavedWorkspaceTabs()
+    if (restoreAllWorkspaces) await restoreSavedWorkspaceTabs()
+    else await restoreTabsForProfile()
   }
   return snapshot()
 }
@@ -2671,7 +2682,7 @@ if (!app.requestSingleInstanceLock()) {
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
 
-    await retryResolution()
+    await retryResolution(true)
     scheduleAutomaticUpdateCheck()
   }).catch((error) => {
     dialog.showErrorBox('Copilot CLI Desktop failed to start', String(error))

@@ -838,6 +838,63 @@ test('restoration links a saved side chat even when its parent follows it in the
   assert.equal(state.tabs.find(tab => tab.sideChat)?.sideParentTabId, state.tabs.find(tab => tab.lastSessionId === SOURCE)?.id)
 }))
 
+test('a failed fresh workspace launch never persists a phantom restore candidate', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  harness.setNextSpawn(async () => { throw new Error('temporary PTY failure') })
+  await harness.restore()
+  await harness.flushConfig()
+  const failed = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(failed.profiles[0]!.tabs, [])
+
+  const opened = await harness.request('desktop:create-tab', 'new', profile.id)
+  await harness.flushConfig()
+  const retried = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(retried.profiles[0]!.tabs.map(tab => tab.lastSessionId), [opened.tabs[0]!.lastSessionId])
+  await harness.request('desktop:close-tab', opened.activeTabId)
+  await harness.flushConfig()
+  const closed = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(closed.profiles[0]!.tabs, [])
+}))
+
+test('manual CLI recheck and update restore only the selected workspace', async () => {
+  for (const operation of ['recheck', 'update']) await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    const secondPath = join(directory, 'second'); await mkdir(secondPath)
+    const second = createWorkspaceProfile(secondPath)
+    second.tabs = [{ title: 'Other workspace', lastSessionId: SOURCE }]
+    harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, second], activeProfileId: profile.id }, capabilities)
+    if (operation === 'recheck') await harness.request('desktop:retry-resolution')
+    else await harness.maintain('update')
+    const state = await harness.request('desktop:get-state')
+    assert.equal(state.activeProfileId, profile.id)
+    assert.deepEqual(harness.spawns.map(spawn => spawn.cwd), [directory])
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(saved.profiles[1]!.tabs.map(tab => tab.lastSessionId), [SOURCE])
+  })
+})
+
+test('restoration preserves the saved order of adjacent parent and side-chat pairs', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  const secondParent = '33333333-3333-4333-8333-333333333333'
+  const secondSide = '44444444-4444-4444-8444-444444444444'
+  profile.tabs = [
+    { title: 'Parent 1', lastSessionId: SOURCE },
+    { title: 'Side 1', lastSessionId: FORK, sideChat: true, sideParentSessionId: SOURCE },
+    { title: 'Parent 2', lastSessionId: secondParent },
+    { title: 'Side 2', lastSessionId: secondSide, sideChat: true, sideParentSessionId: secondParent },
+  ]
+  const expected = profile.tabs.map(tab => tab.lastSessionId)
+  await harness.restore()
+  const state = await harness.request('desktop:get-state')
+  assert.deepEqual(state.tabs.map(tab => tab.lastSessionId), expected)
+  assert.equal(state.tabs[1]!.sideParentTabId, state.tabs[0]!.id)
+  assert.equal(state.tabs[3]!.sideParentTabId, state.tabs[2]!.id)
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.lastSessionId), expected)
+}))
+
 test('an empty selected workspace does not replace saved sessions with a new tab at startup', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   const secondPath = join(directory, 'second'); await mkdir(secondPath)
