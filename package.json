@@ -29,7 +29,8 @@
     "dist:win": "npm run build && electron-builder --win --publish never && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
     "migration:smoke": "npm run build && node dist/scripts/migration-smoke.js",
     "migration:check": "npm run build && node scripts/migration-electron-check.mjs",
-    "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity"
+    "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity",
+    "popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --popout"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

@@ -169,6 +169,8 @@ const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
+const sessionWindows = new Map<string, BrowserWindow>()
+const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let credentialStore: SecureCredentialStore | null = null
@@ -382,9 +384,11 @@ function writeSessionLog(tabId: string, chunk: string): Promise<void> {
   return operation
 }
 
-function snapshot(): DesktopState {
+function snapshot(windowSessionId?: string): DesktopState {
   return {
     ...state,
+    poppedOutTabIds: [...sessionWindows.keys()],
+    ...(windowSessionId ? { windowSessionId } : {}),
     profiles: state.profiles.map((profile) => ({ ...profile, tabs: profile.tabs.map((tab) => ({ ...tab })) })),
     tabs: state.tabs.map((tab) => ({ ...tab })),
     recentLogs: [...state.recentLogs],
@@ -406,6 +410,68 @@ function broadcastState(): void {
   if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), shellUrl())) {
     window.webContents.send('desktop:state-changed', snapshot())
   }
+  for (const [tabId, popout] of sessionWindows) {
+    if (!popout.isDestroyed() && isLauncherShellUrl(popout.webContents.getURL(), shellUrl())) {
+      popout.setTitle(`${state.tabs.find(tab => tab.id === tabId)?.title ?? 'Session'} — Copilot CLI Desktop`)
+      popout.webContents.send('desktop:state-changed', snapshot(tabId))
+    }
+  }
+}
+
+function sessionWindowId(sender: IpcMainInvokeEvent['sender']): string | undefined {
+  return [...sessionWindows].find(([, window]) => window.webContents === sender)?.[0]
+}
+
+// Ownership changes synchronously, before either renderer processes its next
+// state update. Ignore stale input/resize messages from the previous terminal.
+function ownsSessionTerminal(event: IpcMainInvokeEvent, tabId: string): boolean {
+  return (sessionWindows.get(tabId) ?? mainWindow)?.webContents === event.sender
+}
+
+function focusSessionWindow(window: BrowserWindow): void {
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
+function popOutSessionTab(tabId: string): DesktopState {
+  if (shuttingDown()) throw new Error('The application is shutting down')
+  const tab = tabsState.tabs.find(tab => tab.id === tabId)
+  if (!tab) throw new Error('Unknown session tab')
+  const existing = sessionWindows.get(tabId)
+  if (existing) { focusSessionWindow(existing); return snapshot() }
+  const window = new BrowserWindow({
+    width: 1000, height: 760, minWidth: 500, minHeight: 360,
+    show: false, backgroundColor: '#0b1020', icon: iconPath(),
+    title: `${tab.title} — Copilot CLI Desktop`,
+    webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged },
+  })
+  sessionWindows.set(tabId, window)
+  window.on('focus', refreshMenus)
+  window.setMenu(null)
+  window.webContents.session.setPermissionCheckHandler(() => false)
+  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, url) => { if (url !== shellUrl()) event.preventDefault() })
+  window.webContents.on('render-process-gone', () => { if (!window.isDestroyed()) window.destroy() })
+  window.once('ready-to-show', () => { if (!window.isDestroyed()) focusSessionWindow(window) })
+  window.on('closed', () => {
+    if (sessionWindows.get(tabId) !== window) return
+    sessionWindows.delete(tabId)
+    if (!shuttingDown() && tabsState.tabs.some(tab => tab.id === tabId)) activateSessionTab(tabId)
+    else broadcastState()
+  })
+  broadcastState()
+  observe(window.loadFile(rendererPath('index.html')).catch(error => {
+    if (!window.isDestroyed()) window.destroy()
+    throw error
+  }), 'Could not open session window')
+  return snapshot()
+}
+
+function dockSessionTab(tabId: string): DesktopState {
+  sessionWindows.get(tabId)?.close()
+  return snapshot()
 }
 
 async function persistConfig(): Promise<void> {
@@ -721,16 +787,16 @@ function copyDiagnosticsToClipboard(): void {
 function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const title = tab?.title ?? 'Copilot session'
-  const window = mainWindow
-  const isFocusedOnThisTab = Boolean(window?.isFocused()) && tabsState.activeTabId === tabId
+  const popout = sessionWindows.get(tabId)
+  const window = popout ?? mainWindow
+  const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || tabsState.activeTabId === tabId)
   if (isFocusedOnThisTab) return
   const openTab = (): void => {
     if (tabsState.tabs.some((candidate) => candidate.id === tabId)) {
-      tabsState = activateTab(tabsState, tabId)
-      syncTabState()
-      broadcastState()
+      activateSessionTab(tabId)
+    } else {
+      restoreMainWindow()
     }
-    restoreMainWindow()
   }
   if (event.type === 'approval-needed') {
     showNotification('Copilot needs approval', `"${title}" is waiting for your approval.`, openTab)
@@ -902,11 +968,13 @@ function wireSessionEvents(id: string, session: PtySession): void {
     broadcastState()
   })
   session.on('log', (chunk: string) => {
+    const sequence = (sessionOutputSequences.get(id) ?? 0) + 1
+    sessionOutputSequences.set(id, sequence)
     tabsState = touchTab(tabsState, id)
     scheduleActivityBroadcast(id)
     observe(writeSessionLog(id, chunk), 'Could not write session log')
-    const window = mainWindow
-    if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk })
+    const window = sessionWindows.get(id) ?? mainWindow
+    if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk, sequence })
   })
   session.on('session-id', (sessionId: string) => {
     if (managedTabs.get(id)?.session !== session) return
@@ -933,7 +1001,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     syncTabState()
     persistProfileTabs()
     broadcastState()
-    const window = mainWindow
+    const window = sessionWindows.get(id) ?? mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-exit', { tabId: id, exit })
   })
 }
@@ -1098,6 +1166,8 @@ async function createSessionWithAttachments(): Promise<DesktopState> {
 }
 
 function activateSessionTab(tabId: string): DesktopState {
+  const popout = sessionWindows.get(tabId)
+  if (popout) { focusSessionWindow(popout); return snapshot() }
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
   restoreMainWindow()
@@ -1136,9 +1206,13 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     }
     tabsState = closeTab(tabsState, tabId)
     syncTabState()
+    const popout = sessionWindows.get(tabId)
+    sessionWindows.delete(tabId)
+    popout?.destroy()
     persistProfileTabs()
     await sessionLogWriteQueues.get(tabId)
     sessionLogBytesWritten.delete(tabId)
+    sessionOutputSequences.delete(tabId)
     broadcastState()
     refreshMenus()
     return snapshot()
@@ -1594,6 +1668,9 @@ async function runCopilotResourceMutation(args: string[]): Promise<void> {
 }
 
 function installApplicationMenu(): void {
+  const focusedWindow = BrowserWindow.getFocusedWindow()
+  const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
+  const menuTabId = focusedPopoutId ?? tabsState.activeTabId
   const menu = Menu.buildFromTemplate([
     {
       label: 'File',
@@ -1609,7 +1686,12 @@ function installApplicationMenu(): void {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
           enabled: tabsState.activeTabId !== null,
-          click: () => tabsState.activeTabId && observe(closeSessionTab(tabsState.activeTabId), 'Could not close session tab'),
+          click: () => {
+            const focused = BrowserWindow.getFocusedWindow()
+            const poppedOut = focused ? sessionWindowId(focused.webContents) : undefined
+            if (poppedOut) dockSessionTab(poppedOut)
+            else if (tabsState.activeTabId) observe(closeSessionTab(tabsState.activeTabId), 'Could not close session tab')
+          },
         },
         {
           label: 'Resume Session…',
@@ -1624,8 +1706,8 @@ function installApplicationMenu(): void {
         {
           label: 'Restart Active Session',
           accelerator: 'CmdOrCtrl+Shift+R',
-          enabled: !shuttingDown() && activeTabIsRestartable(),
-          click: () => tabsState.activeTabId && observe(restartSessionTab(tabsState.activeTabId), 'Could not restart session tab'),
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote),
+          click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
         },
         { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
         { type: 'separator' },
@@ -1701,6 +1783,7 @@ function createWindow(
   window.once('ready-to-show', () => {
     if (showOnReady) window.show()
   })
+  window.on('focus', refreshMenus)
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, targetUrl) => {
     if (targetUrl !== shellUrl()) event.preventDefault()
@@ -1718,6 +1801,9 @@ function createWindow(
   window.on('closed', () => {
     finishClosePrompt(window, closePromptAbort)
     mainWindow = null
+    // Auxiliary windows must not keep the app alive after closing the main
+    // window with Quit selected. before-quit owns all session cleanup.
+    if (!explicitQuitRequested) app.quit()
   })
   observe(window.loadFile(rendererPath('index.html')), 'Could not load application window')
   return window
@@ -1889,10 +1975,20 @@ async function stopAllSessions(): Promise<void> {
 // --- IPC: main window -------------------------------------------------
 // pty IPC channels (write/resize) validate the sender against the launcher
 // shell URL like every other handler; the tabId itself is passed explicitly
-// by the renderer because a single window hosts every tab's terminal pane.
+// by the renderer; only the current terminal owner may write or resize it.
 ipcMain.handle('desktop:get-state', (event) => {
   assertTrustedIpcSender(event)
-  return snapshot()
+  return snapshot(sessionWindowId(event.sender))
+})
+ipcMain.handle('desktop:pop-out-tab', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  return popOutSessionTab(tabId)
+})
+ipcMain.handle('desktop:dock-tab', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  return dockSessionTab(tabId)
 })
 ipcMain.handle('desktop:select-workspace', (event) => {
   assertTrustedIpcSender(event)
@@ -1946,6 +2042,7 @@ ipcMain.handle('desktop:fork-side-chat', (event, tabId: unknown, sourceSessionId
 ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof data !== 'string') throw new Error('Invalid pty input')
+  if (!ownsSessionTerminal(event, tabId)) return
   managedTabs.get(tabId)?.session.write(data)
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {
@@ -1960,12 +2057,17 @@ ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows
   ) {
     throw new Error('Invalid pty resize request')
   }
-  managedTabs.get(tabId)?.session.resize(Math.max(1, Math.round(cols)), Math.max(1, Math.round(rows)))
+  if (ownsSessionTerminal(event, tabId)) managedTabs.get(tabId)?.session.resize(Math.max(1, Math.round(cols)), Math.max(1, Math.round(rows)))
 })
 ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return managedTabs.get(tabId)?.session.recentOutputText ?? ''
+})
+ipcMain.handle('desktop:get-tab-snapshot', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  return { data: managedTabs.get(tabId)?.session.recentOutputText ?? '', sequence: sessionOutputSequences.get(tabId) ?? 0 }
 })
 ipcMain.handle('desktop:open-settings', (event) => {
   assertTrustedIpcSender(event, true)

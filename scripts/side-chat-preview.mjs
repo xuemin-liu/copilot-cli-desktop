@@ -32,7 +32,9 @@ const built = await build({
         forkSideChat:(id,sourceSessionId,title)=>{tabs=createTab(tabs,{...fields,id:'side-'+ ++sequence,title,sideChat:true,sideParentTabId:id,sessionPermissionPreset:'read-only',canFork:false});return update()},
         createTab:()=>{tabs=createTab(tabs,{...fields,id:'new-'+ ++sequence,title:'New work'});return update()},
         getTabBacklog:async(id)=>'\\x1b[32m'+(id.startsWith('side')?'Forked context — separate conversation':'Original conversation — still running')+'\\x1b[0m\\r\\n> ',
-        writeTab:async(id,data)=>{for(const listener of outputs)listener({tabId:id,data})},
+        getTabSnapshot:async(id)=>({data:await window.copilotDesktop.getTabBacklog(id),sequence:0}),
+        popOutTab:async()=>{throw new Error('Pop-out windows require the Electron app')},
+        writeTab:async(id,data)=>{for(const listener of outputs)listener({tabId:id,data,sequence:1})},
         resizeTab:async()=>{},openSettings:async()=>{},readClipboardText:async()=>'',copyText:async()=>{},showTerminalContextMenu:async()=>{},
       };
       createRoot(document.getElementById('root')).render(<App/>);

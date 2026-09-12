@@ -72,6 +72,9 @@ export interface CopilotResolution {
 }
 
 export interface DesktopState {
+  /** Runtime window placement, never persisted as session configuration. */
+  poppedOutTabIds?: string[]
+  windowSessionId?: string
   desktopVersion: string
   resolution: CopilotResolution | null
   profiles: WorkspaceProfile[]

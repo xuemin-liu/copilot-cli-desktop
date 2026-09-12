@@ -42,6 +42,7 @@ export interface SidebarProps {
   onSelectWorkspace: () => void
   onActivateProfile: (profileId: string) => void
   onActivateTab: (tabId: string) => void
+  onPopOutTab: (tabId: string) => void
   onRenameTab: (tabId: string, currentTitle: string) => void
   onCloseTab: (tabId: string) => void
   onRestartTab: (tabId: string) => void
@@ -64,6 +65,7 @@ export function Sidebar({
   onSelectWorkspace,
   onActivateProfile,
   onActivateTab,
+  onPopOutTab,
   onRenameTab,
   onCloseTab,
   onRestartTab,
@@ -146,6 +148,8 @@ export function Sidebar({
       aria-expanded={openActionsTabId === tab.id}
       onClick={() => setOpenActionsTabId((current) => current === tab.id ? null : tab.id)}>⋯</button>
     {openActionsTabId === tab.id && <div className="sidebar-session-actions" role="group" aria-label={`Actions for ${tab.title}`}>
+        <button type="button" className="icon-button" aria-label={`Open ${tab.title} in new window`} title="Open in new window"
+          onClick={() => { setOpenActionsTabId(null); onPopOutTab(tab.id) }}>↗</button>
         {!tab.remote && <button type="button" className="icon-button session-restart" disabled={busy}
           aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => { setOpenActionsTabId(null); onRestartTab(tab.id) }}>↻</button>}
         <button type="button" className="icon-button session-close" aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}

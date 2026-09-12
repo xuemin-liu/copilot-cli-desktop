@@ -281,21 +281,27 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
     let backlogApplied = false
-    const bufferedLive: string[] = []
+    let snapshotSequence = -1
+    let disposed = false
+    const bufferedLive: { data: string; sequence: number }[] = []
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
       if (payload.tabId !== tabId) return
       if (!backlogApplied) {
-        bufferedLive.push(payload.data)
+        bufferedLive.push(payload)
         return
       }
-      writePtyOutput(payload.data)
+      if (payload.sequence > snapshotSequence) writePtyOutput(payload.data)
     })
-    void window.copilotDesktop.getTabBacklog(tabId).then((backlog) => {
+    void window.copilotDesktop.getTabSnapshot(tabId).then((snapshot) => {
+      if (disposed) return
+      snapshotSequence = snapshot.sequence
       // Backlog is terminal history, not a new command stream. Remove old OSC
       // 52 writes so replay cannot overwrite today's clipboard or consume the
       // first-live-copy recovery before the user copies anything in this pane.
-      if (backlog) terminal.write(stripOsc52Commands(backlog))
-      for (const chunk of bufferedLive) writePtyOutput(chunk)
+      if (snapshot.data) terminal.write(stripOsc52Commands(snapshot.data))
+      // Output already included in the snapshot must not be replayed twice
+      // when it arrives between subscribing and receiving the IPC response.
+      for (const chunk of bufferedLive) if (chunk.sequence > snapshot.sequence) writePtyOutput(chunk.data)
       bufferedLive.length = 0
       backlogApplied = true
     })
@@ -318,6 +324,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     resizeObserver.observe(container)
 
     return () => {
+      disposed = true
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       window.clearTimeout(copyStatusTimer)

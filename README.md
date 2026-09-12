@@ -86,6 +86,23 @@ handle, only input/output/resize events.
   Copilot CLI, and signed tag-triggered releases with unsigned publication
   blocked.
 
+## Session windows
+
+Click **Open in new window** (↗) above a terminal or in a session's **⋯** actions
+to move it to a separate, resizable window. You can open several session windows
+and place them side by side or on different monitors. Selecting a popped-out
+session in the sidebar focuses its window.
+
+Use **Return to main window**, **Ctrl+W**, or the window's close button to bring
+the session back without stopping its CLI process. **Close session** in the main
+app still stops the session and closes its pop-out. Quitting the app stops all
+sessions, including pop-outs. Window placement resets on the next app launch.
+Moving a terminal replays the app's bounded recent output; it does not restart
+the CLI or change the saved conversation.
+
+Run `pnpm popout:check` for the isolated real Electron/CLI regression check
+(requires an installed Copilot CLI; model responses come from a loopback fixture).
+
 ## Side chats
 
 Click **Fork into side chat** above a local terminal, check the source session UUID,
