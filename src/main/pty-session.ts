@@ -8,6 +8,7 @@ import { copilotSessionRoot } from './session-fork.js'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
+import type { SessionActivity } from './session-activity.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_LINES = 500
@@ -49,6 +50,7 @@ export class PtySession extends EventEmitter {
   private readonly options: Required<Pick<PtySessionOptions, 'cols' | 'rows' | 'forceKillTimeoutMs'>> & PtySessionOptions
   private pty: PtyLike | null = null
   private statusValue: SessionLifecycleStatus = 'starting'
+  private activityValue: SessionActivity | null = null
   private stopping = false
   private readonly outputLines: string[] = []
   private pendingLine = ''
@@ -73,6 +75,8 @@ export class PtySession extends EventEmitter {
   get status(): SessionLifecycleStatus {
     return this.statusValue
   }
+
+  get activity(): SessionActivity | null { return this.activityValue }
 
   get processId(): number | null {
     return this.pty?.pid ?? null
@@ -149,6 +153,15 @@ export class PtySession extends EventEmitter {
       (mode) => this.emit('permission-mode', mode),
       5_000,
       (message) => this.emit('permission-monitor-error', message),
+      (activity) => {
+        if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
+        this.activityValue = activity
+        if (activity === 'idle' && this.statusValue === 'approval-needed') {
+          this.heuristicBuffer = ''
+          this.setStatus('running')
+        }
+        this.emit('activity', activity)
+      },
     )
     this.permissionMonitor = monitor
     try {

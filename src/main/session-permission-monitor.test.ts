@@ -5,6 +5,31 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
 
+test('activity tails complete records, seeds only the final outcome, and ignores tool-turn completion', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'copilot-activity-monitor-'))
+  const path = join(directory, 'events.jsonl'), activity: string[] = []
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, (value) => activity.push(value ?? 'unknown'))
+  try {
+    await writeFile(path, line('assistant.turn_start', { turnId: 'old' }) + line('assistant.message', { content: 'Done' }) + line('assistant.turn_end', { turnId: 'old' }))
+    await monitor.start()
+    assert.deepEqual(activity, ['idle'])
+    await appendFile(path, line('assistant.turn_start', { turnId: '1' }) + line('assistant.message', { content: '', toolRequests: [{}] }) + line('assistant.turn_end', { turnId: '1' }))
+    await monitor.poll()
+    assert.deepEqual(activity, ['idle', 'working'])
+    const ending = line('assistant.turn_start', { turnId: '2' }) + line('assistant.message', { content: 'Done' }) + line('assistant.turn_end', { turnId: '2' })
+    await appendFile(path, ending.slice(0, -2))
+    await monitor.poll()
+    assert.deepEqual(activity, ['idle', 'working'])
+    await appendFile(path, ending.slice(-2))
+    await monitor.poll()
+    assert.deepEqual(activity, ['idle', 'working', 'idle'])
+    await writeFile(path, line('assistant.turn_end', { turnId: '2' }))
+    await monitor.poll()
+    assert.equal(activity.at(-1), 'unknown')
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})
+
 test('monitor seeds from bounded history and emits newly appended structured permission changes', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'copilot-permission-monitor-'))
   const path = join(directory, 'events.jsonl')

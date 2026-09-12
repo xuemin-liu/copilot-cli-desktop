@@ -1,5 +1,6 @@
 import { open, stat } from 'node:fs/promises'
 import { parsePermissionChangedEvent, type SessionPermissionMode } from './permission-modes.js'
+import { SessionActivityTracker, type SessionActivity } from './session-activity.js'
 
 const READ_CHUNK_BYTES = 64 * 1024
 const MAX_PENDING_RECORD_BYTES = 8 * 1024 * 1024
@@ -9,7 +10,7 @@ function isMissing(error: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
-/** Streams session history with bounded memory, then tails appended events. */
+/** Streams session history with bounded memory, then tails permission and task events. */
 export class SessionPermissionMonitor {
   private offset = 0
   private pending = Buffer.alloc(0)
@@ -22,12 +23,14 @@ export class SessionPermissionMonitor {
   private finishPromise: Promise<void> | null = null
   private seeding = true
   private seededMode: SessionPermissionMode | null = null
+  private readonly activity = new SessionActivityTracker()
 
   constructor(
     private readonly path: string,
     private readonly onMode: (mode: SessionPermissionMode) => void,
     private readonly pollIntervalMs = 5_000,
     private readonly onDiagnostic: (message: string) => void = () => {},
+    private readonly onActivity: (activity: SessionActivity | null) => void = () => {},
   ) {}
 
   start(): Promise<void> {
@@ -39,6 +42,8 @@ export class SessionPermissionMonitor {
     await this.poll()
     this.seeding = false
     if (!this.stopped && this.seededMode) this.onMode(this.seededMode)
+    const activity = this.activity.finishReplay()
+    if (!this.stopped && activity) this.onActivity(activity)
     if (this.stopped) return
     this.timer = setInterval(() => {
       void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
@@ -97,6 +102,8 @@ export class SessionPermissionMonitor {
       this.offset = 0
       this.pending = Buffer.alloc(0)
       this.discardPartialRecord = false
+      this.activity.reset()
+      if (!this.seeding) this.onActivity(null)
     }
     if (size === this.offset) return
 
@@ -125,8 +132,11 @@ export class SessionPermissionMonitor {
     }
     let start = 0
     for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
+      const line = buffer.subarray(start, end).toString('utf8').trim()
+      const activity = this.activity.consume(line)
+      if (!this.seeding && activity) this.onActivity(activity)
       const mode = parsePermissionChangedEvent(
-        buffer.subarray(start, end).toString('utf8').trim(),
+        line,
         (payload) => this.onDiagnostic(`Unknown session.permissions_changed payload: ${JSON.stringify(payload)}`),
       )
       if (mode) {

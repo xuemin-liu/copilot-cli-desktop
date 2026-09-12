@@ -455,7 +455,8 @@ button:disabled {
 }
 
 .tab-status-starting { background: #929baa; }
-.tab-status-running { background: #4f88ff; box-shadow: 0 0 0 3px rgb(79 136 255 / 12%); }
+.tab-status-running, .tab-status-idle { background: #8b949e; }
+.tab-status-working { background: #4f88ff; box-shadow: 0 0 0 3px rgb(79 136 255 / 12%); }
 .tab-status-approval-needed { background: #ffb84d; box-shadow: 0 0 0 3px rgb(255 184 77 / 12%); }
 .tab-status-stopping { background: #929baa; }
 .tab-status-completed { background: #20c9a6; }

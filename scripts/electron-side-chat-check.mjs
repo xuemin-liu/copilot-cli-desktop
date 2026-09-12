@@ -16,6 +16,10 @@ if (process.versions.electron) {
   app.setPath('userData', process.env.DESKTOP_UI_CHECK_DATA)
   // Everything else, including IPC and PTY lifecycle, is production code.
   await import('../dist/src/main/main.js')
+  if (process.env.DESKTOP_UI_ACTIVITY_CHECK === '1') {
+    const { runActivityCheck } = await import('./session-activity-check.mjs')
+    void runActivityCheck().catch((error) => { console.error(error); process.exitCode = 1; app.quit() })
+  }
   if (process.env.DESKTOP_UI_PERMISSION_CHECK === '1') {
     const { runPermissionCheck } = await import('./session-permission-check.mjs')
     void runPermissionCheck().catch((error) => {
@@ -44,8 +48,12 @@ if (process.versions.electron) {
   const copilotHome = join(directory, 'copilot')
   const modelServer = createServer((request, response) => {
     request.resume()
-    response.writeHead(200, { 'Content-Type': 'application/json' })
-    response.end(JSON.stringify({ id: 'local-ui-check', object: 'chat.completion', created: 1, model: 'ui-check-model', choices: [{ index: 0, message: { role: 'assistant', content: 'The saved marker is desktop-side-chat-42.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    const respond = () => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ id: 'local-ui-check', object: 'chat.completion', created: 1, model: 'ui-check-model', choices: [{ index: 0, message: { role: 'assistant', content: 'The saved marker is desktop-side-chat-42.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
+    }
+    if (process.argv.includes('--activity')) setTimeout(respond, 7_000)
+    else respond()
   })
   let rpc
   try {
@@ -56,6 +64,10 @@ if (process.versions.electron) {
     const baseUrl = `http://127.0.0.1:${address.port}/v1`
     const env = { ...process.env, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true', DESKTOP_UI_CHECK_DATA: appData }
     delete env.ELECTRON_RUN_AS_NODE
+    if (process.argv.includes('--activity')) {
+      env.DESKTOP_UI_ACTIVITY_CHECK = '1'
+      env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'session-activity')
+    }
     if (process.argv.includes('--permissions')) {
       env.DESKTOP_UI_PERMISSION_CHECK = '1'
       env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'permissions')
@@ -94,13 +106,20 @@ if (process.versions.electron) {
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
     console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
-    console.log(env.DESKTOP_UI_PERMISSION_CHECK === '1'
+    console.log(env.DESKTOP_UI_ACTIVITY_CHECK === '1'
+      ? '[electron-check] Running session activity regression.'
+      : env.DESKTOP_UI_PERMISSION_CHECK === '1'
       ? '[electron-check] Running session permission regression.'
       : env.DESKTOP_UI_CLIPBOARD_CHECK === '1'
       ? '[electron-check] Running automated clipboard/tab-switch regression.'
       : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
     const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
     assert.equal(code, 0, 'Electron did not exit normally')
+    if (env.DESKTOP_UI_ACTIVITY_CHECK === '1') {
+      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
+      assert.equal(result.sourceSessionId, sessionId)
+      assert.equal(result.passed, true)
+    }
     if (env.DESKTOP_UI_PERMISSION_CHECK === '1') {
       const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
       assert.equal(result.sourceSessionId, sessionId)

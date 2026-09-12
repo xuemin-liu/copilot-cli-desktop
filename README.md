@@ -164,6 +164,15 @@ See `src/main/permission-presets.ts`.
 
 ## Session resume
 
+The sidebar distinguishes the open CLI process from its task activity:
+**Working** means a root assistant turn is in progress; **Idle** follows a final
+response or cancellation. Tool-call turns stay Working while the assistant
+continues. **Open** means the process is alive but task activity is unknown
+(for example, before the first turn or for remote sessions). These are observed
+from saved CLI events, so updates can lag by a few seconds. Quiet output alone
+does not mark a session idle, and background subagent completion does not mark
+the main task finished.
+
 Each tab tracks a resume mode (per workspace profile, overridable per tab):
 
 - **New** — starts a fresh session with a generated UUID and Copilot-visible

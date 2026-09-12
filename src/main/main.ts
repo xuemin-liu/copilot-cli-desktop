@@ -888,6 +888,12 @@ function finalizeSessionArgs(
  * Shared by session creation and restart, since a restarted tab keeps its
  * id but is backed by a brand-new `PtySession` instance. */
 function wireSessionEvents(id: string, session: PtySession): void {
+  session.on('activity', () => {
+    if (managedTabs.get(id)?.session !== session) return
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activity: session.activity } : tab) }
+    syncTabState()
+    broadcastState()
+  })
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
@@ -1224,6 +1230,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
     })
     managedTabs.set(tabId, { session })
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null } : candidate) }
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
       cliVersion: plan.cliVersion,
