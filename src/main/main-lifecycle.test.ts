@@ -18,8 +18,9 @@ const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   createTestWindow(): void
+  refreshAppMenu(): void
   quitCalls(): number
-  windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
+  windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
   requestIn(tabId: string, name: string, ...args: unknown[]): Promise<any>
   configureMigration(busy: boolean, exclusive: boolean): void
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
@@ -71,19 +72,31 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const app = Object.assign(new EventEmitter(), { quitCalls: 0, requestSingleInstanceLock: () => false, quit() { this.quitCalls++; }, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)} });
         const handlers = new Map();
         export const ipcMain = { handle: (name, handler) => handlers.set(name, handler), invoke: (name, ...args) => handlers.get(name)(...args) };
-        export const Menu = { getApplicationMenu: () => null };
+        const allWindows = []; let applicationMenu = null;
+        export const Menu = {
+          getApplicationMenu: () => applicationMenu,
+          buildFromTemplate: template => template,
+          setApplicationMenu(menu) { applicationMenu = menu; for (const window of allWindows) if (!window.destroyed) window.setMenu(menu); },
+        };
         export const BrowserWindow = class extends EventEmitter {
           destroyed = false; focused = 0; title = ''; messages = [];
+          constructor(options = {}) { super(); this.title = options.title || ''; allWindows.push(this); }
+          static getFocusedWindow() { return null; }
           webContents = Object.assign(new EventEmitter(), {
             getURL: () => this.url || '',
             send: (channel, payload) => this.messages.push({ channel, payload }),
             setWindowOpenHandler() {},
             session: { setPermissionCheckHandler() {}, setPermissionRequestHandler() {} },
           });
-          setMenu() {} setTitle(title) { this.title = title; }
+          setMenu(menu) { this.menu = menu; } setTitle(title) { this.title = title; }
           isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; }
-          show() {} focus() { this.focused++; } restore() {}
-          async loadFile(path) { this.url = (await import('node:url')).pathToFileURL(path).href; }
+          show() {} focus() { this.focused++; this.emit('focus'); } restore() {}
+          async loadFile(path) {
+            this.url = (await import('node:url')).pathToFileURL(path).href;
+            let prevented = false;
+            this.emit('page-title-updated', { preventDefault() { prevented = true; } }, 'Copilot CLI Desktop');
+            if (!prevented) this.title = 'Copilot CLI Desktop';
+          }
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
@@ -139,6 +152,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
+          refreshAppMenu: installApplicationMenu,
           quitCalls: () => app.quitCalls,
           windowFor: (tabId) => tabId ? sessionWindows.get(tabId) : mainWindow,
           requestIn: (tabId, name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: sessionWindows.get(tabId).webContents }, ...args),
@@ -279,6 +293,35 @@ test('multiple pop-outs isolate input and survive sibling close, restart, and re
   await harness.flushConfig()
   assert.ok(harness.spawns.every(spawn => spawn.stopped))
   await assert.rejects(async () => harness.request('desktop:pop-out-tab', second), /shutting down/)
+}))
+
+test('idle pop-outs retain their title, stay menu-free, and focus on workspace activation', async () => fixture(async (harness, directory) => {
+  const first = createWorkspaceProfile(directory)
+  const secondPath = join(directory, 'second'); await mkdir(secondPath)
+  const second = createWorkspaceProfile(secondPath)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), notifications: false, profiles: [first, second], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+  harness.createTestWindow()
+  harness.refreshAppMenu()
+  const firstId = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:rename-tab', firstId, 'Idle session title')
+  await harness.request('desktop:pop-out-tab', firstId)
+  const popout = harness.windowFor(firstId)
+  // Flush the mocked page load, which applies the HTML title unless prevented.
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(popout.title, 'Idle session title — Copilot CLI Desktop')
+  assert.equal(popout.menu, null)
+  harness.refreshAppMenu()
+  assert.ok(harness.windowFor().menu)
+  assert.equal(popout.menu, null, 'global menu rebuilding must not restore pop-out accelerators')
+  await harness.request('desktop:create-tab', null, second.id)
+  const previousFocus = popout.focused
+  const switched = await harness.request('desktop:activate-profile', first.id)
+  assert.equal(popout.focused, previousFocus + 1)
+  assert.equal(switched.activeProfileId, first.id)
+  assert.equal(switched.activeTabId, firstId)
+  assert.equal(popout.menu, null)
+  assert.equal(harness.spawns.length, 2)
+  assert.ok(harness.spawns.every(spawn => !spawn.stopped))
 }))
 
 test('workspace session creation targets an inactive profile without restoring its saved tabs', async () => fixture(async (harness, directory) => {

@@ -447,6 +447,9 @@ function popOutSessionTab(tabId: string): DesktopState {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged },
   })
   sessionWindows.set(tabId, window)
+  // Keep the session name authoritative even when the shared HTML loads or
+  // changes its document title while this session is idle.
+  window.on('page-title-updated', event => event.preventDefault())
   window.on('focus', refreshMenus)
   window.setMenu(null)
   window.webContents.session.setPermissionCheckHandler(() => false)
@@ -1167,10 +1170,10 @@ async function createSessionWithAttachments(): Promise<DesktopState> {
 
 function activateSessionTab(tabId: string): DesktopState {
   const popout = sessionWindows.get(tabId)
-  if (popout) { focusSessionWindow(popout); return snapshot() }
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
-  restoreMainWindow()
+  if (popout) focusSessionWindow(popout)
+  else restoreMainWindow()
   broadcastState()
   refreshMenus()
   return snapshot()
@@ -1434,10 +1437,7 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   if (!activeTabBelongsToProfile) {
     const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id)
     if (firstProfileTab) {
-      tabsState = activateTab(tabsState, firstProfileTab.id)
-      syncTabState()
-      broadcastState()
-      refreshMenus()
+      activateSessionTab(firstProfileTab.id)
     } else if (isCopilotResolved()) {
       await restoreTabsForActiveProfile()
     }
@@ -1744,6 +1744,9 @@ function installApplicationMenu(): void {
     },
   ])
   Menu.setApplicationMenu(menu)
+  // On Windows/Linux this setter installs the menu on every existing window.
+  // Remove it again from pop-outs, including its main-window accelerators.
+  for (const window of sessionWindows.values()) if (!window.isDestroyed()) window.setMenu(null)
 }
 
 function createWindow(

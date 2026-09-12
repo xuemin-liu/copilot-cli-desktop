@@ -3,6 +3,7 @@ import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
+import { TerminalReplay } from '../terminal-replay.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -280,31 +281,12 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     // Subscribe before fetching the backlog so startup output cannot fall in
     // the gap between those operations.
-    let backlogApplied = false
-    let snapshotSequence = -1
-    let disposed = false
-    const bufferedLive: { data: string; sequence: number }[] = []
+    // Historic OSC 52 commands must not overwrite today's clipboard.
+    const replay = new TerminalReplay(data => terminal.write(stripOsc52Commands(data)), writePtyOutput)
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
-      if (payload.tabId !== tabId) return
-      if (!backlogApplied) {
-        bufferedLive.push(payload)
-        return
-      }
-      if (payload.sequence > snapshotSequence) writePtyOutput(payload.data)
+      if (payload.tabId === tabId) replay.push(payload)
     })
-    void window.copilotDesktop.getTabSnapshot(tabId).then((snapshot) => {
-      if (disposed) return
-      snapshotSequence = snapshot.sequence
-      // Backlog is terminal history, not a new command stream. Remove old OSC
-      // 52 writes so replay cannot overwrite today's clipboard or consume the
-      // first-live-copy recovery before the user copies anything in this pane.
-      if (snapshot.data) terminal.write(stripOsc52Commands(snapshot.data))
-      // Output already included in the snapshot must not be replayed twice
-      // when it arrives between subscribing and receiving the IPC response.
-      for (const chunk of bufferedLive) if (chunk.sequence > snapshot.sequence) writePtyOutput(chunk.data)
-      bufferedLive.length = 0
-      backlogApplied = true
-    })
+    void window.copilotDesktop.getTabSnapshot(tabId).then(snapshot => replay.restore(snapshot))
 
     let fitFrame = 0
     const fitTerminal = (): void => {
@@ -324,7 +306,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     resizeObserver.observe(container)
 
     return () => {
-      disposed = true
+      replay.dispose()
       unsubscribe()
       cancelAnimationFrame(fitFrame)
       window.clearTimeout(copyStatusTimer)
