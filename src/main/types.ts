@@ -2,6 +2,7 @@ import type { PermissionPreset } from './permission-presets.js'
 import type { SessionPermissionMode } from './permission-modes.js'
 import type { ResumeMode } from './resume-args.js'
 import type { SessionLaunchConfig } from './session-launch.js'
+import type { SessionActivity } from './session-activity.js'
 
 /** Lifecycle status of one spawned `copilot` pty session. */
 export type SessionLifecycleStatus =
@@ -38,6 +39,8 @@ export interface DesktopSessionTab {
   workspaceProfileId: string
   lastSessionId: string | null
   status: SessionLifecycleStatus
+  /** Observed task activity; absent when this process has no reliable evidence. */
+  activity?: SessionActivity | null
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null

@@ -7,7 +7,7 @@ import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   starting: 'Starting',
-  running: 'Running',
+  running: 'Open',
   'approval-needed': 'Needs approval',
   stopping: 'Stopping',
   completed: 'Completed',
@@ -117,11 +117,13 @@ export function Sidebar({
     ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
     : orderTabs(tabs)
   const sessionButton = (tab: DesktopSessionTab, workspaceName?: string, compactIndex?: number): JSX.Element => {
+    const statusLabel = tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle') : STATUS_LABEL[tab.status]
+    const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${STATUS_LABEL[tab.status]}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${statusLabel}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -133,10 +135,10 @@ export function Sidebar({
       onClick={() => onActivateTab(tab.id)}
       onDoubleClick={() => onRenameTab(tab.id, tab.title)}
     >
-      <span className={`sidebar-status-dot tab-status-${tab.status}`} aria-hidden="true" />
+      <span className={`sidebar-status-dot tab-status-${statusClass}`} aria-hidden="true" />
       <span className="sidebar-session-title">{compactIndex !== undefined ? compactIndex + 1 : tab.title}</span>
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
-        {outdatedCli ? 'Old CLI' : STATUS_LABEL[tab.status]}
+        {outdatedCli ? 'Old CLI' : statusLabel}
       </span>}
     </button>
     <button type="button" className="icon-button sidebar-session-actions-toggle"

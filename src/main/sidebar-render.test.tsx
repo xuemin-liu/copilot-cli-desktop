@@ -57,6 +57,16 @@ test('collapsed sidebar preserves workspace selection, named session navigation,
   assert.doesNotMatch(markup, /workspace-sessions-flat/)
 })
 
+test('sidebar distinguishes an open process, active work, idle, and approval', () => {
+  const profile: WorkspaceProfile = { id: 'one', name: 'one', path: 'D:/one', permissionPreset: 'default', defaultResumeMode: 'new', launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [] }
+  const tab: DesktopSessionTab = { id: 'one', title: 'Chat', workspaceProfileId: 'one', status: 'running', processId: 42, cliVersion: '1.0.82', sessionPermissionPreset: 'default', sessionPermissionMode: null, permissionWarning: null, remote: false, lastSessionId: null, lastActivityAt: 1 }
+  for (const [activity, label] of [[null, 'Open'], ['working', 'Working'], ['idle', 'Idle']] as const) {
+    assert.match(renderAccess([profile], { ...tab, activity }), new RegExp(`Chat — ${label}`))
+    assert.match(renderAccess([profile], { ...tab, activity }, true), new RegExp(`Chat — ${label}`))
+  }
+  assert.match(renderAccess([profile], { ...tab, activity: 'idle', status: 'approval-needed' }), /Chat — Needs approval/)
+})
+
 test('compact navigation honors saved ordering and workspace grouping', () => {
   const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
   let group = 'list'
@@ -146,7 +156,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
   assert.match(markup, /Workspaces/)
   assert.match(markup, /copilot-cli-desktop/)
   assert.match(markup, /Review pull request/)
-  assert.match(markup, /Running/)
+  assert.match(markup, /Open/)
   assert.match(markup, /Settings/)
 })
 
