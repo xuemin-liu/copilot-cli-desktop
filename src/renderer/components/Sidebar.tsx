@@ -109,7 +109,7 @@ export function Sidebar({
         <span className="workspace-name">{profile.name}</span>
       </button>
       <button type="button" className="icon-button workspace-new-session"
-        aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}`}
+        aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}${profile.id === activeProfileId ? ' (Ctrl+T)' : ''}`}
         disabled={!canOpenTab} onClick={() => onCreateTab(profile.id)}>+</button>
     </div>
   )

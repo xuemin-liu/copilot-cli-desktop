@@ -994,6 +994,7 @@ async function createSessionTab(
   })
   managedTabs.set(id, { session })
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
+  const previousProfileId = desktopConfig.activeProfileId
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
@@ -1027,11 +1028,19 @@ async function createSessionTab(
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
       session.removeAllListeners()
+      const wasActive = tabsState.activeTabId === id
       tabsState = closeTab(tabsState, id)
       managedTabs.delete(id)
+      if (wasActive) {
+        desktopConfig.activeProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId
+          ?? (desktopConfig.activeProfileId === profile.id ? previousProfileId : desktopConfig.activeProfileId)
+        syncWorkspaceState()
+      }
     }
     syncTabState()
     broadcastState()
+    refreshMenus()
+    persistProfileTabs()
     throw error
   }
   persistProfileTabs()
