@@ -111,7 +111,7 @@ import {
   touchTab,
   type TabsState,
 } from './session-tab-machine.js'
-import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, WorkspaceProfile } from './types.js'
+import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
@@ -2194,7 +2194,7 @@ async function pathExists(candidate: string, timeoutMs = 3_000): Promise<boolean
     clearTimeout(timer)
   }
 }
-ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: unknown) => {
+ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: unknown): Promise<RevealPathResult> => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 4_096) {
     throw new Error('Invalid file path')
@@ -2206,12 +2206,12 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   if (!owningProfile) throw new Error('The session workspace is unavailable')
   const baseDirectory = owningProfile.path
   const resolved = resolve(baseDirectory, candidate)
-  if (!isPathWithinRoot(baseDirectory, resolved)) throw new Error('Only paths within the session workspace can be revealed')
-  // The text a session prints is not guaranteed to name a real file (it may
-  // be prose that merely looks path-shaped). Silently do nothing rather than
-  // opening Explorer to a location that doesn't exist.
-  if (!(await pathExists(resolved))) return
+  if (!isPathWithinRoot(baseDirectory, resolved)) return { ok: false, reason: 'outside-workspace' }
+  // A path-shaped token is not necessarily a real file (e.g. a diff header).
+  // Report ordinary misses as a result so the renderer can give quiet feedback.
+  if (!(await pathExists(resolved))) return { ok: false, reason: 'missing' }
   shell.showItemInFolder(resolved)
+  return { ok: true }
 })
 
 // --- IPC: settings window ----------------------------------------------

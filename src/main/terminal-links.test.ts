@@ -44,6 +44,34 @@ test('scanLineForLinks strips a trailing line:column location suffix from a path
   assert.equal(links[0]?.text, String.raw`C:\repo\src\main.ts`)
 })
 
+test('scanLineForLinks preserves spaces in backtick-delimited file links', () => {
+  const path = String.raw`C:\repo\folder with spaces\file.txt`
+  const line = 'See `' + path + ':42:7` for details'
+  const links = scanLineForLinks(line)
+  assert.deepEqual(links, [{ type: 'path', text: path, start: 4, end: line.indexOf(' for details') }])
+  assert.deepEqual(scanLineForLinks('`./folder with spaces/file.txt`').map(link => link.text), ['./folder with spaces/file.txt'])
+})
+
+test('scanLineForLinks keeps a backtick-delimited URL on the URL handler', () => {
+  assert.deepEqual(scanLineForLinks('See `https://example.com/path`').map(({ type, text }) => ({ type, text })), [
+    { type: 'url', text: 'https://example.com/path' },
+  ])
+})
+
+test('inline-code commands retain their embedded file links', () => {
+  for (const command of ['node dist/src/cli/cli.js', 'cat ./src/main.ts', 'git diff src/main.ts']) {
+    const expected = command.slice(command.lastIndexOf(' ') + 1)
+    assert.deepEqual(scanLineForLinks('Run `' + command + '` first').map(link => link.text), [expected])
+  }
+  assert.deepEqual(scanLineForLinks('`node "./folder name/app.js"`').map(link => link.text), ['./folder name/app.js'])
+})
+
+test('inline-code globs, branch names and fractions do not become file links', () => {
+  for (const text of ['src/**/*.ts', 'git push origin/main', '1/2']) {
+    assert.deepEqual(scanLineForLinks('`' + text + '`'), [], text)
+  }
+})
+
 test('scanLineForLinks finds an absolute Windows path', () => {
   const links = scanLineForLinks(String.raw`Wrote C:\Users\dev\project\build\icon.png`)
   assert.equal(links.length, 1)

@@ -1,4 +1,4 @@
-import type { DesktopState } from '../main/types.js'
+import type { DesktopState, RevealPathResult } from '../main/types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { CredentialName } from '../main/secure-credentials.js'
@@ -47,7 +47,7 @@ export interface CopilotDesktopBridge {
   readClipboardText(): Promise<string>
   showTerminalContextMenu(text: string): Promise<void>
   openExternalUrl(url: string): Promise<void>
-  revealPath(tabId: string, path: string): Promise<void>
+  revealPath(tabId: string, path: string): Promise<RevealPathResult>
   copyDiagnostics(): Promise<void>
   retryResolution(): Promise<DesktopState>
   installCopilot(): Promise<DesktopState>

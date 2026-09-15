@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SerializeAddon } from '@xterm/addon-serialize'
+import { OperationError } from './OperationError.js'
+import { errorMessage } from '../errors.js'
 import { TerminalReplay } from '../terminal-replay.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
@@ -28,6 +30,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
+  const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info' } | null>(null)
+  const linkRequestRef = useRef(0)
 
   useEffect(() => {
     const container = containerRef.current
@@ -180,9 +184,24 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       })
     }
 
-    const openLink = (link: DetectedLink): void => {
-      if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
-      else void window.copilotDesktop.revealPath(tabId, link.text)
+    const openLink = async (link: DetectedLink): Promise<void> => {
+      const request = ++linkRequestRef.current
+      setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : 'Revealing file…', tone: 'info' })
+      try {
+        const result = link.type === 'url'
+          ? await window.copilotDesktop.openExternalUrl(link.text)
+          : await window.copilotDesktop.revealPath(tabId, link.text)
+        if (request !== linkRequestRef.current) return
+        if (result && !result.ok) {
+          setLinkNotice(result.reason === 'missing'
+            ? { message: `File or folder not found or inaccessible: ${link.text}`, tone: 'info' }
+            : { message: `Only paths within the session workspace can be revealed: ${link.text}`, tone: 'error' })
+        } else setLinkNotice(null)
+      } catch (error) {
+        if (request === linkRequestRef.current) {
+          setLinkNotice({ message: `Could not ${link.type === 'url' ? 'open link' : 'reveal file'}: ${errorMessage(error)}`, tone: 'error' })
+        }
+      }
     }
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
@@ -201,7 +220,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: () => openLink(link),
+            activate: () => { void openLink(link) },
           }]
         })
         callback(links.length > 0 ? links : undefined)
@@ -306,6 +325,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     resizeObserver.observe(container)
 
     return () => {
+      linkRequestRef.current++
       replay.dispose()
       unsubscribe()
       cancelAnimationFrame(fitFrame)
@@ -339,10 +359,21 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   }, [sessionProcessId])
 
   useEffect(() => {
+    // Invalidate pending clicks as well as the visible notice when switching
+    // tabs; a late filesystem response must not resurrect the old message.
+    linkRequestRef.current++
+    setLinkNotice(null)
+  }, [active, tabId])
+
+  useEffect(() => {
     if (!active) return
     fitRef.current?.fit()
     if (focused) terminalRef.current?.focus()
   }, [active, focused])
 
-  return <div ref={containerRef} className={`terminal-pane${active ? ' terminal-pane-active' : ''}`} />
+  return <div className={`terminal-pane${active ? ' terminal-pane-active' : ''}`}>
+    {active && linkNotice && <OperationError message={linkNotice.message} tone={linkNotice.tone} className="terminal-link-error"
+      onDismiss={() => { linkRequestRef.current++; setLinkNotice(null) }} />}
+    <div ref={containerRef} className="terminal-viewport" />
+  </div>
 }

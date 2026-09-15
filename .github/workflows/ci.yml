@@ -24,6 +24,8 @@ jobs:
         run: corepack pnpm typecheck
       - name: Unit tests
         run: corepack pnpm test
+      - name: Terminal link integration check
+        run: corepack pnpm links:check
       - name: Migration round-trip smoke test
         run: corepack pnpm migration:smoke
       - name: Migration Settings integration check
