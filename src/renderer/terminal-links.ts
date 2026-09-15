@@ -6,7 +6,7 @@ export interface DetectedLink {
 }
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
-const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'/g
+const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'|`([^`\r\n]{1,4096})`/g
 // Matches an absolute Windows/UNC path or an explicit relative path (./, ../),
 // or a bare relative path that has at least one separator and a file
 // extension (the common shape of paths CLI tools print, e.g. "dist\app.js").
@@ -65,7 +65,7 @@ export function scanLineForLinks(line: string): DetectedLink[] {
   // spaces (e.g. "C:\Program Files\Git\bin\git.exe") is treated as one link
   // instead of splitting at the first space.
   for (const match of line.matchAll(QUOTED_PATH_PATTERN)) {
-    const inner = match[1] ?? match[2] ?? ''
+    const inner = match[1] ?? match[2] ?? match[3] ?? ''
     if (!/[\\/]/.test(inner)) continue
     const text = stripLocationSuffix(inner)
     if (text.length < 3) continue

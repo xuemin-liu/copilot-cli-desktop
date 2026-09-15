@@ -2207,10 +2207,7 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   const baseDirectory = owningProfile.path
   const resolved = resolve(baseDirectory, candidate)
   if (!isPathWithinRoot(baseDirectory, resolved)) throw new Error('Only paths within the session workspace can be revealed')
-  // The text a session prints is not guaranteed to name a real file (it may
-  // be prose that merely looks path-shaped). Silently do nothing rather than
-  // opening Explorer to a location that doesn't exist.
-  if (!(await pathExists(resolved))) return
+  if (!(await pathExists(resolved))) throw new Error(`File or folder not found or inaccessible: ${resolved}`)
   shell.showItemInFolder(resolved)
 })
 

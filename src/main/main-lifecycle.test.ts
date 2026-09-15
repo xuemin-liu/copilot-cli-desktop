@@ -17,6 +17,7 @@ import { MigrationImportFailure } from './migration-import.js'
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
+  shellCalls: { action: string; target: string }[]
   createTestWindow(): void
   refreshAppMenu(): void
   quitCalls(): number
@@ -101,7 +102,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, shell = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, Tray = {};
+        export const shell = {
+          calls: [],
+          showItemInFolder(target) { this.calls.push({ action: 'reveal', target }); },
+          async openExternal(target) { this.calls.push({ action: 'open', target }); },
+        };
       `,
       'electron-updater': 'export default { autoUpdater: null };',
       // Migration is exercised through its own integration tests. Keep new archive
@@ -152,6 +158,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         const originalWriteAppLog = writeAppLog;
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
+          shellCalls: shell.calls,
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
           refreshAppMenu: installApplicationMenu,
           quitCalls: () => app.quitCalls,
@@ -952,6 +959,30 @@ test('file reveal rejects paths outside the session workspace', async () => {
       () => harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'),
       /within the session workspace/,
     )
+  })
+})
+
+test('file links reveal existing workspace files and report missing targets', async () => {
+  await fixture(async (harness, directory) => {
+    configure(harness, directory)
+    const state = await harness.createMain()
+    const folder = join(directory, 'folder with spaces')
+    const file = join(folder, 'example.txt')
+    await mkdir(folder)
+    await writeFile(file, 'link fixture')
+    await harness.request('desktop:reveal-path', state.activeTabId, 'folder with spaces/example.txt')
+    await harness.request('desktop:reveal-path', state.activeTabId, file)
+    assert.deepEqual(harness.shellCalls, [
+      { action: 'reveal', target: file },
+      { action: 'reveal', target: file },
+    ])
+    await assert.rejects(
+      () => harness.request('desktop:reveal-path', state.activeTabId, 'missing.txt'),
+      /File or folder not found or inaccessible:.*missing\.txt/,
+    )
+    assert.equal(harness.shellCalls.length, 2, 'missing targets must not launch Explorer')
+    await harness.request('desktop:open-external-url', 'https://example.com/')
+    assert.deepEqual(harness.shellCalls[2], { action: 'open', target: 'https://example.com/' })
   })
 })
 

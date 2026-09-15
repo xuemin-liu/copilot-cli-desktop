@@ -482,6 +482,22 @@ button:disabled {
   display: block;
 }
 
+.terminal-link-error {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 6;
+  max-height: 40%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.terminal-link-error button {
+  align-self: flex-start;
+  flex-shrink: 0;
+}
+
 /* FitAddon subtracts padding from the xterm element, not its parent. Keeping
    terminal spacing here prevents it from allocating a row beneath the visible
    pane and clipping that row in normal-size windows. */

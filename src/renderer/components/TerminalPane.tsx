@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -28,6 +28,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
+  const [linkError, setLinkError] = useState<string | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -180,9 +181,20 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       })
     }
 
-    const openLink = (link: DetectedLink): void => {
-      if (link.type === 'url') void window.copilotDesktop.openExternalUrl(link.text)
-      else void window.copilotDesktop.revealPath(tabId, link.text)
+    let disposed = false
+    let linkRequest = 0
+    setLinkError(null)
+    const openLink = async (link: DetectedLink): Promise<void> => {
+      const request = ++linkRequest
+      setLinkError(null)
+      try {
+        if (link.type === 'url') await window.copilotDesktop.openExternalUrl(link.text)
+        else await window.copilotDesktop.revealPath(tabId, link.text)
+      } catch (error) {
+        if (!disposed && request === linkRequest) {
+          setLinkError(`Could not ${link.type === 'url' ? 'open link' : 'reveal file'}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
     }
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
@@ -201,7 +213,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: () => openLink(link),
+            activate: () => { void openLink(link) },
           }]
         })
         callback(links.length > 0 ? links : undefined)
@@ -306,6 +318,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     resizeObserver.observe(container)
 
     return () => {
+      disposed = true
       replay.dispose()
       unsubscribe()
       cancelAnimationFrame(fitFrame)
@@ -344,5 +357,11 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     if (focused) terminalRef.current?.focus()
   }, [active, focused])
 
-  return <div ref={containerRef} className={`terminal-pane${active ? ' terminal-pane-active' : ''}`} />
+  return <>
+    <div ref={containerRef} className={`terminal-pane${active ? ' terminal-pane-active' : ''}`} />
+    {active && linkError && <div className="session-operation-error terminal-link-error" role="alert">
+      <span>{linkError}</span>
+      <button type="button" onClick={() => setLinkError(null)} aria-label="Dismiss link error">×</button>
+    </div>}
+  </>
 }

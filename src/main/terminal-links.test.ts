@@ -44,6 +44,20 @@ test('scanLineForLinks strips a trailing line:column location suffix from a path
   assert.equal(links[0]?.text, String.raw`C:\repo\src\main.ts`)
 })
 
+test('scanLineForLinks preserves spaces in backtick-delimited file links', () => {
+  const path = String.raw`C:\repo\folder with spaces\file.txt`
+  const line = 'See `' + path + ':42:7` for details'
+  const links = scanLineForLinks(line)
+  assert.deepEqual(links, [{ type: 'path', text: path, start: 4, end: line.indexOf(' for details') }])
+  assert.deepEqual(scanLineForLinks('`folder with spaces/file.txt`').map(link => link.text), ['folder with spaces/file.txt'])
+})
+
+test('scanLineForLinks keeps a backtick-delimited URL on the URL handler', () => {
+  assert.deepEqual(scanLineForLinks('See `https://example.com/path`').map(({ type, text }) => ({ type, text })), [
+    { type: 'url', text: 'https://example.com/path' },
+  ])
+})
+
 test('scanLineForLinks finds an absolute Windows path', () => {
   const links = scanLineForLinks(String.raw`Wrote C:\Users\dev\project\build\icon.png`)
   assert.equal(links.length, 1)
