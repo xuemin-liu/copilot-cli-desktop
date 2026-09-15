@@ -6,7 +6,8 @@ export interface DetectedLink {
 }
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
-const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'|`([^`\r\n]{1,4096})`/g
+const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'/g
+const BACKTICK_PATH_PATTERN = /`([^`\r\n]{1,4096})`/g
 // Matches an absolute Windows/UNC path or an explicit relative path (./, ../),
 // or a bare relative path that has at least one separator and a file
 // extension (the common shape of paths CLI tools print, e.g. "dist\app.js").
@@ -14,6 +15,15 @@ const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|
 // Trailing "path:line" or "path:line:column" location suffix many CLIs print
 // (e.g. tsc, eslint) — the number(s) are not part of the filesystem path.
 const LOCATION_SUFFIX = /:\d+(?::\d+)?$/
+const WHOLE_PATH_PATTERN = new RegExp(`^(?:${PATH_PATTERN.source})$`)
+const EXPLICIT_PATH_PREFIX = /^(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])/
+
+function isBacktickPath(text: string): boolean {
+  if (/[<>"'`|*?\r\n]/.test(text)) return false
+  // Inline code also contains commands. Spaced paths need an explicit root
+  // (C:\, ./, ../) so "node dist/app.js" still links only "dist/app.js".
+  return /\s/.test(text) ? EXPLICIT_PATH_PREFIX.test(text) : WHOLE_PATH_PATTERN.test(text)
+}
 
 function stripLocationSuffix(candidate: string): string {
   return candidate.replace(LOCATION_SUFFIX, '')
@@ -64,12 +74,17 @@ export function scanLineForLinks(line: string): DetectedLink[] {
   // Quoted paths are checked before the bare pattern so a path containing
   // spaces (e.g. "C:\Program Files\Git\bin\git.exe") is treated as one link
   // instead of splitting at the first space.
-  for (const match of line.matchAll(QUOTED_PATH_PATTERN)) {
-    const inner = match[1] ?? match[2] ?? match[3] ?? ''
-    if (!/[\\/]/.test(inner)) continue
-    const text = stripLocationSuffix(inner)
-    if (text.length < 3) continue
-    pushIfClear(links, { type: 'path', text, start: match.index, end: match.index + match[0].length })
+  // Scan quotes separately so rejecting a backtick command doesn't consume
+  // an embedded quoted filename, such as `node "./folder name/app.js"`.
+  for (const pattern of [QUOTED_PATH_PATTERN, BACKTICK_PATH_PATTERN]) {
+    for (const match of line.matchAll(pattern)) {
+      const inner = match[1] ?? match[2] ?? ''
+      if (!/[\\/]/.test(inner)) continue
+      const text = stripLocationSuffix(inner)
+      if (text.length < 3) continue
+      if (pattern === BACKTICK_PATH_PATTERN && !isBacktickPath(text)) continue
+      pushIfClear(links, { type: 'path', text, start: match.index, end: match.index + match[0].length })
+    }
   }
   for (const match of line.matchAll(PATH_PATTERN)) {
     const text = stripLocationSuffix(trimTrailingPunctuation(match[0]))

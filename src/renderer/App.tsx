@@ -5,6 +5,8 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
+import { OperationError } from './components/OperationError.js'
+import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 
 const EMPTY_STATE: DesktopState = {
@@ -33,7 +35,7 @@ export function App(): JSX.Element {
   const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
-    void operation.catch((error: unknown) => setOperationError(error instanceof Error ? error.message : String(error)))
+    void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -112,6 +114,7 @@ export function App(): JSX.Element {
   if (state.windowSessionId) {
     const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
     return tab ? <SessionWindow tab={tab} error={operationError}
+      onDismissError={() => setOperationError(null)}
       onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
       onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
   }
@@ -200,7 +203,7 @@ export function App(): JSX.Element {
           </div>
         ) : (
           <>
-          {operationError && <div className="session-operation-error" role="alert">{operationError}<button type="button" onClick={() => setOperationError(null)} aria-label="Dismiss error">×</button></div>}
+          {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}

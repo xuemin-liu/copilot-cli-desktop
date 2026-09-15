@@ -4,6 +4,10 @@ import type { ResumeMode } from './resume-args.js'
 import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
 
+export type RevealPathResult =
+  | { ok: true }
+  | { ok: false; reason: 'missing' | 'outside-workspace' }
+
 /** Lifecycle status of one spawned `copilot` pty session. */
 export type SessionLifecycleStatus =
   | 'starting'

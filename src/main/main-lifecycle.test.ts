@@ -165,7 +165,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           windowFor: (tabId) => tabId ? sessionWindows.get(tabId) : mainWindow,
           requestIn: (tabId, name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: sessionWindows.get(tabId).webContents }, ...args),
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
-          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); shell.showItemInFolder = () => {}; },
+          configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
@@ -419,6 +419,7 @@ test('export IPC snapshots settings while a Desktop session stays open and accep
   harness.configureMigrationExport(service, zip)
   assert.throws(() => harness.checkMigrationIdle(), /Close every Desktop session/)
   await harness.requestSettings('desktop-settings:migration-export', { categories: ['settings'], projectIds: [] })
+  assert.deepEqual(harness.shellCalls, [{ action: 'reveal', target: zip }])
   assert.equal(JSON.parse((await readMigrationArchive(zip)).files.find((file) => file.path === 'copilot/settings.json')!.data.toString()).model, 'live-session-model')
   await harness.request('desktop:write-tab', state.activeTabId, 'still running after export')
   assert.ok(harness.spawns[0]!.written.includes('still running after export'))
@@ -955,10 +956,8 @@ test('file reveal rejects paths outside the session workspace', async () => {
   await fixture(async (harness, directory) => {
     configure(harness, directory)
     const state = await harness.createMain()
-    await assert.rejects(
-      () => harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'),
-      /within the session workspace/,
-    )
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'), { ok: false, reason: 'outside-workspace' })
+    assert.deepEqual(harness.shellCalls, [])
   })
 })
 
@@ -970,16 +969,13 @@ test('file links reveal existing workspace files and report missing targets', as
     const file = join(folder, 'example.txt')
     await mkdir(folder)
     await writeFile(file, 'link fixture')
-    await harness.request('desktop:reveal-path', state.activeTabId, 'folder with spaces/example.txt')
-    await harness.request('desktop:reveal-path', state.activeTabId, file)
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, 'folder with spaces/example.txt'), { ok: true })
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, file), { ok: true })
     assert.deepEqual(harness.shellCalls, [
       { action: 'reveal', target: file },
       { action: 'reveal', target: file },
     ])
-    await assert.rejects(
-      () => harness.request('desktop:reveal-path', state.activeTabId, 'missing.txt'),
-      /File or folder not found or inaccessible:.*missing\.txt/,
-    )
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, 'missing.txt'), { ok: false, reason: 'missing' })
     assert.equal(harness.shellCalls.length, 2, 'missing targets must not launch Explorer')
     await harness.request('desktop:open-external-url', 'https://example.com/')
     assert.deepEqual(harness.shellCalls[2], { action: 'open', target: 'https://example.com/' })
