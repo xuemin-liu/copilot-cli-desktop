@@ -142,6 +142,13 @@ Run `npm run clipboard:smoke` for the automated native-copy → new-session →
 return regression in the real app and CLI. It uses the same disposable data
 and local mock model, and saves screenshots plus `result.json` under
 `test-results/clipboard-switch/` (no paid model requests).
+Ctrl+V uses the terminal's normal paste handling for text and Copilot's native
+clipboard attachment handling for images. Alt+V also reaches Copilot directly
+to attach an image. Pasting adds to the current prompt without submitting it.
+After building, run `node scripts/electron-side-chat-check.mjs --native-paste`
+to verify text, images, multiline input, and pop-out paste with the real CLI
+and a local mock model. Screenshots and request evidence are saved under
+`test-results/native-paste/` (no paid model requests).
 Run `npm run links:check` for the isolated Electron/React/xterm click regression.
 It checks file and URL routing, IPC error messages, notice layout and dismissal,
 and tab-switch races without opening external applications. Results and screenshots

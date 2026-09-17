@@ -16,6 +16,10 @@ if (process.versions.electron) {
   app.setPath('userData', process.env.DESKTOP_UI_CHECK_DATA)
   // Everything else, including IPC and PTY lifecycle, is production code.
   await import('../dist/src/main/main.js')
+  if (process.env.DESKTOP_UI_PASTE_CHECK === '1') {
+    const { runNativePasteCheck } = await import('./native-paste-check.mjs')
+    void runNativePasteCheck().catch((error) => { console.error(error); process.exitCode = 1; app.quit() })
+  }
   if (process.env.DESKTOP_UI_POPOUT_CHECK === '1') {
     const { runPopoutCheck } = await import('./session-popout-check.mjs')
     void runPopoutCheck().catch((error) => { console.error(error); process.exitCode = 1; app.quit() })
@@ -50,14 +54,27 @@ if (process.versions.electron) {
   const workspace = join(directory, 'workspace')
   const appData = join(directory, 'desktop')
   const copilotHome = join(directory, 'copilot')
+  const pasteCheck = process.argv.includes('--native-paste')
+  const pasteArtifacts = join(process.cwd(), 'test-results', 'native-paste')
+  const modelRequests = []
+  if (pasteCheck) await mkdir(pasteArtifacts, { recursive: true })
   const modelServer = createServer((request, response) => {
-    request.resume()
+    const chunks = []
+    request.on('data', chunk => { if (pasteCheck) chunks.push(chunk) })
     const respond = () => {
       response.writeHead(200, { 'Content-Type': 'application/json' })
       response.end(JSON.stringify({ id: 'local-ui-check', object: 'chat.completion', created: 1, model: 'ui-check-model', choices: [{ index: 0, message: { role: 'assistant', content: 'The saved marker is desktop-side-chat-42.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
     }
-    if (process.argv.includes('--activity')) setTimeout(respond, 7_000)
-    else respond()
+    request.on('end', async () => {
+      try {
+        if (pasteCheck) {
+          modelRequests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+          await writeFile(join(pasteArtifacts, 'model-requests.json'), JSON.stringify(modelRequests, null, 2))
+        }
+        if (process.argv.includes('--activity')) setTimeout(respond, 7_000)
+        else respond()
+      } catch (error) { console.error(error); response.writeHead(500); response.end() }
+    })
   })
   let rpc
   try {
@@ -68,6 +85,10 @@ if (process.versions.electron) {
     const baseUrl = `http://127.0.0.1:${address.port}/v1`
     const env = { ...process.env, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true', DESKTOP_UI_CHECK_DATA: appData }
     delete env.ELECTRON_RUN_AS_NODE
+    if (pasteCheck) {
+      env.DESKTOP_UI_PASTE_CHECK = '1'
+      env.DESKTOP_UI_CHECK_ARTIFACTS = pasteArtifacts
+    }
     if (process.argv.includes('--popout')) {
       env.DESKTOP_UI_POPOUT_CHECK = '1'
       env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'session-popout')
@@ -114,7 +135,9 @@ if (process.versions.electron) {
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
     console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
-    console.log(env.DESKTOP_UI_POPOUT_CHECK === '1'
+    console.log(pasteCheck
+      ? '[electron-check] Running native image/text paste regression.'
+      : env.DESKTOP_UI_POPOUT_CHECK === '1'
       ? '[electron-check] Running automated session pop-out regression.'
       : env.DESKTOP_UI_ACTIVITY_CHECK === '1'
       ? '[electron-check] Running session activity regression.'
@@ -125,6 +148,11 @@ if (process.versions.electron) {
       : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
     const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
     assert.equal(code, 0, 'Electron did not exit normally')
+    if (pasteCheck) {
+      const result = JSON.parse(await readFile(join(pasteArtifacts, 'result.json'), 'utf8'))
+      assert.equal(result.sourceSessionId, sessionId)
+      assert.equal(result.passed, true)
+    }
     if (env.DESKTOP_UI_POPOUT_CHECK === '1') {
       const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
       assert.equal(result.sourceSessionId, sessionId)

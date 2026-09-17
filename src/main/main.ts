@@ -2145,11 +2145,6 @@ ipcMain.handle('desktop:copy-text', (event, text: unknown) => {
   if (text.length > 1_000_000) throw new Error('Clipboard text is too large')
   clipboard.writeText(text)
 })
-ipcMain.handle('desktop:read-clipboard-text', (event) => {
-  assertTrustedIpcSender(event)
-  // Bound clipboard input before forwarding it to the terminal process.
-  return clipboard.readText().slice(0, 1_000_000)
-})
 ipcMain.handle('desktop:show-terminal-context-menu', (event, text: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof text !== 'string' || text.length === 0) throw new Error('Invalid clipboard text')

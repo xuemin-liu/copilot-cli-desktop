@@ -238,6 +238,11 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // still hold Shift to make an xterm selection; copy that fallback through
     // Electron, while Ctrl+C without an xterm selection reaches Copilot.
     terminal.attachCustomKeyEventHandler((event) => {
+      // Use Chromium's paste event and xterm's bracketed-paste handling.
+      // Raw Ctrl+V reaches Copilot's image shortcut but does not paste text.
+      // An image-only paste sends empty brackets, which let Copilot read the
+      // image natively. Alt+V remains Copilot's direct attachment shortcut.
+      if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'v') return false
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
         // Ctrl+C is Copilot's interrupt key unless a recent native mouse or
@@ -252,16 +257,6 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       }
       return true
     })
-
-    const handlePasteKey = (event: KeyboardEvent): void => {
-      if (!event.ctrlKey || event.altKey || event.key.toLowerCase() !== 'v') return
-      event.preventDefault()
-      event.stopPropagation()
-      void window.copilotDesktop.readClipboardText().then((text) => {
-        if (text) terminal.paste(text)
-      })
-    }
-    container.addEventListener('keydown', handlePasteKey, true)
 
     const handleContextMenu = (event: MouseEvent): void => {
       if (!terminal.hasSelection()) return
@@ -334,7 +329,6 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       clipboardWriteGate.clear()
       if (clipboardRedrawRef.current === clipboardRedraw) clipboardRedrawRef.current = null
       resizeObserver.disconnect()
-      container.removeEventListener('keydown', handlePasteKey, true)
       container.removeEventListener('mousedown', handleMouseDown, true)
       container.removeEventListener('mousemove', handleMouseMove, true)
       container.removeEventListener('mouseup', handleMouseUp, true)
