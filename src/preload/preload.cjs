@@ -21,7 +21,6 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
   showSessionLog: (tabId) => ipcRenderer.invoke('desktop:show-session-log', tabId),
   copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
-  readClipboardText: () => ipcRenderer.invoke('desktop:read-clipboard-text'),
   showTerminalContextMenu: (text) => ipcRenderer.invoke('desktop:show-terminal-context-menu', text),
   openExternalUrl: (url) => ipcRenderer.invoke('desktop:open-external-url', url),
   revealPath: (tabId, path) => ipcRenderer.invoke('desktop:reveal-path', tabId, path),

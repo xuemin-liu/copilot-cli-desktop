@@ -5,10 +5,11 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { checkModes, selectCheckMode } from './check-modes.mjs'
+import { createCheckModelServer } from './check-model-server.mjs'
 
 if (process.versions.electron) {
   const { app } = await import('electron')
@@ -16,31 +17,18 @@ if (process.versions.electron) {
   app.setPath('userData', process.env.DESKTOP_UI_CHECK_DATA)
   // Everything else, including IPC and PTY lifecycle, is production code.
   await import('../dist/src/main/main.js')
-  if (process.env.DESKTOP_UI_POPOUT_CHECK === '1') {
-    const { runPopoutCheck } = await import('./session-popout-check.mjs')
-    void runPopoutCheck().catch((error) => { console.error(error); process.exitCode = 1; app.quit() })
-  }
-  if (process.env.DESKTOP_UI_ACTIVITY_CHECK === '1') {
-    const { runActivityCheck } = await import('./session-activity-check.mjs')
-    void runActivityCheck().catch((error) => { console.error(error); process.exitCode = 1; app.quit() })
-  }
-  if (process.env.DESKTOP_UI_PERMISSION_CHECK === '1') {
-    const { runPermissionCheck } = await import('./session-permission-check.mjs')
-    void runPermissionCheck().catch((error) => {
+  const mode = selectCheckMode(process.env.DESKTOP_UI_CHECK_MODE ? [process.env.DESKTOP_UI_CHECK_MODE] : [])
+  if (mode) {
+    const check = await import(mode.module)
+    void check[mode.run]().catch(async error => {
       console.error(error)
-      process.exitCode = 1
-      app.quit()
-    })
-  }
-  if (process.env.DESKTOP_UI_CLIPBOARD_CHECK === '1') {
-    const { runClipboardSwitchCheck } = await import('./clipboard-switch-check.mjs')
-    void runClipboardSwitchCheck().catch((error) => {
-      console.error(error)
+      await writeFile(join(process.env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), JSON.stringify({ passed: false, error: String(error) })).catch(() => {})
       process.exitCode = 1
       app.quit()
     })
   }
 } else {
+  const mode = selectCheckMode(process.argv.slice(2))
   const { CopilotRpc } = await import('../dist/src/main/copilot-rpc.js')
   const { resolveCopilotBinary } = await import('../dist/src/main/resolve-copilot.js')
   const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
@@ -50,15 +38,14 @@ if (process.versions.electron) {
   const workspace = join(directory, 'workspace')
   const appData = join(directory, 'desktop')
   const copilotHome = join(directory, 'copilot')
-  const modelServer = createServer((request, response) => {
-    request.resume()
-    const respond = () => {
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ id: 'local-ui-check', object: 'chat.completion', created: 1, model: 'ui-check-model', choices: [{ index: 0, message: { role: 'assistant', content: 'The saved marker is desktop-side-chat-42.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
-    }
-    if (process.argv.includes('--activity')) setTimeout(respond, 7_000)
-    else respond()
-  })
+  const artifacts = mode ? (process.env.DESKTOP_UI_CHECK_ARTIFACTS || join(process.cwd(), 'test-results', mode.artifacts)) : undefined
+  if (artifacts) {
+    await mkdir(artifacts, { recursive: true })
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
+  }
+  const recordingPath = mode?.flag === '--native-paste' ? join(artifacts, 'model-requests.jsonl') : undefined
+  if (recordingPath) await writeFile(recordingPath, '')
+  const modelServer = createCheckModelServer({ recordingPath, delayMs: mode?.flag === '--activity' ? 7_000 : 0 })
   let rpc
   try {
     await Promise.all([workspace, appData, copilotHome].map((path) => mkdir(path)))
@@ -68,25 +55,15 @@ if (process.versions.electron) {
     const baseUrl = `http://127.0.0.1:${address.port}/v1`
     const env = { ...process.env, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true', DESKTOP_UI_CHECK_DATA: appData }
     delete env.ELECTRON_RUN_AS_NODE
-    if (process.argv.includes('--popout')) {
-      env.DESKTOP_UI_POPOUT_CHECK = '1'
-      env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'session-popout')
-    }
-    if (process.argv.includes('--activity')) {
-      env.DESKTOP_UI_ACTIVITY_CHECK = '1'
-      env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'session-activity')
-    }
-    if (process.argv.includes('--permissions')) {
-      env.DESKTOP_UI_PERMISSION_CHECK = '1'
-      env.DESKTOP_UI_CHECK_ARTIFACTS = join(process.cwd(), 'test-results', 'permissions')
-    }
-    if (process.argv.includes('--clipboard-switch') || process.argv.includes('--clipboard-multi-click') || process.argv.includes('--clipboard-status')) {
-      env.DESKTOP_UI_CLIPBOARD_CHECK = '1'
-      const multiClick = process.argv.includes('--clipboard-multi-click')
-      const statusCheck = process.argv.includes('--clipboard-status')
-      env.DESKTOP_UI_COPY_MULTI_CLICK = multiClick ? '1' : '0'
-      env.DESKTOP_UI_COPY_STATUS = statusCheck ? '1' : '0'
-      env.DESKTOP_UI_CHECK_ARTIFACTS = process.env.DESKTOP_UI_CHECK_ARTIFACTS || join(process.cwd(), 'test-results', statusCheck ? 'clipboard-status' : multiClick ? 'clipboard-multi-click' : 'clipboard-switch')
+    for (const entry of checkModes) delete env[entry.env]
+    delete env.DESKTOP_UI_CHECK_MODE
+    delete env.DESKTOP_UI_CHECK_ARTIFACTS
+    env.DESKTOP_UI_COPY_MULTI_CLICK = mode?.flag === '--clipboard-multi-click' ? '1' : '0'
+    env.DESKTOP_UI_COPY_STATUS = mode?.flag === '--clipboard-status' ? '1' : '0'
+    if (mode) {
+      env[mode.env] = '1'
+      env.DESKTOP_UI_CHECK_MODE = mode.flag
+      env.DESKTOP_UI_CHECK_ARTIFACTS = artifacts
     }
     // Trust only this newly-created disposable fixture, never a user folder.
     await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace],
@@ -114,36 +91,17 @@ if (process.versions.electron) {
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
     console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
-    console.log(env.DESKTOP_UI_POPOUT_CHECK === '1'
-      ? '[electron-check] Running automated session pop-out regression.'
-      : env.DESKTOP_UI_ACTIVITY_CHECK === '1'
-      ? '[electron-check] Running session activity regression.'
-      : env.DESKTOP_UI_PERMISSION_CHECK === '1'
-      ? '[electron-check] Running session permission regression.'
-      : env.DESKTOP_UI_CLIPBOARD_CHECK === '1'
-      ? '[electron-check] Running automated clipboard/tab-switch regression.'
-      : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
-    const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
-    assert.equal(code, 0, 'Electron did not exit normally')
-    if (env.DESKTOP_UI_POPOUT_CHECK === '1') {
-      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
-      assert.equal(result.sourceSessionId, sessionId)
-      assert.equal(result.passed, true)
-    }
-    if (env.DESKTOP_UI_ACTIVITY_CHECK === '1') {
-      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
-      assert.equal(result.sourceSessionId, sessionId)
-      assert.equal(result.passed, true)
-    }
-    if (env.DESKTOP_UI_PERMISSION_CHECK === '1') {
-      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
-      assert.equal(result.sourceSessionId, sessionId)
-      assert.equal(result.passed, true)
-    }
-    if (env.DESKTOP_UI_CLIPBOARD_CHECK === '1') {
-      const result = JSON.parse(await readFile(join(env.DESKTOP_UI_CHECK_ARTIFACTS, 'result.json'), 'utf8'))
-      assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run, not an earlier success')
-      assert.equal(result.passed, true, 'Clipboard/tab-switch UI regression failed (see test-results/clipboard-switch)')
+    console.log(mode ? `[electron-check] Running ${mode.label} regression.` : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
+    // Automated runs must also end if Electron or a renderer stops responding.
+    const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, 180_000) : undefined
+    try {
+      const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
+      assert.equal(code, 0, 'Electron did not exit normally')
+    } finally { clearTimeout(timeout) }
+    if (mode) {
+      const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
+      assert.equal(result.passed, true, result.error || `${mode.label} regression failed (see ${artifacts})`)
+      assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
     }
     const remainingHistory = await readFile(historyPath, 'utf8')
     for (const event of originalHistory.trim().split('\n').map(JSON.parse)) assert.ok(remainingHistory.includes(event.id), 'Original history was changed')

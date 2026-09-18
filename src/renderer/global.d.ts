@@ -44,7 +44,6 @@ export interface CopilotDesktopBridge {
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>
   copyText(text: string): Promise<void>
-  readClipboardText(): Promise<string>
   showTerminalContextMenu(text: string): Promise<void>
   openExternalUrl(url: string): Promise<void>
   revealPath(tabId: string, path: string): Promise<RevealPathResult>

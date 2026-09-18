@@ -46,6 +46,12 @@ handle, only input/output/resize events.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
   each, with lifecycle badges (starting / running / needs-approval / stopping
   / completed / crashed) restored per workspace profile.
+- **Paste screenshots with Ctrl+V** while Copilot's prompt is ready. Text uses
+  xterm's normal paste handling; image-only paste invokes Copilot's native Alt+V
+  attachment shortcut. Alt+V also reaches Copilot directly. A clipboard containing
+  both text and an image pastes the text; use Alt+V to attach its image. Pasting
+  adds to the draft without submitting it. Text pastes are limited to 1,000,000
+  characters; image storage is handled by the CLI.
 - A tray icon: closing the window hides it and keeps sessions running; the
   tray menu can reopen the window, start a new tab, open settings, or quit.
   Toggleable in Settings.
@@ -142,6 +148,13 @@ Run `npm run clipboard:smoke` for the automated native-copy → new-session →
 return regression in the real app and CLI. It uses the same disposable data
 and local mock model, and saves screenshots plus `result.json` under
 `test-results/clipboard-switch/` (no paid model requests).
+Run `npm run paste:check` to verify text, images, multiline input, and pop-out
+paste with the real CLI and a local mock model. Screenshots and request evidence
+are saved under `test-results/native-paste/` (no paid model requests).
+The live paste check temporarily uses the OS clipboard and restores its original
+text/image formats if it still owns the clipboard. It stops before changing copied
+files or custom clipboard formats; copy plain text first in that case. If you copy
+something new during the run, the check preserves it and prints a notice.
 Run `npm run links:check` for the isolated Electron/React/xterm click regression.
 It checks file and URL routing, IPC error messages, notice layout and dismissal,
 and tab-switch races without opening external applications. Results and screenshots

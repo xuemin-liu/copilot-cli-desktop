@@ -95,6 +95,24 @@ test('approval-heuristic output flips status to approval-needed, and write() cle
   assert.deepEqual(pty.written, ['y\n'])
 })
 
+test('empty input and empty bracketed paste preserve the approval badge', async () => {
+  const pty = new FakePty()
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
+  await session.start()
+  pty.emit('data', 'Allow copilot to run `git push`?')
+  session.write('')
+  session.write('\u001b[200~\u001b[201~')
+  assert.equal(session.status, 'approval-needed')
+  assert.deepEqual(pty.written, [])
+  session.write('\u001bv')
+  session.write('\u0016')
+  assert.equal(session.status, 'approval-needed', 'image shortcuts are not approval responses')
+  assert.deepEqual(pty.written, ['\u001bv', '\u0016'])
+  session.write('y\n')
+  assert.equal(session.status, 'running')
+  assert.deepEqual(pty.written, ['\u001bv', '\u0016', 'y\n'])
+})
+
 test('heuristics reassemble text split across pty chunks without trusting session IDs by default', async () => {
   const pty = new FakePty()
   const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work', spawnPty: fakeSpawnPty(pty) })
