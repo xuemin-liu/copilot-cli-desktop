@@ -264,11 +264,13 @@ export class PtySession extends EventEmitter {
     this.setStatus('running')
   }
 
-  /** Send raw keystrokes/input to the pty. Also clears an approval-needed badge. */
+  /** Send raw input to the pty. Attachment shortcuts do not answer approvals. */
   write(data: string): void {
-    if (!this.pty) return
-    if (this.statusValue === 'approval-needed') this.setStatus('running')
-    this.heuristicBuffer = ''
+    if (!this.pty || !data || data === '\u001b[200~\u001b[201~') return
+    if (data !== '\u001bv' && data !== '\u0016') {
+      if (this.statusValue === 'approval-needed') this.setStatus('running')
+      this.heuristicBuffer = ''
+    }
     this.pty.write(data)
   }
 

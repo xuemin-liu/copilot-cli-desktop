@@ -35,7 +35,7 @@ const built = await build({
         getTabSnapshot:async(id)=>({data:await window.copilotDesktop.getTabBacklog(id),sequence:0}),
         popOutTab:async()=>{throw new Error('Pop-out windows require the Electron app')},
         writeTab:async(id,data)=>{for(const listener of outputs)listener({tabId:id,data,sequence:1})},
-        resizeTab:async()=>{},openSettings:async()=>{},readClipboardText:async()=>'',copyText:async()=>{},showTerminalContextMenu:async()=>{},
+        resizeTab:async()=>{},openSettings:async()=>{},copyText:async()=>{},showTerminalContextMenu:async()=>{},
       };
       createRoot(document.getElementById('root')).render(<App/>);
     `,

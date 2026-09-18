@@ -21,6 +21,7 @@
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "fork:smoke": "npm run build && node dist/scripts/fork-smoke.js",
     "usage:check": "npm run build && node scripts/usage-electron-check.mjs",
+    "paste:check": "npm run build && node --test scripts/check-helpers.test.mjs && node scripts/terminal-paste-check.mjs && node scripts/electron-side-chat-check.mjs --native-paste",
     "clipboard:smoke": "npm run build && node scripts/electron-side-chat-check.mjs --clipboard-switch",
     "links:check": "node scripts/terminal-links-check.mjs",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app, BrowserWindow } from 'electron'
+import { ui, readEvents } from './check-helpers.mjs'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(action, label) {
@@ -13,10 +14,6 @@ async function until(action, label) {
 export async function runPopoutCheck() {
   await app.whenReady()
   const main = await until(() => BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html')), 'main window')
-  const ui = (window, code) => Promise.race([
-    window.webContents.executeJavaScript(code),
-    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error(`Renderer timeout: ${code}`)), 15_000); timer.unref() }),
-  ])
   const state = (window = main) => ui(window, 'window.copilotDesktop.getState()')
   const artifacts = process.env.DESKTOP_UI_CHECK_ARTIFACTS
   await mkdir(artifacts, { recursive: true })
@@ -32,9 +29,7 @@ export async function runPopoutCheck() {
     const source = await until(async () => (await state()).tabs.find(tab => tab.status === 'running' && tab.activity === 'idle'), 'resumed session idle')
     const id = JSON.stringify(source.id)
     const eventsPath = join(process.env.COPILOT_HOME, 'session-state', source.lastSessionId, 'events.jsonl')
-    const assistantCount = async () => (await readFile(eventsPath, 'utf8')).split('\n').filter(line => {
-      try { return JSON.parse(line).type === 'assistant.message' } catch { return false }
-    }).length
+    const assistantCount = async () => (await readEvents(eventsPath)).filter(event => event.type === 'assistant.message').length
     const initialReplies = await assistantCount()
     await until(async () => (await ui(main, `window.copilotDesktop.getTabBacklog(${id})`)).includes('open sidebar'), 'CLI input prompt ready')
     await until(() => ui(main, `document.querySelector('.session-pane-visible .xterm-screen')` + ' !== null'), 'terminal')

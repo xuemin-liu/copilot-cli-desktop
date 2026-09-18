@@ -1,9 +1,11 @@
 // Real keyboard events -> production xterm/PTY -> CLI clipboard -> mock model.
 // Run: npm run build && node scripts/electron-side-chat-check.mjs --native-paste
 import assert from 'node:assert/strict'
-import { readFile, writeFile } from 'node:fs/promises'
+import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app, BrowserWindow, clipboard, nativeImage } from 'electron'
+import { ui, readEvents } from './check-helpers.mjs'
+import { preserveClipboard } from './check-clipboard.mjs'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(action, label) {
@@ -19,18 +21,15 @@ async function until(action, label) {
 export async function runNativePasteCheck() {
   await app.whenReady()
   const main = await until(() => BrowserWindow.getAllWindows().find(w => w.webContents.getURL().endsWith('/index.html')), 'main renderer')
-  const ui = (window, code) => window.webContents.executeJavaScript(code)
   const state = () => ui(main, 'window.copilotDesktop.getState()')
   const artifacts = process.env.DESKTOP_UI_CHECK_ARTIFACTS
   const screenshot = async (window, name) => writeFile(join(artifacts, `${name}.png`), (await window.webContents.capturePage()).toPNG())
   const text = window => ui(window, `Array.from(document.querySelectorAll(':is(.session-pane-visible, .session-window) .xterm-rows > div'), row => row.textContent).join(${JSON.stringify('\n')})`)
   const imageNames = async window => (await text(window)).match(/copilot-image-[\w-]+\.png/g) ?? []
-  const original = { text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), image: clipboard.readImage() }
-  let ownedClipboard
-  const ownClipboard = () => { ownedClipboard = { text: clipboard.readText(), image: clipboard.readImage().toPNG() } }
-  const setText = value => { clipboard.writeText(value); ownClipboard() }
+  const savedClipboard = preserveClipboard(clipboard)
+  const setText = value => { clipboard.writeText(value); savedClipboard.claim() }
   const fixture = nativeImage.createFromBitmap(Buffer.alloc(32 * 32 * 4, 200), { width: 32, height: 32 })
-  const setImage = () => { clipboard.writeImage(fixture); ownClipboard() }
+  const setImage = () => { clipboard.writeImage(fixture); savedClipboard.claim() }
   const key = async (window, keyCode, modifiers = []) => {
     await ui(window, `document.querySelector(':is(.session-pane-visible, .session-window) .xterm-helper-textarea').focus()`)
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
@@ -40,7 +39,7 @@ export async function runNativePasteCheck() {
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
     const source = await until(async () => (await state()).tabs.find(t => t.status === 'running' && t.activity === 'idle'), 'source idle')
     const eventsPath = join(process.env.COPILOT_HOME, 'session-state', source.lastSessionId, 'events.jsonl')
-    const events = async () => (await readFile(eventsPath, 'utf8')).trim().split('\n').map(JSON.parse)
+    const events = () => readEvents(eventsPath)
     const users = async () => (await events()).filter(event => event.type === 'user.message')
     const replies = async () => (await events()).filter(event => event.type === 'assistant.message').length
     await until(async () => (await text(main)).includes('open sidebar'), 'input ready')
@@ -64,7 +63,7 @@ export async function runNativePasteCheck() {
     assert.ok(JSON.stringify(first).includes(prompt), 'Text must reach the CLI unchanged')
     assert.equal(first.data.content.split(prompt).length - 1, 1, 'Paste must not duplicate text')
     assert.equal(first.data.attachments.length, 1, 'Paste must attach exactly one image')
-    const requests = JSON.parse(await readFile(join(artifacts, 'model-requests.json'), 'utf8'))
+    const requests = await readEvents(join(artifacts, 'model-requests.jsonl'))
     assert.ok(JSON.stringify(requests.at(-1)).includes('data:image/'), 'Actual image bytes must reach the mock model')
     await screenshot(main, '02-image-sent')
 
@@ -93,7 +92,7 @@ export async function runNativePasteCheck() {
     await until(async () => await replies() > beforeReplies, 'popout image prompt completed')
     assert.ok(JSON.stringify((await users()).at(-1)).includes(JSON.stringify(multiline).slice(1, -1)), 'Multiline paste preserved')
     assert.equal((await users()).at(-1).data.attachments.length, 1, 'Alt+V must attach exactly one image')
-    const finalRequests = JSON.parse(await readFile(join(artifacts, 'model-requests.json'), 'utf8'))
+    const finalRequests = await readEvents(join(artifacts, 'model-requests.jsonl'))
     const latestMessage = finalRequests.at(-1).messages.filter(message => message.role === 'user').at(-1)
     assert.ok(JSON.stringify(latestMessage).includes('data:image/'), 'Popout image must reach model')
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, cli: (await state()).resolution.version, checks: ['Ctrl+V text', 'Ctrl+V image bytes reach model', 'existing draft preserved', 'no automatic submit', 'popout multiline text', 'Alt+V image bytes reach model'] }, null, 2))
@@ -105,7 +104,7 @@ export async function runNativePasteCheck() {
     }
     throw error
   } finally {
-    if (ownedClipboard && clipboard.readText() === ownedClipboard.text && clipboard.readImage().toPNG().equals(ownedClipboard.image)) clipboard.write(original)
+    savedClipboard.restore()
     app.quit()
   }
 }

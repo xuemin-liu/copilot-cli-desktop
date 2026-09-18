@@ -6,6 +6,7 @@ import { SerializeAddon } from '@xterm/addon-serialize'
 import { OperationError } from './OperationError.js'
 import { errorMessage } from '../errors.js'
 import { TerminalReplay } from '../terminal-replay.js'
+import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -238,12 +239,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // still hold Shift to make an xterm selection; copy that fallback through
     // Electron, while Ctrl+C without an xterm selection reaches Copilot.
     terminal.attachCustomKeyEventHandler((event) => {
-      // Use Chromium's paste event and xterm's bracketed-paste handling.
-      // Raw Ctrl+V reaches Copilot's image shortcut but does not paste text.
-      // An image-only paste sends empty brackets, which let Copilot read the
-      // image natively. Alt+V remains Copilot's direct attachment shortcut.
-      if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'v') return false
-      if (event.type === 'keydown' && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
+      // Let Chromium dispatch paste; keyup still runs xterm's focus handling.
+      if (isNativePasteKey(event)) return false
+      if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
         // Ctrl+C is Copilot's interrupt key unless a recent native mouse or
         // keyboard selection identifies this invocation as selected-text copy.
@@ -284,12 +282,15 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // Only intercept right-click for Shift/xterm selections. Otherwise the
     // mouse sequence remains Copilot-owned and its native selected-text copy
     // reaches this app through the OSC 52 handler above.
+    const handlePaste = (event: ClipboardEvent): void => handleTerminalPaste(event, terminal)
+    container.addEventListener('paste', handlePaste, true)
     container.addEventListener('mousedown', handleMouseDown, true)
     container.addEventListener('mousemove', handleMouseMove, true)
     container.addEventListener('mouseup', handleMouseUp, true)
     container.addEventListener('contextmenu', handleContextMenu, true)
 
     terminal.onData((data) => {
+      if (!data || data === '\u001b[200~\u001b[201~') return
       void window.copilotDesktop.writeTab(tabId, data)
     })
 
@@ -329,6 +330,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       clipboardWriteGate.clear()
       if (clipboardRedrawRef.current === clipboardRedraw) clipboardRedrawRef.current = null
       resizeObserver.disconnect()
+      container.removeEventListener('paste', handlePaste, true)
       container.removeEventListener('mousedown', handleMouseDown, true)
       container.removeEventListener('mousemove', handleMouseMove, true)
       container.removeEventListener('mouseup', handleMouseUp, true)
