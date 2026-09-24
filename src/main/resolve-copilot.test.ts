@@ -73,7 +73,46 @@ test('resolveCopilotBinary refuses an unverifiable command shim instead of invok
     ? '@"%dp0%\\node_modules\\@github\\copilot\\..\\outside.js" %*'
     : JSON.stringify({ name: '@github/copilot', bin: { copilot: '..\\outside.js' } }))
   assert.equal(resolution.version, null)
-  assert.match(resolution.error ?? '', /unsupported or failed direct launch/)
+  assert.match(resolution.error ?? '', /package-manager shim target could not be verified/)
+})
+
+test('Windows npm loader gets enough time for a cold start before falling back to gh', async () => {
+  const shim = 'C:\\Program Files\\nodejs\\copilot.cmd'
+  const node = 'C:\\Program Files\\nodejs\\node.exe'
+  const entry = 'C:\\Program Files\\nodejs\\node_modules\\@github\\copilot\\npm-loader.js'
+  const calls: string[] = []
+  const resolution = await resolveCopilotBinary({}, async (file, args, options) => {
+    calls.push(file)
+    if (file === WHERE) {
+      assert.deepEqual(args, ['copilot'])
+      assert.equal(options.timeout, 8_000)
+      return { stdout: `${shim}\r\n`, stderr: '' }
+    }
+    assert.equal(file, node)
+    assert.deepEqual(args, [entry, '--version'])
+    // Model a cold load that exceeds the former eight-second limit.
+    if (options.timeout < 12_000) throw Object.assign(new Error('startup timed out'), { killed: true })
+    return { stdout: 'GitHub Copilot CLI 1.0.88\n', stderr: '' }
+  }, 'win32', (path) => [shim, node, entry].includes(path), async (path) => path === shim
+    ? '@"%dp0%\\node_modules\\@github\\copilot\\npm-loader.js" %*'
+    : JSON.stringify({ name: '@github/copilot', bin: { copilot: 'npm-loader.js' } }))
+  assert.equal(resolution.error, null)
+  assert.equal(resolution.command, node)
+  assert.equal(resolution.version, '1.0.88')
+  assert.deepEqual(calls, [WHERE, node])
+})
+
+test('Windows diagnostics preserve version probe failures and identify timeouts', async () => {
+  const slow = 'C:\\tools\\copilot.exe'
+  const broken = 'C:\\other\\copilot.exe'
+  const resolution = await resolveCopilotBinary({}, fakeExecFile({
+    [`${WHERE} copilot`]: { stdout: `${slow}\r\n${broken}\r\n` },
+    [`${slow} --version`]: Object.assign(new Error('Command failed'), { killed: true }),
+    [`${broken} --version`]: new Error('Access is denied'),
+    [`${WHERE} gh`]: new Error('not found'),
+  }), 'win32', () => false)
+  assert.ok(resolution.error?.includes(`${slow}: Version check timed out after 30 seconds`))
+  assert.ok(resolution.error?.includes(`${broken}: Access is denied`))
 })
 
 test('resolveCopilotBinary checks standard npm location when Electron PATH is incomplete', async () => {

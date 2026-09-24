@@ -6,7 +6,9 @@ import { promisify } from 'node:util'
 import type { CopilotResolution } from './types.js'
 
 const execFileAsync = promisify(execFile)
-const COPILOT_PROBE_TIMEOUT_MS = 8_000
+const COMMAND_LOOKUP_TIMEOUT_MS = 8_000
+// Loading the npm CLI can take longer on a cold Windows start.
+const COPILOT_PROBE_TIMEOUT_MS = 30_000
 const COPILOT_PACKAGE_PATH = ['@github', 'copilot'] as const
 const COPILOT_PACKAGE_MARKER = `\\node_modules\\${COPILOT_PACKAGE_PATH.join('\\')}\\`
 
@@ -54,6 +56,9 @@ async function tryVersion(
     })
     return { ok: true, version: parseVersion(stdout || stderr) }
   } catch (error) {
+    if (error instanceof Error && 'killed' in error && error.killed === true) {
+      return { ok: false, error: new Error(`Version check timed out after ${COPILOT_PROBE_TIMEOUT_MS / 1000} seconds: ${error.message}`) }
+    }
     return { ok: false, error }
   }
 }
@@ -68,7 +73,7 @@ async function resolveWindowsCommand(
     const { stdout } = await execFileFn(
       windowsSystemExecutable('where.exe', env),
       [command],
-      { env, cwd: systemDirectory, timeout: COPILOT_PROBE_TIMEOUT_MS, windowsHide: true },
+      { env, cwd: systemDirectory, timeout: COMMAND_LOOKUP_TIMEOUT_MS, windowsHide: true },
     )
     const paths = stdout
       .split(/\r?\n/)
@@ -217,15 +222,15 @@ async function probeWindowsCopilotPath(
   execFileFn: ExecFileFn,
   pathExists: (path: string) => boolean,
   readTextFile: ReadTextFileFn,
-): Promise<Omit<CopilotResolution, 'kind' | 'error'> | null> {
+): Promise<{ launch: Omit<CopilotResolution, 'kind' | 'error'>; error: null } | { launch: null; error: string }> {
   const launch = path.toLowerCase().endsWith('.exe')
     ? { command: path, prefixArgs: [], resolvedPath: path, pathAdditions: [] }
     : await unwrapCopilotNpmShim(path, env, execFileFn, pathExists, readTextFile)
-  if (!launch) return null
+  if (!launch) return { launch: null, error: 'package-manager shim target could not be verified' }
   const launchEnv = withCopilotPathAdditions(env, launch.pathAdditions)
   const result = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], launchEnv, execFileFn)
-  if (!result.ok) return null
-  return { ...launch, version: result.version }
+  if (!result.ok) return { launch: null, error: describeError(result.error) }
+  return { launch: { ...launch, version: result.version }, error: null }
 }
 
 /** Resolve Copilot without ever invoking a command shell. */
@@ -241,9 +246,9 @@ export async function resolveCopilotBinary(
   if (platform === 'win32') {
     const located = await resolveWindowsCommand('copilot', env, execFileFn)
     for (const path of located.paths) {
-      const launch = await probeWindowsCopilotPath(path, env, execFileFn, pathExists, readTextFile)
+      const { launch, error } = await probeWindowsCopilotPath(path, env, execFileFn, pathExists, readTextFile)
       if (launch) return { kind: 'direct', ...launch, error: null }
-      attempts.push(`${path}: unsupported or failed direct launch`)
+      attempts.push(`${path}: ${error}`)
     }
     if (located.error) attempts.push(`where.exe copilot: ${describeError(located.error)}`)
 
@@ -254,9 +259,9 @@ export async function resolveCopilotBinary(
     ].filter((candidate): candidate is string => Boolean(candidate))
     for (const candidate of [...new Set(shimCandidates)]) {
       if (!pathExists(candidate) || located.paths.includes(candidate)) continue
-      const launch = await probeWindowsCopilotPath(candidate, env, execFileFn, pathExists, readTextFile)
+      const { launch, error } = await probeWindowsCopilotPath(candidate, env, execFileFn, pathExists, readTextFile)
       if (launch) return { kind: 'direct', ...launch, error: null }
-      attempts.push(`${candidate}: package-manager shim target could not be verified`)
+      attempts.push(`${candidate}: ${error}`)
     }
   } else {
     const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
