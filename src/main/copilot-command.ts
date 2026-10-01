@@ -7,6 +7,9 @@ const execFileAsync = promisify(execFile)
 // Help loads the same CLI runtime as --version, which can take longer on a
 // cold Windows start (especially through an npm loader).
 const CAPABILITY_PROBE_TIMEOUT_MS = 30_000
+// The retry is a warm load: cap it at five seconds so two hung probes block
+// their caller for at most ~36 seconds (30s + 1s delay + 5s).
+const CAPABILITY_RETRY_TIMEOUT_MS = 5_000
 const CAPABILITY_RETRY_DELAY_MS = 1_000
 
 function delay(milliseconds: number): Promise<void> {
@@ -60,6 +63,7 @@ export interface CopilotCapabilities {
   plugins: boolean
   acp: boolean
   supportedOptions: string[]
+  probeFailed: boolean
 }
 
 export const EMPTY_COPILOT_CAPABILITIES: CopilotCapabilities = {
@@ -70,6 +74,7 @@ export const EMPTY_COPILOT_CAPABILITIES: CopilotCapabilities = {
   plugins: false,
   acp: false,
   supportedOptions: [],
+  probeFailed: false,
 }
 
 export function parseCopilotCapabilities(helpText: string): CopilotCapabilities {
@@ -83,6 +88,7 @@ export function parseCopilotCapabilities(helpText: string): CopilotCapabilities 
     plugins: /\bcopilot plugins?\b|--plugin-dir|\/plugins/.test(helpText),
     acp: hasOption('--acp'),
     supportedOptions,
+    probeFailed: false,
   }
 }
 
@@ -94,14 +100,15 @@ export async function discoverCopilotCapabilities(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       // Query the top-level option reference to validate workspace launch flags.
-      const result = await runCommand(resolution, ['--help'], { timeout: CAPABILITY_PROBE_TIMEOUT_MS })
+      const timeout = attempt === 0 ? CAPABILITY_PROBE_TIMEOUT_MS : CAPABILITY_RETRY_TIMEOUT_MS
+      const result = await runCommand(resolution, ['--help'], { timeout })
       return parseCopilotCapabilities(`${result.stdout}\n${result.stderr}`)
     } catch {
       // A just-installed CLI or an antivirus scan can make the first probe
       // transiently fail. Pause before one bounded retry so the condition has
-      // time to clear. Both attempts still have a bounded cold-start timeout.
+      // time to clear before a shorter warm-start retry.
       if (attempt === 0) await waitForRetry(CAPABILITY_RETRY_DELAY_MS)
     }
   }
-  return { ...EMPTY_COPILOT_CAPABILITIES }
+  return { ...EMPTY_COPILOT_CAPABILITIES, probeFailed: true }
 }

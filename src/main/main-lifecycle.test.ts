@@ -685,6 +685,37 @@ function assertRestricted(args: string[]): void {
   for (const forbidden of ['--allow-all', '--autopilot', 'autopilot', '--agent', '--worktree']) assert.ok(!args.includes(forbidden), `Unexpected launch arg: ${forbidden}`)
 }
 
+test('failed capability detection reports a retryable error before launching a configured model', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.launch.model = 'gpt-5.3-codex'
+    capabilities.probeFailed = true
+    await assert.rejects(harness.createMain(), /Could not determine Copilot CLI capabilities.*Retry CLI detection from Settings/)
+    assert.equal(harness.spawns.length, 0)
+  })
+})
+
+test('a successful probe without --model retains the unsupported-option error', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.launch.model = 'gpt-5.3-codex'
+    await assert.rejects(harness.createMain(), /This Copilot CLI version does not support --model/)
+    assert.equal(harness.spawns.length, 0)
+  })
+})
+
+test('failed capability detection does not stop a running session during restart', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    const opened = await harness.createMain()
+    profile.launch.model = 'gpt-5.3-codex'
+    capabilities.probeFailed = true
+    await assert.rejects(harness.request('desktop:restart-tab', opened.activeTabId), /Could not determine Copilot CLI capabilities/)
+    assert.equal(harness.spawns.length, 1)
+    assert.equal(harness.spawns[0]!.stopped, false)
+  })
+})
+
 test('session launch keeps the inherited PATH when adding the Copilot runtime directory', async () => {
   await fixture(async (harness, directory) => {
     configure(harness, directory)

@@ -29,6 +29,7 @@ test('parseCopilotCapabilities detects supported integration surfaces', () => {
       '--acp', '--available-tools', '--connect', '--effort', '--mode', '--model', '--name', '--plugin-dir',
       '--remote', '--session-id',
     ],
+    probeFailed: false,
   })
   assert.deepEqual(parseCopilotCapabilities('old copilot help'), EMPTY_COPILOT_CAPABILITIES)
 })
@@ -47,10 +48,9 @@ test('buildCopilotCommandArgs preserves the resolved executable prefix', () => {
 test('capability discovery uses the top-level option reference to validate a configured model', async () => {
   const capabilities = await discoverCopilotCapabilities(RESOLUTION, async (resolution, args) => {
     assert.equal(resolution, RESOLUTION)
+    assert.deepEqual(args, ['--help'])
     return {
-      stdout: args[0] === '--help'
-        ? 'Options:\n  --model <model>  Set the AI model\n  --mode <mode>\n  --effort <level>'
-        : 'Help topics:\n  copilot help environment\n  copilot help permissions',
+      stdout: 'Options:\n  --model <model>  Set the AI model\n  --mode <mode>\n  --effort <level>',
       stderr: '',
     }
   })
@@ -73,25 +73,35 @@ test('capability discovery allows a cold Windows npm CLI load beyond five second
 test('capability discovery retries a transient probe failure once', async () => {
   let attempts = 0
   const delays: number[] = []
-  const capabilities = await discoverCopilotCapabilities(RESOLUTION, async (_resolution, args) => {
+  const timeouts: number[] = []
+  const capabilities = await discoverCopilotCapabilities(RESOLUTION, async (_resolution, args, options) => {
     assert.deepEqual(args, ['--help'])
+    timeouts.push(options!.timeout!)
     attempts += 1
     if (attempts === 1) throw new Error('CLI update in progress')
     return { stdout: '--model <model>', stderr: '' }
   }, async (milliseconds) => { delays.push(milliseconds) })
   assert.equal(attempts, 2)
   assert.deepEqual(delays, [1_000])
+  assert.deepEqual(timeouts, [30_000, 5_000])
   assert.deepEqual(capabilities.supportedOptions, ['--model'])
+  assert.equal(capabilities.probeFailed, false)
 })
 
 test('capability discovery stays conservative after both probes fail', async () => {
   let attempts = 0
-  const capabilities = await discoverCopilotCapabilities(RESOLUTION, async () => {
+  const delays: number[] = []
+  const timeouts: number[] = []
+  const capabilities = await discoverCopilotCapabilities(RESOLUTION, async (_resolution, _args, options) => {
+    timeouts.push(options!.timeout!)
     attempts += 1
     throw new Error('CLI unavailable')
-  }, async () => {})
+  }, async (milliseconds) => { delays.push(milliseconds) })
   assert.equal(attempts, 2)
-  assert.deepEqual(capabilities, EMPTY_COPILOT_CAPABILITIES)
+  assert.deepEqual(delays, [1_000])
+  assert.deepEqual(timeouts, [30_000, 5_000])
+  assert.equal(timeouts.reduce((sum, value) => sum + value, 0) + delays[0]!, 36_000)
+  assert.deepEqual(capabilities, { ...EMPTY_COPILOT_CAPABILITIES, probeFailed: true })
 })
 
 test('capability discovery does not assume an older CLI supports --model', async () => {
@@ -101,4 +111,5 @@ test('capability discovery does not assume an older CLI supports --model', async
   }), async () => { assert.fail('a successful help probe must not retry') })
   assert.equal(capabilities.supportedOptions.includes('--model'), false)
   assert.equal(capabilities.launchProfiles, false)
+  assert.equal(capabilities.probeFailed, false)
 })
