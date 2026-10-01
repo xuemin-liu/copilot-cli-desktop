@@ -843,6 +843,9 @@ function validateLaunchOptions(launch: SessionLaunchConfig, connectSessionId: st
     connectSessionId ? { ...launch, remoteControl: 'inherit', remoteExport: 'inherit' } : launch,
     freshSession,
   )
+  if (launchArgs.length > 0 && copilotCapabilities.probeFailed) {
+    throw new Error('Could not determine Copilot CLI capabilities. Retry CLI detection from Settings before starting a session.')
+  }
   const unsupportedLaunchOptions = launchArgs.filter((argument) => (
     argument.startsWith('--') && !copilotCapabilities.supportedOptions.includes(argument)
   ))
