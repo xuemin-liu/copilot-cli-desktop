@@ -4,7 +4,9 @@ import type { CopilotResolution } from './types.js'
 import { withCopilotPathAdditions } from './resolve-copilot.js'
 
 const execFileAsync = promisify(execFile)
-const CAPABILITY_PROBE_TIMEOUT_MS = 5_000
+// Help loads the same CLI runtime as --version, which can take longer on a
+// cold Windows start (especially through an npm loader).
+const CAPABILITY_PROBE_TIMEOUT_MS = 30_000
 const CAPABILITY_RETRY_DELAY_MS = 1_000
 
 function delay(milliseconds: number): Promise<void> {
@@ -84,16 +86,21 @@ export function parseCopilotCapabilities(helpText: string): CopilotCapabilities 
   }
 }
 
-export async function discoverCopilotCapabilities(resolution: CopilotResolution): Promise<CopilotCapabilities> {
+export async function discoverCopilotCapabilities(
+  resolution: CopilotResolution,
+  runCommand: typeof runCopilotCommand = runCopilotCommand,
+  waitForRetry: (milliseconds: number) => Promise<void> = delay,
+): Promise<CopilotCapabilities> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const result = await runCopilotCommand(resolution, ['help'], { timeout: CAPABILITY_PROBE_TIMEOUT_MS })
+      // Query the top-level option reference to validate workspace launch flags.
+      const result = await runCommand(resolution, ['--help'], { timeout: CAPABILITY_PROBE_TIMEOUT_MS })
       return parseCopilotCapabilities(`${result.stdout}\n${result.stderr}`)
     } catch {
       // A just-installed CLI or an antivirus scan can make the first probe
       // transiently fail. Pause before one bounded retry so the condition has
-      // time to clear without leaving startup or Settings blocked for a minute.
-      if (attempt === 0) await delay(CAPABILITY_RETRY_DELAY_MS)
+      // time to clear. Both attempts still have a bounded cold-start timeout.
+      if (attempt === 0) await waitForRetry(CAPABILITY_RETRY_DELAY_MS)
     }
   }
   return { ...EMPTY_COPILOT_CAPABILITIES }
