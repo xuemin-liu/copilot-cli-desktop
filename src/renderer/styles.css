@@ -471,6 +471,35 @@ button:disabled {
   background: #080b12;
 }
 
+.browser-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.browser-workspace-toolbar { display: flex; justify-content: flex-end; padding: 5px 10px; border-bottom: 1px solid #252a33; }
+.browser-workspace-toolbar button { padding: 4px 10px; font-size: 12px; }
+.browser-workspace-content { display: grid; flex: 1; min-height: 0; min-width: 0; }
+.browser-terminal-workspace { display: flex; min-height: 0; min-width: 0; }
+.browser-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #10151e; }
+.browser-toolbar { display: flex; gap: 4px; padding: 8px; }
+.browser-toolbar input { flex: 1; min-width: 0; color: #e6edf3; background: #080b12; border: 1px solid #364153; border-radius: 5px; padding: 5px 8px; }
+.browser-toolbar button { padding: 3px 8px; }
+.browser-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; border-bottom: 1px solid #252a33; }
+.browser-tabs button { padding: 4px 6px; font-size: 11px; }
+.browser-tabs button[aria-selected="true"], .browser-tabs button[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }
+.browser-viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fff; }
+.browser-hint { text-align: center; color: #596477; margin-top: 50px; }
+.browser-activity { height: 100%; overflow: auto; padding: 10px; color: #c8d3e3; background: #0b0e14; font-size: 12px; }
+.browser-console-entry { border-bottom: 1px solid #252a33; padding: 8px 0; }
+.browser-console-entry small { display: block; overflow-wrap: anywhere; color: #929baa; }
+.browser-console-entry pre, .browser-request-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+.browser-console-error { color: #ff8c95; }
+.browser-console-warning { color: #f0c86b; }
+.browser-network { width: 100%; border-collapse: collapse; }
+.browser-network th, .browser-network td { padding: 6px 4px; border-bottom: 1px solid #252a33; text-align: left; vertical-align: top; }
+.browser-network button { padding: 0; border: 0; background: transparent; text-align: left; font: inherit; overflow-wrap: anywhere; }
+.browser-error { margin: 0; padding: 7px 10px; color: #ff8c95; font-size: 12px; overflow-wrap: anywhere; }
+.browser-footer { font-size: 11px; padding: 7px 10px; color: #929baa; }
+.browser-footer details { margin-top: 5px; }
+.browser-footer summary { cursor: pointer; }
+.browser-footer p { line-height: 1.5; }
+
 .terminal-pane {
   position: absolute;
   inset: 0;

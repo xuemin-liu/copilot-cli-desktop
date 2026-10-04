@@ -103,6 +103,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, Tray = {};
+        // Browser rendering is exercised by browser-debug-check.mjs in real
+        // Electron; existing session lifecycle tests never instantiate this view.
+        export const WebContentsView = class {};
         export const shell = {
           calls: [],
           showItemInFolder(target) { this.calls.push({ action: 'reveal', target }); },

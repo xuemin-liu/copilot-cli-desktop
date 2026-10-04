@@ -1,4 +1,5 @@
 import type { DesktopState, RevealPathResult } from '../main/types.js'
+import type { BrowserBounds, BrowserDebugState } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { CredentialName } from '../main/secure-credentials.js'
@@ -24,6 +25,11 @@ export interface TabExitPayload {
 }
 
 export interface CopilotDesktopBridge {
+  browserOpen(): Promise<BrowserDebugState>
+  browserState(): Promise<BrowserDebugState>
+  browserNavigate(url: string): Promise<BrowserDebugState>
+  browserAction(action: 'back' | 'forward' | 'reload' | 'clear' | 'devtools'): Promise<BrowserDebugState>
+  browserBounds(bounds: BrowserBounds | null): Promise<void>
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
