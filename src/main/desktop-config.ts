@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { normalizeBrowserProfileId } from './browser-profile.js'
 import { createHash } from 'node:crypto'
 import { basename, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
@@ -123,9 +124,11 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
     const lastSessionId = typeof tab.lastSessionId === 'string' && tab.lastSessionId.length > 0
       ? tab.lastSessionId
       : null
+    const browserProfileId = normalizeBrowserProfileId(tab.browserProfileId)
     tabs.push({
       title: tab.title,
       lastSessionId,
+      ...(browserProfileId ? { browserProfileId } : {}),
       ...(isPermissionPreset(tab.sessionPermissionPreset)
         ? { sessionPermissionPreset: tab.sessionPermissionPreset }
         : {}),

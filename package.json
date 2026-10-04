@@ -33,7 +33,7 @@
     "migration:check": "npm run build && node scripts/migration-electron-check.mjs",
     "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity",
     "popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --popout",
-    "browser:check": "npm run build && node scripts/browser-debug-check.mjs"
+    "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",

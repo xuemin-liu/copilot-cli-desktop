@@ -20,6 +20,7 @@ export type SessionLifecycleStatus =
 export interface RestoredTab {
   title: string
   lastSessionId: string | null
+  browserProfileId?: string
   /** Session-owned launch bundle. Missing in config files written by older releases. */
   sessionPermissionPreset?: PermissionPreset
   sessionPermissionMode?: SessionPermissionMode
@@ -40,6 +41,7 @@ export interface WorkspaceProfile {
 export interface DesktopSessionTab {
   id: string
   title: string
+  browserProfileId?: string
   workspaceProfileId: string
   lastSessionId: string | null
   status: SessionLifecycleStatus

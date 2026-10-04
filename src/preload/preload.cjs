@@ -2,11 +2,11 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktop', {
   getState: () => ipcRenderer.invoke('desktop:get-state'),
-  browserOpen: () => ipcRenderer.invoke('desktop:browser-open'),
-  browserState: () => ipcRenderer.invoke('desktop:browser-state'),
-  browserNavigate: (url) => ipcRenderer.invoke('desktop:browser-navigate', url),
-  browserAction: (action) => ipcRenderer.invoke('desktop:browser-action', action),
-  browserBounds: (bounds) => ipcRenderer.invoke('desktop:browser-bounds', bounds),
+  browserOpen: (tabId) => ipcRenderer.invoke('desktop:browser-open', tabId),
+  browserState: (tabId) => ipcRenderer.invoke('desktop:browser-state', tabId),
+  browserNavigate: (tabId, url) => ipcRenderer.invoke('desktop:browser-navigate', tabId, url),
+  browserAction: (tabId, action) => ipcRenderer.invoke('desktop:browser-action', tabId, action),
+  browserBounds: (tabId, bounds) => ipcRenderer.invoke('desktop:browser-bounds', tabId, bounds),
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   createTab: (resumeMode, profileId) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId),
