@@ -192,7 +192,7 @@ test('a corrupt vault is quarantined by saveCredential and deleteCredential', as
     await writeFile(filename, '{ not json')
     await store.deleteCredential('GH_TOKEN')
     assert.equal((await readdir(join(filename, '..'))).filter((name) => name.includes('.corrupt-')).length, 1)
-    await writeFile(filename, JSON.stringify({ version: 2, credentials: [] }))
+    await writeFile(filename, JSON.stringify({ version: 'x', credentials: [] }))
     await store.saveCredential('GH_TOKEN', 'gho_test')
     assert.equal((await store.resolveEnvironment()).GH_TOKEN, 'gho_test')
   })
@@ -218,5 +218,37 @@ test('resolveEnvironment skips a record that cannot be decrypted', async () => {
     } finally {
       if (previous !== undefined) process.env.GH_TOKEN = previous
     }
+  })
+})
+
+test('a vault written by a newer app version is preserved, not quarantined', async () => {
+  const { writeFile, readFile: read, readdir } = await import('node:fs/promises')
+  await withTempFile(async (filename) => {
+    const store = new SecureCredentialStore(filename, fakeEncryption())
+    const newer = JSON.stringify({ version: 2, credentials: [] })
+    await writeFile(filename, newer)
+    await assert.rejects(() => store.saveCredential('GH_TOKEN', 'gho_test'), /newer version/)
+    await assert.rejects(() => store.deleteCredential('GH_TOKEN'), /newer version/)
+    assert.equal(await read(filename, 'utf8'), newer)
+    assert.deepEqual((await readdir(join(filename, '..'))).filter((name) => name.includes('.corrupt-')), [])
+  })
+})
+
+test('resolveEnvironment logs the name, never the value, of a skipped record', async () => {
+  await withTempFile(async (filename) => {
+    const logged: string[] = []
+    const encryption: EncryptionProvider = { ...fakeEncryption(), decryptString: () => { throw new Error('cannot decrypt') } }
+    const store = new SecureCredentialStore(filename, encryption, (message) => logged.push(message))
+    await store.saveCredential('COPILOT_PROVIDER_API_KEY', 'sk-secret-value')
+    const previous = process.env.COPILOT_PROVIDER_API_KEY
+    delete process.env.COPILOT_PROVIDER_API_KEY
+    try {
+      assert.deepEqual(await store.resolveEnvironment(), {})
+    } finally {
+      if (previous !== undefined) process.env.COPILOT_PROVIDER_API_KEY = previous
+    }
+    assert.equal(logged.length, 1)
+    assert.match(logged[0]!, /COPILOT_PROVIDER_API_KEY/)
+    assert.doesNotMatch(logged[0]!, /sk-secret-value/)
   })
 })

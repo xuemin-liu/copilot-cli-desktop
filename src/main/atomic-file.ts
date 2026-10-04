@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import { renameSync } from 'node:fs'
 
 const RETRYABLE_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM'])
+const UNSUPPORTED_SYNC_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM'])
 
 /** Worker-only synchronous equivalent for SQLite backup publication/recovery. */
 export function retryFileOperationSync<T>(operation: () => T): T {
@@ -28,7 +29,10 @@ export async function writeFileAtomic(filename: string, contents: string | Buffe
     const handle = await open(temporary, 'w', mode)
     try {
       await handle.writeFile(contents, { encoding: 'utf8' })
-      await handle.sync()
+      // Some network/FUSE filesystems reject fsync; a write that used to succeed must not start failing.
+      await handle.sync().catch((error: NodeJS.ErrnoException) => {
+        if (!UNSUPPORTED_SYNC_CODES.has(error.code ?? '')) throw error
+      })
     } finally {
       await handle.close()
     }
@@ -48,10 +52,13 @@ export async function writeFileAtomic(filename: string, contents: string | Buffe
 }
 
 /** Move a corrupt file aside without allowing quarantine failure to mask recovery. */
-export async function quarantineCorruptFile(filename: string): Promise<void> {
+export async function quarantineCorruptFile(filename: string): Promise<string | null> {
+  const quarantined = `${filename}.corrupt-${Date.now()}`
   try {
-    await rename(filename, `${filename}.corrupt-${Date.now()}`)
+    await rename(filename, quarantined)
+    return quarantined
   } catch {
     // Best effort: callers can still recover with a clean in-memory document.
+    return null
   }
 }

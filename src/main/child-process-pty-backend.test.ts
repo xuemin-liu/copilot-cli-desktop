@@ -48,3 +48,27 @@ test('multibyte output split across chunks is decoded intact and delivered befor
   await new Promise<void>((resolve) => pty.onExit(() => resolve()))
   assert.equal(output, 'héllo→世界')
 })
+
+test('output printed just before a non-zero exit is delivered before the exit event', async () => {
+  const pty = spawnChildProcessPty(process.execPath, ['-e', "process.stderr.write('fatal: boom');process.exit(3)"], {
+    cwd: process.cwd(), env: process.env, cols: 80, rows: 24,
+  })
+  let output = ''
+  pty.onData((data) => { output += data })
+  const exit = await new Promise<{ exitCode: number }>((resolve) => pty.onExit(resolve))
+  assert.equal(output, 'fatal: boom')
+  assert.equal(exit.exitCode, 3)
+})
+
+test('exit is still reported when a grandchild keeps the output pipes open', async () => {
+  const script = "require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},2500)'],{stdio:'inherit'}).unref();process.stdout.write('parent done');process.exit(2)"
+  const pty = spawnChildProcessPty(process.execPath, ['-e', script], { cwd: process.cwd(), env: process.env, cols: 80, rows: 24 })
+  let output = ''
+  pty.onData((data) => { output += data })
+  const started = Date.now()
+  const exit = await new Promise<{ exitCode: number }>((resolve) => pty.onExit(resolve))
+  assert.equal(exit.exitCode, 2)
+  assert.equal(output, 'parent done')
+  assert.ok(Date.now() - started < 2000, 'exit must not wait for the grandchild to release the pipes')
+  pty.dispose?.()
+})

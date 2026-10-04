@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { quarantineCorruptFile, writeFileAtomic } from './atomic-file.js'
 import { access, appendFile, mkdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -2756,8 +2756,15 @@ if (!app.requestSingleInstanceLock()) {
     }, () => { desktopConfigUnparseable = true })
     if (desktopConfigUnparseable) {
       // Keep the unreadable file for manual recovery instead of overwriting it with defaults.
-      await quarantineCorruptFile(configPath())
-      void writeAppLog('desktop.json could not be parsed; it was moved aside and defaults are in use')
+      const quarantined = await quarantineCorruptFile(configPath())
+      void writeAppLog(`desktop.json could not be parsed; defaults are in use. ${quarantined ? `The original was kept at ${quarantined}` : 'It could not be moved aside'}`)
+      // Settings and open tabs are reset and old browser profiles are pruned on the next launch, so tell the user now.
+      showNotification(
+        'Copilot CLI Desktop settings were reset',
+        quarantined
+          ? `Your settings file was unreadable. It was saved as ${basename(quarantined)} in the app data folder; restore it before restarting to keep your workspaces.`
+          : 'Your settings file was unreadable and could not be backed up.',
+      )
     }
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
     // An empty default config references no browser profiles, so pruning against it would delete every saved login.
@@ -2787,7 +2794,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage)
+    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage, (message) => void writeAppLog(message))
 
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'

@@ -74,19 +74,23 @@ export interface CredentialStatus {
   storeError: boolean
 }
 
+class CredentialFormatError extends Error {}
+
+/** The vault was written by a newer app version; it is not corrupt and must not be quarantined. */
+class CredentialVersionError extends Error {}
+
 /**
  * DPAPI-backed (via Electron `safeStorage`) vault for the three Copilot BYOK
  * environment overrides. If protected storage is unavailable, every save is
  * refused outright rather than silently falling back to plaintext.
  */
-class CredentialFormatError extends Error {}
-
 export class SecureCredentialStore {
   private mutationQueue: Promise<unknown> = Promise.resolve()
 
   constructor(
     private readonly filename: string,
     private readonly encryption: EncryptionProvider,
+    private readonly log: (message: string) => void = () => undefined,
   ) {}
 
   isAvailable(): boolean {
@@ -124,6 +128,9 @@ export class SecureCredentialStore {
       throw new CredentialFormatError('The protected credential file has an unsupported format')
     }
     const value = parsed as Record<string, unknown>
+    if (typeof value.version === 'number' && value.version > 1) {
+      throw new CredentialVersionError('The protected credential file was created by a newer version of this app')
+    }
     if (value.version !== 1 || !Array.isArray(value.credentials)) {
       throw new CredentialFormatError('The protected credential file has an unsupported format')
     }
@@ -243,6 +250,8 @@ export class SecureCredentialStore {
       try {
         environment[record.name] = this.encryption.decryptString(Buffer.from(record.encryptedValue, 'base64'))
       } catch {
+        // Name only, never the value.
+        this.log(`Saved credential ${record.name} could not be decrypted and was skipped; re-enter it in Settings`)
         continue
       }
     }

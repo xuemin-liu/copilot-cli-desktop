@@ -42,10 +42,13 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
 
   // Spawn failures (ENOENT/EACCES) emit `error` and never `exit`; without a
   // listener they would crash the daemon, and with one alone the session would
-  // wait forever. Remember the failure so onExit can report it.
+  // wait forever. Remember the failure so onExit can report it. `error` is also
+  // emitted when a kill or IPC send fails while the process is still alive;
+  // those must not be reported as an exit (the pid is only unset on spawn failure).
   let spawnError: Error | null = null
   const errorListeners = new Set<(error: Error) => void>()
   child.on('error', (error) => {
+    if (child.pid !== undefined) return
     spawnError = error
     for (const listener of errorListeners) listener(error)
   })
