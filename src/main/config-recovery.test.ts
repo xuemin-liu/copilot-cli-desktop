@@ -103,3 +103,59 @@ test('an unreadable recovery marker is treated as an active hold', async () => {
     assert.equal(await activeConfigRecovery(marker), marker)
   })
 })
+
+test('a failed marker write leaves the unreadable config untouched and blocks writes', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ bad')
+    // A directory at the marker path makes the atomic marker write fail.
+    await mkdir(marker)
+    const outcome = await resolveConfigRecovery(file, marker, true)
+    assert.deepEqual(outcome, { hold: null, writesBlocked: true, newlyPreserved: false })
+    assert.equal(await readFile(file, 'utf8'), '{ bad')
+    assert.deepEqual((await readdir(dir)).sort(), ['config-recovery.json', 'desktop.json'])
+  })
+})
+
+test('the hold is published before the original moves, so a later launch still finds the backup', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ bad')
+    const first = await resolveConfigRecovery(file, marker, true)
+    assert.ok(first.hold)
+    // Simulate the next launch: desktop.json is gone, so defaults read as valid; the marker must still hold.
+    await assert.rejects(() => stat(file))
+    assert.equal((await resolveConfigRecovery(file, marker, false)).hold, first.hold)
+  })
+})
+
+test('a preserve failure after the marker write removes the marker and leaves the original', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ bad')
+    const outcome = await resolveConfigRecovery(file, marker, true, { rename: lockedRename, copyFile: lockedCopy })
+    assert.equal(outcome.writesBlocked, true)
+    assert.equal(await readFile(file, 'utf8'), '{ bad')
+    await assert.rejects(() => stat(marker))
+  })
+})
+
+test('a non-ENOENT stat error keeps the hold and the marker', async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, 'desktop.json')
+    const marker = join(dir, 'config-recovery.json')
+    await writeFile(file, '{ bad')
+    const first = await resolveConfigRecovery(file, marker, true)
+    const denied = (async () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }) as unknown as typeof stat
+    const held = await resolveConfigRecovery(file, marker, false, { stat: denied })
+    assert.equal(held.hold, first.hold)
+    assert.ok(await readFile(marker, 'utf8'))
+    // A confirmed missing backup still releases it.
+    await rm(first.hold!)
+    assert.equal((await resolveConfigRecovery(file, marker, false)).hold, null)
+    await assert.rejects(() => stat(marker))
+  })
+})
