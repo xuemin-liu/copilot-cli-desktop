@@ -7,7 +7,14 @@ addresses and development hosts (single-label names, `.localhost`, `.local`,
 HTTP/HTTPS always takes precedence. Each terminal session has its own browser page,
 DevTools, console/network capture, and cookie/storage partition, separate from
 other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
-to resize it. Restored terminal sessions retain their browser cookies, local storage,
+to resize it. Links with `target="_blank"`, JavaScript `window.open()` and forms
+targeting a new page open browser page tabs inside the same terminal. They share
+that terminal's login/storage and console/network capture. Select or close pages
+using the page strip; navigation controls and DevTools apply to the selected page.
+The address toolbar shows the selected page's actual browser zoom percentage.
+Opening a child page preserves the source page, POST data and opener callbacks.
+Only the primary page's saved URL is restored after app restart; child tabs are temporary.
+Restored terminal sessions retain their browser cookies, local storage,
 and last successful top-level page's origin and path across app restarts;
 query strings, fragments, and SPA route changes are not saved. Authentication
 callback URLs do not replace the saved page. The pane starts hidden in a new
@@ -33,11 +40,29 @@ automatically compile original TypeScript or modify your project's original
 source files. Source-mapped files have Chromium's normal override limitations.
 See [Chrome's Local Overrides documentation](https://developer.chrome.com/docs/devtools/overrides/).
 
-The pane also has **Console** and **Network** views. Network rows show method,
-URL, HTTP status, timing, errors, redirects, and request/response headers. Select
-a row for its details. These views retain the latest 300 entries in memory and
-capture activity while native DevTools is open. They do not collect request or
-response bodies or WebSocket message frames. Use native DevTools for those.
+**Console** and **Network** open the selected page's native Chromium panels.
+Console includes filtering, JavaScript evaluation/history/autocomplete, object
+inspection, stack traces, grouping, copy/save and live expressions. Network
+includes filters, request payloads, response previews/bodies, cookies, initiators,
+waterfalls/timing, recording and preserve-log controls, disable cache, network
+throttling/offline, replay XHR, copy as cURL and HAR exports. These panels and
+**DevTools / Overrides** fill the browser viewport. **Page** returns to the web app
+without shrinking it; the same DevTools session and overrides remain alive when
+switching views. Native Network starts collecting when that page's DevTools opens;
+reload to capture requests that happened before inspection started.
+
+**Activity** shows the captured logs used by Copilot CLI, including all pages in
+the terminal. It has separate Console/Network logs, text and page filters,
+console-level and request-type filters, failed-request filtering, request sorting,
+repeat grouping, auto-scroll, individual/log copy, and JSON log export. Separate
+**Clear console** and **Clear network** buttons clear one captured log without
+erasing the other. **Pause capture** affects that captured log and **Preserve log**
+controls whether its entries for a page survive that page's navigation. These
+controls are independent of native DevTools' own recording/clearing settings.
+Captured logs retain the latest 300 entries in memory and include `pageId` for
+attribution, including entries from pages that have since closed. They capture
+while native DevTools is open but exclude request/response bodies and WebSocket
+message frames. Inspect those in native Network.
 Credential headers (including cookies, API keys, authentication, token and session
 headers), sensitive URL query parameters, and URL fragments are redacted from
 activity and CLI output. Console filtering handles recognizable credential fields,
@@ -66,6 +91,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 
 The helper also supports `status` and `request <id>`. Its endpoint always belongs
 to the session that launched the shell, regardless of the currently focused tab.
+Read `status` before inspecting logs: `recordingConsole` / `recordingNetwork`
+indicate whether each captured log is recording, and `preserveConsole` /
+`preserveNetwork` indicate whether a page's entries survive navigation. Copilot's
+instructions require reporting paused capture or incomplete history alongside
+the available observations. An empty retained log does not establish that the
+web app has no exceptions or failed requests; logs can also be cleared or exceed
+their retention limit.
 If custom instructions are disabled in Copilot, run the helper explicitly.
 Remote sessions execute tools on their remote computer and cannot read the local
 Desktop endpoint. Restricted side chats retain their file-view/search permissions
@@ -97,8 +129,8 @@ independent Desktop launches and their terminal tabs use different paths.
 **Hide browser** hides the pane and keeps its page, DevTools state, and capture
 alive until the owning terminal session closes or the app quits. The **DevTools / Overrides** button toggles DevTools
 visibility and keeps enabled overrides active while it is hidden. Browser pages have no desktop preload
-bridge or Node integration. Pop-up windows, downloads, and permission requests
-are blocked in this initial implementation.
+bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;
+local files and other external protocols, downloads, and permission requests are blocked.
 
 Run `npm run browser:check` for the isolated real Electron test. It verifies
 native local overrides and edited file refresh, CLI JSON output and access

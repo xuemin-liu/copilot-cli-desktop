@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
+import { BrowserActivity } from './BrowserActivity.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
+  activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
+  recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
   url: '', loading: false, canGoBack: false, canGoForward: false,
   devtools: false, error: null, console: [], network: [],
 }
@@ -12,17 +15,18 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState<'page' | 'console' | 'network'>('page')
-  const [requestId, setRequestId] = useState<string | null>(null)
   const viewport = useRef<HTMLDivElement>(null)
   const urlInput = useRef<HTMLInputElement>(null)
   const lastUrl = useRef('')
+  const lastPageId = useRef(0)
   const accept = (next: BrowserDebugState): void => {
     setState(next)
-    if (lastUrl.current !== next.url) {
+    const switchedPage = lastPageId.current !== next.activePageId
+    lastPageId.current = next.activePageId
+    if (switchedPage || lastUrl.current !== next.url) {
       const previous = lastUrl.current
       lastUrl.current = next.url
-      setUrl(value => document.activeElement !== urlInput.current || value === previous ? next.url : value)
+      setUrl(value => switchedPage || document.activeElement !== urlInput.current || value === previous ? next.url : value)
     }
   }
   const run = (promise: Promise<BrowserDebugState>): void => {
@@ -49,7 +53,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     const resize = (): void => {
       if (disposed) return
       const b = element.getBoundingClientRect()
-      void window.copilotDesktop.browserBounds(tabId, tab === 'page' && active && !obscured && b.width > 0 && b.height > 0
+      void window.copilotDesktop.browserBounds(tabId, active && !obscured && b.width > 0 && b.height > 0
         ? { x: b.x, y: b.y, width: b.width, height: b.height } : null).catch(error => setError(errorMessage(error)))
     }
     const observer = new ResizeObserver(resize)
@@ -57,8 +61,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     window.addEventListener('resize', resize)
     resize()
     return () => { disposed = true; observer.disconnect(); window.removeEventListener('resize', resize) }
-  }, [tabId, tab, active, obscured, error, state.error])
-  const request = state.network.find(entry => entry.id === requestId)
+  }, [tabId, active, obscured, error, state.error])
+  const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}>
     <form className="browser-toolbar" onSubmit={event => { event.preventDefault(); run(window.copilotDesktop.browserNavigate(tabId, url.trim())) }}>
       <button type="button" title="Back" aria-label="Browser back" disabled={!state.canGoBack} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'back'))}>←</button>
@@ -66,33 +70,26 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <button type="button" title="Reload" aria-label="Reload browser" disabled={!state.url} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'reload'))}>↻</button>
       <input ref={urlInput} aria-label="Web app URL" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
+      <output className="browser-zoom" aria-label="Browser zoom" title="Selected page zoom">{Math.round(state.zoomFactor * 100)}%</output>
     </form>
+    {state.pages.length > 1 && <div className="browser-pages" role="tablist" aria-label="Browser pages">
+      {state.pages.map(page => <div className="browser-page" key={page.id}>
+        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.url}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.title}</button>
+        <button type="button" aria-label={`Close browser page ${page.title}`}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
+      </div>)}
+    </div>}
     <div className="browser-tabs" role="tablist" aria-label="Browser views">
-      {(['page', 'console', 'network'] as const).map(name => <button type="button" key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>
-        {name === 'page' ? 'Page' : name === 'console' ? `Console (${state.console.length})` : `Network (${state.network.length})`}
+      {(['page', 'console', 'network', 'devtools', 'activity'] as const).map(name => <button type="button" key={name} className={name === 'devtools' ? 'browser-tools-toggle' : undefined} role="tab" aria-selected={state.view === name}
+        onClick={() => run(window.copilotDesktop.browserAction(tabId, `view:${name}`))}>
+        {name === 'page' ? 'Page' : name === 'console' ? 'Console' : name === 'network' ? 'Network' : name === 'devtools' ? 'DevTools / Overrides' : `Activity (${state.console.length + state.network.length})`}
       </button>)}
-      <button type="button" className="browser-tools-toggle" aria-pressed={state.devtools} onClick={() => { setTab('page'); run(window.copilotDesktop.browserAction(tabId, 'devtools')) }}>DevTools / Overrides</button>
     </div>
     {(error || state.error) && <p className="browser-error" role="alert">{error || state.error}</p>}
     <div className="browser-viewport" ref={viewport}>
-      {tab === 'page' && !state.url && <p className="browser-hint">Enter your web app URL above.</p>}
-      {tab === 'console' && <div className="browser-activity" role="tabpanel" aria-label="Console activity">
-        <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'clear'))}>Clear activity</button>
-        {state.console.length === 0 && <p>No console messages captured yet.</p>}
-        {state.console.map(entry => <div key={entry.id} className={`browser-console-entry browser-console-${entry.level}`}>
-          <small>{entry.level} · {entry.timestamp.slice(11, 19)} · {entry.source}:{entry.line}</small><pre>{entry.message}</pre>
-        </div>)}
-      </div>}
-      {tab === 'network' && <div className="browser-activity" role="tabpanel" aria-label="Network activity">
-        <button type="button" onClick={() => { setRequestId(null); run(window.copilotDesktop.browserAction(tabId, 'clear')) }}>Clear activity</button>
-        {state.network.length === 0 && <p>No network requests captured yet.</p>}
-        <table className="browser-network"><thead><tr><th>Status</th><th>Method / URL</th><th>Time</th></tr></thead><tbody>
-          {state.network.map(entry => <tr key={entry.id}><td>{entry.error || entry.status || '…'}</td>
-            <td><button type="button" onClick={() => setRequestId(entry.id)}>{entry.method} {entry.url}</button></td>
-            <td>{entry.durationMs === null ? '…' : `${entry.durationMs} ms`}</td></tr>)}
-        </tbody></table>
-        {request && <pre className="browser-request-detail">{JSON.stringify(request, null, 2)}</pre>}
-      </div>}
+      {state.view === 'page' && !state.url && <p className="browser-hint">Enter your web app URL above.</p>}
+      {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
     <footer className="browser-footer">{state.loading ? 'Loading…' : 'This session’s browser activity is available to Copilot CLI.'}
       <details><summary>Local Overrides setup</summary><p>Open DevTools / Overrides → Sources → Overrides, select your existing Chrome overrides folder, and enable Local Overrides. Save local edits and reload the page to test them.</p></details>

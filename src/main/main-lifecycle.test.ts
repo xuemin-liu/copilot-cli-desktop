@@ -25,6 +25,7 @@ interface Harness {
   requestIn(tabId: string, name: string, ...args: unknown[]): Promise<any>
   configureMigration(busy: boolean, exclusive: boolean): void
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
+  configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
   setNextSpawn(work: () => Promise<void>): void
   flushConfig(): Promise<void>
@@ -106,6 +107,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           destroyed = false; focused = 0; title = ''; messages = [];
           constructor(options = {}) { super(); this.title = options.title || ''; allWindows.push(this); }
           static getFocusedWindow() { return null; }
+          static fromWebContents(contents) { return allWindows.find(window => window.webContents === contents && !window.destroyed) || null; }
           webContents = Object.assign(new EventEmitter(), {
             getURL: () => this.url || '',
             send: (channel, payload) => this.messages.push({ channel, payload }),
@@ -201,6 +203,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           requestIn: (tabId, name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: sessionWindows.get(tabId).webContents }, ...args),
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
+          configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
@@ -270,7 +273,7 @@ test('production browser IPC validates session ownership, frames, bounds and shu
   harness.createTestWindow()
   const tab = (await harness.createMain()).activeTabId!
   await harness.request('desktop:browser-open', tab)
-  for (const channel of ['open', 'state', 'navigate', 'action', 'bounds']) {
+  for (const channel of ['open', 'state', 'navigate', 'action', 'bounds', 'export']) {
     await assert.rejects(harness.requestWithFrame(`desktop:browser-${channel}`, 'https://untrusted.test'), /untrusted renderer/)
     await assert.rejects(async () => harness.requestSettings(`desktop:browser-${channel}`), /untrusted renderer/)
   }
@@ -291,6 +294,28 @@ test('production browser IPC validates session ownership, frames, bounds and shu
   await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-action', tab, {}), /Invalid browser action/)
   harness.beginQuit()
   await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-state', tab), /owning session window/)
+}))
+
+test('captured browser log export uses the owning session snapshot and respects cancellation', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const tab = (await harness.createMain()).activeTabId!
+  // Seed the native browser stub; rendering/capture/redaction are checked in real Electron.
+  const browser = await harness.request<any>('desktop:browser-open', tab)
+  browser.console.push({ pageId: 12, message: 'exception token=[redacted]' })
+  browser.network.push({ pageId: 12, url: 'http://localhost/api?token=[redacted]' })
+  const path = join(directory, 'browser-log.json')
+  harness.configureBrowserExportDialog({ canceled: false, filePath: path })
+  await harness.request('desktop:browser-export', tab, 'console')
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.console)
+  await assert.rejects(harness.request('desktop:browser-export', tab, '../secret'), /Invalid browser export/)
+  await harness.request('desktop:pop-out-tab', tab)
+  await assert.rejects(harness.request('desktop:browser-export', tab, 'network'), /owning session window/)
+  await harness.requestIn(tab, 'desktop:browser-export', tab, 'network')
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.network)
+  harness.configureBrowserExportDialog({ canceled: true, filePath: path })
+  await harness.requestIn(tab, 'desktop:browser-export', tab, 'console')
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.network, 'cancel does not overwrite an existing log')
 }))
 
 test('browser IPC and CLI environments stay tied to their session through switches, restart and close', async () => fixture(async (harness, directory) => {
