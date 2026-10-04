@@ -480,6 +480,11 @@ button:disabled {
 .browser-toolbar { display: flex; gap: 4px; padding: 8px; }
 .browser-toolbar input { flex: 1; min-width: 0; color: #e6edf3; background: #080b12; border: 1px solid #364153; border-radius: 5px; padding: 5px 8px; }
 .browser-toolbar button { padding: 3px 8px; }
+.browser-pages { display: flex; gap: 4px; padding: 0 8px 8px; overflow-x: auto; flex-shrink: 0; }
+.browser-page { display: flex; min-width: 0; flex-shrink: 0; }
+.browser-page button { padding: 4px 6px; font-size: 11px; }
+.browser-page button[role="tab"] { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-page button[aria-selected="true"] { border-color: #4f88ff; color: #a9c9ff; }
 .browser-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; border-bottom: 1px solid #252a33; }
 .browser-tabs button { padding: 4px 6px; font-size: 11px; }
 .browser-tabs button[aria-selected="true"], .browser-tabs button[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }

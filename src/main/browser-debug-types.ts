@@ -22,6 +22,8 @@ export interface BrowserNetworkEntry {
 }
 
 export interface BrowserDebugState {
+  activePageId: number
+  pages: { id: number; title: string; url: string }[]
   url: string
   loading: boolean
   canGoBack: boolean

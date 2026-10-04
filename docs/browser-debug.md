@@ -7,7 +7,13 @@ addresses and development hosts (single-label names, `.localhost`, `.local`,
 HTTP/HTTPS always takes precedence. Each terminal session has its own browser page,
 DevTools, console/network capture, and cookie/storage partition, separate from
 other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
-to resize it. Restored terminal sessions retain their browser cookies, local storage,
+to resize it. Links with `target="_blank"`, JavaScript `window.open()` and forms
+targeting a new page open browser page tabs inside the same terminal. They share
+that terminal's login/storage and console/network capture. Select or close pages
+using the page strip; navigation controls and DevTools apply to the selected page.
+Opening a child page preserves the source page, POST data and opener callbacks.
+Only the primary page's saved URL is restored after app restart; child tabs are temporary.
+Restored terminal sessions retain their browser cookies, local storage,
 and last successful top-level page's origin and path across app restarts;
 query strings, fragments, and SPA route changes are not saved. Authentication
 callback URLs do not replace the saved page. The pane starts hidden in a new
@@ -97,8 +103,8 @@ independent Desktop launches and their terminal tabs use different paths.
 **Hide browser** hides the pane and keeps its page, DevTools state, and capture
 alive until the owning terminal session closes or the app quits. The **DevTools / Overrides** button toggles DevTools
 visibility and keeps enabled overrides active while it is hidden. Browser pages have no desktop preload
-bridge or Node integration. Pop-up windows, downloads, and permission requests
-are blocked in this initial implementation.
+bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;
+local files and other external protocols, downloads, and permission requests are blocked.
 
 Run `npm run browser:check` for the isolated real Electron test. It verifies
 native local overrides and edited file refresh, CLI JSON output and access

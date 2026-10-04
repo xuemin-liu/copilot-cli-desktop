@@ -4,6 +4,7 @@ import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
+  activePageId: 0, pages: [],
   url: '', loading: false, canGoBack: false, canGoForward: false,
   devtools: false, error: null, console: [], network: [],
 }
@@ -17,12 +18,15 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const viewport = useRef<HTMLDivElement>(null)
   const urlInput = useRef<HTMLInputElement>(null)
   const lastUrl = useRef('')
+  const lastPageId = useRef(0)
   const accept = (next: BrowserDebugState): void => {
     setState(next)
-    if (lastUrl.current !== next.url) {
+    const switchedPage = lastPageId.current !== next.activePageId
+    lastPageId.current = next.activePageId
+    if (switchedPage || lastUrl.current !== next.url) {
       const previous = lastUrl.current
       lastUrl.current = next.url
-      setUrl(value => document.activeElement !== urlInput.current || value === previous ? next.url : value)
+      setUrl(value => switchedPage || document.activeElement !== urlInput.current || value === previous ? next.url : value)
     }
   }
   const run = (promise: Promise<BrowserDebugState>): void => {
@@ -67,6 +71,14 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <input ref={urlInput} aria-label="Web app URL" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
     </form>
+    {state.pages.length > 1 && <div className="browser-pages" role="tablist" aria-label="Browser pages">
+      {state.pages.map(page => <div className="browser-page" key={page.id}>
+        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.url}
+          onClick={() => { setTab('page'); run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`)) }}>{page.title}</button>
+        <button type="button" aria-label={`Close browser page ${page.title}`}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
+      </div>)}
+    </div>}
     <div className="browser-tabs" role="tablist" aria-label="Browser views">
       {(['page', 'console', 'network'] as const).map(name => <button type="button" key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>
         {name === 'page' ? 'Page' : name === 'console' ? `Console (${state.console.length})` : `Network (${state.network.length})`}

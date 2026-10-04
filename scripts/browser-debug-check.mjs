@@ -60,6 +60,7 @@ if (!process.versions.electron) {
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Browser debug check failed')
+    assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true, 'All browser checks must complete before Electron exits')
   } finally { clearTimeout(timer) }
 } else {
   const { app, BrowserWindow, ipcMain } = await import('electron')
@@ -92,6 +93,20 @@ if (!process.versions.electron) {
       if (request.url === '/redirect-secret') { response.writeHead(302, { location: '/landing?code=redirect-secret#fragment-secret' }); response.end(); return }
       if (request.url === '/api.json') { response.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'test-secret=1' }); response.end('{"version":"server"}'); return }
       if (request.url === '/fail') { response.writeHead(500); response.end('fixture failure'); return }
+      if (request.url === '/child-page') {
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.end('<!doctype html><title>Child page</title><script>console.error("child page exception"); window.opener?.postMessage("child-ready", location.origin)</script><h1>Child page</h1>')
+        return
+      }
+      if (request.url === '/new-page-form') {
+        let body = ''
+        request.on('data', chunk => { body += chunk })
+        request.on('end', () => {
+          response.writeHead(200, { 'content-type': 'text/html' })
+          response.end(`<!doctype html><title>Form page</title><pre id="body">${request.method}:${body}</pre>`)
+        })
+        return
+      }
       response.writeHead(200, { 'content-type': 'text/html' })
       response.end('<!doctype html><h1>Browser debug fixture</h1><script>console.log("fixture console"); fetch("/api.json"); fetch("/fail"); setTimeout(() => { throw new Error("fixture exception") }, 50)</script>')
     })
@@ -180,6 +195,96 @@ if (!process.versions.electron) {
       await until(() => browser.snapshot.network.some(entry => entry.url.endsWith('/fail') && entry.status === 500 && entry.durationMs !== null), 'failed API request')
       assert.equal(await browser.view.webContents.executeJavaScript('typeof window.copilotDesktop'), 'undefined')
       assert.equal(await browser.view.webContents.executeJavaScript('typeof require'), 'undefined')
+      // Exercise actual Chromium new-page creation, not a loadURL approximation.
+      {
+        console.log('New-page check: opening target blank link.')
+        const source = browser.view
+        const sourceId = source.webContents.id
+        await source.webContents.executeJavaScript(`
+          window.childReady = false;
+          addEventListener('message', event => { if (event.data === 'child-ready') window.childReady = true });
+          const link = document.createElement('a'); link.href = '/child-page'; link.target = '_blank';
+          link.rel = 'opener'; document.body.append(link); link.click();
+        `)
+        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'target blank child')
+        const child = browser.view
+        const childContents = child.webContents
+        const childId = child.webContents.id
+        assert.equal(source.webContents.getURL(), url, 'new-page link preserves its source')
+        assert.equal(child.webContents.session, source.webContents.session, 'child retains this terminal login')
+        assert.equal(await child.webContents.executeJavaScript('localStorage.getItem("session-only")'), 'first')
+        await until(() => source.webContents.executeJavaScript('window.childReady'), 'opener postMessage callback')
+        assert.equal(await child.webContents.executeJavaScript('typeof require'), 'undefined')
+        assert.equal(await child.webContents.executeJavaScript('typeof window.copilotDesktop'), 'undefined')
+        await until(() => browser.snapshot.console.some(entry => entry.message === 'child page exception'), 'child console capture')
+        await until(() => browser.snapshot.network.some(entry => entry.url.endsWith('/child-page') && entry.status === 200), 'child network capture')
+        assert.ok((await browserCommand(['console'])).some(entry => entry.message === 'child page exception'))
+        assert.ok(!second.snapshot.console.some(entry => entry.message === 'child page exception'))
+        await until(() => ui('document.querySelectorAll(".session-pane-visible .browser-pages [role=tab]").length === 2'), 'page strip')
+        await until(() => child.getVisible() && !source.getVisible(), 'only selected page visible')
+        await writeFile(join(artifacts, 'page-tabs.png'), (await capture(window.webContents, 'browser pages')).toPNG())
+        browser.action('devtools')
+        const childTools = await until(() => childContents.devToolsWebContents, 'child DevTools')
+        await until(() => childTools.executeJavaScript('Boolean(globalThis.DevToolsAPI)'), 'child DevTools ready')
+        console.log('New-page check: opener, storage, telemetry and page strip passed.')
+        await ui('document.querySelector(".session-pane-visible .browser-pages [role=tab]").click()')
+        await until(() => browser.view === source && source.getVisible() && !child.getVisible(), 'select source page')
+        // A POST form targeting _blank must keep its body and method.
+        await source.webContents.executeJavaScript(`
+          const form = document.createElement('form'); form.method = 'POST'; form.action = '/new-page-form'; form.target = '_blank';
+          const input = document.createElement('input'); input.name = 'fixture'; input.value = 'post-body';
+          form.append(input); document.body.append(form); form.requestSubmit();
+        `)
+        await until(() => browser.snapshot.pages.length === 3 && browser.snapshot.url.endsWith('/new-page-form'), 'new-page POST form')
+        const formPage = browser.view
+        await until(() => formPage.webContents.executeJavaScript('document.getElementById("body")?.textContent === "POST:fixture=post-body"'), 'POST request preserved')
+        console.log('New-page check: POST preserved; closing form page.')
+        browser.action(`close-page:${formPage.webContents.id}`)
+        await until(() => browser.snapshot.pages.length === 2, 'close form page')
+        // about:blank -> document.write is used by report/print and popup workflows.
+        browser.action(`select-page:${sourceId}`)
+        await source.webContents.executeJavaScript(`window.blankChild = window.open('', '_blank'); blankChild.document.write('<title>Written page</title><h1>Written page</h1>'); blankChild.document.close()`)
+        await until(() => browser.snapshot.pages.length === 3 && browser.snapshot.pages.some(page => page.title === 'Written page'), 'blank scripted child')
+        const blank = browser.view
+        const blankContents = blank.webContents
+        console.log('New-page check: blank document written; testing window.close.')
+        await source.webContents.executeJavaScript('blankChild.close()')
+        await until(() => blankContents.isDestroyed() && browser.snapshot.pages.length === 2, 'window close removes its tab')
+        browser.action(`select-page:${sourceId}`)
+        const count = browser.snapshot.pages.length
+        await source.webContents.executeJavaScript(`window.open('file:///C:/Windows/win.ini'); window.open('data:text/html,blocked'); window.open('https://user:secret@example.com')`)
+        await delay(200)
+        assert.equal(browser.snapshot.pages.length, count, 'unsafe child URLs are rejected')
+        // Move/hide the complete page family along with its terminal.
+        const pageBounds = browser.bounds
+        const popupOwner = new BrowserWindow({ show: false })
+        browser.setOwner(popupOwner)
+        browser.setBounds({ x: 0, y: 0, width: 400, height: 300 })
+        assert.equal(source.getVisible(), true)
+        assert.equal(child.getVisible(), false)
+        browser.setBounds(null)
+        assert.equal(source.getVisible(), false)
+        browser.setOwner(window)
+        browser.setBounds(pageBounds)
+        popupOwner.destroy()
+        browser.action(`close-page:${childId}`)
+        await until(() => browser.snapshot.pages.length === 1 && childContents.isDestroyed(), 'close child page')
+        assert.equal(childTools.isDestroyed(), true, 'closing a page disposes its DevTools')
+        assert.equal(window.isDestroyed(), false, 'closing a child leaves its terminal alive')
+        await browser.navigate(url)
+        await until(() => source.getVisible(), 'source restored in terminal')
+        // Parent close keeps its child tab and promotes it; terminal disposal closes every page.
+        await source.webContents.executeJavaScript(`window.featureChild = window.open('/child-page', '_blank', 'nodeIntegration=yes,contextIsolation=no,sandbox=no'); void 0`)
+        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'scripted child')
+        const retained = browser.view.webContents
+        const preferences = retained.getLastWebPreferences()
+        assert.equal(preferences.nodeIntegration, false)
+        assert.equal(preferences.contextIsolation, true)
+        assert.equal(preferences.sandbox, true)
+        browser.action(`close-page:${sourceId}`)
+        await until(() => browser.snapshot.pages.length === 1 && !retained.isDestroyed(), 'child survives source close')
+        await browser.navigate(url)
+      }
       await assert.rejects(browser.navigate('file:///C:/Windows/win.ini'), /HTTP or HTTPS/)
       const network = await browserCommand(['network'])
       const api = network.find(entry => entry.url.endsWith('/api.json'))
@@ -293,8 +398,9 @@ if (!process.versions.electron) {
       await writeFile(join(artifacts, 'browser.png'), picture.toPNG())
       // Main-renderer capture excludes child WebContentsViews; capture each
       // native surface separately as well for visual verification.
-      assert.ok(browser.tools.getVisible(), 'DevTools view must be visible for capture')
-      assert.ok(browser.tools.getBounds().height > 0, JSON.stringify(browser.tools.getBounds()))
+      const toolsView = window.contentView.children.find(view => view.webContents?.id === tools.id)
+      assert.ok(toolsView?.getVisible(), 'DevTools view must be visible for capture')
+      assert.ok(toolsView.getBounds().height > 0, JSON.stringify(toolsView.getBounds()))
       await writeFile(join(artifacts, 'page.png'), (await capture(browser.view.webContents, 'browser page')).toPNG())
       await writeFile(join(artifacts, 'devtools.png'), (await capture(tools, 'DevTools')).toPNG())
       assert.equal(browser.snapshot.devtools, true)
@@ -320,8 +426,9 @@ if (!process.versions.electron) {
       await delay(300)
       assert.equal(browser.view.getVisible(), false)
       assert.deepEqual(await ui('window.unhandled'), [])
+      const disposedPage = browser.view
       await browser.dispose()
-      assert.ok(!window.contentView.children.includes(browser.view), 'closed session removes its native browser view')
+      assert.ok(!window.contentView.children.includes(disposedPage), 'closed session removes its native browser view')
       await assert.rejects(readFile(process.env.COPILOT_DESKTOP_BROWSER_STATE, 'utf8'), { code: 'ENOENT' })
       const legacyPath = join(artifacts, 'legacy-settings.json')
       await writeFile(legacyPath, JSON.stringify({ url: `${url}callback?code=legacy-secret` }))
@@ -341,8 +448,11 @@ if (!process.versions.electron) {
           await assert.rejects(readFile(legacyPath, 'utf8'), { code: 'ENOENT' })
         } finally { await manuallyNavigated.dispose() }
       }
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, nativeOverrides: true, cli: true, sessionIsolation: true, powershellDiagnostics: true, copilotInstructions: true }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, newPages: true, openerCallbacks: true, newPagePost: true, nativeOverrides: true, cli: true, sessionIsolation: true, powershellDiagnostics: true, copilotInstructions: true }, null, 2))
       console.log('Browser debug check passed: native overrides, live file changes, CLI telemetry, isolation, and layout.')
+    } catch (error) {
+      console.error(error)
+      throw error
     } finally {
       await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close()
       assert.equal(resolve(sessionRoot, '..'), resolve(tmpdir()), 'cleanup is confined to the owned temporary test directory')
