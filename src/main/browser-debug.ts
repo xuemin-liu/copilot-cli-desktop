@@ -22,6 +22,7 @@ export class BrowserDebug {
   private serverStart: Promise<void> | null = null
   private readonly token = randomBytes(32).toString('hex')
   private readonly endpointPath: string
+  private readonly reportError: (message: string) => void
   private consoleSequence = 0
   private bounds: BrowserBounds | null = null
   private readonly started = new Map<string, number>()
@@ -35,8 +36,9 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string } = {}) {
+    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void } = {}) {
     this.endpointPath = options.endpointPath ?? browserControlPath()
+    this.reportError = options.reportError ?? (message => console.warn(message))
     this.view = new WebContentsView({ webPreferences: {
       partition: options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`, sandbox: true, contextIsolation: true,
       nodeIntegration: false, devTools: true,
@@ -310,6 +312,8 @@ export class BrowserDebug {
         contents.session.flushStorageData()
         await contents.session.cookies.flushStore()
       }
+    } catch (error) {
+      this.reportError(`Could not flush browser storage: ${sanitizedText(String(error))}`)
     } finally {
       if (contents && !contents.isDestroyed()) contents.close()
       if (tools && !tools.isDestroyed()) tools.close()

@@ -9,9 +9,14 @@ export function parseBrowserAddress(value: string): URL {
 
   const parsed = parseSafeHttpUrl(address.startsWith('//') ? `https:${address}` : `https://${address}`)
   const host = parsed.hostname
-  // Local HTTP dev servers remain convenient; named domains default to HTTPS.
-  if (host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(host)) {
-    return parseSafeHttpUrl(address.startsWith('//') ? `http:${address}` : `http://${address}`)
+  // Common LAN/dev hosts use HTTP unless an HTTPS port was explicitly supplied.
+  const local = (!host.includes('.') && !host.includes(':')) || host === '[::1]'
+    || /\.(?:localhost|local|test|internal)$/.test(host)
+    || /^(?:10\.|127\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)
+    || /^\[(?:f[cd][a-f\d]{2}:|fe[89ab][a-f\d]:)/i.test(host)
+  if (local) {
+    const http = parseSafeHttpUrl(address.startsWith('//') ? `http:${address}` : `http://${address}`)
+    if (http.port !== '443' && http.port !== '8443') return http
   }
   return parsed
 }

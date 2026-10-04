@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -35,6 +35,7 @@ interface Harness {
   restore(): Promise<void>
   restoreSaved(): Promise<void>
   beginQuit(): boolean
+  waitForQuit(): Promise<void>
   configureUsageStop(stop: () => Promise<void>): void
   configureUpdate(stop: () => Promise<void>, install: () => void): void
   configureUsageUnavailable(phase: 'pause' | 'flush'): void
@@ -54,6 +55,7 @@ interface Harness {
   requestWithFrame(name: string, frameUrl: string): Promise<unknown>
   browserBounds(): unknown
   browserConfigs: { settings: string; options: { partition: string; endpointPath: string } }[]
+  browserStorageClears: { partition: string; operation: string }[]
   blockBrowserDispose(work: Promise<void>, started: () => void): void
   request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
   cleanup(): Promise<void>
@@ -123,6 +125,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
         export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, Tray = {};
+        export const browserStorageClears = [];
+        export const session = { fromPartition(partition) {
+          return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>
+            [operation, async () => { browserStorageClears.push({ partition, operation }); }]));
+        } };
         // Browser rendering is exercised by browser-debug-check.mjs in real
         // Electron; existing session lifecycle tests never instantiate this view.
         export const WebContentsView = class {};
@@ -172,11 +179,15 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `,
     }
     const source = await readFile(mainPath, 'utf8')
+    assert.ok(source.includes('void withShutdownDeadline(stopAllSessions()'))
+    const testSource = source.replace('void withShutdownDeadline(stopAllSessions()', 'quitCleanupForTest = withShutdownDeadline(quitWorkForTest = stopAllSessions()')
     const bundle = await build({
-      stdin: { contents: source + `
+      stdin: { contents: testSource + `
+        let quitCleanupForTest, quitWorkForTest;
         import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
+        import { browserStorageClears } from 'electron';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
@@ -203,6 +214,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           restore: restoreTabsForProfile,
           restoreSaved: restoreSavedWorkspaceTabs,
           beginQuit() { let prevented = false; app.emit('before-quit', { preventDefault() { prevented = true; } }); return prevented; },
+          waitForQuit: async () => { await quitCleanupForTest; },
           configureUsageStop(stop) { usageService = { stop, abort: async () => {} }; },
           configureBlockedConfig(work) { configWriteQueue = work; },
           configureUpdate(flush, install) { usageService = { flush, stop: flush, abort: async () => {}, pauseCollection() {}, resumeCollection() {}, noteSourceChanged() {} }; updateController = { snapshot: { canInstall: true }, install, installationDidNotQuit() {} }; },
@@ -229,9 +241,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           requestWithFrame: async (name, frameUrl) => ipcMain.invoke(name, { senderFrame: { url: frameUrl }, sender: mainWindow?.webContents }),
           browserBounds: () => lastBounds,
           browserConfigs,
+          browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -583,7 +596,7 @@ test('repeated quit requests wait for the usage backup even with no running sess
     await stopping
     assert.equal(harness.beginQuit(), true)
     finish()
-    await new Promise<void>((resolve) => setImmediate(resolve))
+    await harness.waitForQuit()
     assert.equal(harness.beginQuit(), false)
   })
 })
@@ -664,7 +677,7 @@ test('quit during update preparation waits for the shared collector and cancels 
   harness.updateError()
   assert.equal(harness.beginQuit(), true)
   finish(); await installing
-  await new Promise<void>((resolve) => setImmediate(resolve))
+  await harness.waitForQuit()
   assert.equal(installed, false)
   assert.equal(harness.beginQuit(), false)
 }))
@@ -727,7 +740,7 @@ test('an updater quit dismisses the close prompt and cannot be mistaken for a fa
   assert.equal(harness.updateBusy(), true)
   t.mock.timers.tick(10_001)
   assert.equal(harness.updateBusy(), true)
-  await new Promise<void>((resolve) => setImmediate(resolve))
+  await harness.waitForQuit()
   assert.equal(harness.beginQuit(), false)
   await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
 }))
@@ -793,6 +806,31 @@ test('browser profile identity persists with restored tabs, CLI restarts, and le
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
+}))
+
+test('explicit close removes profile settings and helper files even when browser disposal rejects', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const opened = await harness.createMain()
+  const tab = opened.tabs[0]!
+  const profile = join(directory, 'browser-profiles', tab.browserProfileId!)
+  await mkdir(profile, { recursive: true })
+  await writeFile(join(profile, 'settings.json'), 'saved-page')
+  await harness.request('desktop:browser-open', tab.id)
+  const helper = harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_HELPER!
+  await access(helper)
+  let rejectDispose!: (error: Error) => void
+  harness.blockBrowserDispose(new Promise<void>((_accept, reject) => { rejectDispose = reject }), () => rejectDispose(new Error('flush failed')))
+  const closed = await harness.request('desktop:close-tab', tab.id)
+  assert.equal(closed.tabs.length, 0)
+  await assert.rejects(access(profile))
+  await assert.rejects(access(helper))
+  assert.deepEqual(harness.browserStorageClears.map(entry => entry.operation), ['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'])
+  assert.ok(harness.browserStorageClears.every(entry => entry.partition === `persist:browser-debug:${tab.browserProfileId}`))
+  await assert.rejects(async () => harness.request('desktop:browser-state', tab.id), /Unknown browser session/)
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(saved.profiles[0]!.tabs, [])
 }))
 
 test('failed capability detection reports a retryable error before launching a configured model', async () => {

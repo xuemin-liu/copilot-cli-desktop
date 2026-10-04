@@ -12,6 +12,7 @@ import {
   Menu,
   Notification,
   safeStorage,
+  session as electronSession,
   shell,
   Tray,
   type IpcMainInvokeEvent,
@@ -119,6 +120,7 @@ import { withShutdownDeadline } from './shutdown-deadline.js'
 import { BrowserDebug } from './browser-debug.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
 import { browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
+import { browserProfileHasPartition, clearBrowserStorage, pruneBrowserProfiles, pruneBrowserLaunches, removeBrowserProfileSettings, removeBrowserLaunch } from './browser-cleanup.js'
 import type { BrowserBounds } from './browser-debug-types.js'
 import { MigrationService } from './migration-service.js'
 import { recoverMigrationReport } from './migration-import.js'
@@ -175,6 +177,7 @@ const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as con
 
 let mainWindow: BrowserWindow | null = null
 const sessionBrowsers = new Map<string, BrowserDebug>()
+const closingBrowserTabs = new Set<string>()
 const sessionWindows = new Map<string, BrowserWindow>()
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -1240,6 +1243,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
   // takes effect once the restart's turn finishes, instead of silently
   // dropping the user's click.
   return queueTabTransition(tabId, async () => {
+    closingBrowserTabs.add(tabId)
     const activityTimer = activityBroadcastTimers.get(tabId)
     if (activityTimer) clearTimeout(activityTimer)
     activityBroadcastTimers.delete(tabId)
@@ -1250,8 +1254,22 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       managedTabs.delete(tabId)
     }
     const browser = sessionBrowsers.get(tabId)
-    await browser?.dispose()
-    sessionBrowsers.delete(tabId)
+    const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
+    try { await browser?.dispose() }
+    catch (error) { reportBrowserError(`Failed to dispose browser for ${tabId}: ${String(error)}`) }
+    try {
+      const profileId = tabsState.tabs.find(tab => tab.id === tabId)?.browserProfileId
+      if (profileId) {
+        const paths = browserProfilePaths(app.getPath('userData'), profileId)
+        if (browser || await browserProfileHasPartition(app.getPath('userData'), profileId)) {
+          await clearBrowserStorage(electronSession.fromPartition(paths.partition), reportBrowserError)
+        }
+        await removeBrowserProfileSettings(app.getPath('userData'), profileId)
+      }
+    } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
+    try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
+    catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
+    finally { sessionBrowsers.delete(tabId); closingBrowserTabs.delete(tabId) }
     tabsState = closeTab(tabsState, tabId)
     syncTabState()
     const popout = sessionWindows.get(tabId)
@@ -2069,10 +2087,12 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
   }
   let browser = sessionBrowsers.get(tabId)
   if (!browser) {
+    if (closingBrowserTabs.has(tabId)) throw new Error('Browser session is closing')
     const paths = browserSessionPaths(browserSessionRoot(), tabId)
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
-    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition })
+    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition,
+      reportError: message => { void writeAppLog(message).catch(() => {}) } })
     sessionBrowsers.set(tabId, browser)
   }
   browser.setOwner(owner)
@@ -2707,6 +2727,10 @@ if (!app.requestSingleInstanceLock()) {
       void writeAppLog(message)
     })
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
+    await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
+      .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
+    await pruneBrowserLaunches(app.getPath('userData'), launchId)
+      .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(
@@ -2792,6 +2816,8 @@ app.on('before-quit', (event) => {
       usageService = null
       await Promise.allSettled([service?.stop(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
       sessionBrowsers.clear()
+      await removeBrowserLaunch(app.getPath('userData'), launchId)
+        .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))
     }))
     .catch((error) => {
       void writeAppLog(`Shutdown cleanup failed: ${String(error)}`).catch(() => {})

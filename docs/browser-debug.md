@@ -1,8 +1,10 @@
 # Debug browser and Local Overrides
 
 Select **Open browser** in the terminal session's header, then enter a hostname
-or HTTP/HTTPS URL. Bare domains use HTTPS; bare loopback addresses such as
-`localhost:3000` use HTTP. Each terminal session has its own browser page,
+or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
+addresses and development hosts (single-label names, `.localhost`, `.local`,
+`.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
+HTTP/HTTPS always takes precedence. Each terminal session has its own browser page,
 DevTools, console/network capture, and cookie/storage partition, separate from
 other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
 to resize it. Restored terminal sessions retain their browser cookies, local storage,
@@ -11,6 +13,11 @@ query strings, fragments, and SPA route changes are not saved. Authentication
 callback URLs do not replace the saved page. The pane starts hidden in a new
 session. Switching terminal tabs preserves each session's browser. Pop-out and
 docking move the same browser page with its terminal.
+Explicitly closing a terminal session clears its browser credentials, storage and
+cache and removes its saved page and diagnostic helper files. App quit preserves
+restorable profiles. Startup removes orphaned profiles/partitions and old helper
+directories; Chromium's open partition files are removed after the previous
+process exits.
 
 Select **DevTools / Overrides**, then **Sources → Overrides** in the embedded
 DevTools. Select the folder you already use for Chrome Local Overrides and enable
@@ -98,7 +105,8 @@ native local overrides and edited file refresh, CLI JSON output and access
 control, console capture while DevTools is open, and pane visibility. Evidence
 is saved in `test-results/browser-debug/`; no model calls are made by default.
 The check also verifies remembered usernames in cookies and local storage across
-two Electron processes, with evidence in `test-results/browser-persistence/`.
+Electron restarts, explicit-close cleanup, and a failed storage flush, with
+evidence in `test-results/browser-persistence/`.
 After building, `node scripts/browser-debug-check.mjs --copilot-console` also
 makes one real Copilot prompt request against the isolated fixture and verifies
 that a natural-language console question reports the live exception.
