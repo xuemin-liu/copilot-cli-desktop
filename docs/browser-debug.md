@@ -91,6 +91,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 
 The helper also supports `status` and `request <id>`. Its endpoint always belongs
 to the session that launched the shell, regardless of the currently focused tab.
+Read `status` before inspecting logs: `recordingConsole` / `recordingNetwork`
+indicate whether each captured log is recording, and `preserveConsole` /
+`preserveNetwork` indicate whether a page's entries survive navigation. Copilot's
+instructions require reporting paused capture or incomplete history alongside
+the available observations. An empty retained log does not establish that the
+web app has no exceptions or failed requests; logs can also be cleared or exceed
+their retention limit.
 If custom instructions are disabled in Copilot, run the helper explicitly.
 Remote sessions execute tools on their remote computer and cannot read the local
 Desktop endpoint. Restricted side chats retain their file-view/search permissions

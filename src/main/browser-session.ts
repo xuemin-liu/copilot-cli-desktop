@@ -57,9 +57,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 \`\`\`
 
 The commands return JSON for THIS session, even if another terminal tab is focused.
+Run status first before each console or network inspection. For console, check
+recordingConsole and preserveConsole; for network, check recordingNetwork and
+preserveNetwork. If recordingConsole or recordingNetwork is false for the log you
+inspect, explain that capture is paused and new events are not being recorded.
+If preserveConsole or preserveNetwork is false for that log, explain that its
+history is incomplete because a page's entries are discarded on navigation.
+Still report any matching entries that were captured. An empty log only means
+no matching entries were captured in the retained log; do not claim the web app
+has no exceptions or failed requests, especially when capture is paused or
+history is incomplete. Logs are bounded and may also have been cleared by the user.
 For exception requests, examine console entries with level "error" and messages
 containing Error, Exception, Uncaught, or unhandled rejection. Report the actual
-message, source, and line; if none were captured, say so. For network requests,
+message, source, and line, with any applicable capture limitations. For network requests,
 report failed HTTP statuses and error fields. Do not fabricate browser observations.
 If the command says to open the browser, ask the user to open THIS session's Browser
 pane and load the app. Permissions still apply: do not bypass a disabled shell tool;

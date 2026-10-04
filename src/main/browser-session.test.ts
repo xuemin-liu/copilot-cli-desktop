@@ -23,6 +23,11 @@ test('each terminal gets its own endpoint and additive browser instructions', as
     const instructions = await readFile(join(root, 'tab-1', '.github', 'instructions', 'browser.instructions.md'), 'utf8')
     assert.match(instructions, /find exceptions/)
     assert.match(instructions, /COPILOT_DESKTOP_BROWSER_HELPER.*console/)
+    assert.match(instructions, /Run status first before each console or network inspection/)
+    assert.match(instructions, /For console, check\s+recordingConsole and preserveConsole; for network, check recordingNetwork and\s+preserveNetwork/)
+    assert.match(instructions, /capture is paused and new events are not being recorded/)
+    assert.match(instructions, /history is incomplete because a page's entries are discarded on navigation/)
+    assert.match(instructions, /An empty log only means\s+no matching entries were captured in the retained log; do not claim the web app\s+has no exceptions or failed requests/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
