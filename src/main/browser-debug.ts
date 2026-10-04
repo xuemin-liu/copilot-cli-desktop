@@ -8,7 +8,7 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { parseSafeHttpUrl } from './external-targets.js'
 import { parseBrowserAddress } from './browser-url.js'
-import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry } from './browser-debug-types.js'
+import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry, BrowserViewMode } from './browser-debug-types.js'
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
 
 const MAX_ENTRIES = 300
@@ -23,6 +23,7 @@ interface BrowserPage {
   error: string | null
   lastUrl: string
   devtools: boolean
+  panel: 'console' | 'network' | 'sources' | null
 }
 
 /** Own browser session, with native Chromium DevTools and read-only CLI telemetry.
@@ -41,7 +42,8 @@ export class BrowserDebug {
   private disposed = false
   private settingsWrite = Promise.resolve()
   private state: BrowserDebugState = {
-    activePageId: 0, pages: [],
+    activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
+    recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
     url: '', loading: false, canGoBack: false, canGoForward: false,
     devtools: false, error: null, console: [], network: [],
   }
@@ -70,9 +72,9 @@ export class BrowserDebug {
   private addPage(view: WebContentsView, activate: boolean): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
     this.pages.set(contents.id, page)
-    if (activate) this.activePageId = contents.id
+    if (activate) { this.activePageId = contents.id; this.state.view = 'page' }
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
       try { if (details.url && details.url !== 'about:blank') parseSafeHttpUrl(details.url) }
@@ -125,18 +127,31 @@ export class BrowserDebug {
       try { parseSafeHttpUrl(url) } catch { event.preventDefault() }
     })
     contents.on('did-start-loading', () => { page.loading = true })
+    contents.on('did-start-navigation', details => {
+      if (!details.isMainFrame || details.isSameDocument) return
+      if (!this.state.preserveConsole) this.state.console = this.state.console.filter(entry => entry.pageId !== contents.id)
+      if (!this.state.preserveNetwork) {
+        for (const entry of this.state.network) if (entry.pageId === contents.id) this.started.delete(entry.id)
+        this.state.network = this.state.network.filter(entry => entry.pageId !== contents.id)
+      }
+    })
     contents.on('did-stop-loading', () => { page.loading = false })
     contents.on('did-fail-load', (_event, code, description, _url, main) => {
       if (main && code !== -3) page.error = sanitizedText(description)
     })
     contents.on('did-navigate', (_event, url) => this.rememberUrl(page, url))
     contents.on('console-message', details => {
-      this.state.console.push({ id: ++this.consoleSequence, timestamp: new Date().toISOString(),
+      if (!this.state.recordingConsole) return
+      this.state.console.push({ id: ++this.consoleSequence, pageId: contents.id, timestamp: new Date().toISOString(),
         level: details.level, message: sanitizedText(details.message), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber })
       if (this.state.console.length > MAX_ENTRIES) this.state.console.shift()
     })
     const id = contents.id
-    contents.on('devtools-closed', () => { page.devtools = false; if (this.pages.has(id)) this.layout() })
+    contents.on('devtools-closed', () => {
+      page.devtools = false
+      if (id === this.activePageId && ['console', 'network', 'devtools'].includes(this.state.view)) this.state.view = 'page'
+      if (this.pages.has(id)) this.layout()
+    })
     contents.once('destroyed', () => this.removePage(id, storage))
     return page
   }
@@ -144,13 +159,13 @@ export class BrowserDebug {
   private captureNetwork(request: WebRequest): void {
     const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }
     request.onBeforeRequest(filter, (details, callback) => {
-      if (details.webContentsId !== undefined && this.pages.has(details.webContentsId)) {
+      if (this.state.recordingNetwork && details.webContentsId !== undefined && this.pages.has(details.webContentsId)) {
         const id = String(details.id)
         const previous = this.state.network.find(entry => entry.id === id)
         if (previous) previous.url = sanitizedUrl(details.url)
         else {
           this.started.set(id, Date.now())
-          this.state.network.push({ id, timestamp: new Date().toISOString(), method: details.method,
+          this.state.network.push({ id, pageId: details.webContentsId, timestamp: new Date().toISOString(), method: details.method,
             url: sanitizedUrl(details.url), resourceType: details.resourceType, status: null, durationMs: null, error: null,
             requestHeaders: {}, responseHeaders: {}, redirects: [] })
           if (this.state.network.length > MAX_ENTRIES) {
@@ -217,6 +232,7 @@ export class BrowserDebug {
       this.state.error = page.error
       this.state.devtools = page.devtools
       this.state.activePageId = this.activePageId
+      this.state.zoomFactor = contents.getZoomFactor()
       this.state.pages = [...this.pages].map(([id, entry]) => ({ id,
         title: entry.view.webContents.getTitle().slice(0, 160) || 'New page',
         url: entry.view.webContents.getURL() || entry.lastUrl,
@@ -275,12 +291,29 @@ export class BrowserDebug {
   }
 
   action(action: string): BrowserDebugState {
+    const setting = /^(record-console|record-network|preserve-console|preserve-network):(on|off)$/.exec(action)
+    if (setting) {
+      const enabled = setting[2] === 'on'
+      switch (setting[1]) {
+        case 'record-console': this.state.recordingConsole = enabled; break
+        case 'record-network': this.state.recordingNetwork = enabled; break
+        case 'preserve-console': this.state.preserveConsole = enabled; break
+        case 'preserve-network': this.state.preserveNetwork = enabled; break
+      }
+      return this.snapshot
+    }
+    if (action.startsWith('view:')) {
+      const view = action.slice(5)
+      if (!['page', 'console', 'network', 'devtools', 'activity'].includes(view)) throw new Error('Unknown browser view')
+      this.showView(view as BrowserViewMode)
+      return this.snapshot
+    }
     const pageAction = /^(select-page|close-page):(\d+)$/.exec(action)
     if (pageAction) {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { this.activePageId = id; this.layout() }
+      if (pageAction[1] === 'select-page') { this.activePageId = id; this.showView('page') }
       else if (this.pages.size > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -290,25 +323,45 @@ export class BrowserDebug {
       case 'forward': if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break
       case 'reload': this.activePage.error = null; contents.reload(); break
       case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); break
-      case 'devtools': this.toggleDevtools(); break
+      case 'clear-console': this.state.console = []; break
+      case 'clear-network': this.state.network = []; this.started.clear(); break
+      case 'devtools': this.showView(this.activePage.devtools && this.state.view !== 'page' ? 'page' : 'devtools'); break
       default: throw new Error('Unknown browser action')
     }
     return this.snapshot
   }
 
-  private toggleDevtools(): void {
+  private showView(view: BrowserViewMode): void {
+    this.state.view = view
     const page = this.activePage
-    // Custom DevTools contents do not emit the managed-window close events.
-    // Hide the view while retaining its interception session and overrides.
-    if (page.devtools) { page.devtools = false; this.layout(); return }
+    page.devtools = ['console', 'network', 'devtools'].includes(view)
+    if (!page.devtools) { this.layout(); return }
+    page.panel = view === 'devtools' ? 'sources' : view as 'console' | 'network'
     if (!page.tools) {
       page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true } })
       if (page.attached) this.owner.contentView.addChildView(page.tools)
-      this.view.webContents.setDevToolsWebContents(page.tools.webContents)
-      this.view.webContents.openDevTools({ mode: 'detach', activate: false })
+      page.tools.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      page.tools.webContents.on('did-finish-load', () => this.selectDevtoolsPanel(page))
+      page.contents.setDevToolsWebContents(page.tools.webContents)
+      page.contents.openDevTools({ mode: 'detach', activate: false })
+    } else if (!page.tools.webContents.isLoading()) {
+      this.selectDevtoolsPanel(page)
     }
-    page.devtools = true
     this.layout()
+  }
+
+  private selectDevtoolsPanel(page: BrowserPage): void {
+    const tools = page.tools?.webContents
+    if (!tools || tools.isDestroyed() || !page.panel || this.disposed) return
+    if (!tools.getURL().startsWith('devtools://devtools/')) return
+    // Only execute a fixed panel name in the native DevTools frontend, never in
+    // the inspected page. Chromium queues showPanel until its frontend is ready.
+    const panel = page.panel
+    void tools.executeJavaScript(`globalThis.DevToolsAPI.showPanel(${JSON.stringify(panel)})`).catch(error => {
+      if (!this.disposed && !page.contents.isDestroyed() && page.panel === panel) {
+        page.error = `Could not select DevTools panel: ${sanitizedText(String(error))}`
+      }
+    })
   }
 
   setBounds(bounds: BrowserBounds | null): void {
@@ -341,8 +394,8 @@ export class BrowserDebug {
         if (page.tools) this.owner.contentView.addChildView(page.tools)
         page.attached = true
       }
-      page.view.setVisible(Boolean(b && id === this.activePageId))
-      page.tools?.setVisible(Boolean(b && id === this.activePageId && page.devtools))
+      page.view.setVisible(Boolean(b && id === this.activePageId && this.state.view === 'page'))
+      page.tools?.setVisible(Boolean(b && id === this.activePageId && page.devtools && ['console', 'network', 'devtools'].includes(this.state.view)))
     }
     if (!b) return
     const zoom = this.owner.webContents.getZoomFactor()
@@ -351,9 +404,10 @@ export class BrowserDebug {
     const y = Math.max(0, Math.min(ownerHeight, Math.round(b.y * zoom)))
     const width = Math.max(0, Math.min(ownerWidth - x, Math.round(b.width * zoom)))
     const height = Math.max(0, Math.min(ownerHeight - y, Math.round(b.height * zoom)))
-    const pageHeight = this.activePage.devtools ? Math.floor(height * 0.45) : height
-    this.view.setBounds({ x, y, width, height: pageHeight })
-    this.activePage.tools?.setBounds({ x, y: y + pageHeight, width, height: height - pageHeight })
+    // Inspection replaces the visible surface while preserving the page's full
+    // viewport, so opening Console/Network/DevTools doesn't resize the web app.
+    this.view.setBounds({ x, y, width, height })
+    this.activePage.tools?.setBounds({ x, y, width, height })
   }
 
   private removePage(id: number, storage: Session): void {
@@ -370,7 +424,7 @@ export class BrowserDebug {
     if (this.pages.size === 0) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
-    } else if (this.activePageId === id) this.activePageId = this.pages.keys().next().value!
+    } else if (this.activePageId === id) { this.activePageId = this.pages.keys().next().value!; this.showView('page') }
     if (primary) this.rememberUrl(this.pages.values().next().value!, this.pages.values().next().value!.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()

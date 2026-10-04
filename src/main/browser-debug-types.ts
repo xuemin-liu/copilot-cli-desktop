@@ -1,5 +1,6 @@
 export interface BrowserConsoleEntry {
   id: number
+  pageId: number
   timestamp: string
   level: string
   message: string
@@ -9,6 +10,7 @@ export interface BrowserConsoleEntry {
 
 export interface BrowserNetworkEntry {
   id: string
+  pageId: number
   timestamp: string
   method: string
   url: string
@@ -21,8 +23,17 @@ export interface BrowserNetworkEntry {
   redirects: string[]
 }
 
+export type BrowserViewMode = 'page' | 'console' | 'network' | 'devtools' | 'activity'
+export type BrowserCaptureSetting = 'record-console' | 'record-network' | 'preserve-console' | 'preserve-network'
+
 export interface BrowserDebugState {
+  view: BrowserViewMode
+  recordingConsole: boolean
+  recordingNetwork: boolean
+  preserveConsole: boolean
+  preserveNetwork: boolean
   activePageId: number
+  zoomFactor: number
   pages: { id: number; title: string; url: string }[]
   url: string
   loading: boolean

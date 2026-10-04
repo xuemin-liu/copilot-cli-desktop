@@ -1,5 +1,5 @@
 import type { DesktopState, RevealPathResult } from '../main/types.js'
-import type { BrowserBounds, BrowserDebugState } from '../main/browser-debug-types.js'
+import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserViewMode } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { CredentialName } from '../main/secure-credentials.js'
@@ -28,7 +28,8 @@ export interface CopilotDesktopBridge {
   browserOpen(tabId: string): Promise<BrowserDebugState>
   browserState(tabId: string): Promise<BrowserDebugState>
   browserNavigate(tabId: string, url: string): Promise<BrowserDebugState>
-  browserAction(tabId: string, action: 'back' | 'forward' | 'reload' | 'clear' | 'devtools' | `select-page:${number}` | `close-page:${number}`): Promise<BrowserDebugState>
+  browserAction(tabId: string, action: 'back' | 'forward' | 'reload' | 'clear' | 'clear-console' | 'clear-network' | 'devtools' | `view:${BrowserViewMode}` | `${BrowserCaptureSetting}:${'on' | 'off'}` | `select-page:${number}` | `close-page:${number}`): Promise<BrowserDebugState>
+  browserExport(tabId: string, kind: 'console' | 'network'): Promise<void>
   browserBounds(tabId: string, bounds: BrowserBounds | null): Promise<void>
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
