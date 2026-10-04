@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { quarantineCorruptFile, writeFileAtomic } from './atomic-file.js'
+import { writeFileAtomic } from './atomic-file.js'
+import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -199,6 +200,8 @@ let closePromptAbort: AbortController | null = null
 let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
+/** Set when an unreadable desktop.json could not be preserved: never replace the only copy. */
+let configWritesBlocked = false
 let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
@@ -505,6 +508,7 @@ function dockSessionTab(tabId: string): DesktopState {
 }
 
 async function persistConfig(): Promise<void> {
+  if (configWritesBlocked) return
   const nextConfig = structuredClone(desktopConfig)
   const operation = configWriteQueue.then(() => writeDesktopConfig(configPath(), nextConfig))
   configWriteQueue = operation.catch(() => {})
@@ -2754,21 +2758,33 @@ if (!app.requestSingleInstanceLock()) {
       desktopConfigMigrated = true
       void writeAppLog(message)
     }, () => { desktopConfigUnparseable = true })
-    if (desktopConfigUnparseable) {
-      // Keep the unreadable file for manual recovery instead of overwriting it with defaults.
-      const quarantined = await quarantineCorruptFile(configPath())
-      void writeAppLog(`desktop.json could not be parsed; defaults are in use. ${quarantined ? `The original was kept at ${quarantined}` : 'It could not be moved aside'}`)
-      // Settings and open tabs are reset and old browser profiles are pruned on the next launch, so tell the user now.
+    const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
+    // Never replace the unreadable file unless an independent, verified backup exists, and keep
+    // browser data (referenced only by that file) until the backup is restored or deleted.
+    const configRecovery = await resolveConfigRecovery(configPath(), recoveryMarker, desktopConfigUnparseable)
+    const recoveryHold = configRecovery.hold
+    configWritesBlocked = configRecovery.writesBlocked
+    if (configRecovery.newlyPreserved && recoveryHold) {
+      void writeAppLog(`desktop.json could not be parsed; defaults are in use. The original was kept at ${recoveryHold}`)
       showNotification(
         'Copilot CLI Desktop settings were reset',
-        quarantined
-          ? `Your settings file was unreadable. It was saved as ${basename(quarantined)} in the app data folder; restore it before restarting to keep your workspaces.`
-          : 'Your settings file was unreadable and could not be backed up.',
+        `Your settings file was unreadable. It was saved as ${basename(recoveryHold)} in the app data folder. Browser data is kept until you restore or delete that file.`,
+      )
+    } else if (configRecovery.writesBlocked) {
+      void writeAppLog('desktop.json could not be parsed and could not be backed up; settings changes will not be saved this launch')
+      showNotification(
+        'Copilot CLI Desktop could not save settings',
+        'Your settings file was unreadable and could not be backed up, so it was left untouched. Changes will not be saved until it is fixed or removed.',
+      )
+    } else if (recoveryHold) {
+      showNotification(
+        'Copilot CLI Desktop settings recovery pending',
+        `Browser data is kept while ${basename(recoveryHold)} exists. Restore or delete it when you are done.`,
       )
     }
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
-    // An empty default config references no browser profiles, so pruning against it would delete every saved login.
-    if (!desktopConfigUnparseable) {
+    // Browser profiles referenced only by an unreadable or recovered config must survive until the hold is released.
+    if (!recoveryHold && !configWritesBlocked) {
       await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
         .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
     }
