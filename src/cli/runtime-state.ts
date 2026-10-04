@@ -1,9 +1,9 @@
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import lockfile from 'proper-lockfile'
 import { quarantineCorruptFile, writeFileAtomic } from '../main/atomic-file.js'
+import { constantTimeTokenEqual, isProcessAlive, type CliPaths } from './runtime-core.js'
+export { getCliPaths, constantTimeTokenEqual, isProcessAlive, type CliPaths } from './runtime-core.js'
 
 export type DaemonStatus = 'starting' | 'running' | 'restarting' | 'crashed' | 'stopping'
 
@@ -23,27 +23,6 @@ export interface DaemonState {
 }
 
 export type PublicDaemonState = Omit<DaemonState, 'token' | 'controlPort'>
-
-export interface CliPaths {
-  root: string
-  statePath: string
-  lockPath: string
-  logPath: string
-}
-
-export function getCliPaths(environment: NodeJS.ProcessEnv = process.env): CliPaths {
-  const root = environment.COPILOT_DESKTOP_CLI_HOME
-    ?? (process.platform === 'win32'
-      ? join(environment.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'copilot-cli-desktop', 'cli')
-      : join(environment.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'copilot-cli-desktop', 'cli'))
-
-  return {
-    root,
-    statePath: join(root, 'state.json'),
-    lockPath: join(root, 'controller.lock'),
-    logPath: join(root, 'copilot.log'),
-  }
-}
 
 export async function ensureCliDirectories(paths: CliPaths): Promise<void> {
   await mkdir(paths.root, { recursive: true, mode: 0o700 })
@@ -117,13 +96,6 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds))
 }
 
-export function constantTimeTokenEqual(left: string, right: string): boolean {
-  const leftBytes = Buffer.from(left, 'utf8')
-  const rightBytes = Buffer.from(right, 'utf8')
-  if (leftBytes.length !== rightBytes.length) return false
-  return timingSafeEqual(leftBytes, rightBytes)
-}
-
 async function readControllerLock(paths: CliPaths): Promise<ControllerLock | null> {
   try {
     const parsed = JSON.parse(await readFile(paths.lockPath, 'utf8')) as Partial<ControllerLock>
@@ -147,16 +119,6 @@ async function readSettledControllerLock(paths: CliPaths): Promise<ControllerLoc
     if (attempt + 1 < INCOMPLETE_LOCK_RETRIES) await delay(INCOMPLETE_LOCK_RETRY_MS)
   }
   return null
-}
-
-export function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
 }
 
 async function writeControllerLock(paths: CliPaths, lock: ControllerLock, exclusive: boolean): Promise<void> {

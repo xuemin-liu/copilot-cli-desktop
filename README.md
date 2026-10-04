@@ -35,6 +35,9 @@ handle, only input/output/resize events.
 - **Fork into side chat** keeps a main conversation on the left and an independent,
   resizable conversation on the right. Side chats use read/search-only model tools,
   including after restart, and can be closed without stopping the main session.
+- **Debug browser** opens your web app beside the terminal, with native Chromium
+  DevTools and Local Overrides. Console and network activity are also available
+  through `copilot-desktop browser` commands, without an MCP server.
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a
@@ -93,6 +96,9 @@ handle, only input/output/resize events.
   blocked.
 
 ## Session windows
+
+For the browser pane, native Local Overrides, and CLI console/network commands,
+see [web app debugging](docs/browser-debug.md).
 
 Click **Open in new window** (↗) above a terminal or in a session's **⋯** actions
 to move it to a separate, resizable window. You can open several session windows

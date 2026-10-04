@@ -115,6 +115,8 @@ import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, Reveal
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
+import { BrowserDebug } from './browser-debug.js'
+import type { BrowserBounds } from './browser-debug-types.js'
 import { MigrationService } from './migration-service.js'
 import { recoverMigrationReport } from './migration-import.js'
 import { assertMigrationWritersStopped } from './migration-writers.js'
@@ -169,6 +171,7 @@ const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
+let browserDebug: BrowserDebug | null = null
 const sessionWindows = new Map<string, BrowserWindow>()
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -2031,6 +2034,38 @@ async function stopAllSessions(): Promise<void> {
 }
 
 // --- IPC: main window -------------------------------------------------
+function browserForSender(event: IpcMainInvokeEvent): BrowserDebug {
+  assertTrustedIpcSender(event)
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || shuttingDown()) {
+    throw new Error('Browser controls are only available in the main window')
+  }
+  browserDebug ??= new BrowserDebug(mainWindow, join(app.getPath('userData'), 'browser-settings.json'))
+  return browserDebug
+}
+
+ipcMain.handle('desktop:browser-open', event => browserForSender(event).open())
+ipcMain.handle('desktop:browser-state', event => browserForSender(event).snapshot)
+ipcMain.handle('desktop:browser-navigate', (event, url: unknown) => {
+  const browser = browserForSender(event)
+  if (typeof url !== 'string' || url.length > 8192) throw new Error('Invalid browser URL')
+  return browser.navigate(url)
+})
+ipcMain.handle('desktop:browser-action', (event, action: unknown) => {
+  const browser = browserForSender(event)
+  if (typeof action !== 'string') throw new Error('Invalid browser action')
+  return browser.action(action)
+})
+ipcMain.handle('desktop:browser-bounds', (event, bounds: unknown) => {
+  const browser = browserForSender(event)
+  if (bounds !== null) {
+    if (!bounds || typeof bounds !== 'object' || !['x', 'y', 'width', 'height'].every(key => {
+      const value = (bounds as Record<string, unknown>)[key]
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 20000
+    })) throw new Error('Invalid browser bounds')
+  }
+  browser.setBounds(bounds as BrowserBounds | null)
+})
+
 // pty IPC channels (write/resize) validate the sender against the launcher
 // shell URL like every other handler; the tabId itself is passed explicitly
 // by the renderer; only the current terminal owner may write or resize it.
@@ -2701,7 +2736,7 @@ app.on('before-quit', (event) => {
     return
   }
   clearTimeout(updateQuitTimer)
-  if (managedTabs.size === 0 && !usageService) return
+  if (managedTabs.size === 0 && !usageService && !browserDebug) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via
@@ -2712,7 +2747,11 @@ app.on('before-quit', (event) => {
   const service = usageService
   void withShutdownDeadline(stopAllSessions()
     .then(() => configWriteQueue)
-    .finally(async () => { usageService = null; await service?.stop() }))
+    .finally(async () => {
+      usageService = null
+      await Promise.allSettled([service?.stop(), browserDebug?.dispose()])
+      browserDebug = null
+    }))
     .catch((error) => {
       void writeAppLog(`Shutdown cleanup failed: ${String(error)}`).catch(() => {})
       void service?.abort().catch(() => {})

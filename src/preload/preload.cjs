@@ -2,6 +2,11 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktop', {
   getState: () => ipcRenderer.invoke('desktop:get-state'),
+  browserOpen: () => ipcRenderer.invoke('desktop:browser-open'),
+  browserState: () => ipcRenderer.invoke('desktop:browser-state'),
+  browserNavigate: (url) => ipcRenderer.invoke('desktop:browser-navigate', url),
+  browserAction: (action) => ipcRenderer.invoke('desktop:browser-action', action),
+  browserBounds: (bounds) => ipcRenderer.invoke('desktop:browser-bounds', bounds),
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   createTab: (resumeMode, profileId) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId),

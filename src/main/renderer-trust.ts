@@ -1,9 +1,7 @@
 /**
- * Every renderer surface in this app is a first-party, locally-loaded HTML
- * file — there is no embedded third-party web content (unlike the reference
- * project, which embeds a live web UI). These helpers still exist so IPC
- * handlers can assert the sender is exactly the expected local shell rather
- * than trusting `senderFrame` implicitly.
+ * Only first-party, locally-loaded shell HTML may call desktop IPC. The
+ * embedded debug browser has no preload bridge; its pages and frames must
+ * never gain shell privileges.
  */
 export function isLauncherShellUrl(candidateUrl: string | null | undefined, shellUrl: string): boolean {
   if (!candidateUrl) return false
