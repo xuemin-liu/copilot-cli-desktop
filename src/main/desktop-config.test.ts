@@ -188,3 +188,24 @@ test('readDesktopConfig reports and sanitizes legacy provider URL credentials', 
     assert.equal(migrations.length, 1)
   })
 })
+
+test('readDesktopConfig tolerates a UTF-8 BOM and reports unparseable files', async () => {
+  await withTempFile(async (filename) => {
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(filename, `﻿${JSON.stringify({ notifications: false })}`)
+    let unparseable = false
+    assert.equal((await readDesktopConfig(filename, undefined, () => { unparseable = true })).notifications, false)
+    assert.equal(unparseable, false)
+
+    await writeFile(filename, '{ "profiles": [')
+    const config = await readDesktopConfig(filename, undefined, () => { unparseable = true })
+    assert.equal(unparseable, true)
+    assert.deepEqual(config, DEFAULT_DESKTOP_CONFIG)
+
+    unparseable = false
+    const { rm } = await import('node:fs/promises')
+    await rm(filename)
+    await readDesktopConfig(filename, undefined, () => { unparseable = true })
+    assert.equal(unparseable, false)
+  })
+})

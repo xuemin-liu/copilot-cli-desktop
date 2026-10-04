@@ -18,6 +18,20 @@ test('writeFileAtomic creates and replaces a file without leaving temporary file
   }
 })
 
+test('quarantineCorruptFile returns the new path, or null for a missing file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'copilot-quarantine-path-'))
+  try {
+    const filename = join(directory, 'state.json')
+    assert.equal(await quarantineCorruptFile(filename), null)
+    await writeFile(filename, 'bad')
+    const moved = await quarantineCorruptFile(filename)
+    assert.match(moved ?? '', /state\.json\.corrupt-\d+$/)
+    assert.equal(await readFile(moved!, 'utf8'), 'bad')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('quarantineCorruptFile moves a corrupt file aside and tolerates a missing file', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'copilot-quarantine-'))
   try {

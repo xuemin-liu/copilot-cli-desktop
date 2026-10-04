@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileAtomic } from './atomic-file.js'
+import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -199,6 +200,8 @@ let closePromptAbort: AbortController | null = null
 let quitAfterClosePrompt = false
 let desktopConfig: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG }
 let configWriteQueue: Promise<void> = Promise.resolve()
+/** Set when an unreadable desktop.json could not be preserved: never replace the only copy. */
+let configWritesBlocked = false
 let appLogWriteQueue: Promise<void> = Promise.resolve()
 let nextTabSequence = 1
 let copilotCapabilities: CopilotCapabilities = { ...EMPTY_COPILOT_CAPABILITIES }
@@ -505,6 +508,7 @@ function dockSessionTab(tabId: string): DesktopState {
 }
 
 async function persistConfig(): Promise<void> {
+  if (configWritesBlocked) return
   const nextConfig = structuredClone(desktopConfig)
   const operation = configWriteQueue.then(() => writeDesktopConfig(configPath(), nextConfig))
   configWriteQueue = operation.catch(() => {})
@@ -1358,19 +1362,34 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const dimensions = managed?.session.dimensions
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
-    const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
-    if (tab.sideChat) args.push('--mode=interactive')
-    const session = new PtySession({
-      file: plan.file,
-      args,
-      cwd: plan.cwd,
-      env: plan.env,
-      spawnPty: spawnNodePty,
-      sessionId: deterministicSessionId,
-      discoverSessionIdFromOutput: deterministicSessionId === null,
-      monitorSessionPermissions: true,
-      ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
-    })
+    let session: PtySession
+    let deterministicSessionId: string | null
+    try {
+      const finalized = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
+      deterministicSessionId = finalized.deterministicSessionId
+      if (tab.sideChat) finalized.args.push('--mode=interactive')
+      session = new PtySession({
+        file: plan.file,
+        args: finalized.args,
+        cwd: plan.cwd,
+        env: plan.env,
+        spawnPty: spawnNodePty,
+        sessionId: deterministicSessionId,
+        discoverSessionIdFromOutput: deterministicSessionId === null,
+        monitorSessionPermissions: true,
+        ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
+      })
+    } catch (error) {
+      // The old process is already gone; a validation failure here (for
+      // example capabilities changing during the awaits above) must not leave
+      // the tab looking alive with no process behind it.
+      managedTabs.delete(tabId)
+      tabsState = setTabStatus(tabsState, tabId, 'crashed')
+      tabsState = setTabProcessId(tabsState, tabId, null)
+      syncTabState()
+      broadcastState()
+      throw error
+    }
     managedTabs.set(tabId, { session })
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null } : candidate) }
     tabsState = setTabStatus(tabsState, tabId, 'starting')
@@ -2734,13 +2753,41 @@ if (!app.requestSingleInstanceLock()) {
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
     let desktopConfigMigrated = false
+    let desktopConfigUnparseable = false
     desktopConfig = await readDesktopConfig(configPath(), (message) => {
       desktopConfigMigrated = true
       void writeAppLog(message)
-    })
+    }, () => { desktopConfigUnparseable = true })
+    const recoveryMarker = join(app.getPath('userData'), 'config-recovery.json')
+    // Never replace the unreadable file unless an independent, verified backup exists, and keep
+    // browser data (referenced only by that file) until the backup is restored or deleted.
+    const configRecovery = await resolveConfigRecovery(configPath(), recoveryMarker, desktopConfigUnparseable)
+    const recoveryHold = configRecovery.hold
+    configWritesBlocked = configRecovery.writesBlocked
+    if (configRecovery.newlyPreserved && recoveryHold) {
+      void writeAppLog(`desktop.json could not be parsed; defaults are in use. The original was kept at ${recoveryHold}`)
+      showNotification(
+        'Copilot CLI Desktop settings were reset',
+        `Your settings file was unreadable. It was saved as ${basename(recoveryHold)} in the app data folder. Browser data is kept until you restore or delete that file.`,
+      )
+    } else if (configRecovery.writesBlocked) {
+      void writeAppLog('desktop.json could not be parsed and could not be backed up; settings changes will not be saved this launch')
+      showNotification(
+        'Copilot CLI Desktop could not save settings',
+        'Your settings file was unreadable and could not be backed up, so it was left untouched. Changes will not be saved until it is fixed or removed.',
+      )
+    } else if (recoveryHold) {
+      showNotification(
+        'Copilot CLI Desktop settings recovery pending',
+        `Browser data is kept while ${basename(recoveryHold)} exists. Restore or delete it when you are done.`,
+      )
+    }
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
-    await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
-      .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
+    // Browser profiles referenced only by an unreadable or recovered config must survive until the hold is released.
+    if (!recoveryHold && !configWritesBlocked) {
+      await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
+        .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
+    }
     await pruneBrowserLaunches(app.getPath('userData'), launchId)
       .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
     syncWorkspaceState()
@@ -2763,7 +2810,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage)
+    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage, (message) => void writeAppLog(message))
 
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'
