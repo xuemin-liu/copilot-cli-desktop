@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { renameSync } from 'node:fs'
 
@@ -24,7 +24,14 @@ export async function writeFileAtomic(filename: string, contents: string | Buffe
   await mkdir(dirname(filename), { recursive: true, mode: 0o700 })
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeFile(temporary, contents, { encoding: 'utf8', mode })
+    // Flush to disk before the rename so a crash or power loss cannot publish an empty or truncated file.
+    const handle = await open(temporary, 'w', mode)
+    try {
+      await handle.writeFile(contents, { encoding: 'utf8' })
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
     for (let attempt = 0; ; attempt += 1) {
       try {
         await rename(temporary, filename)

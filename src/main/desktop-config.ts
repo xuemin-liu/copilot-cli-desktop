@@ -149,12 +149,17 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
 export async function readDesktopConfig(
   filename: string,
   reportMigration?: (message: string) => void,
+  reportUnparseable?: () => void,
 ): Promise<DesktopConfig> {
   let parsed: unknown
   try {
-    parsed = JSON.parse(await readFile(filename, 'utf8')) as unknown
+    // Editors such as Notepad prepend a UTF-8 BOM, which JSON.parse rejects.
+    parsed = JSON.parse((await readFile(filename, 'utf8')).replace(/^﻿/, '')) as unknown
   } catch (error) {
     if (!isMissingPath(error) && !(error instanceof SyntaxError)) throw error
+    // Distinguish "no config yet" from "config exists but is unreadable" so
+    // callers do not treat the empty default as the user's real state.
+    if (error instanceof SyntaxError) reportUnparseable?.()
     return normalizeDesktopConfig(null)
   }
   return normalizeDesktopConfig(parsed, reportMigration)

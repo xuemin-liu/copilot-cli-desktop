@@ -79,6 +79,8 @@ export interface CredentialStatus {
  * environment overrides. If protected storage is unavailable, every save is
  * refused outright rather than silently falling back to plaintext.
  */
+class CredentialFormatError extends Error {}
+
 export class SecureCredentialStore {
   private mutationQueue: Promise<unknown> = Promise.resolve()
 
@@ -105,6 +107,11 @@ export class SecureCredentialStore {
     return result
   }
 
+  /** True for unusable file contents; false for transient I/O errors that must not trigger quarantine. */
+  private static isCorrupt(error: unknown): boolean {
+    return error instanceof SyntaxError || error instanceof CredentialFormatError
+  }
+
   private async readDocument(): Promise<CredentialDocument> {
     let parsed: unknown
     try {
@@ -114,16 +121,16 @@ export class SecureCredentialStore {
       throw error
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('The protected credential file has an unsupported format')
+      throw new CredentialFormatError('The protected credential file has an unsupported format')
     }
     const value = parsed as Record<string, unknown>
     if (value.version !== 1 || !Array.isArray(value.credentials)) {
-      throw new Error('The protected credential file has an unsupported format')
+      throw new CredentialFormatError('The protected credential file has an unsupported format')
     }
     const credentials: CredentialRecord[] = []
     for (const candidate of value.credentials) {
       if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        throw new Error('The protected credential file has an unsupported format')
+        throw new CredentialFormatError('The protected credential file has an unsupported format')
       }
       const record = candidate as Record<string, unknown>
       if (
@@ -131,10 +138,10 @@ export class SecureCredentialStore {
         || typeof record.encryptedValue !== 'string'
         || record.encryptedValue.length === 0
       ) {
-        throw new Error('The protected credential file has an unsupported format')
+        throw new CredentialFormatError('The protected credential file has an unsupported format')
       }
       if (credentials.some((entry) => entry.name === record.name)) {
-        throw new Error('The protected credential file contains duplicate variables')
+        throw new CredentialFormatError('The protected credential file contains duplicate variables')
       }
       credentials.push({ name: record.name, encryptedValue: record.encryptedValue })
     }
@@ -183,7 +190,9 @@ export class SecureCredentialStore {
       let document: CredentialDocument
       try {
         document = await this.readDocument()
-      } catch {
+      } catch (error) {
+        // A transient EBUSY/EPERM (antivirus, indexer) must not move the whole vault aside.
+        if (!SecureCredentialStore.isCorrupt(error)) throw error
         await quarantineCorruptFile(this.filename)
         document = { ...EMPTY_DOCUMENT }
       }
@@ -202,7 +211,15 @@ export class SecureCredentialStore {
   async deleteCredential(name: CredentialName): Promise<void> {
     if (!isCredentialName(name)) throw new Error('Unsupported credential variable')
     await this.enqueueMutation(async () => {
-      const document = await this.readDocument()
+      let document: CredentialDocument
+      try {
+        document = await this.readDocument()
+      } catch (error) {
+        // Let the user clear an unusable vault instead of being stuck with a permanent error.
+        if (!SecureCredentialStore.isCorrupt(error)) throw error
+        await quarantineCorruptFile(this.filename)
+        return
+      }
       document.credentials = document.credentials.filter((record) => record.name !== name)
       await this.writeDocument(document)
     })
@@ -222,7 +239,12 @@ export class SecureCredentialStore {
     for (const record of document.credentials) {
       const inherited = process.env[record.name]
       if (typeof inherited === 'string' && inherited.length > 0) continue
-      environment[record.name] = this.encryption.decryptString(Buffer.from(record.encryptedValue, 'base64'))
+      // One undecryptable record (for example after a profile change) must not block every session start.
+      try {
+        environment[record.name] = this.encryption.decryptString(Buffer.from(record.encryptedValue, 'base64'))
+      } catch {
+        continue
+      }
     }
     return environment
   }

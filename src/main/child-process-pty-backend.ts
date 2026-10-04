@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { constants } from 'node:os'
+import { StringDecoder } from 'node:string_decoder'
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
 import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 
@@ -39,13 +40,45 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     : null
   child.once('exit', () => watchdog?.release())
 
+  // Spawn failures (ENOENT/EACCES) emit `error` and never `exit`; without a
+  // listener they would crash the daemon, and with one alone the session would
+  // wait forever. Remember the failure so onExit can report it.
+  let spawnError: Error | null = null
+  const errorListeners = new Set<(error: Error) => void>()
+  child.on('error', (error) => {
+    spawnError = error
+    for (const listener of errorListeners) listener(error)
+  })
+  // Stream output through a decoder so multibyte characters split across
+  // chunks are not replaced with U+FFFD.
+  const forward = (stream: NodeJS.ReadableStream | null, listener: (data: string) => void): void => {
+    if (!stream) return
+    const decoder = new StringDecoder('utf8')
+    stream.on('data', (chunk: Buffer) => {
+      const text = decoder.write(chunk)
+      if (text) listener(text)
+    })
+    stream.on('end', () => {
+      const rest = decoder.end()
+      if (rest) listener(rest)
+    })
+  }
+
   return {
     pid: child.pid,
     onData: (listener) => {
-      child.stdout?.on('data', (chunk: Buffer) => listener(chunk.toString('utf8')))
-      child.stderr?.on('data', (chunk: Buffer) => listener(chunk.toString('utf8')))
+      forward(child.stdout, listener)
+      forward(child.stderr, listener)
     },
     onExit: (listener) => {
+      let reported = false
+      const report = (event: { exitCode: number; signal?: number | undefined }): void => {
+        if (reported) return
+        reported = true
+        listener(event)
+      }
+      errorListeners.add(() => report({ exitCode: 1 }))
+      if (spawnError) report({ exitCode: 1 })
       child.once('exit', (code, signal) => {
         // Node reports `code === null` precisely when the process was
         // terminated by a signal rather than exiting normally. Treating
@@ -56,7 +89,13 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
         // number so PtySession's exitCode === 0 check still works correctly.
         const signalNumber = signal ? constants.signals[signal] : undefined
         const exitCode = code ?? (signalNumber !== undefined ? 128 + signalNumber : 1)
-        listener({ exitCode, signal: signalNumber })
+        // 'exit' can precede the last buffered stdout/stderr (typically the
+        // crash message), and PtySession disposes the streams on exit. Wait
+        // for 'close' so output is delivered first, but only briefly: a
+        // grandchild that inherited the pipes would otherwise hold it open.
+        const finish = (): void => report({ exitCode, signal: signalNumber })
+        const timer = setTimeout(finish, 250)
+        child.once('close', () => { clearTimeout(timer); finish() })
       })
     },
     write: (data) => {

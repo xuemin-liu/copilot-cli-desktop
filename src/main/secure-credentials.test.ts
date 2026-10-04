@@ -170,3 +170,53 @@ test('concurrent saveCredential calls for different variables do not clobber eac
     assert.equal(environment.COPILOT_PROVIDER_API_KEY, 'sk_b')
   })
 })
+
+test('a transient read error does not quarantine the vault on save', async () => {
+  await withTempFile(async (filename) => {
+    const store = new SecureCredentialStore(filename, fakeEncryption())
+    await store.saveCredential('GH_TOKEN', 'gho_test')
+    // A directory at the vault path makes readFile fail with EISDIR, which is I/O, not corruption.
+    const { rename, mkdir, readdir } = await import('node:fs/promises')
+    const moved = `${filename}.held`
+    await rename(filename, moved)
+    await mkdir(filename)
+    await assert.rejects(() => store.saveCredential('GH_TOKEN', 'gho_other'))
+    assert.deepEqual((await readdir(join(filename, '..'))).filter((name) => name.includes('corrupt')), [])
+  })
+})
+
+test('a corrupt vault is quarantined by saveCredential and deleteCredential', async () => {
+  const { writeFile, readdir } = await import('node:fs/promises')
+  await withTempFile(async (filename) => {
+    const store = new SecureCredentialStore(filename, fakeEncryption())
+    await writeFile(filename, '{ not json')
+    await store.deleteCredential('GH_TOKEN')
+    assert.equal((await readdir(join(filename, '..'))).filter((name) => name.includes('.corrupt-')).length, 1)
+    await writeFile(filename, JSON.stringify({ version: 2, credentials: [] }))
+    await store.saveCredential('GH_TOKEN', 'gho_test')
+    assert.equal((await store.resolveEnvironment()).GH_TOKEN, 'gho_test')
+  })
+})
+
+test('resolveEnvironment skips a record that cannot be decrypted', async () => {
+  await withTempFile(async (filename) => {
+    const encryption: EncryptionProvider = {
+      ...fakeEncryption(),
+      decryptString: (value) => {
+        const text = value.toString('utf8')
+        if (text.includes('broken')) throw new Error('cannot decrypt')
+        return text.replace(/^enc:/, '')
+      },
+    }
+    const store = new SecureCredentialStore(filename, encryption)
+    await store.saveCredential('GH_TOKEN', 'broken')
+    await store.saveCredential('COPILOT_PROVIDER_API_KEY', 'sk-good')
+    const previous = process.env.GH_TOKEN
+    delete process.env.GH_TOKEN
+    try {
+      assert.deepEqual(await store.resolveEnvironment(), { COPILOT_PROVIDER_API_KEY: 'sk-good' })
+    } finally {
+      if (previous !== undefined) process.env.GH_TOKEN = previous
+    }
+  })
+})

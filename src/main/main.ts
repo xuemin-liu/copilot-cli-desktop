@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { writeFileAtomic } from './atomic-file.js'
+import { quarantineCorruptFile, writeFileAtomic } from './atomic-file.js'
 import { access, appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1358,19 +1358,34 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const dimensions = managed?.session.dimensions
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
-    const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
-    if (tab.sideChat) args.push('--mode=interactive')
-    const session = new PtySession({
-      file: plan.file,
-      args,
-      cwd: plan.cwd,
-      env: plan.env,
-      spawnPty: spawnNodePty,
-      sessionId: deterministicSessionId,
-      discoverSessionIdFromOutput: deterministicSessionId === null,
-      monitorSessionPermissions: true,
-      ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
-    })
+    let session: PtySession
+    let deterministicSessionId: string | null
+    try {
+      const finalized = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
+      deterministicSessionId = finalized.deterministicSessionId
+      if (tab.sideChat) finalized.args.push('--mode=interactive')
+      session = new PtySession({
+        file: plan.file,
+        args: finalized.args,
+        cwd: plan.cwd,
+        env: plan.env,
+        spawnPty: spawnNodePty,
+        sessionId: deterministicSessionId,
+        discoverSessionIdFromOutput: deterministicSessionId === null,
+        monitorSessionPermissions: true,
+        ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
+      })
+    } catch (error) {
+      // The old process is already gone; a validation failure here (for
+      // example capabilities changing during the awaits above) must not leave
+      // the tab looking alive with no process behind it.
+      managedTabs.delete(tabId)
+      tabsState = setTabStatus(tabsState, tabId, 'crashed')
+      tabsState = setTabProcessId(tabsState, tabId, null)
+      syncTabState()
+      broadcastState()
+      throw error
+    }
     managedTabs.set(tabId, { session })
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null } : candidate) }
     tabsState = setTabStatus(tabsState, tabId, 'starting')
@@ -2734,13 +2749,22 @@ if (!app.requestSingleInstanceLock()) {
     await pruneSessionLogDirectories(join(app.getPath('userData'), 'logs', 'sessions'))
       .catch((error) => writeAppLog(`Could not prune old session logs: ${String(error)}`))
     let desktopConfigMigrated = false
+    let desktopConfigUnparseable = false
     desktopConfig = await readDesktopConfig(configPath(), (message) => {
       desktopConfigMigrated = true
       void writeAppLog(message)
-    })
+    }, () => { desktopConfigUnparseable = true })
+    if (desktopConfigUnparseable) {
+      // Keep the unreadable file for manual recovery instead of overwriting it with defaults.
+      await quarantineCorruptFile(configPath())
+      void writeAppLog('desktop.json could not be parsed; it was moved aside and defaults are in use')
+    }
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
-    await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
-      .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
+    // An empty default config references no browser profiles, so pruning against it would delete every saved login.
+    if (!desktopConfigUnparseable) {
+      await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
+        .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
+    }
     await pruneBrowserLaunches(app.getPath('userData'), launchId)
       .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
     syncWorkspaceState()
