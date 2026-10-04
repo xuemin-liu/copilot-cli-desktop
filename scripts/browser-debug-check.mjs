@@ -123,7 +123,14 @@ if (!process.versions.electron) {
     const trusted = event => { assert.equal(event.sender.id, window.webContents.id) }
     const forTab = tabId => { assert.ok(browsers.has(tabId), 'renderer must address a known session'); return browsers.get(tabId) }
     ipcMain.handle('desktop:browser-open', (event, tabId) => { trusted(event); return forTab(tabId).open() })
-    ipcMain.handle('desktop:browser-state', (event, tabId) => { trusted(event); return forTab(tabId).snapshot })
+    // Count the renderer's address polls so the typing check can wait until the renderer has seen the current page.
+    const polled = { count: 0, activePageId: -1, url: '' }
+    ipcMain.handle('desktop:browser-state', (event, tabId) => {
+      trusted(event)
+      const snapshot = forTab(tabId).snapshot
+      if (tabId === 'tab-1') Object.assign(polled, { count: polled.count + 1, activePageId: snapshot.activePageId, url: snapshot.url })
+      return snapshot
+    })
     ipcMain.handle('desktop:browser-navigate', (event, tabId, value) => { trusted(event); return forTab(tabId).navigate(value) })
     ipcMain.handle('desktop:browser-action', (event, tabId, action) => { trusted(event); return forTab(tabId).action(action) })
     const copied = []
@@ -282,7 +289,7 @@ if (!process.versions.electron) {
         popupOwner.destroy()
         browser.action(`close-page:${childId}`)
         await until(() => browser.snapshot.pages.length === 1 && childContents.isDestroyed(), 'close child page')
-        assert.equal(childTools.isDestroyed(), true, 'closing a page disposes its DevTools')
+        await until(() => childTools.isDestroyed(), 'closing a page disposes its DevTools')
         assert.equal(window.isDestroyed(), false, 'closing a child leaves its terminal alive')
         await browser.navigate(url)
         await until(() => source.getVisible(), 'source restored in terminal')
@@ -356,6 +363,11 @@ if (!process.versions.electron) {
       await interrupted
       assert.equal(browser.snapshot.error, null)
       await until(() => ui(`document.querySelector('[aria-label="Web app URL"]').value === ${JSON.stringify(url)}`), 'address poll')
+      // The address box showing `url` only proves an earlier poll matched. A page switch the renderer has not seen yet
+      // would overwrite typed text, so wait for two further polls that report the current page, then let React render.
+      const settledFrom = polled.count
+      await until(() => polled.count >= settledFrom + 2 && polled.activePageId === browser.snapshot.activePageId && polled.url === browser.snapshot.url, 'renderer caught up with the current page')
+      await delay(150)
       await ui(`(() => {
         const input = document.querySelector('[aria-label="Web app URL"]'); input.focus();
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'http://localhost:3000/typing');
