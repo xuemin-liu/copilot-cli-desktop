@@ -116,6 +116,13 @@ if (!process.versions.electron) {
       cli.stdout.on('data', chunk => { output += chunk }); cli.stderr.on('data', chunk => { errors += chunk })
       assert.equal(await new Promise((accept, reject) => { cli.once('error', reject); cli.once('exit', accept) }), 0, errors)
       assert.equal(JSON.parse(output).url, url)
+      const largeConsoleStart = performance.now()
+      await browser.view.webContents.executeJavaScript('console.log("performance-fixture-" + "password".repeat(25000)); console.log("token=\\"boundary-secret with spaces " + "x".repeat(200000))')
+      await until(() => browser.snapshot.console.some(entry => entry.message.startsWith('performance-fixture-')), 'large console capture')
+      assert.ok(performance.now() - largeConsoleStart < 4000, 'large console messages must not freeze the main process')
+      const largeConsole = await browserCommand(['console'])
+      assert.ok(largeConsole.every(entry => entry.message.length <= 8192))
+      assert.ok(!JSON.stringify(largeConsole).includes('boundary-secret'))
       // Exercise the actual capture -> loopback -> CLI paths, with distinct
       // credential sentinels and legitimate request/console controls above.
       await browser.view.webContents.executeJavaScript(`(async () => {

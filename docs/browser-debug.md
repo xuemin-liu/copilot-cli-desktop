@@ -32,6 +32,9 @@ activity and CLI output. Console filtering handles recognizable credential field
 Bearer values and URLs, but arbitrary console text and URL paths may still contain
 application data or secrets. Avoid logging secrets in the app you debug. The address
 field and native DevTools display the real page URL so navigation and overrides work.
+Console and ordinary header text are capped at 8192 characters before filtering.
+Oversized URLs and URL-bearing headers are replaced with a redaction marker so a
+partial credential cannot escape filtering at the limit.
 
 ## Copilot CLI access
 

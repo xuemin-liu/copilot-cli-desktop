@@ -58,7 +58,7 @@ export class BrowserDebug {
     contents.on('did-navigate', (_event, url) => this.rememberUrl(url))
     contents.on('console-message', details => {
       this.state.console.push({ id: ++this.consoleSequence, timestamp: new Date().toISOString(),
-        level: details.level, message: sanitizedText(details.message).slice(0, 8192), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber })
+        level: details.level, message: sanitizedText(details.message), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber })
       if (this.state.console.length > MAX_ENTRIES) this.state.console.shift()
     })
     contents.on('devtools-closed', () => { this.state.devtools = false; this.layout() })
