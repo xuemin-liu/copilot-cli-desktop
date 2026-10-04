@@ -1,10 +1,12 @@
-// Isolated real Electron/Chromium check; no model or external website requests.
+// Isolated real Electron/Chromium check; --copilot-console additionally makes one real model request.
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
 
 const artifacts = resolve('test-results/browser-debug')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
@@ -30,22 +32,31 @@ if (!process.versions.electron) {
   await build({ stdin: { contents: `
     import { createRoot } from 'react-dom/client';
     import { useState } from 'react';
-    import { BrowserWorkspace } from './src/renderer/components/BrowserWorkspace';
+    import { SessionWorkspace } from './src/renderer/components/SessionWorkspace';
     import './src/renderer/styles.css';
     window.unhandled = [];
     window.addEventListener('unhandledrejection', event => window.unhandled.push(String(event.reason)));
     function Fixture() {
       const [obscured, setObscured] = useState(false);
       window.setObscured = setObscured;
-      return <BrowserWorkspace obscured={obscured}><div data-terminal>Terminal fixture</div></BrowserWorkspace>;
+      const [activeTabId, setActiveTabId] = useState('tab-1');
+      window.setBrowserActive = active => setActiveTabId(active ? 'tab-1' : 'tab-2');
+      const tabs = [{ id: 'tab-1', title: 'First session', status: 'running' }, { id: 'tab-2', title: 'Second session', status: 'running' }];
+      return <SessionWorkspace tabs={tabs} activeTabId={activeTabId} obscured={obscured} canOpenTab={false}
+        onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} />;
     }
     createRoot(document.getElementById('root')).render(<Fixture />);
-  `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic' })
+  `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic',
+    plugins: [{ name: 'fixture-terminal', setup(build) {
+      build.onResolve({ filter: /TerminalPane\.js$/ }, () => ({ path: 'terminal', namespace: 'fixture' }))
+      build.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: 'import React from "react"; export function TerminalPane({tabId}) { return <div data-terminal>{tabId} terminal fixture</div>; }', loader: 'jsx', resolveDir: process.cwd() }))
+    } }],
+  })
   await writeFile(join(artifacts, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"></head><body><div id="root" style="display:flex;height:100vh"><script src="fixture.js"></script></div></body></html>')
   const env = { ...process.env, COPILOT_DESKTOP_BROWSER_STATE: join(artifacts, 'control.json') }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
-  const timer = setTimeout(() => child.kill(), 90000)
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { env, stdio: 'inherit', windowsHide: true })
+  const timer = setTimeout(() => child.kill(), process.argv.includes('--copilot-console') ? 180000 : 90000)
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Browser debug check failed')
@@ -60,9 +71,19 @@ if (!process.versions.electron) {
     await app.whenReady()
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
     const { browserCommand } = await import('../dist/src/cli/browser-control.js')
+    const { prepareBrowserSessionEnvironment } = await import('../dist/src/main/browser-session.js')
+    // Installed-app helpers live outside the project, so test that boundary too.
+    const sessionRoot = await mkdtemp(join(tmpdir(), 'desktop-browser-check-'))
+    const firstEnv = await prepareBrowserSessionEnvironment(sessionRoot, 'tab-1', process.env)
+    Object.assign(process.env, firstEnv)
     let slowSeen = false
     const site = createServer((request, response) => {
       if (request.url === '/slow') { slowSeen = true; return }
+      if (request.url === '/second-session') {
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.end('<!doctype html><h1>Second session</h1><script>console.error("second session fixture exception")</script>')
+        return
+      }
       if (request.url.startsWith('/secret?')) {
         response.writeHead(200, { 'X-Auth-Token': 'response-secret', location: '/callback?code=location-secret',
           link: '</next?token=link-secret>; rel="next"', 'content-type': 'application/json' })
@@ -80,21 +101,82 @@ if (!process.versions.electron) {
       preload: resolve('src/preload/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false,
     } })
     const browser = new BrowserDebug(window, join(artifacts, 'settings.json'))
+    const secondEnv = await prepareBrowserSessionEnvironment(sessionRoot, 'tab-2', { ...process.env, COPILOT_CUSTOM_INSTRUCTIONS_DIRS: '' })
+    const second = new BrowserDebug(window, join(sessionRoot, 'tab-2', 'settings.json'), { endpointPath: secondEnv.COPILOT_DESKTOP_BROWSER_STATE })
+    const browsers = new Map([['tab-1', browser], ['tab-2', second]])
     const trusted = event => { assert.equal(event.sender.id, window.webContents.id) }
-    ipcMain.handle('desktop:browser-open', event => { trusted(event); return browser.open() })
-    ipcMain.handle('desktop:browser-state', event => { trusted(event); return browser.snapshot })
-    ipcMain.handle('desktop:browser-navigate', (event, value) => { trusted(event); return browser.navigate(value) })
-    ipcMain.handle('desktop:browser-action', (event, action) => { trusted(event); return browser.action(action) })
-    ipcMain.handle('desktop:browser-bounds', (event, bounds) => { trusted(event); browser.setBounds(bounds) })
+    const forTab = tabId => { assert.ok(browsers.has(tabId), 'renderer must address a known session'); return browsers.get(tabId) }
+    ipcMain.handle('desktop:browser-open', (event, tabId) => { trusted(event); return forTab(tabId).open() })
+    ipcMain.handle('desktop:browser-state', (event, tabId) => { trusted(event); return forTab(tabId).snapshot })
+    ipcMain.handle('desktop:browser-navigate', (event, tabId, value) => { trusted(event); return forTab(tabId).navigate(value) })
+    ipcMain.handle('desktop:browser-action', (event, tabId, action) => { trusted(event); return forTab(tabId).action(action) })
+    ipcMain.handle('desktop:browser-bounds', (event, tabId, bounds) => { trusted(event); forTab(tabId).setBounds(bounds) })
     const ui = code => window.webContents.executeJavaScript(code)
     try {
       window.showInactive()
       await window.loadFile(join(artifacts, 'index.html'))
-      await until(() => ui('document.querySelector(".browser-workspace-toolbar button")'), 'open button')
-      await ui('document.querySelector(".browser-workspace-toolbar button").click()')
+      await until(() => ui('document.querySelector(".session-pane-visible .session-browser-toggle")'), 'session header open button')
+      assert.equal(await ui('document.querySelectorAll(".session-pane-header .session-browser-toggle").length'), 2)
+      assert.equal(await ui('document.querySelectorAll(".browser-workspace-toolbar").length'), 0, 'no window-wide browser toolbar')
+      await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
       await until(() => ui('Boolean(document.querySelector(".browser-panel"))'), 'browser pane')
-      await ui(`window.copilotDesktop.browserNavigate(${JSON.stringify(url)})`)
+      // Exercise the address bar's native validation and Go submission, not just IPC.
+      await ui(`(() => {
+        const input = document.querySelector('[aria-label="Web app URL"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'localhost.kmha.dev');
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`)
+      assert.equal(await ui('document.querySelector(".browser-toolbar").checkValidity()'), true, 'bare hostname must pass form validation')
+      await ui(`(() => {
+        const input = document.querySelector('[aria-label="Web app URL"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(url.replace('http://', ''))});
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`)
+      await ui('document.querySelector(".browser-toolbar").requestSubmit()')
       await until(() => browser.snapshot.console.some(entry => entry.message.includes('fixture exception')), 'exception capture')
+      assert.equal(browser.snapshot.url, url, 'bare loopback address navigates using HTTP')
+      // Separate live WebContents, cookies/storage, telemetry and helper endpoints.
+      {
+        await browser.view.webContents.executeJavaScript('document.cookie = "session-only=first; SameSite=Strict"; localStorage.setItem("session-only", "first")')
+        await second.open()
+        await second.navigate(`${url}second-session`)
+        await until(() => second.snapshot.console.some(entry => entry.message.includes('second session fixture exception')), 'second session exception')
+        assert.equal(await second.view.webContents.executeJavaScript('document.cookie.includes("session-only")'), false)
+        assert.equal(await second.view.webContents.executeJavaScript('localStorage.getItem("session-only")'), null)
+        assert.ok(!browser.snapshot.console.some(entry => entry.message.includes('second session fixture exception')))
+        assert.ok(!second.snapshot.console.some(entry => entry.message.includes('fixture console')))
+        const execute = promisify(execFile)
+        const readConsole = async env => JSON.parse((await execute('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', env.COPILOT_DESKTOP_BROWSER_HELPER, 'console'], { env, windowsHide: true, timeout: 15000 })).stdout)
+        const firstConsole = await readConsole(firstEnv)
+        const secondConsole = await readConsole(secondEnv)
+        assert.ok(firstConsole.some(entry => entry.message.includes('fixture exception')))
+        assert.ok(!firstConsole.some(entry => entry.message.includes('second session fixture exception')))
+        assert.ok(secondConsole.some(entry => entry.message.includes('second session fixture exception')))
+        // No model calls: verify the installed Copilot discovers the generated guidance.
+        const discovered = await execute('powershell.exe', ['-NoProfile', '-Command', 'copilot instruction list --json'], { env: firstEnv, cwd: artifacts, windowsHide: true, timeout: 15000 })
+        const instructionSources = JSON.parse(discovered.stdout)
+        assert.ok(instructionSources.some(source => source.sourcePath?.toLowerCase().replaceAll('\\', '/') === join(sessionRoot, 'tab-1', '.github', 'instructions', 'browser.instructions.md').toLowerCase().replaceAll('\\', '/') && !source.defaultDisabled), 'Copilot must discover browser instructions')
+        if (process.argv.includes('--copilot-console')) {
+          const answer = await execute('powershell.exe', ['-NoProfile', '-Command', 'copilot -p "Find any exception from browser console. Read the live console and report the exception message, source, and line. Do not modify any files or browser state." --allow-all-tools --no-ask-user --silent'], { env: firstEnv, cwd: artifacts, windowsHide: true, timeout: 100000, maxBuffer: 1024 * 1024 })
+          await writeFile(join(artifacts, 'copilot-console-answer.txt'), answer.stdout)
+          assert.ok(answer.stdout.includes('fixture exception'), 'natural-language Copilot request must report the live exception')
+          assert.ok(!answer.stdout.includes('second session fixture exception'), 'Copilot must read only its own browser')
+          console.log('Copilot natural-language console check passed.')
+        }
+        await ui('window.setBrowserActive(false)')
+        await delay(300)
+        assert.equal(browser.view.getVisible(), false, 'inactive session hides its browser')
+        await browser.view.webContents.executeJavaScript('console.error("inactive session exception")')
+        assert.ok((await readConsole(firstEnv)).some(entry => entry.message.includes('inactive session exception')))
+        await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
+        await until(() => second.view.getVisible(), 'second session own browser')
+        await until(() => ui(`document.querySelector('.session-pane-visible [aria-label="Web app URL"]').value === ${JSON.stringify(`${url}second-session`)}`), 'second session own address')
+        await writeFile(join(artifacts, 'session-header.png'), (await capture(window.webContents, 'session header')).toPNG())
+        await ui('window.setBrowserActive(true)')
+        await until(() => browser.view.getVisible(), 'restored session browser')
+        await until(() => !second.view.getVisible(), 'second browser hides on session switch')
+        assert.equal(browser.snapshot.url, url)
+      }
       await until(() => browser.snapshot.network.some(entry => entry.url.endsWith('/fail') && entry.status === 500 && entry.durationMs !== null), 'failed API request')
       assert.equal(await browser.view.webContents.executeJavaScript('typeof window.copilotDesktop'), 'undefined')
       assert.equal(await browser.view.webContents.executeJavaScript('typeof require'), 'undefined')
@@ -187,6 +269,24 @@ if (!process.versions.electron) {
       await until(async () => await browser.view.webContents.executeJavaScript('fetch("/api.json").then(r => r.json()).then(r => r.version)') === 'local-override', 'native local override')
       await browser.view.webContents.executeJavaScript('console.log("capture with DevTools open")')
       assert.ok((await browserCommand(['console'])).some(entry => entry.message.includes('capture with DevTools open')))
+      const pageId = browser.view.webContents.id
+      const pageUrl = browser.snapshot.url
+      const originalBounds = browser.view.getBounds()
+      const viewportBounds = { ...originalBounds, height: Math.round(originalBounds.height / 0.45) }
+      const popout = new BrowserWindow({ width: 900, height: 800, show: false })
+      try {
+        browser.setOwner(popout)
+        browser.setBounds({ x: 0, y: 0, width: 850, height: 750 })
+        assert.equal(browser.view.webContents.id, pageId)
+        assert.equal(browser.snapshot.url, pageUrl)
+        assert.ok(popout.contentView.children.includes(browser.view))
+        assert.ok(!window.contentView.children.includes(browser.view))
+        assert.equal(await browser.view.webContents.executeJavaScript('fetch("/api.json").then(r => r.json()).then(r => r.version)'), 'local-override', 'overrides survive pop-out')
+        browser.setOwner(window)
+        browser.setBounds(viewportBounds)
+        assert.equal(browser.view.webContents.id, pageId)
+        assert.ok(window.contentView.children.includes(browser.view))
+      } finally { browser.setOwner(window); popout.destroy() }
       await writeFile(join(overrideRoot, hostFolder, 'api.json'), '{"version":"edited-override"}')
       await until(async () => await browser.view.webContents.executeJavaScript('fetch("/api.json").then(r => r.json()).then(r => r.version)') === 'edited-override', 'edited local file refresh')
       const picture = await capture(window.webContents, 'main renderer')
@@ -216,11 +316,12 @@ if (!process.versions.electron) {
       await writeFile(join(artifacts, 'console.png'), (await capture(window.webContents, 'console view')).toPNG())
       await browser.view.webContents.executeJavaScript('for(let i=0;i<320;i++) console.log("bounded-" + i)')
       assert.equal(browser.snapshot.console.length, 300)
-      await ui('document.querySelector(".browser-workspace-toolbar button").click()')
+      await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
       await delay(300)
       assert.equal(browser.view.getVisible(), false)
       assert.deepEqual(await ui('window.unhandled'), [])
       await browser.dispose()
+      assert.ok(!window.contentView.children.includes(browser.view), 'closed session removes its native browser view')
       await assert.rejects(readFile(process.env.COPILOT_DESKTOP_BROWSER_STATE, 'utf8'), { code: 'ENOENT' })
       const legacyPath = join(artifacts, 'legacy-settings.json')
       await writeFile(legacyPath, JSON.stringify({ url: `${url}callback?code=legacy-secret` }))
@@ -240,10 +341,13 @@ if (!process.versions.electron) {
           await assert.rejects(readFile(legacyPath, 'utf8'), { code: 'ENOENT' })
         } finally { await manuallyNavigated.dispose() }
       }
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, nativeOverrides: true, cli: true }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, nativeOverrides: true, cli: true, sessionIsolation: true, powershellDiagnostics: true, copilotInstructions: true }, null, 2))
       console.log('Browser debug check passed: native overrides, live file changes, CLI telemetry, isolation, and layout.')
     } finally {
-      await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit()
+      await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close()
+      assert.equal(resolve(sessionRoot, '..'), resolve(tmpdir()), 'cleanup is confined to the owned temporary test directory')
+      await rm(sessionRoot, { recursive: true, force: true })
+      app.quit()
     }
   }
 }

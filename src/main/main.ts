@@ -109,6 +109,7 @@ import {
   setTabSessionId,
   setTabStatus,
   touchTab,
+  visibleSessionTabs,
   type TabsState,
 } from './session-tab-machine.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, WorkspaceProfile } from './types.js'
@@ -116,6 +117,8 @@ import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } 
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 import { BrowserDebug } from './browser-debug.js'
+import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
+import { browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
 import type { BrowserBounds } from './browser-debug-types.js'
 import { MigrationService } from './migration-service.js'
 import { recoverMigrationReport } from './migration-import.js'
@@ -171,7 +174,7 @@ const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
-let browserDebug: BrowserDebug | null = null
+const sessionBrowsers = new Map<string, BrowserDebug>()
 const sessionWindows = new Map<string, BrowserWindow>()
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -340,6 +343,7 @@ function protectedCredentialPath(): string {
 // appending to — and exposing — a previous launch's transcript at the same
 // filename.
 const launchId = randomUUID()
+function browserSessionRoot(): string { return join(app.getPath('userData'), 'browser-sessions', launchId) }
 
 function sessionLogPath(tabId: string): string {
   if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
@@ -414,6 +418,10 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
+  const visible = visibleSessionTabs(tabsState)
+  for (const [tabId, browser] of sessionBrowsers) {
+    if (!sessionWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
+  }
   const window = mainWindow
   if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), shellUrl())) {
     window.webContents.send('desktop:state-changed', snapshot())
@@ -455,6 +463,10 @@ function popOutSessionTab(tabId: string): DesktopState {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged },
   })
   sessionWindows.set(tabId, window)
+  sessionBrowsers.get(tabId)?.setOwner(window)
+  window.on('close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
+  })
   // Keep the session name authoritative even when the shared HTML loads or
   // changes its document title while this session is idle.
   window.on('page-title-updated', event => event.preventDefault())
@@ -464,7 +476,10 @@ function popOutSessionTab(tabId: string): DesktopState {
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => { if (url !== shellUrl()) event.preventDefault() })
-  window.webContents.on('render-process-gone', () => { if (!window.isDestroyed()) window.destroy() })
+  window.webContents.on('render-process-gone', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
+    if (!window.isDestroyed()) window.destroy()
+  })
   window.once('ready-to-show', () => { if (!window.isDestroyed()) focusSessionWindow(window) })
   window.on('closed', () => {
     if (sessionWindows.get(tabId) !== window) return
@@ -511,6 +526,7 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
           ...(tab.lastSessionId && tab.sessionPermissionMode && !tab.sideChat
             ? { sessionPermissionMode: tab.sessionPermissionMode }
@@ -1063,7 +1079,10 @@ async function createSessionTab(
   const sessionPermissionMode = connectSessionId || sideOptions.sideChat ? null : sessionPermissionModeOverride
   pendingSessionCreations++
   let plan: Awaited<ReturnType<typeof buildSessionSpawnPlan>>
-  try { plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle) }
+  try {
+    plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
+  }
   finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
   // have completed during the await. Register the new tab synchronously.
@@ -1090,6 +1109,7 @@ async function createSessionTab(
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
+    browserProfileId: selectBrowserProfileId(restoredCandidate?.browserProfileId, tabsState.tabs.map(tab => tab.browserProfileId)),
     workspaceProfileId: profile.id,
     sessionPermissionPreset,
     sessionPermissionMode,
@@ -1229,6 +1249,9 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       managed.session.removeAllListeners()
       managedTabs.delete(tabId)
     }
+    const browser = sessionBrowsers.get(tabId)
+    await browser?.dispose()
+    sessionBrowsers.delete(tabId)
     tabsState = closeTab(tabsState, tabId)
     syncTabState()
     const popout = sessionWindows.get(tabId)
@@ -1294,6 +1317,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // refreshing it never reintroduces a second point where this can fail
     // after the healthy process is already gone.
     const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
 
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
@@ -2034,35 +2058,52 @@ async function stopAllSessions(): Promise<void> {
 }
 
 // --- IPC: main window -------------------------------------------------
-function browserForSender(event: IpcMainInvokeEvent): BrowserDebug {
+function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDebug {
   assertTrustedIpcSender(event)
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || shuttingDown()) {
-    throw new Error('Browser controls are only available in the main window')
+  if (!isSessionTabId(tabId) || !tabsState.tabs.some(tab => tab.id === tabId)) {
+    throw new Error('Unknown browser session')
   }
-  browserDebug ??= new BrowserDebug(mainWindow, join(app.getPath('userData'), 'browser-settings.json'))
-  return browserDebug
+  const owner = sessionWindows.get(tabId) ?? mainWindow
+  if (!owner || owner.isDestroyed() || !ownsSessionTerminal(event, tabId) || shuttingDown()) {
+    throw new Error('Browser controls are only available in the owning session window')
+  }
+  let browser = sessionBrowsers.get(tabId)
+  if (!browser) {
+    const paths = browserSessionPaths(browserSessionRoot(), tabId)
+    const tab = tabsState.tabs.find(tab => tab.id === tabId)!
+    const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
+    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition })
+    sessionBrowsers.set(tabId, browser)
+  }
+  browser.setOwner(owner)
+  return browser
 }
 
-ipcMain.handle('desktop:browser-open', event => browserForSender(event).open())
-ipcMain.handle('desktop:browser-state', event => browserForSender(event).snapshot)
-ipcMain.handle('desktop:browser-navigate', (event, url: unknown) => {
-  const browser = browserForSender(event)
+ipcMain.handle('desktop:browser-open', (event, tabId: unknown) => browserForSender(event, tabId).open())
+ipcMain.handle('desktop:browser-state', (event, tabId: unknown) => browserForSender(event, tabId).snapshot)
+ipcMain.handle('desktop:browser-navigate', (event, tabId: unknown, url: unknown) => {
+  const browser = browserForSender(event, tabId)
   if (typeof url !== 'string' || url.length > 8192) throw new Error('Invalid browser URL')
   return browser.navigate(url)
 })
-ipcMain.handle('desktop:browser-action', (event, action: unknown) => {
-  const browser = browserForSender(event)
+ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown) => {
+  const browser = browserForSender(event, tabId)
   if (typeof action !== 'string') throw new Error('Invalid browser action')
   return browser.action(action)
 })
-ipcMain.handle('desktop:browser-bounds', (event, bounds: unknown) => {
-  const browser = browserForSender(event)
+ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown) => {
+  assertTrustedIpcSender(event)
+  // Ignore old renderer cleanup after a tab was closed or moved to another window.
+  if (bounds === null && isSessionTabId(tabId) && (!tabsState.tabs.some(tab => tab.id === tabId) || !ownsSessionTerminal(event, tabId))) return
+  const browser = browserForSender(event, tabId)
   if (bounds !== null) {
     if (!bounds || typeof bounds !== 'object' || !['x', 'y', 'width', 'height'].every(key => {
       const value = (bounds as Record<string, unknown>)[key]
       return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 20000
     })) throw new Error('Invalid browser bounds')
   }
+  const visible = visibleSessionTabs(tabsState)
+  if (bounds !== null && event.sender === mainWindow?.webContents && tabId !== visible.main?.id && tabId !== visible.side?.id) return
   browser.setBounds(bounds as BrowserBounds | null)
 })
 
@@ -2736,7 +2777,7 @@ app.on('before-quit', (event) => {
     return
   }
   clearTimeout(updateQuitTimer)
-  if (managedTabs.size === 0 && !usageService && !browserDebug) return
+  if (managedTabs.size === 0 && !usageService && sessionBrowsers.size === 0) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via
@@ -2749,8 +2790,8 @@ app.on('before-quit', (event) => {
     .then(() => configWriteQueue)
     .finally(async () => {
       usageService = null
-      await Promise.allSettled([service?.stop(), browserDebug?.dispose()])
-      browserDebug = null
+      await Promise.allSettled([service?.stop(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      sessionBrowsers.clear()
     }))
     .catch((error) => {
       void writeAppLog(`Shutdown cleanup failed: ${String(error)}`).catch(() => {})

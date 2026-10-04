@@ -53,7 +53,9 @@ interface Harness {
   requestSettings(name: string, ...args: unknown[]): Promise<unknown>
   requestWithFrame(name: string, frameUrl: string): Promise<unknown>
   browserBounds(): unknown
-  request(name: string, ...args: unknown[]): Promise<DesktopState>
+  browserConfigs: { settings: string; options: { partition: string; endpointPath: string } }[]
+  blockBrowserDispose(work: Promise<void>, started: () => void): void
+  request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
   cleanup(): Promise<void>
   spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
@@ -73,13 +75,18 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const mocks: Record<string, string> = {
       './browser-debug.js': `
         export let lastBounds;
+        export const browserConfigs = [];
+        let disposeWork, disposeStarted;
+        export function blockBrowserDispose(work, started) { disposeWork = work; disposeStarted = started; }
         export class BrowserDebug {
+          constructor(owner, settings, options) { browserConfigs.push({ settings, options }); }
           snapshot = { url: '', console: [], network: [] };
           async open() { return this.snapshot; }
           async navigate(url) { this.snapshot.url = url; return this.snapshot; }
           action() { return this.snapshot; }
           setBounds(bounds) { lastBounds = bounds; }
-          async dispose() {}
+          setOwner() {}
+          async dispose() { const work = disposeWork; disposeWork = null; disposeStarted?.(); disposeStarted = null; await work; }
         }
       `,
       electron: `
@@ -169,7 +176,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       stdin: { contents: source + `
         import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
-        import { lastBounds } from './browser-debug.js';
+        import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
@@ -221,6 +228,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() }, sender: { isDestroyed: () => settingsSenderDestroyed } }, ...args),
           requestWithFrame: async (name, frameUrl) => ipcMain.invoke(name, { senderFrame: { url: frameUrl }, sender: mainWindow?.webContents }),
           browserBounds: () => lastBounds,
+          browserConfigs,
+          blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
@@ -243,30 +252,62 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
   }
 }
 
-test('production browser IPC rejects untrusted frames, auxiliary windows, bad bounds and shutdown', async () => fixture(async (harness, directory) => {
+test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {
   configure(harness, directory)
   harness.createTestWindow()
-  await harness.request('desktop:browser-open')
+  const tab = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:browser-open', tab)
   for (const channel of ['open', 'state', 'navigate', 'action', 'bounds']) {
     await assert.rejects(harness.requestWithFrame(`desktop:browser-${channel}`, 'https://untrusted.test'), /untrusted renderer/)
     await assert.rejects(async () => harness.requestSettings(`desktop:browser-${channel}`), /untrusted renderer/)
   }
-  const tab = (await harness.createMain()).activeTabId!
-  await harness.request('desktop:pop-out-tab', tab)
-  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-state'), /main window/)
-  await harness.request('desktop:browser-bounds', { x: 5, y: 10, width: 500, height: 600 })
+  await assert.rejects(async () => harness.request('desktop:browser-open', 'tab-999'), /Unknown browser session/)
+  await harness.request('desktop:browser-bounds', tab, { x: 5, y: 10, width: 500, height: 600 })
   assert.deepEqual(harness.browserBounds(), { x: 5, y: 10, width: 500, height: 600 })
+  await harness.request('desktop:pop-out-tab', tab)
+  await harness.requestIn(tab, 'desktop:browser-state', tab)
+  await assert.rejects(async () => harness.request('desktop:browser-state', tab), /owning session window/)
   for (const bounds of [{ x: -1, y: 0, width: 1, height: 1 }, { x: 0, y: 0, width: Infinity, height: 1 },
     { x: 0, y: 0, width: 20001, height: 1 }, {}, 'bad']) {
-    await assert.rejects(async () => harness.request('desktop:browser-bounds', bounds), /Invalid browser bounds/)
+    await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-bounds', tab, bounds), /Invalid browser bounds/)
   }
-  await harness.request('desktop:browser-bounds', null)
+  await harness.requestIn(tab, 'desktop:browser-bounds', tab, null)
   assert.equal(harness.browserBounds(), null)
-  await assert.rejects(async () => harness.request('desktop:browser-navigate', 123), /Invalid browser URL/)
-  await assert.rejects(async () => harness.request('desktop:browser-navigate', 'x'.repeat(8193)), /Invalid browser URL/)
-  await assert.rejects(async () => harness.request('desktop:browser-action', {}), /Invalid browser action/)
+  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-navigate', tab, 123), /Invalid browser URL/)
+  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-navigate', tab, 'x'.repeat(8193)), /Invalid browser URL/)
+  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-action', tab, {}), /Invalid browser action/)
   harness.beginQuit()
-  await assert.rejects(async () => harness.request('desktop:browser-state'), /main window/)
+  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-state', tab), /owning session window/)
+}))
+
+test('browser IPC and CLI environments stay tied to their session through switches, restart and close', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const first = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:browser-open', first)
+  await harness.request('desktop:browser-navigate', first, 'https://first.example/')
+  const second = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:browser-open', second)
+  await harness.request('desktop:browser-navigate', second, 'https://second.example/')
+  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/')
+  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', second)).url, 'https://second.example/')
+  assert.notEqual(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE, harness.spawns[1]!.env.COPILOT_DESKTOP_BROWSER_STATE)
+  assert.ok(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_HELPER)
+  await harness.request('desktop:activate-tab', first)
+  await harness.request('desktop:restart-tab', first)
+  assert.equal(harness.spawns[2]!.env.COPILOT_DESKTOP_BROWSER_STATE, harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE)
+  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/')
+  let finishDispose!: () => void
+  let disposeStarted!: () => void
+  const disposing = new Promise<void>(accept => { disposeStarted = accept })
+  harness.blockBrowserDispose(new Promise<void>(accept => { finishDispose = accept }), disposeStarted)
+  const closing = harness.request('desktop:close-tab', first)
+  await disposing
+  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/', 'polling during close must not recreate a browser')
+  finishDispose()
+  await closing
+  await assert.rejects(async () => harness.request('desktop:browser-state', first), /Unknown browser session/)
+  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', second)).url, 'https://second.example/')
 }))
 
 test('pop-out transfers terminal ownership, focuses one window, and docks without stopping the CLI', async () => fixture(async (harness, directory) => {
@@ -729,6 +770,30 @@ function assertRestricted(args: string[]): void {
   assert.ok(args.includes('--no-remote') && args.includes('--no-remote-export'))
   for (const forbidden of ['--allow-all', '--autopilot', 'autopilot', '--agent', '--worktree']) assert.ok(!args.includes(forbidden), `Unexpected launch arg: ${forbidden}`)
 }
+
+test('browser profile identity persists with restored tabs, CLI restarts, and legacy tabs', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.tabs = [
+    { title: 'Remembered', lastSessionId: SOURCE, browserProfileId: SOURCE },
+    { title: 'Duplicate', lastSessionId: FORK, browserProfileId: SOURCE },
+    { title: 'Legacy', lastSessionId: null },
+  ]
+  await harness.restore()
+  const opened = await harness.request('desktop:get-state')
+  assert.equal(opened.tabs[0]!.browserProfileId, SOURCE)
+  assert.equal(new Set(opened.tabs.map(tab => tab.browserProfileId)).size, 3)
+  assert.ok(opened.tabs.every(tab => typeof tab.browserProfileId === 'string'))
+  harness.createTestWindow()
+  await harness.request('desktop:browser-open', opened.tabs[0]!.id)
+  assert.equal(harness.browserConfigs[0]!.settings, join(directory, 'browser-profiles', SOURCE, 'settings.json'))
+  assert.equal(harness.browserConfigs[0]!.options.partition, `persist:browser-debug:${SOURCE}`)
+  assert.notEqual(harness.browserConfigs[0]!.options.endpointPath, harness.browserConfigs[0]!.settings)
+  const restarted = await harness.request('desktop:restart-tab', opened.tabs[0]!.id)
+  assert.deepEqual(restarted.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
+}))
 
 test('failed capability detection reports a retryable error before launching a configured model', async () => {
   await fixture(async (harness, directory) => {

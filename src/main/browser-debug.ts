@@ -7,6 +7,7 @@ import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { parseSafeHttpUrl } from './external-targets.js'
+import { parseBrowserAddress } from './browser-url.js'
 import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry } from './browser-debug-types.js'
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
 
@@ -20,7 +21,7 @@ export class BrowserDebug {
   private server: Server | null = null
   private serverStart: Promise<void> | null = null
   private readonly token = randomBytes(32).toString('hex')
-  private readonly endpointPath = browserControlPath()
+  private readonly endpointPath: string
   private consoleSequence = 0
   private bounds: BrowserBounds | null = null
   private readonly started = new Map<string, number>()
@@ -33,9 +34,11 @@ export class BrowserDebug {
     devtools: false, error: null, console: [], network: [],
   }
 
-  constructor(private readonly owner: BrowserWindow, private readonly settingsPath: string) {
+  constructor(private owner: BrowserWindow, private readonly settingsPath: string,
+    options: { endpointPath?: string; partition?: string } = {}) {
+    this.endpointPath = options.endpointPath ?? browserControlPath()
     this.view = new WebContentsView({ webPreferences: {
-      partition: 'persist:browser-debug', sandbox: true, contextIsolation: true,
+      partition: options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`, sandbox: true, contextIsolation: true,
       nodeIntegration: false, devTools: true,
     } })
     const contents = this.view.webContents
@@ -173,7 +176,7 @@ export class BrowserDebug {
   }
 
   async navigate(url: string): Promise<BrowserDebugState> {
-    const target = parseSafeHttpUrl(url).href
+    const target = parseBrowserAddress(url).href
     this.state.error = null
     this.lastUrl = target
     try { await this.view.webContents.loadURL(target) }
@@ -215,6 +218,19 @@ export class BrowserDebug {
   setBounds(bounds: BrowserBounds | null): void {
     this.bounds = bounds
     this.layout()
+  }
+
+  /** Move the same page and DevTools when its terminal is popped out or docked. */
+  setOwner(owner: BrowserWindow): void {
+    if (this.owner === owner || this.disposed) return
+    this.setBounds(null)
+    if (!this.owner.isDestroyed()) {
+      if (this.attached) this.owner.contentView.removeChildView(this.view)
+      if (this.tools) this.owner.contentView.removeChildView(this.tools)
+    }
+    this.owner = owner
+    this.attached = false
+    if (this.tools) owner.contentView.addChildView(this.tools)
   }
 
   private layout(): void {
@@ -274,6 +290,11 @@ export class BrowserDebug {
 
   async dispose(): Promise<void> {
     if (this.disposed) return
+    this.setBounds(null)
+    if (!this.owner.isDestroyed()) {
+      if (this.attached) this.owner.contentView.removeChildView(this.view)
+      if (this.tools) this.owner.contentView.removeChildView(this.tools)
+    }
     this.disposed = true
     await this.serverStart?.catch(() => {})
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null }
@@ -284,7 +305,14 @@ export class BrowserDebug {
     await this.settingsWrite.catch(() => {})
     const contents = this.view.webContents
     const tools = this.tools?.webContents
-    if (contents && !contents.isDestroyed()) contents.close()
-    if (tools && !tools.isDestroyed()) tools.close()
+    try {
+      if (contents && !contents.isDestroyed()) {
+        contents.session.flushStorageData()
+        await contents.session.cookies.flushStore()
+      }
+    } finally {
+      if (contents && !contents.isDestroyed()) contents.close()
+      if (tools && !tools.isDestroyed()) tools.close()
+    }
   }
 }

@@ -25,11 +25,11 @@ export interface TabExitPayload {
 }
 
 export interface CopilotDesktopBridge {
-  browserOpen(): Promise<BrowserDebugState>
-  browserState(): Promise<BrowserDebugState>
-  browserNavigate(url: string): Promise<BrowserDebugState>
-  browserAction(action: 'back' | 'forward' | 'reload' | 'clear' | 'devtools'): Promise<BrowserDebugState>
-  browserBounds(bounds: BrowserBounds | null): Promise<void>
+  browserOpen(tabId: string): Promise<BrowserDebugState>
+  browserState(tabId: string): Promise<BrowserDebugState>
+  browserNavigate(tabId: string, url: string): Promise<BrowserDebugState>
+  browserAction(tabId: string, action: 'back' | 'forward' | 'reload' | 'clear' | 'devtools'): Promise<BrowserDebugState>
+  browserBounds(tabId: string, bounds: BrowserBounds | null): Promise<void>
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>

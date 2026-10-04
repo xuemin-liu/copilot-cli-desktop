@@ -3,6 +3,7 @@ import type { JSX } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { TerminalPane } from './TerminalPane.js'
+import { BrowserWorkspace } from './BrowserWorkspace.js'
 
 interface SessionWorkspaceProps {
   tabs: DesktopSessionTab[]
@@ -15,6 +16,7 @@ interface SessionWorkspaceProps {
   onCreate: () => void
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
+  obscured?: boolean
 }
 
 function savedSplit(): number {
@@ -24,7 +26,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, obscured = false }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const areaRef = useRef<HTMLDivElement>(null)
@@ -56,8 +58,9 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
-            <header className="session-pane-header">
+            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id)} obscured={obscured} renderHeader={browserToggle => <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}</span>
+              {browserToggle}
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
@@ -74,7 +77,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               <button type="button" className="icon-button session-close" onClick={() => onClose(tab.id)}
                 aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
-            </header>
+            </header>}>
             <div className="session-terminal">
               {poppedOutTabIds.includes(tab.id) ? (
                 <div className="empty-state"><p>This session is open in another window.</p>
@@ -85,6 +88,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Restart this session</button>
               )}
             </div>
+            </BrowserWorkspace>
           </section>
         )
       })}

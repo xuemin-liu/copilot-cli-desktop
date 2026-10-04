@@ -5,7 +5,6 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
-import { BrowserWorkspace } from './components/BrowserWorkspace.js'
 import { OperationError } from './components/OperationError.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
@@ -205,8 +204,8 @@ export function App(): JSX.Element {
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
-          <BrowserWorkspace obscured={inputDialog !== null}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            obscured={inputDialog !== null}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
@@ -214,7 +213,6 @@ export function App(): JSX.Element {
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
             onCreate={() => handleOperation(window.copilotDesktop.createTab())}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
-          </BrowserWorkspace>
           </>
         )}
       </main>

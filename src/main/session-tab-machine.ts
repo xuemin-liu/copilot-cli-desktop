@@ -14,6 +14,7 @@ export const EMPTY_TABS_STATE: TabsState = { tabs: [], activeTabId: null }
 export interface NewTabInput {
   id: string
   title: string
+  browserProfileId?: string
   workspaceProfileId: string
   cliVersion: string | null
   sessionPermissionPreset: PermissionPreset | null
@@ -37,6 +38,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
   const tab: DesktopSessionTab = {
     id: input.id,
     title: input.title,
+    ...(input.browserProfileId ? { browserProfileId: input.browserProfileId } : {}),
     workspaceProfileId: input.workspaceProfileId,
     lastSessionId: input.lastSessionId ?? null,
     status: 'starting',

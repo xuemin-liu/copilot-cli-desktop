@@ -24,6 +24,25 @@ async function withTempFile(run: (filename: string) => Promise<void>): Promise<v
   }
 }
 
+test('saved browser profiles round-trip with terminal tabs and reject invalid identifiers', async () => {
+  await withTempFile(async filename => {
+    const config = structuredClone(DEFAULT_DESKTOP_CONFIG)
+    const profile = activateWorkspaceProfile(config, 'C:\\work\\browser')
+    const id = 'ABCDEFAB-1111-4111-8111-111111111111'
+    profile.tabs = [
+      { title: 'Remembered', lastSessionId: null, browserProfileId: id },
+      { title: 'Legacy', lastSessionId: null },
+      { title: 'Invalid', lastSessionId: null, browserProfileId: '../outside' },
+    ]
+    await writeDesktopConfig(filename, config)
+    assert.deepEqual((await readDesktopConfig(filename)).profiles[0]!.tabs, [
+      { title: 'Remembered', lastSessionId: null, browserProfileId: id.toLowerCase() },
+      { title: 'Legacy', lastSessionId: null },
+      { title: 'Invalid', lastSessionId: null },
+    ])
+  })
+})
+
 test('readDesktopConfig returns defaults when the file does not exist', async () => {
   await withTempFile(async (filename) => {
     const config = await readDesktopConfig(filename);
