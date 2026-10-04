@@ -20,6 +20,8 @@ jobs:
         run: corepack enable
       - name: Install dependencies
         run: corepack pnpm install --frozen-lockfile
+      - name: Install pinned Copilot CLI for instruction discovery checks
+        run: npm install --global @github/copilot@1.0.91
       - name: Type-check
         run: corepack pnpm typecheck
       - name: Unit tests

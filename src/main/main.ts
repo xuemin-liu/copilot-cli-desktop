@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { writeFileAtomic } from './atomic-file.js'
 import { access, appendFile, mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -2110,6 +2111,17 @@ ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown
   const browser = browserForSender(event, tabId)
   if (typeof action !== 'string') throw new Error('Invalid browser action')
   return browser.action(action)
+})
+ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
+  const browser = browserForSender(event, tabId)
+  if (kind !== 'console' && kind !== 'network') throw new Error('Invalid browser export')
+  const data = JSON.stringify(browser.snapshot[kind], null, 2)
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  if (!owner || owner.isDestroyed()) throw new Error('Browser window has closed')
+  const result = await dialog.showSaveDialog(owner, { title: `Save captured ${kind} log`,
+    defaultPath: `browser-${kind}-${new Date().toISOString().replaceAll(':', '-')}.json`,
+    filters: [{ name: 'JSON log', extensions: ['json'] }] })
+  if (!result.canceled && result.filePath) await writeFileAtomic(result.filePath, data)
 })
 ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown) => {
   assertTrustedIpcSender(event)

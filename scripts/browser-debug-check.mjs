@@ -28,6 +28,7 @@ const capture = async (contents, label) => {
 if (!process.versions.electron) {
   await mkdir(artifacts, { recursive: true })
   await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
+  await rm(join(artifacts, 'export-console.json'), { force: true })
   const { build } = await import('esbuild')
   await build({ stdin: { contents: `
     import { createRoot } from 'react-dom/client';
@@ -125,6 +126,9 @@ if (!process.versions.electron) {
     ipcMain.handle('desktop:browser-state', (event, tabId) => { trusted(event); return forTab(tabId).snapshot })
     ipcMain.handle('desktop:browser-navigate', (event, tabId, value) => { trusted(event); return forTab(tabId).navigate(value) })
     ipcMain.handle('desktop:browser-action', (event, tabId, action) => { trusted(event); return forTab(tabId).action(action) })
+    const copied = []
+    ipcMain.handle('desktop:copy-text', (event, text) => { trusted(event); copied.push(text) })
+    ipcMain.handle('desktop:browser-export', (event, tabId, kind) => { trusted(event); assert.ok(['console', 'network'].includes(kind)); return writeFile(join(artifacts, `export-${kind}.json`), JSON.stringify(forTab(tabId).snapshot[kind])) })
     ipcMain.handle('desktop:browser-bounds', (event, tabId, bounds) => { trusted(event); forTab(tabId).setBounds(bounds) })
     const ui = code => window.webContents.executeJavaScript(code)
     try {
@@ -150,6 +154,13 @@ if (!process.versions.electron) {
       await ui('document.querySelector(".browser-toolbar").requestSubmit()')
       await until(() => browser.snapshot.console.some(entry => entry.message.includes('fixture exception')), 'exception capture')
       assert.equal(browser.snapshot.url, url, 'bare loopback address navigates using HTTP')
+      // Read Chromium's page zoom, independently of the narrower embedded viewport.
+      assert.equal(browser.snapshot.zoomFactor, 1)
+      browser.view.webContents.setZoomFactor(1.25)
+      assert.equal(browser.snapshot.zoomFactor, 1.25)
+      await until(() => ui('document.querySelector(".browser-zoom").textContent === "125%"'), 'actual page zoom in toolbar')
+      browser.view.webContents.setZoomFactor(1)
+      await until(() => ui('document.querySelector(".browser-zoom").textContent === "100%"'), 'reset page zoom in toolbar')
       // Separate live WebContents, cookies/storage, telemetry and helper endpoints.
       {
         await browser.view.webContents.executeJavaScript('document.cookie = "session-only=first; SameSite=Strict"; localStorage.setItem("session-only", "first")')
@@ -218,6 +229,8 @@ if (!process.versions.electron) {
         assert.equal(await child.webContents.executeJavaScript('typeof window.copilotDesktop'), 'undefined')
         await until(() => browser.snapshot.console.some(entry => entry.message === 'child page exception'), 'child console capture')
         await until(() => browser.snapshot.network.some(entry => entry.url.endsWith('/child-page') && entry.status === 200), 'child network capture')
+        assert.equal(browser.snapshot.console.find(entry => entry.message === 'child page exception').pageId, childId)
+        assert.equal(browser.snapshot.network.find(entry => entry.url.endsWith('/child-page')).pageId, childId)
         assert.ok((await browserCommand(['console'])).some(entry => entry.message === 'child page exception'))
         assert.ok(!second.snapshot.console.some(entry => entry.message === 'child page exception'))
         await until(() => ui('document.querySelectorAll(".session-pane-visible .browser-pages [role=tab]").length === 2'), 'page strip')
@@ -356,6 +369,46 @@ if (!process.versions.electron) {
       await ui('document.querySelector(".browser-tools-toggle").click()')
       const tools = await until(() => browser.view.webContents.devToolsWebContents, 'embedded DevTools')
       await until(() => tools.executeJavaScript('Boolean(globalThis.DevToolsAPI)'), 'DevTools frontend')
+      const selectedPanel = () => tools.executeJavaScript(`(async () => {
+        const UI = await import('devtools://devtools/bundled/ui/legacy/legacy.js');
+        const id = UI.InspectorView.InspectorView.instance().tabbedPane.selectedTabId;
+        const widget = UI.ViewManager.ViewManager.instance().materializedWidget(id);
+        return widget?.isShowing() && widget.element.getBoundingClientRect().height > 0 ? id : null;
+      })()`)
+      const fullPageBounds = browser.view.getBounds()
+      const toolsSurface = window.contentView.children.find(view => view.webContents?.id === tools.id)
+      assert.deepEqual(toolsSurface.getBounds(), fullPageBounds, 'DevTools fills the viewport')
+      assert.equal(browser.view.getVisible(), false, 'tools replace the visible page')
+      assert.ok(fullPageBounds.height > 400, 'page is not reduced to a bottom-docked split')
+      await ui('Array.from(document.querySelectorAll(".browser-tabs [role=tab]")).find(button => button.textContent === "Console").click()')
+      await until(async () => await selectedPanel() === 'console', 'native console selected')
+      assert.deepEqual(browser.view.getBounds(), fullPageBounds, 'console keeps full page dimensions')
+      const nativeEvaluation = await tools.executeJavaScript(`(async () => {
+        const SDK = await import('devtools://devtools/bundled/core/sdk/sdk.js');
+        const target = SDK.TargetManager.TargetManager.instance().primaryPageTarget();
+        const context = target.model(SDK.RuntimeModel.RuntimeModel).executionContexts().find(context => context.isDefault);
+        const result = await context.evaluate({expression: '({meaning: 42, page: location.href, bridge: typeof window.copilotDesktop})',
+          objectGroup: 'console', includeCommandLineAPI: true, silent: false, returnByValue: true, generatePreview: false, userGesture: false, awaitPromise: true});
+        return result.object?.value;
+      })()`)
+      assert.deepEqual(nativeEvaluation, { meaning: 42, page: url, bridge: 'undefined' }, 'native console evaluates in the inspected page')
+      await writeFile(join(artifacts, 'native-console.png'), (await capture(tools, 'native console')).toPNG())
+      await ui('Array.from(document.querySelectorAll(".browser-tabs [role=tab]")).find(button => button.textContent === "Network").click()')
+      await until(async () => await selectedPanel() === 'network', 'native network selected')
+      assert.deepEqual(browser.view.getBounds(), fullPageBounds, 'network keeps full page dimensions')
+      assert.equal(browser.view.webContents.devToolsWebContents.id, tools.id, 'panel switches reuse the inspection session')
+      await browser.view.webContents.executeJavaScript('fetch("/api.json?native-body").then(r => r.text())')
+      await until(async () => await tools.executeJavaScript(`(async () => {
+        const Logs = await import('devtools://devtools/bundled/models/logs/logs.js');
+        const request = Logs.NetworkLog.NetworkLog.instance().requests().find(request => request.url().endsWith('/api.json?native-body'));
+        if (!request?.finished) return false;
+        const content = await request.requestContentData();
+        return typeof content.text === 'string' && content.text.includes('Browser debug fixture');
+      })()`), 'native network captures readable response body')
+      await tools.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      await writeFile(join(artifacts, 'native-network.png'), (await capture(tools, 'native network')).toPNG())
+      await ui('document.querySelector(".browser-tools-toggle").click()')
+      await until(async () => await selectedPanel() === 'sources', 'native sources selected')
       // Register a disposable native filesystem, then mark the frontend event as
       // overrides. Production uses Chromium's Sources > Overrides folder picker.
       const overrideRoot = join(artifacts, `overrides-${Date.now()}`)
@@ -377,7 +430,7 @@ if (!process.versions.electron) {
       const pageId = browser.view.webContents.id
       const pageUrl = browser.snapshot.url
       const originalBounds = browser.view.getBounds()
-      const viewportBounds = { ...originalBounds, height: Math.round(originalBounds.height / 0.45) }
+      const viewportBounds = { ...originalBounds }
       const popout = new BrowserWindow({ width: 900, height: 800, show: false })
       try {
         browser.setOwner(popout)
@@ -414,14 +467,97 @@ if (!process.versions.electron) {
       assert.equal(browser.view.getVisible(), false)
       await ui('window.setObscured(false)')
       await delay(300)
-      assert.equal(browser.view.getVisible(), true)
-      await ui('Array.from(document.querySelectorAll(".browser-tabs [role=tab]")).find(button => button.textContent.startsWith("Console")).click()')
+      assert.equal(browser.view.getVisible(), false)
+      assert.equal(toolsView.getVisible(), true, 'unobscured native tools restored')
+      await ui('Array.from(document.querySelectorAll(".browser-tabs [role=tab]")).find(button => button.textContent.startsWith("Activity")).click()')
       await delay(1100)
       assert.equal(browser.view.getVisible(), false)
       assert.ok(await ui('document.querySelector(".browser-activity").textContent.includes("capture with DevTools open")'))
       await writeFile(join(artifacts, 'console.png'), (await capture(window.webContents, 'console view')).toPNG())
       await browser.view.webContents.executeJavaScript('for(let i=0;i<320;i++) console.log("bounded-" + i)')
       assert.equal(browser.snapshot.console.length, 300)
+      const networkBeforeClear = browser.snapshot.network
+      assert.ok(networkBeforeClear.length > 0)
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Clear console").click()')
+      await until(() => browser.snapshot.console.length === 0, 'clear console')
+      assert.deepEqual(browser.snapshot.network, networkBeforeClear, 'clear console preserves network activity')
+      assert.deepEqual(await browserCommand(['console']), [], 'CLI sees cleared console')
+      await browser.view.webContents.executeJavaScript('console.error("console after clear")')
+      await until(() => browser.snapshot.console.some(entry => entry.message.includes('console after clear')), 'console capture resumes')
+      await ui(`(() => {
+        const select = document.querySelector('[aria-label="Activity log"]');
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, 'network');
+        select.dispatchEvent(new Event('change', {bubbles:true}));
+      })()`)
+      await until(() => ui('Boolean(document.querySelector(".browser-network tbody button"))'), 'network view')
+      await ui('document.querySelector(".browser-network tbody button").click()')
+      assert.ok(await ui('Boolean(document.querySelector(".browser-request-detail"))'))
+      const consoleBeforeClear = browser.snapshot.console
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Clear network").click()')
+      await until(() => browser.snapshot.network.length === 0, 'clear network')
+      assert.deepEqual(browser.snapshot.console, consoleBeforeClear, 'clear network preserves console activity')
+      assert.deepEqual(await browserCommand(['network']), [], 'CLI sees cleared network')
+      assert.equal(await ui('Boolean(document.querySelector(".browser-request-detail"))'), false, 'clear network removes selected request details')
+      await browser.view.webContents.executeJavaScript('fetch("/api.json").then(r => r.text())')
+      await until(() => browser.snapshot.network.some(entry => entry.url.endsWith('/api.json') && entry.durationMs !== null), 'network capture resumes')
+      const setSelect = (label, value) => ui(`(() => {
+        const select = document.querySelector('[aria-label=${JSON.stringify(label)}]');
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(value)});
+        select.dispatchEvent(new Event('change', {bubbles:true}));
+      })()`)
+      await setSelect('Activity log', 'console')
+      await until(() => ui('document.querySelector(".browser-activity").textContent.includes("Clear console")'), 'console activity controls')
+      await browser.view.webContents.executeJavaScript('console.info("filter info sentinel"); console.error("filter error sentinel"); console.error("filter error sentinel")')
+      await until(() => ui('document.querySelector(".browser-activity-list").textContent.includes("filter error sentinel")'), 'live console activity')
+      await setSelect('Console level', 'error')
+      await ui(`(() => {
+        const input = document.querySelector('[aria-label="Filter activity"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'filter');
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`)
+      await until(() => ui('document.querySelectorAll(".browser-console-entry").length === 1'), 'console level and text filtering with repeat grouping')
+      assert.ok(!(await ui('document.querySelector(".browser-activity-list").textContent')).includes('filter info sentinel'))
+      assert.ok((await ui('document.querySelector(".browser-activity-list").textContent')).includes('×2'))
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Copy visible log").click()')
+      await until(() => copied.length > 0, 'copy filtered activity')
+      assert.equal(JSON.parse(copied.at(-1)).length, 2)
+      assert.equal(JSON.parse(copied.at(-1))[0].pageId, browser.view.webContents.id)
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Save log…").click()')
+      await until(async () => (JSON.parse(await readFile(join(artifacts, 'export-console.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return '[]'; throw error }))).some(entry => entry.message === 'filter error sentinel'), 'export captured console')
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Pause capture").click()')
+      await until(() => browser.snapshot.recordingConsole === false, 'pause console recording')
+      await browser.view.webContents.executeJavaScript('console.error("paused console sentinel")')
+      assert.ok(!browser.snapshot.console.some(entry => entry.message === 'paused console sentinel'))
+      await ui('Array.from(document.querySelectorAll(".browser-activity button")).find(button => button.textContent === "Resume capture").click()')
+      await until(() => browser.snapshot.recordingConsole === true, 'resume console recording')
+      await browser.view.webContents.executeJavaScript('console.error("resumed console sentinel")')
+      assert.ok(browser.snapshot.console.some(entry => entry.message === 'resumed console sentinel'))
+      browser.action('record-network:off')
+      await browser.view.webContents.executeJavaScript('fetch("/network-paused").then(r => r.text())')
+      assert.ok(!browser.snapshot.network.some(entry => entry.url.endsWith('/network-paused')))
+      browser.action('record-network:on')
+      await browser.view.webContents.executeJavaScript('fetch("/network-resumed").then(r => r.text())')
+      assert.ok(browser.snapshot.network.some(entry => entry.url.endsWith('/network-resumed')))
+      browser.action('preserve-console:off')
+      browser.action('preserve-network:off')
+      await browser.navigate(`${url}after-preserve-off`)
+      await until(() => browser.snapshot.console.some(entry => entry.message.includes('fixture exception')), 'capture after navigation without preserve')
+      assert.ok(!browser.snapshot.console.some(entry => entry.message === 'resumed console sentinel'))
+      assert.ok(!browser.snapshot.network.some(entry => entry.url.endsWith('/network-resumed')))
+      browser.action('preserve-console:on')
+      browser.action('preserve-network:on')
+      await browser.view.webContents.executeJavaScript('console.error("preserved console sentinel")')
+      await browser.navigate(url)
+      assert.ok(browser.snapshot.console.some(entry => entry.message === 'preserved console sentinel'))
+      await setSelect('Activity log', 'network')
+      await until(() => ui('document.querySelector(".browser-activity").textContent.includes("Clear network")'), 'network activity controls')
+      await setSelect('Request type', 'xhr')
+      await ui('Array.from(document.querySelectorAll(".browser-activity label")).find(label => label.textContent === "Failed only").querySelector("input").click()')
+      await until(() => ui('document.querySelectorAll(".browser-network tbody tr").length > 0'), 'failed Fetch/XHR filter')
+      assert.ok((await ui('document.querySelector(".browser-network").textContent')).includes('/fail'))
+      assert.ok(!(await ui('document.querySelector(".browser-network").textContent')).includes('/api.json'))
+      await until(() => ui(`document.querySelector('[aria-label="Web app URL"]').value === ${JSON.stringify(url)}`), 'activity address and capture state refreshed')
+      await writeFile(join(artifacts, 'activity-network.png'), (await capture(window.webContents, 'filtered activity network')).toPNG())
       await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
       await delay(300)
       assert.equal(browser.view.getVisible(), false)
