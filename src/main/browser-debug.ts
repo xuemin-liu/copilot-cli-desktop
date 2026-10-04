@@ -8,15 +8,9 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { parseSafeHttpUrl } from './external-targets.js'
 import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry } from './browser-debug-types.js'
+import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
 
 const MAX_ENTRIES = 300
-const SENSITIVE_HEADERS = /^(authorization|proxy-authorization|cookie|set-cookie)$/i
-
-function sanitizedHeaders<T extends string | string[]>(headers: Record<string, T>): Record<string, T> {
-  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [name,
-    SENSITIVE_HEADERS.test(name) ? (Array.isArray(value) ? ['[redacted]'] : '[redacted]') : value,
-  ])) as Record<string, T>
-}
 
 /** Own browser session, with native Chromium DevTools and read-only CLI telemetry.
  * Capture uses Electron events, so opening DevTools cannot detach a CDP collector. */
@@ -59,13 +53,12 @@ export class BrowserDebug {
     contents.on('did-start-loading', () => { this.state.loading = true })
     contents.on('did-stop-loading', () => { this.state.loading = false })
     contents.on('did-fail-load', (_event, code, description, _url, main) => {
-      if (main && code !== -3) this.state.error = description
+      if (main && code !== -3) this.state.error = sanitizedText(description)
     })
     contents.on('did-navigate', (_event, url) => this.rememberUrl(url))
-    contents.on('did-navigate-in-page', (_event, url, main) => { if (main) this.rememberUrl(url) })
     contents.on('console-message', details => {
       this.state.console.push({ id: ++this.consoleSequence, timestamp: new Date().toISOString(),
-        level: details.level, message: details.message.slice(0, 8192), source: details.sourceId.slice(0, 2048), line: details.lineNumber })
+        level: details.level, message: sanitizedText(details.message).slice(0, 8192), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber })
       if (this.state.console.length > MAX_ENTRIES) this.state.console.shift()
     })
     contents.on('devtools-closed', () => { this.state.devtools = false; this.layout() })
@@ -78,11 +71,11 @@ export class BrowserDebug {
       if (details.webContentsId === this.view.webContents.id) {
         const id = String(details.id)
         const previous = this.state.network.find(entry => entry.id === id)
-        if (previous) previous.url = details.url
+        if (previous) previous.url = sanitizedUrl(details.url)
         else {
           this.started.set(id, Date.now())
           this.state.network.push({ id, timestamp: new Date().toISOString(), method: details.method,
-            url: details.url, resourceType: details.resourceType, status: null, durationMs: null, error: null,
+            url: sanitizedUrl(details.url), resourceType: details.resourceType, status: null, durationMs: null, error: null,
             requestHeaders: {}, responseHeaders: {}, redirects: [] })
           if (this.state.network.length > MAX_ENTRIES) {
             const removed = this.state.network.shift()
@@ -105,7 +98,7 @@ export class BrowserDebug {
       callback({})
     })
     request.onBeforeRedirect(filter, details => {
-      this.networkEntry(details.id)?.redirects.push(details.redirectURL)
+      this.networkEntry(details.id)?.redirects.push(sanitizedUrl(details.redirectURL))
     })
     request.onCompleted(filter, details => {
       const entry = this.networkEntry(details.id)
@@ -128,32 +121,54 @@ export class BrowserDebug {
   }
 
   private rememberUrl(url: string): void {
-    try { parseSafeHttpUrl(url) } catch { return }
+    let saved: string | null
+    try { saved = restorableUrl(url) } catch { return }
     this.lastUrl = url
-    this.settingsWrite = this.settingsWrite.catch(() => {}).then(() => writeFileAtomic(this.settingsPath, JSON.stringify({ url })))
+    if (!saved) return
+    this.settingsWrite = this.settingsWrite.catch(() => {}).then(() => writeFileAtomic(this.settingsPath, JSON.stringify({ url: saved })))
     void this.settingsWrite.catch(error => { this.state.error = `Could not save browser URL: ${String(error)}` })
   }
 
-  get snapshot(): BrowserDebugState {
+  private refreshState(): void {
     const contents = this.view.webContents
     if (contents && !contents.isDestroyed()) {
       this.state.url = contents.getURL() || this.lastUrl
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
     }
+  }
+
+  get snapshot(): BrowserDebugState {
+    this.refreshState()
     return structuredClone(this.state)
   }
 
   async open(): Promise<BrowserDebugState> {
     if (this.disposed) throw new Error('Browser has closed')
     await this.startControl()
-    if (!this.lastUrl && !this.view.webContents.getURL()) {
+    let target: string | null = null
+    // Scrub legacy settings even if manual navigation has already started.
+    // Serialize with rememberUrl writes so cleanup cannot delete a newer setting.
+    this.settingsWrite = this.settingsWrite.catch(() => {}).then(async () => {
+      let raw: string
+      try { raw = await readFile(this.settingsPath, 'utf8') }
+      catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return
+        throw error
+      }
+      let saved: { url?: unknown } | null = null
       try {
-        const saved = JSON.parse(await readFile(this.settingsPath, 'utf8')) as { url?: unknown }
-        // A manually entered URL wins if navigation started during disk I/O.
-        if (typeof saved.url === 'string' && !this.lastUrl && !this.disposed && !this.view.webContents.getURL()) await this.navigate(saved.url)
-      } catch { /* A first launch or unavailable saved site leaves the URL field editable. */ }
-    }
+        saved = JSON.parse(raw) as { url?: unknown } | null
+        if (typeof saved?.url === 'string') target = restorableUrl(saved.url)
+      } catch { /* Invalid legacy URLs must not remain on disk or be replayed. */ }
+      if (!target) await rm(this.settingsPath, { force: true })
+      else if (saved?.url !== target) await writeFileAtomic(this.settingsPath, JSON.stringify({ url: target }))
+    })
+    try {
+      await this.settingsWrite
+      // A manually entered URL wins if navigation started during disk I/O.
+      if (target && !this.lastUrl && !this.disposed && !this.view.webContents.getURL()) await this.navigate(target)
+    } catch { /* An unavailable saved site leaves the URL field editable. */ }
     return this.snapshot
   }
 
@@ -161,18 +176,25 @@ export class BrowserDebug {
     const target = parseSafeHttpUrl(url).href
     this.state.error = null
     this.lastUrl = target
-    await this.view.webContents.loadURL(target)
+    try { await this.view.webContents.loadURL(target) }
+    catch (error) {
+      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ERR_ABORTED')) {
+        throw new Error(sanitizedText(error instanceof Error ? error.message : String(error)))
+      }
+    }
     return this.snapshot
   }
 
   action(action: string): BrowserDebugState {
     const contents = this.view.webContents
-    if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack()
-    else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward()
-    else if (action === 'reload') { this.state.error = null; contents.reload() }
-    else if (action === 'clear') { this.state.console = []; this.state.network = []; this.started.clear() }
-    else if (action === 'devtools') this.toggleDevtools()
-    else if (!['back', 'forward'].includes(action)) throw new Error('Unknown browser action')
+    switch (action) {
+      case 'back': if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break
+      case 'forward': if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break
+      case 'reload': this.state.error = null; contents.reload(); break
+      case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); break
+      case 'devtools': this.toggleDevtools(); break
+      default: throw new Error('Unknown browser action')
+    }
     return this.snapshot
   }
 
@@ -231,14 +253,14 @@ export class BrowserDebug {
       const authorization = request.headers.authorization ?? ''
       if (!constantTimeTokenEqual(authorization, `Bearer ${this.token}`)) { send(401, { message: 'Unauthorized' }); return }
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
-      const snapshot = this.snapshot
       if (request.url === '/status') {
-        const { console, network, ...state } = snapshot
-        send(200, { ...state, consoleCount: console.length, networkCount: network.length })
-      } else if (request.url === '/console') send(200, snapshot.console)
-      else if (request.url === '/network') send(200, snapshot.network)
+        this.refreshState()
+        const { console, network, ...state } = this.state
+        send(200, { ...state, url: sanitizedUrl(state.url), consoleCount: console.length, networkCount: network.length })
+      } else if (request.url === '/console') send(200, this.state.console)
+      else if (request.url === '/network') send(200, this.state.network)
       else if (/^\/request\/\d+$/.test(request.url ?? '')) {
-        const entry = snapshot.network.find(entry => entry.id === request.url!.slice(9))
+        const entry = this.state.network.find(entry => entry.id === request.url!.slice(9))
         send(entry ? 200 : 404, entry ?? { message: 'Request not found; activity retains the latest 300 requests.' })
       } else send(404, { message: 'Unknown browser route' })
     })

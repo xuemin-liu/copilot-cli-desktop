@@ -15,10 +15,15 @@ function BrowserPanel({ obscured }: { obscured: boolean }): JSX.Element {
   const [tab, setTab] = useState<'page' | 'console' | 'network'>('page')
   const [requestId, setRequestId] = useState<string | null>(null)
   const viewport = useRef<HTMLDivElement>(null)
+  const urlInput = useRef<HTMLInputElement>(null)
   const lastUrl = useRef('')
   const accept = (next: BrowserDebugState): void => {
     setState(next)
-    if (lastUrl.current !== next.url) { lastUrl.current = next.url; setUrl(next.url) }
+    if (lastUrl.current !== next.url) {
+      const previous = lastUrl.current
+      lastUrl.current = next.url
+      setUrl(value => document.activeElement !== urlInput.current || value === previous ? next.url : value)
+    }
   }
   const run = (promise: Promise<BrowserDebugState>): void => {
     setError(null)
@@ -58,7 +63,7 @@ function BrowserPanel({ obscured }: { obscured: boolean }): JSX.Element {
       <button type="button" title="Back" aria-label="Browser back" disabled={!state.canGoBack} onClick={() => run(window.copilotDesktop.browserAction('back'))}>←</button>
       <button type="button" title="Forward" aria-label="Browser forward" disabled={!state.canGoForward} onClick={() => run(window.copilotDesktop.browserAction('forward'))}>→</button>
       <button type="button" title="Reload" aria-label="Reload browser" disabled={!state.url} onClick={() => run(window.copilotDesktop.browserAction('reload'))}>↻</button>
-      <input aria-label="Web app URL" type="url" required maxLength={8192} placeholder="http://localhost:3000" value={url} onChange={event => setUrl(event.target.value)} />
+      <input ref={urlInput} aria-label="Web app URL" type="url" required maxLength={8192} placeholder="http://localhost:3000" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
     </form>
     <div className="browser-tabs" role="tablist" aria-label="Browser views">

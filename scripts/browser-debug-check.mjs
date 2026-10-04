@@ -13,6 +13,15 @@ const until = async (read, label) => {
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(100) }
   throw new Error(`Timed out: ${label}`)
 }
+const capture = async (contents, label) => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { return await contents.capturePage() }
+    catch (error) {
+      if (attempt === 2) throw new Error(`Could not capture ${label}`, { cause: error })
+      await delay(300)
+    }
+  }
+}
 
 if (!process.versions.electron) {
   await mkdir(artifacts, { recursive: true })
@@ -43,13 +52,23 @@ if (!process.versions.electron) {
   } finally { clearTimeout(timer) }
 } else {
   const { app, BrowserWindow, ipcMain } = await import('electron')
+  // Background test windows still need compositor surfaces for screenshot QA.
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
   void run().catch(error => { console.error(error); app.exit(1) })
   async function run() {
     await app.whenReady()
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
     const { browserCommand } = await import('../dist/src/cli/browser-control.js')
+    let slowSeen = false
     const site = createServer((request, response) => {
+      if (request.url === '/slow') { slowSeen = true; return }
+      if (request.url.startsWith('/secret?')) {
+        response.writeHead(200, { 'X-Auth-Token': 'response-secret', location: '/callback?code=location-secret',
+          link: '</next?token=link-secret>; rel="next"', 'content-type': 'application/json' })
+        response.end('{}'); return
+      }
+      if (request.url === '/redirect-secret') { response.writeHead(302, { location: '/landing?code=redirect-secret#fragment-secret' }); response.end(); return }
       if (request.url === '/api.json') { response.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'test-secret=1' }); response.end('{"version":"server"}'); return }
       if (request.url === '/fail') { response.writeHead(500); response.end('fixture failure'); return }
       response.writeHead(200, { 'content-type': 'text/html' })
@@ -97,6 +116,49 @@ if (!process.versions.electron) {
       cli.stdout.on('data', chunk => { output += chunk }); cli.stderr.on('data', chunk => { errors += chunk })
       assert.equal(await new Promise((accept, reject) => { cli.once('error', reject); cli.once('exit', accept) }), 0, errors)
       assert.equal(JSON.parse(output).url, url)
+      // Exercise the actual capture -> loopback -> CLI paths, with distinct
+      // credential sentinels and legitimate request/console controls above.
+      await browser.view.webContents.executeJavaScript(`(async () => {
+        console.log('x-api-key=console-secret', ${JSON.stringify(`${url}?token=console-url-secret`)});
+        await fetch('/secret?access_token=network-secret', {headers: {'X-API-Key': 'request-secret'}});
+        await fetch('/redirect-secret');
+      })()`)
+      await until(() => browser.snapshot.network.some(entry => entry.redirects.length), 'redirect capture')
+      const telemetry = JSON.stringify([await browserCommand(['console']), await browserCommand(['network'])])
+      for (const secret of ['console-secret', 'console-url-secret', 'network-secret', 'request-secret',
+        'response-secret', 'location-secret', 'link-secret', 'redirect-secret', 'fragment-secret']) {
+        // The route name /redirect-secret remains ordinary diagnostic routing.
+        if (secret === 'redirect-secret') assert.ok(!telemetry.includes('code=redirect-secret'))
+        else assert.ok(!telemetry.includes(secret), secret)
+      }
+      const secretRequest = (await browserCommand(['network'])).find(entry => entry.url.includes('/secret?'))
+      assert.ok(!JSON.stringify(await browserCommand(['request', secretRequest.id])).includes('network-secret'))
+      await browser.navigate(`${url}?q=ordinary`)
+      await until(async () => JSON.parse(await readFile(join(artifacts, 'settings.json'), 'utf8')).url === url, 'query-free persisted URL')
+      await browser.navigate(`${url}callback?code=status-secret&state=state-secret#hash-secret`)
+      assert.equal(browser.snapshot.url, `${url}callback?code=status-secret&state=state-secret#hash-secret`, 'address field keeps the real URL')
+      const status = JSON.stringify(await browserCommand(['status']))
+      for (const secret of ['status-secret', 'state-secret', 'hash-secret']) assert.ok(!status.includes(secret))
+      assert.ok(!(await browserCommand(['console'])).some(entry => entry.source.includes('status-secret')))
+      await browser.view.webContents.executeJavaScript('history.pushState({}, "", "/spa?token=spa-secret")')
+      await delay(100)
+      assert.equal(JSON.parse(await readFile(join(artifacts, 'settings.json'), 'utf8')).url, url)
+      const interrupted = browser.navigate(`${url}slow`)
+      await until(() => slowSeen, 'slow navigation')
+      await browser.navigate(url)
+      await interrupted
+      assert.equal(browser.snapshot.error, null)
+      await until(() => ui(`document.querySelector('[aria-label="Web app URL"]').value === ${JSON.stringify(url)}`), 'address poll')
+      await ui(`(() => {
+        const input = document.querySelector('[aria-label="Web app URL"]'); input.focus();
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'http://localhost:3000/typing');
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+      })()`)
+      await browser.view.webContents.executeJavaScript('history.pushState({}, "", "/new-route")')
+      await delay(1200)
+      assert.equal(await ui('document.querySelector("[aria-label=\\"Web app URL\\"]").value'), 'http://localhost:3000/typing')
+      await ui('document.querySelector("[aria-label=\\"Web app URL\\"]").blur()')
+      await browser.navigate(url)
       await ui('document.querySelector(".browser-tools-toggle").click()')
       const tools = await until(() => browser.view.webContents.devToolsWebContents, 'embedded DevTools')
       await until(() => tools.executeJavaScript('Boolean(globalThis.DevToolsAPI)'), 'DevTools frontend')
@@ -120,12 +182,14 @@ if (!process.versions.electron) {
       assert.ok((await browserCommand(['console'])).some(entry => entry.message.includes('capture with DevTools open')))
       await writeFile(join(overrideRoot, hostFolder, 'api.json'), '{"version":"edited-override"}')
       await until(async () => await browser.view.webContents.executeJavaScript('fetch("/api.json").then(r => r.json()).then(r => r.version)') === 'edited-override', 'edited local file refresh')
-      const picture = await window.webContents.capturePage()
+      const picture = await capture(window.webContents, 'main renderer')
       await writeFile(join(artifacts, 'browser.png'), picture.toPNG())
       // Main-renderer capture excludes child WebContentsViews; capture each
       // native surface separately as well for visual verification.
-      await writeFile(join(artifacts, 'page.png'), (await browser.view.webContents.capturePage()).toPNG())
-      await writeFile(join(artifacts, 'devtools.png'), (await tools.capturePage()).toPNG())
+      assert.ok(browser.tools.getVisible(), 'DevTools view must be visible for capture')
+      assert.ok(browser.tools.getBounds().height > 0, JSON.stringify(browser.tools.getBounds()))
+      await writeFile(join(artifacts, 'page.png'), (await capture(browser.view.webContents, 'browser page')).toPNG())
+      await writeFile(join(artifacts, 'devtools.png'), (await capture(tools, 'DevTools')).toPNG())
       assert.equal(browser.snapshot.devtools, true)
       browser.action('devtools')
       await until(() => browser.snapshot.devtools === false, 'DevTools hidden')
@@ -142,7 +206,7 @@ if (!process.versions.electron) {
       await delay(1100)
       assert.equal(browser.view.getVisible(), false)
       assert.ok(await ui('document.querySelector(".browser-activity").textContent.includes("capture with DevTools open")'))
-      await writeFile(join(artifacts, 'console.png'), (await window.webContents.capturePage()).toPNG())
+      await writeFile(join(artifacts, 'console.png'), (await capture(window.webContents, 'console view')).toPNG())
       await browser.view.webContents.executeJavaScript('for(let i=0;i<320;i++) console.log("bounded-" + i)')
       assert.equal(browser.snapshot.console.length, 300)
       await ui('document.querySelector(".browser-workspace-toolbar button").click()')
@@ -151,6 +215,24 @@ if (!process.versions.electron) {
       assert.deepEqual(await ui('window.unhandled'), [])
       await browser.dispose()
       await assert.rejects(readFile(process.env.COPILOT_DESKTOP_BROWSER_STATE, 'utf8'), { code: 'ENOENT' })
+      const legacyPath = join(artifacts, 'legacy-settings.json')
+      await writeFile(legacyPath, JSON.stringify({ url: `${url}callback?code=legacy-secret` }))
+      const legacy = new BrowserDebug(window, legacyPath)
+      try {
+        await legacy.open()
+        assert.equal(legacy.view.webContents.getURL(), '', 'legacy auth callbacks must not be replayed')
+        await assert.rejects(readFile(legacyPath, 'utf8'), { code: 'ENOENT' })
+      } finally { await legacy.dispose() }
+      for (const legacyUrl of [`${url}callback?code=old-secret`, `http://user:password-secret@127.0.0.1:${site.address().port}/`]) {
+        await writeFile(legacyPath, JSON.stringify({ url: legacyUrl }))
+        const manuallyNavigated = new BrowserDebug(window, legacyPath)
+        try {
+          await manuallyNavigated.navigate(`${url}callback?token=new-secret`)
+          await manuallyNavigated.open()
+          assert.ok(manuallyNavigated.snapshot.url.includes('token=new-secret'), 'manual navigation wins restore')
+          await assert.rejects(readFile(legacyPath, 'utf8'), { code: 'ENOENT' })
+        } finally { await manuallyNavigated.dispose() }
+      }
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, nativeOverrides: true, cli: true }, null, 2))
       console.log('Browser debug check passed: native overrides, live file changes, CLI telemetry, isolation, and layout.')
     } finally {

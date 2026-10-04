@@ -3,8 +3,9 @@
 Select **Open browser** above the session workspace, then enter an HTTP or HTTPS
 URL. The browser runs in Electron's Chromium engine and has a separate persistent
 cookie session from the desktop shell and your installed Chrome. Drag the divider
-to resize it. The last successfully opened URL is remembered; the pane starts
-hidden on app launch.
+to resize it. The last successful top-level page's origin and path are remembered;
+query strings, fragments, and SPA route changes are not saved. Authentication
+callback URLs do not replace the saved page. The pane starts hidden on app launch.
 
 Select **DevTools / Overrides**, then **Sources → Overrides** in the embedded
 DevTools. Select the folder you already use for Chrome Local Overrides and enable
@@ -25,8 +26,12 @@ URL, HTTP status, timing, errors, redirects, and request/response headers. Selec
 a row for its details. These views retain the latest 300 entries in memory and
 capture activity while native DevTools is open. They do not collect request or
 response bodies or WebSocket message frames. Use native DevTools for those.
-Authorization and Cookie headers are redacted from the activity views and CLI;
-URLs and console messages may still contain application data.
+Credential headers (including cookies, API keys, authentication, token and session
+headers), sensitive URL query parameters, and URL fragments are redacted from
+activity and CLI output. Console filtering handles recognizable credential fields,
+Bearer values and URLs, but arbitrary console text and URL paths may still contain
+application data or secrets. Avoid logging secrets in the app you debug. The address
+field and native DevTools display the real page URL so navigation and overrides work.
 
 ## Copilot CLI access
 

@@ -31,11 +31,21 @@ export async function browserCommand(args: string[]): Promise<unknown> {
   }
   const state = await readBrowserControl()
   const route = command === 'request' ? `/request/${argument}` : `/${command}`
-  const response = await fetch(`http://127.0.0.1:${state.port}${route}`, {
-    headers: { authorization: `Bearer ${state.token}` },
-    redirect: 'error', signal: AbortSignal.timeout(5000),
-  })
-  const body = await response.json() as { message?: string }
-  if (!response.ok) throw new Error(body.message ?? `Browser request failed (${response.status})`)
+  let response: Response
+  let body: unknown
+  try {
+    response = await fetch(`http://127.0.0.1:${state.port}${route}`, {
+      headers: { authorization: `Bearer ${state.token}` },
+      redirect: 'error', signal: AbortSignal.timeout(5000),
+    })
+    body = await response.json()
+  } catch {
+    throw new Error('Browser control is not responding. Reopen the Browser pane.')
+  }
+  if (!response.ok) {
+    const message = body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
+      ? body.message : `Browser request failed (${response.status})`
+    throw new Error(message)
+  }
   return body
 }

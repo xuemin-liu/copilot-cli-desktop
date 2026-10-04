@@ -51,6 +51,8 @@ interface Harness {
   maintain(operation: 'install' | 'update'): Promise<void>
   maintenanceStatus(): string
   requestSettings(name: string, ...args: unknown[]): Promise<unknown>
+  requestWithFrame(name: string, frameUrl: string): Promise<unknown>
+  browserBounds(): unknown
   request(name: string, ...args: unknown[]): Promise<DesktopState>
   cleanup(): Promise<void>
   spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
@@ -69,6 +71,17 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
   try {
     const mainPath = fileURLToPath(new URL('./main.js', import.meta.url))
     const mocks: Record<string, string> = {
+      './browser-debug.js': `
+        export let lastBounds;
+        export class BrowserDebug {
+          snapshot = { url: '', console: [], network: [] };
+          async open() { return this.snapshot; }
+          async navigate(url) { this.snapshot.url = url; return this.snapshot; }
+          action() { return this.snapshot; }
+          setBounds(bounds) { lastBounds = bounds; }
+          async dispose() {}
+        }
+      `,
       electron: `
         import { EventEmitter } from 'node:events';
         export const app = Object.assign(new EventEmitter(), { quitCalls: 0, requestSingleInstanceLock: () => false, quit() { this.quitCalls++; }, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)} });
@@ -156,6 +169,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       stdin: { contents: source + `
         import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
+        import { lastBounds } from './browser-debug.js';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
@@ -205,13 +219,15 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           maintain: maintainCopilotCli,
           maintenanceStatus: () => copilotMaintenance.status,
           requestSettings: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: settingsUrl() }, sender: { isDestroyed: () => settingsSenderDestroyed } }, ...args),
+          requestWithFrame: async (name, frameUrl) => ipcMain.invoke(name, { senderFrame: { url: frameUrl }, sender: mainWindow?.webContents }),
+          browserBounds: () => lastBounds,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
           async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
       } }],
     })
@@ -226,6 +242,32 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('production browser IPC rejects untrusted frames, auxiliary windows, bad bounds and shutdown', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  await harness.request('desktop:browser-open')
+  for (const channel of ['open', 'state', 'navigate', 'action', 'bounds']) {
+    await assert.rejects(harness.requestWithFrame(`desktop:browser-${channel}`, 'https://untrusted.test'), /untrusted renderer/)
+    await assert.rejects(async () => harness.requestSettings(`desktop:browser-${channel}`), /untrusted renderer/)
+  }
+  const tab = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:pop-out-tab', tab)
+  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-state'), /main window/)
+  await harness.request('desktop:browser-bounds', { x: 5, y: 10, width: 500, height: 600 })
+  assert.deepEqual(harness.browserBounds(), { x: 5, y: 10, width: 500, height: 600 })
+  for (const bounds of [{ x: -1, y: 0, width: 1, height: 1 }, { x: 0, y: 0, width: Infinity, height: 1 },
+    { x: 0, y: 0, width: 20001, height: 1 }, {}, 'bad']) {
+    await assert.rejects(async () => harness.request('desktop:browser-bounds', bounds), /Invalid browser bounds/)
+  }
+  await harness.request('desktop:browser-bounds', null)
+  assert.equal(harness.browserBounds(), null)
+  await assert.rejects(async () => harness.request('desktop:browser-navigate', 123), /Invalid browser URL/)
+  await assert.rejects(async () => harness.request('desktop:browser-navigate', 'x'.repeat(8193)), /Invalid browser URL/)
+  await assert.rejects(async () => harness.request('desktop:browser-action', {}), /Invalid browser action/)
+  harness.beginQuit()
+  await assert.rejects(async () => harness.request('desktop:browser-state'), /main window/)
+}))
 
 test('pop-out transfers terminal ownership, focuses one window, and docks without stopping the CLI', async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
