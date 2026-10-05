@@ -174,6 +174,8 @@ existing file is not overwritten. Output filenames must be local absolute `.png`
 paths; UNC shares, device paths and other extensions are rejected. Without an output
 filename the screenshot command
 returns PNG base64 in JSON. Save and view the PNG instead of printing its base64.
+Restore and show the browser window to capture a screenshot; minimized or hidden
+windows report `unavailable`. Text snapshots remain available while minimized.
 
 Snapshots use a fixed function in a Chromium isolated world. They do not export raw
 HTML, arbitrary attributes, scripts, styles, hidden content, form values, cookie or

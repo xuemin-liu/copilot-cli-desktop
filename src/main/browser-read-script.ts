@@ -141,13 +141,12 @@ export function browserReadScript(operation: string, args: Record<string, unknow
       }
     }
     walk(document)
-    // capturePage can otherwise return the previously composited, unmasked frame.
-    // Wait through a paint before allowing the main process to capture pixels.
-    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() =>
-      resolve({ redacted: reader.masks.length > 0, masks: reader.masks.length, truncated,
-        viewport: { width: innerWidth, height: innerHeight }, rectangles: reader.masks.map(mask => {
-          const box = mask.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }
-        }) }))))
+    // Pixel masks in the main process protect even a previously composited frame.
+    // Do not wait for animation frames: occluded/minimized pages may never paint.
+    return { redacted: reader.masks.length > 0, masks: reader.masks.length, truncated,
+      viewport: { width: innerWidth, height: innerHeight }, rectangles: reader.masks.map(mask => {
+        const box = mask.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }
+      }) }
   }
   if (operation === 'unmask') { for (const mask of reader.masks) mask.remove(); reader.masks = []; return null }
   throw new Error('Unknown browser read operation.')

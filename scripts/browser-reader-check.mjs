@@ -18,7 +18,7 @@ if (!process.versions.electron) {
   await mkdir(artifacts, { recursive: true })
   await writeFile(join(artifacts, 'result.json'), '{"passed":false}')
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...(process.argv.includes('--hidpi') ? ['--hidpi'] : [])], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 150000)
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
@@ -28,6 +28,7 @@ if (!process.versions.electron) {
 } else {
   const { app, BrowserWindow, nativeImage } = await import('electron')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  if (process.argv.includes('--hidpi')) app.commandLine.appendSwitch('force-device-scale-factor', '1.25')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
   void run().catch(error => { console.error(error); app.exit(1) })
   async function run() {
@@ -162,18 +163,32 @@ if (!process.versions.electron) {
       await browserCommand(['scroll', page, frameId, '700'])
       current = await browserCommand(['snapshot', page]); assert.ok(current.viewport.scrollY > beforeScroll)
       await browserCommand(['scroll', page, frameId, '-700'])
+      window.minimize()
+      await until(() => window.isMinimized(), 'minimized screenshot owner')
+      const minimizedStart = Date.now()
+      const minimizedScreenshot = await browserCommand(['screenshot', page])
+      assert.equal(minimizedScreenshot.state, 'unavailable')
+      assert.match(minimizedScreenshot.reason, /Restore and show/)
+      assert.ok(Date.now() - minimizedStart < 5000, 'minimized screenshots do not wait for the 10 second inspection timeout')
+      assert.ok((await browserCommand(['snapshot', page])).text.includes('APP-123'), 'text reads remain available while minimized')
+      window.restore()
+      await until(() => !window.isMinimized(), 'restored screenshot owner')
+      window.hide()
+      assert.equal((await browserCommand(['screenshot', page])).state, 'unavailable', 'hidden owners cannot provide fresh screenshots')
+      window.show()
       const divCount = await browser.view.webContents.executeJavaScript('document.querySelectorAll("div").length')
-      const protectedBoxes = await browser.view.webContents.executeJavaScript(`['provider-token','api-token','custom-auth'].map(id => {
+      const protectedGeometry = await browser.view.webContents.executeJavaScript(`({ viewport: { width: innerWidth, height: innerHeight }, boxes: ['provider-token','api-token','custom-auth'].map(id => {
         const box = document.getElementById(id).getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height };
-      })`)
+      }) })`)
       const screenshotPath = join(artifacts, `ticket-${Date.now()}.png`)
       const screenshot = await browserCommand(['screenshot', page, screenshotPath])
       assert.equal(screenshot.state, 'available', JSON.stringify(screenshot)); assert.equal(screenshot.redacted, true)
       assert.ok((await readFile(screenshotPath)).length > 100)
       const pixels = nativeImage.createFromBuffer(await readFile(screenshotPath))
       const bitmap = pixels.toBitmap(); const pixelSize = pixels.getSize()
-      for (const box of protectedBoxes) {
-        const x = Math.floor(box.x + box.width - 3); const y = Math.floor(box.y + 3)
+      for (const box of protectedGeometry.boxes) {
+        const x = Math.floor((box.x + box.width - 3) * pixelSize.width / protectedGeometry.viewport.width)
+        const y = Math.floor((box.y + 3) * pixelSize.height / protectedGeometry.viewport.height)
         assert.ok(y >= 0 && y < pixelSize.height && x >= 0 && x < pixelSize.width, 'credential masking is tested inside the viewport')
         const index = (y * pixelSize.width + x) * 4
         assert.deepEqual([...bitmap.subarray(index, index + 3)], [17, 17, 17], 'pasted credentials must be covered in the actual PNG')
@@ -232,7 +247,9 @@ if (!process.versions.electron) {
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, dynamicContent: true, frames: true,
         responses: true, privacy: true, approvalCancellation: true, disconnectedApproval: true, staleApproval: true,
         installedHelper: true, pagination: true, stalePaginatedControl: true, approvalDestination: true, restoredApprovalOwner: true,
-        providerTokenMasking: true, tabs: true, isolation: true, nativeDevTools: true, approvals }, null, 2))
+        providerTokenMasking: true, minimizedScreenshot: true, hiddenScreenshot: true, screenshotPixelSize: pixelSize,
+        screenshotViewport: protectedGeometry.viewport, hidpi: process.argv.includes('--hidpi'),
+        tabs: true, isolation: true, nativeDevTools: true, approvals }, null, 2))
       console.log('Browser reader check passed: dynamic tickets, frames, bodies, masked screenshots, approvals, isolation and native tools.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
   }

@@ -199,7 +199,7 @@ export class BrowserReader {
     }
     const result = await this.command(page, 'Runtime.evaluate', {
       expression: `(${browserReadScript.toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
-      contextId, returnByValue: true, awaitPromise: operation === 'mask', userGesture: false,
+      contextId, returnByValue: true, awaitPromise: false, userGesture: false,
     }, sessionId)
     if (result.exceptionDetails) throw new Error('Control or snapshot is stale or unavailable. Read the frame again.')
     return result.result?.value
@@ -276,6 +276,9 @@ export class BrowserReader {
       return { ...metadata, ...await this.evaluate(page, frameId, 'activate', { snapshotId: args[2], nodeId: args[3] }) }
     }
     if (command === 'screenshot') {
+      const owner = this.options.owner()
+      if (owner.isMinimized() || !owner.isVisible()) return { ...metadata, state: 'unavailable',
+        reason: 'Restore and show this browser window before capturing a screenshot.' }
       if (!this.options.visible(page.contents.id)) return { ...metadata, state: 'unavailable',
         reason: 'Select this browser tab and show its Page view before capturing a screenshot. Hidden surfaces may contain stale pixels.' }
       // Screenshot is of the whole page viewport; frame content is masked and can
