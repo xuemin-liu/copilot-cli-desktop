@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -51,6 +51,10 @@ test('CLI and installed PowerShell test transports send credentials only in the 
     let body = ''; for await (const chunk of request) body += chunk
     const data = JSON.parse(body); seen.push(data)
     assert.equal(data.steps[0].value, 'fixture-private-value'); assert.equal(data.steps[0].valueFromEnv, undefined)
+    if (data.description === 'Reject app') {
+      response.statusCode = 400; response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ message: 'Invalid browser test: fixture rejection.' })); return
+    }
     response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(reply))
   })
   try {
@@ -60,6 +64,16 @@ test('CLI and installed PowerShell test transports send credentials only in the 
     process.env.COPILOT_DESKTOP_BROWSER_STATE = endpoint; process.env.COPILOT_TEST_PASSWORD = 'fixture-private-value'
     const result = await browserCommand(['test', input, join(root, 'cli-report.json')])
     assert.ok(!JSON.stringify(result).includes('fixture-private-value')); assert.ok(!JSON.stringify(result).includes(token))
+    const rejectedPlan = { ...plan, description: 'Reject app', steps: [...plan.steps, { action: 'screenshot', label: 'Second evidence' }] }
+    const missing = async (paths: string[]) => {
+      for (const path of paths) await assert.rejects(stat(path), (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
+    }
+    const cliRejected = join(root, 'cli-server-rejected.json')
+    await writeFile(input, JSON.stringify(rejectedPlan))
+    await assert.rejects(browserCommand(['test', input, cliRejected]), /Invalid browser test: fixture rejection/)
+    await missing([cliRejected, join(root, 'cli-server-rejected.image-1.png'), join(root, 'cli-server-rejected.image-2.png')])
+    await writeFile(input, JSON.stringify(plan))
+    assert.equal((await browserCommand(['test', input, cliRejected]) as { status: string }).status, 'passed', 'Node CLI reuses a rejected plan output path')
     if (process.platform === 'win32') {
       const env = await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
       env.COPILOT_DESKTOP_BROWSER_STATE = endpoint
@@ -69,6 +83,16 @@ test('CLI and installed PowerShell test transports send credentials only in the 
       const report = JSON.parse(shell.stdout)
       assert.equal(report.status, 'passed'); assert.ok(!shell.stdout.includes('fixture-private-value')); assert.ok(!shell.stdout.includes('imageBase64'))
       assert.equal(await readFile(report.screenshots[0].path, 'utf8'), 'fixture-png')
+      const rejectedOutput = join(root, 'server-rejected.json')
+      await writeFile(input, JSON.stringify(rejectedPlan))
+      const rejected = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, 'test', input,
+        '-OutputPath', rejectedOutput], { env, windowsHide: true, timeout: 60000 }).then(() => null, error => error)
+      assert.ok(rejected); assert.match(rejected.stderr, /Invalid browser test: fixture rejection/)
+      await missing([rejectedOutput, join(root, 'server-rejected.image-1.png'), join(root, 'server-rejected.image-2.png')])
+      await writeFile(input, JSON.stringify(plan))
+      const reused = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, 'test', input,
+        '-OutputPath', rejectedOutput], { env, windowsHide: true, timeout: 60000 })
+      assert.equal(JSON.parse(reused.stdout).status, 'passed', 'PowerShell reuses a rejected plan output path')
       const count = seen.length
       await assert.rejects(promisify(execFile)('powershell.exe', args, { env, windowsHide: true, timeout: 60000 }))
       assert.equal(seen.length, count, 'PowerShell rejects an existing report before actions')

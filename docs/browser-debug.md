@@ -304,6 +304,9 @@ Assertions check visibility, hidden state, visible element count, text containme
 exact field value, checkbox/radio state, URL containment, decoded images, or a
 nonempty 2D canvas. Waits poll the same conditions. A plan must include an assertion;
 the assistant must cover each user expectation or explain what remains unverified.
+Every step requires an `action`. `label` is optional and defaults to
+`<action> step <n>` in reports; provide a short label when the step's purpose is
+not obvious.
 An image loading or a canvas painting does not establish correct visual content.
 For WebGL and visual expectations, use the app's ready indicator and have the
 assistant inspect a saved screenshot against the expected result. A missing or

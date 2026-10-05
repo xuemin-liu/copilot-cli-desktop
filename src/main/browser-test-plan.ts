@@ -43,12 +43,12 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
   const timeout = (v: unknown, max: number): void => {
     if (v !== undefined && (typeof v !== 'number' || !Number.isInteger(v) || v < 100 || v > max)) fail('timeout is out of range.')
   }
-  const plan = object(value)
+  const plan = object(structuredClone(value))
   fields(plan, ['description', 'expected', 'steps', 'timeoutMs'])
   string(plan.description, 4000); string(plan.expected, 4000); timeout(plan.timeoutMs, 300000)
   if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 50) fail('use 1–50 steps.')
   let assertions = 0; let screenshots = 0
-  for (const raw of plan.steps as unknown[]) {
+  for (const [index, raw] of (plan.steps as unknown[]).entries()) {
     const step = object(raw)
     const extra: Record<string, string[]> = {
       navigate: ['url'], click: ['selector', 'text', 'frame'], doubleClick: ['selector', 'text', 'frame'], hover: ['selector', 'text', 'frame'],
@@ -58,7 +58,9 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       assert: ['selector', 'text', 'frame', 'condition', 'expected', 'timeoutMs'], screenshot: [],
     }
     if (typeof step.action !== 'string' || !extra[step.action]) fail('unsupported action.')
-    fields(step, ['action', 'label', ...extra[String(step.action)]!]); string(step.label, 200)
+    fields(step, ['action', 'label', ...extra[String(step.action)]!])
+    if (step.label === undefined) step.label = `${step.action} step ${index + 1}`
+    string(step.label, 200)
     if (step.frame !== undefined && (typeof step.frame !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.frame))) fail('invalid frame ID.')
     if (step.selector !== undefined) string(step.selector, 512)
     if (step.text !== undefined) string(step.text, 2000)
@@ -82,5 +84,5 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
   }
   if (!assertions) fail('include at least one assertion of the expected result.')
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_TEST_BYTES) fail('plan exceeds 128 KiB.')
-  return structuredClone(value) as BrowserTestPlan
+  return plan as unknown as BrowserTestPlan
 }
