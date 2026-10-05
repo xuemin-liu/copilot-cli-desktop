@@ -27,6 +27,7 @@ export type BrowserViewMode = 'page' | 'console' | 'network' | 'devtools' | 'act
 export type BrowserCaptureSetting = 'record-console' | 'record-network' | 'preserve-console' | 'preserve-network'
 
 export interface BrowserDebugState {
+  testing?: import('./browser-test-plan.js').BrowserTestState
   view: BrowserViewMode
   recordingConsole: boolean
   recordingNetwork: boolean

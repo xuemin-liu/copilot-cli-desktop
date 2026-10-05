@@ -6,12 +6,27 @@ import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
 import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot-mask.js'
 import type { ScreenshotMaskGeometry, ScreenshotLayout } from './browser-screenshot-mask.js'
 import { MAX_RESPONSE_BYTES, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
+import { browserTestScript } from './browser-test-script.js'
+import { validateBrowserTestPlan } from './browser-test-plan.js'
+import type { BrowserTestState, BrowserTestStep } from './browser-test-plan.js'
+import { runBrowserTest, type TestObservation } from './browser-test-runner.js'
 
 const MAX_RESPONSES = 100
 const MAX_BODY_CACHE = 4 * 1024 * 1024
 const MAX_FRAMES = 64
 type Params = Record<string, any> // CDP's JSON events have domain-specific structures.
-interface Frame { id: string; parentId?: string; url: string; name?: string }
+async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation
+  let abort: (() => void) | undefined
+  try {
+    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new Error('Test stopped.'))
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+    })])
+  } finally { if (abort) signal.removeEventListener('abort', abort) }
+}
+interface Frame { id: string; parentId?: string; url: string; name?: string; securityOrigin?: string }
 interface FrameTree { frame: Frame; childFrames?: FrameTree[] }
 interface ResponseRecord {
   id: string; pageId: number; frameId: string; url: string; status: number; mimeType: string; timestamp: string
@@ -41,8 +56,58 @@ export class BrowserReader {
   private sequence = 0
   private busy = false
   private disposed = false
+  private testPageId: number | null = null
+  private testOrigin: string | null = null
+  private testBlocked = false
+  private testAbort: AbortController | null = null
+  private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
   constructor(private readonly options: BrowserReaderOptions) {}
+
+  get testState(): BrowserTestState { return structuredClone({ enabled: this.testPageId === this.options.active(), ...this.testProgress }) }
+
+  setTesting(enabled: boolean): void {
+    const origin = enabled ? this.httpOrigin(this.page().contents.getURL()) : null
+    if (enabled && !origin) throw new Error('Open an HTTP or HTTPS page before enabling Testing mode.')
+    this.testAbort?.abort()
+    this.testPageId = enabled ? this.options.active() : null
+    this.testOrigin = origin
+    this.testBlocked = false
+  }
+
+  private httpOrigin(url: string): string | null {
+    try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) ? parsed.origin : null } catch { return null }
+  }
+
+  private checkTestOrigin(url: string): void {
+    if (!this.testOrigin || this.httpOrigin(url) !== this.testOrigin) throw new Error('Test destination is outside the enabled origin. Stop testing, open that site yourself and enable Testing mode there.')
+  }
+
+  async test(value: unknown, signal: AbortSignal): Promise<unknown> {
+    const plan = validateBrowserTestPlan(value)
+    const page = this.page()
+    if (this.testPageId !== page.contents.id) throw new Error('Enable Testing mode in the selected browser page first.')
+    this.checkTestOrigin(page.contents.getURL())
+    const origin = this.testOrigin!
+    if (this.busy) throw new Error('Another browser inspection or test is in progress.')
+    this.testBlocked = false
+    this.busy = true
+    this.testAbort = new AbortController()
+    // Keep the last completed report so polling cannot resize the viewport when
+    // a new run starts. The running-step indicator describes the current test.
+    this.testProgress = { running: true, step: 0, total: plan.steps.length, label: '', report: this.testProgress.report }
+    const active = (): boolean => !this.disposed && !page.contents.isDestroyed() && this.options.active() === page.contents.id && this.testPageId === page.contents.id
+    try {
+      const report = await runBrowserTest(plan, page.contents.id, { active,
+        execute: (step, stop) => this.testStep(page, step, stop),
+        progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
+      }, AbortSignal.any([signal, this.testAbort.signal]))
+      report.origin = origin
+      const { screenshots: _screenshots, ...summary } = report
+      this.testProgress.report = summary
+      return report
+    } finally { this.busy = false; this.testProgress.running = false; this.testAbort = null }
+  }
 
   add(contents: WebContents): void {
     const page: PageReader = { contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
@@ -58,6 +123,17 @@ export class BrowserReader {
     contents.on('did-start-navigation', details => {
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
     })
+    // Main-page navigation must obey the origin grant. Embedded pages may load
+    // other origins; the separate frame and focus guards still reject their input.
+    const restrictNavigation = (event: { preventDefault: () => void; isMainFrame: boolean }, url: string): void => {
+      if (!event.isMainFrame || !this.testAbort || this.testPageId !== contents.id || this.httpOrigin(url) === this.testOrigin) return
+      event.preventDefault(); this.testBlocked = true
+    }
+    contents.on('will-frame-navigate', event => restrictNavigation(event, event.url))
+    contents.on('will-redirect', (event, url) => restrictNavigation(event, url))
+    contents.on('did-navigate', (_event, url) => {
+      if (this.testPageId === contents.id && this.httpOrigin(url) !== this.testOrigin) this.setTesting(false)
+    })
     contents.on('did-finish-load', () => { void this.attach(page).catch(() => {}) })
     contents.once('destroyed', () => {
       this.readers.delete(contents.id)
@@ -67,13 +143,14 @@ export class BrowserReader {
     void this.attach(page).catch(() => {})
   }
 
-  private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000): Promise<Params> {
+  private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
+    if (signal?.aborted) throw new Error('Test stopped.')
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await Promise.race([
+      return await abortable(Promise.race([
         page.contents.debugger.sendCommand(method, params, sessionId) as Promise<Params>,
         new Promise<never>((_accept, reject) => { timer = setTimeout(() => reject(new Error('Browser inspection timed out. Content may not be loaded.')), timeoutMs) }),
-      ])
+      ]), signal)
     } finally { if (timer) clearTimeout(timer) }
   }
 
@@ -167,9 +244,9 @@ export class BrowserReader {
     return page
   }
 
-  private async frames(page: PageReader): Promise<Frame[]> {
-    await this.attach(page)
-    const result = await this.command(page, 'Page.getFrameTree')
+  private async frames(page: PageReader, signal?: AbortSignal): Promise<Frame[]> {
+    await abortable(this.attach(page), signal)
+    const result = await this.command(page, 'Page.getFrameTree', {}, undefined, 10000, signal)
     const frames: Frame[] = []
     const walk = (tree: FrameTree): void => {
       if (frames.length >= MAX_FRAMES) return
@@ -180,29 +257,180 @@ export class BrowserReader {
     // OOPIFs have their own CDP session. Include their frame trees as well.
     for (const session of new Set(page.sessions.values())) {
       try {
-        const child = await this.command(page, 'Page.getFrameTree', {}, session)
+        const child = await this.command(page, 'Page.getFrameTree', {}, session, 10000, signal)
         const start = frames.length
         if (child.frameTree) walk(child.frameTree as FrameTree)
         for (const frame of frames.slice(start)) page.sessions.set(frame.id, session)
-      } catch { /* A child may have navigated or detached while inspecting. */ }
+      } catch (error) { if (signal?.aborted) throw error /* A child may have navigated or detached. */ }
     }
     return [...new Map(frames.map(frame => [frame.id, frame])).values()]
   }
 
-  private async evaluate(page: PageReader, frameId: string, operation: string, args: Params): Promise<any> {
+  private async evaluate(page: PageReader, frameId: string, operation: string, args: Params, testing = false, signal?: AbortSignal): Promise<any> {
     const sessionId = page.sessions.get(frameId)
     let contextId = page.contexts.get(frameId)
     if (!contextId) {
-      const world = await this.command(page, 'Page.createIsolatedWorld', { frameId, worldName: 'desktop-browser-reader', grantUniveralAccess: false }, sessionId)
+      const world = await this.command(page, 'Page.createIsolatedWorld', { frameId, worldName: 'desktop-browser-reader', grantUniveralAccess: false }, sessionId, 10000, signal)
       contextId = Number(world.executionContextId)
       page.contexts.set(frameId, contextId)
     }
     const result = await this.command(page, 'Runtime.evaluate', {
-      expression: `(${browserReadScript.toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
-      contextId, returnByValue: true, awaitPromise: operation === 'mask', userGesture: false,
-    }, sessionId, operation === 'mask' ? 1500 : 10000)
+      expression: `(${(testing ? browserTestScript : browserReadScript).toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
+      contextId, returnByValue: true, awaitPromise: operation === 'mask' || testing && operation === 'settle', userGesture: false,
+    }, sessionId, operation === 'mask' || testing && operation === 'settle' ? 1500 : 10000, signal)
     if (result.exceptionDetails) throw new Error('Control or snapshot is stale or unavailable. Read the frame again.')
     return result.result?.value
+  }
+
+  private async testStep(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    const check = (): void => {
+      if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
+      if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
+      this.checkTestOrigin(page.contents.getURL())
+    }
+    check()
+    if (step.action === 'navigate') {
+      this.checkTestOrigin(step.url!)
+      await new Promise<void>((resolve, reject) => {
+        const abort = (): void => { if (!page.contents.isDestroyed()) page.contents.stop(); reject(new Error('Test navigation stopped.')) }
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) abort()
+        else void page.contents.loadURL(step.url!).then(resolve, () => reject(new Error('Test navigation failed.')))
+          .finally(() => signal.removeEventListener('abort', abort))
+      })
+      check(); return { passed: true }
+    }
+    if (step.action === 'screenshot') {
+      const image = await this.run('screenshot', [String(page.contents.id)], signal, true) as Params
+      check()
+      return image.state === 'available' ? { passed: true, screenshot: { step: 0, imageBase64: image.imageBase64, redacted: Boolean(image.redacted) } }
+        : { passed: false, reason: String(image.reason ?? 'Screenshot is unavailable.') }
+    }
+    const frames = await this.frames(page, signal)
+    check()
+    const frame = frames.find(frame => frame.id === (step.frame ?? frames[0]?.id))
+    if (!frame) throw new Error('Frame is unavailable in the selected page.')
+    const interaction = !['waitFor', 'assert'].includes(step.action)
+    if (interaction && (frame.securityOrigin !== this.testOrigin || this.httpOrigin(frame.url) !== this.testOrigin)) throw new Error('Test input frame is outside the enabled origin.')
+    let reference: string | undefined
+    const evaluate = async (operation: string, args: Params = {}): Promise<Params> => {
+      check()
+      const result = await this.evaluate(page, frame.id, operation, { ...step, reference, requireReference: reference !== undefined,
+        ...(interaction ? { allowedOrigin: this.testOrigin } : {}), ...args }, true, signal) as Params
+      check()
+      if (result?.error) throw new Error(String(result.error))
+      return result
+    }
+    if (step.action === 'waitFor' || step.action === 'assert') {
+      try { const result = await evaluate('probe'); return { passed: Boolean(result.passed), ...(result.reason ? { reason: String(result.reason) } : {}) } }
+      catch (error) { check(); if (page.contents.isLoading()) return { passed: false, reason: 'Page is still loading.' }; throw error }
+    }
+    if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
+    reference = randomBytes(16).toString('hex')
+    let prepared = false
+    const targetPoint = async (requireFocus = false): Promise<Params> => {
+      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared })
+      prepared = true
+      let current = frame
+      // Check every embedding frame for overlays. Coordinates from each frame's
+      // own viewport are mapped into its parent, including out-of-process frames.
+      while (current.parentId) {
+        const parent = frames.find(frame => frame.id === current.parentId)
+        if (!parent) throw new Error('Frame parent is unavailable.')
+        const session = page.sessions.get(parent.id)
+        check()
+        const owner = await this.command(page, 'DOM.getFrameOwner', { frameId: current.id }, session, 10000, signal)
+        await this.evaluate(page, parent.id, 'viewport', {}, true, signal)
+        const node = await this.command(page, 'DOM.resolveNode', { backendNodeId: owner.backendNodeId, executionContextId: page.contexts.get(parent.id) }, session, 10000, signal)
+        const objectId = node.object?.objectId
+        if (!objectId) throw new Error('Frame position is unavailable.')
+        try {
+          const mapped = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true,
+            functionDeclaration: `function(rx,ry,focused) {
+              const win = this.ownerDocument.defaultView;
+              if(focused&&this.getRootNode().activeElement!==this) return {error:'Input focus changed during the action.'};
+              for (let el=this; el; el=el.parentElement) {
+                const style=win.getComputedStyle(el);
+                if(style.display==='none'||style.visibility==='hidden') return {error:'Embedding frame is hidden.'};
+                if(style.transform!=='none') { const m=new win.DOMMatrixReadOnly(style.transform); if(!m.is2D||m.b||m.c||m.a<=0||m.d<=0) return {error:'Rotated or skewed frames cannot receive test input.'}; }
+              }
+              const r=this.getBoundingClientRect();
+              const x=r.left+(this.clientLeft+rx*this.clientWidth)*r.width/this.offsetWidth;
+              const y=r.top+(this.clientTop+ry*this.clientHeight)*r.height/this.offsetHeight;
+              const hit=this.getRootNode().elementFromPoint(x,y);
+              if(hit!==this&&!this.contains(hit)) return {error:'Embedding frame is covered or outside the viewport.'};
+              return {x,y,width:win.innerWidth,height:win.innerHeight};
+            }`, arguments: [{ value: Number(point.x) / Number(point.width) }, { value: Number(point.y) / Number(point.height) }, { value: requireFocus }],
+          }, session, 10000, signal)
+          if (mapped.exceptionDetails || !mapped.result?.value) throw new Error('Frame position is unavailable.')
+          if (mapped.result.value.error) throw new Error(String(mapped.result.value.error))
+          Object.assign(point, mapped.result.value)
+        } finally { await this.command(page, 'Runtime.releaseObject', { objectId }, session, 1000).catch(() => {}) }
+        current = parent
+      }
+      check()
+      return point
+    }
+    let point = await targetPoint()
+    if (step.action === 'scroll') return { passed: Boolean((await evaluate('scroll', { selector: step.selector ?? 'html' })).passed) }
+    if (step.action === 'select') return { passed: Boolean((await evaluate('select')).passed) }
+    if (step.action === 'fill' || step.action === 'press') {
+      await evaluate(step.action)
+      const key = async (name: string, code: number, text = '', modifiers = 0): Promise<void> => {
+        check()
+        await targetPoint(true)
+        await evaluate('focused')
+        try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text, modifiers }, undefined, 10000, signal) }
+        finally {
+          if (!page.contents.isDestroyed()) {
+            const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code, modifiers }, undefined, 1000)
+            if (signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) await release.catch(() => {})
+            else await release
+          }
+        }
+      }
+      if (step.action === 'fill') {
+        await key('a', 65, '', 2); await key('Backspace', 8)
+        check(); await targetPoint(true); await evaluate('focused')
+        if (step.value) await this.command(page, 'Input.insertText', { text: step.value }, undefined, 10000, signal)
+      } else {
+        const codes: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Space: 32, Backspace: 8, Delete: 46,
+          ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34 }
+        await key(step.key === 'Space' ? ' ' : step.key!, codes[step.key!]!, step.key === 'Enter' ? '\r' : step.key === 'Space' ? ' ' : '')
+      }
+      check(); return { passed: true }
+    }
+    check()
+    if (![point.x, point.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)) throw new Error('Target is outside the viewport.')
+    const stableUntil = Date.now() + 2000
+    while (true) {
+      check()
+      await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y }, undefined, 10000, signal)
+      if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
+      const fresh = await targetPoint()
+      if (Math.abs(fresh.x - point.x) < 0.5 && Math.abs(fresh.y - point.y) < 0.5) { point = fresh; break }
+      if (Date.now() >= stableUntil) throw new Error('Target did not stabilize after pointer movement.')
+      point = fresh
+    }
+    if (step.action === 'hover') { check(); return { passed: true } }
+    for (let count = 1; count <= (step.action === 'doubleClick' ? 2 : 1); count++) {
+      if (count === 2) {
+        const fresh = await targetPoint()
+        if (Math.abs(fresh.x - point.x) >= 0.5 || Math.abs(fresh.y - point.y) >= 0.5) throw new Error('Target moved during the double-click.')
+      }
+      check()
+      try { await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: count, x: point.x, y: point.y }, undefined, 10000, signal) }
+      finally {
+        const stopped = signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
+        if (!page.contents.isDestroyed()) {
+          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: count,
+            x: stopped ? -1 : point.x, y: stopped ? -1 : point.y }, undefined, 1000)
+          if (stopped) await release.catch(() => {})
+          else await release
+        }
+      }
+    }
+    check(); return { passed: true }
   }
 
   async read(command: string, args: string[], signal?: AbortSignal): Promise<unknown> {
@@ -213,7 +441,17 @@ export class BrowserReader {
     finally { this.busy = false }
   }
 
-  private async run(command: string, args: string[], signal?: AbortSignal): Promise<unknown> {
+  private async run(command: string, args: string[], signal?: AbortSignal, testScreenshot = false): Promise<unknown> {
+    if (command === 'test-targets') {
+      const page = this.page()
+      if (this.testPageId !== page.contents.id) throw new Error('Enable Testing mode before inspecting test targets.')
+      const frames = await this.frames(page, signal)
+      const frame = frames.find(frame => frame.id === (args[0] ?? frames[0]?.id))
+      if (!frame) throw new Error('Test frame is unavailable.')
+      const result = await this.evaluate(page, frame.id, 'inspect', {}, true, signal) as Params
+      if (result.error) throw new Error(String(result.error))
+      return { pageId: page.contents.id, frameId: frame.id, ...redactBrowserValue(result).value as Params }
+    }
     if (command === 'tabs') return { tabs: this.options.pages().map(contents => ({ id: contents.id,
       url: readableUrl(contents.getURL()), active: contents.id === this.options.active(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
     if (command === 'responses') {
@@ -230,7 +468,7 @@ export class BrowserReader {
     }
     const page = this.page(args[0])
     if (command === 'select') { this.options.select(page.contents.id); return { pageId: page.contents.id, state: 'selected' } }
-    const frames = await this.frames(page)
+    const frames = await this.frames(page, signal)
     if (command === 'frames') return { pageId: page.contents.id, frames: frames.map(frame => ({ id: frame.id,
       parentId: frame.parentId ?? null, url: readableUrl(frame.url) })), loading: page.contents.isLoading(), timestamp: new Date().toISOString(),
       limit: MAX_FRAMES, truncated: frames.length >= MAX_FRAMES }
@@ -286,12 +524,12 @@ export class BrowserReader {
       const top = frames[0]!.id
       try {
         let mask: Params
-        try { mask = await this.evaluate(page, top, 'mask', {}) as Params }
+        try { mask = await this.evaluate(page, top, 'mask', { includeCanvas: testScreenshot }) as Params }
         catch { return { ...metadata, state: 'unavailable', reason: 'Could not confirm the page is painting safely. Restore and show the window and retry.' } }
         if (mask.truncated) return { ...metadata, state: 'unavailable', reason: 'Page is too large to mask completely for a screenshot.', truncated: true }
         if (!mask.painted) return { ...metadata, state: 'unavailable', reason: 'The page is not painting. Restore and show the window and retry.' }
         const unchanged = async (): Promise<boolean> => sameScreenshotLayout(mask as ScreenshotLayout,
-          await this.evaluate(page, top, 'mask-state', {}) as ScreenshotLayout)
+          await this.evaluate(page, top, 'mask-state', { includeCanvas: testScreenshot }) as ScreenshotLayout)
         if (!await unchanged()) return { ...metadata, state: 'unavailable', reason: 'Page layout changed while preparing screenshot masks. Wait for it to settle and retry.' }
         let image
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -309,13 +547,16 @@ export class BrowserReader {
         const png = masked.resize({ width: Math.min(1600, size.width) }).toPNG()
         if (png.length > 2 * 1024 * 1024) return { ...metadata, state: 'unavailable', reason: 'Screenshot exceeds the 2 MiB limit.', truncated: true }
         return { ...metadata, frameId: top, state: 'available', mimeType: 'image/png', imageBase64: png.toString('base64'),
-          redacted: Boolean(mask.redacted), size: image.getSize(), limitations: ['Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }
+          redacted: Boolean(mask.redacted), size: image.getSize(), limitations: [testScreenshot
+            ? 'Form controls, credential-marked elements and embedded frames are masked. Canvas pixels are included for the authorized test. Screenshot covers the viewport only.'
+            : 'Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }
       } finally { await this.evaluate(page, top, 'unmask', {}).catch(() => {}) }
     }
     throw new Error('Unknown browser inspection command.')
   }
 
   dispose(): void {
+    this.setTesting(false)
     this.disposed = true
     this.clear()
     for (const page of this.readers.values()) if (!page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
