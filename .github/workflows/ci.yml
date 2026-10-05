@@ -28,6 +28,8 @@ jobs:
         run: corepack pnpm test
       - name: Terminal link integration check
         run: corepack pnpm links:check
+      - name: Sidebar Projects interaction check
+        run: corepack pnpm sidebar:check
       - name: Browser and native Local Overrides integration check
         run: corepack pnpm browser:check
       - name: Upload browser check evidence
@@ -40,6 +42,7 @@ jobs:
             test-results/browser-persistence/
             test-results/browser-reader/
             test-results/browser-testing/
+            test-results/sidebar-projects-check/
           if-no-files-found: ignore
       - name: Migration round-trip smoke test
         run: corepack pnpm migration:smoke

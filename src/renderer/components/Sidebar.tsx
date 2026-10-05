@@ -103,6 +103,11 @@ export function Sidebar({
     const outside = (event: PointerEvent): void => {
       if (event.target instanceof Node && !projectsPopover.current?.contains(event.target) && !projectsButton.current?.contains(event.target)) dismiss()
     }
+    const focusOutside = (event: FocusEvent): void => {
+      const fromProjects = event.target instanceof Node && (projectsPopover.current?.contains(event.target) || projectsButton.current?.contains(event.target))
+      const toProjects = event.relatedTarget instanceof Node && (projectsPopover.current?.contains(event.relatedTarget) || projectsButton.current?.contains(event.relatedTarget))
+      if (fromProjects && !toProjects) dismiss()
+    }
     const escape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       event.preventDefault()
@@ -111,10 +116,12 @@ export function Sidebar({
       projectsButton.current?.focus()
     }
     document.addEventListener('pointerdown', outside, true)
+    document.addEventListener('focusout', focusOutside, true)
     document.addEventListener('keydown', escape, true)
     window.addEventListener('resize', dismiss)
     return () => {
       document.removeEventListener('pointerdown', outside, true)
+      document.removeEventListener('focusout', focusOutside, true)
       document.removeEventListener('keydown', escape, true)
       window.removeEventListener('resize', dismiss)
     }
