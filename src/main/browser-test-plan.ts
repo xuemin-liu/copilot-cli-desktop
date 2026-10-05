@@ -18,6 +18,7 @@ export interface BrowserTestStep {
 }
 export interface BrowserTestPlan { description: string; expected: string; steps: BrowserTestStep[]; timeoutMs?: number }
 export interface BrowserTestReport {
+  origin?: string
   description: string; expected: string; pageId: number; status: 'passed' | 'failed' | 'cancelled'; startedAt: string; durationMs: number
   steps: { action: string; label: string; status: 'passed' | 'failed' | 'skipped'; durationMs: number; reason?: string }[]
   screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string }[]

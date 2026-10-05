@@ -34,14 +34,24 @@ if (!process.versions.electron) {
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
     const { browserCommand } = await import('../dist/src/cli/browser-control.js')
     const { prepareBrowserSessionEnvironment } = await import('../dist/src/main/browser-session.js')
-    let writes = 0; let approvals = 0; let navigationWaiting = false
+    let writes = 0; let approvals = 0; let navigationWaiting = false; let foreignRequests = 0
+    const receivedValues = []
+    const foreign = createServer(async (request, response) => {
+      foreignRequests++
+      if (request.url === '/leak') { let body = ''; for await (const chunk of request) body += chunk; receivedValues.push(body); response.end('received'); return }
+      response.setHeader('content-type', 'text/html')
+      response.end('<input id="q" oninput="fetch(\'/leak\',{method:\'POST\',body:this.value})"><input id="field" oninput="fetch(\'/leak\',{method:\'POST\',body:this.value})"><select id="choice"><option value="old">Old</option><option value="new">New</option></select><button id="button">Run</button><p id="result">Foreign frame ready</p>')
+    })
+    await new Promise(resolve => foreign.listen(0, resolve))
+    const foreignUrl = `http://127.0.0.1:${foreign.address().port}/`
     const site = createServer((request, response) => {
       response.setHeader('content-type', 'text/html')
+      if (request.url === '/origin-redirect') { response.writeHead(302, { location: foreignUrl }); response.end(); return }
       if (request.url === '/never-load') { navigationWaiting = true; return }
       if (request.url === '/redirect-target') { response.end('<h1>Changed document</h1><button id="redirect-target" onclick="fetch(\'/write\',{method:\'POST\'})">Unexpected target</button>'); return }
       if (request.url === '/write') { writes++; response.end('written'); return }
       if (request.url === '/frame') { response.end(`<input id="field" aria-label="Frame input"><button id="button" onclick="result.textContent=event.isTrusted?'Frame passed':'Untrusted'">Run</button><p id="result"></p>`); return }
-      if (request.url === '/frames') { response.end(`<h1>Frames</h1><iframe style="display:block;height:150px" src="/frame"></iframe><iframe style="display:block;height:150px" src="http://localhost:${site.address().port}/frame"></iframe>`); return }
+      if (request.url === '/frames') { response.end(`<h1>Frames</h1><iframe style="display:block;height:150px" src="/frame"></iframe><iframe style="display:block;height:150px" src="http://localhost:${foreign.address().port}/frame"></iframe>`); return }
       response.end(`<!doctype html><title>Generic test application</title><style>body{font:16px sans-serif}#detail{display:none}.cover{position:fixed;inset:0;z-index:100;background:#fff}#hover-result{display:none}#hover-target:hover + #hover-result{display:block}</style>
         <label>User <input id="user"></label><label>Password <input id="password" type="password"></label>
         <button id="login" onclick="login.hidden=true;setTimeout(()=>list.hidden=false,100)">Log in</button>
@@ -49,7 +59,7 @@ if (!process.versions.electron) {
         <select id="category"><option value="old">Old</option><option value="new">New</option></select><input id="check" type="checkbox">
         <div id="row" hidden ondblclick="detail.style.display='block';trusted.textContent=event.isTrusted?'Trusted double-click':'Untrusted';document.querySelector('#canvas').getContext('2d').fillRect(0,0,20,20)">ITEM-42</div></section>
         <section id="detail"><h2 id="title">ITEM-42 details</h2><p id="trusted"></p><img id="image" width="20" height="20" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='20' height='20' fill='green'/%3E%3C/svg%3E"><canvas id="canvas" width="20" height="20"></canvas></section>
-        <button id="write" onclick="fetch('/write',{method:'POST'})">Write</button><div class="duplicate">One</div><div class="duplicate">Two</div><button id="hover-target">Hover menu</button><p id="hover-result">Menu expanded</p>
+        <a id="cross-link" href="${foreignUrl}">Another site</a><button id="write" onclick="fetch('/write',{method:'POST'})">Write</button><div class="duplicate">One</div><div class="duplicate">Two</div><button id="hover-target">Hover menu</button><p id="hover-result">Menu expanded</p>
         <div data-testid="editor"><div id="editor" contenteditable="true">private-editor-value</div></div><textarea>private-textarea-value</textarea>`)
     })
     await new Promise(resolve => site.listen(0, resolve))
@@ -57,7 +67,7 @@ if (!process.versions.electron) {
     await window.loadURL('data:text/html,<title>Isolated browser testing fixture</title>')
     const endpoint = join(artifacts, 'control.json')
     const environment = await prepareBrowserSessionEnvironment(join(artifacts, 'helpers'), 'tab-1', process.env)
-    Object.assign(process.env, environment, { COPILOT_DESKTOP_BROWSER_STATE: endpoint, BROWSER_TEST_PASSWORD: 'fixture-private-password' })
+    Object.assign(process.env, environment, { COPILOT_DESKTOP_BROWSER_STATE: endpoint, COPILOT_TEST_PASSWORD: 'fixture-private-password' })
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint, approveInteraction: async () => { approvals++; return false } })
     const second = new BrowserDebug(window, join(artifacts, `second-settings-${Date.now()}.json`), { endpointPath: join(artifacts, 'second-control.json') })
     const url = `http://127.0.0.1:${site.address().port}/`
@@ -79,12 +89,27 @@ if (!process.versions.electron) {
       await browser.open(); await second.open(); await browser.navigate(url)
       await assert.rejects(execute([visible('#login')]), /Testing mode/)
       browser.action('testing:on')
+      process.env.UNRELATED_SECRET_FOR_TEST = 'unrelated-env-secret-value-123'
+      for (const shell of [false, true]) {
+        await assert.rejects(execute([step('navigate', 'Untrusted destination', { url: foreignUrl }),
+          step('fill', 'Unrelated secret', { selector: '#q', valueFromEnv: 'UNRELATED_SECRET_FOR_TEST' }), visible('#q')], shell), /COPILOT_TEST_/)
+        const blocked = await execute([step('navigate', 'Different origin', { url: foreignUrl }),
+          step('fill', 'Test password', { selector: '#q', valueFromEnv: 'COPILOT_TEST_PASSWORD' }), visible('#q')], shell)
+        assert.equal(blocked.status, 'failed', JSON.stringify(blocked)); assert.match(blocked.steps[0].reason, /origin/)
+        assert.equal(blocked.steps[1].status, 'skipped'); assert.equal(foreignRequests, 0); assert.deepEqual(receivedValues, [])
+      }
+      delete process.env.UNRELATED_SECRET_FOR_TEST
+      const redirected = await execute([step('navigate', 'Redirect to another origin', { url: url + 'origin-redirect' }), visible('#q')])
+      assert.equal(redirected.status, 'failed', JSON.stringify(redirected)); assert.equal(foreignRequests, 0)
+      await browser.navigate(url)
+      const linked = await execute([step('click', 'Link to another origin', { selector: '#cross-link' }), visible('#q', { timeoutMs: 100 })])
+      assert.equal(linked.status, 'failed', JSON.stringify(linked)); assert.equal(foreignRequests, 0)
       const targets = await browserCommand(['test-targets'])
       assert.ok(targets.targets.some(target => target.selector === '#password'))
       assert.ok(!JSON.stringify(targets).includes('private-editor-value')); assert.ok(!JSON.stringify(targets).includes('private-textarea-value'))
       const workflow = await execute([
         step('navigate', 'Open the app', { url }), step('fill', 'Enter user', { selector: '#user', value: 'fixture-user' }),
-        step('fill', 'Enter password', { selector: '#password', valueFromEnv: 'BROWSER_TEST_PASSWORD' }), step('click', 'Log in', { selector: '#login' }),
+        step('fill', 'Enter password', { selector: '#password', valueFromEnv: 'COPILOT_TEST_PASSWORD' }), step('click', 'Log in', { selector: '#login' }),
         step('waitFor', 'Wait for list', { selector: '#list', condition: 'visible' }), step('fill', 'Search item', { selector: '#search', value: 'ITEM-42' }),
         step('press', 'Submit search', { selector: '#search', key: 'Enter' }), step('select', 'Choose category', { selector: '#category', value: 'new' }),
         step('assert', 'Category is selected', { selector: '#category', condition: 'value', expected: 'new' }), step('click', 'Check option', { selector: '#check' }),
@@ -95,6 +120,7 @@ if (!process.versions.electron) {
         step('screenshot', 'Capture outcome', {}),
       ])
       assert.equal(workflow.status, 'passed', JSON.stringify(workflow)); assert.equal(approvals, 0)
+      assert.equal(workflow.origin, new URL(url).origin)
       assert.ok((await readFile(workflow.screenshots[0].path)).length > 100)
       assert.equal(browser.snapshot.testing.report.status, 'passed')
       const savedPassword = await browser.view.webContents.executeJavaScript('document.querySelector("#password").value')
@@ -170,15 +196,34 @@ if (!process.versions.electron) {
       await browser.navigate(url + 'frames')
       const frames = (await browserCommand(['frames'])).frames
       assert.equal(frames.length, 3)
-      for (const frame of frames.slice(1)) {
+      const sameFrame = frames.find(frame => frame.url === url + 'frame')
+      const foreignFrame = frames.find(frame => frame.url.startsWith(`http://localhost:${foreign.address().port}/`))
+      assert.ok(sameFrame); assert.ok(foreignFrame)
+      for (const frame of [sameFrame]) {
         const report = await execute([step('fill', 'Frame input', { selector: '#field', frame: frame.id, value: 'frame-value' }),
           step('assert', 'Frame value', { selector: '#field', frame: frame.id, condition: 'value', expected: 'frame-value' }),
           step('click', 'Frame click', { selector: '#button', frame: frame.id }),
           step('assert', 'Frame event', { selector: '#result', frame: frame.id, condition: 'text', expected: 'Frame passed' })])
         assert.equal(report.status, 'passed', JSON.stringify(report))
       }
+      const foreignReady = await execute([visible('#result', { frame: foreignFrame.id })])
+      assert.equal(foreignReady.status, 'passed', 'cross-origin frame assertions remain read-only')
+      for (const [action, rest] of [['fill', { selector: '#field', value: 'unrelated-env-secret-value-123' }],
+        ['select', { selector: '#choice', value: 'new' }], ['press', { selector: '#field', key: 'Enter' }], ['click', { selector: '#button' }]]) {
+        const blocked = await execute([step(action, 'Untrusted frame input', { frame: foreignFrame.id, ...rest }), visible('#result', { frame: foreignFrame.id })])
+        assert.equal(blocked.status, 'failed', JSON.stringify(blocked)); assert.match(blocked.steps[0].reason, /origin/)
+        assert.deepEqual(receivedValues, [])
+      }
+      await browser.view.webContents.executeJavaScript(`(() => {
+        const input = document.createElement('input'); input.id = 'focus-steal';
+        input.addEventListener('focus', () => document.querySelectorAll('iframe')[1].focus()); document.body.append(input);
+      })()`)
+      const focusSteal = await execute([step('fill', 'Frame steals focus', { selector: '#focus-steal', value: 'unrelated-env-secret-value-123' }),
+        visible('#result', { frame: foreignFrame.id })])
+      assert.equal(focusSteal.status, 'failed', JSON.stringify(focusSteal)); assert.match(focusSteal.steps[0].reason, /focus changed/)
+      assert.deepEqual(receivedValues, [], 'cross-origin focus stealing cannot receive test input')
       await browser.view.webContents.executeJavaScript(`document.body.insertAdjacentHTML('beforeend',${JSON.stringify('<div id="frame-cover" style="position:fixed;inset:0;z-index:999;background:white" onclick="fetch(\'/write\',{method:\'POST\'})"></div>')})`)
-      for (const frame of frames.slice(1)) {
+      for (const frame of [sameFrame]) {
         const report = await execute([step('click', 'Covered frame click', { selector: '#button', frame: frame.id }), visible('#result', { frame: frame.id })])
         assert.equal(report.status, 'failed', JSON.stringify(report)); assert.match(report.steps[0].reason, /covered/)
         assert.equal(writes, 0, 'a covered frame must never click the covering page control')
@@ -191,12 +236,21 @@ if (!process.versions.electron) {
       assert.equal((await fetch(testRoute, { method: 'POST', headers: { origin: 'https://untrusted.test', authorization: `Bearer ${controller.token}` } })).status, 403)
       assert.equal((await request({ ...plan([visible('#title')]), script: 'alert(1)' })).status, 400)
       assert.equal((await fetch(testRoute, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: ' '.repeat(131073) })).status, 413)
+      await browser.navigate(foreignUrl)
+      assert.equal(browser.snapshot.testing.enabled, false, 'manual origin changes revoke the grant')
+      await assert.rejects(execute([visible('#q')]), /Testing mode/)
+      browser.action('testing:on')
+      assert.equal((await execute([step('fill', 'Explicitly chosen site', { selector: '#q', value: 'user-test-input' }), visible('#q')])).status, 'passed')
+      await until(() => receivedValues.includes('user-test-input'), 'explicit user origin grant permits input')
+      assert.ok(!receivedValues.includes('unrelated-env-secret-value-123'))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, workflow: true, nativeInput: true, nativeDoubleClick: true,
         screenshots: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
         disconnect: true, sameOriginFrame: true, crossOriginFrame: true, isolation: true, authentication: true, noPerStepApproval: approvals === 0,
         unicode: true, hover: true, openShadowRoot: true, contentEditable: true, navigationCancellation: true, hiddenCancellation: true,
-        targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true }, null, 2))
+        targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,
+        environmentInputsRestricted: true, originBoundNavigation: true, crossOriginRedirectBlocked: true, crossOriginLinkBlocked: true,
+        crossOriginInputBlocked: true, crossOriginFocusStealingBlocked: true, manualOriginChangeRevokesGrant: true, explicitOriginGrant: true }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
-    } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
+    } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
   }
 }

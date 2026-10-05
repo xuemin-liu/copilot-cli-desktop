@@ -18,7 +18,7 @@ export async function loadBrowserTest(path: string, environment = process.env): 
   catch { throw new Error('Invalid test JSON.') }
   if (Array.isArray(raw?.steps)) for (const step of raw.steps) {
     if (step && typeof step === 'object' && 'valueFromEnv' in step) {
-      if (step.action !== 'fill' || 'value' in step || typeof step.valueFromEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(step.valueFromEnv)) throw new Error('valueFromEnv requires a fill step and an environment variable name.')
+      if (step.action !== 'fill' || 'value' in step || typeof step.valueFromEnv !== 'string' || !/^COPILOT_TEST_[A-Z0-9_]{1,115}$/.test(step.valueFromEnv)) throw new Error('valueFromEnv requires a fill step and a COPILOT_TEST_ environment variable name.')
       const value = environment[step.valueFromEnv]
       if (typeof value !== 'string') throw new Error('The test input environment variable is not set.')
       delete step.valueFromEnv; step.value = value

@@ -1,6 +1,7 @@
 /** Serialized fixed browser operations. Selectors and values are data, never source code. */
 export function browserTestScript(operation: string, args: Record<string, any>): Record<string, any> | Promise<Record<string, any>> {
   if (Date.now() > args.deadline) return { error: 'Test operation expired.' }
+  if (args.allowedOrigin && location.origin !== args.allowedOrigin) return { error: 'Test input frame is outside the enabled origin.' }
   const visible = (element: Element): boolean => {
     for (let node: Element | null = element; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
       const style = getComputedStyle(node)
@@ -91,6 +92,8 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       scope.__desktopTestTarget = { token: args.reference, element: target }
     }
     if (target.matches(':disabled') || target.getAttribute('aria-disabled') === 'true') return { error: 'Target is disabled.' }
+    if (operation === 'focused') return (target.getRootNode() as Document | ShadowRoot).activeElement === target
+      ? { passed: true } : { error: 'Input focus changed during the action.' }
     target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
     const rect = target.getBoundingClientRect(); const x = Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
     const y = Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2

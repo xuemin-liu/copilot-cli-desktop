@@ -277,7 +277,12 @@ per step. **Stop testing** cancels the run and disables further tests. Selecting
 creating, or closing the active page also cancels and resets Testing mode; re-enable
 it on the new page to test there. Hiding the pane or selecting another browser
 view also stops the run and resets Testing mode. Navigating within the selected page preserves
-Testing mode. Popup activation changes the selected page and stops the old run.
+Testing mode for the same HTTP(S) origin. Navigation and input are bound to the
+origin where Testing mode was enabled; other destinations and cross-origin frame
+inputs fail. Page-driven navigation and redirects outside that origin are blocked
+during a run. To test another site, stop testing, open it yourself and enable
+Testing mode there. A manual navigation to another origin disables Testing mode.
+Popup activation changes the selected page and stops the old run.
 A run stops at its first failed step. Test actions may change the app's data; a
 failed or cancelled run does not undo completed steps. Keep the Page view visible
 for input and screenshots. Browser sessions remain isolated from each other.
@@ -287,8 +292,11 @@ single-choice select elements, keyboard keys, document/container scrolling, wait
 assertions, and screenshots. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
 are rejected. Pointer actions recheck the target after hover-driven layout changes
-and stop if the element is replaced or does not stabilize. Open shadow roots and same/cross-origin frames are supported; use
-current frame IDs from `frames`. Closed shadow roots, rotated/skewed frames,
+and stop if the element is replaced or does not stabilize. Open shadow roots and
+same-origin HTTP(S) frames support input; cross-origin frames support read-only
+inspection and assertions. Use current frame IDs from `frames`. Opaque/sandboxed
+frames and frames with non-HTTP(S) URLs cannot receive test input.
+Closed shadow roots, rotated/skewed frames,
 uploads, downloads, drag-and-drop, and arbitrary JavaScript are unavailable.
 
 Assertions check visibility, hidden state, visible element count, text containment,
@@ -326,8 +334,12 @@ The optional CLI equivalents are `copilot-desktop browser test-targets [FRAME_ID
 and `copilot-desktop browser test C:\Temp\plan.json C:\Temp\new-report.json`.
 `test-targets [FRAME_ID]` returns bounded visible target metadata and CSS selector
 suggestions without form values. Suggestions may need refinement for uniqueness.
-Sensitive fill inputs may use `"valueFromEnv": "USER_SUPPLIED_ENV_NAME"` instead of
-`value`; only that explicit variable is resolved by the caller. Credentials are
+Sensitive fill inputs may use `"valueFromEnv": "COPILOT_TEST_PASSWORD"` instead of
+`value`; only explicit uppercase names starting with `COPILOT_TEST_` are accepted
+by both the CLI and installed helper. Set these variables intentionally for your
+test. Ordinary environment variables, such as service tokens, are rejected;
+the assistant must not copy unrelated secrets into test variables or literals.
+Reports identify the enabled origin. Credentials are
 sent in the private POST body, never URL arguments. Input values are omitted from
 the report and redacted if repeated in its labels. The HTTP service accepts no
 file paths; the caller saves the report and PNGs. Outputs use new local absolute

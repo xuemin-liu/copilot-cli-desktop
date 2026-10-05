@@ -18,7 +18,7 @@ try {
   try { $browserPlan = Get-Content -LiteralPath $PlanPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { throw 'Invalid test JSON.' }
   foreach ($step in $browserPlan.steps) {
     if ($step.PSObject.Properties['valueFromEnv']) {
-      if ($step.action -ne 'fill' -or $step.PSObject.Properties['value'] -or $step.valueFromEnv -isnot [string] -or $step.valueFromEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') { throw 'valueFromEnv requires a fill step and an environment variable name.' }
+      if ($step.action -ne 'fill' -or $step.PSObject.Properties['value'] -or $step.valueFromEnv -isnot [string] -or $step.valueFromEnv -cnotmatch '^COPILOT_TEST_[A-Z0-9_]{1,115}$') { throw 'valueFromEnv requires a fill step and a COPILOT_TEST_ environment variable name.' }
       $browserValue = [Environment]::GetEnvironmentVariable($step.valueFromEnv)
       if ($null -eq $browserValue) { throw 'The test input environment variable is not set.' }
       $step.PSObject.Properties.Remove('valueFromEnv')

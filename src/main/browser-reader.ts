@@ -26,7 +26,7 @@ async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promis
     })])
   } finally { if (abort) signal.removeEventListener('abort', abort) }
 }
-interface Frame { id: string; parentId?: string; url: string; name?: string }
+interface Frame { id: string; parentId?: string; url: string; name?: string; securityOrigin?: string }
 interface FrameTree { frame: Frame; childFrames?: FrameTree[] }
 interface ResponseRecord {
   id: string; pageId: number; frameId: string; url: string; status: number; mimeType: string; timestamp: string
@@ -57,6 +57,8 @@ export class BrowserReader {
   private busy = false
   private disposed = false
   private testPageId: number | null = null
+  private testOrigin: string | null = null
+  private testBlocked = false
   private testAbort: AbortController | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
@@ -65,15 +67,30 @@ export class BrowserReader {
   get testState(): BrowserTestState { return structuredClone({ enabled: this.testPageId === this.options.active(), ...this.testProgress }) }
 
   setTesting(enabled: boolean): void {
-    if (!enabled) this.testAbort?.abort()
+    const origin = enabled ? this.httpOrigin(this.page().contents.getURL()) : null
+    if (enabled && !origin) throw new Error('Open an HTTP or HTTPS page before enabling Testing mode.')
+    this.testAbort?.abort()
     this.testPageId = enabled ? this.options.active() : null
+    this.testOrigin = origin
+    this.testBlocked = false
+  }
+
+  private httpOrigin(url: string): string | null {
+    try { const parsed = new URL(url); return /^https?:$/.test(parsed.protocol) ? parsed.origin : null } catch { return null }
+  }
+
+  private checkTestOrigin(url: string): void {
+    if (!this.testOrigin || this.httpOrigin(url) !== this.testOrigin) throw new Error('Test destination is outside the enabled origin. Stop testing, open that site yourself and enable Testing mode there.')
   }
 
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
     const plan = validateBrowserTestPlan(value)
     const page = this.page()
     if (this.testPageId !== page.contents.id) throw new Error('Enable Testing mode in the selected browser page first.')
+    this.checkTestOrigin(page.contents.getURL())
+    const origin = this.testOrigin!
     if (this.busy) throw new Error('Another browser inspection or test is in progress.')
+    this.testBlocked = false
     this.busy = true
     this.testAbort = new AbortController()
     // Keep the last completed report so polling cannot resize the viewport when
@@ -85,6 +102,7 @@ export class BrowserReader {
         execute: (step, stop) => this.testStep(page, step, stop),
         progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
       }, AbortSignal.any([signal, this.testAbort.signal]))
+      report.origin = origin
       const { screenshots: _screenshots, ...summary } = report
       this.testProgress.report = summary
       return report
@@ -104,6 +122,17 @@ export class BrowserReader {
     })
     contents.on('did-start-navigation', details => {
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
+    })
+    // Navigation caused by page input and HTTP redirects must obey the same
+    // origin grant as explicit navigate steps, before sending the new request.
+    const restrictNavigation = (event: { preventDefault: () => void }, url: string): void => {
+      if (!this.testAbort || this.testPageId !== contents.id || this.httpOrigin(url) === this.testOrigin) return
+      event.preventDefault(); this.testBlocked = true
+    }
+    contents.on('will-frame-navigate', event => restrictNavigation(event, event.url))
+    contents.on('will-redirect', (event, url) => restrictNavigation(event, url))
+    contents.on('did-navigate', (_event, url) => {
+      if (this.testPageId === contents.id && this.httpOrigin(url) !== this.testOrigin) this.setTesting(false)
     })
     contents.on('did-finish-load', () => { void this.attach(page).catch(() => {}) })
     contents.once('destroyed', () => {
@@ -256,9 +285,12 @@ export class BrowserReader {
   private async testStep(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
     const check = (): void => {
       if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
+      if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
+      this.checkTestOrigin(page.contents.getURL())
     }
     check()
     if (step.action === 'navigate') {
+      this.checkTestOrigin(step.url!)
       await new Promise<void>((resolve, reject) => {
         const abort = (): void => { if (!page.contents.isDestroyed()) page.contents.stop(); reject(new Error('Test navigation stopped.')) }
         signal.addEventListener('abort', abort, { once: true })
@@ -278,10 +310,13 @@ export class BrowserReader {
     check()
     const frame = frames.find(frame => frame.id === (step.frame ?? frames[0]?.id))
     if (!frame) throw new Error('Frame is unavailable in the selected page.')
+    const interaction = !['waitFor', 'assert'].includes(step.action)
+    if (interaction && (frame.securityOrigin !== this.testOrigin || this.httpOrigin(frame.url) !== this.testOrigin)) throw new Error('Test input frame is outside the enabled origin.')
     let reference: string | undefined
     const evaluate = async (operation: string, args: Params = {}): Promise<Params> => {
       check()
-      const result = await this.evaluate(page, frame.id, operation, { ...step, reference, requireReference: reference !== undefined, ...args }, true, signal) as Params
+      const result = await this.evaluate(page, frame.id, operation, { ...step, reference, requireReference: reference !== undefined,
+        ...(interaction ? { allowedOrigin: this.testOrigin } : {}), ...args }, true, signal) as Params
       check()
       if (result?.error) throw new Error(String(result.error))
       return result
@@ -293,7 +328,7 @@ export class BrowserReader {
     if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
-    const targetPoint = async (): Promise<Params> => {
+    const targetPoint = async (requireFocus = false): Promise<Params> => {
       const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared })
       prepared = true
       let current = frame
@@ -311,8 +346,9 @@ export class BrowserReader {
         if (!objectId) throw new Error('Frame position is unavailable.')
         try {
           const mapped = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true,
-            functionDeclaration: `function(rx,ry) {
+            functionDeclaration: `function(rx,ry,focused) {
               const win = this.ownerDocument.defaultView;
+              if(focused&&this.getRootNode().activeElement!==this) return {error:'Input focus changed during the action.'};
               for (let el=this; el; el=el.parentElement) {
                 const style=win.getComputedStyle(el);
                 if(style.display==='none'||style.visibility==='hidden') return {error:'Embedding frame is hidden.'};
@@ -324,7 +360,7 @@ export class BrowserReader {
               const hit=this.getRootNode().elementFromPoint(x,y);
               if(hit!==this&&!this.contains(hit)) return {error:'Embedding frame is covered or outside the viewport.'};
               return {x,y,width:win.innerWidth,height:win.innerHeight};
-            }`, arguments: [{ value: Number(point.x) / Number(point.width) }, { value: Number(point.y) / Number(point.height) }],
+            }`, arguments: [{ value: Number(point.x) / Number(point.width) }, { value: Number(point.y) / Number(point.height) }, { value: requireFocus }],
           }, session, 10000, signal)
           if (mapped.exceptionDetails || !mapped.result?.value) throw new Error('Frame position is unavailable.')
           if (mapped.result.value.error) throw new Error(String(mapped.result.value.error))
@@ -342,6 +378,8 @@ export class BrowserReader {
       await evaluate(step.action)
       const key = async (name: string, code: number, text = '', modifiers = 0): Promise<void> => {
         check()
+        await targetPoint(true)
+        await evaluate('focused')
         try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text, modifiers }, undefined, 10000, signal) }
         finally {
           if (!page.contents.isDestroyed()) {
@@ -353,7 +391,8 @@ export class BrowserReader {
       }
       if (step.action === 'fill') {
         await key('a', 65, '', 2); await key('Backspace', 8)
-        check(); if (step.value) await this.command(page, 'Input.insertText', { text: step.value }, undefined, 10000, signal)
+        check(); await targetPoint(true); await evaluate('focused')
+        if (step.value) await this.command(page, 'Input.insertText', { text: step.value }, undefined, 10000, signal)
       } else {
         const codes: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Space: 32, Backspace: 8, Delete: 46,
           ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34 }
