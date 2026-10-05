@@ -28,7 +28,52 @@ test('each terminal gets its own endpoint and additive browser instructions', as
     assert.match(instructions, /capture is paused and new events are not being recorded/)
     assert.match(instructions, /history is incomplete because a page's entries are discarded on navigation/)
     assert.match(instructions, /An empty log only means\s+no matching entries were captured in the retained log; do not claim the web app\s+has no exceptions or failed requests/)
+    assert.match(instructions, /When asked to inspect the web app or a Jira ticket/)
+    assert.match(instructions, /Every application activation requires approval/)
+    assert.match(instructions, /Do not simulate approval, bypass the dialog/)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('PowerShell page-reading commands preserve scoped arguments, method and screenshot output without credentials', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-reader-helper-'))
+  const exec = promisify(execFile)
+  const token = 'c'.repeat(64)
+  const seen: { method: string | undefined; url: string | undefined }[] = []
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.authorization, `Bearer ${token}`)
+    seen.push({ method: request.method, url: request.url })
+    response.setHeader('content-type', 'application/json')
+    response.end(request.url?.startsWith('/read/screenshot') ? JSON.stringify({ state: 'available', imageBase64: Buffer.from('fixture-png').toString('base64'), redacted: true }) : JSON.stringify({ state: 'available' }))
+  })
+  try {
+    await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept))
+    const env = await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
+    const paths = browserSessionPaths(root, 'tab-1')
+    await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token }))
+    for (const args of [['snapshot', '123', 'FRAME'], ['select', '123'], ['scroll', '123', 'FRAME', '-700'],
+      ['activate', '123', 'FRAME', 'a'.repeat(32), 'n3'], ['response', 'b123-7'], ['screenshot', '123', '-OutputPath', join(root, 'image.png')]]) {
+      const result = await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, ...args], { env, windowsHide: true, timeout: 60000 })
+      assert.ok(!result.stdout.includes(token)); assert.ok(!result.stdout.includes('imageBase64'))
+      assert.equal(JSON.parse(result.stdout).state, 'available')
+    }
+    assert.deepEqual(seen.slice(0, 3), [
+      { method: 'GET', url: '/read/snapshot?arg=123&arg=FRAME' },
+      { method: 'POST', url: '/read/select?arg=123' },
+      { method: 'POST', url: '/read/scroll?arg=123&arg=FRAME&arg=-700' },
+    ])
+    assert.equal(seen[3]?.method, 'POST')
+    assert.equal(seen[4]?.url, '/read/response?arg=b123-7')
+    assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png')
+    await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '123', '-OutputPath', join(root, 'image.png')], { env, windowsHide: true, timeout: 60000 }))
+    assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png', 'screenshots cannot overwrite a file')
+    const requestCount = seen.length
+    for (const invalid of ['ticket.png', '\\\\host\\share\\ticket.png', '\\\\?\\C:\\ticket.png', '\\\\.\\pipe\\ticket.png', 'C:ticket.png',
+      join(root, 'ticket.exe'), 'C:\\Temp\\CON.png', 'C:\\Temp\\ticket.png:stream.png', '']) {
+      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '123', '-OutputPath', invalid],
+        { env, windowsHide: true, timeout: 60000 }), /local absolute .png/)
+    }
+    assert.equal(seen.length, requestCount, 'invalid paths never contact the browser endpoint')
+  } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('the installed-app PowerShell helper reads only its assigned session without Node or desktop CLI', { skip: process.platform !== 'win32' }, async () => {

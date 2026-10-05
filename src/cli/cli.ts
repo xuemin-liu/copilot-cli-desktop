@@ -257,6 +257,12 @@ Usage:
   copilot-desktop stop
   copilot-desktop browser status|console|network
   copilot-desktop browser request <id>
+  copilot-desktop browser tabs|select <page-id>|frames [page-id]
+  copilot-desktop browser snapshot [page-id] [frame-id] [offset]
+  copilot-desktop browser screenshot <page-id> [new-output.png]
+  copilot-desktop browser responses [page-id]|response <body-id>
+  copilot-desktop browser scroll <page-id> <frame-id> <pixels> [snapshot-id node-id]
+  copilot-desktop browser activate <page-id> <frame-id> <snapshot-id> <node-id>
 
 The controller runs in the background and binds its private control API to
 127.0.0.1 only, with a random bearer token. One controller is supported per
