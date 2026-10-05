@@ -369,8 +369,9 @@ pnpm dist:win   # NSIS installer
 
 Artifacts are written to `release/`. Local and explicitly manual historical
 builds may be unsigned. Automated public tagged releases require the GitHub
-Actions secrets `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`; the release
-workflow refuses unsigned publication. Packaging audits the archive, native
+Actions secrets `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`; without them
+the release workflow ends with a notice, builds nothing and publishes nothing, so
+unsigned publication stays impossible without failing the run. Packaging audits the archive, native
 `node-pty` addon, required executables, Electron fuses, and production-only files.
 
 ## Continuous integration and releases
