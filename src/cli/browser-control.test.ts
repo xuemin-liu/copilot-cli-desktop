@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,6 +47,7 @@ test('CLI routes, authentication and friendly errors use a real loopback endpoin
     if (mode === 'html') { response.end('<html>unavailable</html>'); return }
     if (mode === 'error') { response.writeHead(404); response.end(JSON.stringify({ message: 'Request not found' })); return }
     if (mode === 'null') { response.writeHead(500); response.end('null'); return }
+    if (mode === 'image') { response.end(JSON.stringify({ state: 'available', imageBase64: Buffer.from('fixture-png').toString('base64') })); return }
     response.end(JSON.stringify({ route: request.url }))
   })
   try {
@@ -56,6 +57,13 @@ test('CLI routes, authentication and friendly errors use a real loopback endpoin
     process.env.COPILOT_DESKTOP_BROWSER_STATE = path
     for (const command of ['status', 'console', 'network']) assert.deepEqual(await browserCommand([command]), { route: `/${command}` })
     assert.deepEqual(await browserCommand(['request', '123']), { route: '/request/123' })
+    assert.deepEqual(await browserCommand(['snapshot', '123', 'FRAME']), { route: '/read/snapshot?arg=123&arg=FRAME' })
+    assert.deepEqual(await browserCommand(['scroll', '123', 'FRAME', '-100']), { route: '/read/scroll?arg=123&arg=FRAME&arg=-100' })
+    mode = 'image'
+    const imagePath = join(directory, 'ticket.png')
+    assert.deepEqual(await browserCommand(['screenshot', '123', imagePath]), { state: 'available', path: imagePath })
+    assert.equal(await readFile(imagePath, 'utf8'), 'fixture-png')
+    await assert.rejects(browserCommand(['screenshot', '123', imagePath]), /EEXIST/)
     mode = 'error'; await assert.rejects(browserCommand(['request', '999']), /Request not found/)
     mode = 'null'; await assert.rejects(browserCommand(['status']), /Browser request failed \(500\)/)
     mode = 'html'; await assert.rejects(browserCommand(['status']), /Browser control is not responding/)

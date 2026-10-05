@@ -97,7 +97,7 @@ handle, only input/output/resize events.
 
 ## Session windows
 
-For the browser pane, native Local Overrides, and CLI console/network commands,
+For the browser pane, native Local Overrides, authenticated ticket reading and CLI console/network commands,
 see [web app debugging](docs/browser-debug.md).
 
 Click **Open in new window** (↗) above a terminal or in a session's **⋯** actions

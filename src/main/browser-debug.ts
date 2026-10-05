@@ -10,6 +10,8 @@ import { parseSafeHttpUrl } from './external-targets.js'
 import { parseBrowserAddress } from './browser-url.js'
 import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry, BrowserViewMode } from './browser-debug-types.js'
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
+import { BrowserReader } from './browser-reader.js'
+import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -26,7 +28,7 @@ interface BrowserPage {
   panel: 'console' | 'network' | 'sources' | null
 }
 
-/** Own browser session, with native Chromium DevTools and read-only CLI telemetry.
+/** Own browser session, with native Chromium DevTools, scoped reading and CLI telemetry.
  * Capture uses Electron events, so opening DevTools cannot detach a CDP collector. */
 export class BrowserDebug {
   private readonly pages = new Map<number, BrowserPage>()
@@ -41,6 +43,7 @@ export class BrowserDebug {
   private readonly started = new Map<string, number>()
   private disposed = false
   private settingsWrite = Promise.resolve()
+  private readonly reader: BrowserReader
   private state: BrowserDebugState = {
     activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
     recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
@@ -49,9 +52,13 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean> } = {}) {
     this.endpointPath = options.endpointPath ?? browserControlPath()
     this.reportError = options.reportError ?? (message => console.warn(message))
+    this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
+      active: () => this.activePageId, select: id => { this.action(`select-page:${id}`) }, owner: () => this.owner,
+      recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
+      ...(options.approveInteraction ? { approve: options.approveInteraction } : {}) })
     const view = new WebContentsView({ webPreferences: {
       partition: options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`, sandbox: true, contextIsolation: true,
       nodeIntegration: false, devTools: true,
@@ -74,6 +81,7 @@ export class BrowserDebug {
     const storage = contents.session
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
     this.pages.set(contents.id, page)
+    this.reader.add(contents)
     if (activate) { this.activePageId = contents.id; this.state.view = 'page' }
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
@@ -131,6 +139,7 @@ export class BrowserDebug {
       if (!details.isMainFrame || details.isSameDocument) return
       if (!this.state.preserveConsole) this.state.console = this.state.console.filter(entry => entry.pageId !== contents.id)
       if (!this.state.preserveNetwork) {
+        this.reader.clear(contents.id)
         for (const entry of this.state.network) if (entry.pageId === contents.id) this.started.delete(entry.id)
         this.state.network = this.state.network.filter(entry => entry.pageId !== contents.id)
       }
@@ -322,9 +331,9 @@ export class BrowserDebug {
       case 'back': if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break
       case 'forward': if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break
       case 'reload': this.activePage.error = null; contents.reload(); break
-      case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); break
+      case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'clear-console': this.state.console = []; break
-      case 'clear-network': this.state.network = []; this.started.clear(); break
+      case 'clear-network': this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'devtools': this.showView(this.activePage.devtools && this.state.view !== 'page' ? 'page' : 'devtools'); break
       default: throw new Error('Unknown browser action')
     }
@@ -447,6 +456,21 @@ export class BrowserDebug {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { message: 'Forbidden' }); return }
       const authorization = request.headers.authorization ?? ''
       if (!constantTimeTokenEqual(authorization, `Bearer ${this.token}`)) { send(401, { message: 'Unauthorized' }); return }
+      if (request.url?.startsWith('/read/')) {
+        const url = new URL(request.url, `http://127.0.0.1:${port}`)
+        const command = url.pathname.slice(6)
+        if (!BROWSER_READ_COMMANDS.some(value => value === command)) { send(404, { message: 'Unknown browser read route' }); return }
+        if (request.method !== browserReadMethod(command)) { send(405, { message: 'Incorrect browser read method' }); return }
+        const args = url.searchParams.getAll('arg')
+        try { validateBrowserReadCommand(command, args) }
+        catch (error) { send(400, { message: error instanceof Error ? error.message : 'Invalid browser read arguments' }); return }
+        const cancelled = new AbortController()
+        response.once('close', () => cancelled.abort())
+        void this.reader.read(command, args, cancelled.signal).then(value => { if (!response.destroyed) send(200, value) }, error => {
+          if (!response.destroyed) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Browser content unavailable') })
+        })
+        return
+      }
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
@@ -485,6 +509,7 @@ export class BrowserDebug {
       }
     }
     this.disposed = true
+    this.reader.dispose()
     await this.serverStart?.catch(() => {})
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null }
     try {

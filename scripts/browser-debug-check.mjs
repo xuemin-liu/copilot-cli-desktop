@@ -395,6 +395,11 @@ if (!process.versions.electron) {
       await ui('Array.from(document.querySelectorAll(".browser-tabs [role=tab]")).find(button => button.textContent === "Console").click()')
       await until(async () => await selectedPanel() === 'console', 'native console selected')
       assert.deepEqual(browser.view.getBounds(), fullPageBounds, 'console keeps full page dimensions')
+      await until(() => tools.executeJavaScript(`(async () => {
+        const SDK = await import('devtools://devtools/bundled/core/sdk/sdk.js');
+        const target = SDK.TargetManager.TargetManager.instance().primaryPageTarget();
+        return Boolean(target?.model(SDK.RuntimeModel.RuntimeModel)?.executionContexts().some(context => context.isDefault));
+      })()`), 'native console execution context ready')
       const nativeEvaluation = await tools.executeJavaScript(`(async () => {
         const SDK = await import('devtools://devtools/bundled/core/sdk/sdk.js');
         const target = SDK.TargetManager.TargetManager.instance().primaryPageTarget();

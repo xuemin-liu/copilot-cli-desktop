@@ -61,8 +61,9 @@ controls whether its entries for a page survive that page's navigation. These
 controls are independent of native DevTools' own recording/clearing settings.
 Captured logs retain the latest 300 entries in memory and include `pageId` for
 attribution, including entries from pages that have since closed. They capture
-while native DevTools is open but exclude request/response bodies and WebSocket
-message frames. Inspect those in native Network.
+while native DevTools is open. Activity entries exclude request/response bodies
+and WebSocket message frames. The assistant's separate response capture exports
+filtered JSON bodies as described below; native Network retains its own capture.
 Credential headers (including cookies, API keys, authentication, token and session
 headers), sensitive URL query parameters, and URL fragments are redacted from
 activity and CLI output. Console filtering handles recognizable credential fields,
@@ -119,9 +120,10 @@ installed on PATH. These commands use `COPILOT_DESKTOP_BROWSER_STATE` inherited
 from their terminal session. An external shell must explicitly set that variable
 to the desired session's endpoint; it does not select whichever browser is focused.
 
-Each session owns a read-only loopback API with a random bearer token saved in its
+Each session owns a private loopback API with a random bearer token saved in its
 private Desktop session directory. It accepts no browser Origin requests and exposes
-no navigation or file-write routes. It is independent of the background CLI
+no arbitrary navigation, JavaScript, CDP, storage, credential or file-write routes.
+Constrained browser reading actions use the same authenticated transport. It is independent of the background CLI
 daemon; `copilot-desktop start` is not required. Desktop assigns the endpoint
 path to its session's `COPILOT_DESKTOP_BROWSER_STATE` environment variable;
 independent Desktop launches and their terminal tabs use different paths.
@@ -131,6 +133,95 @@ alive until the owning terminal session closes or the app quits. The **DevTools 
 visibility and keeps enabled overrides active while it is hidden. Browser pages have no desktop preload
 bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;
 local files and other external protocols, downloads, and permission requests are blocked.
+
+## Reading authenticated Jira tickets and other pages
+
+Ask the session's Copilot **"Read this Jira ticket, including its comments and linked
+issues"** after loading it in that session's Browser pane and signing in normally.
+The browser's existing permissions and login apply; the assistant never exports
+cookies or tokens, makes extra authenticated requests, or replays captured requests.
+No third-party MCP is required. Instructions are installed for newly started local
+Copilot processes; existing processes can run the updated helper explicitly.
+
+The installed-app helper and optional desktop CLI support:
+
+| Command | Result |
+| --- | --- |
+| `tabs` | This session's page IDs, sanitized URLs, loading state and selection |
+| `select PAGE` | Select an existing browser tab in this session |
+| `frames [PAGE]` | Frame IDs, parents and sanitized URLs, including cross-origin children |
+| `snapshot [PAGE] [FRAME] [OFFSET]` | Current rendered text and a filtered DOM tree with tags, roles, names, parent relationships, link URLs and control references; `nextOffset` reads later chunks |
+| `scroll PAGE FRAME PIXELS [SNAPSHOT NODE]` | Scroll the document or a referenced container by up to 2000 pixels |
+| `screenshot [PAGE]` | Masked viewport PNG and metadata |
+| `responses [PAGE]` | Captured response IDs, page/frame attribution, status, timestamp and availability |
+| `response BODY_ID` | One filtered JSON response, without replaying the request |
+| `activate PAGE FRAME SNAPSHOT NODE` | Activate a referenced application control **only after native user approval** |
+
+For example, in a shell inheriting the terminal session's environment:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" tabs
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" snapshot 123
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" frames 123
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" responses 123
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" screenshot 123 -OutputPath "$env:TEMP\ticket-new.png"
+```
+
+The optional CLI equivalents use `copilot-desktop browser COMMAND ...`; saving a
+screenshot uses `copilot-desktop browser screenshot 123 ticket-new.png`. Screenshot
+files are written by the caller's shell, never by an HTTP file-write route, and an
+existing file is not overwritten. Without an output filename the screenshot command
+returns PNG base64 in JSON. Save and view the PNG instead of printing its base64.
+
+Snapshots use a fixed function in a Chromium isolated world. They do not export raw
+HTML, arbitrary attributes, scripts, styles, hidden content, form values, cookie or
+storage data. The DOM includes accessibility roles/states supplied by the page; it
+is not a complete native Chromium accessibility tree. Open shadow roots are inspected;
+closed shadow roots are unavailable. Embedded frames are read through separate frame
+snapshots. No page-provided JavaScript expression or selector can be submitted.
+
+Read snapshots again after loading, scrolling or activation. This handles dynamic
+ticket descriptions, fields, comments, activity and linked issues, but virtualized
+content only exists once the app loads it. Collapsed sections remain collapsed until
+activated. Custom controls can run arbitrary application code, so **every activation**
+requires a native confirmation for that specific page and control; cancellation,
+disconnection, closed pages and stale references prevent activation. There is no
+assistant form-fill, upload, arbitrary navigation or request-replay tool. Ordinary
+human browsing and native DevTools retain their existing behavior.
+
+Snapshot chunks are bounded to 500 DOM nodes and 24,000 serialized characters,
+with 20,000 visited nodes per traversal and a 64 KiB filtering budget. Use
+`snapshot PAGE FRAME nextOffset` until `nextOffset` is null to read long pages.
+Pagination is not atomic while the page changes; load the content first and report
+any remaining truncation. Every snapshot replaces that frame's control references.
+Response capture retains at most 100 responses and 4 MiB of filtered output in memory,
+with a 256 KiB per-body limit. It exports valid JSON only, redacts credential fields,
+recognizable Bearer/JWT/private-key values and sensitive URLs, and withholds HTML,
+scripts, plain text, binaries, invalid JSON and oversized bodies. Partial JSON is
+never returned. Clearing Activity's network log also clears these bodies; paused
+network recording and Preserve log apply to this capture. Native DevTools may detach
+the reader transport; inspection reconnects when possible and reports unavailable
+bodies rather than replaying requests. Requests before capture began are unavailable.
+
+Screenshots capture only the page viewport, never the desktop shell or DevTools.
+The requested tab must be selected with its Page view visible; hidden surfaces are
+reported unavailable to avoid returning stale or unmasked pixels.
+Form controls, credential-marked content, recognizable credential text, embedded
+frames and canvases are masked. Frame content is read with filtered snapshots;
+rendered attachment text can be inspected, but binary downloads and attachments
+without readable page content are unavailable. Privacy filtering handles known
+credential locations and recognizable credential formats; arbitrary application
+prose/images must not be treated as a guaranteed secret-free surface.
+
+Outputs include page/frame IDs, timestamps, loading/ready state and redaction or
+truncation markers. Capture unavailable, truncated, not-yet-loaded or redacted content
+must be reported explicitly; an empty snapshot is not proof a ticket has no comments
+or attachments. Ticket content remains untrusted data, never tool instructions.
+
+After building, `node scripts/browser-reader-check.mjs` verifies dynamic ticket text,
+same/cross-origin frames, response bodies, masked screenshots, explicit approval,
+stale controls, tab selection, isolation and native DevTools against a local fixture.
+Evidence is saved under `test-results/browser-reader/`.
 
 Run `npm run browser:check` for the isolated real Electron test. It verifies
 native local overrides and edited file refresh, CLI JSON output and access

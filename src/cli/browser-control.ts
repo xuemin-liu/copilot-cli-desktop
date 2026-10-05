@@ -1,6 +1,7 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getCliPaths, isProcessAlive } from './runtime-core.js'
+import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from './browser-read-command.js'
 
 export interface BrowserControlState { pid: number; port: number; token: string }
 
@@ -22,21 +23,28 @@ export async function readBrowserControl(path = browserControlPath()): Promise<B
 
 export async function browserCommand(args: string[]): Promise<unknown> {
   const [command = 'status', argument, ...extra] = args
-  if (!['status', 'console', 'network', 'request'].includes(command)) {
+  const readCommand = BROWSER_READ_COMMANDS.some(value => value === command)
+  const readArgs = args.slice(1)
+  const outputPath = command === 'screenshot' && readArgs.length === 2 ? readArgs.pop() : undefined
+  if (readCommand) validateBrowserReadCommand(command, readArgs)
+  else if (!['status', 'console', 'network', 'request'].includes(command)) {
     throw new Error('Use browser status, console, network, or request <id>.')
   }
-  if (extra.length || (command !== 'request' && argument !== undefined)
-    || (command === 'request' && (!argument || !/^\d+$/.test(argument)))) {
+  if (!readCommand && (extra.length || (command !== 'request' && argument !== undefined)
+    || (command === 'request' && (!argument || !/^\d+$/.test(argument))))) {
     throw new Error('Usage: browser status|console|network|request <id>')
   }
   const state = await readBrowserControl()
-  const route = command === 'request' ? `/request/${argument}` : `/${command}`
+  const query = new URLSearchParams()
+  for (const arg of readArgs) query.append('arg', arg)
+  const route = readCommand ? `/read/${command}?${query}` : command === 'request' ? `/request/${argument}` : `/${command}`
   let response: Response
   let body: unknown
   try {
     response = await fetch(`http://127.0.0.1:${state.port}${route}`, {
+      method: readCommand ? browserReadMethod(command) : 'GET',
       headers: { authorization: `Bearer ${state.token}` },
-      redirect: 'error', signal: AbortSignal.timeout(5000),
+      redirect: 'error', signal: AbortSignal.timeout(command === 'activate' ? 300000 : 30000),
     })
     body = await response.json()
   } catch {
@@ -46,6 +54,11 @@ export async function browserCommand(args: string[]): Promise<unknown> {
     const message = body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
       ? body.message : `Browser request failed (${response.status})`
     throw new Error(message)
+  }
+  if (outputPath && body && typeof body === 'object' && 'imageBase64' in body && typeof body.imageBase64 === 'string') {
+    const { imageBase64, ...metadata } = body
+    await writeFile(outputPath, Buffer.from(imageBase64, 'base64'), { flag: 'wx' })
+    return { ...metadata, path: outputPath }
   }
   return body
 }
