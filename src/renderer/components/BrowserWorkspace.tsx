@@ -3,6 +3,7 @@ import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
+import { BrowserIcon } from './Icons.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -106,7 +107,8 @@ export function BrowserWorkspace({ children, tabId, active = true, obscured = fa
   const root = useRef<HTMLDivElement>(null)
   const dragging = useRef<number | null>(null)
   const changeSplit = (value: number): void => setSplit(Math.min(75, Math.max(25, value)))
-  const toggle = <button type="button" className="session-browser-toggle" aria-expanded={open} disabled={!active} onClick={() => setOpen(value => !value)}>{open ? 'Hide browser' : 'Open browser'}</button>
+  const toggleLabel = open ? 'Hide browser' : 'Open browser'
+  const toggle = <button type="button" className="icon-button session-browser-toggle" aria-expanded={open} aria-label={toggleLabel} title={toggleLabel} disabled={!active} onClick={() => setOpen(value => !value)}><BrowserIcon /></button>
   return <div className="browser-workspace">
     {renderHeader ? renderHeader(toggle) : <div className="browser-workspace-toolbar">{toggle}</div>}
     <div ref={root} className="browser-workspace-content" style={{ gridTemplateColumns: open && active ? `minmax(0, ${split}fr) 6px minmax(0, ${100 - split}fr)` : 'minmax(0, 1fr)' }}>

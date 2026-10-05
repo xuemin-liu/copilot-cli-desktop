@@ -4,6 +4,7 @@ import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { TerminalPane } from './TerminalPane.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
+import { ForkIcon } from './Icons.js'
 
 interface SessionWorkspaceProps {
   tabs: DesktopSessionTab[]
@@ -65,9 +66,9 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               {tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
               ) : !tab.remote && (
-                <button type="button" className="session-fork" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
+                <button type="button" className="icon-button session-fork" aria-label="Fork into side chat" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'completed' || tab.status === 'crashed'}
                   title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
-                  onClick={() => onFork(tab)}>Fork into side chat</button>
+                  onClick={() => onFork(tab)}><ForkIcon /></button>
               )}
               {!tab.remote && (
                 <button type="button" className="icon-button session-restart" disabled={busy} onClick={() => onRestart(tab.id)}

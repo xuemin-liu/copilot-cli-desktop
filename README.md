@@ -32,7 +32,7 @@ handle, only input/output/resize events.
   grouped or flat session views, manual/last-activity ordering, named recent
   workspace profiles, manual session naming, attachment-aware session
   creation, and restored session tabs.
-- **Fork into side chat** keeps a main conversation on the left and an independent,
+- The **Fork into side chat** button (branch icon in the session header) keeps a main conversation on the left and an independent,
   resizable conversation on the right. Side chats use read/search-only model tools,
   including after restart, and can be closed without stopping the main session.
 - **Debug browser** opens your web app beside the terminal, with native Chromium
@@ -117,7 +117,7 @@ Run `pnpm popout:check` for the isolated real Electron/CLI regression check
 
 ## Side chats
 
-Click **Fork into side chat** above a local terminal, check the source session UUID,
+Click the **Fork into side chat** button (branch icon) in the header above a local terminal, check the source session UUID,
 and choose **Fork side chat**. The right-hand pane has its own terminal and input;
 drag the divider (or focus it and use the arrow keys) to resize it. One side chat
 can be open per main tab. Both panes count toward the 20-tab limit.

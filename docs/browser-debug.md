@@ -1,6 +1,6 @@
 # Debug browser and Local Overrides
 
-Select **Open browser** in the terminal session's header, then enter a hostname
+Select the **Open browser** button (window icon) in the terminal session's header, then enter a hostname
 or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
 addresses and development hosts (single-label names, `.localhost`, `.local`,
 `.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
@@ -126,7 +126,7 @@ daemon; `copilot-desktop start` is not required. Desktop assigns the endpoint
 path to its session's `COPILOT_DESKTOP_BROWSER_STATE` environment variable;
 independent Desktop launches and their terminal tabs use different paths.
 
-**Hide browser** hides the pane and keeps its page, DevTools state, and capture
+The same button, now labelled **Hide browser**, hides the pane and keeps its page, DevTools state, and capture
 alive until the owning terminal session closes or the app quits. The **DevTools / Overrides** button toggles DevTools
 visibility and keeps enabled overrides active while it is hidden. Browser pages have no desktop preload
 bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;

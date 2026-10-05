@@ -780,7 +780,9 @@ button:disabled {
 .session-pane-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-pane-header button { padding: 4px 8px; font-size: 12px; }
 .session-pane-header .icon-button { flex: 0 0 28px; padding: 0; font-size: 17px; }
-.session-fork { min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; }
+.icon-button .button-icon { flex: none; }
+.session-browser-toggle[aria-expanded="true"] { background: #1f3358; color: #9db9f5; }
 .side-chat-badge { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: #91c8bc; font-size: 11px; white-space: nowrap; }
 .session-terminal { flex: 1; position: relative; min-height: 0; }
 .session-window { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
