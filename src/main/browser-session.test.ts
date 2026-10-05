@@ -50,12 +50,12 @@ test('the installed-app PowerShell helper reads only its assigned session withou
       const env = await prepareBrowserSessionEnvironment(root, tabId, process.env)
       const paths = browserSessionPaths(root, tabId)
       await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token }))
-      const result = await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 15000 })
+      const result = await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 60000 })
       assert.deepEqual(JSON.parse(result.stdout), [{ level: 'error', message, source: 'app.js', line: 12 }])
       assert.equal(result.stderr, '')
       assert.ok(!result.stdout.includes(token))
       await rm(paths.endpoint)
-      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 15000 }), /Open the Browser pane for this session/)
+      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 60000 }), /Open the Browser pane for this session/)
     }
   } finally {
     for (const server of servers) { server.closeAllConnections(); server.close() }

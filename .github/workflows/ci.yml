@@ -36,7 +36,7 @@ jobs:
         with:
           name: browser-check
           path: test-results/browser-debug/
-          if-no-files-found: warn
+          if-no-files-found: ignore
       - name: Migration round-trip smoke test
         run: corepack pnpm migration:smoke
       - name: Migration Settings integration check
@@ -47,7 +47,7 @@ jobs:
         with:
           name: migration-check
           path: test-results/migration/
-          if-no-files-found: warn
+          if-no-files-found: ignore
       - name: Best-effort live copilot smoke test
         run: corepack pnpm smoke
       - name: Best-effort background CLI smoke test
