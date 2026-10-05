@@ -279,8 +279,9 @@ it on the new page to test there. Hiding the pane or selecting another browser
 view also stops the run and resets Testing mode. Navigating within the selected page preserves
 Testing mode for the same HTTP(S) origin. Navigation and input are bound to the
 origin where Testing mode was enabled; other destinations and cross-origin frame
-inputs fail. Page-driven navigation and redirects outside that origin are blocked
-during a run. To test another site, stop testing, open it yourself and enable
+inputs fail. Main-page navigation and redirects outside that origin are blocked
+during a run; embedded third-party frames may load and redirect for read-only
+inspection. To test another site, stop testing, open it yourself and enable
 Testing mode there. A manual navigation to another origin disables Testing mode.
 Popup activation changes the selected page and stops the old run.
 A run stops at its first failed step. Test actions may change the app's data; a

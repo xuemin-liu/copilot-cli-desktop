@@ -123,10 +123,10 @@ export class BrowserReader {
     contents.on('did-start-navigation', details => {
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
     })
-    // Navigation caused by page input and HTTP redirects must obey the same
-    // origin grant as explicit navigate steps, before sending the new request.
-    const restrictNavigation = (event: { preventDefault: () => void }, url: string): void => {
-      if (!this.testAbort || this.testPageId !== contents.id || this.httpOrigin(url) === this.testOrigin) return
+    // Main-page navigation must obey the origin grant. Embedded pages may load
+    // other origins; the separate frame and focus guards still reject their input.
+    const restrictNavigation = (event: { preventDefault: () => void; isMainFrame: boolean }, url: string): void => {
+      if (!event.isMainFrame || !this.testAbort || this.testPageId !== contents.id || this.httpOrigin(url) === this.testOrigin) return
       event.preventDefault(); this.testBlocked = true
     }
     contents.on('will-frame-navigate', event => restrictNavigation(event, event.url))

@@ -47,6 +47,8 @@ if (!process.versions.electron) {
     const site = createServer((request, response) => {
       response.setHeader('content-type', 'text/html')
       if (request.url === '/origin-redirect') { response.writeHead(302, { location: foreignUrl }); response.end(); return }
+      if (request.url === '/frame-origin-redirect') { response.writeHead(302, { location: `http://localhost:${foreign.address().port}/frame` }); response.end(); return }
+      if (request.url === '/redirect-frames') { response.end('<h1 id="ok">App ready</h1><iframe src="/frame-origin-redirect"></iframe>'); return }
       if (request.url === '/never-load') { navigationWaiting = true; return }
       if (request.url === '/redirect-target') { response.end('<h1>Changed document</h1><button id="redirect-target" onclick="fetch(\'/write\',{method:\'POST\'})">Unexpected target</button>'); return }
       if (request.url === '/write') { writes++; response.end('written'); return }
@@ -193,7 +195,8 @@ if (!process.versions.electron) {
       await until(() => navigationWaiting, 'navigation started'); browser.action('testing:off')
       assert.equal((await (await pending).json()).status, 'cancelled')
       browser.action('testing:on')
-      await browser.navigate(url + 'frames')
+      const embedded = await execute([step('navigate', 'Open app with third-party frame', { url: url + 'frames' }), visible('h1')])
+      assert.equal(embedded.status, 'passed', JSON.stringify(embedded))
       const frames = (await browserCommand(['frames'])).frames
       assert.equal(frames.length, 3)
       const sameFrame = frames.find(frame => frame.url === url + 'frame')
@@ -231,6 +234,14 @@ if (!process.versions.electron) {
       await browser.view.webContents.executeJavaScript('document.querySelector("#frame-cover").remove()')
       const isolated = await execute([visible('#button', { frame: String(second.view.webContents.id) })])
       assert.equal(isolated.status, 'failed'); assert.match(isolated.steps[0].reason, /Frame is unavailable/)
+      const redirectedFrame = await execute([step('navigate', 'Open app with redirected third-party frame', { url: url + 'redirect-frames' }), visible('#ok')])
+      assert.equal(redirectedFrame.status, 'passed', JSON.stringify(redirectedFrame))
+      const child = (await browserCommand(['frames'])).frames.find(frame => frame.url.startsWith(`http://localhost:${foreign.address().port}/`))
+      assert.ok(child, 'the third-party iframe redirect completes')
+      assert.equal((await execute([visible('#result', { frame: child.id })])).status, 'passed')
+      const redirectedInput = await execute([step('fill', 'Redirected frame input stays blocked', { selector: '#field', frame: child.id, value: 'unrelated-env-secret-value-123' }), visible('#ok')])
+      assert.equal(redirectedInput.status, 'failed', JSON.stringify(redirectedInput)); assert.match(redirectedInput.steps[0].reason, /origin/)
+      assert.deepEqual(receivedValues, [])
       const testRoute = `http://127.0.0.1:${controller.port}/test`
       assert.equal((await fetch(testRoute, { method: 'POST', body: '{}' })).status, 401)
       assert.equal((await fetch(testRoute, { method: 'POST', headers: { origin: 'https://untrusted.test', authorization: `Bearer ${controller.token}` } })).status, 403)
@@ -249,7 +260,8 @@ if (!process.versions.electron) {
         unicode: true, hover: true, openShadowRoot: true, contentEditable: true, navigationCancellation: true, hiddenCancellation: true,
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,
         environmentInputsRestricted: true, originBoundNavigation: true, crossOriginRedirectBlocked: true, crossOriginLinkBlocked: true,
-        crossOriginInputBlocked: true, crossOriginFocusStealingBlocked: true, manualOriginChangeRevokesGrant: true, explicitOriginGrant: true }, null, 2))
+        crossOriginInputBlocked: true, crossOriginFocusStealingBlocked: true, manualOriginChangeRevokesGrant: true, explicitOriginGrant: true,
+        thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
   }
