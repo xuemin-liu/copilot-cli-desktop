@@ -217,10 +217,10 @@ export class BrowserReader {
     if (command === 'tabs') return { tabs: this.options.pages().map(contents => ({ id: contents.id,
       url: readableUrl(contents.getURL()), active: contents.id === this.options.active(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
     if (command === 'responses') {
-      const pageId = args[0] ? this.page(args[0]).contents.id : undefined
+      const pageId = this.page(args[0]).contents.id
       return { recording: this.options.recording(), limit: MAX_RESPONSES, timestamp: new Date().toISOString(),
-        capture: [...this.readers].filter(([id]) => pageId === undefined || id === pageId).map(([id, page]) => ({ pageId: id, state: page.capture })),
-        responses: [...this.responses.values()].filter(record => pageId === undefined || record.pageId === pageId).map(({ data: _data, ...metadata }) => metadata),
+        capture: [...this.readers].filter(([id]) => id === pageId).map(([id, page]) => ({ pageId: id, state: page.capture })),
+        responses: [...this.responses.values()].filter(record => record.pageId === pageId).map(({ data: _data, ...metadata }) => metadata),
         limitations: ['Only captured JSON is exported. Earlier, cleared, oversized, non-JSON and unretained responses are unavailable; requests are never replayed.'] }
     }
     if (command === 'response') {

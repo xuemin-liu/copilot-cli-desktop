@@ -64,6 +64,17 @@ test('PowerShell page-reading commands preserve scoped arguments, method and scr
     assert.equal(seen[3]?.method, 'POST')
     assert.equal(seen[4]?.url, '/read/response?arg=b123-7')
     assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png')
+    for (const command of ['snapshot', 'frames', 'responses']) {
+      const result = await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, command], { env, windowsHide: true, timeout: 60000 })
+      assert.equal(JSON.parse(result.stdout).state, 'available')
+      assert.equal(new URL(seen.at(-1)!.url!, 'http://127.0.0.1').pathname, `/read/${command}`)
+      assert.equal(new URL(seen.at(-1)!.url!, 'http://127.0.0.1').search, '')
+    }
+    const currentPageImage = join(root, 'current-page.png')
+    await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '-OutputPath', currentPageImage], { env, windowsHide: true, timeout: 60000 })
+    assert.equal(new URL(seen.at(-1)!.url!, 'http://127.0.0.1').pathname, '/read/screenshot')
+    assert.equal(new URL(seen.at(-1)!.url!, 'http://127.0.0.1').search, '')
+    assert.equal(await readFile(currentPageImage, 'utf8'), 'fixture-png')
     await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '123', '-OutputPath', join(root, 'image.png')], { env, windowsHide: true, timeout: 60000 }))
     assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png', 'screenshots cannot overwrite a file')
     const requestCount = seen.length

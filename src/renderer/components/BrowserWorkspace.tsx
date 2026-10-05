@@ -30,9 +30,12 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       setUrl(value => switchedPage || document.activeElement !== urlInput.current || value === previous ? next.url : value)
     }
   }
-  const run = (promise: Promise<BrowserDebugState>): void => {
+  const run = (promise: Promise<BrowserDebugState>, focusAddress = false): void => {
     setError(null)
-    void promise.then(accept).catch(error => setError(errorMessage(error)))
+    void promise.then(next => {
+      accept(next)
+      if (focusAddress) urlInput.current?.focus()
+    }).catch(error => setError(errorMessage(error)))
   }
   useEffect(() => {
     if (!active) return
@@ -73,14 +76,16 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <button type="submit">Go</button>
       <output className="browser-zoom" aria-label="Browser zoom" title="Selected page zoom">{Math.round(state.zoomFactor * 100)}%</output>
     </form>
-    {state.pages.length > 1 && <div className="browser-pages" role="tablist" aria-label="Browser pages">
+    <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
         <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.url}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.title}</button>
-        <button type="button" aria-label={`Close browser page ${page.title}`}
+        <button type="button" aria-label={`Close browser page ${page.title}`} disabled={state.pages.length <= 1}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
       </div>)}
-    </div>}
+      <button type="button" className="browser-new-page" aria-label="New browser page" title="New page" disabled={state.pages.length >= 32}
+        onClick={() => run(window.copilotDesktop.browserAction(tabId, 'new-page'), true)}>+</button>
+    </div>
     <div className="browser-tabs" role="tablist" aria-label="Browser views">
       {(['page', 'console', 'network', 'devtools', 'activity'] as const).map(name => <button type="button" key={name} className={name === 'devtools' ? 'browser-tools-toggle' : undefined} role="tab" aria-selected={state.view === name}
         onClick={() => run(window.copilotDesktop.browserAction(tabId, `view:${name}`))}>
