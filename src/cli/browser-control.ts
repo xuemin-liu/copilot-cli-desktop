@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { getCliPaths, isProcessAlive } from './runtime-core.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from './browser-read-command.js'
+import { executeBrowserTest, loadBrowserTest } from './browser-test-client.js'
 
 export interface BrowserControlState { pid: number; port: number; token: string }
 
@@ -32,6 +33,22 @@ export async function readBrowserControl(path = browserControlPath()): Promise<B
 
 export async function browserCommand(args: string[]): Promise<unknown> {
   const [command = 'status', argument, ...extra] = args
+  if (command === 'test') {
+    if (!argument || extra.length > 1) throw new Error('Usage: browser test <absolute-plan.json> [new-absolute-report.json]')
+    const plan = await loadBrowserTest(argument)
+    const state = await readBrowserControl()
+    return executeBrowserTest(plan, argument, extra[0], async value => {
+      let response: Response
+      try {
+        response = await fetch(`http://127.0.0.1:${state.port}/test`, { method: 'POST',
+          headers: { authorization: `Bearer ${state.token}`, 'content-type': 'application/json' }, body: JSON.stringify(value),
+          redirect: 'error', signal: AbortSignal.timeout(315000) })
+      } catch { throw new Error('Test connection failed. Inspect Last test in the browser before rerunning actions.') }
+      const body = await response.json()
+      if (!response.ok) throw new Error(typeof body?.message === 'string' ? body.message : 'Browser test failed.')
+      return body
+    })
+  }
   const readCommand = BROWSER_READ_COMMANDS.some(value => value === command)
   const readArgs = args.slice(1)
   const outputPath = command === 'screenshot' && (readArgs.length === 2

@@ -513,6 +513,11 @@ button:disabled {
 .browser-footer details { margin-top: 5px; }
 .browser-footer summary { cursor: pointer; }
 .browser-footer p { line-height: 1.5; }
+.browser-testing { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 5px 8px; font-size: 11px; color: #929baa; }
+.browser-testing button { flex-shrink: 0; }
+.browser-testing span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-testing button[aria-pressed="true"] { color: #ffcc80; border-color: #ffcc80; }
+.browser-test-report { max-height: 180px; overflow: auto; }
 
 .terminal-pane {
   position: absolute;

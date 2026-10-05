@@ -128,7 +128,8 @@ to the desired session's endpoint; it does not select whichever browser is focus
 
 Each session owns a private loopback API with a random bearer token saved in its
 private Desktop session directory. It accepts no browser Origin requests and exposes
-no arbitrary navigation, JavaScript, CDP, storage, credential or file-write routes.
+no arbitrary JavaScript, CDP, storage, credential or file-write routes. Test plans
+can navigate to HTTP/HTTPS pages only while Testing mode is enabled.
 Constrained browser reading actions use the same authenticated transport. It is independent of the background CLI
 daemon; `copilot-desktop start` is not required. Desktop assigns the endpoint
 path to its session's `COPILOT_DESKTOP_BROWSER_STATE` environment variable;
@@ -200,10 +201,11 @@ snapshots. No page-provided JavaScript expression or selector can be submitted.
 Read snapshots again after loading, scrolling or activation. This handles dynamic
 ticket descriptions, fields, comments, activity and linked issues, but virtualized
 content only exists once the app loads it. Collapsed sections remain collapsed until
-activated. Custom controls can run arbitrary application code, so **every activation**
+activated. In ordinary reading mode, custom controls can run arbitrary application code, so **every activation**
 requires a native confirmation for that specific page and control; cancellation,
 disconnection, closed pages and stale references prevent activation. There is no
-assistant form-fill, upload, arbitrary navigation or request-replay tool. Ordinary
+form-fill or upload in reading mode; described tests use the separate runner below.
+There is no arbitrary script or request-replay tool. Ordinary
 human browsing and native DevTools retain their existing behavior.
 
 Snapshot chunks are bounded to 500 DOM nodes and 24,000 serialized characters,
@@ -253,3 +255,104 @@ evidence in `test-results/browser-persistence/`.
 After building, `node scripts/browser-debug-check.mjs --copilot-console` also
 makes one real Copilot prompt request against the isolated fixture and verifies
 that a natural-language console question reports the live exception.
+
+## General web-app automation testing
+
+1. Open the web app in the session browser and select the page to test.
+2. Enable **Testing mode** below the browser views.
+3. Tell the session assistant the steps, inputs, and expected results. For example:
+   “Search for ITEM-42, open its details with a double-click, and verify that the
+   title is ITEM-42 details, the preview has loaded, and no error banner appears.”
+4. The assistant inspects the page, creates and runs a test plan, checks your
+   expectations, and reports passed, failed, and skipped checks with evidence.
+
+This works with general web apps. There is no viewer-specific workflow. Existing
+login and storage are reused. The assistant receives test instructions when a
+local CLI session starts; start a new CLI session after updating Desktop to load
+the new guidance. You provide the test description; the assistant prepares the
+structured plan. A user does not need to write selectors or JSON manually.
+
+Testing mode authorizes the described test's interactions without a confirmation
+per step. **Stop testing** cancels the run and disables further tests. Selecting,
+creating, or closing the active page also cancels and resets Testing mode; re-enable
+it on the new page to test there. Hiding the pane or selecting another browser
+view also stops the run and resets Testing mode. Navigating within the selected page preserves
+Testing mode. Popup activation changes the selected page and stops the old run.
+A run stops at its first failed step. Test actions may change the app's data; a
+failed or cancelled run does not undo completed steps. Keep the Page view visible
+for input and screenshots. Browser sessions remain isolated from each other.
+
+The runner supports navigation, click, double-click, hover, text entry and replacement,
+single-choice select elements, keyboard keys, document/container scrolling, waits,
+assertions, and screenshots. CSS selectors plus optional visible text identify
+targets. Exactly one visible enabled target is required for input. Covered targets
+are rejected. Pointer actions recheck the target after hover-driven layout changes
+and stop if the element is replaced or does not stabilize. Open shadow roots and same/cross-origin frames are supported; use
+current frame IDs from `frames`. Closed shadow roots, rotated/skewed frames,
+uploads, downloads, drag-and-drop, and arbitrary JavaScript are unavailable.
+
+Assertions check visibility, hidden state, visible element count, text containment,
+exact field value, checkbox/radio state, URL containment, decoded images, or a
+nonempty 2D canvas. Waits poll the same conditions. A plan must include an assertion;
+the assistant must cover each user expectation or explain what remains unverified.
+An image loading or a canvas painting does not establish correct visual content.
+For WebGL and visual expectations, use the app's ready indicator and have the
+assistant inspect a saved screenshot against the expected result. A missing or
+unverifiable signal must not be reported as a pass.
+
+For direct use, create a local UTF-8 plan:
+
+```json
+{
+  "description": "Find and open an item",
+  "expected": "The ITEM-42 details heading is displayed",
+  "steps": [
+    { "action": "fill", "label": "Search", "selector": "#search", "value": "ITEM-42" },
+    { "action": "press", "label": "Submit search", "selector": "#search", "key": "Enter" },
+    { "action": "waitFor", "label": "Wait for result", "selector": "[data-testid=search-result]", "text": "ITEM-42", "condition": "visible" },
+    { "action": "doubleClick", "label": "Open result", "selector": "[data-testid=search-result]", "text": "ITEM-42" },
+    { "action": "assert", "label": "Correct heading", "selector": "h1", "condition": "text", "expected": "ITEM-42 details" },
+    { "action": "screenshot", "label": "Capture result" }
+  ]
+}
+```
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" test-targets
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" test "C:\Temp\plan.json" -OutputPath "C:\Temp\new-report.json"
+```
+
+The optional CLI equivalents are `copilot-desktop browser test-targets [FRAME_ID]`
+and `copilot-desktop browser test C:\Temp\plan.json C:\Temp\new-report.json`.
+`test-targets [FRAME_ID]` returns bounded visible target metadata and CSS selector
+suggestions without form values. Suggestions may need refinement for uniqueness.
+Sensitive fill inputs may use `"valueFromEnv": "USER_SUPPLIED_ENV_NAME"` instead of
+`value`; only that explicit variable is resolved by the caller. Credentials are
+sent in the private POST body, never URL arguments. Input values are omitted from
+the report and redacted if repeated in its labels. The HTTP service accepts no
+file paths; the caller saves the report and PNGs. Outputs use new local absolute
+paths and never overwrite existing files. If no output path is given, a unique
+report filename is generated beside the plan. On a transport failure, inspect
+**Last test** before rerunning actions; their result may already have taken effect.
+
+Test screenshots mask form controls, credential-marked elements, recognizable
+credential text, and embedded frames, but include canvas pixels for visual
+evidence. Arbitrary application text/images can contain data; masking is not a
+guarantee that every secret is detected. Frame screenshots are masked; read frame
+snapshots and assert application readiness for embedded content.
+
+Plans are limited to 128 KiB, 50 steps, and five screenshots of up to 2 MiB each.
+The default run deadline is 120 seconds; `timeoutMs` can set up to 300 seconds.
+Waits default to 30 seconds and assertions to 5 seconds; each can set `timeoutMs`
+up to 60 seconds. Supported keys: Enter, Tab, Escape, Space, Backspace, Delete,
+arrow keys, Home, End, PageUp and PageDown. `scroll` takes `pixels` between -2000
+and 2000 and an optional container `selector`. `select` takes an option `value`.
+`frame` and `text` are optional on target-based steps. `checked` expects a boolean;
+`count` expects an integer; `text`, `value`, and `url` expect strings. A `url`
+condition has no selector. Navigate uses `url`; screenshot takes no target.
+
+After building, `node scripts/browser-test-check.mjs` runs a real isolated Electron
+workflow and verifies native input, expected results, screenshots, the installed
+PowerShell helper, frames, cancellation, access control, and prevention of
+subsequent writes after a failure. Evidence is saved in
+`test-results/browser-testing/` and included in `npm run browser:check`.

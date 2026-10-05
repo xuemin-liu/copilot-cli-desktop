@@ -168,6 +168,22 @@ if (!process.versions.electron) {
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "125%"'), 'actual page zoom in toolbar')
       browser.view.webContents.setZoomFactor(1)
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "100%"'), 'reset page zoom in toolbar')
+      await ui('document.querySelector(".browser-testing button").click()')
+      await until(() => browser.snapshot.testing.enabled, 'testing mode UI enables selected page')
+      const testingHeight = browser.view.getBounds().height
+      const testPlan = join(artifacts, `ui-test-${Date.now()}.json`)
+      await writeFile(testPlan, JSON.stringify({ description: 'Check this browser page', expected: 'The page body is visible', steps: [
+        { action: 'waitFor', label: 'Long progress label '.repeat(10), selector: '#ui-test-ready', condition: 'visible', timeoutMs: 10000 },
+        { action: 'assert', label: 'Page body visible', selector: 'body', condition: 'visible' },
+      ] }))
+      const testResult = browserCommand(['test', testPlan])
+      await until(() => ui('document.querySelector(".browser-testing span").textContent.includes("Long progress label")'), 'running step in renderer')
+      assert.equal(browser.view.getBounds().height, testingHeight, 'progress labels must not resize the page during test input')
+      await browser.view.webContents.executeJavaScript('document.body.insertAdjacentHTML("beforeend", "<div id=ui-test-ready>Ready</div>")')
+      assert.equal((await testResult).status, 'passed')
+      await until(() => ui('document.querySelector(".browser-test-report summary")?.textContent === "Last test: passed"'), 'test outcome in renderer')
+      await ui('document.querySelector(".browser-testing button").click()')
+      await until(() => !browser.snapshot.testing.enabled, 'stop testing UI disables selected page')
       // Manually added pages keep the original alive, share only this session's storage,
       // and make CLI reads follow the page selected by the user.
       {
@@ -206,9 +222,14 @@ if (!process.versions.electron) {
         }, 'manual page response capture')
         assert.ok(addedResponses.responses.every(entry => entry.pageId === addedId))
         assert.ok(addedResponses.capture.every(entry => entry.pageId === addedId))
+        const beforeConsole = await browserCommand(['console'])
         const addedStatus = await browserCommand(['status'])
-        assert.equal(addedStatus.consoleCount, (await browserCommand(['console'])).length)
-        assert.equal(addedStatus.networkCount, addedNetwork.length)
+        const afterConsole = await browserCommand(['console'])
+        const afterNetwork = await browserCommand(['network'])
+        // Requests/messages may arrive between HTTP reads. Bracket the status
+        // sample instead of comparing it to an older captured list exactly.
+        assert.ok(addedStatus.consoleCount >= beforeConsole.length && addedStatus.consoleCount <= afterConsole.length)
+        assert.ok(addedStatus.networkCount >= addedNetwork.length && addedStatus.networkCount <= afterNetwork.length)
         await until(() => ui(`document.querySelectorAll('.browser-pages [role="tab"]').length === 2`), 'manual page strip')
         await ui(`document.querySelectorAll('.browser-pages [role="tab"]')[0].click()`)
         await until(() => browser.snapshot.activePageId === originalId, 'manual page selection')
@@ -623,7 +644,10 @@ if (!process.versions.electron) {
       await until(() => ui('document.querySelector(".browser-activity").textContent.includes("Clear network")'), 'network activity controls')
       await setSelect('Request type', 'xhr')
       await ui('Array.from(document.querySelectorAll(".browser-activity label")).find(label => label.textContent === "Failed only").querySelector("input").click()')
-      await until(() => ui('document.querySelectorAll(".browser-network tbody tr").length > 0'), 'failed Fetch/XHR filter')
+      await until(() => ui(`(() => {
+        const text = document.querySelector('.browser-network')?.textContent ?? '';
+        return text.includes('/fail') && !text.includes('/api.json');
+      })()`), 'failed Fetch/XHR filter rendered')
       assert.ok((await ui('document.querySelector(".browser-network").textContent')).includes('/fail'))
       assert.ok(!(await ui('document.querySelector(".browser-network").textContent')).includes('/api.json'))
       await until(() => ui(`document.querySelector('[aria-label="Web app URL"]').value === ${JSON.stringify(url)}`), 'activity address and capture state refreshed')

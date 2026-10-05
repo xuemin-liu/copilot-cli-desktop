@@ -39,6 +39,7 @@ jobs:
             test-results/browser-debug/
             test-results/browser-persistence/
             test-results/browser-reader/
+            test-results/browser-testing/
           if-no-files-found: ignore
       - name: Migration round-trip smoke test
         run: corepack pnpm migration:smoke

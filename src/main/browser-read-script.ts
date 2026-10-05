@@ -145,7 +145,7 @@ export function browserReadScript(operation: string, args: Record<string, unknow
         if (++visited > 20000) { truncated = true; return }
         const directText = Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent ?? '').join(' ')
         const credentialText = credentials.test(directText) || /(?:password|token|secret|api[-_ ]?key|credential|cookie)\s*[:=]/i.test(directText)
-        if (sensitive(element) || valueControl(element) || credentialText || element.matches('iframe,object,embed,canvas')) cover(element)
+        if (sensitive(element) || valueControl(element) || credentialText || element.matches('iframe,object,embed') || (!args.includeCanvas && element.matches('canvas'))) cover(element)
         if (element.shadowRoot) walk(element.shadowRoot)
       }
     }

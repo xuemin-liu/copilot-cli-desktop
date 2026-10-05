@@ -37,7 +37,9 @@ handle, only input/output/resize events.
   including after restart, and can be closed without stopping the main session.
 - **Debug browser** opens your web app beside the terminal, with native Chromium
   DevTools and Local Overrides. Console and network activity are also available
-  through `copilot-desktop browser` commands, without an MCP server.
+  through `copilot-desktop browser` commands, without an MCP server. Testing mode
+  lets the assistant run user-described web-app workflows and check expected results,
+  with step reports and screenshots.
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a

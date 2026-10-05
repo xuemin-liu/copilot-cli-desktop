@@ -263,6 +263,8 @@ Usage:
   copilot-desktop browser responses [page-id]|response <body-id>
   copilot-desktop browser scroll <page-id> <frame-id> <pixels> [snapshot-id node-id]
   copilot-desktop browser activate <page-id> <frame-id> <snapshot-id> <node-id>
+  copilot-desktop browser test-targets [frame-id]
+  copilot-desktop browser test <absolute-plan.json> [new-absolute-report.json]
 
 The controller runs in the background and binds its private control API to
 127.0.0.1 only, with a random bearer token. One controller is supported per

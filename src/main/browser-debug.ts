@@ -12,6 +12,7 @@ import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry, BrowserView
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
 import { BrowserReader } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
+import { MAX_TEST_BYTES } from './browser-test-plan.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -82,7 +83,7 @@ export class BrowserDebug {
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
-    if (activate) { this.activePageId = contents.id; this.state.view = 'page' }
+    if (activate) { this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
       try { if (details.url && details.url !== 'about:blank') parseSafeHttpUrl(details.url) }
@@ -233,6 +234,7 @@ export class BrowserDebug {
 
   private refreshState(): void {
     if (this.disposed) return
+    this.state.testing = this.reader.testState
     const contents = this.view.webContents
     if (contents && !contents.isDestroyed()) {
       const page = this.activePage
@@ -300,6 +302,12 @@ export class BrowserDebug {
   }
 
   action(action: string): BrowserDebugState {
+    if (action === 'testing:on' || action === 'testing:off') {
+      if (this.disposed) throw new Error('Browser has closed')
+      if (action === 'testing:on') this.showView('page')
+      this.reader.setTesting(action === 'testing:on')
+      return this.snapshot
+    }
     if (action === 'new-page') {
       if (this.disposed) throw new Error('Browser has closed')
       if (this.pages.size >= MAX_PAGES) throw new Error('Close a browser page before opening another (32 pages maximum).')
@@ -330,7 +338,7 @@ export class BrowserDebug {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { this.activePageId = id; this.showView('page') }
+      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) this.reader.setTesting(false); this.activePageId = id; this.showView('page') }
       else if (this.pages.size > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -349,6 +357,7 @@ export class BrowserDebug {
   }
 
   private showView(view: BrowserViewMode): void {
+    if (view !== 'page') this.reader.setTesting(false)
     this.state.view = view
     const page = this.activePage
     page.devtools = ['console', 'network', 'devtools'].includes(view)
@@ -382,6 +391,7 @@ export class BrowserDebug {
   }
 
   setBounds(bounds: BrowserBounds | null): void {
+    if (!bounds) this.reader.setTesting(false)
     this.bounds = bounds
     this.layout()
   }
@@ -441,7 +451,7 @@ export class BrowserDebug {
     if (this.pages.size === 0) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
-    } else if (this.activePageId === id) { this.activePageId = this.pages.keys().next().value!; this.showView('page') }
+    } else if (this.activePageId === id) { this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
     if (primary) this.rememberUrl(this.pages.values().next().value!, this.pages.values().next().value!.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()
@@ -456,7 +466,7 @@ export class BrowserDebug {
   private async listen(): Promise<void> {
     const server = createServer((request, response) => {
       const send = (status: number, body: unknown): void => {
-        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         response.end(JSON.stringify(body))
       }
       const port = (server.address() as { port: number } | null)?.port
@@ -464,6 +474,26 @@ export class BrowserDebug {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { message: 'Forbidden' }); return }
       const authorization = request.headers.authorization ?? ''
       if (!constantTimeTokenEqual(authorization, `Bearer ${this.token}`)) { send(401, { message: 'Unauthorized' }); return }
+      if (request.url === '/test') {
+        if (request.method !== 'POST') { send(405, { message: 'Tests require POST.' }); return }
+        if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] ?? '')) { send(415, { message: 'Tests require JSON.' }); return }
+        const cancelled = new AbortController()
+        response.once('close', () => cancelled.abort())
+        void (async () => {
+          const chunks: Buffer[] = []; let bytes = 0
+          for await (const chunk of request) {
+            bytes += chunk.length
+            if (bytes > MAX_TEST_BYTES) { send(413, { message: 'Test plan exceeds 128 KiB.' }); return }
+            chunks.push(Buffer.from(chunk))
+          }
+          let plan: unknown
+          try { plan = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+          catch { send(400, { message: 'Invalid test JSON.' }); return }
+          const result = await this.reader.test(plan, cancelled.signal)
+          if (!response.destroyed) send(200, result)
+        })().catch(error => { if (!response.destroyed && !response.headersSent) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Test unavailable.') }) })
+        return
+      }
       if (request.url?.startsWith('/read/')) {
         const url = new URL(request.url, `http://127.0.0.1:${port}`)
         const command = url.pathname.slice(6)
