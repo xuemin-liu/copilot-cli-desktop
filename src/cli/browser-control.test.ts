@@ -46,11 +46,17 @@ test('screenshots reject network, device, relative and non-PNG output paths befo
   validateBrowserScreenshotPath(join(tmpdir(), 'ticket.PNG'))
 })
 
-test('CLI routes, authentication and friendly errors use a real loopback endpoint', async () => {
+test('CLI routes, authentication and friendly errors use a real loopback endpoint', async context => {
   const directory = await mkdtemp(join(tmpdir(), 'browser-command-'))
   const path = join(directory, 'browser.json')
   const previous = process.env.COPILOT_DESKTOP_BROWSER_STATE
   const token = 'b'.repeat(64)
+  const requestedUrls: string[] = []
+  const originalFetch = globalThis.fetch
+  context.mock.method(globalThis, 'fetch', (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    requestedUrls.push(String(input))
+    return originalFetch(input, init)
+  })
   let mode = 'json'
   const server = createServer((request, response) => {
     assert.equal(request.headers.authorization, `Bearer ${token}`)
@@ -68,8 +74,9 @@ test('CLI routes, authentication and friendly errors use a real loopback endpoin
     for (const command of ['status', 'console', 'network']) assert.deepEqual(await browserCommand([command]), { route: `/${command}` })
     assert.deepEqual(await browserCommand(['request', '123']), { route: '/request/123' })
     assert.deepEqual(await browserCommand(['snapshot', '123', 'FRAME']), { route: '/read/snapshot?arg=123&arg=FRAME' })
-    for (const command of ['snapshot', 'frames', 'responses']) {
+    for (const command of ['tabs', 'snapshot', 'frames', 'responses', 'screenshot']) {
       assert.deepEqual(await browserCommand([command]), { route: `/read/${command}` })
+      assert.equal(requestedUrls.at(-1), `http://127.0.0.1:${port}/read/${command}`, 'argument-free URLs must not depend on HTTP client query normalization')
     }
     assert.deepEqual(await browserCommand(['scroll', '123', 'FRAME', '-100']), { route: '/read/scroll?arg=123&arg=FRAME&arg=-100' })
     mode = 'image'

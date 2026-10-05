@@ -48,7 +48,7 @@ export async function browserCommand(args: string[]): Promise<unknown> {
   const state = await readBrowserControl()
   const query = new URLSearchParams()
   for (const arg of readArgs) query.append('arg', arg)
-  const route = readCommand ? `/read/${command}?${query}` : command === 'request' ? `/request/${argument}` : `/${command}`
+  const route = readCommand ? `/read/${command}${query.size ? `?${query}` : ''}` : command === 'request' ? `/request/${argument}` : `/${command}`
   let response: Response
   let body: unknown
   try {

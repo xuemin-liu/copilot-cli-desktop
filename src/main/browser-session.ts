@@ -43,7 +43,11 @@ try {
     throw 'Browser control state is stale or invalid. Reopen this session Browser pane.'
   }
   $browserRoute = if ($browserIsReadCommand) {
-    'read/' + $Command + '?' + (($Arguments | ForEach-Object { 'arg=' + [Uri]::EscapeDataString($_) }) -join '&')
+    $browserReadRoute = 'read/' + $Command
+    if ($Arguments.Count -gt 0) {
+      $browserReadRoute += '?' + (($Arguments | ForEach-Object { 'arg=' + [Uri]::EscapeDataString($_) }) -join '&')
+    }
+    $browserReadRoute
   } elseif ($Command -eq 'request') { 'request/' + $Arguments[0] } else { $Command }
   $browserMethod = if (@('select', 'scroll', 'activate') -contains $Command) { 'POST' } else { 'GET' }
   $browserTimeout = if ($Command -eq 'activate') { 300 } else { 30 }
