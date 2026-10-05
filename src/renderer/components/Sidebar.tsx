@@ -361,7 +361,7 @@ export function Sidebar({
           </svg>
         </button>
         {projectsOpen && createPortal(<div id={projectsId} ref={projectsPopover} className="sidebar-projects-popover"
-          role="dialog" aria-label="Projects">
+          role="dialog" aria-label="Projects" tabIndex={-1}>
           <div className="sidebar-projects-header">
             <strong>Projects</strong>
             <button type="button" className="icon-button" aria-label="Close projects" title="Close projects" onClick={closeProjects}>×</button>

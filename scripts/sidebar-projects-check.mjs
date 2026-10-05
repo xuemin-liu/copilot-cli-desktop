@@ -81,13 +81,13 @@ if (!process.versions.electron) {
         const state = await ui('({focus:document.activeElement.outerHTML.slice(0,300),hasFocus:document.hasFocus(),open:!!document.querySelector(".sidebar-projects-popover"),fixture:window.fixture})')
         throw new Error(`Timed out: ${label}: ${JSON.stringify(state)}`)
       }
-      const click = async selector => {
+      const click = async (selector, leftInset = null) => {
         const point = await ui(`(() => {
           const element = document.querySelector(${JSON.stringify(selector)});
           if (!element) throw new Error('Missing click target');
           element.scrollIntoView({block:'nearest'});
           const rect = element.getBoundingClientRect();
-          return {x:Math.round(rect.left + rect.width / 2), y:Math.round(rect.top + rect.height / 2)};
+          return {x:Math.round(rect.left + (${JSON.stringify(leftInset)} ?? rect.width / 2)), y:Math.round(rect.top + rect.height / 2)};
         })()`)
         window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
         window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
@@ -108,6 +108,19 @@ if (!process.versions.electron) {
       await until('!!document.querySelector(".sidebar-projects-button")', 'fixture ready')
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 1)
       assert.equal(await ui('!!document.querySelector(".sidebar-projects-popover")'), false)
+
+      await open()
+      for (const [selector, leftInset] of [['.sidebar-projects-header strong', null], ['.sidebar-projects-popover', 3]]) {
+        // Start from a focused row so the click must transfer focus safely.
+        await ui('document.querySelector(".sidebar-project-choice[aria-current=true]").focus()')
+        await click(selector, leftInset)
+        await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        assert.equal(await ui('!!document.querySelector(".sidebar-projects-popover")'), true, `${selector} click must keep flyout open`)
+        assert.equal(await ui('window.fixture.openChanges.at(-1)'), true)
+      }
+      key('Escape')
+      await closed()
+      checks.push('Heading and padding clicks keep flyout open and browser obscured')
 
       await open()
       key('Escape')
