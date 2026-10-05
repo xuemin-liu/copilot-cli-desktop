@@ -38,7 +38,26 @@ try {
       $browserControl.port -notmatch '^\d+$' -or [long]$browserControl.port -lt 1 -or [long]$browserControl.port -gt 65535 -or
       $browserControl.token -notmatch '^[a-f0-9]{64}$') { throw 'Browser control state is stale or invalid. Reopen this session Browser pane.' }
   $browserPerformed = $true
-  $browserResponse = Invoke-WebRequest -UseBasicParsing -Method POST -Uri ('http://127.0.0.1:' + $browserControl.port + '/test') -Headers @{ Authorization = 'Bearer ' + $browserControl.token } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($browserBody)) -TimeoutSec 315 -MaximumRedirection 0
+  try {
+    $browserResponse = Invoke-WebRequest -UseBasicParsing -Method POST -Uri ('http://127.0.0.1:' + $browserControl.port + '/test') -Headers @{ Authorization = 'Bearer ' + $browserControl.token } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($browserBody)) -TimeoutSec 315 -MaximumRedirection 0
+  } catch {
+    $browserRequestFailure = $_
+    $browserRequestMessage = $null
+    try {
+      if ($browserRequestFailure.ErrorDetails.Message -is [string]) { $browserErrorBody = $browserRequestFailure.ErrorDetails.Message }
+      $browserErrorResponse = $browserRequestFailure.Exception.Response
+      if (!$browserErrorBody -and $browserErrorResponse -and $browserErrorResponse.PSObject.Methods['GetResponseStream']) {
+        $browserReader = New-Object IO.StreamReader($browserErrorResponse.GetResponseStream())
+        try { $browserErrorBody = $browserReader.ReadToEnd() } finally { $browserReader.Dispose() }
+      }
+      if ($browserErrorBody) {
+        $browserError = $browserErrorBody | ConvertFrom-Json
+        if ($browserError.message -is [string] -and $browserError.message) { $browserRequestMessage = $browserError.message }
+      }
+    } catch {}
+    if ($browserRequestMessage) { throw $browserRequestMessage }
+    throw $browserRequestFailure
+  }
   $browserReport = $browserResponse.Content | ConvertFrom-Json
   if (@('passed','failed','cancelled') -notcontains $browserReport.status -or $null -eq $browserReport.steps -or $null -eq $browserReport.screenshots -or @($browserReport.screenshots).Count -gt $browserCount) { throw 'Invalid test response; do not rerun actions automatically.' }
   $i = 0
@@ -68,5 +87,6 @@ try {
 } finally {
   foreach ($file in $browserFiles) { $file.Dispose() }
   $browserBody = $null; $browserPlan = $null; $browserValue = $null; $browserControl = $null
+  $browserRequestFailure = $null; $browserRequestMessage = $null; $browserErrorResponse = $null; $browserErrorBody = $null; $browserError = $null
 }
 `

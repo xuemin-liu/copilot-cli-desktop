@@ -51,6 +51,10 @@ test('CLI and installed PowerShell test transports send credentials only in the 
     let body = ''; for await (const chunk of request) body += chunk
     const data = JSON.parse(body); seen.push(data)
     assert.equal(data.steps[0].value, 'fixture-private-value'); assert.equal(data.steps[0].valueFromEnv, undefined)
+    if (data.description === 'Reject app') {
+      response.statusCode = 400; response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ message: 'Invalid browser test: fixture rejection.' })); return
+    }
     response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(reply))
   })
   try {
@@ -69,6 +73,11 @@ test('CLI and installed PowerShell test transports send credentials only in the 
       const report = JSON.parse(shell.stdout)
       assert.equal(report.status, 'passed'); assert.ok(!shell.stdout.includes('fixture-private-value')); assert.ok(!shell.stdout.includes('imageBase64'))
       assert.equal(await readFile(report.screenshots[0].path, 'utf8'), 'fixture-png')
+      await writeFile(input, JSON.stringify({ ...plan, description: 'Reject app' }))
+      const rejected = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, 'test', input,
+        '-OutputPath', join(root, 'server-rejected.json')], { env, windowsHide: true, timeout: 60000 }).then(() => null, error => error)
+      assert.ok(rejected); assert.match(rejected.stderr, /Invalid browser test: fixture rejection/)
+      await writeFile(input, JSON.stringify(plan))
       const count = seen.length
       await assert.rejects(promisify(execFile)('powershell.exe', args, { env, windowsHide: true, timeout: 60000 }))
       assert.equal(seen.length, count, 'PowerShell rejects an existing report before actions')

@@ -19,6 +19,14 @@ test('test plans require real assertions and bounded fixed operations', () => {
   assert.equal(plan([{ ...assertion, condition: 'value', expected: '' }]).steps[0]?.expected, '')
 })
 
+test('test plans derive display labels when generated plans omit them', () => {
+  const value = plan([
+    { action: 'fill', selector: '#search', value: 'fire tv bulb' },
+    { action: 'assert', selector: 'body', condition: 'text', expected: 'fire tv bulb' },
+  ])
+  assert.deepEqual(value.steps.map(step => step.label), ['fill step 1', 'assert step 2'])
+})
+
 test('failed assertions stop writes; report redacts inputs and marks remaining steps skipped', async () => {
   const executed: string[] = []
   const value = plan([{ action: 'fill', label: 'Type private-value', selector: '#field', value: 'private-value' },

@@ -55,6 +55,7 @@ if (!process.versions.electron) {
       if (request.url === '/frame') { response.end(`<input id="field" aria-label="Frame input"><button id="button" onclick="result.textContent=event.isTrusted?'Frame passed':'Untrusted'">Run</button><p id="result"></p>`); return }
       if (request.url === '/frames') { response.end(`<h1>Frames</h1><iframe style="display:block;height:150px" src="/frame"></iframe><iframe style="display:block;height:150px" src="http://localhost:${foreign.address().port}/frame"></iframe>`); return }
       response.end(`<!doctype html><title>Generic test application</title><style>body{font:16px sans-serif}#detail{display:none}.cover{position:fixed;inset:0;z-index:100;background:#fff}#hover-result{display:none}#hover-target:hover + #hover-result{display:block}</style>
+        <input id="simple-search" aria-label="Search" onkeydown="if(event.key==='Enter'){history.pushState(null,'','/search?q='+encodeURIComponent(this.value));searchResult.textContent='Search results for '+this.value}"><p id="searchResult"></p>
         <label>User <input id="user"></label><label>Password <input id="password" type="password"></label>
         <button id="login" onclick="login.hidden=true;setTimeout(()=>list.hidden=false,100)">Log in</button>
         <section id="list" hidden><input id="search" aria-label="Search" onkeydown="if(event.key==='Enter')row.hidden=this.value!=='ITEM-42'">
@@ -91,6 +92,14 @@ if (!process.versions.electron) {
       await browser.open(); await second.open(); await browser.navigate(url)
       await assert.rejects(execute([visible('#login')]), /Testing mode/)
       browser.action('testing:on')
+      const generatedWithoutLabels = await execute([
+        { action: 'fill', selector: '#simple-search', value: 'amazon fire tv bub' },
+        { action: 'press', selector: '#simple-search', key: 'Enter' },
+        { action: 'waitFor', condition: 'url', expected: '/search' },
+        { action: 'assert', condition: 'text', selector: 'body', expected: 'amazon fire tv bub' },
+      ], true)
+      assert.equal(generatedWithoutLabels.status, 'passed', JSON.stringify(generatedWithoutLabels))
+      assert.deepEqual(generatedWithoutLabels.steps.map(item => item.label), ['fill step 1', 'press step 2', 'waitFor step 3', 'assert step 4'])
       process.env.UNRELATED_SECRET_FOR_TEST = 'unrelated-env-secret-value-123'
       for (const shell of [false, true]) {
         await assert.rejects(execute([step('navigate', 'Untrusted destination', { url: foreignUrl }),
@@ -261,7 +270,7 @@ if (!process.versions.electron) {
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,
         environmentInputsRestricted: true, originBoundNavigation: true, crossOriginRedirectBlocked: true, crossOriginLinkBlocked: true,
         crossOriginInputBlocked: true, crossOriginFocusStealingBlocked: true, manualOriginChangeRevokesGrant: true, explicitOriginGrant: true,
-        thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true }, null, 2))
+        thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true, generatedPlanWithoutLabels: true }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
   }
