@@ -265,6 +265,50 @@ button:disabled {
   padding-top: 10px;
 }
 
+.sidebar-projects-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 36px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.sidebar-projects-button[aria-expanded="true"] { background: #2b2e35; }
+
+.sidebar-projects-popover {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  inset: auto;
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(420px, calc(100vh - 16px));
+  margin: 0;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid #373b45;
+  border-radius: 10px;
+  background: #20232a;
+  color: #eef2f8;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 45%);
+}
+
+.sidebar-projects-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; padding: 0 5px 6px 8px; }
+.sidebar-projects-list { min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.sidebar-project-row { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; gap: 4px; }
+.sidebar-project-choice { display: grid; gap: 3px; min-width: 0; padding: 9px 8px; border: 0; background: transparent; text-align: left; }
+.sidebar-project-choice[aria-current="true"] { background: #30343d; }
+.sidebar-project-name, .sidebar-project-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-project-path { color: #9ca4b3; font-size: 11px; }
+.sidebar-project-add { flex-shrink: 0; margin-top: 8px; padding: 8px; text-align: left; }
+.sidebar-projects-empty { margin: 12px 8px; color: #9ca4b3; }
+.sidebar-projects-button:focus-visible, .sidebar-projects-popover button:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+
 .sidebar-compact-sessions {
   display: flex;
   flex-direction: column;

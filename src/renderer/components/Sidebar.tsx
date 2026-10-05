@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { JSX } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
@@ -38,6 +39,7 @@ export interface SidebarProps {
   activeTabId: string | null
   canOpenTab: boolean
   collapsed: boolean
+  onProjectsOpenChange?: (open: boolean) => void
   onToggleCollapsed: () => void
   onSelectWorkspace: () => void
   onActivateProfile: (profileId: string) => void
@@ -61,6 +63,7 @@ export function Sidebar({
   activeTabId,
   canOpenTab,
   collapsed,
+  onProjectsOpenChange,
   onToggleCollapsed,
   onSelectWorkspace,
   onActivateProfile,
@@ -78,11 +81,67 @@ export function Sidebar({
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [viewOpen, setViewOpen] = useState(false)
+  const [projectsOpen, setProjectsOpen] = useState(false)
+  const projectsId = useId()
+  const projectsPopover = useRef<HTMLDivElement>(null)
+  const projectsButton = useRef<HTMLButtonElement>(null)
   const [openActionsTabId, setOpenActionsTabId] = useState<string | null>(null)
   const [groupMode, setGroupMode] = useState<'workspace' | 'list'>(() => readSidebarPreference('sidebar-group-mode') === 'list' ? 'list' : 'workspace')
   const [orderMode, setOrderMode] = useState<'manual' | 'last-updated'>(() => readSidebarPreference('sidebar-order-mode') === 'last-updated' ? 'last-updated' : 'manual')
   const normalizedQuery = query.trim().toLowerCase()
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
+  useEffect(() => {
+    if (!collapsed) setProjectsOpen(false)
+  }, [collapsed])
+  useEffect(() => {
+    onProjectsOpenChange?.(collapsed && projectsOpen)
+    return () => onProjectsOpenChange?.(false)
+  }, [collapsed, projectsOpen, onProjectsOpenChange])
+  useEffect(() => {
+    if (!projectsOpen) return
+    const dismiss = (): void => setProjectsOpen(false)
+    const outside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !projectsPopover.current?.contains(event.target) && !projectsButton.current?.contains(event.target)) dismiss()
+    }
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      dismiss()
+      projectsButton.current?.focus()
+    }
+    document.addEventListener('pointerdown', outside, true)
+    document.addEventListener('keydown', escape, true)
+    window.addEventListener('resize', dismiss)
+    return () => {
+      document.removeEventListener('pointerdown', outside, true)
+      document.removeEventListener('keydown', escape, true)
+      window.removeEventListener('resize', dismiss)
+    }
+  }, [projectsOpen])
+  const closeProjects = (): void => {
+    setProjectsOpen(false)
+    projectsButton.current?.focus()
+  }
+  const positionProjects = (): void => {
+    const popover = projectsPopover.current
+    const button = projectsButton.current
+    if (!popover || !button) return
+    const anchor = button.getBoundingClientRect()
+    const width = Math.min(340, window.innerWidth - 24)
+    const height = popover.getBoundingClientRect().height
+    popover.style.left = `${Math.max(8, Math.min(anchor.right + 12, window.innerWidth - width - 8))}px`
+    popover.style.top = `${Math.max(8, Math.min(anchor.top, window.innerHeight - height - 8))}px`
+  }
+  useLayoutEffect(() => {
+    if (!projectsOpen) return
+    positionProjects()
+    const popover = projectsPopover.current
+    const selected = popover?.querySelector<HTMLButtonElement>('button[aria-current="true"]')
+    const first = popover?.querySelector<HTMLButtonElement>('.sidebar-project-choice, .sidebar-project-add')
+    const target = selected ?? first
+    target?.focus()
+  }, [projectsOpen])
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
   const activeTabProfile = activeTab
     ? profiles.find((profile) => profile.id === activeTab.workspaceProfileId) ?? null
@@ -284,8 +343,43 @@ export function Sidebar({
         </div>
       )}
 
+      {collapsed && <>
+        <button type="button" className="sidebar-projects-button" ref={projectsButton}
+          aria-label="Projects" title={`Projects${activeProfile ? ` — ${activeProfile.name}` : ''}`}
+          aria-expanded={projectsOpen} aria-haspopup="dialog" aria-controls={projectsOpen ? projectsId : undefined}
+          onClick={() => setProjectsOpen((open) => !open)}>
+          <svg className="folder-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 7V5.5A1.5 1.5 0 0 1 4.5 4H9l3 3h7.5A1.5 1.5 0 0 1 21 8.5v10a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5V7Z" />
+          </svg>
+        </button>
+        {projectsOpen && createPortal(<div id={projectsId} ref={projectsPopover} className="sidebar-projects-popover"
+          role="dialog" aria-label="Projects">
+          <div className="sidebar-projects-header">
+            <strong>Projects</strong>
+            <button type="button" className="icon-button" aria-label="Close projects" title="Close projects" onClick={closeProjects}>×</button>
+          </div>
+          <nav className="sidebar-projects-list" aria-label="Projects">
+            {profiles.map((profile) => <div key={profile.id} className="sidebar-project-row">
+              <button type="button" className="sidebar-project-choice" aria-label={profile.name}
+                title={`${profile.name} — ${profile.path}`} aria-current={profile.id === activeProfileId ? 'true' : undefined}
+                onClick={() => { closeProjects(); onActivateProfile(profile.id) }}>
+                <span className="sidebar-project-name">{profile.name}</span>
+                <span className="sidebar-project-path">{profile.path}</span>
+              </button>
+              <button type="button" className="icon-button" disabled={!canOpenTab}
+                aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}`}
+                onClick={() => { closeProjects(); onCreateTab(profile.id) }}>+</button>
+            </div>)}
+            {profiles.length === 0 && <p className="sidebar-projects-empty">No projects yet.</p>}
+          </nav>
+          <button type="button" className="sidebar-project-add"
+            onClick={() => { closeProjects(); onSelectWorkspace() }}>+ Add project</button>
+        </div>, document.body)}
+      </>}
+
       <div className="workspace-list">
-        {(collapsed || groupMode === 'list') && (
+        {!collapsed && groupMode === 'list' && (
           <nav aria-label="Workspaces">
             {profiles.map(workspaceRow)}
           </nav>
@@ -295,7 +389,7 @@ export function Sidebar({
             {compactTabs.map((tab, index) => sessionButton(tab, workspaceName(tab), index))}
           </nav>
         )}
-        {profiles.length === 0 && (
+        {!collapsed && profiles.length === 0 && (
           <button type="button" className="workspace-empty" onClick={onSelectWorkspace}>
             Choose a project folder to begin
           </button>

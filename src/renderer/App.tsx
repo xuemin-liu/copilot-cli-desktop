@@ -30,6 +30,7 @@ export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
   const [loading, setLoading] = useState(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
+  const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(false)
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const [operationError, setOperationError] = useState<string | null>(null)
   const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
@@ -156,6 +157,7 @@ export function App(): JSX.Element {
         activeTabId={state.activeTabId}
         canOpenTab={canOpenTab}
         collapsed={sidebarCollapsed}
+        onProjectsOpenChange={setSidebarProjectsOpen}
         onToggleCollapsed={() => {
           setSidebarCollapsed((collapsed) => {
             const next = !collapsed
@@ -205,7 +207,7 @@ export function App(): JSX.Element {
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
-            obscured={inputDialog !== null}
+            obscured={inputDialog !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
