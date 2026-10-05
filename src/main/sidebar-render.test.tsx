@@ -32,7 +32,7 @@ function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab, coll
   )
 }
 
-test('collapsed sidebar preserves workspace selection, named session navigation, and background actions', () => {
+test('collapsed sidebar exposes the Projects flyout trigger, named session navigation, and background actions', () => {
   const profiles: WorkspaceProfile[] = ['one', 'two'].map((id) => ({
     id, name: id, path: `D:\\${id}`, permissionPreset: 'default', defaultResumeMode: 'new',
     launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
@@ -45,8 +45,12 @@ test('collapsed sidebar preserves workspace selection, named session navigation,
   const background = { ...active, id: 'background', title: 'Background', workspaceProfileId: 'two', status: 'starting' as const }
   const remote = { ...background, id: 'remote', title: 'Remote', remote: true }
   const markup = renderAccess(profiles, active, true, [active, background, remote])
-  assert.match(markup, /aria-label="Workspaces"/)
-  assert.match(markup, /aria-label="two"/)
+  assert.match(markup, /aria-label="Projects" title="Projects — one" aria-expanded="false" aria-haspopup="dialog"/)
+  assert.equal((markup.match(/aria-label="Projects"/g) ?? []).length, 1)
+  assert.doesNotMatch(markup, /aria-label="Workspaces"/)
+  assert.doesNotMatch(markup, /aria-label="two"/)
+  assert.doesNotMatch(markup, /sidebar-projects-popover/)
+  assert.doesNotMatch(markup, /aria-label="New session in two"/)
   assert.match(markup, /sidebar-compact-sessions/)
   assert.match(markup, /aria-label="1: Active[^\"]*" aria-current="true"/)
   assert.match(markup, /sidebar-session-title">1</)
@@ -92,7 +96,8 @@ test('compact navigation honors saved ordering and workspace grouping', () => {
     const expanded = renderAccess(profiles, older, false, tabs)
     assert.match(expanded, /aria-label="Workspaces"/)
     assert.match(expanded, /aria-label="two" title="two — D:\\two"/)
-    assert.match(flat, /aria-label="two" title="two — D:\\two"/)
+    assert.match(flat, /aria-label="Projects" title="Projects — one" aria-expanded="false"/)
+    assert.doesNotMatch(flat, /aria-label="Workspaces"|aria-label="two"|sidebar-projects-popover/)
     group = 'workspace'
     const grouped = renderAccess(profiles, older, true, tabs)
     assert.match(grouped, /aria-label="1: Middle/)
