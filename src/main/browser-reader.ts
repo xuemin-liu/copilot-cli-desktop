@@ -3,8 +3,8 @@ import { dialog, nativeImage } from 'electron'
 import type { BrowserWindow, WebContents } from 'electron'
 import { browserReadScript } from './browser-read-script.js'
 import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
-import { maskScreenshotBitmap } from './browser-screenshot-mask.js'
-import type { ScreenshotMaskGeometry } from './browser-screenshot-mask.js'
+import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot-mask.js'
+import type { ScreenshotMaskGeometry, ScreenshotLayout } from './browser-screenshot-mask.js'
 import { MAX_RESPONSE_BYTES, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
 
 const MAX_RESPONSES = 100
@@ -67,12 +67,12 @@ export class BrowserReader {
     void this.attach(page).catch(() => {})
   }
 
-  private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string): Promise<Params> {
+  private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000): Promise<Params> {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       return await Promise.race([
         page.contents.debugger.sendCommand(method, params, sessionId) as Promise<Params>,
-        new Promise<never>((_accept, reject) => { timer = setTimeout(() => reject(new Error('Browser inspection timed out. Content may not be loaded.')), 10000) }),
+        new Promise<never>((_accept, reject) => { timer = setTimeout(() => reject(new Error('Browser inspection timed out. Content may not be loaded.')), timeoutMs) }),
       ])
     } finally { if (timer) clearTimeout(timer) }
   }
@@ -199,8 +199,8 @@ export class BrowserReader {
     }
     const result = await this.command(page, 'Runtime.evaluate', {
       expression: `(${browserReadScript.toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
-      contextId, returnByValue: true, awaitPromise: false, userGesture: false,
-    }, sessionId)
+      contextId, returnByValue: true, awaitPromise: operation === 'mask', userGesture: false,
+    }, sessionId, operation === 'mask' ? 1500 : 10000)
     if (result.exceptionDetails) throw new Error('Control or snapshot is stale or unavailable. Read the frame again.')
     return result.result?.value
   }
@@ -285,8 +285,14 @@ export class BrowserReader {
       // be inspected using its own filtered snapshot. Never capture shell/DevTools.
       const top = frames[0]!.id
       try {
-        const mask = await this.evaluate(page, top, 'mask', {}) as Params
+        let mask: Params
+        try { mask = await this.evaluate(page, top, 'mask', {}) as Params }
+        catch { return { ...metadata, state: 'unavailable', reason: 'Could not confirm the page is painting safely. Restore and show the window and retry.' } }
         if (mask.truncated) return { ...metadata, state: 'unavailable', reason: 'Page is too large to mask completely for a screenshot.', truncated: true }
+        if (!mask.painted) return { ...metadata, state: 'unavailable', reason: 'The page is not painting. Restore and show the window and retry.' }
+        const unchanged = async (): Promise<boolean> => sameScreenshotLayout(mask as ScreenshotLayout,
+          await this.evaluate(page, top, 'mask-state', {}) as ScreenshotLayout)
+        if (!await unchanged()) return { ...metadata, state: 'unavailable', reason: 'Page layout changed while preparing screenshot masks. Wait for it to settle and retry.' }
         let image
         for (let attempt = 0; attempt < 3; attempt++) {
           try { image = await page.contents.capturePage(undefined, { stayHidden: true, stayAwake: true }); break }
@@ -294,8 +300,9 @@ export class BrowserReader {
         }
         if (!image) return { ...metadata, state: 'unavailable', reason: 'No rendered display surface is available. Show this browser page and retry.' }
         if (image.isEmpty()) return { ...metadata, state: 'unavailable', reason: 'Page has no rendered screenshot yet.' }
-        // DOM overlays alone are insufficient: capturePage can return an older
-        // compositor frame. Apply the same masks to opaque pixels before export.
+        if (!await unchanged()) return { ...metadata, state: 'unavailable', reason: 'Page layout changed during screenshot capture. Wait for it to settle and retry.' }
+        // Paint confirmation and stable geometry are required as well as opaque
+        // pixel masks: a mask for the current layout cannot protect an old frame.
         const size = image.getSize(1)
         const bitmap = maskScreenshotBitmap(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry)
         const masked = nativeImage.createFromBitmap(bitmap, { ...size, scaleFactor: 1 })

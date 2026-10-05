@@ -2,7 +2,7 @@
  * no expression, selector, attribute dump, storage or credential API is exposed. */
 export function browserReadScript(operation: string, args: Record<string, unknown>, credentialPatternSource: string): unknown {
   if (typeof args.deadline === 'number' && Date.now() > args.deadline) throw new Error('Browser operation expired; read the page again.')
-  type Reader = { snapshotId: string; nodes: Map<string, Element>; masks: HTMLElement[]; pending: Map<string, string> }
+  type Reader = { snapshotId: string; nodes: Map<string, Element>; masks: HTMLElement[]; pending: Map<string, string>; cancelPaint?: () => void }
   const scope = globalThis as typeof globalThis & { __desktopReader?: Reader }
   const reader = scope.__desktopReader ??= { snapshotId: '', nodes: new Map(), masks: [], pending: new Map() }
   const hidden = (element: Element): boolean => {
@@ -117,13 +117,21 @@ export function browserReadScript(operation: string, args: Record<string, unknow
     reader.snapshotId = ''; reader.nodes.clear(); reader.pending.clear()
     return { state: 'activated', requiresNewSnapshot: true }
   }
-  if (operation === 'mask') {
-    for (const mask of reader.masks) mask.remove()
-    reader.masks = []
+  if (operation === 'mask' || operation === 'mask-state') {
+    const install = operation === 'mask'
+    if (install) {
+      reader.cancelPaint?.()
+      for (const mask of reader.masks) mask.remove()
+      reader.masks = []
+    }
+    const overlays = new Set<Element>(reader.masks)
+    const rectangles: { x: number; y: number; width: number; height: number }[] = []
     // Cross-origin frames are deliberately covered; their text is read separately.
     const cover = (element: Element): void => {
       const box = element.getBoundingClientRect()
       if (!box.width || !box.height) return
+      rectangles.push({ x: box.x, y: box.y, width: box.width, height: box.height })
+      if (!install) return
       const mask = document.createElement('div')
       mask.style.cssText = `position:fixed!important;left:${box.left}px!important;top:${box.top}px!important;width:${box.width}px!important;height:${box.height}px!important;background:#111!important;color:#fff!important;z-index:2147483647!important;pointer-events:none!important;opacity:1!important;`
       mask.textContent = '[redacted]'; document.documentElement.append(mask); reader.masks.push(mask)
@@ -133,6 +141,7 @@ export function browserReadScript(operation: string, args: Record<string, unknow
     const credentials = new RegExp(credentialPatternSource, 'i')
     const walk = (root: Document | ShadowRoot): void => {
       for (const element of Array.from(root.querySelectorAll('*'))) {
+        if (overlays.has(element)) continue
         if (++visited > 20000) { truncated = true; return }
         const directText = Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent ?? '').join(' ')
         const credentialText = credentials.test(directText) || /(?:password|token|secret|api[-_ ]?key|credential|cookie)\s*[:=]/i.test(directText)
@@ -141,13 +150,23 @@ export function browserReadScript(operation: string, args: Record<string, unknow
       }
     }
     walk(document)
-    // Pixel masks in the main process protect even a previously composited frame.
-    // Do not wait for animation frames: occluded/minimized pages may never paint.
-    return { redacted: reader.masks.length > 0, masks: reader.masks.length, truncated,
-      viewport: { width: innerWidth, height: innerHeight }, rectangles: reader.masks.map(mask => {
-        const box = mask.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }
-      }) }
+    const geometry = { viewport: { width: innerWidth, height: innerHeight }, rectangles, scrollX, scrollY, truncated }
+    if (!install) return geometry
+    // Current rectangles cannot cover secrets in an older layout. Require a paint
+    // before capture, and fail closed if an occluded page cannot confirm it.
+    return new Promise(resolve => {
+      let settled = false
+      let frame = 0
+      const finish = (painted: boolean): void => {
+        if (settled) return
+        settled = true; clearTimeout(timer); cancelAnimationFrame(frame); delete reader.cancelPaint
+        resolve({ ...geometry, redacted: reader.masks.length > 0, masks: reader.masks.length, painted })
+      }
+      const timer = setTimeout(() => finish(false), 500)
+      reader.cancelPaint = () => finish(false)
+      frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => finish(true)) })
+    })
   }
-  if (operation === 'unmask') { for (const mask of reader.masks) mask.remove(); reader.masks = []; return null }
+  if (operation === 'unmask') { reader.cancelPaint?.(); for (const mask of reader.masks) mask.remove(); reader.masks = []; return null }
   throw new Error('Unknown browser read operation.')
 }

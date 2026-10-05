@@ -9,6 +9,12 @@ import { promisify } from 'node:util'
 
 const artifacts = resolve('test-results/browser-reader')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+const redPixels = image => {
+  const bitmap = image.toBitmap()
+  let count = 0
+  for (let i = 0; i < bitmap.length; i += 4) if (bitmap[i + 2] >= 235 && bitmap[i + 1] <= 25 && bitmap[i] <= 25) count++
+  return count
+}
 const until = async (read, name) => {
   const end = Date.now() + 20000
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(100) }
@@ -194,6 +200,60 @@ if (!process.versions.electron) {
         assert.deepEqual([...bitmap.subarray(index, index + 3)], [17, 17, 17], 'pasted credentials must be covered in the actual PNG')
       }
       assert.equal(await browser.view.webContents.executeJavaScript('document.querySelectorAll("div").length'), divCount, 'screenshot masks removed')
+      // Scan the whole PNG, rather than sampling settled layout coordinates.
+      // Scroll + immediate capture can expose an older compositor frame whose
+      // credentials no longer align with the DOM's current mask rectangles.
+      await browser.view.webContents.executeJavaScript(`['provider-token','api-token','custom-auth'].forEach(id => document.getElementById(id).style.color='#ff0000')`)
+      const controlRedPixels = await until(async () => redPixels(await browser.view.webContents.capturePage()), 'unmasked red-credential detector control')
+      assert.ok(controlRedPixels > 100, 'unmasked credential text must be detectable')
+      const screenshotStress = { attempts: 160, available: 0, controlRedPixels, leaks: 0 }
+      for (let i = 0; i < screenshotStress.attempts; i++) {
+        await browserCommand(['scroll', page, frameId, String([9, -9, 37, -37, 120, -120, 250, -250][i % 8])])
+        const capture = await browserCommand(['screenshot', page])
+        if (capture.state === 'unavailable') { assert.equal(capture.imageBase64, undefined); continue }
+        assert.equal(capture.state, 'available'); screenshotStress.available++
+        const png = Buffer.from(capture.imageBase64, 'base64')
+        const exposed = redPixels(nativeImage.createFromBuffer(png))
+        if (exposed) {
+          screenshotStress.leaks++
+          await writeFile(join(artifacts, 'scroll-credential-leak.png'), png)
+          await writeFile(join(artifacts, 'scroll-screenshot-stress.json'), JSON.stringify({ ...screenshotStress, failedIteration: i, exposed }, null, 2))
+        }
+        assert.equal(exposed, 0, `credential pixels exposed after immediate scroll/capture at iteration ${i}`)
+      }
+      assert.ok(screenshotStress.available >= 120, 'paint-safe captures must remain usable during the stress run')
+      await writeFile(join(artifacts, 'scroll-screenshot-stress.json'), JSON.stringify(screenshotStress, null, 2))
+      await browser.view.webContents.executeJavaScript(`['provider-token','api-token','custom-auth'].forEach(id => document.getElementById(id).style.color='')`)
+      await browserCommand(['scroll', page, frameId, '-2000'])
+      // A page that cannot paint must not call capturePage or export an image.
+      const contents = browser.view.webContents
+      const world = await contents.debugger.sendCommand('Page.createIsolatedWorld', { frameId, worldName: 'desktop-browser-reader', grantUniveralAccess: false })
+      const fixtureEvaluate = expression => contents.debugger.sendCommand('Runtime.evaluate', { contextId: world.executionContextId, expression })
+      const originalCapture = contents.capturePage.bind(contents)
+      let captureCalls = 0
+      contents.capturePage = async (...args) => { captureCalls++; return originalCapture(...args) }
+      await fixtureEvaluate('globalThis.__fixtureRaf = requestAnimationFrame; requestAnimationFrame = () => 0')
+      try {
+        const paintStart = Date.now()
+        const stalled = await browserCommand(['screenshot', page])
+        assert.equal(stalled.state, 'unavailable'); assert.match(stalled.reason, /painting/)
+        assert.equal(stalled.imageBase64, undefined); assert.equal(captureCalls, 0)
+        assert.ok(Date.now() - paintStart < 2500, 'stopped painting fails closed promptly')
+      } finally {
+        await fixtureEvaluate('requestAnimationFrame = globalThis.__fixtureRaf; delete globalThis.__fixtureRaf')
+        contents.capturePage = originalCapture
+      }
+      assert.equal(await contents.executeJavaScript('document.querySelectorAll("div").length'), divCount, 'paint-timeout masks removed')
+      contents.capturePage = async (...args) => {
+        const image = await originalCapture(...args)
+        await contents.executeJavaScript('document.body.style.paddingTop="25px"')
+        return image
+      }
+      try {
+        const changed = await browserCommand(['screenshot', page])
+        assert.equal(changed.state, 'unavailable'); assert.match(changed.reason, /layout changed/)
+        assert.equal(changed.imageBase64, undefined, 'layout-changed pixels are discarded')
+      } finally { contents.capturePage = originalCapture; await contents.executeJavaScript('document.body.style.paddingTop=""') }
       // Approval cannot be reused for a stale snapshot or a control changed during the dialog.
       current = await browserCommand(['snapshot', page])
       duringApproval = () => browser.view.webContents.executeJavaScript('document.getElementById("comments").textContent="Changed control"')
@@ -249,6 +309,7 @@ if (!process.versions.electron) {
         installedHelper: true, pagination: true, stalePaginatedControl: true, approvalDestination: true, restoredApprovalOwner: true,
         providerTokenMasking: true, minimizedScreenshot: true, hiddenScreenshot: true, screenshotPixelSize: pixelSize,
         screenshotViewport: protectedGeometry.viewport, hidpi: process.argv.includes('--hidpi'),
+        screenshotStress, paintTimeout: true, changingScreenshotLayout: true,
         tabs: true, isolation: true, nativeDevTools: true, approvals }, null, 2))
       console.log('Browser reader check passed: dynamic tickets, frames, bodies, masked screenshots, approvals, isolation and native tools.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }

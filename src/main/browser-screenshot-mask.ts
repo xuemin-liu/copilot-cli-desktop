@@ -1,6 +1,17 @@
 interface Size { width: number; height: number }
 interface Rectangle { x: number; y: number; width: number; height: number }
 export interface ScreenshotMaskGeometry { viewport: Size; rectangles: Rectangle[] }
+export interface ScreenshotLayout extends ScreenshotMaskGeometry { scrollX: number; scrollY: number; truncated: boolean }
+
+/** CDP may reorder object keys; compare layout values instead of JSON text. */
+export function sameScreenshotLayout(before: ScreenshotLayout, after: ScreenshotLayout): boolean {
+  return before.viewport.width === after.viewport.width && before.viewport.height === after.viewport.height
+    && before.scrollX === after.scrollX && before.scrollY === after.scrollY && before.truncated === after.truncated
+    && before.rectangles.length === after.rectangles.length && before.rectangles.every((rect, index) => {
+      const other = after.rectangles[index]!
+      return rect.x === other.x && rect.y === other.y && rect.width === other.width && rect.height === other.height
+    })
+}
 
 /** NativeImage's platform bitmap format is preserved. Equal RGB components and
  * opaque alpha work with both BGRA and RGBA. Never trust compositor mask timing. */

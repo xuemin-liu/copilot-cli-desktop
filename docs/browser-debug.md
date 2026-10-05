@@ -176,6 +176,8 @@ filename the screenshot command
 returns PNG base64 in JSON. Save and view the PNG instead of printing its base64.
 Restore and show the browser window to capture a screenshot; minimized or hidden
 windows report `unavailable`. Text snapshots remain available while minimized.
+Screenshots are withheld if the page cannot confirm painting promptly or the
+protected layout changes during capture. Wait for the page to settle and retry.
 
 Snapshots use a fixed function in a Chromium isolated world. They do not export raw
 HTML, arbitrary attributes, scripts, styles, hidden content, form values, cookie or
