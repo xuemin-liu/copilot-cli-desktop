@@ -26,7 +26,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow } = await import('electron')
+  const { app, BrowserWindow, nativeImage } = await import('electron')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
   void run().catch(error => { console.error(error); app.exit(1) })
@@ -35,7 +35,7 @@ if (!process.versions.electron) {
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
     const { browserCommand } = await import('../dist/src/cli/browser-control.js')
     const { prepareBrowserSessionEnvironment } = await import('../dist/src/main/browser-session.js')
-    let writes = 0; let approval = false; let approvals = 0; let duringApproval = async () => {}
+    let writes = 0; let approval = false; let approvals = 0; let duringApproval = async () => {}; let approvalDescription = ''
     const site = createServer((request, response) => {
       if (request.url === '/write') { writes++; response.end('modified'); return }
       if (request.url === '/ticket.json') {
@@ -50,7 +50,11 @@ if (!process.versions.electron) {
         <input type="password" value="private-password"><input type="text" value="private-username">
         <input type="hidden" value="private-hidden"><div hidden>private-hidden-text</div>
         <div data-private>private-marked</div><p>Authorization: Bearer private-inline</p>
+        <p id="provider-token">ghp_abcdefghijklmnopqrstuvwxyz0123456789</p>
+        <p id="api-token">Use API key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 for access</p>
+        <p id="custom-auth">Authorization: Token opaque-private-token</p>
         <button role="tab" id="comments" onclick="document.getElementById('result').textContent='Comment by Alice: reproduced'">Comments</button>
+        <a id="approval-link" href="/write?atl_token=private-link-token">Next</a>
         <button id="write" onclick="fetch('/write',{method:'POST'})">Delete issue</button>
         <a href="/child" target="_blank">Linked issue</a>
         <details><summary>Activity</summary><p>Activity: issue opened</p></details>
@@ -66,7 +70,12 @@ if (!process.versions.electron) {
     const environment = await prepareBrowserSessionEnvironment(join(artifacts, 'helpers'), 'tab-1', process.env)
     Object.assign(process.env, environment, { COPILOT_DESKTOP_BROWSER_STATE: endpoint })
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint,
-      approveInteraction: async () => { approvals++; await duringApproval(); return approval } })
+      approveInteraction: async description => {
+        approvalDescription = description; approvals++
+        assert.equal(window.isVisible(), true, 'hidden owner must be shown before approval')
+        assert.equal(window.isMinimized(), false, 'minimized owner must be restored before approval')
+        await duringApproval(); return approval
+      } })
     const second = new BrowserDebug(window, join(artifacts, `second-settings-${Date.now()}.json`), { endpointPath: join(artifacts, 'second-control.json') })
     try {
       browser.setBounds({ x: 0, y: 0, width: 900, height: 750 })
@@ -77,7 +86,8 @@ if (!process.versions.electron) {
       await until(async () => (await browserCommand(['snapshot', page])).text?.includes('Dynamic linked issue'), 'dynamic page snapshot')
       const snapshot = await browserCommand(['snapshot', page])
       const all = JSON.stringify(snapshot)
-      for (const secret of ['private-password', 'private-username', 'private-hidden', 'private-hidden-text', 'private-marked', 'private-inline', 'private-storage']) assert.ok(!all.includes(secret), secret)
+      for (const secret of ['private-password', 'private-username', 'private-hidden', 'private-hidden-text', 'private-marked', 'private-inline', 'private-storage',
+        'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', 'opaque-private-token', 'private-link-token']) assert.ok(!all.includes(secret), secret)
       assert.ok(snapshot.text.includes('Description: verify'))
       const shellSnapshot = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', environment.COPILOT_DESKTOP_BROWSER_HELPER, 'snapshot', page], {
         env: process.env, windowsHide: true, timeout: 60000,
@@ -120,7 +130,25 @@ if (!process.versions.electron) {
       const comments = find(snapshot, 'Comments')
       assert.ok(comments)
       const beforeApproval = await browserCommand(['snapshot', page])
-      let activation = await browserCommand(['activate', page, frameId, beforeApproval.snapshotId, find(beforeApproval, 'Comments')])
+      const firstChunkControl = find(beforeApproval, 'Comments')
+      await browserCommand(['snapshot', page, frameId, String(beforeApproval.nextOffset)])
+      await assert.rejects(browserCommand(['activate', page, frameId, beforeApproval.snapshotId, firstChunkControl]), /stale|unavailable/)
+      await browser.view.webContents.executeJavaScript(`document.getElementById('approval-link').setAttribute('aria-label', 'Next\\n\\n' + 'misleading '.repeat(100))`)
+      let linkSnapshot = await browserCommand(['snapshot', page])
+      window.hide()
+      const deniedLink = await browserCommand(['activate', page, frameId, linkSnapshot.snapshotId, find(linkSnapshot, 'Next')])
+      assert.equal(deniedLink.state, 'denied')
+      assert.ok(approvalDescription.includes('Link destination: http://127.0.0.1:'))
+      assert.ok(approvalDescription.includes('/write?atl_token=%5Bredacted%5D'))
+      assert.ok(!approvalDescription.includes('private-link-token'))
+      const dialogLabel = approvalDescription.match(/“([^”]*)”/)?.[1]
+      assert.ok(dialogLabel && dialogLabel.length <= 200 && !/[\r\n]/.test(dialogLabel))
+      window.minimize()
+      await until(() => window.isMinimized(), 'fixture owner minimized')
+      linkSnapshot = await browserCommand(['snapshot', page])
+      await browserCommand(['activate', page, frameId, linkSnapshot.snapshotId, find(linkSnapshot, 'Next')])
+      const restoredSnapshot = await browserCommand(['snapshot', page])
+      let activation = await browserCommand(['activate', page, frameId, restoredSnapshot.snapshotId, find(restoredSnapshot, 'Comments')])
       assert.equal(activation.state, 'denied'); assert.equal(writes, 0)
       assert.ok(!(await browserCommand(['snapshot', page])).text.includes('Comment by Alice'))
       approval = true
@@ -135,10 +163,21 @@ if (!process.versions.electron) {
       current = await browserCommand(['snapshot', page]); assert.ok(current.viewport.scrollY > beforeScroll)
       await browserCommand(['scroll', page, frameId, '-700'])
       const divCount = await browser.view.webContents.executeJavaScript('document.querySelectorAll("div").length')
+      const protectedBoxes = await browser.view.webContents.executeJavaScript(`['provider-token','api-token','custom-auth'].map(id => {
+        const box = document.getElementById(id).getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height };
+      })`)
       const screenshotPath = join(artifacts, `ticket-${Date.now()}.png`)
       const screenshot = await browserCommand(['screenshot', page, screenshotPath])
       assert.equal(screenshot.state, 'available', JSON.stringify(screenshot)); assert.equal(screenshot.redacted, true)
       assert.ok((await readFile(screenshotPath)).length > 100)
+      const pixels = nativeImage.createFromBuffer(await readFile(screenshotPath))
+      const bitmap = pixels.toBitmap(); const pixelSize = pixels.getSize()
+      for (const box of protectedBoxes) {
+        const x = Math.floor(box.x + box.width - 3); const y = Math.floor(box.y + 3)
+        assert.ok(y >= 0 && y < pixelSize.height && x >= 0 && x < pixelSize.width, 'credential masking is tested inside the viewport')
+        const index = (y * pixelSize.width + x) * 4
+        assert.deepEqual([...bitmap.subarray(index, index + 3)], [17, 17, 17], 'pasted credentials must be covered in the actual PNG')
+      }
       assert.equal(await browser.view.webContents.executeJavaScript('document.querySelectorAll("div").length'), divCount, 'screenshot masks removed')
       // Approval cannot be reused for a stale snapshot or a control changed during the dialog.
       current = await browserCommand(['snapshot', page])
@@ -192,7 +231,8 @@ if (!process.versions.electron) {
       await writeFile(join(artifacts, 'snapshot.json'), JSON.stringify(snapshot, null, 2))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, dynamicContent: true, frames: true,
         responses: true, privacy: true, approvalCancellation: true, disconnectedApproval: true, staleApproval: true,
-        installedHelper: true, pagination: true, tabs: true, isolation: true, nativeDevTools: true, approvals }, null, 2))
+        installedHelper: true, pagination: true, stalePaginatedControl: true, approvalDestination: true, restoredApprovalOwner: true,
+        providerTokenMasking: true, tabs: true, isolation: true, nativeDevTools: true, approvals }, null, 2))
       console.log('Browser reader check passed: dynamic tickets, frames, bodies, masked screenshots, approvals, isolation and native tools.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
   }

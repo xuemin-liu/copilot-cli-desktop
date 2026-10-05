@@ -1,6 +1,6 @@
 /** Fixed code runs in a Chromium isolated world. Callers can only supply data;
  * no expression, selector, attribute dump, storage or credential API is exposed. */
-export function browserReadScript(operation: string, args: Record<string, unknown>): unknown {
+export function browserReadScript(operation: string, args: Record<string, unknown>, credentialPatternSource: string): unknown {
   if (typeof args.deadline === 'number' && Date.now() > args.deadline) throw new Error('Browser operation expired; read the page again.')
   type Reader = { snapshotId: string; nodes: Map<string, Element>; masks: HTMLElement[]; pending: Map<string, string> }
   const scope = globalThis as typeof globalThis & { __desktopReader?: Reader }
@@ -107,7 +107,8 @@ export function browserReadScript(operation: string, args: Record<string, unknow
     if (element.outerHTML.length > 32000) throw new Error('Control is too large to approve safely.')
     if (operation === 'describe') {
       reader.pending.set(String(args.nodeId), element.outerHTML)
-      return { name: name(element) || (element.textContent ?? '').slice(0, 1000), tag: element.tagName.toLowerCase() }
+      return { name: name(element) || (element.textContent ?? '').slice(0, 1000), tag: element.tagName.toLowerCase(),
+        ...(element instanceof HTMLAnchorElement ? { href: element.href.length > 8000 ? '[redacted oversized URL]' : element.href } : {}) }
     }
     if (reader.pending.get(String(args.nodeId)) !== element.outerHTML) throw new Error('Control changed during approval. Read the frame again.')
     // This branch is only called by the main process after a native user approval.
@@ -129,17 +130,24 @@ export function browserReadScript(operation: string, args: Record<string, unknow
     }
     let visited = 0
     let truncated = false
+    const credentials = new RegExp(credentialPatternSource, 'i')
     const walk = (root: Document | ShadowRoot): void => {
       for (const element of Array.from(root.querySelectorAll('*'))) {
         if (++visited > 20000) { truncated = true; return }
-        const credentialText = /\b(?:Bearer|Basic)\s|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.|(?:password|token|secret|api[-_ ]?key|credential|cookie)\s*[:=]|-----BEGIN .*PRIVATE KEY-----/i.test(
-          Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent ?? '').join(' '))
+        const directText = Array.from(element.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent ?? '').join(' ')
+        const credentialText = credentials.test(directText) || /(?:password|token|secret|api[-_ ]?key|credential|cookie)\s*[:=]/i.test(directText)
         if (sensitive(element) || valueControl(element) || credentialText || element.matches('iframe,object,embed,canvas')) cover(element)
         if (element.shadowRoot) walk(element.shadowRoot)
       }
     }
     walk(document)
-    return { redacted: reader.masks.length > 0, masks: reader.masks.length, truncated }
+    // capturePage can otherwise return the previously composited, unmasked frame.
+    // Wait through a paint before allowing the main process to capture pixels.
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() =>
+      resolve({ redacted: reader.masks.length > 0, masks: reader.masks.length, truncated,
+        viewport: { width: innerWidth, height: innerHeight }, rectangles: reader.masks.map(mask => {
+          const box = mask.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }
+        }) }))))
   }
   if (operation === 'unmask') { for (const mask of reader.masks) mask.remove(); reader.masks = []; return null }
   throw new Error('Unknown browser read operation.')

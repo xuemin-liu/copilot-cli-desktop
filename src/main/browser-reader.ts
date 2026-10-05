@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto'
-import { dialog } from 'electron'
+import { dialog, nativeImage } from 'electron'
 import type { BrowserWindow, WebContents } from 'electron'
 import { browserReadScript } from './browser-read-script.js'
+import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
+import { maskScreenshotBitmap } from './browser-screenshot-mask.js'
+import type { ScreenshotMaskGeometry } from './browser-screenshot-mask.js'
 import { MAX_RESPONSE_BYTES, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
 
 const MAX_RESPONSES = 100
@@ -195,8 +198,8 @@ export class BrowserReader {
       page.contexts.set(frameId, contextId)
     }
     const result = await this.command(page, 'Runtime.evaluate', {
-      expression: `(${browserReadScript.toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })})`,
-      contextId, returnByValue: true, awaitPromise: false, userGesture: false,
+      expression: `(${browserReadScript.toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
+      contextId, returnByValue: true, awaitPromise: operation === 'mask', userGesture: false,
     }, sessionId)
     if (result.exceptionDetails) throw new Error('Control or snapshot is stale or unavailable. Read the frame again.')
     return result.result?.value
@@ -255,8 +258,16 @@ export class BrowserReader {
     if (command === 'activate') {
       const control = await this.evaluate(page, frameId, 'describe', { snapshotId: args[2], nodeId: args[3] }) as Params
       const filtered = redactBrowserValue(control).value as Params
-      const description = `Activate ${String(filtered.tag)} “${String(filtered.name)}” on ${metadata.url}\n\nThis control runs the web app's code and may change data or navigate. Approve only this specific action. Cancel keeps the page unchanged.`
-      const approved = this.options.approve ? await this.options.approve(description) : (await dialog.showMessageBox(this.options.owner(), {
+      const label = String(filtered.name).replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, ' ').trim().slice(0, 200)
+      const destination = typeof filtered.href === 'string' ? `\nLink destination: ${readableUrl(filtered.href)}` : ''
+      const description = `Activate ${String(filtered.tag)} “${label}” on ${metadata.url}${destination}\n\nThis control runs the web app's code and may change data or navigate. Approve only this specific action. Cancel keeps the page unchanged.`
+      if (signal?.aborted || this.disposed) return { ...metadata, state: 'denied', reason: 'The interaction request was cancelled.' }
+      const owner = this.options.owner()
+      if (owner.isMinimized()) owner.restore()
+      if (!owner.isVisible()) owner.show()
+      owner.focus()
+      if (!owner.isFocused()) owner.flashFrame(true)
+      const approved = this.options.approve ? await this.options.approve(description) : (await dialog.showMessageBox(owner, {
         type: 'question', title: 'Approve browser interaction', message: 'The assistant wants to activate a page control.',
         detail: description, buttons: ['Cancel', 'Approve this action'], defaultId: 0, cancelId: 0, noLink: true,
         ...(signal ? { signal } : {}),
@@ -270,8 +281,8 @@ export class BrowserReader {
       // Screenshot is of the whole page viewport; frame content is masked and can
       // be inspected using its own filtered snapshot. Never capture shell/DevTools.
       const top = frames[0]!.id
-      const mask = await this.evaluate(page, top, 'mask', {}) as Params
       try {
+        const mask = await this.evaluate(page, top, 'mask', {}) as Params
         if (mask.truncated) return { ...metadata, state: 'unavailable', reason: 'Page is too large to mask completely for a screenshot.', truncated: true }
         let image
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -280,7 +291,12 @@ export class BrowserReader {
         }
         if (!image) return { ...metadata, state: 'unavailable', reason: 'No rendered display surface is available. Show this browser page and retry.' }
         if (image.isEmpty()) return { ...metadata, state: 'unavailable', reason: 'Page has no rendered screenshot yet.' }
-        const png = image.resize({ width: Math.min(1600, image.getSize().width) }).toPNG()
+        // DOM overlays alone are insufficient: capturePage can return an older
+        // compositor frame. Apply the same masks to opaque pixels before export.
+        const size = image.getSize(1)
+        const bitmap = maskScreenshotBitmap(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry)
+        const masked = nativeImage.createFromBitmap(bitmap, { ...size, scaleFactor: 1 })
+        const png = masked.resize({ width: Math.min(1600, size.width) }).toPNG()
         if (png.length > 2 * 1024 * 1024) return { ...metadata, state: 'unavailable', reason: 'Screenshot exceeds the 2 MiB limit.', truncated: true }
         return { ...metadata, frameId: top, state: 'available', mimeType: 'image/png', imageBase64: png.toString('base64'),
           redacted: Boolean(mask.redacted), size: image.getSize(), limitations: ['Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }

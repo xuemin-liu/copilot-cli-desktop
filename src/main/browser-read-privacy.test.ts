@@ -39,3 +39,16 @@ test('bounded tree output reports truncation and handles hostile property names 
   assert.ok(!JSON.stringify(prose).includes('private-key'))
   assert.ok(!JSON.stringify(prose).includes('private-client'))
 })
+
+test('pasted provider tokens and arbitrary authorization schemes are withheld in ticket text', () => {
+  const secrets = ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'github_pat_abcdefghijklmnopqrstuvwxyz0123456789',
+    'gho_abcdefghijklmnopqrstuvwxyz0123456789', 'glpat-abcdefghijklmnopqrstuvwxyz0123456789',
+    ['xoxb', '1234567890', 'abcdefghijklmnop'].join('-'), 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', 'AKIA1234567890ABCDEF']
+  const result = redactBrowserValue({ comments: secrets.map(secret => `Use API key ${secret} for access`),
+    header: 'Authorization: Token opaque-private-token', otherHeader: 'Proxy-Authorization: CustomScheme opaque-private-proxy',
+    multiline: 'Authorization: Digest opaque-private-digest\nTicket description remains readable', normal: 'Skip the next step' })
+  const output = JSON.stringify(result.value)
+  for (const secret of [...secrets, 'opaque-private-token', 'opaque-private-proxy', 'opaque-private-digest']) assert.ok(!output.includes(secret), secret)
+  assert.ok(output.includes('Ticket description remains readable')); assert.ok(output.includes('Skip the next step'))
+  assert.equal(result.redacted, true)
+})

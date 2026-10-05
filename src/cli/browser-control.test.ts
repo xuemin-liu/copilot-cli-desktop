@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { browserCommand, browserControlPath, readBrowserControl } from './browser-control.js'
+import { browserCommand, browserControlPath, readBrowserControl, validateBrowserScreenshotPath } from './browser-control.js'
 
 test('browser endpoint uses configured state location', () => {
   assert.equal(browserControlPath({ COPILOT_DESKTOP_BROWSER_STATE: 'custom.json' }), 'custom.json')
@@ -34,6 +34,16 @@ test('command arguments reject invalid request IDs and extra arguments before co
     await assert.rejects(browserCommand(args), /Usage/)
   }
   await assert.rejects(browserCommand(['navigate']), /Use browser/)
+})
+
+test('screenshots reject network, device, relative and non-PNG output paths before contacting the app', async () => {
+  const invalid = ['ticket.png', '\\\\host\\share\\ticket.png', '//host/share/ticket.png', '\\\\?\\C:\\ticket.png', '\\\\.\\pipe\\ticket.png', 'C:ticket.png', join(tmpdir(), 'ticket.exe'), '']
+  if (process.platform === 'win32') invalid.push('C:\\Temp\\CON.png', 'C:\\Temp\\ticket.png:stream.png', 'C:\\Temp\\bad?.png')
+  for (const path of invalid) {
+    assert.throws(() => validateBrowserScreenshotPath(path), /local absolute .png/)
+    await assert.rejects(browserCommand(['screenshot', '123', path]), /local absolute .png/)
+  }
+  validateBrowserScreenshotPath(join(tmpdir(), 'ticket.PNG'))
 })
 
 test('CLI routes, authentication and friendly errors use a real loopback endpoint', async () => {

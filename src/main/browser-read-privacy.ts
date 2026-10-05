@@ -1,4 +1,5 @@
 import { sanitizedText, sanitizedUrl } from './browser-privacy.js'
+import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
 
 export const MAX_RESPONSE_BYTES = 256 * 1024
 export const MAX_READ_TEXT = 64 * 1024
@@ -16,11 +17,9 @@ export function redactBrowserValue(value: unknown): { value: unknown; redacted: 
     if (++count > 8000 || depth > 32 || remaining <= 0) { truncated = true; return '[truncated]' }
     if (typeof item === 'string') {
       // Filter before truncating. Cutting a credential field in half first can leak it.
-      const recognizable = item.length > 8192 ? '' : item.replace(/\b(?:Basic|Bearer)\s+[A-Za-z0-9.+/=_~-]+/gi, '[redacted authorization]')
+      const recognizable = item.length > 8192 ? '' : item.replace(new RegExp(CREDENTIAL_PATTERN_SOURCE, 'gi'), '[redacted]')
         .replace(/\b(api|access|refresh|client|session)\s+(key|token|secret|cookie)(?=\s*[:=])/gi, '$1-$2')
       let clean = item.length > 8192 ? '[unavailable oversized text]' : sanitizedText(recognizable)
-      clean = clean.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
-        .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, '[redacted]')
       if (clean !== item) redacted = true
       if (item.length > 8192) truncated = true
       if (clean.length > remaining) { clean = clean.slice(0, remaining); truncated = true }

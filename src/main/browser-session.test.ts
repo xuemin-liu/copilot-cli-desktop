@@ -66,6 +66,13 @@ test('PowerShell page-reading commands preserve scoped arguments, method and scr
     assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png')
     await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '123', '-OutputPath', join(root, 'image.png')], { env, windowsHide: true, timeout: 60000 }))
     assert.equal(await readFile(join(root, 'image.png'), 'utf8'), 'fixture-png', 'screenshots cannot overwrite a file')
+    const requestCount = seen.length
+    for (const invalid of ['ticket.png', '\\\\host\\share\\ticket.png', '\\\\?\\C:\\ticket.png', '\\\\.\\pipe\\ticket.png', 'C:ticket.png',
+      join(root, 'ticket.exe'), 'C:\\Temp\\CON.png', 'C:\\Temp\\ticket.png:stream.png', '']) {
+      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'screenshot', '123', '-OutputPath', invalid],
+        { env, windowsHide: true, timeout: 60000 }), /local absolute .png/)
+    }
+    assert.equal(seen.length, requestCount, 'invalid paths never contact the browser endpoint')
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
 })
 

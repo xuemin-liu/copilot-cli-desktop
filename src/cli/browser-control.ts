@@ -1,9 +1,18 @@
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { getCliPaths, isProcessAlive } from './runtime-core.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from './browser-read-command.js'
 
 export interface BrowserControlState { pid: number; port: number; token: string }
+
+export function validateBrowserScreenshotPath(path: string): void {
+  const windows = process.platform === 'win32'
+  if (!isAbsolute(path) || !/\.png$/i.test(path) || /^[\\/]{2}/.test(path) || /[\u0000-\u001f]/.test(path)
+    || (windows && (!/^[A-Za-z]:[\\/]/.test(path) || /[<>:"|?*]/.test(path.slice(2))
+      || /(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)/i.test(path)))) {
+    throw new Error('Screenshot output must be a local absolute .png path; network and device paths are not allowed.')
+  }
+}
 
 export function browserControlPath(environment: NodeJS.ProcessEnv = process.env): string {
   return environment.COPILOT_DESKTOP_BROWSER_STATE ?? join(getCliPaths(environment).root, 'browser.json')
@@ -26,6 +35,7 @@ export async function browserCommand(args: string[]): Promise<unknown> {
   const readCommand = BROWSER_READ_COMMANDS.some(value => value === command)
   const readArgs = args.slice(1)
   const outputPath = command === 'screenshot' && readArgs.length === 2 ? readArgs.pop() : undefined
+  if (outputPath !== undefined) validateBrowserScreenshotPath(outputPath)
   if (readCommand) validateBrowserReadCommand(command, readArgs)
   else if (!['status', 'console', 'network', 'request'].includes(command)) {
     throw new Error('Use browser status, console, network, or request <id>.')

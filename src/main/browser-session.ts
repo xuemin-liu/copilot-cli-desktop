@@ -18,6 +18,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 try {
+  if ($PSBoundParameters.ContainsKey('OutputPath')) {
+    if ($Command -ne 'screenshot') { throw 'OutputPath is only supported for screenshots.' }
+    if ($OutputPath -notmatch '^[A-Za-z]:[\\/]' -or $OutputPath -notmatch '\.png$' -or
+        $OutputPath.Substring(2) -match '[\x00-\x1f<>:"|?*]' -or
+        $OutputPath -match '(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)') {
+      throw 'Screenshot output must be a local absolute .png path; network and device paths are not allowed.'
+    }
+  }
   if (!$env:COPILOT_DESKTOP_BROWSER_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_BROWSER_STATE)) {
     throw 'Open the Browser pane for this session first.'
   }
@@ -33,7 +41,6 @@ try {
       $browserControl.token -notmatch '^[a-f0-9]{64}$') {
     throw 'Browser control state is stale or invalid. Reopen this session Browser pane.'
   }
-  if ($OutputPath -and $Command -ne 'screenshot') { throw 'OutputPath is only supported for screenshots.' }
   $browserRoute = if ($browserIsReadCommand) {
     'read/' + $Command + '?' + (($Arguments | ForEach-Object { 'arg=' + [Uri]::EscapeDataString($_) }) -join '&')
   } elseif ($Command -eq 'request') { 'request/' + $Arguments[0] } else { $Command }
@@ -123,6 +130,9 @@ loading, scrolling, navigation or activation. Virtualized and collapsed content
 is not complete until loaded. When nextOffset is a number, use snapshot PAGE FRAME
 NEXT_OFFSET repeatedly to read later chunks; null means no further chunk. DOM
 pagination is not atomic while the app is changing, so report that limitation.
+Every snapshot, including a later chunk, replaces that frame's control references.
+Act on a control before reading the next chunk, or re-read its chunk immediately
+before activating or scrolling it.
 For a scrolling container, use scroll PAGE FRAME
 PIXELS SNAPSHOT_ID NODE_ID from the latest snapshot. Frames are inspected separately.
 Report state/loading, redacted, truncated and limitations; never infer absent
@@ -140,7 +150,8 @@ tabs, snapshots, screenshots and scrolling do not activate application controls.
 No arbitrary JavaScript, CDP, storage, cookies, tokens or request replay is exposed.
 
 Screenshots mask form values and embedded frames; use frame snapshots for their
-content. Use a new output filename if the screenshot file already exists. View the
+content. OutputPath must be a local absolute .png path; network and device paths
+are rejected. Use a new output filename if the screenshot file already exists. View the
 saved PNG with the available image-view tool; do not print base64. Response output
 contains only captured, filtered JSON and records its page/frame, time and limits.
 HTML, scripts, non-JSON and oversized bodies are withheld. Native DevTools may

@@ -168,9 +168,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 ```
 
 The optional CLI equivalents use `copilot-desktop browser COMMAND ...`; saving a
-screenshot uses `copilot-desktop browser screenshot 123 ticket-new.png`. Screenshot
+screenshot uses `copilot-desktop browser screenshot 123 C:\Temp\ticket-new.png`. Screenshot
 files are written by the caller's shell, never by an HTTP file-write route, and an
-existing file is not overwritten. Without an output filename the screenshot command
+existing file is not overwritten. Output filenames must be local absolute `.png`
+paths; UNC shares, device paths and other extensions are rejected. Without an output
+filename the screenshot command
 returns PNG base64 in JSON. Save and view the PNG instead of printing its base64.
 
 Snapshots use a fixed function in a Chromium isolated world. They do not export raw
@@ -194,10 +196,13 @@ with 20,000 visited nodes per traversal and a 64 KiB filtering budget. Use
 `snapshot PAGE FRAME nextOffset` until `nextOffset` is null to read long pages.
 Pagination is not atomic while the page changes; load the content first and report
 any remaining truncation. Every snapshot replaces that frame's control references.
+Act on a control before reading the next chunk, or re-read its chunk immediately
+before activating or scrolling it.
 Response capture retains at most 100 responses and 4 MiB of filtered output in memory,
 with a 256 KiB per-body limit. It exports valid JSON only, redacts credential fields,
-recognizable Bearer/JWT/private-key values and sensitive URLs, and withholds HTML,
-scripts, plain text, binaries, invalid JSON and oversized bodies. Partial JSON is
+recognizable authorization values, common API-token prefixes, JWTs, private keys
+and sensitive URLs, and withholds HTML, scripts, plain text, binaries, invalid JSON
+and oversized bodies. Partial JSON is
 never returned. Clearing Activity's network log also clears these bodies; paused
 network recording and Preserve log apply to this capture. Native DevTools may detach
 the reader transport; inspection reconnects when possible and reports unavailable
