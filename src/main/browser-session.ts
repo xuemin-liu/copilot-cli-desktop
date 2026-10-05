@@ -193,7 +193,8 @@ selectors, labels and element types. Targets omit field values. If selectors are
 ambiguous, refine with CSS and optional text. Open shadow roots are supported;
 inspect frames separately and use a frame ID belonging to this page when needed.
 Write a local UTF-8 JSON plan with description, expected and steps. Each step has
-action and label. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
+an action. label is optional and defaults to <action> step <n> in reports; provide
+a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
 fill(selector,value), select(selector,value), press(selector,key),
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
 assert(condition,selector,optional expected), screenshot(). Optional text filters

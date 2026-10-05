@@ -55,7 +55,7 @@ try {
         if ($browserError.message -is [string] -and $browserError.message) { $browserRequestMessage = $browserError.message }
       }
     } catch {}
-    if ($browserRequestMessage) { throw $browserRequestMessage }
+    if ($browserRequestMessage) { $browserPerformed = $false; throw $browserRequestMessage }
     throw $browserRequestFailure
   }
   $browserReport = $browserResponse.Content | ConvertFrom-Json

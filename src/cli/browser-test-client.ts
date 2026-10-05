@@ -4,6 +4,10 @@ import { isAbsolute } from 'node:path'
 import { MAX_TEST_BYTES, validateBrowserTestPlan } from '../main/browser-test-plan.js'
 import type { BrowserTestPlan, BrowserTestReport } from '../main/browser-test-plan.js'
 
+export class BrowserTestRejectedError extends Error {
+  constructor(message: string) { super(message); this.name = 'BrowserTestRejectedError' }
+}
+
 export function validateTestPath(path: string): void {
   if (!isAbsolute(path) || !/\.json$/i.test(path) || /^[\\/]{2}/.test(path) || /[\u0000-\u001f]/.test(path)
     || process.platform === 'win32' && (!/^[A-Za-z]:[\\/]/.test(path) || /[<>:"|?*]/.test(path.slice(2))
@@ -52,6 +56,7 @@ export async function executeBrowserTest(plan: BrowserTestPlan, planPath: string
     for (let index = report.screenshots.length + 1; index < files.length; index++) { await files[index]!.close(); await unlink(paths[index]!) }
     return saved
   } catch (error) {
+    if (error instanceof BrowserTestRejectedError) performed = false
     if (performed && files[0]) await files[0].writeFile(JSON.stringify({ status: 'unavailable', message: 'Test outcome unavailable. Inspect the browser last-test report before rerunning actions.' })).catch(() => {})
     else for (let index = 0; index < files.length; index++) { await files[index]!.close(); await unlink(paths[index]!).catch(() => {}) }
     throw error

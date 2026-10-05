@@ -2,7 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { getCliPaths, isProcessAlive } from './runtime-core.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from './browser-read-command.js'
-import { executeBrowserTest, loadBrowserTest } from './browser-test-client.js'
+import { BrowserTestRejectedError, executeBrowserTest, loadBrowserTest } from './browser-test-client.js'
 
 export interface BrowserControlState { pid: number; port: number; token: string }
 
@@ -45,7 +45,11 @@ export async function browserCommand(args: string[]): Promise<unknown> {
           redirect: 'error', signal: AbortSignal.timeout(315000) })
       } catch { throw new Error('Test connection failed. Inspect Last test in the browser before rerunning actions.') }
       const body = await response.json()
-      if (!response.ok) throw new Error(typeof body?.message === 'string' ? body.message : 'Browser test failed.')
+      if (!response.ok) {
+        const message = typeof body?.message === 'string' ? body.message : 'Browser test failed.'
+        if (response.status >= 400 && response.status < 500) throw new BrowserTestRejectedError(message)
+        throw new Error(message)
+      }
       return body
     })
   }
