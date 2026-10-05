@@ -24,6 +24,18 @@ if (!process.versions.electron) {
     }));
     const noop = () => {};
     window.fixture = { calls: [], openChanges: [], errors: [] };
+    const describe = node => node instanceof Element ? node.getAttribute('aria-label') || node.getAttribute('class') || node.tagName : null;
+    window.fixture.events = [];
+    window.fixture.lastResizeAt = performance.now();
+    for (const type of ['pointerdown', 'click', 'focusin', 'focusout']) document.addEventListener(type, event => {
+      window.fixture.events.push({type, target:describe(event.target), related:describe(event.relatedTarget), focused:document.hasFocus(),connected:event.target.isConnected});
+      if (window.fixture.events.length > 50) window.fixture.events.shift();
+    }, true);
+    window.addEventListener('resize', () => {
+      window.fixture.lastResizeAt = performance.now();
+      window.fixture.events.push({type:'resize',width:innerWidth,height:innerHeight});
+      if (window.fixture.events.length > 50) window.fixture.events.shift();
+    });
     window.addEventListener('error', event => window.fixture.errors.push(event.message));
     window.addEventListener('unhandledrejection', event => window.fixture.errors.push(String(event.reason)));
     const recordOpen = open => window.fixture.openChanges.push(open);
@@ -57,7 +69,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow } = await import('electron')
+  const { app, BrowserWindow, Menu } = await import('electron')
   // Do not await app readiness at module scope: Electron waits for ESM
   // evaluation to finish before emitting ready.
   void run().catch(error => { console.error(error); app.exit(1) })
@@ -66,20 +78,30 @@ if (!process.versions.electron) {
     app.setPath('userData', profile)
     app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
     let window
+    let lastCommand
     const checks = []
     try {
       await app.whenReady()
+      // Electron's default application menu can otherwise arrive after the
+      // first render and resize the client viewport during pointer assertions.
+      Menu.setApplicationMenu(null)
       window = new BrowserWindow({ width: 800, height: 600, show: false,
         webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } })
       await window.loadFile(join(artifacts, 'index.html'))
-      // A hidden renderer needs focus for native Tab traversal to emit focus events.
-      window.webContents.focus()
-      const ui = code => window.webContents.executeJavaScript(code)
+      const ui = code => { lastCommand = code; return window.webContents.executeJavaScript(code) }
       const until = async (code, label) => {
         const end = Date.now() + 10000
         while (Date.now() < end) { const value = await ui(code); if (value) return value; await delay(25) }
         const state = await ui('({focus:document.activeElement.outerHTML.slice(0,300),hasFocus:document.hasFocus(),open:!!document.querySelector(".sidebar-projects-popover"),fixture:window.fixture})')
         throw new Error(`Timed out: ${label}: ${JSON.stringify(state)}`)
+      }
+      const assertStable = async (code, label) => {
+        // Verify settled input continuously; a close is never retried or reopened.
+        const end = Date.now() + 300
+        do {
+          assert.equal(await ui(code), true, label)
+          await delay(25)
+        } while (Date.now() < end)
       }
       const click = async (selector, leftInset = null) => {
         const point = await ui(`(() => {
@@ -106,6 +128,14 @@ if (!process.versions.electron) {
         await until('!document.querySelector(".sidebar-projects-popover") && window.fixture.openChanges.at(-1) === false', 'flyout closed and unobscured callback reported')
       }
       await until('!!document.querySelector(".sidebar-projects-button")', 'fixture ready')
+      window.webContents.focus()
+      await click('#outside')
+      // Initial Chromium viewport delivery can lag loadFile and React mounting,
+      // especially with display scaling. Flush layout while the flyout is closed
+      // and wait for its client dimensions and resize events to settle.
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      const [initialWidth, initialHeight] = window.getContentSize()
+      await until(`innerWidth === ${initialWidth} && innerHeight === ${initialHeight} && performance.now() - window.fixture.lastResizeAt >= 300`, 'initial viewport settled')
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 1)
       assert.equal(await ui('!!document.querySelector(".sidebar-projects-popover")'), false)
 
@@ -114,9 +144,8 @@ if (!process.versions.electron) {
         // Start from a focused row so the click must transfer focus safely.
         await ui('document.querySelector(".sidebar-project-choice[aria-current=true]").focus()')
         await click(selector, leftInset)
-        await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
-        assert.equal(await ui('!!document.querySelector(".sidebar-projects-popover")'), true, `${selector} click must keep flyout open`)
-        assert.equal(await ui('window.fixture.openChanges.at(-1)'), true)
+        await until('document.activeElement === document.querySelector(".sidebar-projects-popover")', `${selector} click focuses flyout`)
+        await assertStable('!!document.querySelector(".sidebar-projects-popover") && window.fixture.openChanges.at(-1) === true', `${selector} click must keep flyout open`)
       }
       key('Escape')
       await closed()
@@ -185,13 +214,19 @@ if (!process.versions.electron) {
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 0)
       checks.push('Expanding sidebar dismisses flyout and reports unobscured')
       assert.deepEqual(await ui('window.fixture.errors'), [])
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)
       window.destroy()
       await rm(profile, { recursive: true, force: true }).catch(() => {})
       app.exit(0)
     } catch (error) {
       console.error(error)
+      console.error('Last renderer command:', lastCommand)
+      if (window && !window.isDestroyed()) {
+        const diagnostic = await window.webContents.executeJavaScript('({fixture:window.fixture, focus:document.activeElement.outerHTML.slice(0,300), hasFocus:document.hasFocus(), open:!!document.querySelector(".sidebar-projects-popover")})').catch(() => null)
+        await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false, electron: process.versions.electron, error: String(error), lastCommand, diagnostic }, null, 2))
+        console.error(JSON.stringify(diagnostic))
+      }
       window?.destroy()
       app.exit(1)
     }
