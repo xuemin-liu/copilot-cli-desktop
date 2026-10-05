@@ -4,16 +4,19 @@ Select the **Open browser** button (window icon) in the terminal session's heade
 or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
 addresses and development hosts (single-label names, `.localhost`, `.local`,
 `.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
-HTTP/HTTPS always takes precedence. Each terminal session has its own browser page,
+HTTP/HTTPS always takes precedence. Each terminal session has its own browser pages,
 DevTools, console/network capture, and cookie/storage partition, separate from
 other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
-to resize it. Links with `target="_blank"`, JavaScript `window.open()` and forms
+to resize it. Use **+ (New page)** in the page strip to open another page in the
+same session, then enter its address. New pages share the session's login and
+storage, keep other pages open, and are selected automatically. Up to 32 pages
+can be open in one session. Links with `target="_blank"`, JavaScript `window.open()` and forms
 targeting a new page open browser page tabs inside the same terminal. They share
 that terminal's login/storage and console/network capture. Select or close pages
 using the page strip; navigation controls and DevTools apply to the selected page.
 The address toolbar shows the selected page's actual browser zoom percentage.
 Opening a child page preserves the source page, POST data and opener callbacks.
-Only the primary page's saved URL is restored after app restart; child tabs are temporary.
+Only the primary page's saved URL is restored after app restart; additional pages are temporary.
 Restored terminal sessions retain their browser cookies, local storage,
 and last successful top-level page's origin and path across app restarts;
 query strings, fragments, and SPA route changes are not saved. Authentication
@@ -92,6 +95,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 
 The helper also supports `status` and `request <id>`. Its endpoint always belongs
 to the session that launched the shell, regardless of the currently focused tab.
+Within that session, `console`, `network`, and their `status` counts reflect only
+the selected browser page. Switching pages changes the queried page without
+discarding the other pages' captured activity.
 Read `status` before inspecting logs: `recordingConsole` / `recordingNetwork`
 indicate whether each captured log is recording, and `preserveConsole` /
 `preserveNetwork` indicate whether a page's entries survive navigation. Copilot's
@@ -159,16 +165,21 @@ The installed-app helper and optional desktop CLI support:
 
 For example, in a shell inheriting the terminal session's environment:
 
+Omit the page ID to read the currently selected browser page. This applies to
+`frames`, `snapshot`, `screenshot`, and `responses`. Explicit page IDs remain
+available for targeted reads and pagination; the assistant should not select a
+different page unless asked.
+
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" tabs
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" snapshot 123
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" frames 123
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" responses 123
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" screenshot 123 -OutputPath "$env:TEMP\ticket-new.png"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" snapshot
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" frames
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" responses
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" screenshot -OutputPath "$env:TEMP\ticket-new.png"
 ```
 
 The optional CLI equivalents use `copilot-desktop browser COMMAND ...`; saving a
-screenshot uses `copilot-desktop browser screenshot 123 C:\Temp\ticket-new.png`. Screenshot
+screenshot uses `copilot-desktop browser screenshot C:\Temp\ticket-new.png`. Screenshot
 files are written by the caller's shell, never by an HTTP file-write route, and an
 existing file is not overwritten. Output filenames must be local absolute `.png`
 paths; UNC shares, device paths and other extensions are rejected. Without an output

@@ -486,6 +486,7 @@ button:disabled {
 .browser-page button { padding: 4px 6px; font-size: 11px; }
 .browser-page button[role="tab"] { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-page button[aria-selected="true"] { border-color: #4f88ff; color: #a9c9ff; }
+.browser-new-page { flex-shrink: 0; padding: 4px 8px; }
 .browser-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; border-bottom: 1px solid #252a33; }
 .browser-tabs button { padding: 4px 6px; font-size: 11px; }
 .browser-tabs button[aria-selected="true"], .browser-tabs button[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }

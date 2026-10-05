@@ -300,6 +300,14 @@ export class BrowserDebug {
   }
 
   action(action: string): BrowserDebugState {
+    if (action === 'new-page') {
+      if (this.disposed) throw new Error('Browser has closed')
+      if (this.pages.size >= MAX_PAGES) throw new Error('Close a browser page before opening another (32 pages maximum).')
+      this.addPage(new WebContentsView({ webPreferences: { session: this.activePage.contents.session,
+        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+      this.layout()
+      return this.snapshot
+    }
     const setting = /^(record-console|record-network|preserve-console|preserve-network):(on|off)$/.exec(action)
     if (setting) {
       const enabled = setting[2] === 'on'
@@ -479,9 +487,10 @@ export class BrowserDebug {
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
           pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url) })),
-          consoleCount: console.length, networkCount: network.length })
-      } else if (request.url === '/console') send(200, this.state.console)
-      else if (request.url === '/network') send(200, this.state.network)
+          consoleCount: console.filter(entry => entry.pageId === this.activePageId).length,
+          networkCount: network.filter(entry => entry.pageId === this.activePageId).length })
+      } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === this.activePageId))
+      else if (request.url === '/network') send(200, this.state.network.filter(entry => entry.pageId === this.activePageId))
       else if (/^\/request\/\d+$/.test(request.url ?? '')) {
         const entry = this.state.network.find(entry => entry.id === request.url!.slice(9))
         send(entry ? 200 : 404, entry ?? { message: 'Request not found; activity retains the latest 300 requests.' })

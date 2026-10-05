@@ -168,6 +168,59 @@ if (!process.versions.electron) {
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "125%"'), 'actual page zoom in toolbar')
       browser.view.webContents.setZoomFactor(1)
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "100%"'), 'reset page zoom in toolbar')
+      // Manually added pages keep the original alive, share only this session's storage,
+      // and make CLI reads follow the page selected by the user.
+      {
+        const original = browser.view.webContents
+        const originalId = original.id
+        await original.executeJavaScript('localStorage.setItem("manual-page-storage", "shared")')
+        await ui('document.querySelector("[aria-label=\\"New browser page\\"]").click()')
+        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.activePageId !== originalId, 'manual browser page')
+        const added = browser.view.webContents
+        const addedId = added.id
+        assert.equal(added.session, original.session, 'manual pages share this session login')
+        assert.equal(added.getLastWebPreferences().nodeIntegration, false)
+        assert.equal(added.getLastWebPreferences().contextIsolation, true)
+        assert.equal(added.getLastWebPreferences().sandbox, true)
+        await until(() => ui('document.activeElement?.getAttribute("aria-label") === "Web app URL" && document.activeElement.value === ""'), 'new page focuses an empty address bar')
+        await ui(`(() => {
+          const input = document.querySelector('[aria-label="Web app URL"]');
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(`${url}manual-page`)});
+          input.dispatchEvent(new Event('input', {bubbles:true}));
+        })()`)
+        await ui('document.querySelector(".browser-toolbar").requestSubmit()')
+        await until(() => browser.snapshot.url === `${url}manual-page` && !browser.snapshot.loading, 'manual page address navigation')
+        assert.equal(original.getURL(), url, 'new page does not replace the original')
+        assert.equal(await added.executeJavaScript('localStorage.getItem("manual-page-storage")'), 'shared')
+        await added.executeJavaScript('console.error("manual-page-only")')
+        await until(() => browser.snapshot.console.some(entry => entry.message === 'manual-page-only'), 'manual page console capture')
+        assert.equal((await browserCommand(['snapshot'])).pageId, addedId)
+        assert.equal((await browserCommand(['frames'])).pageId, addedId)
+        assert.ok((await browserCommand(['console'])).every(entry => entry.pageId === addedId))
+        const addedNetwork = await until(async () => {
+          const entries = await browserCommand(['network']); return entries.some(entry => entry.url.endsWith('/manual-page')) && entries
+        }, 'manual page network capture')
+        assert.ok(addedNetwork.every(entry => entry.pageId === addedId))
+        const addedResponses = await until(async () => {
+          const result = await browserCommand(['responses']); return result.responses.length && result
+        }, 'manual page response capture')
+        assert.ok(addedResponses.responses.every(entry => entry.pageId === addedId))
+        assert.ok(addedResponses.capture.every(entry => entry.pageId === addedId))
+        const addedStatus = await browserCommand(['status'])
+        assert.equal(addedStatus.consoleCount, (await browserCommand(['console'])).length)
+        assert.equal(addedStatus.networkCount, addedNetwork.length)
+        await until(() => ui(`document.querySelectorAll('.browser-pages [role="tab"]').length === 2`), 'manual page strip')
+        await ui(`document.querySelectorAll('.browser-pages [role="tab"]')[0].click()`)
+        await until(() => browser.snapshot.activePageId === originalId, 'manual page selection')
+        assert.equal((await browserCommand(['snapshot'])).pageId, originalId)
+        assert.ok(!(await browserCommand(['console'])).some(entry => entry.message === 'manual-page-only'))
+        assert.ok((await browserCommand(['network'])).every(entry => entry.pageId === originalId))
+        assert.ok((await browserCommand(['responses'])).responses.every(entry => entry.pageId === originalId))
+        await ui(`document.querySelectorAll('.browser-page button[aria-label^="Close browser page"]')[1].click()`)
+        await until(() => added.isDestroyed() && browser.snapshot.pages.length === 1, 'manual page close')
+        assert.equal(original.isDestroyed(), false)
+        assert.equal(browser.snapshot.activePageId, originalId)
+      }
       // Separate live WebContents, cookies/storage, telemetry and helper endpoints.
       {
         await browser.view.webContents.executeJavaScript('document.cookie = "session-only=first; SameSite=Strict"; localStorage.setItem("session-only", "first")')

@@ -34,7 +34,8 @@ export async function browserCommand(args: string[]): Promise<unknown> {
   const [command = 'status', argument, ...extra] = args
   const readCommand = BROWSER_READ_COMMANDS.some(value => value === command)
   const readArgs = args.slice(1)
-  const outputPath = command === 'screenshot' && readArgs.length === 2 ? readArgs.pop() : undefined
+  const outputPath = command === 'screenshot' && (readArgs.length === 2
+    || (readArgs.length === 1 && /\.png$/i.test(readArgs[0]!))) ? readArgs.pop() : undefined
   if (outputPath !== undefined) validateBrowserScreenshotPath(outputPath)
   if (readCommand) validateBrowserReadCommand(command, readArgs)
   else if (!['status', 'console', 'network', 'request'].includes(command)) {
@@ -47,7 +48,7 @@ export async function browserCommand(args: string[]): Promise<unknown> {
   const state = await readBrowserControl()
   const query = new URLSearchParams()
   for (const arg of readArgs) query.append('arg', arg)
-  const route = readCommand ? `/read/${command}?${query}` : command === 'request' ? `/request/${argument}` : `/${command}`
+  const route = readCommand ? `/read/${command}${query.size ? `?${query}` : ''}` : command === 'request' ? `/request/${argument}` : `/${command}`
   let response: Response
   let body: unknown
   try {
