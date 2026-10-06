@@ -89,7 +89,7 @@ view cancels the selection, and it ends by itself after two minutes.
 The element is described in a short text block that is **pasted into the session's prompt
 box, not sent**: review or edit it, then press Enter. The block has the element's tag,
 classes and id, a CSS selector that says whether it is unique, its visible text (up to 300
-characters), a fixed allow-list of attributes (`id`, `class`, `role`, `aria-label`,
+characters; text that is hidden, `aria-hidden`, `display:none`, `visibility:hidden`, fully transparent or without a rendered box is left out), a fixed allow-list of attributes (`id`, `class`, `role`, `aria-label`,
 `data-testid`, `href`, `src`, `alt`, `title`, `type`, `name`, `placeholder`, `for`,
 `disabled`), its position and size in the page, a few computed styles, and the chain of
 parents. Without bracketed paste the block is joined onto one line with ` | `, so a line

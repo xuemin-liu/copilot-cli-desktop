@@ -32,18 +32,35 @@ export function browserPickScript(this: Element, credentialPatternSource: string
     attributes[name] = (name === 'href' || name === 'src') && value.length > 8000 ? '[redacted oversized URL]' : clean(value, name === 'href' || name === 'src' ? 2000 : 200)
   }
 
-  // Text comes only from text nodes that are not inside hidden, script-like or form-value content.
+  // Text comes only from text nodes the user can see: not inside script-like, form-value, hidden,
+  // aria-hidden, display:none, visibility:hidden or fully transparent content, and only if it has a rendered box.
+  const hiddenCache = new Map<Element, boolean>()
+  const hiddenElement = (element: Element): boolean => {
+    let result = hiddenCache.get(element)
+    if (result === undefined) {
+      const style = getComputedStyle(element)
+      result = element.hasAttribute('hidden') || element.getAttribute('aria-hidden') === 'true' || style.display === 'none'
+        || Number(style.opacity) === 0
+      hiddenCache.set(element, result)
+    }
+    return result
+  }
   let text = ''
   if (!protectedControl) {
     const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
+    const range = document.createRange()
     let inspected = 0
     for (let node = walker.nextNode(); node && text.length < 600 && ++inspected < 2000; node = walker.nextNode()) {
-      let skip = false
-      for (let parent = node.parentElement; parent; parent = parent === target ? null : parent.parentElement) {
-        if (excluded(parent) || sensitive(parent) || valueControl(parent)) { skip = true; break }
+      // Visibility is inherited and can be turned back on by a descendant, so only the text's own parent decides it.
+      let skip = !node.parentElement || getComputedStyle(node.parentElement).visibility !== 'visible'
+      for (let parent = node.parentElement; !skip && parent; parent = parent === target ? null : parent.parentElement) {
+        if (excluded(parent) || sensitive(parent) || valueControl(parent) || hiddenElement(parent)) { skip = true; break }
       }
-      if (!skip) text += ` ${node.textContent ?? ''}`
+      if (skip) continue
+      range.selectNodeContents(node)
+      if (range.getClientRects().length > 0) text += ` ${node.textContent ?? ''}`
     }
+    range.detach()
   }
 
   const path: string[] = []

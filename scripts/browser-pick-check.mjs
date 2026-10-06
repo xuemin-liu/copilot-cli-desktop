@@ -44,7 +44,10 @@ if (!process.versions.electron) {
         <input id="pw" type="password" value="private-password">
         <div id="note">Authorization: Bearer private-inline-token and ghp_abcdefghijklmnopqrstuvwxyz0123456789</div>
         <a id="link" href="/next?atl_token=private-link-token&page=2">Next page</a>
-        <div id="box">Visible text <input type="text" value="private-username"> <span data-private>private-marked</span> tail</div>
+        <div id="box">Visible text <input type="text" value="private-username"> <span data-private>private-marked</span>
+          <span style="display:none">INTERNAL_HIDDEN</span><span hidden>HIDDEN_ATTRIBUTE</span><span aria-hidden="true">ARIA_HIDDEN</span>
+          <span style="visibility:hidden">INVISIBLE</span><span style="opacity:0">TRANSPARENT</span><div hidden><b>NESTED_HIDDEN</b></div>
+          <span style="visibility:hidden"><span style="visibility:visible">SHOWN_AGAIN</span></span> tail</div>
         <script>window.clicks = 0; document.addEventListener('click', () => window.clicks++, true)</script>`)
     })
     await new Promise(resolve => site.listen(0, resolve))
@@ -89,8 +92,8 @@ if (!process.versions.electron) {
       assert.match(link, /href="[^"]*page=2/)
       assert.doesNotMatch(link, /private-link-token/)
       const box = await pick(430, 365)
-      assert.match(box, /Text: "Visible text tail"/)
-      assert.doesNotMatch(box, /private-username|private-marked/)
+      assert.match(box, /Text: "Visible text SHOWN_AGAIN tail"/)
+      assert.doesNotMatch(box, /private-username|private-marked|INTERNAL_HIDDEN|HIDDEN_ATTRIBUTE|ARIA_HIDDEN|INVISIBLE|TRANSPARENT|NESTED_HIDDEN/)
       // Esc and the cancel call end the selection without a result.
       let started = browser.pickElement()
       await until(() => browser.picking, 'second picker started')
