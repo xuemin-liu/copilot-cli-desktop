@@ -2111,7 +2111,7 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     const paths = browserSessionPaths(browserSessionRoot(), tabId)
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
-    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition,
+    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition, tabId,
       reportError: message => { void writeAppLog(message).catch(() => {}) } })
     sessionBrowsers.set(tabId, browser)
   }
@@ -2132,6 +2132,12 @@ ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown
   return browser.action(action)
 })
 ipcMain.handle('desktop:browser-pick', (event, tabId: unknown) => browserForSender(event, tabId).pickElement())
+ipcMain.handle('desktop:browser-find', (event, tabId: unknown, text: unknown, forward: unknown, next: unknown) => {
+  const browser = browserForSender(event, tabId)
+  if (typeof text !== 'string' || text.length > 500 || typeof forward !== 'boolean' || typeof next !== 'boolean') throw new Error('Invalid find request')
+  return browser.find(text, forward, next)
+})
+ipcMain.handle('desktop:browser-find-stop', (event, tabId: unknown) => browserForSender(event, tabId).stopFind())
 ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { browserForSender(event, tabId).cancelPick() })
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)
