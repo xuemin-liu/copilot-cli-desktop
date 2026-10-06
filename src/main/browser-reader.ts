@@ -16,6 +16,8 @@ import { runBrowserTest, type TestObservation } from './browser-test-runner.js'
 const MAX_RESPONSES = 100
 const MAX_BODY_CACHE = 4 * 1024 * 1024
 const MAX_FRAMES = 64
+const MAX_MULTI_PICKS = 10
+const PICK_IDLE_MS = 120_000
 type Params = Record<string, any> // CDP's JSON events have domain-specific structures.
 async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return operation
@@ -62,7 +64,7 @@ export class BrowserReader {
   private testOrigin: string | null = null
   private testBlocked = false
   private testAbort: AbortController | null = null
-  private picker: { pageId: number; choose: (backendNodeId: number | null) => void } | null = null
+  private picker: { pageId: number; choose: (backendNodeId: number | null) => void; next: () => Promise<number | null> } | null = null
   private pickAbort: AbortController | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
@@ -505,8 +507,9 @@ export class BrowserReader {
   }
 
   /** The user clicks an element with Chromium's own inspect overlay and receives prompt text
-   * for it. Only the desktop window can start this; the assistant's control server cannot. */
-  async pick(): Promise<string | null> {
+   * for it. Only the desktop window can start this; the assistant's control server cannot.
+   * With `onElement` the overlay stays on and every click is reported (up to ten) until it is cancelled or idle. */
+  async pick(onElement?: (text: string) => void): Promise<string | null> {
     if (this.disposed) throw new Error('Browser session has closed.')
     if (this.busy || this.pickAbort) throw new Error('Another browser inspection, test or element selection is in progress.')
     const page = this.page()
@@ -520,30 +523,35 @@ export class BrowserReader {
       await this.attach(page)
       await this.command(page, 'DOM.enable')
       await this.command(page, 'Overlay.enable')
-      const chosen = new Promise<number | null>(resolve => { this.picker = { pageId, choose: resolve } })
+      // Clicks queue up while an element is being described; cancellation jumps the queue.
+      const queued: (number | null)[] = []
+      let waiting: ((backendNodeId: number | null) => void) | null = null
+      const choose = (backendNodeId: number | null): void => {
+        if (backendNodeId === null) queued.length = 0
+        if (waiting) { const resolve = waiting; waiting = null; resolve(backendNodeId) } else queued.push(backendNodeId)
+      }
+      const next = (): Promise<number | null> => queued.length ? Promise.resolve(queued.shift()!) : new Promise(resolve => { waiting = resolve })
+      this.picker = { pageId, choose, next }
       abort.signal.addEventListener('abort', () => this.picker?.choose(null), { once: true })
       // Cancellation can arrive while Chromium is still being prepared; an already-aborted signal fires no event.
       if (abort.signal.aborted) return null
-      timer = setTimeout(() => abort.abort(), 120_000)
+      const idle = (): void => { if (timer) clearTimeout(timer); timer = setTimeout(() => abort.abort(), PICK_IDLE_MS) }
+      idle()
       await this.command(page, 'Overlay.setInspectMode', { mode: 'searchForNode', highlightConfig: {
         showInfo: true, contentColor: { r: 111, g: 168, b: 220, a: 0.45 }, paddingColor: { r: 147, g: 196, b: 125, a: 0.4 },
         borderColor: { r: 255, g: 229, b: 153, a: 0.6 }, marginColor: { r: 246, g: 178, b: 107, a: 0.4 } } })
-      const backendNodeId = await chosen
-      if (backendNodeId === null || abort.signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== pageId) return null
-      const node = await this.command(page, 'DOM.describeNode', { backendNodeId })
-      const frames = await this.frames(page)
-      const frameId = typeof node.node?.frameId === 'string' && frames.some(frame => frame.id === node.node.frameId) ? String(node.node.frameId) : frames[0]?.id
-      if (!frameId) throw new Error('The selected element is no longer available.')
-      const contextId = await this.isolatedContext(page, frameId)
-      const resolved = await this.command(page, 'DOM.resolveNode', { backendNodeId, executionContextId: contextId }, page.sessions.get(frameId))
-      const objectId = resolved.object?.objectId
-      if (!objectId) throw new Error('The selected element is no longer available.')
-      try {
-        const result = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true, userGesture: false,
-          functionDeclaration: browserPickScript.toString(), arguments: [{ value: CREDENTIAL_PATTERN_SOURCE }] }, page.sessions.get(frameId))
-        if (result.exceptionDetails || !result.result?.value) throw new Error('The selected element could not be described. Select it again.')
-        return formatPickedElement(result.result.value)
-      } finally { await this.command(page, 'Runtime.releaseObject', { objectId }, page.sessions.get(frameId), 1000).catch(() => {}) }
+      let count = 0
+      while (true) {
+        const backendNodeId = await next()
+        if (backendNodeId === null || abort.signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== pageId) return null
+        if (!onElement) return await this.describePicked(page, backendNodeId)
+        // In a multi-selection one stale element must not end the others.
+        const text = await this.describePicked(page, backendNodeId).catch(() => null)
+        if (text === null) continue
+        onElement(text)
+        if (++count >= MAX_MULTI_PICKS) return null
+        idle()
+      }
     } finally {
       if (timer) clearTimeout(timer)
       this.picker = null; this.pickAbort = null; this.busy = false
@@ -553,6 +561,23 @@ export class BrowserReader {
         await this.command(page, 'Overlay.disable', {}, undefined, 1000).catch(() => {})
       }
     }
+  }
+
+  private async describePicked(page: PageReader, backendNodeId: number): Promise<string> {
+    const node = await this.command(page, 'DOM.describeNode', { backendNodeId })
+    const frames = await this.frames(page)
+    const frameId = typeof node.node?.frameId === 'string' && frames.some(frame => frame.id === node.node.frameId) ? String(node.node.frameId) : frames[0]?.id
+    if (!frameId) throw new Error('The selected element is no longer available.')
+    const contextId = await this.isolatedContext(page, frameId)
+    const resolved = await this.command(page, 'DOM.resolveNode', { backendNodeId, executionContextId: contextId }, page.sessions.get(frameId))
+    const objectId = resolved.object?.objectId
+    if (!objectId) throw new Error('The selected element is no longer available.')
+    try {
+      const result = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true, userGesture: false,
+        functionDeclaration: browserPickScript.toString(), arguments: [{ value: CREDENTIAL_PATTERN_SOURCE }] }, page.sessions.get(frameId))
+      if (result.exceptionDetails || !result.result?.value) throw new Error('The selected element could not be described. Select it again.')
+      return formatPickedElement(result.result.value)
+    } finally { await this.command(page, 'Runtime.releaseObject', { objectId }, page.sessions.get(frameId), 1000).catch(() => {}) }
   }
 
   cancelPick(): void { this.pickAbort?.abort() }

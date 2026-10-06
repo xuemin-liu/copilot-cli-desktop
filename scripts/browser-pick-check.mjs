@@ -111,6 +111,32 @@ if (!process.versions.electron) {
       assert.equal(await started, null)
       await assert.rejects(browser.pickElement(), /Page view/)
       browser.action('view:page')
+      // Several elements in one go: the overlay stays on, every click is reported in order, and Esc ends it.
+      const several = []
+      const many = browser.pickElement(text => several.push(text))
+      await until(() => browser.picking, 'multi picker started')
+      await delay(300)
+      for (const [x, y] of [[100, 60], [100, 275], [430, 365]]) await mouse(x, y, ['mouseMove', 'mouseDown', 'mouseUp'])
+      await until(() => several.length === 3, 'three elements reported')
+      assert.match(several[0], /<button#save\.primary\.big>/)
+      assert.match(several[1], /<a#link>/)
+      assert.match(several[2], /<div#box>/)
+      assert.doesNotMatch(several.join('\n'), /private-username|private-marked|private-link-token|INTERNAL_HIDDEN/)
+      assert.equal(browser.picking, true, 'the picker stays on between clicks')
+      assert.equal(await contents.executeJavaScript('window.clicks'), 0, 'selecting must not click the page')
+      contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
+      assert.equal(await many, null)
+      assert.equal(browser.picking, false)
+      assert.equal(several.length, 3)
+      // It stops by itself after ten elements.
+      const ten = []
+      const capped = browser.pickElement(text => ten.push(text))
+      await until(() => browser.picking, 'capped picker started')
+      await delay(300)
+      for (let index = 0; index < 11 && browser.picking; index++) await mouse(100, 60, ['mouseMove', 'mouseDown', 'mouseUp'])
+      assert.equal(await capped, null)
+      assert.equal(ten.length, 10)
+      assert.equal(browser.picking, false)
       // The inspect overlay is gone afterwards: a real click reaches the page again.
       await mouse(100, 60, ['mouseMove', 'mouseDown', 'mouseUp'])
       await until(async () => await contents.executeJavaScript('window.clicks') === 1, 'click reaches the page after picking')

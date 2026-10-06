@@ -2132,6 +2132,10 @@ ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown
   return browser.action(action)
 })
 ipcMain.handle('desktop:browser-pick', (event, tabId: unknown) => browserForSender(event, tabId).pickElement())
+ipcMain.handle('desktop:browser-pick-many', async (event, tabId: unknown) => {
+  const browser = browserForSender(event, tabId)
+  await browser.pickElement(text => { if (!event.sender.isDestroyed()) event.sender.send('desktop:browser-picked', tabId, text) })
+})
 ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { browserForSender(event, tabId).cancelPick() })
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)
