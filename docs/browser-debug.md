@@ -79,6 +79,20 @@ Console and ordinary header text are capped at 8192 characters before filtering.
 Oversized URLs and URL-bearing headers are replaced with a redaction marker so a
 partial credential cannot escape filtering at the limit.
 
+## Everyday browser controls
+
+With the page focused (or the address toolbar, for find):
+
+| Action | How |
+|---|---|
+| Zoom in, out, reset | **Ctrl+=**, **Ctrl+-**, **Ctrl+0**, or select the zoom percentage in the toolbar to reset. Steps follow Chrome (25% to 500%). |
+| Find in page | **Ctrl+F** opens a find bar above the page with a match count; **Enter** / **Shift+Enter** (or **F3** / **Shift+F3**) step through matches; **Esc** closes it. Navigating to another page ends the search. |
+| DevTools | **F12** or **Ctrl+Shift+I** toggles DevTools, like the DevTools / Overrides tab. |
+| Address suggestions | The address field suggests pages you visited in this session, newest first (up to 200; nothing with a query string secret or a fragment, and not saved across restarts). |
+| Right-click menu | Back, Forward, Reload, Hard reload, Select all, and **Inspect element** (opens DevTools on that element). On a link: **Open link in new page** and **Copy link address**; on an image: **Copy image address**; on selected text: **Copy**; in a field: **Cut / Copy / Paste**. Only HTTP(S) addresses are offered. |
+
+The assistant's browser status does not include the address suggestions or the find text.
+
 ## Adding a page element to the prompt
 
 Select the crosshair button in the address toolbar, then click an element in the page.
