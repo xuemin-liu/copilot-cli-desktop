@@ -558,6 +558,8 @@ button:disabled {
 .browser-error { margin: 0; padding: 7px 10px; color: #ff8c95; font-size: 12px; overflow-wrap: anywhere; }
 .browser-footer { font-size: 11px; padding: 7px 10px; color: #929baa; }
 .browser-footer details { margin-top: 5px; }
+.browser-footer-details { display: flex; flex-wrap: wrap; gap: 0 16px; }
+.browser-footer-details details[open] { flex-basis: 100%; }
 .browser-footer summary { cursor: pointer; }
 .browser-footer p { line-height: 1.5; }
 .browser-testing { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 5px 8px; font-size: 11px; color: #929baa; }
