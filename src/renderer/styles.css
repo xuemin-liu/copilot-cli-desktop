@@ -530,6 +530,13 @@ button:disabled {
 .browser-permissions ul { list-style: none; margin: 4px 0; padding: 0; }
 .browser-permissions li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
 .browser-permissions button { padding: 2px 6px; font-size: 11px; }
+.browser-selection { margin: 0 8px 6px; padding: 8px 10px; border: 1px solid #364153; border-radius: 6px; background: #121a28; color: #e6edf3; font-size: 12px; }
+.browser-selection p { margin: 0 0 6px; }
+.browser-selection ul { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; padding: 0; }
+.browser-selection li { display: inline-flex; align-items: center; gap: 2px; padding: 1px 4px 1px 8px; border: 1px solid #364153; border-radius: 10px; }
+.browser-selection li button { padding: 0 5px; border: 0; background: transparent; }
+.browser-selection input { width: 100%; box-sizing: border-box; margin-bottom: 6px; color: #e6edf3; background: #080b12; border: 1px solid #364153; border-radius: 5px; padding: 4px 8px; }
+.browser-selection div { display: flex; gap: 6px; }
 .browser-dialog { margin: 0 8px 6px; padding: 8px 10px; border: 1px solid #4f88ff; border-radius: 6px; background: #17233a; color: #e6edf3; font-size: 12px; overflow-wrap: anywhere; }
 .browser-dialog p { margin: 0 0 6px; }
 .browser-dialog div { display: flex; gap: 6px; }

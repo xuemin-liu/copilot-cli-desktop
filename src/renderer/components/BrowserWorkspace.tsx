@@ -6,6 +6,7 @@ import { BrowserActivity } from './BrowserActivity.js'
 import { BrowserIcon, ConsoleErrorsIcon, PickElementIcon, ScreenshotIcon } from './Icons.js'
 import { attachClipboardImage, insertIntoPrompt } from '../prompt-insert.js'
 import { formatBrowserContext } from '../../main/browser-context-format.js'
+import { MAX_PICKED_ELEMENTS, composeElementSelection, pickedElementLabel } from '../../main/browser-pick-compose.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -19,6 +20,9 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
+  const [selecting, setSelecting] = useState(false)
+  const [selection, setSelection] = useState<string[]>([])
+  const [note, setNote] = useState('')
   const [capturing, setCapturing] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
   const [findText, setFindText] = useState('')
@@ -74,8 +78,22 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     resize()
     return () => { disposed = true; observer.disconnect(); window.removeEventListener('resize', resize) }
   }, [tabId, active, obscured, error, state.error])
-  const pickElement = (): void => {
+  useEffect(() => window.copilotDesktop.onBrowserPicked((id, text) => {
+    if (id === tabId) setSelection(list => list.length >= MAX_PICKED_ELEMENTS ? list : [...list, text])
+  }), [tabId])
+  const selectElements = (): void => {
+    setError(null); setNotice(null); setPicking(true); setSelecting(true)
+    void window.copilotDesktop.browserPickMany(tabId).catch(error => setError(errorMessage(error))).finally(() => { setPicking(false); setSelecting(false) })
+  }
+  const addSelection = (): void => {
+    void window.copilotDesktop.browserPickCancel(tabId).catch(() => {})
+    insertIntoPrompt(tabId, composeElementSelection(selection, note))
+    setSelection([]); setNote('')
+    setNotice('Elements added to the prompt box. Review them and press Enter to send.')
+  }
+  const pickElement = (several = false): void => {
     if (picking) { void window.copilotDesktop.browserPickCancel(tabId).catch(() => {}); return }
+    if (several) { selectElements(); return }
     setError(null); setNotice(null); setPicking(true)
     void window.copilotDesktop.browserPick(tabId).then(text => {
       if (text) { insertIntoPrompt(tabId, text); setNotice('Element added to the prompt box. Review it and press Enter to send.') }
@@ -125,8 +143,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <input ref={urlInput} aria-label="Web app URL" list={`browser-history-${tabId}`} type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
       <datalist id={`browser-history-${tabId}`}>{state.history.slice(0, 50).map(address => <option key={address} value={address} />)}</datalist>
-      <button type="button" className="browser-pick" title="Select an element on the page and add it to the prompt (Esc cancels)" aria-label="Select element to add to the prompt"
-        aria-pressed={picking} disabled={!state.url || (state.view !== 'page' && !picking)} onClick={pickElement}><PickElementIcon /></button>
+      <button type="button" className="browser-pick" title="Select an element on the page and add it to the prompt (Esc cancels). Shift+click to select several elements and add a comment." aria-label="Select element to add to the prompt"
+        aria-pressed={picking} disabled={!state.url || (state.view !== 'page' && !picking)} onClick={event => pickElement(event.shiftKey)}><PickElementIcon /></button>
       <button type="button" className="browser-pick" title="Attach a screenshot of the page to the prompt (form fields, credentials, frames and canvases are masked)" aria-label="Attach screenshot to the prompt"
         disabled={!state.url || state.view !== 'page' || capturing} onClick={addScreenshot}><ScreenshotIcon /></button>
       <button type="button" className="browser-pick" title="Add this page's console errors and failed requests to the prompt" aria-label="Add console errors to the prompt"
@@ -176,7 +194,17 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <button type="button" aria-label="Close find" onClick={closeFind}>×</button>
     </div>}
     {(error || state.error) && <p className="browser-error" role="alert">{error || state.error}</p>}
-    {!error && !state.error && (picking ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
+    {(selecting || selection.length > 0) && <div className="browser-selection" role="group" aria-label="Selected elements">
+      <p>{selecting ? `Click elements in the page (${selection.length} of ${MAX_PICKED_ELEMENTS}). Press Esc when you are done.` : `${selection.length} element${selection.length === 1 ? '' : 's'} selected.`}</p>
+      {selection.length > 0 && <ul>{selection.map((block, index) => <li key={index}><span>{pickedElementLabel(block)}</span>
+        <button type="button" aria-label={`Remove ${pickedElementLabel(block)} from the selection`} onClick={() => setSelection(list => list.filter((_item, position) => position !== index))}>×</button></li>)}</ul>}
+      <input type="text" aria-label="Comment about the selected elements" placeholder="Comment (optional)" maxLength={500} value={note} onChange={event => setNote(event.target.value)} />
+      <div>
+        <button type="button" disabled={selection.length === 0 && !note.trim()} onClick={addSelection}>Add to prompt</button>
+        <button type="button" onClick={() => { void window.copilotDesktop.browserPickCancel(tabId).catch(() => {}); setSelection([]); setNote('') }}>Clear</button>
+      </div>
+    </div>}
+    {!error && !state.error && (picking && !selecting ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
       : notice && <p className="browser-notice" role="status">{notice}</p>)}
     <div className="browser-viewport" ref={viewport}>
       {state.view === 'page' && !state.url && <p className="browser-hint">Enter your web app URL above.</p>}

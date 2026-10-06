@@ -1,5 +1,5 @@
 export const INSERT_PROMPT_EVENT = 'copilot-desktop:insert-prompt'
-const MAX_INSERT_CHARS = 4000
+const MAX_INSERT_CHARS = 12000
 
 /** Text for the prompt box of one session. It is pasted, never submitted: the user reviews it and presses Enter. */
 export function promptInsertText(text: string, bracketedPaste: boolean): string {

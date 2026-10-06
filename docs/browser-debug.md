@@ -109,6 +109,12 @@ characters; text that is hidden, `aria-hidden`, `display:none`, `visibility:hidd
 parents. Without bracketed paste the block is joined onto one line with ` | `, so a line
 break cannot press Enter for you.
 
+**Several elements and a comment:** Shift+click the crosshair button. The picker stays on, each click
+adds a chip above the page (up to ten; **×** removes one), and **Esc** ends the selecting. Type an
+optional comment, then **Add to prompt** pastes the comment and every element block, numbered
+"Element 1 of N", into the prompt box. Nothing is sent. Selecting several elements stops by itself after ten, or two
+minutes without a click.
+
 Privacy: only you can start a selection (it is a desktop action, not part of the
 assistant's browser commands). Form controls and credential-marked elements show no value
 or text, descendants that are form controls or credential-marked are left out of the text,

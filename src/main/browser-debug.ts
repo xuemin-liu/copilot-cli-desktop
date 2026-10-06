@@ -377,10 +377,10 @@ export class BrowserDebug {
   }
 
   /** User-initiated only (desktop IPC). Resolves to prompt text for the clicked element, or null if cancelled. */
-  async pickElement(): Promise<string | null> {
+  async pickElement(onElement?: (text: string) => void): Promise<string | null> {
     if (this.disposed) throw new Error('Browser has closed')
     if (this.state.view !== 'page') throw new Error('Show the Page view before selecting an element.')
-    return this.reader.pick()
+    return this.reader.pick(onElement)
   }
 
   cancelPick(): void { this.reader.cancelPick() }

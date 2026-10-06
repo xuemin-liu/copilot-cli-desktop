@@ -43,3 +43,18 @@ test('hostile or malformed descriptions cannot inject lines, control codes or un
   assert.ok(text.includes('Position: x=0 y=0 width=-1 height=0'))
   assert.equal(typeof formatPickedElement(null), 'string')
 })
+
+test('several picked elements and a comment become one prompt, and a single element stays unchanged', async () => {
+  const { composeElementSelection, pickedElementLabel } = await import('./browser-pick-compose.js')
+  const one = formatPickedElement(element())
+  const two = formatPickedElement(element({ label: 'a.nav', selector: 'nav > a', text: 'Home' }))
+  assert.equal(composeElementSelection([one], ''), one)
+  const both = composeElementSelection([one, two], '  Make these\nthe same size ')
+  assert.ok(both.startsWith('Comment: Make these the same size\n\nElement 1 of 2:\n[Browser element] <button#save.primary>'))
+  assert.ok(both.includes('\n\nElement 2 of 2:\n[Browser element] <a.nav>'))
+  assert.equal(composeElementSelection([], 'Only a note'), 'Comment: Only a note')
+  assert.equal(composeElementSelection(Array.from({ length: 15 }, () => one), '').split('Element ').length - 1, 10)
+  assert.equal(composeElementSelection([one], 'x'.repeat(900)).split('\n')[0]!.length, 'Comment: '.length + 500)
+  assert.equal(pickedElementLabel(one), 'button#save.primary')
+  assert.equal(pickedElementLabel('nothing useful'), 'element')
+})
