@@ -2131,6 +2131,8 @@ ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown
   if (typeof action !== 'string') throw new Error('Invalid browser action')
   return browser.action(action)
 })
+ipcMain.handle('desktop:browser-pick', (event, tabId: unknown) => browserForSender(event, tabId).pickElement())
+ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { browserForSender(event, tabId).cancelPick() })
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)
   if (kind !== 'console' && kind !== 'network') throw new Error('Invalid browser export')
