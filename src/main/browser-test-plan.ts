@@ -17,12 +17,14 @@ export interface BrowserTestStep {
   condition?: 'visible' | 'hidden' | 'text' | 'count' | 'checked' | 'value' | 'imageLoaded' | 'canvasPainted' | 'url'
   expected?: string | number | boolean
   timeoutMs?: number
+  /** The step is expected to open a JavaScript dialog (alert, confirm or beforeunload); answer it like this. */
+  dialog?: { accept: boolean; message?: string }
 }
 export interface BrowserTestPlan { description: string; expected: string; steps: BrowserTestStep[]; timeoutMs?: number }
 export interface BrowserTestReport {
   origin?: string
   description: string; expected: string; pageId: number; status: 'passed' | 'failed' | 'cancelled'; startedAt: string; durationMs: number
-  steps: { action: string; label: string; status: 'passed' | 'failed' | 'skipped'; durationMs: number; reason?: string }[]
+  steps: { action: string; label: string; status: 'passed' | 'failed' | 'skipped'; durationMs: number; reason?: string; detail?: string }[]
   screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string }[]
 }
 export interface BrowserTestState {
@@ -53,10 +55,10 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
   for (const [index, raw] of (plan.steps as unknown[]).entries()) {
     const step = object(raw)
     const extra: Record<string, string[]> = {
-      navigate: ['url'], click: ['selector', 'text', 'frame'], doubleClick: ['selector', 'text', 'frame'], hover: ['selector', 'text', 'frame'],
+      navigate: ['url', 'dialog'], click: ['selector', 'text', 'frame', 'dialog'], doubleClick: ['selector', 'text', 'frame', 'dialog'], hover: ['selector', 'text', 'frame'],
       drag: ['selector', 'text', 'frame', 'path', 'durationMs'],
-      fill: ['selector', 'text', 'frame', 'value'], select: ['selector', 'text', 'frame', 'value'],
-      press: ['selector', 'text', 'frame', 'key'], scroll: ['selector', 'text', 'frame', 'pixels'],
+      fill: ['selector', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'text', 'frame', 'value', 'dialog'],
+      press: ['selector', 'text', 'frame', 'key', 'dialog'], scroll: ['selector', 'text', 'frame', 'pixels'],
       waitFor: ['selector', 'text', 'frame', 'condition', 'expected', 'timeoutMs'],
       assert: ['selector', 'text', 'frame', 'condition', 'expected', 'timeoutMs'], screenshot: [],
     }
@@ -67,6 +69,11 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (step.frame !== undefined && (typeof step.frame !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.frame))) fail('invalid frame ID.')
     if (step.selector !== undefined) string(step.selector, 512)
     if (step.text !== undefined) string(step.text, 2000)
+    if (step.dialog !== undefined) {
+      const dialog = object(step.dialog); fields(dialog, ['accept', 'message'])
+      if (typeof dialog.accept !== 'boolean') fail('dialog.accept must be true or false.')
+      if (dialog.message !== undefined) string(dialog.message, 500)
+    }
     if (step.action === 'navigate') { string(step.url, 8192); parseSafeHttpUrl(step.url as string) }
     if (['click', 'doubleClick', 'hover', 'drag', 'fill', 'select', 'press'].includes(String(step.action))) string(step.selector, 512)
     if (step.action === 'drag') {

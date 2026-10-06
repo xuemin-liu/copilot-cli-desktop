@@ -47,6 +47,8 @@ export interface BrowserDebugState {
   console: BrowserConsoleEntry[]
   network: BrowserNetworkEntry[]
   sitePermissions: BrowserSitePermission[]
+  /** A JavaScript dialog is holding the selected page until the user answers it. */
+  dialog?: { type: string; message: string }
   /** Find in page for the selected page; absent when no search is active. */
   find?: { query: string; matches: number; active: number }
   /** Recently visited pages (address only, no query or fragment), newest first, for the address bar suggestions. */

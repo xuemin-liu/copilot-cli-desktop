@@ -3,8 +3,9 @@ import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
-import { BrowserIcon, PickElementIcon } from './Icons.js'
-import { insertIntoPrompt } from '../prompt-insert.js'
+import { BrowserIcon, ConsoleErrorsIcon, PickElementIcon, ScreenshotIcon } from './Icons.js'
+import { attachClipboardImage, insertIntoPrompt } from '../prompt-insert.js'
+import { formatBrowserContext } from '../../main/browser-context-format.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -18,6 +19,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
+  const [capturing, setCapturing] = useState(false)
   const [findOpen, setFindOpen] = useState(false)
   const [findText, setFindText] = useState('')
   const findInput = useRef<HTMLInputElement>(null)
@@ -79,6 +81,20 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       if (text) { insertIntoPrompt(tabId, text); setNotice('Element added to the prompt box. Review it and press Enter to send.') }
     }).catch(error => setError(errorMessage(error))).finally(() => setPicking(false))
   }
+  const addScreenshot = (): void => {
+    setError(null); setNotice(null); setCapturing(true)
+    void window.copilotDesktop.browserScreenshot(tabId).then(result => {
+      attachClipboardImage(tabId)
+      setNotice(`Screenshot placed on the clipboard and attached with Alt+V${result.redacted ? ' (form fields, credential-marked elements, frames and canvases are masked)' : ''}. Review the prompt, then press Enter.`)
+    }).catch(error => setError(errorMessage(error))).finally(() => setCapturing(false))
+  }
+  const addConsole = (): void => {
+    setError(null)
+    const text = formatBrowserContext({ url: state.url, pageId: state.activePageId, console: state.console, network: state.network })
+    if (!text) { setNotice('This page has no console messages or failed requests yet.'); return }
+    insertIntoPrompt(tabId, text)
+    setNotice('Console errors and failed requests added to the prompt box. Review them and press Enter to send.')
+  }
   const openFind = (): void => {
     setFindOpen(true)
     setTimeout(() => { findInput.current?.focus(); findInput.current?.select() }, 0)
@@ -111,6 +127,10 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <datalist id={`browser-history-${tabId}`}>{state.history.slice(0, 50).map(address => <option key={address} value={address} />)}</datalist>
       <button type="button" className="browser-pick" title="Select an element on the page and add it to the prompt (Esc cancels)" aria-label="Select element to add to the prompt"
         aria-pressed={picking} disabled={!state.url || (state.view !== 'page' && !picking)} onClick={pickElement}><PickElementIcon /></button>
+      <button type="button" className="browser-pick" title="Attach a screenshot of the page to the prompt (form fields, credentials, frames and canvases are masked)" aria-label="Attach screenshot to the prompt"
+        disabled={!state.url || state.view !== 'page' || capturing} onClick={addScreenshot}><ScreenshotIcon /></button>
+      <button type="button" className="browser-pick" title="Add this page's console errors and failed requests to the prompt" aria-label="Add console errors to the prompt"
+        disabled={!state.url} onClick={addConsole}><ConsoleErrorsIcon /></button>
       <button type="button" className="browser-zoom" aria-label={`Browser zoom ${Math.round(state.zoomFactor * 100)}%, select to reset`} title="Page zoom: Ctrl+= zooms in, Ctrl+- zooms out, Ctrl+0 or this button resets"
         onClick={() => run(window.copilotDesktop.browserAction(tabId, 'zoom-reset'))}>{Math.round(state.zoomFactor * 100)}%</button>
     </form>
@@ -136,6 +156,13 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
         {state.testing?.enabled ? 'Stop testing' : 'Testing mode'}</button>
       <span role="status" title={testingMessage}>{testingMessage}</span>
     </div>
+    {state.dialog && <div className="browser-dialog" role="alertdialog" aria-label="Page dialog">
+      <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : 'This page says'}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
+      <div>
+        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
+        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
+      </div>
+    </div>}
     {findOpen && <div className="browser-find" role="search" aria-label="Find in page">
       <input ref={findInput} type="text" aria-label="Find in page" placeholder="Find in page" maxLength={500} value={findText}
         onChange={event => { setFindText(event.target.value); find(event.target.value, true, false) }}

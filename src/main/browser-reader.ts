@@ -12,6 +12,7 @@ import { formatPickedElement } from './browser-pick-format.js'
 import { validateBrowserTestPlan } from './browser-test-plan.js'
 import type { BrowserTestState, BrowserTestStep } from './browser-test-plan.js'
 import { runBrowserTest, type TestObservation } from './browser-test-runner.js'
+import { sanitizedText } from './browser-privacy.js'
 
 const MAX_RESPONSES = 100
 const MAX_BODY_CACHE = 4 * 1024 * 1024
@@ -34,7 +35,11 @@ interface ResponseRecord {
   id: string; pageId: number; frameId: string; url: string; status: number; mimeType: string; timestamp: string
   state: string; reason?: string; redacted: boolean; truncated: boolean; data?: unknown
 }
+/** A JavaScript dialog (alert, confirm, prompt, beforeunload) that is holding the page until someone answers it. */
+export interface PendingDialog { type: string; message: string; sessionId?: string }
+interface DialogRule { spec?: NonNullable<BrowserTestStep['dialog']>; handled: { type: string; message: string; accepted: boolean } | null }
 interface PageReader {
+  dialog: PendingDialog | null; dialogRule: DialogRule | null
   contents: WebContents; sessions: Map<string, string>; contexts: Map<string, number>; ready: Promise<void> | null
   capture: 'starting' | 'ready' | 'unavailable'
   requests: Map<string, { requestId: string; sessionId?: string; response: ResponseRecord }>
@@ -61,6 +66,7 @@ export class BrowserReader {
   private testPageId: number | null = null
   private testOrigin: string | null = null
   private testBlocked = false
+  private testUnexpectedDialog: string | null = null
   private testAbort: AbortController | null = null
   private picker: { pageId: number; choose: (backendNodeId: number | null) => void } | null = null
   private pickAbort: AbortController | null = null
@@ -95,6 +101,7 @@ export class BrowserReader {
     const origin = this.testOrigin!
     if (this.busy) throw new Error('Another browser inspection or test is in progress.')
     this.testBlocked = false
+    this.testUnexpectedDialog = null
     this.busy = true
     this.testAbort = new AbortController()
     // Keep the last completed report so polling cannot resize the viewport when
@@ -114,7 +121,7 @@ export class BrowserReader {
   }
 
   add(contents: WebContents): void {
-    const page: PageReader = { contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
+    const page: PageReader = { dialog: null, dialogRule: null, contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
     this.readers.set(contents.id, page)
     contents.debugger.on('detach', () => {
       page.ready = null; page.capture = 'unavailable'; page.sessions.clear(); page.contexts.clear()
@@ -193,6 +200,8 @@ export class BrowserReader {
     }
     // Chromium reports Esc in its inspect overlay this way, and the keystroke never reaches the page.
     if (method === 'Overlay.inspectModeCanceled' && !sessionId && this.picker?.pageId === page.contents.id) { this.picker.choose(null); return }
+    if (method === 'Page.javascriptDialogOpening') { await this.dialogOpened(page, params, sessionId); return }
+    if (method === 'Page.javascriptDialogClosed') { if (page.dialog?.sessionId === sessionId) page.dialog = null; return }
     if (method === 'Runtime.executionContextsCleared' || method === 'Page.frameNavigated') page.contexts.clear()
     const key = `${sessionId ?? ''}:${String(params.requestId)}`
     if (method === 'Network.responseReceived' && this.options.recording()) {
@@ -229,6 +238,40 @@ export class BrowserReader {
     }
   }
 
+  /** While a test runs, a dialog is answered by the step that expected it, or dismissed and reported. Otherwise it waits for the user. */
+  private async dialogOpened(page: PageReader, params: Params, sessionId?: string): Promise<void> {
+    const type = String(params.type ?? 'alert')
+    const raw = String(params.message ?? '')
+    const message = sanitizedText(raw).slice(0, 500)
+    const testing = this.testAbort !== null && this.testPageId === page.contents.id
+    const rule = page.dialogRule
+    if (!testing && !rule) {
+      page.dialog = { type, message, ...(sessionId ? { sessionId } : {}) }
+      return
+    }
+    const spec = rule?.spec
+    const matches = Boolean(spec && (!spec.message || raw.includes(spec.message)))
+    if (!spec) this.testUnexpectedDialog = `The page opened a ${type} dialog (“${message}”) that no step expected, so it was dismissed. Add a dialog field to the step that triggers it.`
+    else if (!matches) this.testUnexpectedDialog = `The page opened a ${type} dialog (“${message}”) whose text does not contain the expected message, so it was dismissed.`
+    const accept = Boolean(spec && matches && spec.accept)
+    if (rule && spec && matches) rule.handled = { type, message, accepted: accept }
+    await this.command(page, 'Page.handleJavaScriptDialog', { accept }, sessionId)
+  }
+
+  /** The dialog holding the selected page, if any. */
+  get pendingDialog(): { type: string; message: string } | null {
+    const dialog = this.readers.get(this.options.active())?.dialog
+    return dialog ? { type: dialog.type, message: dialog.message } : null
+  }
+
+  async answerDialog(accept: boolean): Promise<void> {
+    const page = this.page()
+    const dialog = page.dialog
+    if (!dialog) throw new Error('No page dialog is waiting.')
+    page.dialog = null
+    await this.command(page, 'Page.handleJavaScriptDialog', { accept }, dialog.sessionId)
+  }
+
   private trim(): void {
     let bytes = 0
     for (const record of this.responses.values()) bytes += JSON.stringify(record).length * 2
@@ -253,7 +296,12 @@ export class BrowserReader {
     return page
   }
 
+  private assertNoDialog(page: PageReader): void {
+    if (page.dialog) throw new Error(`A page dialog is waiting for the user: ${page.dialog.type} “${page.dialog.message}”. Ask them to answer it in the browser pane, then retry.`)
+  }
+
   private async frames(page: PageReader, signal?: AbortSignal): Promise<Frame[]> {
+    this.assertNoDialog(page)
     await abortable(this.attach(page), signal)
     const result = await this.command(page, 'Page.getFrameTree', {}, undefined, 10000, signal)
     const frames: Frame[] = []
@@ -286,6 +334,7 @@ export class BrowserReader {
   }
 
   private async evaluate(page: PageReader, frameId: string, operation: string, args: Params, testing = false, signal?: AbortSignal): Promise<any> {
+    this.assertNoDialog(page)
     const sessionId = page.sessions.get(frameId)
     const contextId = await this.isolatedContext(page, frameId, signal)
     const result = await this.command(page, 'Runtime.evaluate', {
@@ -297,7 +346,27 @@ export class BrowserReader {
   }
 
   private async testStep(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    const rule: DialogRule = { ...(step.dialog ? { spec: step.dialog } : {}), handled: null }
+    page.dialogRule = rule
+    try {
+      const result = await this.testStepAction(page, step, signal)
+      if (step.dialog && !rule.handled && !this.testUnexpectedDialog) {
+        // The dialog may open a moment after the action, from a timer or a promise.
+        const end = Date.now() + 1500
+        while (!rule.handled && !this.testUnexpectedDialog && Date.now() < end && !signal.aborted) await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      if (this.testUnexpectedDialog) return { passed: false, reason: this.testUnexpectedDialog }
+      if (step.dialog && !rule.handled) return { passed: false, reason: 'The step was expected to open a page dialog, but none opened within 1.5 seconds.' }
+      return rule.handled ? { ...result, detail: `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.` } : result
+    } catch (error) {
+      if (this.testUnexpectedDialog) return { passed: false, reason: this.testUnexpectedDialog }
+      throw error
+    } finally { page.dialogRule = null }
+  }
+
+  private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
     const check = (): void => {
+      if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
       if (step.action === 'drag' && (!this.options.visible(page.contents.id) || this.options.owner().isDestroyed()
         || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')

@@ -31,6 +31,8 @@ export interface CopilotDesktopBridge {
   browserAction(tabId: string, action: 'new-page' | 'back' | 'forward' | 'reload' | 'hard-reload' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | 'clear' | 'clear-console' | 'clear-network' | 'devtools' | `testing:${'on' | 'off'}` | `view:${BrowserViewMode}` | `${BrowserCaptureSetting}:${'on' | 'off'}` | `select-page:${number}` | `close-page:${number}` | 'forget-permissions' | `forget-permission:${number}`): Promise<BrowserDebugState>
   browserPick(tabId: string): Promise<string | null>
   browserPickCancel(tabId: string): Promise<void>
+  browserScreenshot(tabId: string): Promise<{ redacted: boolean }>
+  browserDialog(tabId: string, accept: boolean): Promise<BrowserDebugState>
   browserFind(tabId: string, text: string, forward: boolean, next: boolean): Promise<BrowserDebugState>
   browserFindStop(tabId: string): Promise<BrowserDebugState>
   onBrowserShortcut(listener: (tabId: string, name: 'find' | 'find-close') => void): () => void

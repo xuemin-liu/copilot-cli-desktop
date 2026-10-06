@@ -286,9 +286,11 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     const handlePaste = (event: ClipboardEvent): void => handleTerminalPaste(event, terminal)
     container.addEventListener('paste', handlePaste, true)
     const handleInsertPrompt = (event: Event): void => {
-      const detail = (event as CustomEvent<{ tabId?: unknown; text?: unknown }>).detail
-      if (detail?.tabId !== tabId || typeof detail.text !== 'string') return
-      terminal.paste(promptInsertText(detail.text, terminal.modes.bracketedPasteMode))
+      const detail = (event as CustomEvent<{ tabId?: unknown; text?: unknown; image?: unknown }>).detail
+      if (detail?.tabId !== tabId) return
+      if (detail.image === true) terminal.input('\u001bv', true)
+      else if (typeof detail.text === 'string') terminal.paste(promptInsertText(detail.text, terminal.modes.bracketedPasteMode))
+      else return
       terminal.focus()
     }
     window.addEventListener(INSERT_PROMPT_EVENT, handleInsertPrompt)
