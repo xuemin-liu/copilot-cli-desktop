@@ -56,7 +56,8 @@ export class SitePermissions {
     const answer = this.queue.then(async () => {
       const again = this.entries.get(key)
       if (again) return again.decision === 'allow'
-      if (signal.aborted) return false
+      // Requests that arrived together all saw the same size above; capacity is decided here, one at a time.
+      if (signal.aborted || this.entries.size >= MAX_ENTRIES) return false
       const allow = await this.ask(origin, permission, signal)
       // A dismissed prompt, or a page that went away while it was open, remembers nothing.
       if (allow === null || signal.aborted) return false

@@ -85,3 +85,13 @@ test('removing an answer asks again, and the list is capped', async () => {
   permissions.clear()
   assert.deepEqual(permissions.list(), [])
 })
+
+test('a burst of simultaneous unknown sites cannot get past the cap', async () => {
+  let calls = 0
+  const permissions = new SitePermissions(async () => { calls++; return true })
+  const results = await Promise.all(Array.from({ length: 60 }, (_item, index) => permissions.request(`http://burst${index}.test`, 'notifications', never)))
+  assert.equal(results.filter(Boolean).length, 50)
+  assert.equal(results.slice(50).some(Boolean), false)
+  assert.equal(calls, 50)
+  assert.equal(permissions.list().length, 50)
+})
