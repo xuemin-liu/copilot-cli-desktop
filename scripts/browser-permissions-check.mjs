@@ -68,10 +68,19 @@ if (!process.versions.electron) {
       assert.equal(await settle('Notification.requestPermission()'), 'granted')
       assert.equal(prompts.length, 1, 'a remembered answer is not asked again')
       contents.focus()
-      assert.equal(await settle("navigator.clipboard.writeText('from the page').then(() => 'written')"), 'written')
-      assert.equal(prompts.length, 2)
+      // The system clipboard is shared with other programs (clipboard managers, the user), which can replace it at any moment.
+      // Retry the round trip a few times so an unrelated write cannot fail the check; a blocked page never gets this right.
+      const roundTrip = async (name, attempt) => {
+        for (let tries = 0; tries < 5; tries++) { if (await attempt(`${name} ${tries}`)) return true; await delay(100) }
+        return false
+      }
+      assert.equal(await roundTrip('write', async text => {
+        assert.equal(await settle(`navigator.clipboard.writeText(${JSON.stringify(text)}).then(() => 'written')`), 'written')
+        const seen = []; for (let poll = 0; poll < 10; poll++) { const value = await clipboard.readText(); seen.push(value); if (value === text) return true; await delay(50) }
+        console.log('clipboard saw', JSON.stringify([...new Set(seen)])); return false
+      }), true, 'the allowed page can copy to the clipboard')
+      assert.equal(prompts.length, 2, 'the answer to the first copy is remembered')
       assert.match(prompts[1], /copy text to your clipboard/)
-      assert.equal(await clipboard.readText(), 'from the page')
       assert.deepEqual(browser.snapshot.sitePermissions.map(entry => [entry.origin, entry.permission, entry.decision]),
         [[origins.allowed, 'notifications', 'allow'], [origins.allowed, 'clipboard-sanitized-write', 'allow']])
 
@@ -79,7 +88,10 @@ if (!process.versions.electron) {
       assert.match(await settle('navigator.mediaDevices.getUserMedia({ video: true })'), /^rejected:/)
       assert.match(await settle("new Promise(resolve => navigator.geolocation.getCurrentPosition(() => resolve('granted'), error => resolve('code ' + error.code)))"), /^code 1$/)
       const readsBefore = prompts.length
-      assert.equal(await settle("navigator.clipboard.readText().then(text => text)"), 'from the page')
+      assert.equal(await roundTrip('read', async text => {
+        await clipboard.writeText(text)
+        return await settle('navigator.clipboard.readText().then(text => text)') === text
+      }), true, 'the allowed page can read the clipboard')
       assert.equal(prompts.length, readsBefore + 1)
       assert.match(prompts.at(-1), /read text from your clipboard/)
       const afterBlocked = prompts.length
@@ -97,9 +109,10 @@ if (!process.versions.electron) {
       assert.equal(prompts.length, before + 1)
       assert.equal(await settle('Notification.requestPermission()'), 'denied')
       assert.equal(prompts.length, before + 1, 'a remembered refusal is not asked again')
+      await clipboard.writeText('sentinel')
       assert.equal(await settle("navigator.clipboard.writeText('x').then(() => 'written')"), 'rejected:NotAllowedError')
       assert.equal(await settle("navigator.clipboard.readText().then(() => 'read')"), 'rejected:NotAllowedError')
-      assert.equal(await clipboard.readText(), 'from the page', 'the other origin did not get the allowed origin\'s answer')
+      assert.notEqual(await clipboard.readText(), 'x', 'the other origin could not replace the clipboard')
       assert.ok(browser.snapshot.sitePermissions.some(entry => entry.origin === origins.blocked && entry.decision === 'block'))
 
       // Removing an answer asks again; the control server does not expose the list.
