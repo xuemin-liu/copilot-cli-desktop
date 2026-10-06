@@ -6,6 +6,18 @@ import { runBrowserTest } from './browser-test-runner.js'
 const assertion = { action: 'assert', label: 'Result visible', selector: '#result', condition: 'visible' }
 const plan = (steps: unknown[] = [assertion], extra = {}) => validateBrowserTestPlan({ description: 'Test the app', expected: 'The result is visible', steps, ...extra })
 
+test('drag plans accept bounded CSS-pixel paths and reject malformed input', () => {
+  const drag = { action: 'drag', selector: '#canvas', path: [{ x: 1.5, y: 20 }, { x: 240, y: 90 }], durationMs: 500 }
+  assert.deepEqual(plan([drag, assertion]).steps[0]?.path, drag.path)
+  for (const path of [undefined, [], [{ x: 1, y: 1 }], Array.from({ length: 101 }, () => ({ x: 1, y: 1 })),
+    [{ x: -1, y: 0 }, { x: 1, y: 1 }], [{ x: NaN, y: 0 }, { x: 1, y: 1 }], [{ x: Infinity, y: 0 }, { x: 1, y: 1 }],
+    [{ x: '1', y: 0 }, { x: 1, y: 1 }], [{ x: 20000, y: 0 }, { x: 1, y: 1 }],
+    [{ x: 1, y: 0, script: 'alert(1)' }, { x: 1, y: 1 }]]) assert.throws(() => plan([{ ...drag, path }, assertion]))
+  for (const durationMs of [0, 99, 5001, 100.5, '500', NaN]) assert.throws(() => plan([{ ...drag, durationMs }, assertion]))
+  assert.throws(() => plan([{ ...drag, selector: undefined }, assertion]))
+  assert.throws(() => plan([{ ...drag, button: 'right' }, assertion]))
+})
+
 test('test plans require real assertions and bounded fixed operations', () => {
   assert.equal(plan().steps.length, 1)
   for (const steps of [[], [{ action: 'click', label: 'click', selector: '#button' }], [{ ...assertion, action: 'evaluate', script: 'process.exit()' }],

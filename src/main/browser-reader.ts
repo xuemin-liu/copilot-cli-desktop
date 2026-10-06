@@ -285,6 +285,8 @@ export class BrowserReader {
   private async testStep(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
     const check = (): void => {
       if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
+      if (step.action === 'drag' && (!this.options.visible(page.contents.id) || this.options.owner().isDestroyed()
+        || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')
       if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
       this.checkTestOrigin(page.contents.getURL())
     }
@@ -328,8 +330,8 @@ export class BrowserReader {
     if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
-    const targetPoint = async (requireFocus = false): Promise<Params> => {
-      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared })
+    const targetPoint = async (requireFocus = false, offset?: { x: number; y: number }, scroll = true): Promise<Params> => {
+      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared, offset, scroll })
       prepared = true
       let current = frame
       // Check every embedding frame for overlays. Coordinates from each frame's
@@ -370,6 +372,61 @@ export class BrowserReader {
       }
       check()
       return point
+    }
+    if (step.action === 'drag') {
+      const path = step.path!
+      // Scroll once, then freeze geometry: moving/replaced/covered surfaces must
+      // never redirect a held pointer into a different control or document.
+      let start = await targetPoint(false, path[0])
+      const stableUntil = Date.now() + 2000
+      while (true) {
+        check()
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y }, undefined, 10000, signal)
+        if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
+        const fresh = await targetPoint(false, path[0], false)
+        if (Math.abs(fresh.x - start.x) < 0.5 && Math.abs(fresh.y - start.y) < 0.5) { start = fresh; break }
+        if (Date.now() >= stableUntil) throw new Error('Target did not stabilize before the drag.')
+        start = fresh
+      }
+      const geometry = ['width', 'height', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight']
+      const mapped: Params[] = []
+      const stable = (point: Params): void => {
+        if (geometry.some(key => Math.abs(Number(point[key]) - Number(start[key])) >= 0.5)) throw new Error('Target geometry changed during the drag.')
+      }
+      for (const offset of path) { const point = await targetPoint(false, offset, false); stable(point); mapped.push(point) }
+      let last = start; let completed = false; let pressed = false
+      try {
+        check()
+        const freshStart = await targetPoint(false, path[0], false); stable(freshStart)
+        if (Math.abs(freshStart.x - start.x) >= 0.5 || Math.abs(freshStart.y - start.y) >= 0.5) throw new Error('Frame position changed before the drag.')
+        pressed = true
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x: start.x, y: start.y }, undefined, 10000, signal)
+        const segmentMs = (step.durationMs ?? 500) / (path.length - 1)
+        const samples = Math.max(1, Math.ceil(segmentMs / 16))
+        for (let segment = 1; segment < path.length; segment++) for (let sample = 1; sample <= samples; sample++) {
+          await abortable(new Promise<void>(resolve => setTimeout(resolve, segmentMs / samples)), signal)
+          check()
+          const fraction = sample / samples
+          const offset = { x: path[segment - 1]!.x + (path[segment]!.x - path[segment - 1]!.x) * fraction,
+            y: path[segment - 1]!.y + (path[segment]!.y - path[segment - 1]!.y) * fraction }
+          const point = await targetPoint(false, offset, false); stable(point)
+          if (Math.abs(point.x - (mapped[segment - 1]!.x + (mapped[segment]!.x - mapped[segment - 1]!.x) * fraction)) >= 0.5
+            || Math.abs(point.y - (mapped[segment - 1]!.y + (mapped[segment]!.y - mapped[segment - 1]!.y) * fraction)) >= 0.5) throw new Error('Frame position changed during the drag.')
+          check()
+          await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: point.x, y: point.y }, undefined, 10000, signal)
+          last = point
+        }
+        check(); completed = true
+      } finally {
+        if (pressed && !page.contents.isDestroyed()) {
+          const stopped = !completed || signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
+          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1,
+            x: stopped ? -1 : last.x, y: stopped ? -1 : last.y }, undefined, 1000)
+          if (stopped) await release.catch(() => {})
+          else await release
+        }
+      }
+      check(); return { passed: true }
     }
     let point = await targetPoint()
     if (step.action === 'scroll') return { passed: Boolean((await evaluate('scroll', { selector: step.selector ?? 'html' })).passed) }

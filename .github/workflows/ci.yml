@@ -32,6 +32,8 @@ jobs:
         run: corepack pnpm sidebar:check
       - name: Browser and native Local Overrides integration check
         run: corepack pnpm browser:check
+      - name: Browser testing at 125% display scale
+        run: node scripts/browser-test-check.mjs --force-device-scale-factor=1.25
       - name: Upload browser check evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

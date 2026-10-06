@@ -3,7 +3,7 @@ import { parseSafeHttpUrl } from './external-targets.js'
 export const MAX_TEST_BYTES = 128 * 1024
 export const TEST_KEYS = ['Enter', 'Tab', 'Escape', 'Space', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'] as const
 export interface BrowserTestStep {
-  action: 'navigate' | 'click' | 'doubleClick' | 'hover' | 'fill' | 'select' | 'press' | 'scroll' | 'waitFor' | 'assert' | 'screenshot'
+  action: 'navigate' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'fill' | 'select' | 'press' | 'scroll' | 'waitFor' | 'assert' | 'screenshot'
   label: string
   selector?: string
   text?: string
@@ -12,6 +12,8 @@ export interface BrowserTestStep {
   value?: string
   key?: string
   pixels?: number
+  path?: { x: number; y: number }[]
+  durationMs?: number
   condition?: 'visible' | 'hidden' | 'text' | 'count' | 'checked' | 'value' | 'imageLoaded' | 'canvasPainted' | 'url'
   expected?: string | number | boolean
   timeoutMs?: number
@@ -52,6 +54,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     const step = object(raw)
     const extra: Record<string, string[]> = {
       navigate: ['url'], click: ['selector', 'text', 'frame'], doubleClick: ['selector', 'text', 'frame'], hover: ['selector', 'text', 'frame'],
+      drag: ['selector', 'text', 'frame', 'path', 'durationMs'],
       fill: ['selector', 'text', 'frame', 'value'], select: ['selector', 'text', 'frame', 'value'],
       press: ['selector', 'text', 'frame', 'key'], scroll: ['selector', 'text', 'frame', 'pixels'],
       waitFor: ['selector', 'text', 'frame', 'condition', 'expected', 'timeoutMs'],
@@ -65,7 +68,15 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (step.selector !== undefined) string(step.selector, 512)
     if (step.text !== undefined) string(step.text, 2000)
     if (step.action === 'navigate') { string(step.url, 8192); parseSafeHttpUrl(step.url as string) }
-    if (['click', 'doubleClick', 'hover', 'fill', 'select', 'press'].includes(String(step.action))) string(step.selector, 512)
+    if (['click', 'doubleClick', 'hover', 'drag', 'fill', 'select', 'press'].includes(String(step.action))) string(step.selector, 512)
+    if (step.action === 'drag') {
+      if (!Array.isArray(step.path) || step.path.length < 2 || step.path.length > 100) fail('drag requires 2–100 path points.')
+      for (const rawPoint of step.path as unknown[]) {
+        const point = object(rawPoint); fields(point, ['x', 'y'])
+        if (![point.x, point.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)) fail('drag coordinates must be finite CSS pixels within 0–19999.')
+      }
+      if (step.durationMs !== undefined && (typeof step.durationMs !== 'number' || !Number.isInteger(step.durationMs) || step.durationMs < 100 || step.durationMs > 5000)) fail('drag duration must be within 100–5000 milliseconds.')
+    }
     if (step.action === 'fill' || step.action === 'select') string(step.value, 8192, true)
     if (step.action === 'press' && !TEST_KEYS.includes(step.key as typeof TEST_KEYS[number])) fail('unsupported key.')
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
