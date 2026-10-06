@@ -7,7 +7,9 @@ addresses and development hosts (single-label names, `.localhost`, `.local`,
 HTTP/HTTPS always takes precedence. Each terminal session has its own browser pages,
 DevTools, console/network capture, and cookie/storage partition, separate from
 other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
-to resize it. Use **+ (New page)** in the page strip to open another page in the
+to resize it. The **Reload** button does a normal reload, which can keep serving cached
+scripts and styles; **Shift+click** it (or press **Ctrl+Shift+R** or **Ctrl+F5** while the
+page has focus) for a hard reload that bypasses the cache and applies your latest changes. Use **+ (New page)** in the page strip to open another page in the
 same session, then enter its address. New pages share the session's login and
 storage, keep other pages open, and are selected automatically. Up to 32 pages
 can be open in one session. Links with `target="_blank"`, JavaScript `window.open()` and forms

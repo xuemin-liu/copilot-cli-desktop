@@ -129,6 +129,16 @@ export class BrowserDebug {
         },
       }
     })
+    // The page has no application menu, so give it Chrome's hard-reload shortcuts.
+    contents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || this.activePageId !== contents.id) return
+      const key = input.key.toLowerCase()
+      const hard = (key === 'r' && input.shift && (input.control || input.meta)) || (key === 'f5' && (input.control || input.meta || input.shift))
+      if (!hard) return
+      event.preventDefault()
+      page.error = null
+      contents.reloadIgnoringCache()
+    })
     contents.on('will-navigate', (event, url) => {
       try { parseSafeHttpUrl(url) } catch { event.preventDefault() }
     })
@@ -347,6 +357,8 @@ export class BrowserDebug {
       case 'back': if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break
       case 'forward': if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break
       case 'reload': this.activePage.error = null; contents.reload(); break
+      // Re-fetch every resource instead of trusting the HTTP cache, like Ctrl+Shift+R in Chrome.
+      case 'hard-reload': this.activePage.error = null; contents.reloadIgnoringCache(); break
       case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'clear-console': this.state.console = []; break
       case 'clear-network': this.state.network = []; this.started.clear(); this.reader.clear(); break
