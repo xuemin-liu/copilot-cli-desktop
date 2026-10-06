@@ -141,7 +141,23 @@ The same button, now labelled **Hide browser**, hides the pane and keeps its pag
 alive until the owning terminal session closes or the app quits. The **DevTools / Overrides** button toggles DevTools
 visibility and keeps enabled overrides active while it is hidden. Browser pages have no desktop preload
 bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;
-local files and other external protocols, downloads, and permission requests are blocked.
+local files and other external protocols and downloads are blocked, and so are permission requests,
+except the three described under *Site permissions* below.
+
+## Site permissions
+
+A page can ask to copy text to your clipboard (`navigator.clipboard.writeText`), read text from
+your clipboard, or show notifications. A native dialog names the site and the request; **Allow**
+or **Block** is remembered for that site and permission in this session's browser. Open
+**Site permissions** at the bottom of the browser pane to see the answers and **Forget** one (or
+all), after which the page is asked again. Answers are not saved across app restarts.
+
+Everything else (camera, microphone, location, screen capture, USB and other devices, fullscreen
+and so on) is always blocked without a prompt. Only the page's top frame can ask: requests from
+embedded frames are blocked, as are `file:`, `data:` and other non-HTTP(S) pages. Dialogs are
+queued one at a time, and a request from a page that closes while the dialog is open remembers
+nothing. The assistant cannot answer a prompt, and the list of answers is not part of the
+assistant's browser status.
 
 ## Reading authenticated Jira tickets and other pages
 

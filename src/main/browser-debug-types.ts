@@ -23,6 +23,8 @@ export interface BrowserNetworkEntry {
   redirects: string[]
 }
 
+export interface BrowserSitePermission { id: number; origin: string; permission: string; label: string; decision: 'allow' | 'block' }
+
 export type BrowserViewMode = 'page' | 'console' | 'network' | 'devtools' | 'activity'
 export type BrowserCaptureSetting = 'record-console' | 'record-network' | 'preserve-console' | 'preserve-network'
 
@@ -44,6 +46,7 @@ export interface BrowserDebugState {
   error: string | null
   console: BrowserConsoleEntry[]
   network: BrowserNetworkEntry[]
+  sitePermissions: BrowserSitePermission[]
 }
 
 export interface BrowserBounds { x: number; y: number; width: number; height: number }
