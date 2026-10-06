@@ -205,6 +205,8 @@ stay inside that target and the visible viewport. durationMs is 100–5000, defa
 500. Example: {action:"drag",selector:"#canvas",path:[{x:20,y:20},{x:100,y:80}]}.
 Native left-button input follows the path; covered, moved or replaced targets stop
 the drag and release the button. File/DataTransfer drag-and-drop is unsupported.
+Fractional display scaling can shift delivered pointer coordinates by about one
+CSS pixel. Prefer assertions of the resulting app state over exact coordinates.
 Conditions: visible, hidden, text (contains expected), count (visible elements),
 checked (boolean), value (exact), imageLoaded, canvasPainted, url (contains expected,
 no selector). At least one assert is required. Convert EVERY expected outcome to

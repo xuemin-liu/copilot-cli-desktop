@@ -311,6 +311,11 @@ defaults to 500 and accepts 100–5000 milliseconds; event processing can extend
 elapsed time. Covered, moved, replaced, or navigated targets stop the drag. The
 button is released on completion, failure, cancellation, or page switching.
 Same-origin frame coordinates are mapped into the selected page automatically.
+At fractional display scaling, native input is quantized to physical pixels, so
+the delivered position can differ from the requested point by about one CSS
+pixel. Assert the resulting app state; checks of delivered pointer coordinates
+should allow a one-CSS-pixel tolerance rather than require exact equality.
+Display scaling and browser page zoom are separate settings.
 
 ```json
 { "action": "drag", "selector": "#canvas", "path": [{ "x": 20, "y": 20 }, { "x": 80, "y": 40 }, { "x": 240, "y": 90 }], "durationMs": 500 }
@@ -391,3 +396,5 @@ workflow and verifies native input, expected results, screenshots, the installed
 PowerShell helper, frames, cancellation, access control, and prevention of
 subsequent writes after a failure. Evidence is saved in
 `test-results/browser-testing/` and included in `npm run browser:check`.
+To exercise fractional display scaling independently of the machine's display
+setting, run `node scripts/browser-test-check.mjs --force-device-scale-factor=1.25`.

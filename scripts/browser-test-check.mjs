@@ -17,7 +17,9 @@ if (!process.versions.electron) {
   await mkdir(artifacts, { recursive: true })
   await writeFile(join(artifacts, 'result.json'), '{"passed":false}')
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const scale = process.argv.slice(2).find(arg => arg.startsWith('--force-device-scale-factor='))
+  if (scale) assert.ok(/^--force-device-scale-factor=\d+(\.\d+)?$/.test(scale) && Number(scale.split('=')[1]) >= 0.5 && Number(scale.split('=')[1]) <= 3, 'Display scale must be within 0.5–3')
+  const child = spawn((await import('electron')).default, [...(scale ? [scale] : []), fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 150000)
   try {
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
@@ -113,7 +115,15 @@ if (!process.versions.electron) {
       return true
     }.toString()})()`
     const drag = (extra = {}) => step('drag', 'Drag canvas path', { selector: '#drag-canvas', path: [{ x: 20, y: 20 }, { x: 80, y: 40 }, { x: 240, y: 90 }], durationMs: 200, ...extra })
-    const dragResult = step('assert', 'Canvas reports the intended endpoint', { selector: '#drag-status', condition: 'text', expected: 'Dragged to 240,90' })
+    const dragResult = step('assert', 'Canvas reports drag completion', { selector: '#drag-status', condition: 'text', expected: 'Dragged to ' })
+    const assertDragEndpoint = async contents => {
+      const status = await contents.executeJavaScript('document.querySelector("#drag-status").textContent')
+      const point = /^Dragged to (-?\d+),(-?\d+)$/.exec(status)
+      assert.ok(point, `Invalid drag endpoint: ${status}`)
+      // Native coordinates are quantized to physical pixels. Frame offsets and
+      // fractional display scaling can shift the delivered CSS point by a pixel.
+      assert.ok(Math.abs(Number(point[1]) - 240) <= 1 && Math.abs(Number(point[2]) - 90) <= 1, `Drag endpoint is outside one CSS pixel of (240,90): ${status}`)
+    }
     let sequence = 0
     const runId = Date.now()
     const execute = async (steps, shell = false) => {
@@ -224,11 +234,12 @@ if (!process.versions.electron) {
         assert.equal(target.bounds.width, 300); assert.equal(target.bounds.height, 140)
         const report = await execute([drag(), dragResult], shell)
         assert.equal(report.status, 'passed', JSON.stringify(report))
+        await assertDragEndpoint(browser.view.webContents)
         const state = await browser.view.webContents.executeJavaScript('window.dragFixture')
         assert.ok(state.events.every(event => event.trusted), 'drag dispatches trusted native pointer events')
         assert.ok(state.events.filter(event => event.type === 'pointermove').length > 2, 'drag interpolates between waypoints')
         assert.ok(state.events.filter(event => event.type === 'pointermove').every(event => event.buttons === 1))
-        assert.ok(state.events.some(event => event.type === 'pointermove' && event.x === 80 && event.y === 40), 'drag visits the intermediate waypoint')
+        assert.ok(state.events.some(event => event.type === 'pointermove' && Math.abs(event.x - 80) <= 1 && Math.abs(event.y - 40) <= 1), 'drag visits the intermediate waypoint within one CSS pixel')
         assert.equal(state.events[0].type, 'pointerdown'); assert.ok(state.events.some(event => event.type === 'pointerup' && event.buttons === 0))
         assert.equal(state.pressed, false)
       }
@@ -236,6 +247,7 @@ if (!process.versions.electron) {
       await browser.view.webContents.executeJavaScript(dragSetup)
       const zoomedDrag = await execute([drag(), dragResult])
       assert.equal(zoomedDrag.status, 'passed', JSON.stringify(zoomedDrag))
+      await assertDragEndpoint(browser.view.webContents)
       browser.view.webContents.setZoomFactor(1)
       for (const mode of ['bounds', 'move', 'cover', 'replace']) {
         await browser.view.webContents.executeJavaScript(dragSetup)
@@ -305,6 +317,7 @@ if (!process.versions.electron) {
         await browser.view.webContents.executeJavaScript('document.querySelector("iframe").style.height="350px"')
         const dragged = await execute([drag({ frame: frame.id }), { ...dragResult, frame: frame.id }])
         assert.equal(dragged.status, 'passed', JSON.stringify(dragged))
+        await assertDragEndpoint(childContents)
       }
       const foreignReady = await execute([visible('#result', { frame: foreignFrame.id })])
       assert.equal(foreignReady.status, 'passed', 'cross-origin frame assertions remain read-only')
@@ -362,7 +375,8 @@ if (!process.versions.electron) {
         thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true, generatedPlanWithoutLabels: true,
         nativeCoordinateDrag: true, dragInterpolation: true, dragBounds: true, dragGeometryGuard: true, dragOverlayGuard: true,
         dragReplacementGuard: true, zoomedCoordinateDrag: true, dragCancellationReleasesButton: true, dragPageSwitchReleasesButton: true,
-        sameOriginFrameDrag: true, crossOriginDragBlocked: true }, null, 2))
+        sameOriginFrameDrag: true, crossOriginDragBlocked: true, dragEndpointTolerance: 1,
+        devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
   }
