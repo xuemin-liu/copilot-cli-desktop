@@ -3,7 +3,8 @@ import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
-import { BrowserIcon } from './Icons.js'
+import { BrowserIcon, PickElementIcon } from './Icons.js'
+import { insertIntoPrompt } from '../prompt-insert.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -16,6 +17,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [picking, setPicking] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
   const viewport = useRef<HTMLDivElement>(null)
   const urlInput = useRef<HTMLInputElement>(null)
   const lastUrl = useRef('')
@@ -66,6 +69,13 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     resize()
     return () => { disposed = true; observer.disconnect(); window.removeEventListener('resize', resize) }
   }, [tabId, active, obscured, error, state.error])
+  const pickElement = (): void => {
+    if (picking) { void window.copilotDesktop.browserPickCancel(tabId).catch(() => {}); return }
+    setError(null); setNotice(null); setPicking(true)
+    void window.copilotDesktop.browserPick(tabId).then(text => {
+      if (text) { insertIntoPrompt(tabId, text); setNotice('Element added to the prompt box. Review it and press Enter to send.') }
+    }).catch(error => setError(errorMessage(error))).finally(() => setPicking(false))
+  }
   const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
@@ -77,6 +87,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
         onClick={event => run(window.copilotDesktop.browserAction(tabId, event.shiftKey || event.ctrlKey || event.metaKey ? 'hard-reload' : 'reload'))}>↻</button>
       <input ref={urlInput} aria-label="Web app URL" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
+      <button type="button" className="browser-pick" title="Select an element on the page and add it to the prompt (Esc cancels)" aria-label="Select element to add to the prompt"
+        aria-pressed={picking} disabled={!state.url || (state.view !== 'page' && !picking)} onClick={pickElement}><PickElementIcon /></button>
       <output className="browser-zoom" aria-label="Browser zoom" title="Selected page zoom">{Math.round(state.zoomFactor * 100)}%</output>
     </form>
     <div className="browser-pages" role="tablist" aria-label="Browser pages">
@@ -102,6 +114,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <span role="status" title={testingMessage}>{testingMessage}</span>
     </div>
     {(error || state.error) && <p className="browser-error" role="alert">{error || state.error}</p>}
+    {!error && !state.error && (picking ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
+      : notice && <p className="browser-notice" role="status">{notice}</p>)}
     <div className="browser-viewport" ref={viewport}>
       {state.view === 'page' && !state.url && <p className="browser-hint">Enter your web app URL above.</p>}
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}

@@ -524,6 +524,9 @@ button:disabled {
 .browser-toolbar { display: flex; gap: 4px; padding: 8px; }
 .browser-toolbar input { flex: 1; min-width: 0; color: #e6edf3; background: #080b12; border: 1px solid #364153; border-radius: 5px; padding: 5px 8px; }
 .browser-toolbar button { padding: 3px 8px; }
+.browser-toolbar .browser-pick { display: inline-flex; align-items: center; }
+.browser-toolbar .browser-pick[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }
+.browser-notice { margin: 0; padding: 4px 8px; font-size: 11px; color: #a9c9ff; }
 .browser-permissions ul { list-style: none; margin: 4px 0; padding: 0; }
 .browser-permissions li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
 .browser-permissions button { padding: 2px 6px; font-size: 11px; }

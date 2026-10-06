@@ -160,6 +160,7 @@ export class BrowserDebug {
     contents.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || this.activePageId !== contents.id) return
       const key = input.key.toLowerCase()
+      if (key === 'escape' && this.reader.picking) { event.preventDefault(); this.reader.cancelPick(); return }
       const hard = (key === 'r' && input.shift && (input.control || input.meta)) || (key === 'f5' && (input.control || input.meta || input.shift))
       if (!hard) return
       event.preventDefault()
@@ -339,6 +340,17 @@ export class BrowserDebug {
     return this.snapshot
   }
 
+  /** User-initiated only (desktop IPC). Resolves to prompt text for the clicked element, or null if cancelled. */
+  async pickElement(): Promise<string | null> {
+    if (this.disposed) throw new Error('Browser has closed')
+    if (this.state.view !== 'page') throw new Error('Show the Page view before selecting an element.')
+    return this.reader.pick()
+  }
+
+  cancelPick(): void { this.reader.cancelPick() }
+
+  get picking(): boolean { return this.reader.picking }
+
   action(action: string): BrowserDebugState {
     if (action === 'testing:on' || action === 'testing:off') {
       if (this.disposed) throw new Error('Browser has closed')
@@ -379,7 +391,7 @@ export class BrowserDebug {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) this.reader.setTesting(false); this.activePageId = id; this.showView('page') }
+      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
       else if (this.pages.size > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -400,7 +412,7 @@ export class BrowserDebug {
   }
 
   private showView(view: BrowserViewMode): void {
-    if (view !== 'page') this.reader.setTesting(false)
+    if (view !== 'page') { this.reader.setTesting(false); this.reader.cancelPick() }
     this.state.view = view
     const page = this.activePage
     page.devtools = ['console', 'network', 'devtools'].includes(view)
@@ -434,7 +446,7 @@ export class BrowserDebug {
   }
 
   setBounds(bounds: BrowserBounds | null): void {
-    if (!bounds) this.reader.setTesting(false)
+    if (!bounds) { this.reader.setTesting(false); this.reader.cancelPick() }
     this.bounds = bounds
     this.layout()
   }
