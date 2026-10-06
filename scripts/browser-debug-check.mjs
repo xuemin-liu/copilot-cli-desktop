@@ -157,12 +157,15 @@ if (!process.versions.electron) {
       // Exercise the address bar's native validation and Go submission, not just IPC.
       await ui(`(() => {
         const input = document.querySelector('[aria-label="Web app URL"]');
+        // Typing happens in a focused field. Unfocused, the 1-second state poll may reset the value to the page URL first.
+        input.focus();
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'localhost.kmha.dev');
         input.dispatchEvent(new Event('input', {bubbles:true}));
       })()`)
       assert.equal(await ui('document.querySelector(".browser-toolbar").checkValidity()'), true, 'bare hostname must pass form validation')
       await ui(`(() => {
         const input = document.querySelector('[aria-label="Web app URL"]');
+        input.focus();
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(url.replace('http://', ''))});
         input.dispatchEvent(new Event('input', {bubbles:true}));
       })()`)
