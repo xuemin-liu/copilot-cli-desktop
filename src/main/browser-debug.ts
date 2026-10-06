@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { BrowserWindow, WebContentsView } from 'electron'
+import { BrowserWindow, WebContentsView, dialog } from 'electron'
 import type { BrowserWindowConstructorOptions, Session, WebContents, WebRequest } from 'electron'
 import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
@@ -13,6 +13,7 @@ import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './
 import { BrowserReader } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
+import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget } from './browser-permissions.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -45,17 +46,31 @@ export class BrowserDebug {
   private disposed = false
   private settingsWrite = Promise.resolve()
   private readonly reader: BrowserReader
+  private readonly sitePermissions: SitePermissions
   private state: BrowserDebugState = {
     activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
     recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
     url: '', loading: false, canGoBack: false, canGoForward: false,
-    devtools: false, error: null, console: [], network: [],
+    devtools: false, error: null, console: [], network: [], sitePermissions: [],
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean> } = {}) {
+    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean> } = {}) {
     this.endpointPath = options.endpointPath ?? browserControlPath()
     this.reportError = options.reportError ?? (message => console.warn(message))
+    this.sitePermissions = new SitePermissions(async (origin, permission, signal) => {
+      const description = `${origin} wants to ${SITE_PERMISSIONS[permission]}.\n\nBlock keeps it off. Either answer is remembered for this session's browser until you remove it under Site permissions or quit the app. Camera, microphone, location, screen capture and other permissions are always blocked.`
+      if (this.disposed || signal.aborted) return null
+      if (options.approvePermission) return options.approvePermission(description)
+      const owner = this.owner
+      if (owner.isDestroyed()) return null
+      if (owner.isMinimized()) owner.restore()
+      if (!owner.isVisible()) owner.show()
+      owner.focus()
+      const { response } = await dialog.showMessageBox(owner, { type: 'question', title: 'Allow site permission?', message: 'A page in the session browser is asking for permission.',
+        detail: description, buttons: ['Block', 'Allow'], defaultId: 0, cancelId: 0, noLink: true, signal })
+      return signal.aborted ? null : response === 1
+    })
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
       active: () => this.activePageId, select: id => { this.action(`select-page:${id}`) }, owner: () => this.owner,
       recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
@@ -66,8 +81,20 @@ export class BrowserDebug {
     } })
     this.addPage(view, true)
     const session = view.webContents.session
-    session.setPermissionCheckHandler(() => false)
-    session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+    // Only a few permissions can be granted, only to http(s) main frames of this session's pages, and only after the user answered a native prompt.
+    session.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+      const target = sitePermissionTarget(permission, details.requestingUrl ?? requestingOrigin, details.isMainFrame)
+      return Boolean(target && contents && this.pages.has(contents.id) && this.sitePermissions.allowed(target.origin, target.permission))
+    })
+    session.setPermissionRequestHandler((contents, permission, callback, details) => {
+      const target = sitePermissionTarget(permission, details.requestingUrl, details.isMainFrame)
+      if (!target || !contents || !this.pages.has(contents.id) || this.disposed) { callback(false); return }
+      const closed = new AbortController()
+      const abort = (): void => closed.abort()
+      contents.once('destroyed', abort)
+      void this.sitePermissions.request(target.origin, target.permission, closed.signal)
+        .finally(() => { contents.off('destroyed', abort) }).then(callback, () => callback(false))
+    })
     session.on('will-download', event => event.preventDefault())
     this.captureNetwork(session.webRequest)
   }
@@ -259,6 +286,7 @@ export class BrowserDebug {
         title: entry.view.webContents.getTitle().slice(0, 160) || 'New page',
         url: entry.view.webContents.getURL() || entry.lastUrl,
       }))
+      this.state.sitePermissions = this.sitePermissions.list()
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
     }
@@ -355,6 +383,9 @@ export class BrowserDebug {
       this.showView(view as BrowserViewMode)
       return this.snapshot
     }
+    const forget = /^forget-permission:(\d+)$/.exec(action)
+    if (forget) { this.sitePermissions.forget(Number(forget[1])); return this.snapshot }
+    if (action === 'forget-permissions') { this.sitePermissions.clear(); return this.snapshot }
     const pageAction = /^(select-page|close-page):(\d+)$/.exec(action)
     if (pageAction) {
       const id = Number(pageAction[2])
@@ -536,7 +567,7 @@ export class BrowserDebug {
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const { console, network, pages, ...state } = this.state
+        const { console, network, pages, sitePermissions: _sitePermissions, ...state } = this.state
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
@@ -572,6 +603,7 @@ export class BrowserDebug {
       }
     }
     this.disposed = true
+    this.sitePermissions.clear()
     this.reader.dispose()
     await this.serverStart?.catch(() => {})
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null }

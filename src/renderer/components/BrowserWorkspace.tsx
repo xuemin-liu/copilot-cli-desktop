@@ -10,7 +10,7 @@ const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
   recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
   url: '', loading: false, canGoBack: false, canGoForward: false,
-  devtools: false, error: null, console: [], network: [],
+  devtools: false, error: null, console: [], network: [], sitePermissions: [],
 }
 
 function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: boolean; active: boolean }): JSX.Element {
@@ -125,7 +125,18 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
         <p>{state.testing.report.description}</p><p>Expected: {state.testing.report.expected}</p>
         <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>
       </details>}
-      <details><summary>Local Overrides setup</summary><p>Open DevTools / Overrides → Sources → Overrides, select your existing Chrome overrides folder, and enable Local Overrides. Save local edits and reload the page to test them.</p></details>
+      <div className="browser-footer-details">
+        <details className="browser-permissions"><summary>Site permissions ({state.sitePermissions.length})</summary>
+          {state.sitePermissions.length === 0
+            ? <p>Pages are asked before they can copy to or read from your clipboard or show notifications. Your answers appear here for this session; camera, microphone, location and other permissions are always blocked.</p>
+            : <><ul>{state.sitePermissions.map(entry => <li key={entry.id}>
+                <span><strong>{entry.decision === 'allow' ? 'Allowed' : 'Blocked'}</strong> {entry.origin}: {entry.label}</span>
+                <button type="button" aria-label={`Forget ${entry.decision === 'allow' ? 'allowed' : 'blocked'} permission for ${entry.origin}: ${entry.label}`}
+                  onClick={() => run(window.copilotDesktop.browserAction(tabId, `forget-permission:${entry.id}`))}>Forget</button></li>)}</ul>
+                <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forget-permissions'))}>Forget all</button></>}
+        </details>
+        <details><summary>Local Overrides setup</summary><p>Open DevTools / Overrides → Sources → Overrides, select your existing Chrome overrides folder, and enable Local Overrides. Save local edits and reload the page to test them.</p></details>
+      </div>
     </footer>
   </aside>
 }

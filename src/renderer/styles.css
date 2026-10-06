@@ -527,6 +527,9 @@ button:disabled {
 .browser-toolbar .browser-pick { display: inline-flex; align-items: center; }
 .browser-toolbar .browser-pick[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }
 .browser-notice { margin: 0; padding: 4px 8px; font-size: 11px; color: #a9c9ff; }
+.browser-permissions ul { list-style: none; margin: 4px 0; padding: 0; }
+.browser-permissions li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; overflow-wrap: anywhere; }
+.browser-permissions button { padding: 2px 6px; font-size: 11px; }
 .browser-zoom { align-self: center; white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 4px; }
 .browser-pages { display: flex; gap: 4px; padding: 0 8px 8px; overflow-x: auto; flex-shrink: 0; }
 .browser-page { display: flex; min-width: 0; flex-shrink: 0; }
@@ -558,6 +561,8 @@ button:disabled {
 .browser-error { margin: 0; padding: 7px 10px; color: #ff8c95; font-size: 12px; overflow-wrap: anywhere; }
 .browser-footer { font-size: 11px; padding: 7px 10px; color: #929baa; }
 .browser-footer details { margin-top: 5px; }
+.browser-footer-details { display: flex; flex-wrap: wrap; gap: 0 16px; }
+.browser-footer-details details[open] { flex-basis: 100%; }
 .browser-footer summary { cursor: pointer; }
 .browser-footer p { line-height: 1.5; }
 .browser-testing { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 5px 8px; font-size: 11px; color: #929baa; }

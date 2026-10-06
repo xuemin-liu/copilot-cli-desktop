@@ -28,7 +28,7 @@ export interface CopilotDesktopBridge {
   browserOpen(tabId: string): Promise<BrowserDebugState>
   browserState(tabId: string): Promise<BrowserDebugState>
   browserNavigate(tabId: string, url: string): Promise<BrowserDebugState>
-  browserAction(tabId: string, action: 'new-page' | 'back' | 'forward' | 'reload' | 'hard-reload' | 'clear' | 'clear-console' | 'clear-network' | 'devtools' | `testing:${'on' | 'off'}` | `view:${BrowserViewMode}` | `${BrowserCaptureSetting}:${'on' | 'off'}` | `select-page:${number}` | `close-page:${number}`): Promise<BrowserDebugState>
+  browserAction(tabId: string, action: 'new-page' | 'back' | 'forward' | 'reload' | 'hard-reload' | 'clear' | 'clear-console' | 'clear-network' | 'devtools' | `testing:${'on' | 'off'}` | `view:${BrowserViewMode}` | `${BrowserCaptureSetting}:${'on' | 'off'}` | `select-page:${number}` | `close-page:${number}` | 'forget-permissions' | `forget-permission:${number}`): Promise<BrowserDebugState>
   browserPick(tabId: string): Promise<string | null>
   browserPickCancel(tabId: string): Promise<void>
   browserExport(tabId: string, kind: 'console' | 'network'): Promise<void>
