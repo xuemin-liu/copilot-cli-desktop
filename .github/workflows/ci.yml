@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # A pull request is built once (pull_request); pushes only build main and release tags. Building every branch push as well
+  # ran each pull-request commit twice.
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -46,6 +50,7 @@ jobs:
             test-results/browser-testing/
             test-results/sidebar-projects-check/
           if-no-files-found: ignore
+          retention-days: 7
       - name: Migration round-trip smoke test
         run: corepack pnpm migration:smoke
       - name: Migration Settings integration check
@@ -57,6 +62,7 @@ jobs:
           name: migration-check
           path: test-results/migration/
           if-no-files-found: ignore
+          retention-days: 7
       - name: Best-effort live copilot smoke test
         run: corepack pnpm smoke
       - name: Best-effort background CLI smoke test
@@ -70,4 +76,5 @@ jobs:
           path: release/win-unpacked/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          # About 400 MB each and nothing downloads it automatically, so keep it for a day only.
+          retention-days: 1
