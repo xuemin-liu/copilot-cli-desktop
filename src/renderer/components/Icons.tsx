@@ -24,6 +24,22 @@ export function PickElementIcon(): JSX.Element {
   </Icon>
 }
 
+/** Camera: attach a screenshot of the page to the prompt. */
+export function ScreenshotIcon(): JSX.Element {
+  return <Icon>
+    <path d="M2.5 5h2.2l1-1.6h4.6l1 1.6h2.2v7.5h-11z" />
+    <circle cx="8" cy="8.6" r="2.2" />
+  </Icon>
+}
+
+/** Terminal prompt with a warning mark: attach console errors to the prompt. */
+export function ConsoleErrorsIcon(): JSX.Element {
+  return <Icon>
+    <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
+    <path d="M4.5 6l2 2-2 2M8 10.2h3" />
+  </Icon>
+}
+
 /** Window with an address bar: the debug browser. */
 export function BrowserIcon(): JSX.Element {
   return <Icon>

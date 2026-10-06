@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { BrowserWindow, WebContentsView, dialog } from 'electron'
+import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog } from 'electron'
 import type { BrowserWindowConstructorOptions, Session, WebContents, WebRequest } from 'electron'
 import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
@@ -14,9 +14,12 @@ import { BrowserReader } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
 import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget } from './browser-permissions.js'
+import { nextZoomFactor } from './browser-zoom.js'
+import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
+const MAX_HISTORY = 200
 
 interface BrowserPage {
   contents: WebContents
@@ -47,15 +50,24 @@ export class BrowserDebug {
   private settingsWrite = Promise.resolve()
   private readonly reader: BrowserReader
   private readonly sitePermissions: SitePermissions
+  private readonly tabId: string
+  private readonly notifyShortcut: (name: 'find' | 'find-close') => void
+  private readonly showMenu: (menu: Menu) => void
+  private readonly history: string[] = []
+  private findQuery = ''
+  private findResult: { matches: number; active: number } | null = null
   private state: BrowserDebugState = {
     activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
     recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
     url: '', loading: false, canGoBack: false, canGoForward: false,
-    devtools: false, error: null, console: [], network: [], sitePermissions: [],
+    devtools: false, error: null, console: [], network: [], sitePermissions: [], history: [],
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean> } = {}) {
+    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; notify?: (name: 'find' | 'find-close') => void; showMenu?: (menu: Menu) => void } = {}) {
+    this.showMenu = options.showMenu ?? (menu => { if (!this.owner.isDestroyed()) menu.popup({ window: this.owner }) })
+    this.tabId = options.tabId ?? ''
+    this.notifyShortcut = options.notify ?? (name => { if (!this.owner.isDestroyed() && this.tabId) this.owner.webContents.send('desktop:browser-shortcut', this.tabId, name) })
     this.endpointPath = options.endpointPath ?? browserControlPath()
     this.reportError = options.reportError ?? (message => console.warn(message))
     this.sitePermissions = new SitePermissions(async (origin, permission, signal) => {
@@ -110,7 +122,7 @@ export class BrowserDebug {
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
-    if (activate) { this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
+    if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
       try { if (details.url && details.url !== 'about:blank') parseSafeHttpUrl(details.url) }
@@ -161,6 +173,19 @@ export class BrowserDebug {
       if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || this.activePageId !== contents.id) return
       const key = input.key.toLowerCase()
       if (key === 'escape' && this.reader.picking) { event.preventDefault(); this.reader.cancelPick(); return }
+      // The page has no application menu, so give it the browser shortcuts people expect.
+      const command = input.control || input.meta
+      const handled = ((): boolean => {
+        if (command && (key === '=' || key === '+')) { this.action('zoom-in'); return true }
+        if (command && (key === '-' || key === '_')) { this.action('zoom-out'); return true }
+        if (command && key === '0') { this.action('zoom-reset'); return true }
+        if (command && !input.shift && key === 'f') { this.notifyShortcut('find'); return true }
+        if (key === 'escape' && this.findQuery) { this.stopFind(); this.notifyShortcut('find-close'); return true }
+        if (this.findQuery && (key === 'f3' || (command && !input.shift && key === 'g'))) { this.find(this.findQuery, !input.shift, true); return true }
+        if (key === 'f12' || (command && input.shift && key === 'i')) { this.action('devtools'); return true }
+        return false
+      })()
+      if (handled) { event.preventDefault(); return }
       const hard = (key === 'r' && input.shift && (input.control || input.meta)) || (key === 'f5' && (input.control || input.meta || input.shift))
       if (!hard) return
       event.preventDefault()
@@ -176,6 +201,7 @@ export class BrowserDebug {
     contents.on('did-start-loading', () => { page.loading = true })
     contents.on('did-start-navigation', details => {
       if (!details.isMainFrame || details.isSameDocument) return
+      if (this.findQuery && this.activePageId === contents.id) { this.stopFind(); this.notifyShortcut('find-close') }
       if (!this.state.preserveConsole) this.state.console = this.state.console.filter(entry => entry.pageId !== contents.id)
       if (!this.state.preserveNetwork) {
         this.reader.clear(contents.id)
@@ -187,7 +213,11 @@ export class BrowserDebug {
     contents.on('did-fail-load', (_event, code, description, _url, main) => {
       if (main && code !== -3) page.error = sanitizedText(description)
     })
-    contents.on('did-navigate', (_event, url) => this.rememberUrl(page, url))
+    contents.on('did-navigate', (_event, url) => { this.rememberUrl(page, url); this.recordHistory(url) })
+    contents.on('found-in-page', (_event, result) => {
+      if (this.activePageId === contents.id && this.findQuery && result.finalUpdate) this.findResult = { matches: result.matches, active: result.activeMatchOrdinal }
+    })
+    contents.on('context-menu', (_event, params) => { if (this.activePageId === contents.id && !this.disposed) this.showContextMenu(page, params) })
     contents.on('console-message', details => {
       if (!this.state.recordingConsole) return
       this.state.console.push({ id: ++this.consoleSequence, pageId: contents.id, timestamp: new Date().toISOString(),
@@ -287,6 +317,12 @@ export class BrowserDebug {
         url: entry.view.webContents.getURL() || entry.lastUrl,
       }))
       this.state.sitePermissions = this.sitePermissions.list()
+      const dialog = this.reader.pendingDialog
+      if (dialog) this.state.dialog = dialog
+      else delete this.state.dialog
+      this.state.history = [...this.history]
+      if (this.findQuery) this.state.find = { query: this.findQuery, ...(this.findResult ?? { matches: 0, active: 0 }) }
+      else delete this.state.find
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
     }
@@ -349,6 +385,110 @@ export class BrowserDebug {
 
   cancelPick(): void { this.reader.cancelPick() }
 
+  /** User-initiated only: the selected page's viewport, masked exactly like an assistant screenshot, placed on the clipboard
+   * as an image so it can be attached to the prompt. Throws a readable reason when a safe screenshot is not possible. */
+  async screenshotToClipboard(): Promise<{ redacted: boolean }> {
+    if (this.disposed) throw new Error('Browser has closed')
+    const result = await this.reader.read('screenshot', [String(this.activePageId)]) as { state?: string; reason?: string; imageBase64?: string; redacted?: boolean }
+    if (result.state !== 'available' || !result.imageBase64) throw new Error(result.reason ?? 'A screenshot is not available right now.')
+    const png = Buffer.from(result.imageBase64, 'base64')
+    if (png.length === 0) throw new Error('The screenshot could not be read.')
+    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) })])
+    return { redacted: Boolean(result.redacted) }
+  }
+
+  /** The user's answer to an alert, confirm or leave-page dialog. */
+  async answerDialog(accept: boolean): Promise<BrowserDebugState> {
+    if (this.disposed) throw new Error('Browser has closed')
+    await this.reader.answerDialog(accept)
+    return this.snapshot
+  }
+
+  /** Find text in the selected page. `next` continues the current search instead of starting a new one. */
+  find(text: string, forward = true, next = false): BrowserDebugState {
+    if (this.disposed) throw new Error('Browser has closed')
+    if (!text) { this.stopFind(); return this.snapshot }
+    const query = text.slice(0, 500)
+    if (!next || query !== this.findQuery) this.findResult = { matches: 0, active: 0 }
+    this.findQuery = query
+    // A new search takes no options: Chromium drops the first result when they are passed on the first request.
+    if (next) this.view.webContents.findInPage(query, { forward, findNext: true })
+    else this.view.webContents.findInPage(query)
+    return this.snapshot
+  }
+
+  stopFind(): BrowserDebugState {
+    this.endFind(false)
+    return this.snapshot
+  }
+
+  /** Ends the search on the selected page, clearing its highlights. Called before the selection changes so a search never
+   * outlives its page: the find bar would otherwise show the old page's results for the new page. */
+  private endFind(notify = true): void {
+    if (!this.findQuery) return
+    const page = this.pages.get(this.activePageId)
+    this.findQuery = ''; this.findResult = null
+    if (page && !page.contents.isDestroyed()) page.contents.stopFindInPage('clearSelection')
+    if (notify) this.notifyShortcut('find-close')
+  }
+
+  private recordHistory(url: string): void {
+    let saved: string | null
+    try { saved = restorableUrl(url) } catch { return }
+    if (!saved) return
+    const existing = this.history.indexOf(saved)
+    if (existing >= 0) this.history.splice(existing, 1)
+    this.history.unshift(saved)
+    if (this.history.length > MAX_HISTORY) this.history.length = MAX_HISTORY
+  }
+
+  private showContextMenu(page: BrowserPage, params: ContextMenuInput & { x: number; y: number }): void {
+    const contents = page.contents
+    const items = contextMenuItems(params, { canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward() })
+    const menu = Menu.buildFromTemplate(items.map(item => 'separator' in item ? { type: 'separator' as const }
+      : { label: item.label, enabled: item.enabled, click: () => { this.runContextAction(page, item.id, params) } }))
+    this.showMenu(menu)
+  }
+
+  /** Runs one entry of the page's right-click menu. */
+  private runContextAction(page: BrowserPage, id: ContextMenuId, params: ContextMenuInput & { x: number; y: number }): void {
+    const contents = page.contents
+    if (this.disposed || contents.isDestroyed()) return
+    switch (id) {
+      case 'back': this.action('back'); break
+      case 'forward': this.action('forward'); break
+      case 'reload': this.action('reload'); break
+      case 'hard-reload': this.action('hard-reload'); break
+      case 'cut': contents.cut(); break
+      case 'copy': contents.copy(); break
+      case 'paste': contents.paste(); break
+      case 'select-all': contents.selectAll(); break
+      case 'copy-link': if (/^https?:\/\//i.test(params.linkURL)) void clipboard.writeText(params.linkURL); break
+      case 'copy-image-address': if (/^https?:\/\//i.test(params.srcURL)) void clipboard.writeText(params.srcURL); break
+      case 'open-link': this.openInNewPage(params.linkURL); break
+      case 'inspect': {
+        // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
+        const reused = page.tools !== null
+        this.showView('devtools')
+        const tools = page.tools?.webContents
+        const inspect = (): void => { if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y) }
+        if (reused && tools && !tools.isLoading()) inspect()
+        else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
+        break
+      }
+    }
+  }
+
+  private openInNewPage(url: string): void {
+    const source = this.activePage
+    try { parseSafeHttpUrl(url) } catch { source.error = 'This browser opens HTTP and HTTPS links only.'; return }
+    if (this.pages.size >= MAX_PAGES) { source.error = 'Close a browser page before opening another (32 pages maximum).'; return }
+    const page = this.addPage(new WebContentsView({ webPreferences: { session: source.contents.session,
+      sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+    this.layout()
+    void page.contents.loadURL(url).catch(error => { page.error = sanitizedText(String(error)) })
+  }
+
   get picking(): boolean { return this.reader.picking }
 
   action(action: string): BrowserDebugState {
@@ -391,7 +531,7 @@ export class BrowserDebug {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
+      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
       else if (this.pages.size > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -402,6 +542,7 @@ export class BrowserDebug {
       case 'reload': this.activePage.error = null; contents.reload(); break
       // Re-fetch every resource instead of trusting the HTTP cache, like Ctrl+Shift+R in Chrome.
       case 'hard-reload': this.activePage.error = null; contents.reloadIgnoringCache(); break
+      case 'zoom-in': case 'zoom-out': case 'zoom-reset': contents.setZoomFactor(nextZoomFactor(contents.getZoomFactor(), action.slice(5) as 'in' | 'out' | 'reset')); break
       case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'clear-console': this.state.console = []; break
       case 'clear-network': this.state.network = []; this.started.clear(); this.reader.clear(); break
@@ -506,7 +647,7 @@ export class BrowserDebug {
     if (this.pages.size === 0) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
-    } else if (this.activePageId === id) { this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
+    } else if (this.activePageId === id) { this.endFind(); this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
     if (primary) this.rememberUrl(this.pages.values().next().value!, this.pages.values().next().value!.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()
@@ -567,7 +708,7 @@ export class BrowserDebug {
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const { console, network, pages, sitePermissions: _sitePermissions, ...state } = this.state
+        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, ...state } = this.state
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.

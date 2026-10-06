@@ -1,7 +1,7 @@
 import { redactBrowserValue } from './browser-read-privacy.js'
 import type { BrowserTestPlan, BrowserTestReport, BrowserTestStep } from './browser-test-plan.js'
 
-export interface TestObservation { passed: boolean; reason?: string; screenshot?: BrowserTestReport['screenshots'][number] }
+export interface TestObservation { passed: boolean; reason?: string; detail?: string; screenshot?: BrowserTestReport['screenshots'][number] }
 export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, executor: {
   active: () => boolean
   execute: (step: BrowserTestStep, signal: AbortSignal) => Promise<TestObservation>
@@ -42,7 +42,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         check()
         if (!result.passed) throw new Error(result.reason ?? 'Expected condition was not met before the timeout.')
         if (result.screenshot) report.screenshots.push({ ...result.screenshot, step: index + 1 })
-        report.steps.push({ action: step.action, label, status: 'passed', durationMs: Date.now() - stepStart })
+        report.steps.push({ action: step.action, label, status: 'passed', durationMs: Date.now() - stepStart, ...(result.detail ? { detail: safe(result.detail) } : {}) })
       } catch (error) {
         report.status = expired.signal.aborted ? 'failed' : signal.aborted || !executor.active() ? 'cancelled' : 'failed'
         report.steps.push({ action: step.action, label, status: 'failed', durationMs: Date.now() - stepStart,

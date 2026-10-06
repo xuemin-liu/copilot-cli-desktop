@@ -199,6 +199,14 @@ drag(selector,path,optional durationMs), fill(selector,value), select(selector,v
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
 assert(condition,selector,optional expected), screenshot(). Optional text filters
 match visible element text; optional frame selects a current-page frame.
+A step that triggers a JavaScript alert, confirm or leave-page dialog (click, doubleClick,
+press, fill, select, navigate) must say so with dialog:{accept:true|false,optional message}.
+message must be contained in the dialog text. The dialog is answered during that step,
+and the report's step detail records its type, text and answer. A dialog that no step
+expected is dismissed and fails the test, so the page never hangs; run the plan once
+with accept true and once with false to cover both outcomes of a confirm. prompt()
+is not supported by this browser. Outside a test, a dialog waits for the user to answer
+it in the browser pane, and reads fail with a message saying so; ask the user to answer it.
 Drag path has 2–100 {x,y} points in CSS pixels relative to the target's bounding
 box top-left (not canvas backing-store pixels or screen coordinates). Points must
 stay inside that target and the visible viewport. durationMs is 100–5000, default

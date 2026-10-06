@@ -3,15 +3,16 @@ import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
-import { BrowserIcon, PickElementIcon } from './Icons.js'
-import { insertIntoPrompt } from '../prompt-insert.js'
+import { BrowserIcon, ConsoleErrorsIcon, PickElementIcon, ScreenshotIcon } from './Icons.js'
+import { attachClipboardImage, insertIntoPrompt } from '../prompt-insert.js'
+import { formatBrowserContext } from '../../main/browser-context-format.js'
 import { MAX_PICKED_ELEMENTS, composeElementSelection, pickedElementLabel } from '../../main/browser-pick-compose.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
   recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
   url: '', loading: false, canGoBack: false, canGoForward: false,
-  devtools: false, error: null, console: [], network: [], sitePermissions: [],
+  devtools: false, error: null, console: [], network: [], sitePermissions: [], history: [],
 }
 
 function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: boolean; active: boolean }): JSX.Element {
@@ -22,6 +23,10 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const [selecting, setSelecting] = useState(false)
   const [selection, setSelection] = useState<string[]>([])
   const [note, setNote] = useState('')
+  const [capturing, setCapturing] = useState(false)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findText, setFindText] = useState('')
+  const findInput = useRef<HTMLInputElement>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const viewport = useRef<HTMLDivElement>(null)
   const urlInput = useRef<HTMLInputElement>(null)
@@ -94,20 +99,58 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       if (text) { insertIntoPrompt(tabId, text); setNotice('Element added to the prompt box. Review it and press Enter to send.') }
     }).catch(error => setError(errorMessage(error))).finally(() => setPicking(false))
   }
+  const addScreenshot = (): void => {
+    setError(null); setNotice(null); setCapturing(true)
+    void window.copilotDesktop.browserScreenshot(tabId).then(result => {
+      attachClipboardImage(tabId)
+      setNotice(`Screenshot placed on the clipboard and attached with Alt+V${result.redacted ? ' (form fields, credential-marked elements, frames and canvases are masked)' : ''}. Review the prompt, then press Enter.`)
+    }).catch(error => setError(errorMessage(error))).finally(() => setCapturing(false))
+  }
+  const addConsole = (): void => {
+    setError(null)
+    const text = formatBrowserContext({ url: state.url, pageId: state.activePageId, console: state.console, network: state.network })
+    if (!text) { setNotice('This page has no console messages or failed requests yet.'); return }
+    insertIntoPrompt(tabId, text)
+    setNotice('Console errors and failed requests added to the prompt box. Review them and press Enter to send.')
+  }
+  const openFind = (): void => {
+    setFindOpen(true)
+    setTimeout(() => { findInput.current?.focus(); findInput.current?.select() }, 0)
+  }
+  const closeFind = (): void => {
+    setFindOpen(false)
+    void window.copilotDesktop.browserFindStop(tabId).then(accept).catch(() => {})
+  }
+  useEffect(() => window.copilotDesktop.onBrowserShortcut((id, name) => {
+    if (id !== tabId) return
+    if (name === 'find') openFind()
+    else { setFindOpen(false) }
+  }), [tabId]) // eslint-disable-line react-hooks/exhaustive-deps
+  const find = (text: string, forward: boolean, next: boolean): void => {
+    if (!text) { void window.copilotDesktop.browserFindStop(tabId).then(accept).catch(() => {}); return }
+    run(window.copilotDesktop.browserFind(tabId, text, forward, next))
+  }
   const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
-  return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}>
+  return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
+    onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); openFind() } }}>
     <form className="browser-toolbar" onSubmit={event => { event.preventDefault(); run(window.copilotDesktop.browserNavigate(tabId, url.trim())) }}>
       <button type="button" title="Back" aria-label="Browser back" disabled={!state.canGoBack} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'back'))}>←</button>
       <button type="button" title="Forward" aria-label="Browser forward" disabled={!state.canGoForward} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forward'))}>→</button>
       <button type="button" title="Reload (Shift+click or Ctrl+Shift+R: hard reload that bypasses the cache)" aria-label="Reload browser" aria-keyshortcuts="Control+Shift+R" disabled={!state.url}
         onClick={event => run(window.copilotDesktop.browserAction(tabId, event.shiftKey || event.ctrlKey || event.metaKey ? 'hard-reload' : 'reload'))}>↻</button>
-      <input ref={urlInput} aria-label="Web app URL" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
+      <input ref={urlInput} aria-label="Web app URL" list={`browser-history-${tabId}`} type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
+      <datalist id={`browser-history-${tabId}`}>{state.history.slice(0, 50).map(address => <option key={address} value={address} />)}</datalist>
       <button type="button" className="browser-pick" title="Select an element on the page and add it to the prompt (Esc cancels). Shift+click to select several elements and add a comment." aria-label="Select element to add to the prompt"
         aria-pressed={picking} disabled={!state.url || (state.view !== 'page' && !picking)} onClick={event => pickElement(event.shiftKey)}><PickElementIcon /></button>
-      <output className="browser-zoom" aria-label="Browser zoom" title="Selected page zoom">{Math.round(state.zoomFactor * 100)}%</output>
+      <button type="button" className="browser-pick" title="Attach a screenshot of the page to the prompt (form fields, credentials, frames and canvases are masked)" aria-label="Attach screenshot to the prompt"
+        disabled={!state.url || state.view !== 'page' || capturing} onClick={addScreenshot}><ScreenshotIcon /></button>
+      <button type="button" className="browser-pick" title="Add this page's console errors and failed requests to the prompt" aria-label="Add console errors to the prompt"
+        disabled={!state.url} onClick={addConsole}><ConsoleErrorsIcon /></button>
+      <button type="button" className="browser-zoom" aria-label={`Browser zoom ${Math.round(state.zoomFactor * 100)}%, select to reset`} title="Page zoom: Ctrl+= zooms in, Ctrl+- zooms out, Ctrl+0 or this button resets"
+        onClick={() => run(window.copilotDesktop.browserAction(tabId, 'zoom-reset'))}>{Math.round(state.zoomFactor * 100)}%</button>
     </form>
     <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
@@ -131,6 +174,25 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
         {state.testing?.enabled ? 'Stop testing' : 'Testing mode'}</button>
       <span role="status" title={testingMessage}>{testingMessage}</span>
     </div>
+    {state.dialog && <div className="browser-dialog" role="alertdialog" aria-label="Page dialog">
+      <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : 'This page says'}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
+      <div>
+        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
+        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
+      </div>
+    </div>}
+    {findOpen && <div className="browser-find" role="search" aria-label="Find in page">
+      <input ref={findInput} type="text" aria-label="Find in page" placeholder="Find in page" maxLength={500} value={findText}
+        onChange={event => { setFindText(event.target.value); find(event.target.value, true, false) }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') { event.preventDefault(); find(findText, !event.shiftKey, true) }
+          else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeFind() }
+        }} />
+      <output aria-live="polite">{state.find ? (state.find.matches ? `${state.find.active} of ${state.find.matches}` : 'No matches') : ''}</output>
+      <button type="button" aria-label="Previous match" disabled={!state.find?.matches} onClick={() => find(findText, false, true)}>↑</button>
+      <button type="button" aria-label="Next match" disabled={!state.find?.matches} onClick={() => find(findText, true, true)}>↓</button>
+      <button type="button" aria-label="Close find" onClick={closeFind}>×</button>
+    </div>}
     {(error || state.error) && <p className="browser-error" role="alert">{error || state.error}</p>}
     {(selecting || selection.length > 0) && <div className="browser-selection" role="group" aria-label="Selected elements">
       <p>{selecting ? `Click elements in the page (${selection.length} of ${MAX_PICKED_ELEMENTS}). Press Esc when you are done.` : `${selection.length} element${selection.length === 1 ? '' : 's'} selected.`}</p>

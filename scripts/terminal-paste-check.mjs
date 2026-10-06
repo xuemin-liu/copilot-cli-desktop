@@ -76,8 +76,17 @@ if (!process.versions.electron) {
       // A picked browser element is pasted, never submitted: without bracketed paste a line break would press Enter.
       assert.deepEqual(await insert('paste', '[Browser element] <a>\nText: "x"'), [frame(bracketed ? '[Browser element] <a>\rText: "x"' : '[Browser element] <a> | Text: "x"')])
       assert.deepEqual(await insert('another-session', 'must not reach this terminal'), [])
+      // A page screenshot is attached with Copilot's Alt+V shortcut, to this session only.
+      writes.length = 0
+      await ui(window, `window.dispatchEvent(new CustomEvent('copilot-desktop:insert-prompt', { detail: { tabId: 'paste', image: true } }))`)
+      await delay(80)
+      assert.deepEqual([...writes], ['v'])
+      writes.length = 0
+      await ui(window, `window.dispatchEvent(new CustomEvent('copilot-desktop:insert-prompt', { detail: { tabId: 'another-session', image: true } }))`)
+      await delay(80)
+      assert.deepEqual([...writes], [])
     }
-    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['StrictMode mount', 'bracketed mode on/off', 'image shortcut', 'multiline and mixed text', 'browser element insert (bracketed and plain)', 'empty paste no-op', 'bounded text with intact framing'] }, null, 2))
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['StrictMode mount', 'bracketed mode on/off', 'image shortcut', 'multiline and mixed text', 'browser element insert (bracketed and plain)', 'screenshot attach shortcut', 'empty paste no-op', 'bounded text with intact framing'] }, null, 2))
     console.log('[terminal-paste] PASS')
     app.quit()
   }

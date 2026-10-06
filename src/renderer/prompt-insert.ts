@@ -11,3 +11,8 @@ export function promptInsertText(text: string, bracketedPaste: boolean): string 
 export function insertIntoPrompt(tabId: string, text: string): void {
   window.dispatchEvent(new CustomEvent(INSERT_PROMPT_EVENT, { detail: { tabId, text } }))
 }
+
+/** Attach the image on the clipboard to the prompt with Copilot's own paste-image shortcut (Alt+V). Nothing is sent. */
+export function attachClipboardImage(tabId: string): void {
+  window.dispatchEvent(new CustomEvent(INSERT_PROMPT_EVENT, { detail: { tabId, image: true } }))
+}

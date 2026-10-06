@@ -79,6 +79,20 @@ Console and ordinary header text are capped at 8192 characters before filtering.
 Oversized URLs and URL-bearing headers are replaced with a redaction marker so a
 partial credential cannot escape filtering at the limit.
 
+## Everyday browser controls
+
+With the page focused (or the address toolbar, for find):
+
+| Action | How |
+|---|---|
+| Zoom in, out, reset | **Ctrl+=**, **Ctrl+-**, **Ctrl+0**, or select the zoom percentage in the toolbar to reset. Steps follow Chrome (25% to 500%). |
+| Find in page | **Ctrl+F** opens a find bar above the page with a match count; **Enter** / **Shift+Enter** (or **F3** / **Shift+F3**) step through matches; **Esc** closes it. Navigating to another page ends the search. |
+| DevTools | **F12** or **Ctrl+Shift+I** toggles DevTools, like the DevTools / Overrides tab. |
+| Address suggestions | The address field suggests pages you visited in this session, newest first (up to 200; nothing with a query string secret or a fragment, and not saved across restarts). |
+| Right-click menu | Back, Forward, Reload, Hard reload, Select all, and **Inspect element** (opens DevTools on that element). On a link: **Open link in new page** and **Copy link address**; on an image: **Copy image address**; on selected text: **Copy**; in a field: **Cut / Copy / Paste**. Only HTTP(S) addresses are offered. |
+
+The assistant's browser status does not include the address suggestions or the find text.
+
 ## Adding a page element to the prompt
 
 Select the crosshair button in the address toolbar, then click an element in the page.
@@ -172,6 +186,37 @@ visibility and keeps enabled overrides active while it is hidden. Browser pages 
 bridge or Node integration. New pages accept HTTP/HTTPS and initial blank pages;
 local files and other external protocols and downloads are blocked, and so are permission requests,
 except the three described under *Site permissions* below.
+
+## Page dialogs
+
+`alert()`, `confirm()` and the leave-page prompt (`beforeunload`) hold the page until they are
+answered. The browser pane shows the page's message with **OK** / **Cancel** (**Leave** / **Stay**
+for a leave-page prompt) above the page, and the dialog text is filtered for credentials. While a
+dialog is open the assistant's reads fail at once with a message that says a dialog is waiting for
+you, instead of timing out. `prompt()` is not supported by the Electron browser engine, so pages
+that call it receive no answer.
+
+In Testing mode a step that triggers a dialog declares it, for example
+`{ "action": "click", "selector": "#delete", "dialog": { "accept": true, "message": "Delete item" } }`.
+`dialog` is accepted on `click`, `doubleClick`, `press`, `fill`, `select` and `navigate`; `message`
+must be contained in the dialog's text. The dialog is answered during that step (it may open up to
+1.5 seconds after the action), and the report's step `detail` records its type, text and answer.
+A dialog that no step expected is dismissed and the test fails with its text; a step that declares a
+dialog that never opens fails too. Run a plan twice, with `accept` true and false, to cover both
+outcomes of a `confirm`.
+
+## Adding a screenshot or console errors to the prompt
+
+Two more buttons in the address toolbar put context into the session's prompt box. Nothing is
+sent: review the prompt, then press Enter.
+
+- **Camera**: captures the selected page's viewport, masked exactly like an assistant screenshot
+  (form controls, credential-marked elements, frames and canvases are covered), puts the PNG on the
+  system clipboard, and attaches it with Copilot's Alt+V shortcut. The clipboard is replaced by the
+  image. The Page view must be showing and the window visible.
+- **Console**: adds the page's console errors and warnings (or its latest messages when there are
+  none) and failed requests (HTTP 400 and above, or a network error) as text. Entries are the
+  filtered ones the browser already captured, limited to 25 console lines and 10 requests.
 
 ## Site permissions
 

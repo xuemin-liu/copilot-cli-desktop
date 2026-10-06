@@ -69,3 +69,19 @@ test('page changes and overall deadline fail closed', async () => {
     progress: () => {}, execute: async () => ({ passed: false }) }, new AbortController().signal)
   assert.equal(expired.status, 'failed'); assert.match(expired.steps[0]!.reason!, /timed out/)
 })
+
+test('dialog expectations are accepted only on actions that can trigger a dialog and only in their closed shape', () => {
+  const click = { action: 'click', selector: '#delete', dialog: { accept: true, message: 'Delete item' } }
+  assert.deepEqual(plan([click, assertion]).steps[0]?.dialog, { accept: true, message: 'Delete item' })
+  for (const action of ['doubleClick', 'press', 'fill', 'select']) {
+    const extra = action === 'press' ? { key: 'Enter' } : action === 'fill' || action === 'select' ? { value: 'x' } : {}
+    assert.ok(plan([{ action, selector: '#a', ...extra, dialog: { accept: false } }, assertion]))
+  }
+  assert.ok(plan([{ action: 'navigate', url: 'http://localhost:3000/', dialog: { accept: true } }, assertion]))
+  for (const dialog of [{}, { accept: 'yes' }, { accept: true, value: 'typed' }, { accept: true, message: '' }, { accept: true, message: 'x'.repeat(501) }, 'accept', null, []]) {
+    assert.throws(() => plan([{ ...click, dialog }, assertion]), /Invalid browser test/, JSON.stringify(dialog))
+  }
+  for (const action of ['hover', 'scroll', 'screenshot', 'waitFor', 'assert']) {
+    assert.throws(() => plan([{ action, selector: '#a', pixels: 1, condition: 'visible', dialog: { accept: true } }, assertion]), /Invalid browser test/, action)
+  }
+})
