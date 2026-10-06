@@ -79,6 +79,29 @@ Console and ordinary header text are capped at 8192 characters before filtering.
 Oversized URLs and URL-bearing headers are replaced with a redaction marker so a
 partial credential cannot escape filtering at the limit.
 
+## Adding a page element to the prompt
+
+Select the crosshair button in the address toolbar, then click an element in the page.
+Chromium highlights what is under the pointer, and the click is consumed by the picker, so
+it never reaches the web app. **Esc**, the same button, switching pages or leaving the Page
+view cancels the selection, and it ends by itself after two minutes.
+
+The element is described in a short text block that is **pasted into the session's prompt
+box, not sent**: review or edit it, then press Enter. The block has the element's tag,
+classes and id, a CSS selector that says whether it is unique, its visible text (up to 300
+characters), a fixed allow-list of attributes (`id`, `class`, `role`, `aria-label`,
+`data-testid`, `href`, `src`, `alt`, `title`, `type`, `name`, `placeholder`, `for`,
+`disabled`), its position and size in the page, a few computed styles, and the chain of
+parents. Without bracketed paste the block is joined onto one line with ` | `, so a line
+break cannot press Enter for you.
+
+Privacy: only you can start a selection (it is a desktop action, not part of the
+assistant's browser commands). Form controls and credential-marked elements show no value
+or text, descendants that are form controls or credential-marked are left out of the text,
+and recognizable credentials and URL secrets are filtered both in the page and again in the
+app. The page itself is never given a handle to the element or the selection. Elements
+inside cross-origin frames are not supported.
+
 ## Copilot CLI access
 
 Local Copilot processes launched by Desktop receive browser diagnostic

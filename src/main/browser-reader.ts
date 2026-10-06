@@ -7,6 +7,8 @@ import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot
 import type { ScreenshotMaskGeometry, ScreenshotLayout } from './browser-screenshot-mask.js'
 import { MAX_RESPONSE_BYTES, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
 import { browserTestScript } from './browser-test-script.js'
+import { browserPickScript } from './browser-pick-script.js'
+import { formatPickedElement } from './browser-pick-format.js'
 import { validateBrowserTestPlan } from './browser-test-plan.js'
 import type { BrowserTestState, BrowserTestStep } from './browser-test-plan.js'
 import { runBrowserTest, type TestObservation } from './browser-test-runner.js'
@@ -60,6 +62,8 @@ export class BrowserReader {
   private testOrigin: string | null = null
   private testBlocked = false
   private testAbort: AbortController | null = null
+  private picker: { pageId: number; choose: (backendNodeId: number | null) => void } | null = null
+  private pickAbort: AbortController | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
   constructor(private readonly options: BrowserReaderOptions) {}
@@ -184,6 +188,11 @@ export class BrowserReader {
       for (const [frameId, session] of page.sessions) if (session === params.sessionId) { page.sessions.delete(frameId); page.contexts.delete(frameId) }
       return
     }
+    if (method === 'Overlay.inspectNodeRequested' && !sessionId && this.picker?.pageId === page.contents.id) {
+      this.picker.choose(Number.isInteger(params.backendNodeId) ? Number(params.backendNodeId) : null); return
+    }
+    // Chromium reports Esc in its inspect overlay this way, and the keystroke never reaches the page.
+    if (method === 'Overlay.inspectModeCanceled' && !sessionId && this.picker?.pageId === page.contents.id) { this.picker.choose(null); return }
     if (method === 'Runtime.executionContextsCleared' || method === 'Page.frameNavigated') page.contexts.clear()
     const key = `${sessionId ?? ''}:${String(params.requestId)}`
     if (method === 'Network.responseReceived' && this.options.recording()) {
@@ -266,14 +275,19 @@ export class BrowserReader {
     return [...new Map(frames.map(frame => [frame.id, frame])).values()]
   }
 
-  private async evaluate(page: PageReader, frameId: string, operation: string, args: Params, testing = false, signal?: AbortSignal): Promise<any> {
-    const sessionId = page.sessions.get(frameId)
+  private async isolatedContext(page: PageReader, frameId: string, signal?: AbortSignal): Promise<number> {
     let contextId = page.contexts.get(frameId)
     if (!contextId) {
-      const world = await this.command(page, 'Page.createIsolatedWorld', { frameId, worldName: 'desktop-browser-reader', grantUniveralAccess: false }, sessionId, 10000, signal)
+      const world = await this.command(page, 'Page.createIsolatedWorld', { frameId, worldName: 'desktop-browser-reader', grantUniveralAccess: false }, page.sessions.get(frameId), 10000, signal)
       contextId = Number(world.executionContextId)
       page.contexts.set(frameId, contextId)
     }
+    return contextId
+  }
+
+  private async evaluate(page: PageReader, frameId: string, operation: string, args: Params, testing = false, signal?: AbortSignal): Promise<any> {
+    const sessionId = page.sessions.get(frameId)
+    const contextId = await this.isolatedContext(page, frameId, signal)
     const result = await this.command(page, 'Runtime.evaluate', {
       expression: `(${(testing ? browserTestScript : browserReadScript).toString()})(${JSON.stringify(operation)},${JSON.stringify({ ...args, deadline: Date.now() + 8000 })},${JSON.stringify(CREDENTIAL_PATTERN_SOURCE)})`,
       contextId, returnByValue: true, awaitPromise: operation === 'mask' || testing && operation === 'settle', userGesture: false,
@@ -490,6 +504,61 @@ export class BrowserReader {
     check(); return { passed: true }
   }
 
+  /** The user clicks an element with Chromium's own inspect overlay and receives prompt text
+   * for it. Only the desktop window can start this; the assistant's control server cannot. */
+  async pick(): Promise<string | null> {
+    if (this.disposed) throw new Error('Browser session has closed.')
+    if (this.busy || this.pickAbort) throw new Error('Another browser inspection, test or element selection is in progress.')
+    const page = this.page()
+    if (!this.options.visible(page.contents.id)) throw new Error('Show the Page view before selecting an element.')
+    const abort = new AbortController()
+    this.pickAbort = abort
+    this.busy = true
+    const pageId = page.contents.id
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await this.attach(page)
+      await this.command(page, 'DOM.enable')
+      await this.command(page, 'Overlay.enable')
+      const chosen = new Promise<number | null>(resolve => { this.picker = { pageId, choose: resolve } })
+      abort.signal.addEventListener('abort', () => this.picker?.choose(null), { once: true })
+      // Cancellation can arrive while Chromium is still being prepared; an already-aborted signal fires no event.
+      if (abort.signal.aborted) return null
+      timer = setTimeout(() => abort.abort(), 120_000)
+      await this.command(page, 'Overlay.setInspectMode', { mode: 'searchForNode', highlightConfig: {
+        showInfo: true, contentColor: { r: 111, g: 168, b: 220, a: 0.45 }, paddingColor: { r: 147, g: 196, b: 125, a: 0.4 },
+        borderColor: { r: 255, g: 229, b: 153, a: 0.6 }, marginColor: { r: 246, g: 178, b: 107, a: 0.4 } } })
+      const backendNodeId = await chosen
+      if (backendNodeId === null || abort.signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== pageId) return null
+      const node = await this.command(page, 'DOM.describeNode', { backendNodeId })
+      const frames = await this.frames(page)
+      const frameId = typeof node.node?.frameId === 'string' && frames.some(frame => frame.id === node.node.frameId) ? String(node.node.frameId) : frames[0]?.id
+      if (!frameId) throw new Error('The selected element is no longer available.')
+      const contextId = await this.isolatedContext(page, frameId)
+      const resolved = await this.command(page, 'DOM.resolveNode', { backendNodeId, executionContextId: contextId }, page.sessions.get(frameId))
+      const objectId = resolved.object?.objectId
+      if (!objectId) throw new Error('The selected element is no longer available.')
+      try {
+        const result = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true, userGesture: false,
+          functionDeclaration: browserPickScript.toString(), arguments: [{ value: CREDENTIAL_PATTERN_SOURCE }] }, page.sessions.get(frameId))
+        if (result.exceptionDetails || !result.result?.value) throw new Error('The selected element could not be described. Select it again.')
+        return formatPickedElement(result.result.value)
+      } finally { await this.command(page, 'Runtime.releaseObject', { objectId }, page.sessions.get(frameId), 1000).catch(() => {}) }
+    } finally {
+      if (timer) clearTimeout(timer)
+      this.picker = null; this.pickAbort = null; this.busy = false
+      if (!page.contents.isDestroyed() && page.contents.debugger.isAttached()) {
+        await this.command(page, 'Overlay.setInspectMode', { mode: 'none', highlightConfig: {} }, undefined, 1000).catch(() => {})
+        await this.command(page, 'Overlay.hideHighlight', {}, undefined, 1000).catch(() => {})
+        await this.command(page, 'Overlay.disable', {}, undefined, 1000).catch(() => {})
+      }
+    }
+  }
+
+  cancelPick(): void { this.pickAbort?.abort() }
+
+  get picking(): boolean { return this.pickAbort !== null }
+
   async read(command: string, args: string[], signal?: AbortSignal): Promise<unknown> {
     if (this.disposed) throw new Error('Browser session has closed.')
     if (this.busy) throw new Error('Another browser inspection or approval is in progress. Retry after it finishes.')
@@ -613,6 +682,7 @@ export class BrowserReader {
   }
 
   dispose(): void {
+    this.cancelPick()
     this.setTesting(false)
     this.disposed = true
     this.clear()

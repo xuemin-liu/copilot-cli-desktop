@@ -16,6 +16,14 @@ export function ForkIcon(): JSX.Element {
   </Icon>
 }
 
+/** Crosshair on a box corner: pick an element on the page. */
+export function PickElementIcon(): JSX.Element {
+  return <Icon>
+    <path d="M2.5 5.5v-3h3M10.5 2.5h3v3M13.5 10.5v3h-3M5.5 13.5h-3v-3" />
+    <path d="M8 5.5v5M5.5 8h5" />
+  </Icon>
+}
+
 /** Window with an address bar: the debug browser. */
 export function BrowserIcon(): JSX.Element {
   return <Icon>

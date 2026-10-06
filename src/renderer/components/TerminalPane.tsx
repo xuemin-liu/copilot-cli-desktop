@@ -7,6 +7,7 @@ import { OperationError } from './OperationError.js'
 import { errorMessage } from '../errors.js'
 import { TerminalReplay } from '../terminal-replay.js'
 import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
+import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -284,6 +285,13 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // reaches this app through the OSC 52 handler above.
     const handlePaste = (event: ClipboardEvent): void => handleTerminalPaste(event, terminal)
     container.addEventListener('paste', handlePaste, true)
+    const handleInsertPrompt = (event: Event): void => {
+      const detail = (event as CustomEvent<{ tabId?: unknown; text?: unknown }>).detail
+      if (detail?.tabId !== tabId || typeof detail.text !== 'string') return
+      terminal.paste(promptInsertText(detail.text, terminal.modes.bracketedPasteMode))
+      terminal.focus()
+    }
+    window.addEventListener(INSERT_PROMPT_EVENT, handleInsertPrompt)
     container.addEventListener('mousedown', handleMouseDown, true)
     container.addEventListener('mousemove', handleMouseMove, true)
     container.addEventListener('mouseup', handleMouseUp, true)
@@ -331,6 +339,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       if (clipboardRedrawRef.current === clipboardRedraw) clipboardRedrawRef.current = null
       resizeObserver.disconnect()
       container.removeEventListener('paste', handlePaste, true)
+      window.removeEventListener(INSERT_PROMPT_EVENT, handleInsertPrompt)
       container.removeEventListener('mousedown', handleMouseDown, true)
       container.removeEventListener('mousemove', handleMouseMove, true)
       container.removeEventListener('mouseup', handleMouseUp, true)
