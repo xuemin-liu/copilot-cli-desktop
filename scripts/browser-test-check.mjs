@@ -77,6 +77,43 @@ if (!process.versions.electron) {
     const plan = steps => ({ description: 'Exercise a user-described workflow 用户测试', expected: 'Expected checks pass', steps })
     const step = (action, label, rest) => ({ action, label, ...rest })
     const visible = (selector, extra = {}) => step('assert', 'Expected element visible', { selector, condition: 'visible', ...extra })
+    const dragSetup = `(${function () {
+      window.dragFixtureCleanup?.()
+      for (const id of ['drag-canvas', 'drag-status', 'drag-cover']) document.getElementById(id)?.remove()
+      const canvas = document.createElement('canvas'); canvas.id = 'drag-canvas'; canvas.width = 600; canvas.height = 280
+      canvas.style.cssText = 'display:block;width:300px;height:140px;touch-action:none;background:#eef'
+      const status = document.createElement('p'); status.id = 'drag-status'; status.textContent = 'Ready'
+      document.body.append(canvas, status)
+      window.dragFixture = { events: [], mode: '', pressed: false }
+      const released = event => {
+        // Removing a captured element routes cancellation/up to the document,
+        // rather than the removed canvas. Observe native button state there too.
+        if (window.dragFixture.pressed && event.target !== canvas && event.buttons === 0) {
+          window.dragFixture.events.push({ type: event.type, buttons: event.buttons, trusted: event.isTrusted })
+          window.dragFixture.pressed = false
+        }
+      }
+      for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) document.addEventListener(type, released)
+      window.dragFixtureCleanup = () => { for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) document.removeEventListener(type, released) }
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(type, event => {
+        const state = window.dragFixture; const rect = canvas.getBoundingClientRect()
+        const x = Math.round(event.clientX - rect.left); const y = Math.round(event.clientY - rect.top)
+        if (type === 'pointermove' && !state.pressed) return
+        state.events.push({ type, x, y, buttons: event.buttons, trusted: event.isTrusted })
+        if (type === 'pointerdown') {
+          state.pressed = true; canvas.setPointerCapture(event.pointerId)
+          if (state.mode === 'move') canvas.style.marginLeft = '20px'
+          if (state.mode === 'replace') canvas.replaceWith(canvas.cloneNode(true))
+          if (state.mode === 'cover') { const cover = document.createElement('div'); cover.id = 'drag-cover'; cover.style.cssText = 'position:fixed;inset:0;z-index:999;background:white'; document.body.append(cover) }
+        }
+        if (type === 'pointermove') canvas.getContext('2d').fillRect(x * 2, y * 2, 4, 4)
+        if (type === 'pointerup') { state.pressed = false; status.textContent = 'Dragged to ' + x + ',' + y }
+        if ((type === 'pointercancel' || type === 'lostpointercapture') && event.buttons === 0) state.pressed = false
+      })
+      return true
+    }.toString()})()`
+    const drag = (extra = {}) => step('drag', 'Drag canvas path', { selector: '#drag-canvas', path: [{ x: 20, y: 20 }, { x: 80, y: 40 }, { x: 240, y: 90 }], durationMs: 200, ...extra })
+    const dragResult = step('assert', 'Canvas reports the intended endpoint', { selector: '#drag-status', condition: 'text', expected: 'Dragged to 240,90' })
     let sequence = 0
     const runId = Date.now()
     const execute = async (steps, shell = false) => {
@@ -181,6 +218,52 @@ if (!process.versions.electron) {
       await browser.view.webContents.executeJavaScript('document.querySelector("#cover").remove()')
       const controller = JSON.parse(await readFile(endpoint, 'utf8'))
       const request = (value, signal) => fetch(`http://127.0.0.1:${controller.port}/test`, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: JSON.stringify(value), ...(signal ? { signal } : {}) })
+      for (const shell of [false, true]) {
+        await browser.view.webContents.executeJavaScript(dragSetup)
+        const target = (await browserCommand(['test-targets'])).targets.find(target => target.selector === '#drag-canvas')
+        assert.equal(target.bounds.width, 300); assert.equal(target.bounds.height, 140)
+        const report = await execute([drag(), dragResult], shell)
+        assert.equal(report.status, 'passed', JSON.stringify(report))
+        const state = await browser.view.webContents.executeJavaScript('window.dragFixture')
+        assert.ok(state.events.every(event => event.trusted), 'drag dispatches trusted native pointer events')
+        assert.ok(state.events.filter(event => event.type === 'pointermove').length > 2, 'drag interpolates between waypoints')
+        assert.ok(state.events.filter(event => event.type === 'pointermove').every(event => event.buttons === 1))
+        assert.ok(state.events.some(event => event.type === 'pointermove' && event.x === 80 && event.y === 40), 'drag visits the intermediate waypoint')
+        assert.equal(state.events[0].type, 'pointerdown'); assert.ok(state.events.some(event => event.type === 'pointerup' && event.buttons === 0))
+        assert.equal(state.pressed, false)
+      }
+      browser.view.webContents.setZoomFactor(1.25)
+      await browser.view.webContents.executeJavaScript(dragSetup)
+      const zoomedDrag = await execute([drag(), dragResult])
+      assert.equal(zoomedDrag.status, 'passed', JSON.stringify(zoomedDrag))
+      browser.view.webContents.setZoomFactor(1)
+      for (const mode of ['bounds', 'move', 'cover', 'replace']) {
+        await browser.view.webContents.executeJavaScript(dragSetup)
+        await browser.view.webContents.executeJavaScript(`window.dragFixture.mode=${JSON.stringify(mode)}`)
+        const report = await execute([drag(mode === 'bounds' ? { path: [{ x: 20, y: 20 }, { x: 300, y: 90 }] } : {}), step('click', 'Must not write after bad drag', { selector: '#write' }), dragResult])
+        assert.equal(report.status, 'failed', JSON.stringify(report)); assert.equal(report.steps[1].status, 'skipped')
+        assert.match(report.steps[0].reason, mode === 'bounds' ? /bounds/ : mode === 'move' ? /geometry changed/ : mode === 'replace' ? /replaced/ : /covered/)
+        const state = await browser.view.webContents.executeJavaScript('window.dragFixture')
+        assert.equal(state.pressed, false, `failed drag releases its captured pointer (${mode})`); assert.equal(writes, 0)
+        if (mode === 'bounds') assert.equal(state.events.length, 0, 'invalid endpoint is rejected before pointer down')
+        else assert.ok(state.events.some(event => ['pointerup', 'pointercancel', 'lostpointercapture'].includes(event.type) && event.trusted && event.buttons === 0), 'failed drag clears native button state')
+      }
+      for (const switchPage of [false, true]) {
+        await browser.view.webContents.executeJavaScript(dragSetup)
+        const contents = browser.view.webContents; const pageId = browser.snapshot.activePageId
+        const dragging = request(plan([drag({ durationMs: 2000 }), step('click', 'Must not write after cancelled drag', { selector: '#write' }), dragResult]))
+        await until(() => contents.executeJavaScript('window.dragFixture.pressed'), 'native drag begins')
+        browser.action(switchPage ? 'new-page' : 'testing:off')
+        assert.equal((await (await dragging).json()).status, 'cancelled')
+        const cancelledState = await contents.executeJavaScript('window.dragFixture')
+        await writeFile(join(artifacts, `drag-cancel-${switchPage ? 'page' : 'stop'}.json`), JSON.stringify(cancelledState, null, 2))
+        assert.equal(cancelledState.pressed, false, `cancelled drag releases its captured pointer (page switch: ${switchPage})`)
+        assert.ok(cancelledState.events.some(event => ['pointerup', 'pointercancel', 'lostpointercapture'].includes(event.type) && event.trusted && event.buttons === 0), 'cancellation clears native button/capture state')
+        assert.equal(writes, 0)
+        if (switchPage) browser.action(`select-page:${pageId}`)
+        browser.action('testing:on')
+      }
+      await browser.view.webContents.executeJavaScript('document.querySelector("#drag-canvas").remove();document.querySelector("#drag-status").remove()')
       const waiting = plan([step('waitFor', 'Waiting to cancel', { selector: '#never', condition: 'visible' }), step('click', 'Must not write', { selector: '#write' }), visible('#title')])
       const lastCompleted = browser.snapshot.testing.report
       let pending = request(waiting)
@@ -217,11 +300,17 @@ if (!process.versions.electron) {
           step('click', 'Frame click', { selector: '#button', frame: frame.id }),
           step('assert', 'Frame event', { selector: '#result', frame: frame.id, condition: 'text', expected: 'Frame passed' })])
         assert.equal(report.status, 'passed', JSON.stringify(report))
+        const childContents = browser.view.webContents.mainFrame.frames.find(child => child.url === url + 'frame')
+        await childContents.executeJavaScript(dragSetup)
+        await browser.view.webContents.executeJavaScript('document.querySelector("iframe").style.height="350px"')
+        const dragged = await execute([drag({ frame: frame.id }), { ...dragResult, frame: frame.id }])
+        assert.equal(dragged.status, 'passed', JSON.stringify(dragged))
       }
       const foreignReady = await execute([visible('#result', { frame: foreignFrame.id })])
       assert.equal(foreignReady.status, 'passed', 'cross-origin frame assertions remain read-only')
       for (const [action, rest] of [['fill', { selector: '#field', value: 'unrelated-env-secret-value-123' }],
-        ['select', { selector: '#choice', value: 'new' }], ['press', { selector: '#field', key: 'Enter' }], ['click', { selector: '#button' }]]) {
+        ['select', { selector: '#choice', value: 'new' }], ['press', { selector: '#field', key: 'Enter' }], ['click', { selector: '#button' }],
+        ['drag', { selector: '#button', path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }]]) {
         const blocked = await execute([step(action, 'Untrusted frame input', { frame: foreignFrame.id, ...rest }), visible('#result', { frame: foreignFrame.id })])
         assert.equal(blocked.status, 'failed', JSON.stringify(blocked)); assert.match(blocked.steps[0].reason, /origin/)
         assert.deepEqual(receivedValues, [])
@@ -270,7 +359,10 @@ if (!process.versions.electron) {
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,
         environmentInputsRestricted: true, originBoundNavigation: true, crossOriginRedirectBlocked: true, crossOriginLinkBlocked: true,
         crossOriginInputBlocked: true, crossOriginFocusStealingBlocked: true, manualOriginChangeRevokesGrant: true, explicitOriginGrant: true,
-        thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true, generatedPlanWithoutLabels: true }, null, 2))
+        thirdPartyFrameNavigation: true, thirdPartyFrameRedirect: true, redirectedFrameInputBlocked: true, generatedPlanWithoutLabels: true,
+        nativeCoordinateDrag: true, dragInterpolation: true, dragBounds: true, dragGeometryGuard: true, dragOverlayGuard: true,
+        dragReplacementGuard: true, zoomedCoordinateDrag: true, dragCancellationReleasesButton: true, dragPageSwitchReleasesButton: true,
+        sameOriginFrameDrag: true, crossOriginDragBlocked: true }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
   }

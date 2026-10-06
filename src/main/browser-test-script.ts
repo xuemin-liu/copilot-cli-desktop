@@ -53,6 +53,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
           : element.hasAttribute('name') ? `${element.tagName.toLowerCase()}[name=${JSON.stringify(element.getAttribute('name'))}]` : element.tagName.toLowerCase(),
         tag: element.tagName.toLowerCase(), type: element.getAttribute('type'),
         name: name(element),
+        bounds: (() => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height } })(),
         disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
       }))
       return { targets, truncated: matches.length > 200 }
@@ -94,13 +95,18 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if (target.matches(':disabled') || target.getAttribute('aria-disabled') === 'true') return { error: 'Target is disabled.' }
     if (operation === 'focused') return (target.getRootNode() as Document | ShadowRoot).activeElement === target
       ? { passed: true } : { error: 'Input focus changed during the action.' }
-    target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
-    const rect = target.getBoundingClientRect(); const x = Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
-    const y = Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2
+    if (args.scroll !== false) target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+    const rect = target.getBoundingClientRect()
+    if (args.offset && (![args.offset.x, args.offset.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+      || args.offset.x >= rect.width || args.offset.y >= rect.height)) return { error: 'Drag point is outside the target bounds.' }
+    const x = args.offset ? rect.left + args.offset.x : Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
+    const y = args.offset ? rect.top + args.offset.y : Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return { error: 'Target is outside the viewport.' }
     const root = target.getRootNode() as Document | ShadowRoot
     const hit = root.elementFromPoint(x, y)
     if (!hit || !(target === hit || target.contains(hit))) return { error: 'Target is covered or outside the viewport.' }
-    if (operation === 'target') return { x, y, width: innerWidth, height: innerHeight }
+    if (operation === 'target') return { x, y, width: innerWidth, height: innerHeight,
+      targetLeft: rect.left, targetTop: rect.top, targetWidth: rect.width, targetHeight: rect.height }
     if (operation === 'scroll') { target.scrollBy({ top: args.pixels, behavior: 'instant' }); return { passed: true } }
     if (operation === 'select') {
       if (!(target instanceof HTMLSelectElement) || target.multiple || ![...target.options].some(option => option.value === args.value && !option.disabled && !(option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled))) return { error: 'Select option is unavailable.' }

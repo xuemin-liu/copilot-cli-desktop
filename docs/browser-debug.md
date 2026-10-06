@@ -288,7 +288,7 @@ A run stops at its first failed step. Test actions may change the app's data; a
 failed or cancelled run does not undo completed steps. Keep the Page view visible
 for input and screenshots. Browser sessions remain isolated from each other.
 
-The runner supports navigation, click, double-click, hover, text entry and replacement,
+The runner supports navigation, click, double-click, hover, coordinate dragging, text entry and replacement,
 single-choice select elements, keyboard keys, document/container scrolling, waits,
 assertions, and screenshots. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
@@ -298,7 +298,26 @@ same-origin HTTP(S) frames support input; cross-origin frames support read-only
 inspection and assertions. Use current frame IDs from `frames`. Opaque/sandboxed
 frames and frames with non-HTTP(S) URLs cannot receive test input.
 Closed shadow roots, rotated/skewed frames,
-uploads, downloads, drag-and-drop, and arbitrary JavaScript are unavailable.
+uploads, downloads, file/DataTransfer drag-and-drop, and arbitrary JavaScript are unavailable.
+
+For drawing, canvas panning, or moving an item within a surface, use `drag` with a
+unique `selector` and a `path` of 2–100 `{ "x": number, "y": number }` points. Each
+point uses CSS pixels relative to the target's bounding-box top-left, rather than
+screen coordinates or the canvas backing-store resolution. `test-targets` exposes
+CSS-pixel bounds to help choose points. Points must remain within the target and
+visible viewport. The runner scrolls the target into view before pressing, then
+holds the native left mouse button while interpolating the path. `durationMs`
+defaults to 500 and accepts 100–5000 milliseconds; event processing can extend the
+elapsed time. Covered, moved, replaced, or navigated targets stop the drag. The
+button is released on completion, failure, cancellation, or page switching.
+Same-origin frame coordinates are mapped into the selected page automatically.
+
+```json
+{ "action": "drag", "selector": "#canvas", "path": [{ "x": 20, "y": 20 }, { "x": 80, "y": 40 }, { "x": 240, "y": 90 }], "durationMs": 500 }
+```
+
+Include an assertion of the app's resulting state after the drag. Painting a
+canvas alone does not prove the intended selection, drawing, or pan succeeded.
 
 Assertions check visibility, hidden state, visible element count, text containment,
 exact field value, checkbox/radio state, URL containment, decoded images, or a
