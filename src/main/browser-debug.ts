@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { BrowserWindow, WebContentsView, dialog } from 'electron'
+import { BrowserWindow, ClipboardItem, WebContentsView, clipboard, dialog } from 'electron'
 import type { BrowserWindowConstructorOptions, Session, WebContents, WebRequest } from 'electron'
 import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
@@ -287,6 +287,9 @@ export class BrowserDebug {
         url: entry.view.webContents.getURL() || entry.lastUrl,
       }))
       this.state.sitePermissions = this.sitePermissions.list()
+      const dialog = this.reader.pendingDialog
+      if (dialog) this.state.dialog = dialog
+      else delete this.state.dialog
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
     }
@@ -348,6 +351,25 @@ export class BrowserDebug {
   }
 
   cancelPick(): void { this.reader.cancelPick() }
+
+  /** User-initiated only: the selected page's viewport, masked exactly like an assistant screenshot, placed on the clipboard
+   * as an image so it can be attached to the prompt. Throws a readable reason when a safe screenshot is not possible. */
+  async screenshotToClipboard(): Promise<{ redacted: boolean }> {
+    if (this.disposed) throw new Error('Browser has closed')
+    const result = await this.reader.read('screenshot', [String(this.activePageId)]) as { state?: string; reason?: string; imageBase64?: string; redacted?: boolean }
+    if (result.state !== 'available' || !result.imageBase64) throw new Error(result.reason ?? 'A screenshot is not available right now.')
+    const png = Buffer.from(result.imageBase64, 'base64')
+    if (png.length === 0) throw new Error('The screenshot could not be read.')
+    await clipboard.write([new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) })])
+    return { redacted: Boolean(result.redacted) }
+  }
+
+  /** The user's answer to an alert, confirm or leave-page dialog. */
+  async answerDialog(accept: boolean): Promise<BrowserDebugState> {
+    if (this.disposed) throw new Error('Browser has closed')
+    await this.reader.answerDialog(accept)
+    return this.snapshot
+  }
 
   get picking(): boolean { return this.reader.picking }
 

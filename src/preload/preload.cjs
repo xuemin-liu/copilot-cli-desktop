@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   browserNavigate: (tabId, url) => ipcRenderer.invoke('desktop:browser-navigate', tabId, url),
   browserAction: (tabId, action) => ipcRenderer.invoke('desktop:browser-action', tabId, action),
   browserPick: (tabId) => ipcRenderer.invoke('desktop:browser-pick', tabId),
+  browserDialog: (tabId, accept) => ipcRenderer.invoke('desktop:browser-dialog', tabId, accept),
+  browserScreenshot: (tabId) => ipcRenderer.invoke('desktop:browser-screenshot', tabId),
   browserPickCancel: (tabId) => ipcRenderer.invoke('desktop:browser-pick-cancel', tabId),
   browserExport: (tabId, kind) => ipcRenderer.invoke('desktop:browser-export', tabId, kind),
   browserBounds: (tabId, bounds) => ipcRenderer.invoke('desktop:browser-bounds', tabId, bounds),

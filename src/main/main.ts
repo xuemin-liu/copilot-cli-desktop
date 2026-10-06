@@ -2132,6 +2132,12 @@ ipcMain.handle('desktop:browser-action', (event, tabId: unknown, action: unknown
   return browser.action(action)
 })
 ipcMain.handle('desktop:browser-pick', (event, tabId: unknown) => browserForSender(event, tabId).pickElement())
+ipcMain.handle('desktop:browser-dialog', (event, tabId: unknown, accept: unknown) => {
+  const browser = browserForSender(event, tabId)
+  if (typeof accept !== 'boolean') throw new Error('Invalid dialog answer')
+  return browser.answerDialog(accept)
+})
+ipcMain.handle('desktop:browser-screenshot', (event, tabId: unknown) => browserForSender(event, tabId).screenshotToClipboard())
 ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { browserForSender(event, tabId).cancelPick() })
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)

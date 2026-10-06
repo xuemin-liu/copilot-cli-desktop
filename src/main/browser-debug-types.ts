@@ -47,6 +47,8 @@ export interface BrowserDebugState {
   console: BrowserConsoleEntry[]
   network: BrowserNetworkEntry[]
   sitePermissions: BrowserSitePermission[]
+  /** A JavaScript dialog is holding the selected page until the user answers it. */
+  dialog?: { type: string; message: string }
 }
 
 export interface BrowserBounds { x: number; y: number; width: number; height: number }
