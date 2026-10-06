@@ -32,3 +32,14 @@ test('prompt text is bounded and cannot contain line breaks inside an entry', ()
   assert.ok(text.split('\n').every(item => item === '' || item.startsWith('- ') || item.startsWith('[Browser console]') || item.startsWith('Console errors')))
   assert.ok(text.includes('latest 25 of 80') || text.length === 4000)
 })
+
+test('the page address in the prompt never carries credentials, query secrets or a fragment', () => {
+  const text = formatBrowserContext({ url: 'https://alice:password@example.test/path?access_token=top-secret&page=2#private-fragment', pageId: 1,
+    console: [log(1, 'error', 'boom')], network: [] })!
+  const first = text.split('\n')[0]!
+  assert.ok(first.startsWith('[Browser console] https://example.test/path?'), first)
+  for (const secret of ['alice', 'password', 'top-secret', 'private-fragment']) assert.ok(!text.includes(secret), secret)
+  assert.ok(first.includes('page=2') && first.includes('[redacted]'))
+  const oversized = formatBrowserContext({ url: `https://example.test/?access_token=${'a'.repeat(9000)}`, pageId: 1, console: [log(1, 'error', 'boom')], network: [] })!
+  assert.ok(!oversized.includes('aaaa'))
+})

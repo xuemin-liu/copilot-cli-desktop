@@ -1,4 +1,5 @@
 import type { BrowserConsoleEntry, BrowserNetworkEntry } from './browser-debug-types.js'
+import { sanitizedUrl } from './browser-url-sanitize.js'
 
 const MAX_CONSOLE_LINES = 25
 const MAX_REQUEST_LINES = 10
@@ -16,7 +17,8 @@ export function formatBrowserContext(page: { url: string; pageId: number; consol
   const shown = (problems.length ? problems : messages).slice(-(problems.length ? MAX_CONSOLE_LINES : 10))
   const failed = page.network.filter(entry => entry.pageId === page.pageId && (entry.error || (entry.status !== null && entry.status >= 400))).slice(-MAX_REQUEST_LINES)
   if (!shown.length && !failed.length) return null
-  const lines = [`[Browser console] ${line(page.url, 300) || 'selected page'}`]
+  // The address bar shows the real URL; the prompt must not carry its userinfo, query secrets or fragment.
+  const lines = [`[Browser console] ${line(sanitizedUrl(page.url), 300) || 'selected page'}`]
   if (shown.length) {
     lines.push(problems.length ? `Console errors and warnings (${problems.length > shown.length ? `latest ${shown.length} of ${problems.length}` : shown.length}):` : `No errors or warnings; latest console messages:`)
     for (const entry of shown) lines.push(`- ${entry.level}: ${line(entry.message, 400)}${entry.source ? ` (${line(entry.source, 160)}${entry.line ? `:${entry.line}` : ''})` : ''}`)
