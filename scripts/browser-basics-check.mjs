@@ -92,6 +92,24 @@ if (!process.versions.electron) {
       await browser.navigate(`${base}/second`); await loaded()
       assert.equal(browser.snapshot.find, undefined, 'navigating ends the search')
 
+      // A search belongs to the page it was run on: switching, opening or closing pages ends it.
+      browser.find('hello'); await until(() => browser.snapshot.find?.matches === 2, 'find before switching')
+      notices.length = 0
+      browser.action('new-page')
+      assert.equal(browser.snapshot.find, undefined, 'opening a page ends the search')
+      assert.ok(notices.includes('find-close'))
+      const first = browser.snapshot.pages[0].id
+      browser.action(`select-page:${first}`); await delay(200)
+      assert.equal(browser.snapshot.find, undefined)
+      browser.find('hello'); await until(() => browser.snapshot.find?.matches === 2, 'find on the first page')
+      browser.action(`select-page:${browser.snapshot.pages[1].id}`)
+      assert.equal(browser.snapshot.find, undefined, 'selecting another page ends the search')
+      browser.find('anything')
+      browser.action(`close-page:${browser.snapshot.pages[1].id}`)
+      await until(() => browser.snapshot.pages.length === 1, 'second page closed')
+      assert.equal(browser.snapshot.find, undefined, 'closing the searched page ends the search')
+      assert.equal(browser.snapshot.activePageId, first)
+
       // F12 and Ctrl+Shift+I toggle DevTools.
       key('F12'); await until(() => browser.snapshot.view === 'devtools', 'F12 opens DevTools')
       key('F12'); await until(() => browser.snapshot.view === 'page', 'F12 closes DevTools')
@@ -143,8 +161,22 @@ if (!process.versions.electron) {
       menu = await rightClick(60, 155)
       assert.deepEqual(labels(menu).slice(0, 4), ['Cut', 'Copy', 'Paste', 'Select all'])
       menu = await rightClick(60, 100)
+      // Inspect element reaches the page both when DevTools opens for the first time and when it is reused from the Page view.
+      const inspected = []
+      const original = contents.inspectElement.bind(contents)
+      contents.inspectElement = (x, y) => { inspected.push([x, y]); return original(x, y) }
       choose(menu, 'Inspect element')
       await until(() => browser.snapshot.view === 'devtools', 'Inspect element opens DevTools')
+      await until(() => inspected.length === 1, 'first Inspect element reaches the page')
+      browser.action('view:page')
+      menu = await rightClick(60, 100)
+      choose(menu, 'Inspect element')
+      await until(() => browser.snapshot.view === 'devtools', 'Inspect element reopens DevTools')
+      await until(() => inspected.length === 2, 'Inspect element works when the DevTools view is reused')
+      browser.action('devtools')
+      menu = await rightClick(60, 100)
+      choose(menu, 'Inspect element')
+      await until(() => inspected.length === 3, 'Inspect element works while DevTools is already showing')
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, history }, null, 2))
     } finally { await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
   }

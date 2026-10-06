@@ -122,7 +122,7 @@ export class BrowserDebug {
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
-    if (activate) { this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
+    if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
       try { if (details.url && details.url !== 'about:blank') parseSafeHttpUrl(details.url) }
@@ -396,10 +396,18 @@ export class BrowserDebug {
   }
 
   stopFind(): BrowserDebugState {
-    this.findQuery = ''; this.findResult = null
-    const contents = this.view.webContents
-    if (contents && !contents.isDestroyed()) contents.stopFindInPage('clearSelection')
+    this.endFind(false)
     return this.snapshot
+  }
+
+  /** Ends the search on the selected page, clearing its highlights. Called before the selection changes so a search never
+   * outlives its page: the find bar would otherwise show the old page's results for the new page. */
+  private endFind(notify = true): void {
+    if (!this.findQuery) return
+    const page = this.pages.get(this.activePageId)
+    this.findQuery = ''; this.findResult = null
+    if (page && !page.contents.isDestroyed()) page.contents.stopFindInPage('clearSelection')
+    if (notify) this.notifyShortcut('find-close')
   }
 
   private recordHistory(url: string): void {
@@ -437,11 +445,13 @@ export class BrowserDebug {
       case 'copy-image-address': if (/^https?:\/\//i.test(params.srcURL)) void clipboard.writeText(params.srcURL); break
       case 'open-link': this.openInNewPage(params.linkURL); break
       case 'inspect': {
-        const ready = page.devtools && page.tools && !page.tools.webContents.isLoading()
+        // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
+        const reused = page.tools !== null
         this.showView('devtools')
+        const tools = page.tools?.webContents
         const inspect = (): void => { if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y) }
-        if (ready) inspect()
-        else page.tools?.webContents.once('did-finish-load', () => setTimeout(inspect, 300))
+        if (reused && tools && !tools.isLoading()) inspect()
+        else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
         break
       }
     }
@@ -499,7 +509,7 @@ export class BrowserDebug {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
+      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
       else if (this.pages.size > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -615,7 +625,7 @@ export class BrowserDebug {
     if (this.pages.size === 0) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
-    } else if (this.activePageId === id) { this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
+    } else if (this.activePageId === id) { this.endFind(); this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
     if (primary) this.rememberUrl(this.pages.values().next().value!, this.pages.values().next().value!.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()
