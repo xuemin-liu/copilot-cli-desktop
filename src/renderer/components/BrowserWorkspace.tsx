@@ -73,7 +73,8 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     <form className="browser-toolbar" onSubmit={event => { event.preventDefault(); run(window.copilotDesktop.browserNavigate(tabId, url.trim())) }}>
       <button type="button" title="Back" aria-label="Browser back" disabled={!state.canGoBack} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'back'))}>←</button>
       <button type="button" title="Forward" aria-label="Browser forward" disabled={!state.canGoForward} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forward'))}>→</button>
-      <button type="button" title="Reload" aria-label="Reload browser" disabled={!state.url} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'reload'))}>↻</button>
+      <button type="button" title="Reload (Shift+click or Ctrl+Shift+R: hard reload that bypasses the cache)" aria-label="Reload browser" aria-keyshortcuts="Control+Shift+R" disabled={!state.url}
+        onClick={event => run(window.copilotDesktop.browserAction(tabId, event.shiftKey || event.ctrlKey || event.metaKey ? 'hard-reload' : 'reload'))}>↻</button>
       <input ref={urlInput} aria-label="Web app URL" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
       <output className="browser-zoom" aria-label="Browser zoom" title="Selected page zoom">{Math.round(state.zoomFactor * 100)}%</output>

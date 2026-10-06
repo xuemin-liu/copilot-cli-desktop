@@ -79,8 +79,16 @@ if (!process.versions.electron) {
     const firstEnv = await prepareBrowserSessionEnvironment(sessionRoot, 'tab-1', process.env)
     Object.assign(process.env, firstEnv)
     let slowSeen = false
+    let cachedScriptVersion = 1
+    const cachedScriptRequests = []
     const site = createServer((request, response) => {
       if (request.url === '/slow') { slowSeen = true; return }
+      if (request.url === '/cached') { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<!doctype html><title>cached page</title><script src="/cached.js"></script>'); return }
+      if (request.url === '/cached.js') {
+        cachedScriptRequests.push(request.headers['cache-control'] ?? '')
+        response.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'max-age=3600' })
+        response.end(`document.title = 'script v${cachedScriptVersion}'`); return
+      }
       if (request.url === '/second-session') {
         response.writeHead(200, { 'content-type': 'text/html' })
         response.end('<!doctype html><h1>Second session</h1><script>console.error("second session fixture exception")</script>')
@@ -168,6 +176,31 @@ if (!process.versions.electron) {
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "125%"'), 'actual page zoom in toolbar')
       browser.view.webContents.setZoomFactor(1)
       await until(() => ui('document.querySelector(".browser-zoom").textContent === "100%"'), 'reset page zoom in toolbar')
+      // A normal reload trusts the HTTP cache; hard reload (toolbar Shift+click, Ctrl+Shift+R, Ctrl+F5) must fetch fresh files.
+      {
+        const title = () => browser.view.webContents.executeJavaScript('document.title')
+        const settle = async expected => until(async () => (await title()) === expected && !browser.snapshot.loading, `page title ${expected}`)
+        const reloadButton = '[aria-label="Reload browser"]'
+        const clickReload = modifiers => ui(`document.querySelector(${JSON.stringify(reloadButton)}).dispatchEvent(new MouseEvent('click', { bubbles: true, ${modifiers} }))`)
+        const press = (keyCode, modifiers) => {
+          browser.view.webContents.focus()
+          browser.view.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers }); browser.view.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+        }
+        await browser.navigate(`${url}cached`); await settle('script v1')
+        cachedScriptVersion = 2; let requests = cachedScriptRequests.length
+        await clickReload(''); await delay(1200)
+        assert.equal(await title(), 'script v1', 'a plain reload keeps using the cached script')
+        assert.equal(cachedScriptRequests.length, requests, 'a plain reload does not re-request the cached script')
+        await clickReload('shiftKey: true'); await settle('script v2')
+        assert.equal(cachedScriptRequests.at(-1), 'no-cache', 'toolbar Shift+click bypasses the cache')
+        cachedScriptVersion = 3; await clickReload('ctrlKey: true'); await settle('script v3')
+        cachedScriptVersion = 4; press('R', ['control', 'shift']); await settle('script v4')
+        cachedScriptVersion = 5; press('F5', ['control']); await settle('script v5')
+        cachedScriptVersion = 6; requests = cachedScriptRequests.length; press('R', ['control']); await delay(1200)
+        assert.equal(await title(), 'script v5', 'Ctrl+R alone is not a hard reload')
+        assert.equal(cachedScriptRequests.length, requests)
+        await browser.navigate(url)
+      }
       await ui('document.querySelector(".browser-testing button").click()')
       await until(() => browser.snapshot.testing.enabled, 'testing mode UI enables selected page')
       const testingHeight = browser.view.getBounds().height
@@ -678,7 +711,7 @@ if (!process.versions.electron) {
           await assert.rejects(readFile(legacyPath, 'utf8'), { code: 'ENOENT' })
         } finally { await manuallyNavigated.dispose() }
       }
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, newPages: true, openerCallbacks: true, newPagePost: true, nativeOverrides: true, cli: true, sessionIsolation: true, powershellDiagnostics: true, copilotInstructions: true }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, hardReload: true, newPages: true, openerCallbacks: true, newPagePost: true, nativeOverrides: true, cli: true, sessionIsolation: true, powershellDiagnostics: true, copilotInstructions: true }, null, 2))
       console.log('Browser debug check passed: native overrides, live file changes, CLI telemetry, isolation, and layout.')
     } catch (error) {
       console.error(error)
