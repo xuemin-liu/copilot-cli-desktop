@@ -40,19 +40,30 @@ export const DEFAULT_SKIP_NAMES: ReadonlySet<string> = new Set([
   'node_modules', 'dist', 'build', 'release', '.venv', 'venv', 'target', '.next', '.git',
 ])
 
+/** A `.git` file or `commondir` is one path. */
 const GIT_POINTER_MAX_BYTES = 4_096
+/** `objects/info/alternates` lists one directory per line, so it may be longer; real ones are a few hundred bytes. */
+const GIT_ALTERNATES_MAX_BYTES = 64 * 1024
 
 const sameFolder = (left: string, right: string): boolean => win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase()
 
-async function readSmallText(path: string): Promise<string | null> {
+type PointerRead = { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unsafe' }
+
+/**
+ * Read a file that can redirect git. "No such file" is the only answer that means nothing is being redirected; a file that
+ * is too large to inspect completely, or cannot be read, is `unsafe`, because git reads all of it and the part left unseen
+ * could be the part that names a share.
+ */
+async function readPointerFile(path: string, maxBytes: number): Promise<PointerRead> {
   let handle
   try {
     handle = await open(path, 'r')
-    const buffer = Buffer.alloc(GIT_POINTER_MAX_BYTES + 1)
+    const buffer = Buffer.alloc(maxBytes + 1)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    return bytesRead > GIT_POINTER_MAX_BYTES ? null : buffer.subarray(0, bytesRead).toString('utf8')
-  } catch {
-    return null
+    return bytesRead > maxBytes ? { kind: 'unsafe' } : { kind: 'text', text: buffer.subarray(0, bytesRead).toString('utf8') }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR' ? { kind: 'absent' } : { kind: 'unsafe' }
   } finally {
     await handle?.close().catch(() => undefined)
   }
@@ -69,14 +80,16 @@ function localAbsolute(base: string, value: string): string | null {
  * them in both the `.git` directory form and the `gitdir:` file form.
  */
 async function pointerIssue(gitDir: string): Promise<string | null> {
-  const common = await readSmallText(win32.join(gitDir, 'commondir'))
-  const commonDir = common === null ? gitDir : localAbsolute(gitDir, common)
+  const common = await readPointerFile(win32.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  if (common.kind === 'unsafe') return 'The repository\'s commondir could not be checked completely, so it is not opened'
+  const commonDir = common.kind === 'absent' ? gitDir : localAbsolute(gitDir, common.text)
   if (!commonDir) return 'The repository points outside local storage, so it is not opened'
   for (const directory of new Set([gitDir, commonDir])) {
-    const alternates = await readSmallText(win32.join(directory, 'objects', 'info', 'alternates'))
-    if (alternates === null) continue
+    const alternates = await readPointerFile(win32.join(directory, 'objects', 'info', 'alternates'), GIT_ALTERNATES_MAX_BYTES)
+    if (alternates.kind === 'absent') continue
+    if (alternates.kind === 'unsafe') return 'The repository\'s alternates could not be checked completely, so it is not opened'
     const objects = win32.join(directory, 'objects')
-    for (const line of alternates.split(/\r?\n/)) {
+    for (const line of alternates.text.split(/\r?\n/)) {
       if (line.trim() && !line.startsWith('#') && !localAbsolute(objects, line)) return 'The repository borrows objects from outside local storage, so it is not opened'
     }
   }
@@ -91,8 +104,8 @@ export async function inspectGitEntry(folder: string): Promise<{ issue: string |
   if (info.isSymbolicLink()) return { issue: 'The .git entry is a link, so it is not opened' }
   if (info.isDirectory()) return { issue: await pointerIssue(entry) }
   if (!info.isFile()) return { issue: 'The .git entry is not a folder or a file' }
-  const text = await readSmallText(entry)
-  const match = text === null ? null : /^gitdir:\s*(.+?)\s*$/m.exec(text)
+  const pointer = await readPointerFile(entry, GIT_POINTER_MAX_BYTES)
+  const match = pointer.kind === 'text' ? /^gitdir:\s*(.+?)\s*$/m.exec(pointer.text) : null
   if (!match?.[1]) return { issue: 'The .git file does not name a git directory' }
   const gitDir = localAbsolute(folder, match[1])
   if (!gitDir) return { issue: 'The .git file points outside local storage, so it is not opened' }

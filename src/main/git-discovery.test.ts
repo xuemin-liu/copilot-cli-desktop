@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -179,4 +179,43 @@ test('alternates that borrow objects from a share are refused in both forms; loc
   mkdirSync(join(root, 'file-form'))
   writeFileSync(join(root, 'file-form', '.git'), `gitdir: ${gitDir}\n`)
   assert.match((await inspectGitEntry(join(root, 'file-form')))?.issue ?? '', /borrows objects/)
+})
+
+test('a share named past the first 4 KB of a long alternates file is still found', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'repo', '.git', 'objects', 'info'), { recursive: true })
+  const local = Array.from({ length: 150 }, (_item, index) => `../../donor-${String(index).padStart(3, '0')}/objects-with-a-long-name-to-pad`).join('\n')
+  const file = join(root, 'repo', '.git', 'objects', 'info', 'alternates')
+  writeFileSync(file, `${local}\n\\\\review-invalid-host\\share\\objects\n`)
+  assert.ok(statSync(file).size > 6_000, 'the share starts well past the old 4 KB limit')
+  assert.match((await inspectGitEntry(join(root, 'repo')))?.issue ?? '', /borrows objects/)
+})
+
+test('a long alternates file that is entirely local is accepted', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'repo', '.git', 'objects', 'info'), { recursive: true })
+  const local = Array.from({ length: 150 }, (_item, index) => `../../donor-${String(index).padStart(3, '0')}/objects-with-a-long-name-to-pad`).join('\n')
+  writeFileSync(join(root, 'repo', '.git', 'objects', 'info', 'alternates'), `${local}\n`)
+  assert.equal((await inspectGitEntry(join(root, 'repo')))?.issue, null)
+})
+
+test('pointer files too large to inspect completely, or unreadable, are refused rather than treated as absent', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'huge-alternates', '.git', 'objects', 'info'), { recursive: true })
+  writeFileSync(join(root, 'huge-alternates', '.git', 'objects', 'info', 'alternates'), `${'#'.repeat(70_000)}\n`)
+  assert.match((await inspectGitEntry(join(root, 'huge-alternates')))?.issue ?? '', /could not be checked completely/)
+
+  mkdirSync(join(root, 'huge-commondir', '.git'), { recursive: true })
+  writeFileSync(join(root, 'huge-commondir', '.git', 'commondir'), `../${'a'.repeat(5_000)}\n`)
+  assert.match((await inspectGitEntry(join(root, 'huge-commondir')))?.issue ?? '', /could not be checked completely/)
+
+  // Present but not a readable file: git would not use it either, but its safety cannot be established.
+  mkdirSync(join(root, 'dir-alternates', '.git', 'objects', 'info', 'alternates'), { recursive: true })
+  assert.match((await inspectGitEntry(join(root, 'dir-alternates')))?.issue ?? '', /could not be checked completely/)
+})
+
+test('a repository with no pointer files at all is still accepted', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'plain', '.git'), { recursive: true })
+  assert.equal((await inspectGitEntry(join(root, 'plain')))?.issue, null)
 })
