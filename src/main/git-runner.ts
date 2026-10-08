@@ -134,6 +134,8 @@ export class GitRunner {
     for (const arg of options.args) assertGitArgument(arg)
     if (options.signal?.aborted) return emptyResult({ cancelled: true })
     if (kind === 'read') await this.ensureHooksDirectory()
+    // An abort during the await above fires before any listener exists, so check again before spawning.
+    if (options.signal?.aborted) return emptyResult({ cancelled: true })
     const args = [...gitArgsPrefix(kind, this.options.hooksDirectory), ...options.args]
     const env = buildGitEnvironment(this.options.baseEnvironment ?? process.env, options.environment)
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS[kind]

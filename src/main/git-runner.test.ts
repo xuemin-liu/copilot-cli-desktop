@@ -161,6 +161,29 @@ test('an AbortSignal cancels a running command', { skip }, async (t) => {
   assert.equal((await fixture.runner.run({ cwd: repo, args: ['status'], signal: controller.signal })).cancelled, true, 'an already-aborted signal never starts git')
 })
 
+test('an abort that arrives while the hooks directory is being prepared never starts git', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  let spawned = 0
+  const runner = new GitRunner({
+    gitPath: fixture.git.path, hooksDirectory: join(fixture.root, 'fresh-hooks'), baseEnvironment: fixture.env, trackProcess: null,
+    spawn: (file, args, options) => { spawned++; return spawn(file, args, options) },
+  })
+  // First call: the hooks directory does not exist yet, so run() awaits mkdir.
+  const first = new AbortController()
+  const pending = runner.run({ cwd: fixture.root, args: ['--version'], signal: first.signal })
+  first.abort()
+  assert.equal((await pending).cancelled, true)
+  // Second call: the hooks promise is cached, but awaiting it still yields before the spawn.
+  const second = new AbortController()
+  const cached = runner.run({ cwd: fixture.root, args: ['--version'], signal: second.signal })
+  second.abort()
+  const result = await cached
+  assert.equal(result.cancelled, true)
+  assert.equal(result.exitCode, null)
+  assert.equal(spawned, 0, 'git was started for a call that was already cancelled')
+})
+
 test('the process is tracked by the watchdog and released when it ends', { skip }, async (t) => {
   const fixture = (await createGitFixture())!
   t.after(() => fixture.cleanup())
