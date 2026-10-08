@@ -64,6 +64,31 @@ test('an enclosing repository at the home folder or a drive root is ignored', as
   assert.match(result.notes.join(' '), /home folder/)
 })
 
+test('the home folder is recognized when it is reached through a junction', async (t) => {
+  const root = workspace(t)
+  makeRepo(root)
+  const project = join(root, 'work', 'app')
+  mkdirSync(project, { recursive: true })
+  const links = workspace(t)
+  junction(join(links, 'home'), root)
+  const result = await discoverRepos(project, { homeDirectory: join(links, 'home') })
+  assert.equal(result.repos.length, 0)
+  assert.match(result.notes.join(' '), /home folder/)
+})
+
+test('the home folder is recognized through its 8.3 short name', async (t) => {
+  const root = workspace(t)
+  makeRepo(root)
+  const project = join(root, 'work', 'app')
+  mkdirSync(project, { recursive: true })
+  // The same folder spelled with its short name, as os.homedir() or a CI runner profile can report it.
+  const short = execFileSync('powershell.exe', ['-NoProfile', '-Command', `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${root}').ShortPath`], { encoding: 'utf8' }).trim()
+  if (short.toLowerCase() === root.toLowerCase()) t.diagnostic('short names are disabled for this folder; the case is covered only by the long form')
+  const result = await discoverRepos(project, { homeDirectory: short })
+  assert.equal(result.repos.length, 0)
+  assert.match(result.notes.join(' '), /home folder/)
+})
+
 test('a .git file must point at a local git directory', async (t) => {
   const root = workspace(t)
   const real = join(root, 'real-gitdir')

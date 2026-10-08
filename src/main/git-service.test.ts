@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
@@ -138,7 +138,8 @@ test('a repository whose config runs a program waits for review and is never rea
   const trusted = await h.service.trust(SUBSCRIBER, PROFILE, repo.id, repo.configHash!)
   assert.equal(repoAt(trusted, '.')?.state, 'ready')
   assert.equal(h.calls.includes('status'), true)
-  assert.equal(await h.trustStore.isTrusted(h.project, repo.configHash!), true)
+  // The service keys trust by canonical path; the temp folder may be reached through an 8.3 short name.
+  assert.equal(await h.trustStore.isTrusted(realpathSync.native(h.project), repo.configHash!), true)
 })
 
 test('trusting is undone by changing the config', { skip }, async (t) => {

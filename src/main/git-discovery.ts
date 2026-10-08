@@ -91,7 +91,10 @@ export async function discoverRepos(projectPath: string, options: DiscoveryOptio
   if (!isLocalFilesystemPath(projectPath)) throw new Error('Only local project folders can be inspected for git repositories')
   const project = await realPathNative(projectPath)
   if (!isLocalFilesystemPath(project)) throw new Error('The project folder resolves outside local storage')
-  const home = options.homeDirectory ?? homedir()
+  // Compare against the home folder's canonical form: the project is canonical, and a home reached through an 8.3 short
+  // name or a junction would otherwise never match it.
+  const rawHome = options.homeDirectory ?? homedir()
+  const home = await realPathNative(rawHome).catch(() => rawHome)
   const maxDepth = options.maxDepth ?? 3
   const maxRepos = options.maxRepos ?? 25
   const maxDirectories = options.maxDirectories ?? 2_000
