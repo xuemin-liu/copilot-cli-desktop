@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1272 916" width="1272" height="916" font-family="Inter, 'Segoe UI', system-ui, sans-serif" font-size="12">
+  <title>Git side tab mockup</title>
+  <desc>Copilot CLI Desktop with a docked Git panel on the right: repo switcher, branch and sync bar, staged and unstaged changes, diff preview and a commit box.</desc>
+  <defs>
+    <clipPath id="win"><rect x="0" y="0" width="1272" height="820" rx="10"/></clipPath>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#20c9a6"/>
+    </marker>
+  </defs>
+
+  <rect width="1272" height="916" fill="#05070b"/>
+
+  <g clip-path="url(#win)">
+    <!-- window + title bar -->
+    <rect width="1272" height="820" fill="#0b0e14"/>
+    <rect width="1272" height="32" fill="#12151c"/>
+    <text x="14" y="21" fill="#9ca4b3" font-size="12">Copilot CLI Desktop</text>
+    <text x="1202" y="21" fill="#9ca4b3" font-size="14">–   ☐   ✕</text>
+
+    <!-- ===== Sidebar ===== -->
+    <rect x="0" y="32" width="250" height="788" fill="#17191f"/>
+    <line x1="250" y1="32" x2="250" y2="820" stroke="#272a32"/>
+    <rect x="14" y="48" width="26" height="26" rx="7" fill="#386cf5"/>
+    <text x="22" y="66" fill="#fff" font-weight="700" font-size="14">C</text>
+    <text x="50" y="66" fill="#f0f3f8" font-weight="700" font-size="14">Copilot</text>
+    <rect x="14" y="88" width="222" height="30" rx="6" fill="#0f1218" stroke="#2b2e35"/>
+    <text x="26" y="107" fill="#596477">Search projects and sessions</text>
+
+    <!-- project 1 (active) -->
+    <text x="16" y="146" fill="#9ca4b3" font-size="11">▾</text>
+    <text x="32" y="146" fill="#f0f3f8" font-weight="600">copilot-cli-desktop</text>
+    <rect x="164" y="133" width="72" height="18" rx="9" fill="#2a2418"/>
+    <circle cx="176" cy="142" r="3.5" fill="#ffb84d"/>
+    <text x="184" y="146" fill="#ffcc80" font-size="10.5">3 repos · 4</text>
+    <rect x="12" y="156" width="226" height="30" rx="6" fill="#1f2a44"/>
+    <circle cx="26" cy="171" r="4" fill="#4f88ff"/>
+    <text x="40" y="175" fill="#eef2f8">Git side tab plan</text>
+    <circle cx="26" cy="203" r="4" fill="#8b949e"/>
+    <text x="40" y="207" fill="#c8d0dc">Fix terminal links</text>
+    <!-- project 2 -->
+    <text x="16" y="248" fill="#9ca4b3" font-size="11">▸</text>
+    <text x="32" y="248" fill="#c8d0dc" font-weight="600">api-gateway</text>
+    <rect x="172" y="235" width="64" height="18" rx="9" fill="#13261f"/>
+    <text x="186" y="248" fill="#20c9a6" font-size="10.5">clean ✓</text>
+    <text x="16" y="284" fill="#9ca4b3" font-size="11">▸</text>
+    <text x="32" y="284" fill="#c8d0dc" font-weight="600">notes</text>
+    <text x="172" y="284" fill="#596477" font-size="10.5">not a repo</text>
+    <line x1="12" y1="770" x2="238" y2="770" stroke="#272a32"/>
+    <text x="16" y="796" fill="#9ca4b3">⚙  Settings</text>
+
+    <!-- ===== Session header ===== -->
+    <rect x="250" y="32" width="1022" height="38" fill="#151923"/>
+    <line x1="250" y1="70" x2="1272" y2="70" stroke="#4f88ff"/>
+    <text x="264" y="56" fill="#e6edf3">Git side tab plan</text>
+    <!-- header buttons -->
+    <g fill="none" stroke="#9ca4b3" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="1010" y="38" width="28" height="26" rx="6" fill="#1f3358" stroke="none"/>
+      <!-- git branch icon (active) -->
+      <circle cx="1020" cy="46" r="2" stroke="#9db9f5"/><circle cx="1020" cy="57" r="2" stroke="#9db9f5"/><circle cx="1029" cy="49" r="2" stroke="#9db9f5"/>
+      <path d="M1020 48v7M1029 51c0 3-5 3-9 5" stroke="#9db9f5"/>
+      <!-- browser icon -->
+      <rect x="1046" y="43" width="16" height="14" rx="2"/><path d="M1046 48h16"/>
+    </g>
+    <text x="1076" y="57" fill="#9ca4b3" font-size="15">↗</text>
+    <text x="1104" y="57" fill="#9ca4b3" font-size="15">⑂</text>
+    <text x="1132" y="57" fill="#9ca4b3" font-size="15">↻</text>
+    <text x="1160" y="57" fill="#9ca4b3" font-size="16">×</text>
+    <text x="925" y="56" fill="#9db9f5" font-size="11">Ctrl+Shift+G</text>
+
+    <!-- ===== Terminal ===== -->
+    <rect x="250" y="70" width="546" height="750" fill="#080b12"/>
+    <g font-family="Consolas, 'Cascadia Mono', monospace" font-size="12.5">
+      <text x="270" y="102" fill="#20c9a6">●</text><text x="288" y="102" fill="#c8d0dc">copilot · interactive</text>
+      <text x="270" y="134" fill="#4f88ff">&gt;</text><text x="288" y="134" fill="#e6edf3">add retry with backoff to the sync call</text>
+      <text x="270" y="170" fill="#20c9a6">●</text><text x="288" y="170" fill="#c8d0dc">Read src/renderer/App.tsx</text>
+      <text x="270" y="194" fill="#20c9a6">●</text><text x="288" y="194" fill="#c8d0dc">Edit src/renderer/App.tsx</text>
+      <text x="288" y="214" fill="#20c9a6">+12</text><text x="324" y="214" fill="#ff6b7a">−2</text>
+      <text x="270" y="250" fill="#c8d0dc">Done. The Git panel shows the change</text>
+      <text x="270" y="270" fill="#c8d0dc">as soon as the file is written.</text>
+      <text x="270" y="306" fill="#4f88ff">&gt;</text><text x="288" y="306" fill="#e6edf3">▌</text>
+    </g>
+    <!-- live-refresh callout -->
+    <path d="M520 262 C 640 262, 700 330, 814 392" fill="none" stroke="#20c9a6" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+    <text x="548" y="244" fill="#20c9a6" font-size="11">Copilot edits → panel refreshes</text>
+
+    <!-- divider -->
+    <rect x="796" y="70" width="6" height="750" fill="#292d35"/>
+
+    <!-- ===== Git panel ===== -->
+    <rect x="802" y="70" width="470" height="750" fill="#10151e"/>
+    <!-- header -->
+    <text x="818" y="94" fill="#f0f3f8" font-weight="700" font-size="13">Git</text>
+    <text x="846" y="94" fill="#929baa" font-size="11">3 repositories in this project</text>
+    <text x="1210" y="95" fill="#9ca4b3" font-size="15">↻</text>
+    <text x="1242" y="96" fill="#9ca4b3" font-size="16">×</text>
+    <line x1="802" y1="106" x2="1272" y2="106" stroke="#252a33"/>
+
+    <!-- repo switcher -->
+    <rect x="814" y="114" width="446" height="38" rx="6" fill="#1f3358" stroke="#4f88ff"/>
+    <circle cx="830" cy="133" r="4" fill="#ffb84d"/>
+    <text x="842" y="130" fill="#eef2f8" font-weight="600">copilot-cli-desktop</text>
+    <text x="842" y="144" fill="#929baa" font-size="10.5">.</text>
+    <text x="1160" y="138" fill="#a9c9ff" font-size="11.5">main   <tspan fill="#ffb84d">● 4</tspan></text>
+
+    <rect x="814" y="158" width="446" height="38" rx="6" fill="#131a26" stroke="#252a33"/>
+    <circle cx="830" cy="177" r="4" fill="#20c9a6"/>
+    <text x="842" y="174" fill="#c8d0dc" font-weight="600">docs-site</text>
+    <text x="842" y="188" fill="#929baa" font-size="10.5">sites\docs</text>
+    <text x="1130" y="182" fill="#929baa" font-size="11.5">feature/nav   <tspan fill="#20c9a6">clean ✓</tspan></text>
+
+    <rect x="814" y="202" width="446" height="38" rx="6" fill="#131a26" stroke="#252a33"/>
+    <circle cx="830" cy="221" r="4" fill="#4f88ff"/>
+    <text x="842" y="218" fill="#c8d0dc" font-weight="600">shared-lib</text>
+    <text x="842" y="232" fill="#929baa" font-size="10.5">packages\shared-lib</text>
+    <text x="1170" y="226" fill="#929baa" font-size="11.5">main   <tspan fill="#a9c9ff">↓2</tspan></text>
+
+    <!-- branch + sync bar -->
+    <g fill="none" stroke="#a9c9ff" stroke-width="1.4" stroke-linecap="round">
+      <circle cx="822" cy="262" r="2"/><circle cx="822" cy="273" r="2"/><circle cx="831" cy="265" r="2"/><path d="M822 264v7M831 267c0 3-5 3-9 5"/>
+    </g>
+    <text x="842" y="272" fill="#eef2f8" font-weight="600">main</text>
+    <text x="880" y="272" fill="#929baa" font-size="11">origin/main  <tspan fill="#20c9a6">↑1</tspan> <tspan fill="#a9c9ff">↓0</tspan></text>
+    <rect x="1050" y="254" width="52" height="26" rx="5" fill="#161c28" stroke="#364153"/><text x="1062" y="271" fill="#e6edf3" font-size="11.5">Fetch</text>
+    <rect x="1108" y="254" width="48" height="26" rx="5" fill="#161c28" stroke="#364153"/><text x="1120" y="271" fill="#e6edf3" font-size="11.5">Pull</text>
+    <rect x="1162" y="254" width="98" height="26" rx="5" fill="#161c28" stroke="#364153"/><text x="1174" y="271" fill="#e6edf3" font-size="11.5">Push  <tspan fill="#20c9a6">↑1</tspan></text>
+
+    <!-- tabs -->
+    <line x1="802" y1="296" x2="1272" y2="296" stroke="#252a33"/>
+    <text x="818" y="316" fill="#a9c9ff" font-weight="600">Changes <tspan fill="#ffb84d">3</tspan></text>
+    <rect x="812" y="323" width="86" height="2" fill="#4f88ff"/>
+    <text x="920" y="316" fill="#929baa">History</text>
+    <text x="984" y="316" fill="#929baa">Branches</text>
+    <text x="1058" y="316" fill="#929baa">Stashes</text>
+
+    <!-- staged -->
+    <text x="818" y="346" fill="#929baa" font-size="10.5" font-weight="700" letter-spacing="0.6">STAGED (1)</text>
+    <text x="1196" y="346" fill="#a9c9ff" font-size="11">Unstage all</text>
+    <rect x="808" y="352" width="458" height="26" rx="4" fill="#12192a"/>
+    <text x="820" y="369" fill="#ffb84d" font-weight="700">M</text>
+    <text x="840" y="369" fill="#e6edf3">types.ts</text><text x="892" y="369" fill="#596477" font-size="11">src\main</text>
+    <text x="1244" y="370" fill="#9ca4b3" font-size="15">−</text>
+
+    <!-- unstaged -->
+    <text x="818" y="400" fill="#929baa" font-size="10.5" font-weight="700" letter-spacing="0.6">CHANGES (2)</text>
+    <text x="1108" y="400" fill="#a9c9ff" font-size="11">Stage all</text>
+    <rect x="808" y="406" width="458" height="26" rx="4" fill="#1b2740"/>
+    <rect x="808" y="406" width="3" height="26" fill="#4f88ff"/>
+    <text x="820" y="423" fill="#ffb84d" font-weight="700">M</text>
+    <text x="840" y="423" fill="#eef2f8">App.tsx</text><text x="892" y="423" fill="#596477" font-size="11">src\renderer</text>
+    <text x="1210" y="424" fill="#9ca4b3" font-size="13">↶</text><text x="1244" y="424" fill="#9ca4b3" font-size="15">+</text>
+    <rect x="808" y="434" width="458" height="26" rx="4" fill="none"/>
+    <text x="820" y="451" fill="#929baa" font-weight="700">?</text>
+    <text x="840" y="451" fill="#c8d0dc">git-panel.md</text><text x="918" y="451" fill="#596477" font-size="11">docs</text>
+    <text x="1244" y="452" fill="#9ca4b3" font-size="15">+</text>
+
+    <!-- diff preview -->
+    <rect x="808" y="470" width="458" height="196" rx="6" fill="#0b0e14" stroke="#252a33"/>
+    <text x="820" y="488" fill="#c8d0dc" font-size="11.5" font-weight="600">src\renderer\App.tsx</text>
+    <text x="1130" y="488" fill="#20c9a6" font-size="11">+12</text><text x="1160" y="488" fill="#ff6b7a" font-size="11">−2</text>
+    <line x1="808" y1="496" x2="1266" y2="496" stroke="#252a33"/>
+    <g font-family="Consolas, 'Cascadia Mono', monospace" font-size="11.5">
+      <rect x="809" y="500" width="456" height="18" fill="#16213a"/>
+      <text x="820" y="513" fill="#7f9fd6">@@ -148,6 +148,16 @@ export function App()</text>
+      <text x="820" y="531" fill="#596477">148</text><text x="858" y="531" fill="#929baa">  const [loading, setLoading] =</text>
+      <rect x="809" y="536" width="456" height="18" fill="#12301f"/>
+      <text x="820" y="549" fill="#3f8f6a">149</text><text x="858" y="549" fill="#7fe0b8">+ const retry = withBackoff(sync, {</text>
+      <rect x="809" y="554" width="456" height="18" fill="#12301f"/>
+      <text x="820" y="567" fill="#3f8f6a">150</text><text x="858" y="567" fill="#7fe0b8">+   attempts: 5, baseMs: 250,</text>
+      <rect x="809" y="572" width="456" height="18" fill="#3a1c28"/>
+      <text x="820" y="585" fill="#9a4a58">151</text><text x="858" y="585" fill="#ff9aa6">- await sync()</text>
+      <rect x="809" y="590" width="456" height="18" fill="#12301f"/>
+      <text x="820" y="603" fill="#3f8f6a">152</text><text x="858" y="603" fill="#7fe0b8">+ await retry()</text>
+      <text x="820" y="621" fill="#596477">153</text><text x="858" y="621" fill="#929baa">  setLoading(false)</text>
+      <text x="820" y="639" fill="#596477">154</text><text x="858" y="639" fill="#929baa">}, [])</text>
+    </g>
+    <text x="1150" y="656" fill="#a9c9ff" font-size="11">Add to prompt ↵</text>
+
+    <!-- commit box -->
+    <rect x="808" y="676" width="458" height="64" rx="6" fill="#080b12" stroke="#364153"/>
+    <text x="820" y="696" fill="#e6edf3">feat(sync): retry with backoff</text>
+    <text x="820" y="716" fill="#596477" font-size="11">Description (optional) — Ctrl+Enter commits</text>
+    <rect x="808" y="750" width="196" height="30" rx="6" fill="#161c28" stroke="#364153"/>
+    <text x="824" y="770" fill="#91c8bc">✦ Draft message with Copilot</text>
+    <rect x="1086" y="750" width="180" height="30" rx="6" fill="#386cf5"/>
+    <text x="1112" y="770" fill="#fff" font-weight="700">Commit 1 file ▾</text>
+    <text x="818" y="802" fill="#596477" font-size="10.5">▾ menu (later phase): Commit &amp; push · Amend last commit</text>
+
+  </g>
+
+  <!-- callout badges (outside clip so they can overhang) -->
+  <g font-weight="700" font-size="12" text-anchor="middle" fill="#05070b">
+    <circle cx="1024" cy="84" r="9" fill="#20c9a6"/><text x="1024" y="88">1</text>
+    <circle cx="790" cy="133" r="11" fill="#20c9a6"/><text x="790" y="137">2</text>
+    <circle cx="790" cy="267" r="11" fill="#20c9a6"/><text x="790" y="271">3</text>
+    <circle cx="790" cy="378" r="11" fill="#20c9a6"/><text x="790" y="382">4</text>
+    <circle cx="790" cy="560" r="11" fill="#20c9a6"/><text x="790" y="564">5</text>
+    <circle cx="790" cy="740" r="11" fill="#20c9a6"/><text x="790" y="744">6</text>
+    <circle cx="244" cy="142" r="9" fill="#20c9a6"/><text x="244" y="146">7</text>
+  </g>
+
+  <!-- ===== legend ===== -->
+  <g fill="#c8d0dc" font-size="12.5">
+    <text x="24" y="850" fill="#20c9a6" font-weight="700">1</text><text x="40" y="850">Git toggle in the main session header (highlighted), or Ctrl+Shift+G. No always-visible rail.</text>
+    <text x="24" y="874" fill="#20c9a6" font-weight="700">2</text><text x="40" y="874">Every repo found in the project folder (the folder itself and nested ones).</text>
+    <text x="660" y="850" fill="#20c9a6" font-weight="700">3</text><text x="676" y="850">Branch, upstream, ahead/behind, Fetch / Pull (fast-forward) / Push.</text>
+    <text x="660" y="874" fill="#20c9a6" font-weight="700">4</text><text x="676" y="874">Staged and unstaged files; per-file stage, unstage, discard (later phases).</text>
+    <text x="24" y="898" fill="#20c9a6" font-weight="700">5</text><text x="40" y="898">Diff preview, with "Add to prompt" so Copilot sees exactly what you see.</text>
+    <text x="660" y="898" fill="#20c9a6" font-weight="700">6</text><text x="676" y="898">Commit box; Copilot drafts the message into the prompt. 7: optional sidebar git status.</text>
+  </g>
+</svg>
