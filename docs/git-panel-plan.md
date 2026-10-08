@@ -1,8 +1,9 @@
 # Git side tab plan
 
-Status: revision 3. Phase 0 (spikes, runner, parsers) is done on branch `feat/git-panel-phase0`; results are in
-[git-panel-spikes.md](git-panel-spikes.md). Phase 1 has not started. Revision 2 came from an independent review
-(see [Review log](#review-log)).
+Status: revision 4. Phase 0 (spikes, runner, parsers) is merged (#65); results are in
+[git-panel-spikes.md](git-panel-spikes.md). Phase 1 is split in two: **1a, the main-process backend** (discovery, trust
+gate, service, IPC, Electron check) is done on `feat/git-panel-phase1a`; **1b, the panel UI** has not started. Revision 2
+came from an independent review (see [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
 
@@ -358,6 +359,11 @@ Built `git-env`, `git-commands`, `git-runner` and `git-parse` with tests, settle
 
 ### Phase 1 — read-only review
 
+Delivered in two pull requests. **1a (backend, done):** `git-discovery`, `git-trust`, `git-untracked`, `git-service`,
+`git-ipc`, `git-types`, the `main.ts` wiring (activity, focus, hide/minimize, quit), the preload bridge, and
+`scripts/git-ipc-check.mjs`. **1b (UI, next):** `ProjectDock`, `Splitter`, `ObscureContext`, `GitPanel` and its parts, the
+header toggle and shortcut, persistence, Add to prompt and Draft message, and the panel's Electron check.
+
 - Single repo from `rev-parse` first, then nested discovery; repo list; status; diff;
   History; trust gate for repos that need review.
 - `ProjectDock`, header toggle, shortcut, persistence, `Splitter` extraction.
@@ -516,6 +522,31 @@ Open from the spikes: SSH batch-mode behavior, git versions other than 2.55, and
   binary files, with truncation and masking.
 - Typecheck, unit tests and `git:check` pass in CI on Windows.
 - `docs/git-panel.md` and the README feature list are updated.
+
+## Phase 1a result
+
+The backend runs end to end through the real preload bridge (`pnpm git:check`, added to CI): discovery of three
+repositories, a repository that must be reviewed before it is read, status, diff (tracked, staged, untracked, binary,
+directory), log, a pushed change event, argument validation, main-window-only access, and release of the
+subscription when the renderer reloads. 20 service tests, 10 discovery, 8 trust, 7 untracked-file and 7 IPC tests run
+against real git.
+
+Decisions made while building it:
+
+- **Explicit requests bypass the background pause.** Opening, rescanning, trusting and reading a status refresh even if
+  the window is hidden; only timers and activity-driven refreshes honor `shouldPause`. An early version returned
+  "git not found" for an open while hidden, which the Electron check caught.
+- **Trust is a separate file**, `git-trust.json` in userData (canonical path to config hash), not part of `desktop.json`,
+  so it does not touch config normalization or the migration projection.
+- **Standard Git LFS settings do not need review.** Exactly the four values `git lfs install` writes are allowed; any
+  other `filter.*` value, `core.sshCommand`, credential helpers, `include.*`, `url.*` and the rest put the repository in
+  "Needs review". This answers the open LFS question.
+- **Discovery never starts git.** It walks the filesystem and validates `.git` files (UNC `gitdir`, UNC `commondir`,
+  links) before any process is asked to open the repository.
+- **The first view is also pushed as an event.** The renderer must treat `onGitChanged` as idempotent.
+
+Not done in 1a: diagnostics (git version and repo count), the sidebar status setting, and a test that kills a running
+status mid-flight by hiding the window.
 
 ## Phase 0 result
 

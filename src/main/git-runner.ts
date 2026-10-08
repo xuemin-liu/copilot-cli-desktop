@@ -90,11 +90,11 @@ export interface GitRunOptions {
   cwd: string
   args: readonly string[]
   kind?: GitCommandKind
-  stdin?: string | Buffer
-  timeoutMs?: number
-  maxStdoutBytes?: number
-  signal?: AbortSignal
-  environment?: GitEnvironmentOptions
+  stdin?: string | Buffer | undefined
+  timeoutMs?: number | undefined
+  maxStdoutBytes?: number | undefined
+  signal?: AbortSignal | undefined
+  environment?: GitEnvironmentOptions | undefined
 }
 
 export interface GitRunResult {

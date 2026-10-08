@@ -20,13 +20,15 @@ export function statusArgs(untracked: 'normal' | 'no' = 'normal'): string[] {
   return ['status', '--porcelain=v2', '-z', '--branch', `--untracked-files=${untracked}`, '--ignore-submodules=all']
 }
 
-export function diffArgs(options: { staged: boolean; path?: string; numstat?: boolean }): string[] {
+export function diffArgs(options: { staged: boolean; path?: string; alsoPath?: string | null; numstat?: boolean }): string[] {
   const args = ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--submodule=short']
   if (options.numstat) args.push('--numstat', '-z')
   if (options.staged) args.push('--cached')
   if (options.path !== undefined) {
     assertGitArgument(options.path, 'path')
     args.push('--', options.path)
+    // A staged rename shows as a delete plus an add; include the old path so both halves appear.
+    if (options.alsoPath) { assertGitArgument(options.alsoPath, 'path'); args.push(options.alsoPath) }
   }
   return args
 }

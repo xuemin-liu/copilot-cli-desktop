@@ -11,6 +11,7 @@ import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
+import type { GitDiffView, GitLogEntry, GitProjectView, GitRepoStatusView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
@@ -40,6 +41,14 @@ export interface CopilotDesktopBridge {
   onBrowserShortcut(listener: (tabId: string, name: 'find' | 'find-close') => void): () => void
   browserExport(tabId: string, kind: 'console' | 'network'): Promise<void>
   browserBounds(tabId: string, bounds: BrowserBounds | null): Promise<void>
+  gitOpen(profileId: string): Promise<GitProjectView>
+  gitClose(profileId: string): Promise<void>
+  gitRescan(profileId: string): Promise<GitProjectView>
+  gitTrust(profileId: string, repoId: string, configHash: string): Promise<GitProjectView>
+  gitStatus(profileId: string, repoId: string): Promise<GitRepoStatusView>
+  gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean): Promise<GitDiffView>
+  gitLog(profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]>
+  onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
