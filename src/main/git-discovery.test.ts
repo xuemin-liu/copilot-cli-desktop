@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { discoverRepos, inspectGitEntry } from './git-discovery.js'
+import { decodeGitQuoted, discoverRepos, inspectGitEntry } from './git-discovery.js'
 
 function workspace(t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), 'git-discovery-'))
@@ -218,4 +218,46 @@ test('a repository with no pointer files at all is still accepted', async (t) =>
   const root = workspace(t)
   mkdirSync(join(root, 'plain', '.git'), { recursive: true })
   assert.equal((await inspectGitEntry(join(root, 'plain')))?.issue, null)
+})
+
+test('decodeGitQuoted follows git\'s C-style quoting and refuses anything it cannot decode exactly', () => {
+  assert.equal(decodeGitQuoted('"plain"'), 'plain')
+  assert.equal(decodeGitQuoted('"\\\\\\\\host\\\\share"'), '\\\\host\\share')
+  assert.equal(decodeGitQuoted('"quote\\"inside"'), 'quote"inside')
+  assert.equal(decodeGitQuoted('"tab\\there\\nnewline"'), 'tab\there\nnewline')
+  assert.equal(decodeGitQuoted('"\\134\\134host"'), '\\\\host', 'octal escapes decode to bytes')
+  assert.equal(decodeGitQuoted('"caf\\303\\251"'), 'café', 'octal bytes combine into UTF-8')
+  for (const bad of ['unquoted', '"unterminated', '"trailing"junk', '"bad\\q"', '"bad\\9"', '"short\\12"', '"\\400"', '"ends with backslash\\"', '']) {
+    assert.equal(decodeGitQuoted(bad), null, JSON.stringify(bad))
+  }
+})
+
+test('a quoted alternates line that decodes to a share is refused, whatever the quoting', async (t) => {
+  const root = workspace(t)
+  const cases: Array<[string, string]> = [
+    ['json-escaped', JSON.stringify('\\\\review-invalid-host\\share\\objects')],
+    ['octal-escaped', '"\\134\\134review-invalid-host\\\\share"'],
+    ['forward-slashes', '"//review-invalid-host/share/objects"'],
+  ]
+  for (const [name, line] of cases) {
+    mkdirSync(join(root, name, '.git', 'objects', 'info'), { recursive: true })
+    writeFileSync(join(root, name, '.git', 'objects', 'info', 'alternates'), `${line}\n`)
+    assert.match((await inspectGitEntry(join(root, name)))?.issue ?? '', /borrows objects/, name)
+  }
+})
+
+test('a quoted alternates line that is local is accepted, and an undecodable one is refused', async (t) => {
+  const root = workspace(t)
+  const write = (name: string, line: string): void => {
+    mkdirSync(join(root, name, '.git', 'objects', 'info'), { recursive: true })
+    writeFileSync(join(root, name, '.git', 'objects', 'info', 'alternates'), `${line}\n`)
+  }
+  write('local', '"../../donor/objects"')
+  write('local-spaces', '"../../my donor/objects"')
+  write('broken', '"../../donor/objects')
+  write('junk', '"../../donor/objects"extra')
+  assert.equal((await inspectGitEntry(join(root, 'local')))?.issue, null)
+  assert.equal((await inspectGitEntry(join(root, 'local-spaces')))?.issue, null)
+  assert.match((await inspectGitEntry(join(root, 'broken')))?.issue ?? '', /could not be checked completely/)
+  assert.match((await inspectGitEntry(join(root, 'junk')))?.issue ?? '', /could not be checked completely/)
 })

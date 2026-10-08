@@ -130,3 +130,14 @@ test('values that contain newlines or key=value text cannot imitate a different 
   assert.notEqual(configItemsHash(smuggled), configItemsHash(separate))
   assert.notEqual(configItemsHash([{ key: 'a.b', value: 'c\0d' }]), configItemsHash([{ key: 'a.b', value: 'c' }, { key: 'd', value: '' }]))
 })
+
+test('a repository-local excludes or attributes file needs review, because status reads it', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('paths', (d) => {
+    fixture.plain(d, 'config', 'core.excludesFile', '\\\\review-invalid-host\\share\\ignore')
+    fixture.plain(d, 'config', 'core.attributesFile', '\\\\review-invalid-host\\share\\attributes')
+  })
+  const scan = await scanRepoConfig(fixture.runner, repo)
+  assert.deepEqual(scan.items.map(item => item.key).sort(), ['core.attributesfile', 'core.excludesfile'])
+})

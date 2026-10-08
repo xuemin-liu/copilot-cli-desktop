@@ -13,7 +13,7 @@ import type { GitReviewItem } from './git-types.js'
  */
 
 /** POSIX ERE over lower-cased config keys. Only settings that can start a program or redirect git. */
-export const REVIEW_KEY_PATTERN = '^(core\\.(fsmonitor|sshcommand|hookspath|worktree|askpass|gitproxy)|filter\\..+|diff\\.external|diff\\..+\\.(command|textconv)|merge\\..+\\.driver|credential\\..+|gpg\\..+|include\\..+|includeif\\..+|url\\..+|remote\\..+\\.(vcs|proxy|receivepack|uploadpack|uploadarchive)|protocol\\..+)$'
+export const REVIEW_KEY_PATTERN = '^(core\\.(fsmonitor|sshcommand|hookspath|worktree|askpass|gitproxy|excludesfile|attributesfile)|filter\\..+|diff\\.external|diff\\..+\\.(command|textconv)|merge\\..+\\.driver|credential\\..+|gpg\\..+|include\\..+|includeif\\..+|url\\..+|remote\\..+\\.(vcs|proxy|receivepack|uploadpack|uploadarchive)|protocol\\..+)$'
 
 /** The three values Git LFS writes for `git lfs install`; a repository cannot make them run anything else. */
 const LFS_STANDARD: Readonly<Record<string, string>> = {

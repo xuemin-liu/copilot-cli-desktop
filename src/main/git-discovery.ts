@@ -69,6 +69,31 @@ async function readPointerFile(path: string, maxBytes: number): Promise<PointerR
   }
 }
 
+const C_ESCAPES: Readonly<Record<string, number>> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '\\': 92, '"': 34 }
+
+/**
+ * Decode a line in git's C-style quoted form (`"..."` with `\\`, `\"`, `\a \b \f \n \r \t \v` and three-digit octal escapes),
+ * which `objects/info/alternates` accepts. Returns null for anything that is not exactly one well-formed quoted string, so the
+ * caller can refuse it: a validator that guesses at quoting can be talked into calling a share a local path.
+ */
+export function decodeGitQuoted(line: string): string | null {
+  if (!line.startsWith('"')) return null
+  const bytes: number[] = []
+  let index = 1
+  for (;;) {
+    const char = line[index]
+    if (char === undefined) return null
+    if (char === '"') return line.slice(index + 1) === '' ? Buffer.from(bytes).toString('utf8') : null
+    if (char !== '\\') { bytes.push(...Buffer.from(char, 'utf8')); index++; continue }
+    const next = line[index + 1]
+    if (next !== undefined && next in C_ESCAPES) { bytes.push(C_ESCAPES[next]!); index += 2; continue }
+    const octal = /^[0-3][0-7]{2}/.exec(line.slice(index + 1))
+    if (!octal) return null
+    bytes.push(parseInt(octal[0], 8))
+    index += 4
+  }
+}
+
 function localAbsolute(base: string, value: string): string | null {
   const resolved = win32.resolve(base, value.trim())
   return win32.isAbsolute(resolved) && isLocalFilesystemPath(resolved) ? resolved : null
@@ -89,8 +114,13 @@ async function pointerIssue(gitDir: string): Promise<string | null> {
     if (alternates.kind === 'absent') continue
     if (alternates.kind === 'unsafe') return 'The repository\'s alternates could not be checked completely, so it is not opened'
     const objects = win32.join(directory, 'objects')
-    for (const line of alternates.text.split(/\r?\n/)) {
-      if (line.trim() && !line.startsWith('#') && !localAbsolute(objects, line)) return 'The repository borrows objects from outside local storage, so it is not opened'
+    for (const raw of alternates.text.split(/\r?\n/)) {
+      if (!raw.trim() || raw.startsWith('#')) continue
+      // Git reads a quoted line as the decoded path. Anything it could not decode is refused, not guessed at.
+      const quoted = raw.startsWith('"')
+      const entry = quoted ? decodeGitQuoted(raw) : raw
+      if (entry === null) return 'The repository\'s alternates could not be checked completely, so it is not opened'
+      if (!localAbsolute(objects, entry)) return 'The repository borrows objects from outside local storage, so it is not opened'
     }
   }
   return null
