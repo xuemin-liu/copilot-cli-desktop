@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
-import { GitService, GitStaleError } from './git-service.js'
+import { GitCancelledError, GitService, GitStaleError } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
 import { GitTrustStore } from './git-trust.js'
 import type { GitProjectView } from './git-types.js'
@@ -350,4 +350,86 @@ test('a corrupt repository is an error row, not an exception', { skip }, async (
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'error')
   assert.ok((repo.error ?? '').length > 0)
+})
+
+test('an explicit diff re-checks the settings and refuses a config that appeared after the last refresh', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-service-diffgate-${process.pid}.marker`)
+  const control = `${marker}.control`
+  for (const file of [marker, control]) rmSync(file, { force: true })
+  t.after(() => { for (const file of [marker, control]) rmSync(file, { force: true }) })
+  const modified = (f: GitFixture, project: string): void => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'a.txt'), 'one\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init')
+    writeFileSync(join(project, 'a.txt'), 'two\n')
+  }
+  // Same size, newer timestamp: git cannot tell the file is unchanged without running the clean filter.
+  const arm = (f: GitFixture, project: string, file: string): void => {
+    f.plain(project, 'config', 'filter.evil.clean', `sh -c 'echo x > "${shellPath(file)}"; cat'`)
+    writeFileSync(join(project, '.gitattributes'), '*.txt filter=evil\n')
+    const later = new Date(Date.now() + 5_000); utimesSync(join(project, 'a.txt'), later, later)
+  }
+  const h = await harness(t, modified)
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(repo.state, 'ready')
+  const status = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
+  const entryId = status.unstaged[0]!.id
+
+  // Control: this is what the reviewer saw. A plain diff in an identical repository runs the filter.
+  const other = h.fixture.repo('control-repo')
+  writeFileSync(join(other, 'a.txt'), 'two\n')
+  arm(h.fixture, other, control)
+  h.fixture.plain(other, 'diff', '--', 'a.txt')
+  assert.equal(existsSync(control), true, 'control: git diff does run a clean filter')
+
+  arm(h.fixture, h.project, marker)
+  await assert.rejects(h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, entryId, false), /need review/)
+  await assert.rejects(h.service.getLog(SUBSCRIBER, PROFILE, repo.id, 5, 0), /not available|need review/)
+  assert.equal(existsSync(marker), false, 'the filter must not run without approval')
+  assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'needs-review', 'the panel is told at once')
+})
+
+test('a .git pointer that turns unsafe after discovery is caught before the next command', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(repo.state, 'ready')
+  writeFileSync(join(h.project, '.git', 'commondir'), '\\\\review-invalid-host\\share\\repo\n')
+  await assert.rejects(h.service.getLog(SUBSCRIBER, PROFILE, repo.id, 5, 0), /outside local storage/)
+  assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'error')
+})
+
+test('closing the panel while an open is still resolving the folder leaves nothing running', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
+  const pending = h.service.subscribe(SUBSCRIBER, PROFILE)
+  h.service.unsubscribeAll(SUBSCRIBER)
+  await assert.rejects(pending, GitCancelledError)
+  assert.equal(h.service.hasSubscribers(), false)
+
+  const second = h.service.subscribe(SUBSCRIBER, PROFILE)
+  h.service.unsubscribe(SUBSCRIBER, PROFILE)
+  await assert.rejects(second, GitCancelledError)
+  assert.equal(h.service.hasSubscribers(), false)
+
+  h.service.requestRefresh(PROFILE)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(h.calls.length, 0, 'no git process may run after the panel was closed')
+})
+
+test('a later open of the same profile still works after a cancelled one', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
+  const first = h.service.subscribe(SUBSCRIBER, PROFILE)
+  h.service.unsubscribeAll(SUBSCRIBER)
+  await assert.rejects(first, GitCancelledError)
+  const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
+  assert.equal(repoAt(view, '.')?.state, 'ready')
+})
+
+test('the status summary follows a branch change even when the file list does not change', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'x\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init') })
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  const before = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
+  assert.equal(before.summary.branch, 'main')
+  h.fixture.plain(h.project, 'checkout', '-q', '-b', 'second-branch')
+  const after = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
+  assert.equal(after.summary.branch, 'second-branch')
+  assert.equal(after.generation, before.generation, 'entry ids stay valid when the file list is unchanged')
 })

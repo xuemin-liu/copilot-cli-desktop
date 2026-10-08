@@ -63,23 +63,40 @@ function localAbsolute(base: string, value: string): string | null {
   return win32.isAbsolute(resolved) && isLocalFilesystemPath(resolved) ? resolved : null
 }
 
+/**
+ * Files inside a git directory that make git open another location. Any of them naming a share would let the first git
+ * command touch it, and Windows would offer the user's credentials, so every one must stay on local storage. Git honors
+ * them in both the `.git` directory form and the `gitdir:` file form.
+ */
+async function pointerIssue(gitDir: string): Promise<string | null> {
+  const common = await readSmallText(win32.join(gitDir, 'commondir'))
+  const commonDir = common === null ? gitDir : localAbsolute(gitDir, common)
+  if (!commonDir) return 'The repository points outside local storage, so it is not opened'
+  for (const directory of new Set([gitDir, commonDir])) {
+    const alternates = await readSmallText(win32.join(directory, 'objects', 'info', 'alternates'))
+    if (alternates === null) continue
+    const objects = win32.join(directory, 'objects')
+    for (const line of alternates.split(/\r?\n/)) {
+      if (line.trim() && !line.startsWith('#') && !localAbsolute(objects, line)) return 'The repository borrows objects from outside local storage, so it is not opened'
+    }
+  }
+  return null
+}
+
 /** What lives at `<folder>\.git`: `null` when absent, otherwise whether git may be pointed at it. */
 export async function inspectGitEntry(folder: string): Promise<{ issue: string | null } | null> {
   const entry = win32.join(folder, '.git')
   let info
   try { info = await lstat(entry) } catch { return null }
   if (info.isSymbolicLink()) return { issue: 'The .git entry is a link, so it is not opened' }
-  if (info.isDirectory()) return { issue: null }
+  if (info.isDirectory()) return { issue: await pointerIssue(entry) }
   if (!info.isFile()) return { issue: 'The .git entry is not a folder or a file' }
   const text = await readSmallText(entry)
   const match = text === null ? null : /^gitdir:\s*(.+?)\s*$/m.exec(text)
   if (!match?.[1]) return { issue: 'The .git file does not name a git directory' }
   const gitDir = localAbsolute(folder, match[1])
   if (!gitDir) return { issue: 'The .git file points outside local storage, so it is not opened' }
-  // A linked worktree's git directory names its shared directory in `commondir`.
-  const common = await readSmallText(win32.join(gitDir, 'commondir'))
-  if (common !== null && !localAbsolute(gitDir, common)) return { issue: 'The worktree points outside local storage, so it is not opened' }
-  return { issue: null }
+  return { issue: await pointerIssue(gitDir) }
 }
 
 function isAncestorTooBroad(candidate: string, homeDirectory: string): boolean {

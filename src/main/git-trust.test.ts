@@ -123,3 +123,10 @@ test('a corrupt trust file is treated as empty, not as trust', async (t) => {
   writeFileSync(file, 'not json')
   assert.equal(await new GitTrustStore(file).isTrusted('C:\\Work\\Repo', 'a'.repeat(64)), false)
 })
+
+test('values that contain newlines or key=value text cannot imitate a different configuration', () => {
+  const smuggled = [{ key: 'core.sshcommand', value: 'ssh\nfilter.evil.clean=cmd' }]
+  const separate = [{ key: 'core.sshcommand', value: 'ssh' }, { key: 'filter.evil.clean', value: 'cmd' }]
+  assert.notEqual(configItemsHash(smuggled), configItemsHash(separate))
+  assert.notEqual(configItemsHash([{ key: 'a.b', value: 'c\0d' }]), configItemsHash([{ key: 'a.b', value: 'c' }, { key: 'd', value: '' }]))
+})

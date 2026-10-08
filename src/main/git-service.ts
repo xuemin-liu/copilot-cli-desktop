@@ -1,6 +1,6 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { diffArgs, logArgs, statusArgs } from './git-commands.js'
-import { discoverRepos } from './git-discovery.js'
+import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
 import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStatusV2 } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
@@ -39,6 +39,14 @@ export class GitStaleError extends Error {
   constructor(message = 'The file list changed. Refresh and try again.') {
     super(message)
     this.name = 'GitStaleError'
+  }
+}
+
+/** The caller closed the panel (or its renderer went away) before the request finished. */
+export class GitCancelledError extends Error {
+  constructor() {
+    super('Cancelled')
+    this.name = 'GitCancelledError'
   }
 }
 
@@ -103,6 +111,8 @@ export class GitService {
   private readonly projects = new Map<string, ProjectRuntime>()
   /** subscriber (a webContents id) -> profile id -> project */
   private readonly subscriptions = new Map<number, Map<string, ProjectRuntime>>()
+  /** Opens still in flight, by `subscriber:profile`. Releasing the subscriber removes its entry, which cancels the open. */
+  private readonly opening = new Map<string, symbol>()
   private nextRepoNumber = 1
   private paused = false
   private disposed = false
@@ -117,8 +127,23 @@ export class GitService {
     if (this.disposed) throw new Error('The git service has stopped')
     const folder = this.options.resolveProject(profileId)
     if (!folder) throw new Error('Unknown workspace')
+    // The open is cancellable until it returns: closing the panel or losing the renderer while the folder is being
+    // resolved must not leave a subscription (and its timers) behind.
+    const openKey = `${subscriberId}:${profileId}`
+    const token = Symbol('open')
+    this.opening.set(openKey, token)
+    try {
+      return await this.openSubscription(subscriberId, profileId, folder, openKey, token)
+    } finally {
+      if (this.opening.get(openKey) === token) this.opening.delete(openKey)
+    }
+  }
+
+  private async openSubscription(subscriberId: number, profileId: string, folder: string, openKey: string, token: symbol): Promise<GitProjectView> {
+    const cancelled = (): boolean => this.disposed || this.opening.get(openKey) !== token
     let canonical: string
     try { canonical = await realPathNative(folder) } catch { throw new Error('The workspace folder is not available') }
+    if (cancelled()) throw new GitCancelledError()
     const key = repoTrustKey(canonical)
     let project = this.projects.get(key)
     if (!project) {
@@ -135,16 +160,19 @@ export class GitService {
     if (previous && previous !== project) this.release(subscriberId, profileId)
     mine.set(profileId, project)
     await this.refreshProject(project, true)
+    if (cancelled()) throw new GitCancelledError()
     if (this.projects.get(key) === project) this.arm(project)
     return this.viewOf(project)
   }
 
   unsubscribe(subscriberId: number, profileId: string): void {
+    this.opening.delete(`${subscriberId}:${profileId}`)
     this.release(subscriberId, profileId)
   }
 
   /** Called when a renderer reloads, crashes or closes: nothing it started may keep running. */
   unsubscribeAll(subscriberId: number): void {
+    for (const key of [...this.opening.keys()]) if (key.startsWith(`${subscriberId}:`)) this.opening.delete(key)
     for (const profileId of [...(this.subscriptions.get(subscriberId)?.keys() ?? [])]) this.release(subscriberId, profileId)
     this.subscriptions.delete(subscriberId)
   }
@@ -307,14 +335,30 @@ export class GitService {
     for (const key of [...project.repos.keys()]) if (!seen.has(key)) project.repos.delete(key)
   }
 
-  private async refreshRepo(project: ProjectRuntime, repo: RepoRuntime, runtime: GitRuntime, signal: AbortSignal): Promise<void> {
+  private markError(repo: RepoRuntime, message: string): void {
+    repo.state = 'error'
+    repo.error = message
+    repo.status = null
+    repo.statusView = null
+    repo.entries = new Map()
+    repo.scan = null
+  }
+
+  /**
+   * Everything that must hold before git is pointed at a repository: its `.git` pointers stay on local storage, git is
+   * recent enough, and its own config either names no program or the user has accepted exactly that config. It runs before
+   * every git command, not only at discovery, because the CLI or another process can change `.git` while the panel is open.
+   * Returns false, with the repository's state updated, when git must not be run.
+   */
+  private async passGate(repo: RepoRuntime, runtime: GitRuntime, signal: AbortSignal): Promise<boolean> {
     const root = repo.discovered.root
-    const fail = (message: string): void => { repo.state = 'error'; repo.error = message; repo.status = null; repo.statusView = null; repo.entries = new Map(); repo.scan = null }
-    if (repo.discovered.issue) return fail(repo.discovered.issue)
-    if (!runtime.executable.supported) return fail(`${runtime.executable.version.text} is older than the supported minimum (2.30)`)
+    const entry = await inspectGitEntry(root)
+    if (!entry) { this.markError(repo, 'The .git entry is gone'); return false }
+    if (entry.issue ?? repo.discovered.issue) { this.markError(repo, entry.issue ?? repo.discovered.issue ?? 'Not safe to open'); return false }
+    if (!runtime.executable.supported) { this.markError(repo, `${runtime.executable.version.text} is older than the supported minimum (2.30)`); return false }
     try {
       const scan = await scanRepoConfig(runtime.runner, root, signal)
-      if (signal.aborted) return
+      if (signal.aborted) return false
       repo.scan = scan
       if (scan.items.length > 0 && !(await this.options.trustStore.isTrusted(root, scan.hash))) {
         repo.state = 'needs-review'
@@ -322,8 +366,21 @@ export class GitService {
         repo.status = null
         repo.statusView = null
         repo.entries = new Map()
-        return
+        return false
       }
+      return true
+    } catch (error) {
+      if (signal.aborted) return false
+      this.markError(repo, redactDiagnosticText(error instanceof Error ? error.message : String(error)).slice(0, 300))
+      return false
+    }
+  }
+
+  private async refreshRepo(project: ProjectRuntime, repo: RepoRuntime, runtime: GitRuntime, signal: AbortSignal): Promise<void> {
+    const root = repo.discovered.root
+    const fail = (message: string): void => this.markError(repo, message)
+    try {
+      if (!(await this.passGate(repo, runtime, signal))) return
       const result = await runtime.runner.run({
         cwd: root, args: statusArgs(repo.discovered.kind === 'parent' ? 'no' : 'normal'), signal, timeoutMs: STATUS_TIMEOUT_MS,
       })
@@ -362,6 +419,9 @@ export class GitService {
         totalEntries: status.totalEntries, truncated: status.truncated,
       }
     }
+    // Branch, upstream and ahead/behind can change while the file list does not, so the summary is rebuilt on every read.
+    // The entry ids and generation above stay put.
+    if (repo.statusView) repo.statusView = { ...repo.statusView, summary: this.summarize(repo) }
   }
 
   // ---- views --------------------------------------------------------------------------------------
@@ -436,6 +496,7 @@ export class GitService {
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
     const entry = repo.entries.get(entryId)
     if (!entry) throw new GitStaleError()
     const base = { entryId, path: entry.path }
@@ -470,11 +531,21 @@ export class GitService {
     return { ...base, kind: 'text', text: bounded.text, truncated: bounded.truncated || diff.stdoutTruncated, added, deleted }
   }
 
+  /** Explicit reads re-run the gate: the settings may have changed since the last refresh. */
+  private async requireGate(project: ProjectRuntime, repo: RepoRuntime, runtime: GitRuntime): Promise<void> {
+    if (await this.passGate(repo, runtime, project.abort.signal)) return
+    // Tell the panel straight away that this repository needs attention, then refuse the read.
+    project.view = this.buildView(project, runtime)
+    this.publish(project)
+    throw new Error(repo.state === 'needs-review' ? 'This repository\'s settings changed and need review before it can be read' : repo.error ?? 'This repository is not available')
+  }
+
   async getLog(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
     const result = await runtime.runner.run({ cwd: repo.discovered.root, args: logArgs({ limit, skip }), signal: project.abort.signal })
     // A repository with no commits yet exits 128 with "does not have any commits".
     if (result.exitCode === 128 && /does not have any commits/i.test(result.stderr)) return []
@@ -505,6 +576,7 @@ export class GitService {
       this.stopProject(project)
     }
     this.subscriptions.clear()
+    this.opening.clear()
     await Promise.allSettled(pending)
   }
 }

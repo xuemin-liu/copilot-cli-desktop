@@ -50,8 +50,11 @@ export function parseConfigScan(output: string): GitReviewItem[] {
 }
 
 export function configItemsHash(items: readonly GitReviewItem[]): string {
-  const lines = items.map(item => `${item.key}=${item.value}`).sort()
-  return createHash('sha256').update(lines.join('\n')).digest('hex')
+  // JSON keeps every key and value distinct. A value may itself contain newlines or text that looks like `key=value`,
+  // so joining plain lines would let two different configurations hash the same.
+  const tuples = items.map(item => [item.key, item.value] as const)
+    .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+  return createHash('sha256').update(JSON.stringify(tuples)).digest('hex')
 }
 
 /** Read only the repository's own config (local and worktree scope), never global or system. */

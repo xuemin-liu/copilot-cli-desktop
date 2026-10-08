@@ -118,7 +118,7 @@ test('a linked worktree whose commondir points at a share is refused', async (t)
   mkdirSync(join(root, 'wt'))
   writeFileSync(join(root, 'wt', '.git'), `gitdir: ${gitDir}\n`)
   const found = await inspectGitEntry(join(root, 'wt'))
-  assert.match(found?.issue ?? '', /worktree points outside/)
+  assert.match(found?.issue ?? '', /outside local storage/)
 })
 
 test('a .git junction is listed but marked unsafe, and junctioned folders are not followed', async (t) => {
@@ -141,4 +141,42 @@ test('UNC and device project folders are refused', async () => {
 
 test('an absent project folder rejects instead of reporting no repositories', async () => {
   await assert.rejects(discoverRepos(join(tmpdir(), 'git-discovery-missing-folder-xyz')))
+})
+
+test('a directory-form .git whose commondir points at a share is refused', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'repo', '.git'), { recursive: true })
+  writeFileSync(join(root, 'repo', '.git', 'commondir'), '\\\\review-invalid-host\\share\\repo\n')
+  assert.match((await inspectGitEntry(join(root, 'repo')))?.issue ?? '', /outside local storage/)
+  const result = await discoverRepos(root)
+  assert.match(result.repos[0]?.issue ?? '', /outside local storage/)
+})
+
+test('a local commondir is accepted, in the directory form and through a .git file', async (t) => {
+  const root = workspace(t)
+  mkdirSync(join(root, 'shared'), { recursive: true })
+  mkdirSync(join(root, 'repo', '.git'), { recursive: true })
+  writeFileSync(join(root, 'repo', '.git', 'commondir'), '../../shared\n')
+  assert.equal((await inspectGitEntry(join(root, 'repo')))?.issue, null)
+  mkdirSync(join(root, 'wt-gitdir'))
+  writeFileSync(join(root, 'wt-gitdir', 'commondir'), '..\\shared\n')
+  mkdirSync(join(root, 'wt'))
+  writeFileSync(join(root, 'wt', '.git'), `gitdir: ${join(root, 'wt-gitdir')}\n`)
+  assert.equal((await inspectGitEntry(join(root, 'wt')))?.issue, null)
+})
+
+test('alternates that borrow objects from a share are refused in both forms; local ones are fine', async (t) => {
+  const root = workspace(t)
+  for (const [name, text] of [['dir-unc', '\\\\review-invalid-host\\share\\objects\n'], ['dir-local', '../../other/objects\n']] as const) {
+    mkdirSync(join(root, name, '.git', 'objects', 'info'), { recursive: true })
+    writeFileSync(join(root, name, '.git', 'objects', 'info', 'alternates'), `# comment\n${text}`)
+  }
+  assert.match((await inspectGitEntry(join(root, 'dir-unc')))?.issue ?? '', /borrows objects/)
+  assert.equal((await inspectGitEntry(join(root, 'dir-local')))?.issue, null)
+  const gitDir = join(root, 'real-gitdir')
+  mkdirSync(join(gitDir, 'objects', 'info'), { recursive: true })
+  writeFileSync(join(gitDir, 'objects', 'info', 'alternates'), '//review-invalid-host/share/objects\n')
+  mkdirSync(join(root, 'file-form'))
+  writeFileSync(join(root, 'file-form', '.git'), `gitdir: ${gitDir}\n`)
+  assert.match((await inspectGitEntry(join(root, 'file-form')))?.issue ?? '', /borrows objects/)
 })
