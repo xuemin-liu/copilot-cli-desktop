@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { createGitFixture } from './fixtures/git-fixture.js'
 import { decodeGitQuoted, discoverRepos, inspectGitEntry } from './git-discovery.js'
 
 function workspace(t: test.TestContext): string {
@@ -194,8 +195,11 @@ test('a share named past the first 4 KB of a long alternates file is still found
 test('a long alternates file that is entirely local is accepted', async (t) => {
   const root = workspace(t)
   mkdirSync(join(root, 'repo', '.git', 'objects', 'info'), { recursive: true })
-  const local = Array.from({ length: 150 }, (_item, index) => `../../donor-${String(index).padStart(3, '0')}/objects-with-a-long-name-to-pad`).join('\n')
-  writeFileSync(join(root, 'repo', '.git', 'objects', 'info', 'alternates'), `${local}\n`)
+  // Over 4 KB but within the entry cap: 40 long lines.
+  const local = Array.from({ length: 40 }, (_item, index) => `../../donor-${String(index).padStart(3, '0')}/${'x'.repeat(100)}`).join('\n')
+  const file = join(root, 'repo', '.git', 'objects', 'info', 'alternates')
+  writeFileSync(file, `${local}\n`)
+  assert.ok(statSync(file).size > 4_096)
   assert.equal((await inspectGitEntry(join(root, 'repo')))?.issue, null)
 })
 
@@ -260,4 +264,90 @@ test('a quoted alternates line that is local is accepted, and an undecodable one
   assert.equal((await inspectGitEntry(join(root, 'local-spaces')))?.issue, null)
   assert.match((await inspectGitEntry(join(root, 'broken')))?.issue ?? '', /could not be checked completely/)
   assert.match((await inspectGitEntry(join(root, 'junk')))?.issue ?? '', /could not be checked completely/)
+})
+
+/** Make `<root>/<name>/.git/objects` and return its path (forward slashes, as git writes them). */
+function objectsDir(root: string, name: string): string {
+  const directory = join(root, name, '.git', 'objects')
+  mkdirSync(join(directory, 'info'), { recursive: true })
+  return directory
+}
+const setAlternates = (directory: string, ...lines: string[]): void => {
+  writeFileSync(join(directory, 'info', 'alternates'), `${lines.join('\n')}\n`)
+}
+const slashes = (path: string): string => path.replace(/\\/g, '/')
+
+test('a share named by a later hop of the alternates chain is found', async (t) => {
+  const root = workspace(t)
+  const [a, b, c] = ['a', 'b', 'c'].map(name => objectsDir(root, name)) as [string, string, string]
+  setAlternates(a, slashes(b))
+  setAlternates(b, slashes(c))
+  assert.equal((await inspectGitEntry(join(root, 'a')))?.issue, null, 'a local chain is fine')
+  setAlternates(b, '\\\\review-invalid-host\\share\\objects')
+  assert.match((await inspectGitEntry(join(root, 'a')))?.issue ?? '', /borrows objects/)
+  setAlternates(b, slashes(c))
+  setAlternates(c, JSON.stringify('\\\\review-invalid-host\\share\\objects'))
+  assert.match((await inspectGitEntry(join(root, 'a')))?.issue ?? '', /borrows objects/, 'a quoted entry on the third hop')
+})
+
+test('git really follows a chained alternate, so the chain has to be checked', async (t) => {
+  const fixture = await createGitFixture()
+  if (!fixture) { t.skip('git is not installed'); return }
+  t.after(() => fixture.cleanup())
+  const donor = fixture.repo('donor')
+  const middle = join(fixture.root, 'middle')
+  const front = join(fixture.root, 'front')
+  for (const folder of [middle, front]) { mkdirSync(folder); fixture.plain(folder, 'init', '-q') }
+  setAlternates(join(middle, '.git', 'objects'), slashes(join(donor, '.git', 'objects')))
+  setAlternates(join(front, '.git', 'objects'), slashes(join(middle, '.git', 'objects')))
+  const commit = fixture.plain(donor, 'rev-parse', 'HEAD').trim()
+  assert.equal(fixture.plain(front, 'cat-file', '-t', commit).trim(), 'commit', 'control: git read an object that only the second hop has')
+  assert.equal((await inspectGitEntry(front))?.issue, null)
+  setAlternates(join(middle, '.git', 'objects'), '\\\\review-invalid-host\\share\\objects')
+  assert.match((await inspectGitEntry(front))?.issue ?? '', /borrows objects/)
+})
+
+test('an alternates chain that leads back to itself ends and is accepted', async (t) => {
+  const root = workspace(t)
+  const a = objectsDir(root, 'a')
+  const b = objectsDir(root, 'b')
+  setAlternates(a, slashes(b))
+  setAlternates(b, slashes(a), slashes(b))
+  assert.equal((await inspectGitEntry(join(root, 'a')))?.issue, null)
+})
+
+test('a chain deeper than git follows, or wider than any real repository, is refused', async (t) => {
+  const root = workspace(t)
+  const links = Array.from({ length: 8 }, (_item, index) => objectsDir(root, `hop${index}`))
+  for (let index = 0; index < links.length - 1; index++) setAlternates(links[index]!, slashes(links[index + 1]!))
+  assert.equal((await inspectGitEntry(join(root, 'hop3')))?.issue, null, 'a short chain is fine')
+  assert.match((await inspectGitEntry(join(root, 'hop0')))?.issue ?? '', /could not be checked completely/)
+
+  const wide = objectsDir(root, 'wide')
+  setAlternates(wide, ...Array.from({ length: 70 }, (_item, index) => slashes(join(root, `missing-${index}`, 'objects'))))
+  assert.match((await inspectGitEntry(join(root, 'wide')))?.issue ?? '', /could not be checked completely/)
+})
+
+test('an alternate reached through a junction is checked where it really lives', async (t) => {
+  const root = workspace(t)
+  const real = objectsDir(root, 'real')
+  setAlternates(real, '\\\\review-invalid-host\\share\\objects')
+  const front = objectsDir(root, 'front')
+  mkdirSync(join(root, 'links'))
+  junction(join(root, 'links', 'objects'), real)
+  setAlternates(front, slashes(join(root, 'links', 'objects')))
+  assert.match((await inspectGitEntry(join(root, 'front')))?.issue ?? '', /borrows objects/)
+})
+
+test('the repository\'s own objects directory and a shared common directory are both walked', async (t) => {
+  const root = workspace(t)
+  const common = join(root, 'common')
+  mkdirSync(join(common, 'objects', 'info'), { recursive: true })
+  setAlternates(join(common, 'objects'), '\\\\review-invalid-host\\share\\objects')
+  const gitDir = join(root, 'wt-gitdir')
+  mkdirSync(gitDir)
+  writeFileSync(join(gitDir, 'commondir'), `${common}\n`)
+  mkdirSync(join(root, 'wt'))
+  writeFileSync(join(root, 'wt', '.git'), `gitdir: ${gitDir}\n`)
+  assert.match((await inspectGitEntry(join(root, 'wt')))?.issue ?? '', /borrows objects/)
 })

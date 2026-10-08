@@ -109,18 +109,45 @@ async function pointerIssue(gitDir: string): Promise<string | null> {
   if (common.kind === 'unsafe') return 'The repository\'s commondir could not be checked completely, so it is not opened'
   const commonDir = common.kind === 'absent' ? gitDir : localAbsolute(gitDir, common.text)
   if (!commonDir) return 'The repository points outside local storage, so it is not opened'
-  for (const directory of new Set([gitDir, commonDir])) {
-    const alternates = await readPointerFile(win32.join(directory, 'objects', 'info', 'alternates'), GIT_ALTERNATES_MAX_BYTES)
+  return alternatesIssue([...new Set([gitDir, commonDir])].map(directory => win32.join(directory, 'objects')))
+}
+
+/** Git ignores alternates nested deeper than this; a longer chain is refused rather than trusted to be ignored. */
+const ALTERNATES_MAX_DEPTH = 5
+/** Distinct object directories examined per repository. Real repositories have zero to a handful. */
+const ALTERNATES_MAX_DIRECTORIES = 64
+const ALTERNATES_INCOMPLETE = 'The repository\'s alternates could not be checked completely, so it is not opened'
+
+/**
+ * Follow the whole chain of `objects/info/alternates`, because git does: an alternate's own alternates file is read too, so
+ * a local first hop can lead to a share on the second. Every hop is decoded, resolved against the directory that names it,
+ * and followed through links to where it really lives. Depth, count and file size are capped, and anything that cannot be
+ * examined completely is refused.
+ */
+async function alternatesIssue(roots: readonly string[]): Promise<string | null> {
+  const seen = new Set<string>()
+  const queue = roots.map(directory => ({ directory, depth: 0 }))
+  while (queue.length > 0) {
+    const { directory, depth } = queue.shift()!
+    const key = directory.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    if (seen.size > ALTERNATES_MAX_DIRECTORIES) return ALTERNATES_INCOMPLETE
+    const alternates = await readPointerFile(win32.join(directory, 'info', 'alternates'), GIT_ALTERNATES_MAX_BYTES)
     if (alternates.kind === 'absent') continue
-    if (alternates.kind === 'unsafe') return 'The repository\'s alternates could not be checked completely, so it is not opened'
-    const objects = win32.join(directory, 'objects')
+    if (alternates.kind === 'unsafe') return ALTERNATES_INCOMPLETE
     for (const raw of alternates.text.split(/\r?\n/)) {
       if (!raw.trim() || raw.startsWith('#')) continue
       // Git reads a quoted line as the decoded path. Anything it could not decode is refused, not guessed at.
-      const quoted = raw.startsWith('"')
-      const entry = quoted ? decodeGitQuoted(raw) : raw
-      if (entry === null) return 'The repository\'s alternates could not be checked completely, so it is not opened'
-      if (!localAbsolute(objects, entry)) return 'The repository borrows objects from outside local storage, so it is not opened'
+      const entry = raw.startsWith('"') ? decodeGitQuoted(raw) : raw
+      if (entry === null) return ALTERNATES_INCOMPLETE
+      const target = localAbsolute(directory, entry)
+      if (!target) return 'The repository borrows objects from outside local storage, so it is not opened'
+      // A link inside local storage can still lead to a share; follow it to where the directory really is.
+      const real = await realPathNative(target).catch(() => null)
+      if (real !== null && !isLocalFilesystemPath(real)) return 'The repository borrows objects from outside local storage, so it is not opened'
+      if (depth + 1 > ALTERNATES_MAX_DEPTH) return ALTERNATES_INCOMPLETE
+      queue.push({ directory: real ?? target, depth: depth + 1 })
     }
   }
   return null
