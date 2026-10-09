@@ -185,3 +185,8 @@ export function createBranchArgs(name: string): string[] {
   if (name.startsWith('-')) throw new Error('A branch name cannot start with "-"')
   return ['switch', '--no-guess', '--no-recurse-submodules', '--no-track', '--create', name]
 }
+
+/** Put tracked files' working-tree content back to the staged (or committed) version. Never touches the index and never recurses. */
+export function restoreArgs(): string[] {
+  return ['restore', '--worktree', '--no-recurse-submodules', '--pathspec-from-file=-', '--pathspec-file-nul']
+}

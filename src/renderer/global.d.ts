@@ -50,6 +50,7 @@ export interface CopilotDesktopBridge {
   gitUnstage(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitCommit(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null): Promise<GitOperationResult>
   gitSync(profileId: string, repoId: string, operation: 'fetch' | 'pull' | 'push', remote: string | null, expected: { branch: string; headOid: string } | null): Promise<GitOperationResult>
+  gitDiscard(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitBranches(profileId: string, repoId: string): Promise<GitBranchView[]>
   gitBranch(profileId: string, repoId: string, action: 'create' | 'switch', name: string, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>
   gitCancel(profileId: string, repoId: string): Promise<void>

@@ -1100,6 +1100,7 @@ button:disabled {
 .git-publish { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid #3a4a66; border-radius: 6px; background: #101725; font-size: 12px; }
 .git-publish p { margin: 0; }
 .git-publish-remote { display: flex; align-items: center; gap: 8px; color: #929baa; }
+.git-entry-danger:hover:not(:disabled) { color: #ff9a9a; border-color: #8a3a3a; }
 .git-branches { display: grid; gap: 8px; padding: 10px; }
 .git-branch-new { display: flex; gap: 6px; }
 .git-branch-new input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #2a3344; border-radius: 6px; background: #0b0f17; color: #eef2f8; }

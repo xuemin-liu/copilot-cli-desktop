@@ -140,6 +140,11 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     const seen = expectedBranchArg(expected)
     return operation === 'push' ? service.push(...args, remoteName, seen) : service.pull(...args, seen)
   })
+  handle('desktop:git-discard', (service, event, profileId: unknown, repoId: unknown, entryIds: unknown, generation: unknown) => {
+    if (!Array.isArray(entryIds) || entryIds.length < 1 || entryIds.length > 500) throw new Error('Invalid file selection')
+    for (const id of entryIds) if (typeof id !== 'string' || !ENTRY_ID.test(id)) throw new Error('Invalid file')
+    return service.discard(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), entryIds as string[], boundedInteger(generation, 'file list version', 0, 1_000_000_000))
+  })
   handle('desktop:git-branches', (service, event, profileId: unknown, repoId: unknown) =>
     service.getBranches(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
   handle('desktop:git-branch', (service, event, profileId: unknown, repoId: unknown, action: unknown, name: unknown, expected: unknown) => {

@@ -1,10 +1,10 @@
 # Git side tab plan
 
-Status: revision 8. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67), phase 2
-(stage, unstage, local commit, #68) and phase 3 (fetch, pull, push, #69) are merged;
+Status: revision 9. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67), phase 2
+(stage, unstage, local commit, #68), phase 3 (fetch, pull, push, #69) and phase 4a (branches, #70) are merged;
 results are in [git-panel-spikes.md](git-panel-spikes.md) and the user-facing behavior is in [git-panel.md](git-panel.md).
-**Phase 4 is split in two, like phase 1: 4a (branches: list, create, switch) is built on `feat/git-panel-phase4`; 4b (amend, per-file
-discard with snapshot and native confirmation, untracked deletion, "Discard all") has not started.** Revision 2 came from an independent review (see
+**Phase 4 is split in three: 4a (branches) is merged; 4b (discard: per-file and "Discard all", with saved copies, native confirmation
+and the Recycle Bin for untracked files) is built on `feat/git-panel-phase4b`; 4c (amend) has not started.** Revision 2 came from an independent review (see
 [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
@@ -458,6 +458,33 @@ Not in phase 3, on purpose:
 Branch list, create, checkout (gated as above), amend, per-file discard with snapshot and
 native confirmation. "Discard all" and untracked deletion last. Delivered in two pull requests: **4a (branches)** and **4b (amend and
 discard)**, so the riskiest, data-losing half gets its own review.
+
+#### Phase 4b — discard
+
+One write channel (`desktop:git-discard`: entry ids and the file-list generation), a **↶** button per row and **Discard all** per
+group, and three service options (`confirm` with a `danger` flag, `snapshotDirectory`, `trash`) that `main.ts` supplies
+(`dialog.showMessageBox` of type warning with Cancel as the default, `userData/git-discarded`, `shell.trashItem`). Any of them
+missing means the discard is refused: it fails closed. Decisions, each with a test that fails without it:
+
+- **Recoverability instead of a view-time hash.** The plan asked for the file's hash to match what the person saw. The panel does
+  not hash files at view time, and the list version (generation) cannot see a content edit to an already-modified file. What the
+  design guarantees instead is that **the copy saved is exactly what the restore throws away**: the copy is made after the answer,
+  from the file on disk, each file is measured before and after its copy (a change stops the discard), and the restore follows
+  immediately. Work an agent added after the person looked is therefore in the copy.
+- **Check, ask, check again.** Everything that can make a discard unsafe (session working, copies too large or not regular files,
+  an untracked folder that holds a repository or is too big to inspect, unsafe names, links) is evaluated before the window opens,
+  so nothing impossible is offered, and again after it closes together with the trust gate, the list version and the session.
+  Refusals are all-or-nothing for the request.
+- **Untracked is the dangerous half.** `checkTrashable` refuses a link or junction, a path that resolves outside the repository, a
+  reserved or stream name, anything under `.git`, and a folder containing a `.git` entry at any depth (walked without following
+  links, capped at 20,000 items). `shell.trashItem` (spike 4: removes only a link, rejects `file:stream`) does the deletion, one item
+  at a time, reporting failures per item.
+- **`git restore --worktree --no-recurse-submodules` from stdin** (`--pathspec-from-file=- --pathspec-file-nul`), so the index is
+  untouched: a staged version survives. Hooks are off. It waits for `index.lock` like any write.
+- **Retention:** the newest 30 copies; only folders this code created (matching its own name pattern) inside the copies folder are
+  ever pruned.
+- **Not in 4b:** discarding staged changes (unstage first), conflicts, submodules, an "undo" button that restores a copy (the message
+  names the folder), and `Discard all` across both groups at once.
 
 #### Phase 4a — branches
 

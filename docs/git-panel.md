@@ -73,6 +73,31 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   not pushed from the panel at all, so a check you rely on is never skipped silently; push from a terminal.
 - Remote addresses are redacted (user names with passwords, tokens) before they reach the panel, a result or a log.
 
+## Discarding changes
+
+Each row in **Changes** and **Untracked** has a **↶** button, and each group has **Discard all**. Discarding is the one action in the
+panel that destroys work, so it is built around three promises:
+
+- **You are asked first, in a native window** that lists the files (up to twelve, then a count) and says what will happen. Cancel is
+  the default. Nothing is discarded unless you press **Discard**.
+- **Nothing is lost for good.**
+  - A tracked file goes back to its staged (or committed) version, and **a copy of what was on disk is saved first** under the app's
+    data folder (`git-discarded`, in a folder named by the date and the repository, with a `manifest.json`). The message names the
+    folder. The newest 30 copies are kept. The copy is taken from the file as it is when the discard runs, so work that was added
+    after you looked is saved too. A file that changes while its copy is being made stops the discard.
+  - Untracked files and folders go to the **Recycle Bin**, never deleted outright.
+- **It is refused when it cannot be done safely**, with nothing changed:
+  - while a Copilot session is working in the project (and re-checked after you answer, because a session may have started);
+  - for a file that is too large to copy (25 MB, 200 MB in total), a link, a name Windows could misread (a reserved device name, a
+    stream, `..`), or a path that resolves outside the repository;
+  - for an untracked **folder that contains a git repository** (that would delete a whole history), a folder with more than 20,000
+    items, and anything inside a `.git` folder. One refusal stops the whole request, so a mixed selection is all-or-nothing.
+- Only the working-tree change is discarded: a file that is also staged keeps its staged version. Conflicted files, submodules and
+  files that were only added with `git add -N` have no Discard button. The file list you were looking at is part of the request, so
+  a list that changed (including while the window was open) is refused.
+- If one untracked item cannot be moved (it is in use, say), the others still are, and the message says which failed. If Git cannot
+  restore a tracked file, the message says so and names the saved copy.
+
 ## Branches
 
 The **Branches** tab lists the local branches of the selected repository, newest commit first: the current one is marked, and each
@@ -128,7 +153,7 @@ error and is never opened. This is checked again before every command, not only 
   closing the panel stops all of it.
 - Only the main window has the panel; a session popped out to its own window does not.
 - A very narrow window gives the panel the whole area instead of squeezing the terminal; closing it returns the session.
-- Amending and discarding changes are not in the panel yet, and neither is a sidebar summary (it would need
+- Amending is not in the panel yet, and neither is a sidebar summary (it would need
   Git to run in the background while the panel is closed, which the panel deliberately does not do).
 - Pull changes the files in your folder. The panel does not check whether a Copilot session is working there; a fast-forward only
   touches files that differ between the two commits, and Git refuses it when a local change is in the way.

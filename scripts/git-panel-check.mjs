@@ -36,7 +36,7 @@ if (!process.versions.electron) {
   const env = { ...process.env, GIT_PANEL_CHECK_DIR: directory, GIT_PANEL_CHECK_ARTIFACTS: artifacts }
   delete env.ELECTRON_RUN_AS_NODE
   const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
-  const timer = setTimeout(() => child.kill(), 150_000)
+  const timer = setTimeout(() => child.kill(), 300_000)
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Git panel check failed')
@@ -106,10 +106,18 @@ if (!process.versions.electron) {
     let window
     // A branch switch rewrites files: the check plays the session-activity gate and the native confirmation.
     let agentBusy = false
+    let confirmAnswer = true
     const confirmations = []
+    // Discard saves copies here and "trashes" into a folder (the check never touches the real Recycle Bin).
+    const copies = join(directory, 'discard-copies')
+    const bin = join(directory, 'bin')
+    await mkdir(copies, { recursive: true }); await mkdir(bin, { recursive: true })
+    const { rename } = await import('node:fs/promises')
     const service = new GitService({
       sessionActivity: () => agentBusy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' },
-      confirm: async (_profileId, request) => { confirmations.push(request); return true },
+      confirm: async (_profileId, request) => { confirmations.push(request); return confirmAnswer },
+      snapshotDirectory: copies,
+      trash: async absolute => { await rename(absolute, join(bin, `${Date.now()}-${absolute.split(/[\\\\/]/).pop()}`)) },
       getRuntime: async () => ({ executable, runner: new GitRunner({ gitPath: executable.path, hooksDirectory: join(directory, 'no-hooks') }) }),
       trustStore: new GitTrustStore(join(directory, 'git-trust.json')),
       resolveProject: id => id === PROFILE ? workspace : null,
@@ -454,6 +462,49 @@ ${point.missing}`)
     assert.equal(confirmations.length, 1)
     assert.equal(confirmations[0].title, 'Switch to "main"?')
     results.branches = true
+
+    // 16. Discard: a tracked file (a copy is saved first), an untracked file (to the "bin"), a declined window, and a working session.
+    await clickByText('.git-tabs button', 'Changes')
+    await until('!!document.querySelector("button[aria-label=\\"Discard a.txt\\"]")', 'Discard is offered on a changed file')
+    assert.match(gitIn('status', '--porcelain'), /^ M a\.txt$/m, 'a.txt has an unstaged edit')
+    const edited = await readFile(join(alpha, 'a.txt'), 'utf8')
+    confirmations.length = 0
+    await screenshot('discard-buttons.png')
+    await click('button[aria-label="Discard a.txt"]')
+    await until('/Discarded 1 change/.test(document.querySelector(".git-message-info")?.innerText || "")', 'discard reported')
+    assert.equal(confirmations.length, 1)
+    assert.equal(confirmations[0].title, 'Discard 1 change?')
+    assert.equal(confirmations[0].danger, true)
+    assert.match(confirmations[0].detail, /a\.txt/)
+    assert.equal((await readFile(join(alpha, 'a.txt'), 'utf8')).replace(/\r/g, ''), 'one\n', 'back to the committed version')
+    const { readdir } = await import('node:fs/promises')
+    const saved = await readdir(copies)
+    assert.equal(saved.length, 1, 'one saved copy')
+    assert.equal(await readFile(join(copies, saved[0], 'files', 'a.txt'), 'utf8'), edited, 'it holds what was discarded')
+    assert.match(await text('.git-message-info'), /A copy of the changed file is saved in/)
+
+    await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "slow.txt")', 'the untracked file is listed')
+    await click('button[aria-label="Discard slow.txt"]')
+    await until('/Discarded 1 change/.test(document.querySelector(".git-message-info")?.innerText || "")', 'the untracked file was discarded')
+    assert.equal(existsSync(join(alpha, 'slow.txt')), false)
+    assert.equal((await readdir(bin)).length, 1, 'it is in the bin')
+
+    await writeFile(join(alpha, 'keep.txt'), 'keep me\n')
+    service.requestRefresh(PROFILE)
+    await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "keep.txt")', 'a new untracked file is listed')
+    confirmAnswer = false
+    await click('button[aria-label="Discard keep.txt"]')
+    await until('/Nothing was discarded/.test(document.querySelector(".git-message-info")?.innerText || "")', 'declining is reported as a notice')
+    assert.equal(existsSync(join(alpha, 'keep.txt')), true, 'declining deletes nothing')
+    confirmAnswer = true
+    agentBusy = true
+    confirmations.length = 0
+    await click('button[aria-label="Discard keep.txt"]')
+    await until('/is working/.test(document.querySelector(".git-message-error")?.innerText || "")', 'a working session blocks the discard')
+    assert.equal(confirmations.length, 0, 'the person was not asked')
+    assert.equal(existsSync(join(alpha, 'keep.txt')), true)
+    agentBusy = false
+    results.discard = true
     assert.equal(service.hasSubscribers(), true)
     await click('button[aria-label="Close Git panel"]')
     await until('!!document.querySelector("#closed")', 'panel closed')

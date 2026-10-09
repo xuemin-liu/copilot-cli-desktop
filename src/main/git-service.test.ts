@@ -4,8 +4,9 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
@@ -1638,4 +1639,260 @@ test('a branch that shares its name with a tag is listed by its real name and ca
   const created = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'idea', headOf(h))
   assert.equal(created.ok, true, created.message)
   assert.equal((await h.service.getBranches(SUBSCRIBER, PROFILE, repoId)).find(branch => branch.current)?.name, 'idea')
+})
+
+// ---- discard ----------------------------------------------------------------------------------------------------------------------
+
+interface DiscardKit {
+  asked: Array<{ title: string; detail: string; confirmLabel: string; danger?: boolean }>
+  trashed: string[]
+  snapshots: string
+  bin: string
+  options: Partial<GitServiceOptions>
+}
+
+/** Options for a discard: copies go to a temp folder, "trash" moves to another one, and the confirmation says yes unless told otherwise. */
+function discardKit(t: test.TestContext, answer: () => Promise<boolean> | boolean = () => true, extra: Partial<GitServiceOptions> = {}): DiscardKit {
+  const base = mkdtempSync(join(tmpdir(), 'git-discard-kit-'))
+  t.after(() => rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const kit: DiscardKit = { asked: [], trashed: [], snapshots: join(base, 'snapshots'), bin: join(base, 'bin'), options: {} }
+  mkdirSync(kit.snapshots); mkdirSync(kit.bin)
+  kit.options = {
+    sessionActivity: () => ({ busy: false, detail: '' }),
+    confirm: async (_profile, request) => { kit.asked.push(request); return answer() },
+    snapshotDirectory: kit.snapshots,
+    trash: async (absolute) => { kit.trashed.push(absolute); renameSync(absolute, join(kit.bin, `${kit.trashed.length}-${basename(absolute)}`)) },
+    now: () => new Date('2026-10-09T12:00:00.000Z'),
+    ...extra,
+  }
+  return kit
+}
+
+const withChanges = (t: test.TestContext, kit: DiscardKit, setup: (f: GitFixture, project: string) => void) =>
+  harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n', 'b.txt': 'bee\n', 'c.txt': 'sea\n' }); setup(f, project) }, kit.options)
+
+const text = (path: string): string => readFileSync(path, 'utf8').replace(/\r/g, '')
+const savedCopies = (kit: DiscardKit): string[] => readdirSync(kit.snapshots)
+
+test('discarding a tracked file puts back its last version, after saving a copy of what was on disk', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'b.txt'), 'other edit\n') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(text(join(h.project, 'a.txt')), 'one\n', 'back to the committed version')
+  assert.equal(text(join(h.project, 'b.txt')), 'other edit\n', 'another changed file was not touched')
+  assert.deepEqual(result.status!.unstaged.map(entry => entry.path), ['b.txt'])
+  const [copy] = savedCopies(kit)
+  assert.match(copy!, /^2026-10-09T12-00-00-000Z-/)
+  assert.equal(text(join(kit.snapshots, copy!, 'files', 'a.txt')), 'my edit\n', 'the copy holds the discarded work')
+  assert.match(result.message, /Discarded 1 change\. A copy of the changed file is saved in .*2026-10-09T12-00-00-000Z/)
+  assert.equal(kit.asked.length, 1)
+  assert.equal(kit.asked[0]!.title, 'Discard 1 change?')
+  assert.equal(kit.asked[0]!.danger, true)
+  assert.match(kit.asked[0]!.detail, /a\.txt/)
+  assert.doesNotMatch(kit.asked[0]!.detail, /b\.txt/)
+})
+
+test('only the working-tree edit is discarded: what is staged stays staged', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (f, project) => {
+    writeFileSync(join(project, 'a.txt'), 'staged version\n'); f.plain(project, 'add', 'a.txt')
+    writeFileSync(join(project, 'a.txt'), 'staged version\nthen more\n')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const entry = current.unstaged.find(item => item.path === 'a.txt')!
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [entry.id], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(text(join(h.project, 'a.txt')), 'staged version\n', 'back to the staged version, not the committed one')
+  assert.deepEqual(result.status!.staged.map(item => item.path), ['a.txt'], 'still staged')
+  assert.deepEqual(result.status!.unstaged, [])
+})
+
+test('a file deleted in the working tree comes back, with nothing to copy', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (_f, project) => rmSync(join(project, 'c.txt')))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'c.txt')], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(text(join(h.project, 'c.txt')), 'sea\n')
+  assert.doesNotMatch(result.message, /copy/i)
+})
+
+test('untracked files and folders go to the Recycle Bin, not away for good', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (_f, project) => {
+    writeFileSync(join(project, 'scratch.txt'), 'x\n'); mkdirSync(join(project, 'build', 'deep'), { recursive: true }); writeFileSync(join(project, 'build', 'deep', 'out.js'), 'o\n')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const ids = current.untracked.map(item => item.id)
+  assert.equal(ids.length, 2)
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, ids, current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(existsSync(join(h.project, 'scratch.txt')), false)
+  assert.equal(existsSync(join(h.project, 'build')), false)
+  assert.deepEqual(kit.trashed.map(path => basename(path)).sort(), ['build', 'scratch.txt'])
+  assert.equal(readdirSync(kit.bin).length, 2, 'both are in the bin')
+  assert.deepEqual(savedCopies(kit), [], 'untracked items need no copy')
+  assert.match(kit.asked[0]!.detail, /scratch\.txt {2}\(untracked\)/)
+  assert.match(kit.asked[0]!.detail, /moved to the Recycle Bin/)
+})
+
+test('a folder that holds a git repository is not offered for deletion, and nothing else in the request happens either', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (_f, project) => {
+    writeFileSync(join(project, 'a.txt'), 'my edit\n')
+    mkdirSync(join(project, 'vendored', '.git'), { recursive: true }); writeFileSync(join(project, 'vendored', '.git', 'HEAD'), 'ref: refs/heads/main\n'); writeFileSync(join(project, 'vendored', 'f.txt'), 'f\n')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const ids = [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)]
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, ids, current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /contains a git repository.*Nothing was discarded/)
+  assert.equal(kit.asked.length, 0, 'the person is not asked about something that cannot be done')
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n', 'the tracked edit was kept as well')
+  assert.equal(existsSync(join(h.project, 'vendored', '.git', 'HEAD')), true)
+  assert.deepEqual(kit.trashed, [])
+})
+
+test('declining the confirmation discards nothing and saves nothing', { skip }, async (t) => {
+  const kit = discardKit(t, () => false)
+  const h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'new.txt'), 'n\n') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), idOf(current, 'new.txt')], current.generation)
+  assert.deepEqual([result.ok, result.reason, result.message], [false, 'cancelled', 'Nothing was discarded.'])
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
+  assert.equal(existsSync(join(h.project, 'new.txt')), true)
+  assert.deepEqual(savedCopies(kit), [])
+})
+
+test('without a confirmation window, a place for copies or a Recycle Bin, nothing is discarded', { skip }, async (t) => {
+  for (const [name, remove] of [['confirm', 'confirm'], ['snapshotDirectory', 'snapshotDirectory'], ['trash', 'trash']] as const) {
+    const kit = discardKit(t)
+    const options = { ...kit.options }
+    delete options[remove]
+    const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'new.txt'), 'n\n') }, options)
+    const { repoId, status } = await open(h)
+    const current = await status()
+    const ids = remove === 'trash' ? [idOf(current, 'new.txt')] : remove === 'snapshotDirectory' ? [idOf(current, 'a.txt')] : [idOf(current, 'a.txt')]
+    const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, ids, current.generation)
+    assert.deepEqual([result.ok, result.reason], [false, 'failed'], name)
+    assert.equal(text(join(h.project, 'a.txt')), 'my edit\n', name)
+    assert.equal(existsSync(join(h.project, 'new.txt')), true, name)
+  }
+})
+
+test('a discard is refused while a Copilot session is working, and the person is not even asked', { skip }, async (t) => {
+  const kit = discardKit(t, () => true, { sessionActivity: () => ({ busy: true, detail: '"Main session" is working' }) })
+  const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'agent-working'])
+  assert.match(result.message, /"Main session" is working\. Discarding changes files under it/)
+  assert.equal(kit.asked.length, 0)
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
+})
+
+test('a session that starts working while the confirmation is open stops the discard', { skip }, async (t) => {
+  let busy = false
+  const kit = discardKit(t, () => { busy = true; return true }, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' } })
+  const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'agent-working'])
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
+  assert.deepEqual(savedCopies(kit), [])
+})
+
+test('a discard is for the file list that was on screen, and only for files that can be discarded', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await withChanges(t, kit, (f, project) => {
+    writeFileSync(join(project, 'a.txt'), 'my edit\n')
+    writeFileSync(join(project, 'b.txt'), 'staged only\n'); f.plain(project, 'add', 'b.txt')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  await assert.rejects(h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation + 1), GitStaleError)
+  await assert.rejects(h.service.discard(SUBSCRIBER, PROFILE, repoId, ['e999-0'], current.generation), GitStaleError)
+  await assert.rejects(h.service.discard(SUBSCRIBER, PROFILE, repoId, [], current.generation), /between 1 and 500/)
+  const stagedOnly = current.staged.find(item => item.path === 'b.txt')!
+  await assert.rejects(h.service.discard(SUBSCRIBER, PROFILE, repoId, [stagedOnly.id], current.generation), /nothing to discard in that selection/)
+  assert.equal(kit.asked.length, 0)
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
+})
+
+test('the list changing while the confirmation is open stops the discard', { skip }, async (t) => {
+  let h!: Harness
+  const kit = discardKit(t, () => { writeFileSync(join(h.project, 'late.txt'), 'late\n'); return true })
+  h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  await assert.rejects(h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation), /changed while you were deciding/)
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
+  assert.deepEqual(savedCopies(kit), [])
+})
+
+test('the saved copy is of what is on disk when the discard runs, so work added while the window was open is kept too', { skip }, async (t) => {
+  let h!: Harness
+  const kit = discardKit(t, () => { appendFileSync(join(h.project, 'a.txt'), 'added while the window was open\n'); return true })
+  h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  const [copy] = savedCopies(kit)
+  assert.equal(text(join(kit.snapshots, copy!, 'files', 'a.txt')), 'my edit\nadded while the window was open\n')
+  assert.equal(text(join(h.project, 'a.txt')), 'one\n')
+})
+
+test('a file too big to copy stops the discard before anything is touched', { skip }, async (t) => {
+  const kit = discardKit(t, () => true, { maxSnapshotFileBytes: 10 })
+  const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'much more than ten bytes of edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /too large to save a copy of.*Nothing was discarded/)
+  assert.equal(kit.asked.length, 0)
+  assert.equal(text(join(h.project, 'a.txt')), 'much more than ten bytes of edit\n')
+})
+
+test('if one untracked item cannot be moved, the rest still are, the tracked restore stands, and the message says what failed', { skip }, async (t) => {
+  let count = 0
+  const kit = discardKit(t, () => true, {})
+  const trash = kit.options.trash!
+  kit.options.trash = async absolute => { if (++count === 1) throw new Error('The file is in use by another process'); await trash(absolute) }
+  const h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'x1.txt'), '1'); writeFileSync(join(project, 'x2.txt'), '2') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /1 of 2 untracked items could not be moved to the Recycle Bin: .*in use by another process/)
+  assert.match(result.message, /A copy of the changed file is saved in/)
+  assert.equal(text(join(h.project, 'a.txt')), 'one\n', 'the tracked file was restored')
+  assert.equal(readdirSync(kit.bin).length, 1, 'the other item is in the bin')
+})
+
+test('a long list is shown in part, and discarding many files at once works', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const h = await harness(t, (f, project) => {
+    committed(f, project, Object.fromEntries(Array.from({ length: 15 }, (_, index) => [`f${String(index).padStart(2, '0')}.txt`, 'orig\n'])))
+    for (let index = 0; index < 15; index++) writeFileSync(join(project, `f${String(index).padStart(2, '0')}.txt`), 'edited\n')
+  }, kit.options)
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, current.unstaged.map(item => item.id), current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.match(result.message, /Discarded 15 changes\. Copies of the 15 changed files are saved in/)
+  assert.match(kit.asked[0]!.detail, /…and 3 more/)
+  assert.equal(result.status!.unstaged.length, 0)
+  for (let index = 0; index < 15; index++) assert.equal(text(join(h.project, `f${String(index).padStart(2, '0')}.txt`)), 'orig\n')
 })

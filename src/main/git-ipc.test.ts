@@ -15,7 +15,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
-    getBranches: record('getBranches'), createBranch: record('createBranch'), switchBranch: record('switchBranch'),
+    getBranches: record('getBranches'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -39,7 +39,7 @@ const PROFILE = '0123456789abcdef'
 test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
-    'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
+    'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
     'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage',
   ])
 })
@@ -155,7 +155,7 @@ test('cancel takes only a workspace and a repository, and the write channels are
   call('desktop:git-cancel', sender(), PROFILE, 'repo-2')
   assert.deepEqual(calls, [['cancel', 1, PROFILE, 'repo-2']])
   assert.throws(() => call('desktop:git-cancel', sender(), PROFILE, 'repo-0'), /Invalid repository/)
-  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync', 'desktop:git-branch']) {
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync', 'desktop:git-branch', 'desktop:git-discard']) {
     assert.ok(handlers.has(channel), channel)
     assert.throws(() => call(channel, sender(2), PROFILE, 'repo-1', ['e1-0'], 1, null), /main window/, channel)
   }
@@ -207,5 +207,18 @@ test('branch changes carry the branch name and the head the person saw, and noth
     assert.throws(() => call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'switch', 'x', bad), /Invalid (branch|commit)/, JSON.stringify(bad))
   }
   assert.throws(() => call('desktop:git-branches', sender(), PROFILE, 'repo-0'), /Invalid repository/)
+  assert.equal(calls.length, 0, 'nothing reached the service')
+})
+
+test('discard takes only file ids and the file list version the person saw', () => {
+  const { call, sender, calls } = setup()
+  call('desktop:git-discard', sender(), PROFILE, 'repo-1', ['e3-0', 'e3-12'], 3)
+  assert.deepEqual(calls, [['discard', 1, PROFILE, 'repo-1', ['e3-0', 'e3-12'], 3]])
+  calls.length = 0
+  for (const bad of [[], 'e3-0', null, undefined, ['a.txt'], ['../../x'], ['e3-0', 5], Array.from({ length: 501 }, (_, index) => `e1-${index}`)]) {
+    assert.throws(() => call('desktop:git-discard', sender(), PROFILE, 'repo-1', bad, 3), /Invalid file/, JSON.stringify(bad)?.slice(0, 40))
+  }
+  for (const bad of [-1, 1.5, '3', null, undefined, 2_000_000_000]) assert.throws(() => call('desktop:git-discard', sender(), PROFILE, 'repo-1', ['e3-0'], bad), /Invalid file list version/, String(bad))
+  assert.throws(() => call('desktop:git-discard', sender(), PROFILE, 'repo-0', ['e3-0'], 3), /Invalid repository/)
   assert.equal(calls.length, 0, 'nothing reached the service')
 })
