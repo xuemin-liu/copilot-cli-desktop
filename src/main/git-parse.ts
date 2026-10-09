@@ -250,3 +250,22 @@ export function parseLog(output: string): GitLogEntry[] {
   }
   return result
 }
+
+export interface GitStagedRawEntry {
+  path: string
+  oldMode: string
+  newMode: string
+}
+
+/** Parse `git diff --cached --raw -z --no-renames`: `:oldmode newmode oldoid newoid status NUL path NUL`. */
+export function parseStagedRaw(output: string): GitStagedRawEntry[] {
+  const result: GitStagedRawEntry[] = []
+  const records = splitNul(output)
+  for (let position = 0; position < records.length; position++) {
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ [A-Z]\d*$/.exec(records[position] ?? '')
+    if (!match) continue
+    const path = records[++position] ?? ''
+    if (path !== '') result.push({ path, oldMode: match[1] ?? '', newMode: match[2] ?? '' })
+  }
+  return result
+}

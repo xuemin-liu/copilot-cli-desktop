@@ -102,6 +102,7 @@ export type GitOperationFailure =
   | 'hooks-unverifiable'   // a hook cannot be fully checked (a link, too large), so it can never be approved
   | 'conflicts'            // unresolved conflicts are present
   | 'nothing-staged'
+  | 'hidden-staged'        // the index holds staged entries the panel does not list (a submodule update), so a commit would include unseen changes
   | 'cancelled'
   | 'failed'               // git exited non-zero; `output` has what it said
 

@@ -970,3 +970,40 @@ test('a commit whose hooks stay approved still goes through after waiting for a 
   assert.equal(existsSync(marker), true)
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '2')
 })
+
+// ---- staged entries the panel does not list ------------------------------------------------------------------------------
+
+test('a commit is refused while a staged submodule update is in the index but not in the list', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    f.plain(project, 'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},sub`)
+    f.plain(project, 'commit', '-q', '-m', 'add submodule pointer')
+    f.plain(project, 'update-index', '--cacheinfo', `160000,${'2'.repeat(40)},sub`)
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', 'a.txt')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  assert.deepEqual(current.staged.map(item => item.path), ['a.txt'], 'the list does not show the submodule')
+  const before = h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim()
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  assert.deepEqual([result.ok, result.reason], [false, 'hidden-staged'])
+  assert.match(result.message, /submodule changes.*sub/)
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), before, 'nothing was committed')
+
+  // Once it is unstaged the commit goes through.
+  h.fixture.plain(h.project, 'update-index', '--cacheinfo', `160000,${'1'.repeat(40)},sub`)
+  const fresh = await status()
+  const done = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', fresh.generation, null)
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+})
+
+test('a staged rename is listed under both names, so a commit with it is not refused', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'old.txt': 'content that is long enough to be detected as a rename\n' })
+    f.plain(project, 'mv', 'old.txt', 'renamed.txt')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+})

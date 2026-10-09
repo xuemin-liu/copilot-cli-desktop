@@ -4,7 +4,7 @@ import { inspectCommitHooks } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
-import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStatusV2 } from './git-parse.js'
+import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStagedRaw, parseStatusV2 } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
@@ -752,6 +752,17 @@ export class GitService {
         this.outcome({ ok: false, reason, message: text, status: repo.statusView, ...extra })
       const status = repo.status
       if (!status || status.entries.some(entry => entry.kind === 'unmerged')) return refused('conflicts', 'Resolve the conflicts and stage the result before committing.')
+
+      // The status view leaves submodules out (reading them would run git inside another repository), so a staged submodule
+      // update is in the index but not in the list. A commit must not include what the person was never shown.
+      const shown = new Set(status.entries.flatMap(entry => entry.index === '.' ? [] : [entry.path, ...(entry.originalPath ? [entry.originalPath] : [])]))
+      const unseen = parseStagedRaw(staged).filter(entry => !shown.has(entry.path))
+      if (unseen.length > 0) {
+        const named = unseen.slice(0, 5).map(entry => entry.path).join(', ') + (unseen.length > 5 ? ` and ${unseen.length - 5} more` : '')
+        const kind = unseen.every(entry => entry.oldMode === '160000' || entry.newMode === '160000') ? 'Staged submodule changes' : 'Staged changes'
+        return refused('hidden-staged', `${kind} that this panel does not list would be included in the commit: ${named}. Unstage them, or commit from a terminal.`)
+      }
+
       if (!status.entries.some(entry => (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.')) return refused('nothing-staged', 'There is nothing staged to commit.')
 
       for (const key of ['user.name', 'user.email']) {
