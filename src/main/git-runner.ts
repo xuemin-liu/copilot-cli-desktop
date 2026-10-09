@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
 import { win32 } from 'node:path'
 import { assertGitArgument, buildGitEnvironment, gitArgsPrefix } from './git-env.js'
 import type { GitCommandKind, GitEnvironmentOptions } from './git-env.js'
@@ -95,6 +96,10 @@ export interface GitRunOptions {
   maxStdoutBytes?: number | undefined
   signal?: AbortSignal | undefined
   environment?: GitEnvironmentOptions | undefined
+  /** Run with `core.hooksPath` pointed at an empty folder, so no repository hook can run. Always on for reads. */
+  disableHooks?: boolean | undefined
+  /** Called with output as it arrives (for example a commit hook's messages), decoded and never split mid-character. */
+  onOutput?: ((stream: 'stdout' | 'stderr', text: string) => void) | undefined
 }
 
 export interface GitRunResult {
@@ -133,10 +138,10 @@ export class GitRunner {
     assertGitArgument(options.cwd, 'working folder')
     for (const arg of options.args) assertGitArgument(arg)
     if (options.signal?.aborted) return emptyResult({ cancelled: true })
-    if (kind === 'read') await this.ensureHooksDirectory()
+    if (kind === 'read' || options.disableHooks) await this.ensureHooksDirectory()
     // An abort during the await above fires before any listener exists, so check again before spawning.
     if (options.signal?.aborted) return emptyResult({ cancelled: true })
-    const args = [...gitArgsPrefix(kind, this.options.hooksDirectory), ...options.args]
+    const args = [...gitArgsPrefix(kind, this.options.hooksDirectory, options.disableHooks === true), ...options.args]
     const env = buildGitEnvironment(this.options.baseEnvironment ?? process.env, options.environment)
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS[kind]
     const maxStdout = options.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES
@@ -197,7 +202,15 @@ export class GitRunner {
         lease?.release()
         reject((error as NodeJS.ErrnoException).code === 'ENOENT' ? new GitUnavailableError('git was not found') : error)
       })
+      const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
+      const emit = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+        if (!options.onOutput) return
+        const text = decoders[stream].write(chunk)
+        // A listener that throws must never break the command it is watching.
+        if (text) try { options.onOutput(stream, text) } catch { /* ignored */ }
+      }
       child.stdout?.on('data', (chunk: Buffer) => {
+        emit('stdout', chunk)
         if (truncated) return
         const room = maxStdout - stdoutBytes
         if (chunk.length > room) {
@@ -211,6 +224,7 @@ export class GitRunner {
         }
       })
       child.stderr?.on('data', (chunk: Buffer) => {
+        emit('stderr', chunk)
         const room = MAX_STDERR_BYTES - stderrBytes
         if (room > 0) { stderr.push(chunk.subarray(0, room)); stderrBytes += Math.min(room, chunk.length) }
       })

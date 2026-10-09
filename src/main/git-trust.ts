@@ -87,13 +87,20 @@ export function repoTrustKey(root: string): string {
 interface TrustFile {
   version: 1
   repos: Record<string, string>
+  /** Repository hooks the user has approved, by canonical path and the hash of their names and contents. */
+  hooks?: Record<string, string>
 }
 
 const MAX_TRUSTED_REPOS = 500
+const HASH = /^[0-9a-f]{64}$/
 
-/** Persists "the user accepted this repository's config" by canonical path and config hash. */
+/**
+ * Persists what the user has accepted, by canonical repository path and hash: the repository's own config (so Git may
+ * read it) and the hooks a commit would run (so Git may commit in it). A changed config or hook is a new question.
+ */
 export class GitTrustStore {
   private repos = new Map<string, string>()
+  private hooks = new Map<string, string>()
   private loaded: Promise<void> | null = null
   private writes: Promise<void> = Promise.resolve()
 
@@ -102,12 +109,26 @@ export class GitTrustStore {
   private load(): Promise<void> {
     this.loaded ??= readFile(this.file, 'utf8').then(text => {
       const parsed = JSON.parse(text) as Partial<TrustFile>
-      if (parsed.version !== 1 || !parsed.repos || typeof parsed.repos !== 'object') return
-      for (const [key, hash] of Object.entries(parsed.repos)) {
-        if (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)) this.repos.set(key, hash)
+      if (parsed.version !== 1) return
+      for (const [target, source] of [[this.repos, parsed.repos], [this.hooks, parsed.hooks]] as const) {
+        if (!source || typeof source !== 'object') continue
+        for (const [key, hash] of Object.entries(source)) if (typeof hash === 'string' && HASH.test(hash)) target.set(key, hash)
       }
     }).catch(() => undefined)
     return this.loaded
+  }
+
+  private save(): Promise<void> {
+    const body: TrustFile = { version: 1, repos: Object.fromEntries(this.repos), hooks: Object.fromEntries(this.hooks) }
+    this.writes = this.writes.then(() => writeFileAtomic(this.file, JSON.stringify(body, null, 2)))
+    return this.writes
+  }
+
+  private remember(map: Map<string, string>, root: string, hash: string): void {
+    const key = repoTrustKey(root)
+    map.delete(key)
+    map.set(key, hash)
+    while (map.size > MAX_TRUSTED_REPOS) map.delete(map.keys().next().value as string)
   }
 
   async isTrusted(root: string, hash: string): Promise<boolean> {
@@ -117,12 +138,18 @@ export class GitTrustStore {
 
   async trust(root: string, hash: string): Promise<void> {
     await this.load()
-    const key = repoTrustKey(root)
-    this.repos.delete(key)
-    this.repos.set(key, hash)
-    while (this.repos.size > MAX_TRUSTED_REPOS) this.repos.delete(this.repos.keys().next().value as string)
-    const body: TrustFile = { version: 1, repos: Object.fromEntries(this.repos) }
-    this.writes = this.writes.then(() => writeFileAtomic(this.file, JSON.stringify(body, null, 2)))
-    await this.writes
+    this.remember(this.repos, root, hash)
+    await this.save()
+  }
+
+  async areHooksApproved(root: string, hash: string): Promise<boolean> {
+    await this.load()
+    return this.hooks.get(repoTrustKey(root)) === hash
+  }
+
+  async approveHooks(root: string, hash: string): Promise<void> {
+    await this.load()
+    this.remember(this.hooks, root, hash)
+    await this.save()
   }
 }

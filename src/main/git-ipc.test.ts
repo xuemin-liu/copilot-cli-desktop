@@ -13,6 +13,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
   const fake = {
     subscribe: record('subscribe'), unsubscribe: record('unsubscribe'), unsubscribeAll: record('unsubscribeAll'), rescan: record('rescan'),
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
+    stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -36,7 +37,8 @@ const PROFILE = '0123456789abcdef'
 test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
-    'desktop:git-close', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan', 'desktop:git-status', 'desktop:git-trust',
+    'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
+    'desktop:git-stage', 'desktop:git-status', 'desktop:git-trust', 'desktop:git-unstage',
   ])
 })
 
@@ -108,5 +110,51 @@ test('a reload, crash or close of the renderer releases its subscriptions, regis
     calls.length = 0
     listeners.get(name)?.[0]?.()
     assert.deepEqual(calls, [['unsubscribeAll', 1]], name)
+  }
+})
+
+test('stage and unstage take a bounded list of valid file ids and the file list version they were made from', () => {
+  const { call, sender, calls } = setup()
+  call('desktop:git-stage', sender(), PROFILE, 'repo-3', ['e4-0', 'e4-12'], 4)
+  call('desktop:git-unstage', sender(), PROFILE, 'repo-3', ['e4-1'], 4)
+  assert.deepEqual(calls, [['stage', 1, PROFILE, 'repo-3', ['e4-0', 'e4-12'], 4], ['unstage', 1, PROFILE, 'repo-3', ['e4-1'], 4]])
+  calls.length = 0
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage']) {
+    for (const bad of [[], 'e1-0', null, ['e1-0', 5], ['..\\x'], ['e1-0; calc'], ['e1'], Array.from({ length: 5_001 }, (_item, index) => `e1-${index}`)]) {
+      assert.throws(() => call(channel, sender(), PROFILE, 'repo-1', bad, 1), /Invalid file/, `${channel} ${JSON.stringify(bad)?.slice(0, 40)}`)
+    }
+    for (const bad of [-1, 1.5, '1', null, 1_000_000_001, NaN]) {
+      assert.throws(() => call(channel, sender(), PROFILE, 'repo-1', ['e1-0'], bad), /Invalid file list version/, String(bad))
+    }
+    assert.throws(() => call(channel, sender(), 'nope', 'repo-1', ['e1-0'], 1), /Invalid workspace/)
+    assert.throws(() => call(channel, sender(), PROFILE, 'repo-0', ['e1-0'], 1), /Invalid repository/)
+  }
+  assert.equal(calls.length, 0, 'nothing reached the service')
+})
+
+test('commit validates the message, the version and the hooks approval before the service sees them', () => {
+  const { call, sender, calls } = setup()
+  call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'feat: a thing', 3, null)
+  call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'feat: a thing', 3, 'a'.repeat(64))
+  assert.deepEqual(calls.map(entry => entry.slice(4)), [['feat: a thing', 3, null], ['feat: a thing', 3, 'a'.repeat(64)]])
+  calls.length = 0
+  for (const bad of ['', '   \n', 'a\0b', 'x'.repeat(100_001), 5, null, undefined]) {
+    assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', bad, 3, null), /Invalid commit message/, JSON.stringify(bad)?.slice(0, 30))
+  }
+  for (const bad of ['', 'abc', 'G'.repeat(64), 5, undefined]) {
+    assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'ok', 3, bad), /Invalid hooks approval/, JSON.stringify(bad))
+  }
+  assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'ok', -2, null), /Invalid file list version/)
+  assert.equal(calls.length, 0)
+})
+
+test('cancel takes only a workspace and a repository, and the write channels are main-window only', () => {
+  const { call, sender, calls, handlers } = setup({ mainWindowId: 1 })
+  call('desktop:git-cancel', sender(), PROFILE, 'repo-2')
+  assert.deepEqual(calls, [['cancel', 1, PROFILE, 'repo-2']])
+  assert.throws(() => call('desktop:git-cancel', sender(), PROFILE, 'repo-0'), /Invalid repository/)
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel']) {
+    assert.ok(handlers.has(channel), channel)
+    assert.throws(() => call(channel, sender(2), PROFILE, 'repo-1', ['e1-0'], 1, null), /main window/, channel)
   }
 })

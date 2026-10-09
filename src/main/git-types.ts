@@ -94,4 +94,38 @@ export interface GitProjectView {
   notes: string[]
 }
 
+/** Why a write did not happen. Expected failures come back as a result; programming errors and stale ids are thrown. */
+export type GitOperationFailure =
+  | 'busy'                 // another git process holds the repository's index lock
+  | 'identity-missing'     // git has no user.name / user.email
+  | 'hooks-need-approval'  // the repository has hooks a commit would run
+  | 'conflicts'            // unresolved conflicts are present
+  | 'nothing-staged'
+  | 'cancelled'
+  | 'failed'               // git exited non-zero; `output` has what it said
+
+export interface GitOperationResult {
+  ok: boolean
+  reason: GitOperationFailure | null
+  /** One plain sentence for the person. */
+  message: string
+  /** What git (and any hook) printed, redacted and trimmed. Empty when there is nothing useful. */
+  output: string
+  /** For `hooks-need-approval`: the hooks a commit would run, and the hash to send back to approve exactly these. */
+  hooks: string[]
+  hooksHash: string | null
+  /** For a successful commit. */
+  commit: { hash: string; subject: string } | null
+  /** The repository's status after the operation, so the panel updates in one step. */
+  status: GitRepoStatusView | null
+}
+
+/** Output from a running write (for example a commit hook), forwarded as it arrives. */
+export interface GitProgressEvent {
+  repoId: string
+  operation: 'stage' | 'unstage' | 'commit'
+  stream: 'stdout' | 'stderr'
+  text: string
+}
+
 export type { GitLogEntry }

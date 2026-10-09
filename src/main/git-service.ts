@@ -1,17 +1,18 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { diffArgs, logArgs, statusArgs } from './git-commands.js'
+import { commitArgs, configGetArgs, diffArgs, logArgs, stageArgs, statusArgs, unstageArgs } from './git-commands.js'
+import { inspectCommitHooks } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
 import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStatusV2 } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
-import type { GitExecutable, GitRunResult, GitRunner } from './git-runner.js'
+import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 import { isReviewable } from './git-review-format.js'
 import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitDiffView, GitEntryView, GitLogEntry, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
+  GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
 } from './git-types.js'
 import { realPathNative } from './real-path.js'
 
@@ -27,6 +28,11 @@ export interface GitServiceOptions {
   resolveProject(profileId: string): string | null
   /** One call per subscription whose project view changed. */
   onChanged(subscriberId: number, profileId: string, view: GitProjectView): void
+  /** Output from a running write, for example a commit hook's messages. */
+  onProgress?(subscriberId: number, profileId: string, event: GitProgressEvent): void
+  /** How long a write waits for another process's `index.lock` before saying so. */
+  lockWaitMs?: number
+  lockPollMs?: number
   /** True while refreshing must not start (shutdown, migration, window hidden). Checked before every refresh. */
   shouldPause?(): boolean
   discover?: typeof discoverRepos
@@ -62,6 +68,10 @@ interface RepoRuntime {
   status: GitStatus | null
   entries: Map<string, GitStatusEntry>
   statusView: GitRepoStatusView | null
+  /** Tail of this repository's write queue: writes run one at a time, in order. */
+  writeQueue: Promise<unknown>
+  /** Cancel handle of the write running now, if any. */
+  writeAbort: AbortController | null
 }
 
 interface ProjectRuntime {
@@ -100,6 +110,17 @@ function describeFailure(result: GitRunResult, what: string, repoRoot: string): 
   return line || `${what} failed (exit ${result.exitCode ?? 'none'})`
 }
 
+/** The failure every write shares: another process holds the index lock. Git says so when it cannot create `index.lock`. */
+export function isIndexLockFailure(result: GitRunResult): boolean {
+  return result.exitCode !== 0 && result.stderr.includes('index.lock') && /File exists|another git process/i.test(result.stderr)
+}
+
+/** What git and its hooks printed, redacted and cut to the last few thousand characters. */
+function tailOutput(result: GitRunResult): string {
+  const text = redactDiagnosticText(`${result.stdout.toString('utf8')}${result.stderr}`).replace(/\r\n/g, '\n').trim()
+  return text.length > 4_000 ? `…${text.slice(-3_999)}` : text
+}
+
 async function mapLimit<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
   let next = 0
   const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
@@ -114,6 +135,8 @@ export class GitService {
   private readonly subscriptions = new Map<number, Map<string, ProjectRuntime>>()
   /** Opens still in flight, by `subscriber:profile`. Releasing the subscriber removes its entry, which cancels the open. */
   private readonly opening = new Map<string, symbol>()
+  /** Writes in flight. They outlive a closed panel (the user asked for them) but not the app. */
+  private readonly writeControllers = new Set<AbortController>()
   private nextRepoNumber = 1
   private paused = false
   private disposed = false
@@ -331,6 +354,7 @@ export class GitService {
       project.repos.set(key, {
         id: `repo-${this.nextRepoNumber++}`, discovered: found, state: 'ready', error: null, scan: null,
         generation: 0, signature: '', status: null, entries: new Map(), statusView: null,
+        writeQueue: Promise.resolve(), writeAbort: null,
       })
     }
     for (const key of [...project.repos.keys()]) if (!seen.has(key)) project.repos.delete(key)
@@ -535,8 +559,8 @@ export class GitService {
   }
 
   /** Explicit reads re-run the gate: the settings may have changed since the last refresh. */
-  private async requireGate(project: ProjectRuntime, repo: RepoRuntime, runtime: GitRuntime): Promise<void> {
-    if (await this.passGate(repo, runtime, project.abort.signal)) return
+  private async requireGate(project: ProjectRuntime, repo: RepoRuntime, runtime: GitRuntime, signal: AbortSignal = project.abort.signal): Promise<void> {
+    if (await this.passGate(repo, runtime, signal)) return
     // Tell the panel straight away that this repository needs attention, then refuse the read.
     project.view = this.buildView(project, runtime)
     this.publish(project)
@@ -571,10 +595,171 @@ export class GitService {
     return this.viewOf(project)
   }
 
+  // ---- writes -------------------------------------------------------------------------------------
+
+  /** Run `task` after any write already running on this repository, with a cancel handle of its own. */
+  private enqueueWrite<T>(repo: RepoRuntime, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error('The git service has stopped'))
+    const run = async (): Promise<T> => {
+      const controller = new AbortController()
+      repo.writeAbort = controller
+      this.writeControllers.add(controller)
+      try { return await task(controller.signal) } finally {
+        this.writeControllers.delete(controller)
+        if (repo.writeAbort === controller) repo.writeAbort = null
+      }
+    }
+    const result = repo.writeQueue.then(run, run)
+    repo.writeQueue = result.catch(() => undefined)
+    return result
+  }
+
+  /** Stop the write running on this repository (a commit waiting on a slow hook, say). Writes still queued are not affected. */
+  cancel(subscriberId: number, profileId: string, repoId: string): void {
+    this.repoFor(this.projectFor(subscriberId, profileId), repoId).writeAbort?.abort()
+  }
+
+  /** git takes `index.lock` for the duration of a write; another process (Copilot, a hook) may hold it for a moment. */
+  private async runWithLockWait(runtime: GitRuntime, options: GitRunOptions): Promise<GitRunResult> {
+    const deadline = Date.now() + (this.options.lockWaitMs ?? 10_000)
+    for (;;) {
+      const result = await runtime.runner.run(options)
+      if (!isIndexLockFailure(result) || Date.now() >= deadline || options.signal?.aborted) return result
+      await new Promise(resolve => setTimeout(resolve, this.options.lockPollMs ?? 400))
+    }
+  }
+
+  private emitter(subscriberId: number, profileId: string, repoId: string, operation: GitProgressEvent['operation']): (stream: 'stdout' | 'stderr', text: string) => void {
+    return (stream, text) => this.options.onProgress?.(subscriberId, profileId, { repoId, operation, stream, text: text.slice(0, 4_000) })
+  }
+
+  /** A refresh that is certain to start after a write finished, then the repository's fresh status. */
+  private async statusAfterWrite(project: ProjectRuntime, repo: RepoRuntime): Promise<GitRepoStatusView | null> {
+    if (this.disposed || this.projects.get(project.key) !== project) return null
+    if (project.refreshing) await project.refreshing.catch(() => undefined)
+    await this.refreshProject(project, true).catch(() => undefined)
+    return repo.statusView
+  }
+
+  private outcome(overrides: Partial<GitOperationResult> & Pick<GitOperationResult, 'ok' | 'message'>): GitOperationResult {
+    return { reason: null, output: '', hooks: [], hooksHash: null, commit: null, status: null, ...overrides }
+  }
+
+  /** A failed command as a result: busy, cancelled, timed out or failed, with what git said. */
+  private failure(result: GitRunResult, root: string, what: string): Omit<GitOperationResult, 'status'> {
+    const output = tailOutput(result)
+    const base = { ok: false, hooks: [], hooksHash: null, commit: null, output }
+    if (result.cancelled) return { ...base, reason: 'cancelled', message: 'Cancelled. If Git left a lock file behind, delete .git/index.lock in this repository before trying again.' }
+    if (result.timedOut) return { ...base, reason: 'failed', message: `${what} timed out. If Git left a lock file behind, delete .git/index.lock in this repository before trying again.` }
+    if (isIndexLockFailure(result)) return { ...base, reason: 'busy', message: 'Another Git process is using this repository (it holds .git/index.lock). Wait for it to finish; if none is running, delete that file yourself.' }
+    return { ...base, reason: 'failed', message: describeFailure(result, what, root) }
+  }
+
+  /** Which entries a stage or unstage request means, checked against the exact list the person was looking at. */
+  private writableEntries(repo: RepoRuntime, entryIds: readonly string[], generation: number, operation: 'stage' | 'unstage'): GitStatusEntry[] {
+    if (repo.generation !== generation) throw new GitStaleError()
+    if (entryIds.length === 0 || entryIds.length > 5_000) throw new Error('Choose between 1 and 5,000 files')
+    const chosen: GitStatusEntry[] = []
+    for (const id of new Set(entryIds)) {
+      const entry = repo.entries.get(id)
+      if (!entry) throw new GitStaleError()
+      const eligible = operation === 'stage'
+        ? entry.kind === 'untracked' || entry.kind === 'unmerged' || ((entry.kind === 'changed' || entry.kind === 'renamed') && entry.worktree !== '.')
+        : (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.'
+      if (eligible) chosen.push(entry)
+    }
+    if (chosen.length === 0) throw new Error(`There is nothing to ${operation} in that selection`)
+    return chosen
+  }
+
+  stage(subscriberId: number, profileId: string, repoId: string, entryIds: readonly string[], generation: number): Promise<GitOperationResult> {
+    return this.changeIndex('stage', subscriberId, profileId, repoId, entryIds, generation)
+  }
+
+  unstage(subscriberId: number, profileId: string, repoId: string, entryIds: readonly string[], generation: number): Promise<GitOperationResult> {
+    return this.changeIndex('unstage', subscriberId, profileId, repoId, entryIds, generation)
+  }
+
+  private async changeIndex(operation: 'stage' | 'unstage', subscriberId: number, profileId: string, repoId: string, entryIds: readonly string[], generation: number): Promise<GitOperationResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    return this.enqueueWrite(repo, async signal => {
+      // Everything is checked again now that this write has its turn: the list or the settings may have changed while it waited.
+      await this.requireGate(project, repo, runtime, signal)
+      const entries = this.writableEntries(repo, entryIds, generation, operation)
+      const paths = [...new Set(entries.flatMap(entry => operation === 'unstage' && entry.originalPath ? [entry.path, entry.originalPath] : [entry.path]))]
+      const root = repo.discovered.root
+      const result = await this.runWithLockWait(runtime, {
+        cwd: root, kind: 'write', disableHooks: true, signal, timeoutMs: 120_000,
+        args: operation === 'stage' ? stageArgs() : unstageArgs(repo.status?.branch.oid != null),
+        stdin: `${paths.join('\0')}\0`,
+        onOutput: this.emitter(subscriberId, profileId, repoId, operation),
+      })
+      const status = await this.statusAfterWrite(project, repo)
+      if (!gitSucceeded(result)) return { ...this.failure(result, root, `git ${operation === 'stage' ? 'add' : 'restore'}`), status }
+      const count = entries.length
+      return this.outcome({ ok: true, message: `${operation === 'stage' ? 'Staged' : 'Unstaged'} ${count} file${count === 1 ? '' : 's'}.`, status })
+    })
+  }
+
+  /**
+   * Commit what is staged. Refused, with a result that says why, when git does not know who the author is, when a hook
+   * the person has not approved would run, or when conflicts are unresolved. The message goes in on stdin, hooks run only
+   * after approval, and the exit code decides success.
+   */
+  async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null): Promise<GitOperationResult> {
+    if (typeof message !== 'string' || message.trim() === '') throw new Error('Write a commit message first')
+    if (message.length > 100_000 || message.includes('\0')) throw new Error('That commit message is not valid')
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    return this.enqueueWrite(repo, async signal => {
+      await this.requireGate(project, repo, runtime, signal)
+      if (repo.generation !== generation) throw new GitStaleError()
+      const root = repo.discovered.root
+      const refused = (reason: GitOperationResult['reason'], text: string, extra: Partial<GitOperationResult> = {}): GitOperationResult =>
+        this.outcome({ ok: false, reason, message: text, status: repo.statusView, ...extra })
+      const status = repo.status
+      if (!status || status.entries.some(entry => entry.kind === 'unmerged')) return refused('conflicts', 'Resolve the conflicts and stage the result before committing.')
+      if (!status.entries.some(entry => (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.')) return refused('nothing-staged', 'There is nothing staged to commit.')
+
+      for (const key of ['user.name', 'user.email']) {
+        const configured = await runtime.runner.run({ cwd: root, args: configGetArgs(key), signal })
+        if (!gitSucceeded(configured) || configured.stdout.toString('utf8').trim() === '') {
+          return refused('identity-missing', 'Git does not know who you are. In a terminal, run: git config --global user.name "Your Name" and git config --global user.email "you@example.com", then commit again.')
+        }
+      }
+
+      const inventory = await inspectCommitHooks(runtime.runner, root, signal)
+      if (inventory.hooks.length > 0 && !(await this.options.trustStore.areHooksApproved(root, inventory.hash))) {
+        if (approvedHooksHash !== inventory.hash) {
+          return refused('hooks-need-approval', `This repository has hooks that a commit would run: ${inventory.hooks.join(', ')}.`, { hooks: inventory.hooks, hooksHash: inventory.hash })
+        }
+        await this.options.trustStore.approveHooks(root, inventory.hash)
+      }
+
+      const result = await this.runWithLockWait(runtime, {
+        cwd: root, kind: 'write', args: commitArgs(), stdin: message, signal, timeoutMs: 600_000,
+        onOutput: this.emitter(subscriberId, profileId, repoId, 'commit'),
+      })
+      const fresh = await this.statusAfterWrite(project, repo)
+      if (!gitSucceeded(result)) return { ...this.failure(result, root, 'git commit'), status: fresh }
+      const latest = await runtime.runner.run({ cwd: root, args: logArgs({ limit: 1 }), signal: new AbortController().signal }).then(run => gitSucceeded(run) ? parseLog(run.stdout.toString('utf8'))[0] : undefined, () => undefined)
+      return this.outcome({
+        ok: true, message: latest ? `Committed ${latest.hash.slice(0, 7)}: ${latest.subject}` : 'Committed.', output: tailOutput(result),
+        commit: latest ? { hash: latest.hash, subject: latest.subject } : null, status: fresh,
+      })
+    })
+  }
+
   // ---- shutdown -----------------------------------------------------------------------------------
 
   async dispose(): Promise<void> {
     this.disposed = true
+    for (const controller of this.writeControllers) controller.abort()
     const pending: Promise<void>[] = []
     for (const project of [...this.projects.values()]) {
       if (project.refreshing) pending.push(project.refreshing.catch(() => undefined))

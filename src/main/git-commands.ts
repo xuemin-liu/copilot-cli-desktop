@@ -12,6 +12,36 @@ function boundedInteger(value: number, label: string, max: number): string {
   return String(value)
 }
 
+/** Stage the paths read from stdin (NUL-separated). Deletions and new files are included for those paths. */
+export function stageArgs(): string[] {
+  return ['add', '--pathspec-from-file=-', '--pathspec-file-nul']
+}
+
+/**
+ * Unstage the paths read from stdin. Before the first commit there is no HEAD to restore from, so the entries are removed
+ * from the index instead; the working-tree files stay either way.
+ */
+export function unstageArgs(hasHead: boolean): string[] {
+  return hasHead
+    ? ['restore', '--staged', '--pathspec-from-file=-', '--pathspec-file-nul']
+    : ['rm', '--cached', '-r', '-q', '--ignore-unmatch', '--pathspec-from-file=-', '--pathspec-file-nul']
+}
+
+/** Commit the index. The message comes from stdin, so it is never an argument and cannot be read as an option. */
+export function commitArgs(): string[] {
+  return ['commit', '-F', '-']
+}
+
+export function gitPathArgs(name: string): string[] {
+  assertGitArgument(name, 'path name')
+  return ['rev-parse', '--git-path', name]
+}
+
+export function configGetArgs(key: string): string[] {
+  assertGitArgument(key, 'config key')
+  return ['config', '--get', key]
+}
+
 export function topLevelArgs(): string[] {
   return ['rev-parse', '--show-toplevel']
 }

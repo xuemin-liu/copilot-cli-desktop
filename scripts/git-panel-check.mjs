@@ -2,6 +2,7 @@
 // Drives it with native mouse input against three throwaway repositories and saves a screenshot.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -108,6 +109,7 @@ if (!process.versions.electron) {
       trustStore: new GitTrustStore(join(directory, 'git-trust.json')),
       resolveProject: id => id === PROFILE ? workspace : null,
       onChanged: (_subscriber, profileId, view) => { if (window && !window.isDestroyed()) window.webContents.send('desktop:git-changed', { profileId, view }) },
+      onProgress: (_subscriber, profileId, event) => { if (window && !window.isDestroyed()) window.webContents.send('desktop:git-progress', { profileId, event }) },
       debounceMs: 20, fallbackMs: 120_000,
     })
     window = new BrowserWindow({ width: 460, height: 900, show: false, webPreferences: {
@@ -124,13 +126,16 @@ if (!process.versions.electron) {
     }
     const text = selector => ui(`(document.querySelector(${JSON.stringify(selector)}) || {}).innerText || ''`)
     const click = async selector => {
+      // A missing target is reported as a value, with what the panel was showing, so a failure says where it stopped.
       const point = await ui(`(() => {
         const element = document.querySelector(${JSON.stringify(selector)});
-        if (!element) throw new Error('Missing click target: ' + ${JSON.stringify(selector)});
+        if (!element) return { missing: document.body.innerText.slice(0, 1200) };
         element.scrollIntoView({ block: 'center' });
         const rect = element.getBoundingClientRect();
         return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
       })()`)
+      if (point.missing !== undefined) throw new Error(`No click target ${selector}. The panel showed:
+${point.missing}`)
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
       window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
       window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
@@ -197,7 +202,7 @@ if (!process.versions.electron) {
     results.stagedAndUntracked = true
 
     // 6. Draft commit message builds a prompt from the staged files only.
-    await click('.git-actions button')
+    await clickByText('.git-commit-row button', 'Draft with Copilot')
     await until('window.__inserted.length === 2', 'draft prompt inserted')
     const draft = await ui('window.__inserted[1]')
     assert.match(draft.text, /conventional-commit message/)
@@ -267,7 +272,7 @@ if (!process.versions.electron) {
     await clickByText('.git-tabs button', 'Changes')
     await until('/Staged \\(31\\)/.test(document.body.textContent)', 'delta staged files')
     const insertedBefore = await ui('window.__inserted.length')
-    await click('.git-actions button')
+    await clickByText('.git-commit-row button', 'Draft with Copilot')
     await until(`window.__inserted.length === ${insertedBefore + 1}`, 'draft prompt for delta')
     const stagedDraft = (await ui('window.__inserted.at(-1)')).text
     const headings = (stagedDraft.match(/^### /gm) ?? []).length
@@ -284,6 +289,85 @@ if (!process.versions.electron) {
     await clickByText('.git-entry', 'a.txt')
     await until('!!document.querySelector(".git-diff-add")', 'diff for the screenshot')
     await screenshot('panel.png')
+
+    // 11. Stage and unstage with the row buttons, and "Stage all", against the real repository.
+    const slash = String.fromCharCode(92)
+    const forwardSlashes = path => path.split(slash).join('/')
+    const groups = () => ui('[...document.querySelectorAll(".git-group h3")].map(element => element.textContent)')
+    const gitIn = (...args) => git(alpha, ...args)
+    await click('button[aria-label="Stage a.txt"]')
+    await until('/Staged \\(2\\)/.test(document.body.textContent)', 'a.txt staged')
+    assert.match(gitIn('status', '--porcelain'), /^M[ M] a\.txt$/m, 'the real index changed')
+    await click('button[aria-label="Unstage a.txt"]')
+    await until('/Staged \\(1\\)/.test(document.body.textContent) && /Changes \\(1\\)/.test(document.body.textContent)', 'a.txt unstaged again')
+    assert.equal(await ui('document.body.textContent.includes("Mark resolved")'), false)
+    const untrackedGroup = await ui('[...document.querySelectorAll(".git-group")].find(group => group.getAttribute("aria-label") === "Untracked").querySelector(".git-group-action").textContent')
+    assert.equal(untrackedGroup, 'Stage all')
+    await ui('(() => { const group = [...document.querySelectorAll(".git-group")].find(candidate => candidate.getAttribute("aria-label") === "Untracked"); group.querySelector(".git-group-action").setAttribute("data-pick", "") })()')
+    await click('[data-pick]')
+    await until('/Staged \\(3\\)/.test(document.body.textContent) && !/Untracked/.test(document.body.textContent)', 'stage all untracked')
+    assert.deepEqual((await groups()).map(title => title.replace(/ \(\d+\)/, '')), ['Staged', 'Changes'])
+    results.stageAndUnstage = true
+
+    // 12. Type a message and commit; the real repository gets exactly that commit.
+    await ui('document.querySelector(".git-commit textarea").focus()')
+    window.webContents.insertText('feat: committed from the panel')
+    await until('document.querySelector(".git-commit textarea").value === "feat: committed from the panel"', 'message typed')
+    await screenshot('commit-box.png')
+    const headBefore = gitIn('rev-parse', 'HEAD').trim()
+    await click('.git-commit-button')
+    await until('/Committed [0-9a-f]{7}: feat: committed from the panel/.test(document.querySelector(".git-message-info")?.innerText || "")', 'commit reported')
+    assert.equal(gitIn('log', '-1', '--format=%s').trim(), 'feat: committed from the panel')
+    assert.notEqual(gitIn('rev-parse', 'HEAD').trim(), headBefore)
+    assert.equal(await ui('document.querySelector(".git-commit textarea")?.value ?? ""'), '', 'the message box is cleared')
+    assert.equal(gitIn('diff', '--cached', '--name-only').trim(), '', 'nothing is left staged')
+    results.commit = true
+
+    // 13. A repository hook needs approval first, then runs; a slow hook can be cancelled.
+    const hookPath = join(alpha, '.git', 'hooks', 'pre-commit')
+    const marker = join(directory, 'hook-ran.txt')
+    await mkdir(join(alpha, '.git', 'hooks'), { recursive: true })
+    await writeFile(hookPath, `#!/bin/sh\necho "hook says hi" >&2\necho ran > "${forwardSlashes(marker)}"\n`)
+    await writeFile(join(alpha, 'hooked.txt'), 'x\n')
+    service.requestRefresh(PROFILE)
+    await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "hooked.txt")', 'new file listed')
+    await click('button[aria-label="Stage hooked.txt"]')
+    await until('/Staged \\(1\\)/.test(document.body.textContent)', 'hooked.txt staged')
+    await ui('document.querySelector(".git-commit textarea").focus()')
+    window.webContents.insertText('chore: through a hook')
+    await until('document.querySelector(".git-commit textarea").value === "chore: through a hook"', 'second message typed')
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'hook approval requested')
+    assert.match(await text('.git-hooks'), /pre-commit/)
+    assert.equal(existsSync(marker), false, 'nothing ran before approval')
+    await screenshot('hooks-approval.png')
+    await clickByText('.git-hooks button', 'Allow these hooks')
+    await until('/Committed/.test(document.querySelector(".git-message-info")?.innerText || "")', 'committed after approval')
+    assert.equal(existsSync(marker), true, 'the approved hook ran')
+    assert.equal(gitIn('log', '-1', '--format=%s').trim(), 'chore: through a hook')
+
+    await writeFile(hookPath, '#!/bin/sh\necho "slow hook started"\nsleep 30\n')
+    await writeFile(join(alpha, 'slow.txt'), 'x\n')
+    service.requestRefresh(PROFILE)
+    await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "slow.txt")', 'slow.txt listed')
+    await click('button[aria-label="Stage slow.txt"]')
+    await until('/Staged \\(1\\)/.test(document.body.textContent)', 'slow.txt staged')
+    await ui('document.querySelector(".git-commit textarea").focus()')
+    window.webContents.insertText('chore: never finishes')
+    await until('document.querySelector(".git-commit textarea").value === "chore: never finishes"', 'third message typed')
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'the changed hook is a new question')
+    await clickByText('.git-hooks button', 'Allow these hooks')
+    await until('/slow hook started/.test(document.querySelector(".git-progress")?.innerText || "")', 'the hook output streams into the panel')
+    assert.match(await text('.git-commit-button'), /Committing/)
+    const headBeforeCancel = gitIn('rev-parse', 'HEAD').trim()
+    await clickByText('.git-commit-row button', 'Cancel')
+    await until('/Cancelled/.test(document.querySelector(".git-message-error")?.innerText || "")', 'cancelled')
+    assert.equal(gitIn('rev-parse', 'HEAD').trim(), headBeforeCancel, 'no commit was made')
+    assert.equal(existsSync(join(alpha, '.git', 'index.lock')), false, 'cancelling during a hook leaves no lock behind')
+    assert.equal(await ui('!!document.querySelector(".git-commit textarea")?.value'), true, 'the message is kept for another try')
+    await screenshot('cancelled.png')
+    results.hooksAndCancel = true
     assert.equal(service.hasSubscribers(), true)
     await click('button[aria-label="Close Git panel"]')
     await until('!!document.querySelector("#closed")', 'panel closed')

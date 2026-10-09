@@ -80,6 +80,24 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     if (typeof staged !== 'boolean') throw new Error('Invalid diff side')
     return service.getDiff(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), entryId, staged)
   })
+  const entryIdsArg = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 5_000) throw new Error('Invalid file selection')
+    for (const id of value) if (typeof id !== 'string' || !ENTRY_ID.test(id)) throw new Error('Invalid file')
+    return value as string[]
+  }
+  for (const operation of ['stage', 'unstage'] as const) {
+    handle(`desktop:git-${operation}`, (service, event, profileId: unknown, repoId: unknown, entryIds: unknown, generation: unknown) => {
+      const ids = entryIdsArg(entryIds)
+      const seen = boundedInteger(generation, 'file list version', 0, 1_000_000_000)
+      return service[operation](event.sender.id, profileIdArg(profileId), repoIdArg(repoId), ids, seen)
+    })
+  }
+  handle('desktop:git-commit', (service, event, profileId: unknown, repoId: unknown, message: unknown, generation: unknown, approvedHooksHash: unknown) => {
+    if (typeof message !== 'string' || message.trim() === '' || message.length > 100_000 || message.includes('\0')) throw new Error('Invalid commit message')
+    if (approvedHooksHash !== null && (typeof approvedHooksHash !== 'string' || !CONFIG_HASH.test(approvedHooksHash))) throw new Error('Invalid hooks approval')
+    return service.commit(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), message, boundedInteger(generation, 'file list version', 0, 1_000_000_000), approvedHooksHash)
+  })
+  handle('desktop:git-cancel', (service, event, profileId: unknown, repoId: unknown) => { service.cancel(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)) })
   handle('desktop:git-log', (service, event, profileId: unknown, repoId: unknown, limit: unknown, skip: unknown) =>
     service.getLog(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), boundedInteger(limit, 'limit', 1, 200), boundedInteger(skip, 'offset', 0, 100_000)))
 }

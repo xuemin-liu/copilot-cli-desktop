@@ -200,3 +200,48 @@ test('a missing git executable surfaces as GitUnavailableError', async () => {
   const runner = new GitRunner({ gitPath: 'C:\\definitely\\not\\here\\git.exe', hooksDirectory: join(process.env.TEMP ?? 'C:\\Windows\\Temp', 'git-runner-no-git'), trackProcess: null })
   await assert.rejects(runner.run({ cwd: process.env.TEMP ?? 'C:\\Windows\\Temp', args: ['--version'] }), { name: 'GitUnavailableError' })
 })
+
+test('disableHooks keeps a repository hook from running, and its absence lets it run', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const marker = join(fixture.root, 'hook.marker')
+  const repo = fixture.repo('hooks', (directory) => {
+    mkdirSync(join(directory, '.git', 'hooks'), { recursive: true })
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho ran > "${shellPath(marker)}"\n`)
+  })
+  writeFileSync(join(repo, 'b.txt'), 'b\n')
+  await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['add', '--', 'b.txt'] })
+  const quiet = await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['commit', '-m', 'no hooks'] })
+  assert.equal(quiet.exitCode, 0, quiet.stderr)
+  assert.equal(existsSync(marker), false, 'with hooks disabled the pre-commit hook did not run')
+  writeFileSync(join(repo, 'c.txt'), 'c\n')
+  await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['add', '--', 'c.txt'] })
+  const loud = await fixture.runner.run({ cwd: repo, kind: 'write', args: ['commit', '-m', 'with hooks'] })
+  assert.equal(loud.exitCode, 0, loud.stderr)
+  assert.equal(existsSync(marker), true, 'a write without the override runs the user\'s hooks')
+})
+
+test('onOutput delivers what a hook prints as it arrives, in whole characters', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('stream', (directory) => {
+    mkdirSync(join(directory, '.git', 'hooks'), { recursive: true })
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho "hello 名前 from the hook" >&2\nexit 0\n')
+  })
+  writeFileSync(join(repo, 'b.txt'), 'b\n')
+  await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['add', '--', 'b.txt'] })
+  const seen: string[] = []
+  const result = await fixture.runner.run({ cwd: repo, kind: 'write', args: ['commit', '-m', 'streamed'], onOutput: (stream, text) => { seen.push(`${stream}:${text}`) } })
+  assert.equal(result.exitCode, 0, result.stderr)
+  const text = seen.join('')
+  assert.match(text, /stderr:.*hello 名前 from the hook/s)
+  assert.doesNotMatch(text, /�/, 'no character was split across chunks')
+})
+
+test('a listener that throws never breaks the command it watches', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const result = await fixture.runner.run({ cwd: fixture.root, args: ['--version'], onOutput: () => { throw new Error('listener bug') } })
+  assert.equal(result.exitCode, 0)
+  assert.match(result.stdout.toString(), /^git version/)
+})

@@ -1,8 +1,8 @@
 # Git side tab plan
 
-Status: revision 5. Phase 0 (spikes, runner, parsers, #65) and phase 1a (backend, #66) are merged; results are in
-[git-panel-spikes.md](git-panel-spikes.md). **Phase 1b, the panel UI, is built on `feat/git-panel-phase1b`** and described
-in [git-panel.md](git-panel.md). Phases 2 to 4 have not started. Revision 2 came from an independent review (see
+Status: revision 6. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66) and phase 1b (panel UI, #67) are merged;
+results are in [git-panel-spikes.md](git-panel-spikes.md) and the user-facing behavior is in [git-panel.md](git-panel.md).
+**Phase 2 (stage, unstage, local commit) is built on `feat/git-panel-phase2`.** Phases 3 and 4 have not started. Revision 2 came from an independent review (see
 [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
@@ -372,10 +372,28 @@ header toggle and shortcut, persistence, Add to prompt and Draft message, and th
 
 Ship this when it is useful on its own: review what Copilot just changed.
 
-### Phase 2 — stage, unstage, local commit
+### Phase 2 — stage, unstage, local commit (done)
 
 Stage/unstage with the stdin pathspec path, commit with identity pre-check, hook output
 streaming and Cancel, `index.lock` backoff.
+
+Delivered, with these decisions made while building it:
+
+- **Hooks need approval, which the plan had not required.** A commit runs the repository's own hook files, and the config trust
+  check cannot see them (an unpacked archive can carry a hostile `.git/hooks/pre-commit`). A commit therefore lists the hooks
+  a commit can run and waits for approval of their exact contents (a hash of names and file contents, stored beside the config
+  trust and asked again when anything changes). Staging and unstaging run with hooks switched off.
+- **A bug the tests caught on the way:** the first version found the hooks folder through a read-mode git command, which
+  redirects `core.hooksPath` to an empty folder, so every repository looked hook-free and the commit ran its hooks unapproved.
+  The lookup now asks git without the override (a regression test covers it).
+- **Writes quote the file list they were made from** (a generation number) and are checked again when their turn comes in the
+  per-repository queue, so a click cannot affect a different file than the one shown.
+- **Lock handling:** wait up to ten seconds for another process's `index.lock`, then report it as busy; never delete it. After a
+  Cancel the message tells the person which file to delete if one remains.
+- Commit messages travel on stdin (`commit -F -`), paths on stdin NUL-separated, and the commit never uses `--no-verify`.
+- Progress from a running write streams to the panel (colour codes and carriage returns are removed for display).
+
+Not in phase 2: amending, discarding, and any network operation.
 
 ### Phase 3 — network
 
