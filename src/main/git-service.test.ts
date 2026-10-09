@@ -1625,3 +1625,17 @@ test('before the first commit there is no branch to create or leave', { skip }, 
   assert.deepEqual([result.ok, result.reason], [false, 'failed'])
   assert.match(result.message, /no commits yet/)
 })
+
+test('a branch that shares its name with a tag is listed by its real name and can be switched to', { skip }, async (t) => {
+  const h = await withFeature(t, {}, (f, project) => { f.plain(project, 'tag', 'feature', 'main'); f.plain(project, 'tag', 'main', 'feature') })
+  const { repoId } = await open(h)
+  const branches = await h.service.getBranches(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual(branches.map(branch => branch.name).sort(), ['feature', 'main'], 'the names are the real branch names, not heads/feature')
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(currentBranch(h), 'feature')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'HEAD').trim(), h.fixture.plain(h.project, 'rev-parse', 'refs/heads/feature').trim(), 'it is the branch, not the tag, that was checked out')
+  const created = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'idea', headOf(h))
+  assert.equal(created.ok, true, created.message)
+  assert.equal((await h.service.getBranches(SUBSCRIBER, PROFILE, repoId)).find(branch => branch.current)?.name, 'idea')
+})

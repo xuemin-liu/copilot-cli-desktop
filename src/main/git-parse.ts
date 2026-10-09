@@ -292,7 +292,9 @@ export function parseBranches(output: string, max = 500): GitBranchEntry[] {
     if (result.length >= max) break
     const fields = line.replace(String.fromCharCode(13), '').split(separator)
     if (fields.length !== 7) continue
-    const [head = '', name = '', oid = '', upstream = '', track = '', committed = '', subject = ''] = fields
+    const [head = '', ref = '', oid = '', upstream = '', track = '', committed = '', subject = ''] = fields
+    // The full ref, so a tag or other ref with the same name cannot change what the branch is called.
+    const name = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ''
     if (name === '' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(oid)) continue
     result.push({
       name, current: head === '*', oid, upstream: upstream === '' ? null : upstream,

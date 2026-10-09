@@ -73,15 +73,17 @@ test('branches are read from one line each and parsed with their upstream distan
   const oid = 'a'.repeat(40)
   const line = (...fields: string[]): string => fields.join(unit)
   const output = [
-    line('*', 'main', oid, 'origin/main', 'ahead 2, behind 1', '1700000300', 'newest work'),
-    line(' ', 'feature/x', oid, 'origin/feature/x', '', '1700000200', 'in sync'),
-    line(' ', 'old', oid, 'origin/old', 'gone', '1700000100', 'upstream deleted'),
-    line(' ', 'local', oid, '', '', '1700000000', 'subject with spaces and: punctuation'),
-    line(' ', 'ahead-only', oid, 'origin/a', 'ahead 3', '1700000000', 's'),
-    line(' ', 'behind-only', oid, 'origin/b', 'behind 4', '1700000000', 's'),
+    line('*', 'refs/heads/main', oid, 'origin/main', 'ahead 2, behind 1', '1700000300', 'newest work'),
+    line(' ', 'refs/heads/feature/x', oid, 'origin/feature/x', '', '1700000200', 'in sync'),
+    line(' ', 'refs/heads/old', oid, 'origin/old', 'gone', '1700000100', 'upstream deleted'),
+    line(' ', 'refs/heads/local', oid, '', '', '1700000000', 'subject with spaces and: punctuation'),
+    line(' ', 'refs/heads/ahead-only', oid, 'origin/a', 'ahead 3', '1700000000', 's'),
+    line(' ', 'refs/heads/behind-only', oid, 'origin/b', 'behind 4', '1700000000', 's'),
     'not a branch line',
-    line(' ', 'bad-oid', 'zz', '', '', '1', 's'),
-    line(' ', '', oid, '', '', '1', 's'),
+    line(' ', 'refs/heads/bad-oid', 'zz', '', '', '1', 's'),
+    line(' ', 'refs/heads/', oid, '', '', '1', 's'),
+    line(' ', 'refs/tags/not-a-branch', oid, '', '', '1', 's'),
+    line(' ', 'heads/feature', oid, '', '', '1', 's'),
   ].join(String.fromCharCode(10)) + String.fromCharCode(10)
   const branches = parseBranches(output)
   assert.deepEqual(branches.map(branch => branch.name), ['main', 'feature/x', 'old', 'local', 'ahead-only', 'behind-only'])

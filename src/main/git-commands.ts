@@ -154,11 +154,14 @@ export function upstreamConfigArgs(branch: string, remote: string, remoteBranch:
 
 // ---- branches -----------------------------------------------------------------------------------------------------------
 
-/** The local branches, newest commit first, one per line with fields separated by code 31 (see `parseBranches`). */
+/**
+ * The local branches, newest commit first, one per line with fields separated by code 31 (see `parseBranches`). The name is the
+ * full ref: `%(refname:short)` turns a branch that shares its name with a tag into `heads/<name>`, which no command accepts.
+ */
 export function branchListArgs(): string[] {
   return [
     'for-each-ref', '--count=500', '--sort=-committerdate',
-    '--format=%(HEAD)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track,nobracket)%1f%(committerdate:unix)%1f%(subject)',
+    '--format=%(HEAD)%1f%(refname)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track,nobracket)%1f%(committerdate:unix)%1f%(subject)',
     'refs/heads',
   ]
 }
