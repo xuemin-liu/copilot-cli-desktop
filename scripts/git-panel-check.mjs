@@ -104,7 +104,12 @@ if (!process.versions.electron) {
     const executable = await resolveGitExecutable()
     assert.ok(executable, 'git is required')
     let window
+    // A branch switch rewrites files: the check plays the session-activity gate and the native confirmation.
+    let agentBusy = false
+    const confirmations = []
     const service = new GitService({
+      sessionActivity: () => agentBusy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' },
+      confirm: async (_profileId, request) => { confirmations.push(request); return true },
       getRuntime: async () => ({ executable, runner: new GitRunner({ gitPath: executable.path, hooksDirectory: join(directory, 'no-hooks') }) }),
       trustStore: new GitTrustStore(join(directory, 'git-trust.json')),
       resolveProject: id => id === PROFILE ? workspace : null,
@@ -422,6 +427,33 @@ ${point.missing}`)
     assert.equal(remoteHead('topic'), git(alpha, 'rev-parse', 'HEAD').trim())
     assert.equal(git(alpha, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/topic')
     results.sync = true
+
+    // 15. Branches: create from the panel, then switch (asked first, refused while a session is working).
+    await clickByText('.git-tabs button', 'Branches')
+    await until('document.querySelectorAll(".git-branch-row").length >= 2', 'the branch list loads')
+    assert.match(await text('.git-branch-current'), /topic/, 'the current branch is marked')
+    await ui('document.querySelector("input[aria-label=\\"New branch name\\"]").focus()')
+    window.webContents.insertText('ui-branch')
+    await until('document.querySelector("input[aria-label=\\"New branch name\\"]").value === "ui-branch"', 'branch name typed')
+    await screenshot('branches.png')
+    await clickByText('.git-branch-new button', 'Create and switch')
+    await until('/Created and switched to ui-branch/.test(document.querySelector(".git-message-info")?.innerText || "")', 'branch created')
+    assert.equal(git(alpha, 'branch', '--show-current').trim(), 'ui-branch')
+    await until('/ui-branch/.test(document.querySelector(".git-branch-current")?.innerText || "")', 'the list shows the new current branch')
+    assert.equal(await ui('document.querySelector("input[aria-label=\\"New branch name\\"]").value'), '', 'the name box is cleared')
+
+    agentBusy = true
+    await click('button[aria-label="Switch to main"]')
+    await until('/is working/.test(document.querySelector(".git-message-error")?.innerText || "")', 'a working session blocks the switch')
+    assert.equal(git(alpha, 'branch', '--show-current').trim(), 'ui-branch', 'nothing moved')
+    assert.equal(confirmations.length, 0, 'the person was not even asked')
+    agentBusy = false
+    await click('button[aria-label="Switch to main"]')
+    await until('/Switched to main/.test(document.querySelector(".git-message-info")?.innerText || "")', 'switched')
+    assert.equal(git(alpha, 'branch', '--show-current').trim(), 'main')
+    assert.equal(confirmations.length, 1)
+    assert.equal(confirmations[0].title, 'Switch to "main"?')
+    results.branches = true
     assert.equal(service.hasSubscribers(), true)
     await click('button[aria-label="Close Git panel"]')
     await until('!!document.querySelector("#closed")', 'panel closed')

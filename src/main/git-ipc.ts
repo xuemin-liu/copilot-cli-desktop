@@ -34,6 +34,21 @@ function expectedBranchArg(value: unknown): { branch: string; headOid: string } 
   return { branch, headOid }
 }
 
+/** The current branch (null while detached) and its commit, as the person saw them when they asked for a branch change. */
+function expectedHeadArg(value: unknown): { branch: string | null; headOid: string } {
+  const entry = value as { branch?: unknown; headOid?: unknown } | null
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error('Invalid branch')
+  const { branch, headOid } = entry
+  if (branch !== null && (typeof branch !== 'string' || branch.length < 1 || branch.length > 255 || [...branch].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))) throw new Error('Invalid branch')
+  if (typeof headOid !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headOid)) throw new Error('Invalid commit')
+  return { branch: branch as string | null, headOid }
+}
+
+function branchNameArg(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 255 || value.startsWith('-') || [...value].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) throw new Error('Invalid branch name')
+  return value
+}
+
 function remoteNameArg(value: unknown): string {
   if (typeof value !== 'string' || value.length < 1 || value.length > 200 || value.startsWith('-') || [...value].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) throw new Error('Invalid remote')
   return value
@@ -124,6 +139,13 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     // A pull or push belongs to the branch, at the commit, that the person was looking at when they asked.
     const seen = expectedBranchArg(expected)
     return operation === 'push' ? service.push(...args, remoteName, seen) : service.pull(...args, seen)
+  })
+  handle('desktop:git-branches', (service, event, profileId: unknown, repoId: unknown) =>
+    service.getBranches(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
+  handle('desktop:git-branch', (service, event, profileId: unknown, repoId: unknown, action: unknown, name: unknown, expected: unknown) => {
+    if (action !== 'create' && action !== 'switch') throw new Error('Invalid operation')
+    const args = [event.sender.id, profileIdArg(profileId), repoIdArg(repoId), branchNameArg(name), expectedHeadArg(expected)] as const
+    return action === 'create' ? service.createBranch(...args) : service.switchBranch(...args)
   })
   handle('desktop:git-cancel', (service, event, profileId: unknown, repoId: unknown) => { service.cancel(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)) })
   handle('desktop:git-log', (service, event, profileId: unknown, repoId: unknown, limit: unknown, skip: unknown) =>

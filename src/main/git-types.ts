@@ -110,6 +110,8 @@ export type GitOperationFailure =
   | 'needs-upstream'      // the branch has no upstream yet; `remotes` lists where it could be published
   | 'diverged'            // a pull cannot fast-forward
   | 'rejected'            // the remote refused a push because it has changes the branch lacks
+  | 'agent-working'       // a Copilot session is working in the project, and a branch switch would rewrite files under it
+  | 'local-changes'       // uncommitted changes would be overwritten by the switch; git refused and changed nothing
   | 'hooks-unsupported'   // a hook that would run on push (pre-push) is present, and the panel does not run hooks for push
   | 'failed'               // git exited non-zero; `output` has what it said
 
@@ -132,9 +134,29 @@ export interface GitOperationResult {
 }
 
 /** Output from a running write (for example a commit hook), forwarded as it arrives. */
+/** One local branch, as the Branches tab shows it. */
+export interface GitBranchView {
+  name: string
+  current: boolean
+  oid: string
+  upstream: string | null
+  ahead: number | null
+  behind: number | null
+  upstreamGone: boolean
+  subject: string
+  committedAt: number | null
+}
+
+/** What the person is asked before something that rewrites files; shown by the main process in a native window. */
+export interface GitConfirmRequest {
+  title: string
+  detail: string
+  confirmLabel: string
+}
+
 export interface GitProgressEvent {
   repoId: string
-  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push'
+  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'switch'
   stream: 'stdout' | 'stderr'
   text: string
 }

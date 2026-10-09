@@ -269,3 +269,39 @@ export function parseStagedRaw(output: string): GitStagedRawEntry[] {
   }
   return result
 }
+
+export interface GitBranchEntry {
+  name: string
+  current: boolean
+  oid: string
+  upstream: string | null
+  ahead: number | null
+  behind: number | null
+  /** The upstream is configured but no longer exists on the remote. */
+  upstreamGone: boolean
+  subject: string
+  /** Seconds since the epoch of the branch's last commit. */
+  committedAt: number | null
+}
+
+/** Parse `branchListArgs()` output: one branch per line, fields separated by the unit separator (code 31). */
+export function parseBranches(output: string, max = 500): GitBranchEntry[] {
+  const result: GitBranchEntry[] = []
+  const separator = String.fromCharCode(31)
+  for (const line of output.split(String.fromCharCode(10))) {
+    if (result.length >= max) break
+    const fields = line.replace(String.fromCharCode(13), '').split(separator)
+    if (fields.length !== 7) continue
+    const [head = '', ref = '', oid = '', upstream = '', track = '', committed = '', subject = ''] = fields
+    // The full ref, so a tag or other ref with the same name cannot change what the branch is called.
+    const name = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ''
+    if (name === '' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(oid)) continue
+    result.push({
+      name, current: head === '*', oid, upstream: upstream === '' ? null : upstream,
+      ahead: /ahead (\d+)/.exec(track) ? Number(/ahead (\d+)/.exec(track)?.[1]) : upstream === '' || track.includes('gone') ? null : 0,
+      behind: /behind (\d+)/.exec(track) ? Number(/behind (\d+)/.exec(track)?.[1]) : upstream === '' || track.includes('gone') ? null : 0,
+      upstreamGone: track.includes('gone'), subject, committedAt: /^\d+$/.test(committed) ? Number(committed) : null,
+    })
+  }
+  return result
+}

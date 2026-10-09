@@ -1100,6 +1100,16 @@ button:disabled {
 .git-publish { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid #3a4a66; border-radius: 6px; background: #101725; font-size: 12px; }
 .git-publish p { margin: 0; }
 .git-publish-remote { display: flex; align-items: center; gap: 8px; color: #929baa; }
+.git-branches { display: grid; gap: 8px; padding: 10px; }
+.git-branch-new { display: flex; gap: 6px; }
+.git-branch-new input { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #2a3344; border-radius: 6px; background: #0b0f17; color: #eef2f8; }
+.git-branch-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.git-branch-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 1px solid #1f2733; border-radius: 6px; background: #0e131c; }
+.git-branch-current { border-color: #3a5a9a; background: #101a2c; }
+.git-branch-main { display: grid; gap: 2px; min-width: 0; }
+.git-branch-title { font-weight: 700; color: #eef2f8; overflow-wrap: anywhere; }
+.git-branch-badge { justify-self: start; padding: 0 6px; border-radius: 8px; background: #2c4d86; color: #dfe9ff; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.git-branch-track, .git-branch-subject { color: #929baa; font-size: 11px; overflow-wrap: anywhere; }
 
 .git-review { margin: 8px 10px 0; padding: 10px; border: 1px solid #5a3d1a; border-radius: 6px; background: #2a2418; }
 .git-review h3 { margin: 0 0 6px; font-size: 12px; color: #ffcc80; }

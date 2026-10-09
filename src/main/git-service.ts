@@ -1,10 +1,12 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, configGetArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
+import type { ProjectActivity } from './git-branch.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
-import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStagedRaw, parseStatusV2 } from './git-parse.js'
+import { boundText, groupStatusEntries, parseBranches, parseLog, parseNumstat, parseStagedRaw, parseStatusV2 } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
@@ -13,7 +15,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
+  GitBranchView, GitConfirmRequest, GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -38,6 +40,10 @@ export interface GitServiceOptions {
   lockPollMs?: number
   /** The largest hook that can be hashed for approval; a bigger one can never be approved. Tests lower it. */
   maxHookBytes?: number
+  /** Whether a Copilot session is working in this project. A branch switch is refused while one is. */
+  sessionActivity?(profileId: string): ProjectActivity
+  /** Ask the person in a native window. Without it, anything that needs a confirmation is refused. */
+  confirm?(profileId: string, request: GitConfirmRequest): Promise<boolean>
   /** True while refreshing must not start (shutdown, migration, window hidden). Checked before every refresh. */
   shouldPause?(): boolean
   discover?: typeof discoverRepos
@@ -132,6 +138,12 @@ export function isIndexLockFailure(result: GitRunResult): boolean {
 /** The branch, and the commit on it, that a pull or push was asked for. */
 export interface ExpectedBranch {
   branch: string
+  headOid: string
+}
+
+/** What a branch change was asked from: the current branch (null while detached) and its commit. */
+export interface ExpectedHead {
+  branch: string | null
   headOid: string
 }
 
@@ -841,6 +853,116 @@ export class GitService {
       const message = (/everything up-to-date/i.test(output) ? 'Everything is already up to date.'
         : setUpstream ? `Published ${head} to ${remote} and set it as the upstream.` : `Pushed ${head} to ${remote}/${remoteBranch}.`) + upstreamNote
       return this.outcome({ ok: true, message, output, status })
+    })
+  }
+
+  // ---- branches -----------------------------------------------------------------------------------------------------
+
+  /** The local branches, newest commit first. A read: it runs no hook and changes nothing. */
+  async getBranches(subscriberId: number, profileId: string, repoId: string): Promise<GitBranchView[]> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
+    return this.readBranches(runtime, repo.discovered.root, project.abort.signal)
+  }
+
+  private async readBranches(runtime: GitRuntime, root: string, signal: AbortSignal): Promise<GitBranchView[]> {
+    const result = await runtime.runner.run({ cwd: root, args: branchListArgs(), signal, timeoutMs: 15_000 })
+    if (!gitSucceeded(result)) throw new Error(describeFailure(result, 'git for-each-ref', root))
+    return parseBranches(result.stdout.toString('utf8'))
+  }
+
+  /** Create a branch at the current commit and switch to it. No file changes, so no confirmation; a branch name is all it needs. */
+  createBranch(subscriberId: number, profileId: string, repoId: string, name: string, expected: ExpectedHead): Promise<GitOperationResult> {
+    return this.changeBranch('create', subscriberId, profileId, repoId, name, expected)
+  }
+
+  /**
+   * Switch to another local branch. This rewrites files under any Copilot session working in the project, so it is refused while
+   * one is working and otherwise needs the person's confirmation in a native window. Git itself refuses, and changes nothing, when
+   * uncommitted changes would be overwritten: the panel never passes `--force` or `--merge`.
+   */
+  switchBranch(subscriberId: number, profileId: string, repoId: string, name: string, expected: ExpectedHead): Promise<GitOperationResult> {
+    return this.changeBranch('switch', subscriberId, profileId, repoId, name, expected)
+  }
+
+  private async changeBranch(kind: 'create' | 'switch', subscriberId: number, profileId: string, repoId: string, name: string, expected: ExpectedHead): Promise<GitOperationResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    if (typeof name !== 'string' || name.includes('\0')) throw new Error('Invalid branch name')
+    return this.enqueueWrite(repo, async signal => {
+      await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
+      const root = repo.discovered.root
+      const branch = repo.status?.branch
+      if (!branch) throw new Error('This repository is not available')
+      const refused = (reason: GitOperationResult['reason'], text: string): GitOperationResult =>
+        this.outcome({ ok: false, reason, message: text, status: repo.statusView })
+      const read = async (args: string[]): Promise<string | null> => {
+        const result = await runtime.runner.run({ cwd: root, args, signal, timeoutMs: 15_000 })
+        return gitSucceeded(result) ? result.stdout.toString('utf8').trim() : null
+      }
+      // The person chose this from a branch at a commit. If another tool has moved on, nothing happens.
+      const moved = (head: string | null, oid: string | null): boolean => expected.branch !== head || expected.headOid !== oid
+      if (branch.oid === null) return refused('failed', 'There are no commits yet. Make the first commit before creating or switching branches.')
+      if (moved(branch.head, branch.oid)) throw new GitStaleError('The branch changed since you last looked. Check it, then try again.')
+
+      const verb = kind === 'create' ? 'create' : 'switch'
+      if (kind === 'create') {
+        const problem = branchNameProblem(name)
+        if (problem) return refused('failed', problem)
+        if (!gitSucceeded(await runtime.runner.run({ cwd: root, args: refFormatArgs(name), signal, timeoutMs: 15_000 }))) return refused('failed', 'That is not a valid branch name.')
+      }
+      const branches = await this.readBranches(runtime, root, signal)
+      if (kind === 'create' && branches.some(item => item.name === name)) return refused('failed', 'A branch with that name already exists.')
+      if (kind === 'switch') {
+        const target = branches.find(item => item.name === name)
+        if (!target) return refused('failed', `There is no local branch "${name}".`)
+        if (target.current) return refused('failed', `You are already on "${name}".`)
+        const working = this.options.sessionActivity?.(profileId)
+        if (working?.busy) return refused('agent-working', `${working.detail}. Switching branches rewrites files under it. Wait for it to finish, then switch.`)
+        if (!this.options.confirm) return refused('failed', 'Switching branches needs a confirmation window, which is not available.')
+        const changes = repo.statusView?.totalEntries ?? 0
+        const confirmed = await this.options.confirm(profileId, {
+          title: `Switch to "${name}"?`,
+          detail: `${repo.discovered.relativePath === '.' ? 'This repository' : repo.discovered.relativePath} will move from "${branch.head ?? 'a detached commit'}" to "${name}", and the files in your folder will change to match it.\n\n`
+            + (changes > 0 ? `${changes} uncommitted change${changes === 1 ? '' : 's'} stay in your folder. If any of them would be overwritten, Git refuses and nothing is changed.` : 'There are no uncommitted changes.'),
+          confirmLabel: 'Switch branch',
+        })
+        if (!confirmed) return this.outcome({ ok: false, reason: 'cancelled', message: 'Not switched.', status: repo.statusView })
+      }
+
+      const emit = this.emitter(subscriberId, profileId, repoId, 'switch')
+      let result: GitRunResult
+      try {
+        result = await this.runWithLockWait(runtime, {
+          cwd: root, kind: 'write', disableHooks: true, args: kind === 'create' ? createBranchArgs(name) : switchArgs(name), signal, timeoutMs: 120_000, onOutput: emit,
+        }, async () => {
+          // A confirmation window can stay open for a long time, and a lock wait for seconds: before every attempt it must still be the
+          // branch, at the commit, that was confirmed, and (for a switch) no session may have started working meanwhile.
+          await this.requireGate(project, repo, runtime, signal)
+          const headRef = await read(headRefArgs())
+          const head = headRef === null ? null : headRef.startsWith('refs/heads/') ? headRef.slice('refs/heads/'.length) : headRef
+          if (moved(head, await read(['rev-parse', 'HEAD']))) throw new GitStaleError('The branch changed while you were deciding. Nothing was switched. Check it, then try again.')
+          const working = kind === 'switch' ? this.options.sessionActivity?.(profileId) : undefined
+          if (working?.busy) throw new WriteRefused(refused('agent-working', `${working.detail}. Switching branches rewrites files under it. Wait for it to finish, then switch.`))
+        })
+      } catch (error) {
+        if (error instanceof WriteRefused) return error.result
+        throw error
+      }
+      const status = await this.statusAfterWrite(project, repo)
+      if (!gitSucceeded(result)) {
+        if (result.cancelled) return this.outcome({ ok: false, reason: 'cancelled', message: 'Cancelled.', output: tailOutput(result), status })
+        if (isIndexLockFailure(result)) return { ...this.failure(result, root, `git ${verb}`), status }
+        const failed = describeSwitchFailure(result, kind)
+        return this.outcome({ ok: false, reason: failed.reason, message: failed.message, output: tailOutput(result), status })
+      }
+      return this.outcome({ ok: true, message: kind === 'create' ? `Created and switched to ${name}.` : `Switched to ${name}.`, output: tailOutput(result), status })
     })
   }
 

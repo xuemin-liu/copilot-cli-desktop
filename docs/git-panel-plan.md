@@ -1,9 +1,10 @@
 # Git side tab plan
 
-Status: revision 7. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67) and phase 2
-(stage, unstage, local commit, #68) are merged;
+Status: revision 8. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67), phase 2
+(stage, unstage, local commit, #68) and phase 3 (fetch, pull, push, #69) are merged;
 results are in [git-panel-spikes.md](git-panel-spikes.md) and the user-facing behavior is in [git-panel.md](git-panel.md).
-**Phase 3 (fetch, pull, push) is built on `feat/git-panel-phase3`.** Phase 4 has not started. Revision 2 came from an independent review (see
+**Phase 4 is split in two, like phase 1: 4a (branches: list, create, switch) is built on `feat/git-panel-phase4`; 4b (amend, per-file
+discard with snapshot and native confirmation, untracked deletion, "Discard all") has not started.** Revision 2 came from an independent review (see
 [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
@@ -455,7 +456,29 @@ Not in phase 3, on purpose:
 ### Phase 4 — branches and destructive actions
 
 Branch list, create, checkout (gated as above), amend, per-file discard with snapshot and
-native confirmation. "Discard all" and untracked deletion last.
+native confirmation. "Discard all" and untracked deletion last. Delivered in two pull requests: **4a (branches)** and **4b (amend and
+discard)**, so the riskiest, data-losing half gets its own review.
+
+#### Phase 4a — branches
+
+One read channel (`desktop:git-branches`) and one write channel (`desktop:git-branch`: `create` or `switch`, a branch name, and the
+current branch and commit the person was looking at), a Branches tab, and two new service options. Decisions, each with a test that
+fails without it:
+
+- **Create is free, switch is gated.** Creating a branch at HEAD changes no file, so it only needs a valid name (the panel's rules,
+  then `git check-ref-format refs/heads/<name>` on the literal name so `@{-1}` shorthand is never expanded). Switching rewrites files
+  under whatever is working in the folder, so `GitServiceOptions.sessionActivity` decides first and `confirm` (a native
+  `dialog.showMessageBox` parented to the main window, supplied by `main.ts`) asks second. Without `confirm` the switch is refused:
+  it fails closed.
+- **What counts as "working"** (`projectActivity`, pure and tested): a live tab of this workspace that is `working`, `starting`,
+  `approval-needed`, or `running` with no activity signal and output in the last 60 seconds. Observed `idle` wins over recent output.
+- **The lesson from phase 3 applied from the start:** a confirmation window can stay open for a long time, so before every attempt of
+  the switch (after the answer, and on each `index.lock` retry) main re-checks the trust gate, that HEAD is still the confirmed
+  branch at the confirmed commit (`GitStaleError`), and that no session has started working.
+- **Git stays the safety net:** `git switch --no-guess --no-recurse-submodules <branch>` with no `--force`, `--merge` or
+  `--discard-changes`; an overwrite is refused by Git and reported as `local-changes` with "Nothing was changed". The target must be in
+  the freshly read local branch list and not the current one. Hooks are switched off (`post-checkout` would run a repository program).
+- **Not in 4a:** remote branches, deleting or renaming a branch, and the amend/discard half (4b).
 
 ### Later
 

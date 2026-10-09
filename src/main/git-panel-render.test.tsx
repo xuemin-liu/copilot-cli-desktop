@@ -7,8 +7,10 @@ import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
 import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
+import { GitBranchList, upstreamLabel } from '../renderer/components/GitBranchList.js'
+import type { GitBranchListProps } from '../renderer/components/GitBranchList.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
-import type { GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
 
 const diff = (text: string, extra: Partial<GitDiff> = {}): GitDiff => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 1, ...extra })
 
@@ -207,4 +209,47 @@ test('publishing a branch names the branch and the remote, and is a separate con
   assert.match(asking, /Publish to fork</)
   assert.match(asking, />Not now</)
   assert.doesNotMatch(syncBar(), /alertdialog/, 'no prompt unless a push asked for one')
+})
+
+const branch = (extra: Partial<GitBranchView> = {}): GitBranchView => ({ name: 'main', current: false, oid: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, subject: 'work', committedAt: 1, ...extra })
+const branchList = (extra: Partial<GitBranchListProps> = {}): string => renderToStaticMarkup(
+  <GitBranchList branches={[branch({ name: 'main', current: true }), branch({ name: 'feature/x', upstream: null, ahead: null, behind: null, subject: 'in progress' })]} error={null}
+    locked={false} lockedReason={null} newName="" onNewNameChange={() => undefined} onCreate={() => undefined} onSwitch={() => undefined} {...extra} />)
+
+test('the branch list marks the current branch, offers Switch for the others, and shows how far each is from its upstream', () => {
+  const list = branchList()
+  assert.match(list, /git-branch-current[^>]*>.*main.*current/s)
+  assert.equal((list.match(/>Switch</g) ?? []).length, 1, 'no Switch for the current branch')
+  assert.match(list, /aria-label="Switch to feature\/x"/)
+  assert.match(list, /local only/)
+  assert.match(list, /origin\/main · in sync/)
+  assert.equal(upstreamLabel(branch({ ahead: 2, behind: 1 })), 'origin/main ↑2 ↓1')
+  assert.equal(upstreamLabel(branch({ ahead: 0, behind: 3 })), 'origin/main ↓3')
+  assert.equal(upstreamLabel(branch({ upstreamGone: true })), 'upstream gone')
+  assert.equal(upstreamLabel(branch({ upstream: null, ahead: null, behind: null })), 'local only')
+})
+
+test('branch names from a repository are shown as text, never as markup', () => {
+  const list = branchList({ branches: [branch({ name: '<img src=x onerror=alert(1)>', subject: '<script>boom</script>' })] })
+  assert.doesNotMatch(list, /<img|<script/)
+  assert.match(list, /&lt;img/)
+})
+
+test('creating a branch needs a valid name, and everything is locked while a write runs', () => {
+  assert.match(branchList({ newName: '' }), /<button[^>]*disabled[^>]*>Create and switch/)
+  assert.doesNotMatch(branchList({ newName: 'idea' }), /<button[^>]*disabled[^>]*>Create and switch/)
+  const bad = branchList({ newName: 'has space' })
+  assert.match(bad, /<button[^>]*disabled[^>]*>Create and switch/)
+  assert.match(bad, /cannot contain spaces/)
+  const locked = branchList({ newName: 'idea', locked: true })
+  assert.match(locked, /<button[^>]*disabled[^>]*>Create and switch/)
+  assert.match(locked, /<button[^>]*disabled[^>]*>Switch</)
+  assert.match(branchList({ locked: true, lockedReason: 'There are no commits yet.' }), /There are no commits yet\./)
+})
+
+test('the branch list says when it is loading, empty, or failed', () => {
+  assert.match(branchList({ branches: null }), /Loading branches…/)
+  assert.match(branchList({ branches: [] }), /No branches yet\./)
+  assert.match(branchList({ branches: null, error: 'git failed' }), /git failed/)
+  assert.doesNotMatch(branchList({ branches: null, error: 'git failed' }), /Loading branches/)
 })
