@@ -76,12 +76,41 @@ export interface CommitPromptPart {
   diff: GitDiffView
 }
 
-/** A prompt asking Copilot to draft a commit message for the staged files, sharing the budget fairly between them. */
-export function composeCommitMessagePrompt(input: { repoName: string; branch: string | null; parts: readonly CommitPromptPart[] }): string {
+/** Names that fit in `maxChars`, whole, then how many more there are. */
+export function listNames(paths: readonly string[], maxChars: number): string {
+  const kept: string[] = []
+  let used = 0
+  for (const path of paths) {
+    const next = used + path.length + 2
+    if (kept.length > 0 && next > maxChars) break
+    kept.push(path.length > 120 ? `…${path.slice(-119)}` : path)
+    used = next
+  }
+  const rest = paths.length - kept.length
+  return kept.join(', ') + (rest > 0 ? `, and ${rest} more` : '')
+}
+
+export interface CommitPromptInput {
+  repoName: string
+  branch: string | null
+  /** Staged files whose diffs were read. */
+  parts: readonly CommitPromptPart[]
+  /** Staged files whose diffs were not read (the panel reads a bounded number). They are still named and counted. */
+  omitted?: readonly string[]
+  /** The status list itself was cut off, so there may be staged files the panel does not know about. */
+  listTruncated?: boolean
+}
+
+/**
+ * A prompt asking Copilot to draft a commit message for the staged files, sharing the budget fairly between them. Every
+ * staged file the caller knows about appears either with its diff or in the closing note, with an accurate count, so a
+ * message is never drafted from part of a commit without saying so.
+ */
+export function composeCommitMessagePrompt(input: CommitPromptInput): string {
   const intro = `Write a concise conventional-commit message (a subject under 72 characters, then a short body only if it helps) for these staged changes in \`${input.repoName}\`${input.branch ? ` on branch \`${input.branch}\`` : ''}. Reply with only the message.\n`
   const sections: string[] = []
   // Room for the closing note about files that did not fit.
-  let remaining = PROMPT_BUDGET - intro.length - 420
+  let remaining = PROMPT_BUDGET - intro.length - 900
   // Show as many files as can each get a useful share; the rest are listed by name at the end.
   const showable = Math.max(1, Math.min(input.parts.length, Math.floor(remaining / 700)))
   const notes = new Set<string>()
@@ -90,17 +119,16 @@ export function composeCommitMessagePrompt(input: { repoName: string; branch: st
     const share = Math.floor(remaining / (showable - index))
     const body = bodyFor(part.path, part.diff, share - label.length - 40)
     for (const note of body.notes) notes.add(note)
-    const section = `
-### ${label}
-${FENCE}diff
-${body.text}
-${FENCE}
-`
+    const section = `\n### ${label}\n${FENCE}diff\n${body.text}\n${FENCE}\n`
     sections.push(section)
     remaining -= section.length
   }
   const shown = Math.min(showable, input.parts.length)
-  const left = input.parts.length - shown
-  const tail = [...notes].join(' ') + (left > 0 ? `${notes.size ? ' ' : ''}${left} more staged file${left === 1 ? '' : 's'} not shown: ${input.parts.slice(shown).map(part => part.path).join(', ').slice(0, 300)}` : '')
+  const notShown = [...input.parts.slice(shown).map(part => part.path), ...(input.omitted ?? [])]
+  const tail = [
+    ...notes,
+    ...(notShown.length > 0 ? [`${notShown.length} more staged file${notShown.length === 1 ? '' : 's'} not shown: ${listNames(notShown, 400)}.`] : []),
+    ...(input.listTruncated ? ['The status list was cut off, so there may be more staged files that are not named here.'] : []),
+  ].join(' ')
   return intro + sections.join('') + (tail ? `\n${tail}\n` : '')
 }

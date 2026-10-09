@@ -77,6 +77,22 @@ if (!process.versions.electron) {
     await writeFile(join(alpha, 'b.txt'), 'bee\nbuzz\n'); git(alpha, 'add', 'b.txt') // staged change
     await writeFile(join(alpha, 'new.txt'), 'hello\n')               // untracked
     git(join(workspace, 'gamma'), 'config', 'core.sshCommand', 'ssh -i check') // needs review
+    // A second setting hides a command behind 220 spaces: the review card must show all of it.
+    git(join(workspace, 'gamma'), 'config', 'filter.review.clean', `cat${' '.repeat(220)}; echo HIDDEN-COMMAND > review-marker.txt`)
+
+    // delta: 120 commits for history paging, and 31 staged files for the commit-message prompt.
+    const delta = join(workspace, 'delta')
+    await mkdir(delta)
+    git(delta, 'init', '-q')
+    let stream = ''
+    for (let index = 1; index <= 120; index++) {
+      const message = `commit ${index}`
+      stream += `commit refs/heads/main\ncommitter Check <check@example.com> ${1_700_000_000 + index} +0000\ndata ${message.length}\n${message}\n${index === 1 ? 'M 100644 inline base.txt\ndata 5\nbase\n' : ''}\n`
+    }
+    execFileSync('git', ['fast-import', '--quiet'], { cwd: delta, env: process.env, input: stream })
+    git(delta, 'reset', '-q', '--hard', 'main')
+    for (let index = 0; index < 31; index++) await writeFile(join(delta, `extra-${index}.txt`), `extra ${index}\n`)
+    git(delta, 'add', '.')
 
     const { GitService } = await import('../dist/src/main/git-service.js')
     const { GitRunner, resolveGitExecutable } = await import('../dist/src/main/git-runner.js')
@@ -111,7 +127,7 @@ if (!process.versions.electron) {
       const point = await ui(`(() => {
         const element = document.querySelector(${JSON.stringify(selector)});
         if (!element) throw new Error('Missing click target: ' + ${JSON.stringify(selector)});
-        element.scrollIntoView({ block: 'nearest' });
+        element.scrollIntoView({ block: 'center' });
         const rect = element.getBoundingClientRect();
         return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
       })()`)
@@ -143,9 +159,9 @@ if (!process.versions.electron) {
 
     // 1. The panel opens on the repository with changes and lists the others.
     await until('!!document.querySelector(".git-repo-selected")', 'repositories listed')
-    assert.match(await text('.git-panel-sub'), /3 repositories/)
+    assert.match(await text('.git-panel-sub'), /4 repositories/)
     assert.match(await text('.git-repo-selected'), /alpha/)
-    assert.deepEqual(await ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)'), ['alpha', 'beta', 'gamma'])
+    assert.deepEqual(await ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)'), ['alpha', 'beta', 'delta', 'gamma'])
     results.repositories = true
 
     // 2. Staged, changed and untracked files are grouped.
@@ -211,11 +227,55 @@ if (!process.versions.electron) {
     await clickByText('.git-repo', 'gamma')
     await until('!!document.querySelector(".git-review")', 'review card')
     assert.match(await text('.git-review'), /core\.sshcommand/)
+    // Trust accepts the whole value, so the card shows the whole value: the command after the padding is on screen.
+    const card = await ui('document.querySelector(".git-review").textContent')
+    assert.match(card, /HIDDEN-COMMAND > review-marker\.txt/)
+    assert.match(card, /⟦220 spaces⟧/)
+    assert.doesNotMatch(card, /cat…/)
     assert.equal(await ui('!!document.querySelector(".git-tabs")'), false, 'nothing of the repository is shown before it is trusted')
     await screenshot('needs-review.png')
     await click('.git-review button')
     await until('!document.querySelector(".git-review") && !!document.querySelector(".git-tabs")', 'trusted repository opens')
     results.trustReview = true
+
+    // 9b. History pages without overlap, even when "Load more" is clicked twice while a page is still loading.
+    const realGetLog = service.getLog.bind(service)
+    service.getLog = async (...args) => { await delay(900); return realGetLog(...args) }
+    await clickByText('.git-repo', 'delta')
+    await until('!!document.querySelector(".git-tabs")', 'delta opens')
+    await clickByText('.git-tabs button', 'History')
+    await until('document.querySelectorAll(".git-log li").length === 50', 'first page of history')
+    await click('.git-history > button')
+    await until('document.querySelector(".git-history > button")?.disabled === true', 'Load more is disabled while the page loads')
+    assert.match(await text('.git-history > button'), /Loading/)
+    await click('.git-history > button')
+    await until('document.querySelectorAll(".git-log li").length >= 100', 'second page appended')
+    await delay(1600)
+    const hashes = () => ui('[...document.querySelectorAll(".git-log-meta code")].map(element => element.innerText)')
+    let seen = await hashes()
+    assert.equal(seen.length, 100, 'two quick clicks append one page, not two')
+    assert.equal(new Set(seen).size, 100, 'no commit is listed twice')
+    await click('.git-history > button')
+    await until('document.querySelectorAll(".git-log li").length === 120', 'last page appended')
+    seen = await hashes()
+    assert.equal(new Set(seen).size, 120, 'every commit is listed exactly once and none is skipped')
+    assert.equal(await ui('!document.querySelector(".git-history > button")'), true, 'no Load more once the history is complete')
+    service.getLog = realGetLog
+    results.historyPaging = true
+
+    // 9c. The commit-message prompt accounts for every staged file, including those whose diffs were not read.
+    await clickByText('.git-tabs button', 'Changes')
+    await until('/Staged \\(31\\)/.test(document.body.textContent)', 'delta staged files')
+    const insertedBefore = await ui('window.__inserted.length')
+    await click('.git-actions button')
+    await until(`window.__inserted.length === ${insertedBefore + 1}`, 'draft prompt for delta')
+    const stagedDraft = (await ui('window.__inserted.at(-1)')).text
+    const headings = (stagedDraft.match(/^### /gm) ?? []).length
+    const stated = Number(/(\d+) more staged files? not shown/.exec(stagedDraft)?.[1] ?? 0)
+    assert.equal(headings + stated, 31, `${headings} diffs shown + ${stated} stated omitted must be all 31`)
+    assert.ok(stagedDraft.includes('extra-30.txt'), 'the last staged file appears in the prompt')
+    assert.ok(stagedDraft.length <= 11_000)
+    results.draftAccountsForEveryFile = true
 
     // 10. Back to alpha for the screenshot, then close: the panel tells the main process to stop.
     await clickByText('.git-repo', 'alpha')

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt } from '../../main/git-prompt.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
 import { GitDiffView } from './GitDiffView.js'
+import { GitReviewCard } from './GitReviewCard.js'
 
 export interface GitPanelProps {
   profileId: string
@@ -115,7 +116,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
-  const [log, setLog] = useState<{ repoId: string; entries: GitLogEntry[]; done: boolean } | null>(null)
+  const [log, setLog] = useState<{ repoId: string; headOid: string | null; entries: GitLogEntry[]; done: boolean } | null>(null)
+  // The "Load more" request in flight, if any. Only one at a time, and a response only extends the list it was asked for.
+  const moreRequest = useRef<number | null>(null)
+  const moreCounter = useRef(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [logError, setLogError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -163,16 +168,30 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   useEffect(() => {
     if (tab !== 'history' || !repo || repo.state !== 'ready') return
     let stale = false
+    // A new first page replaces the list, so any page still loading for the old one no longer applies.
+    moreRequest.current = null
+    setLoadingMore(false)
     window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, 0)
-      .then(entries => { if (!stale) { setLog({ repoId: repo.id, entries, done: entries.length < HISTORY_PAGE }); setLogError(null) } })
+      .then(entries => { if (!stale) { setLog({ repoId: repo.id, headOid: repo.headOid, entries, done: entries.length < HISTORY_PAGE }); setLogError(null) } })
       .catch((cause: unknown) => { if (!stale) setLogError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
   const loadMore = (): void => {
-    if (!repo || !log) return
-    window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, log.entries.length)
-      .then(more => setLog(current => current && current.repoId === repo.id ? { ...current, entries: [...current.entries, ...more], done: more.length < HISTORY_PAGE } : current))
+    if (!repo || !log || moreRequest.current !== null) return
+    const { repoId, headOid } = log
+    const skip = log.entries.length
+    const id = ++moreCounter.current
+    moreRequest.current = id
+    setLoadingMore(true)
+    window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, skip)
+      .then(more => setLog(current => {
+        // Extend only the very list this page continues: same repository, same commit, and nothing added since.
+        if (!current || current.repoId !== repoId || current.headOid !== headOid || current.entries.length !== skip) return current
+        const known = new Set(current.entries.map(entry => entry.hash))
+        return { ...current, entries: [...current.entries, ...more.filter(entry => !known.has(entry.hash))], done: more.length < HISTORY_PAGE }
+      }))
       .catch((cause: unknown) => setLogError(errorMessage(cause)))
+      .finally(() => { if (moreRequest.current === id) { moreRequest.current = null; setLoadingMore(false) } })
   }
 
   const chooseRepo = (next: GitRepoSummary): void => {
@@ -199,12 +218,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
   const draftMessage = (): void => {
     if (!repo || !currentStatus || !promptTarget) return
-    const staged = currentStatus.staged.slice(0, MAX_DRAFT_FILES)
+    // Read a bounded number of diffs, but hand the composer the whole staged inventory so it can name and count the rest.
+    const read = currentStatus.staged.slice(0, MAX_DRAFT_FILES)
+    const omitted = currentStatus.staged.slice(MAX_DRAFT_FILES).map(entry => entry.path)
     setWorking(true)
     setActionError(null)
-    Promise.all(staged.map(entry => window.copilotDesktop.gitDiff(profileId, repo.id, entry.id, true).then(value => ({ path: entry.path, diff: value }))))
+    Promise.all(read.map(entry => window.copilotDesktop.gitDiff(profileId, repo.id, entry.id, true).then(value => ({ path: entry.path, diff: value }))))
       .then(parts => {
-        insert(promptTarget.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts }))
+        insert(promptTarget.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts, omitted, listTruncated: currentStatus.truncated }))
         setNotice(`Asked “${promptTarget.title}” to draft a commit message. Review the prompt and press Enter to send.`)
       })
       .catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setWorking(false))
@@ -250,16 +271,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
             </div>
           )}
 
-          {repo.state === 'needs-review' && (
-            <section className="git-review" aria-label="Review repository settings">
-              <h3>This repository needs your review</h3>
-              <p>Its own settings can make Git run programs. Nothing in it has been read yet. Trust it only if you recognise these settings.</p>
-              <ul>
-                {repo.reviewItems.map(item => <li key={`${item.key}=${item.value}`}><code>{item.key}</code> = <code>{item.value.length > 200 ? `${item.value.slice(0, 200)}…` : item.value}</code></li>)}
-              </ul>
-              <button type="button" className="primary-button" disabled={working} onClick={trust}>Trust this repository</button>
-            </section>
-          )}
+          {repo.state === 'needs-review' && <GitReviewCard items={repo.reviewItems} working={working} onTrust={trust} />}
 
           {repo.state === 'error' && <p className="git-message git-message-error" role="alert">{repo.error ?? 'This repository could not be read.'}</p>}
 
@@ -329,7 +341,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       ))}
                     </ol>
                   )}
-                  {log && log.repoId === repo.id && !log.done && <button type="button" onClick={loadMore}>Load more</button>}
+                  {log && log.repoId === repo.id && !log.done && <button type="button" disabled={loadingMore} onClick={loadMore}>{loadingMore ? 'Loading…' : 'Load more'}</button>}
                 </div>
               )}
             </>

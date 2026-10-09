@@ -17,14 +17,17 @@ debug browser sees it). Close it the same way. Its width and open state are reme
   starts or finishes working), when the window regains focus, and every 20 seconds as a fallback. **↻** rescans the folder.
 - **Diff.** Select a file to see its diff, coloured by line. Untracked files are shown as all-added. Binary files, folders
   and very large files show a notice instead of content.
-- **History.** The latest commits, 50 at a time.
+- **History.** The latest commits, 50 at a time. **Load more** waits for the page in flight, so a double click never lists a
+  commit twice or skips one.
 
 ## Giving context to Copilot
 
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
   Enter. The text is kept under 11,000 characters and says how many lines were left out.
 - **Draft commit message with Copilot** (shown when files are staged) puts a prompt in the box asking for a
-  conventional-commit message, with the staged diffs shared fairly between files.
+  conventional-commit message. It reads up to 30 staged diffs and shares the space between them; every other staged file is
+  still named and counted in the prompt, and a note says if the file list itself was cut off, so a message is never drafted
+  from part of a commit without saying so.
 - Files that look like they hold secrets (`.env*`, `*.pem`, `*.key`, `id_rsa`, `secrets*`, `.npmrc` and similar) are named
   but their contents are never added. Values that look like credentials in other files are replaced with `[REDACTED]`.
   This is a safeguard for the common shapes, not a guarantee.
@@ -36,7 +39,9 @@ A repository's own settings (`.git/config`) can make Git run programs: clean fil
 helpers, a custom excludes or attributes file, includes, URL rewrites and similar. Because opening a repository you did not
 create can then run something, the panel does not read such a repository until you have looked at those settings.
 
-It lists them and offers **Trust this repository**. Your choice is remembered for that folder and those exact settings; if
+It lists them **in full** and offers **Trust this repository**. Trusting accepts the whole value of every setting, so nothing is
+shortened: a long run of spaces, a line break or an invisible character is spelled out in ⟦ ⟧ marks, so a command cannot hide
+behind padding. A setting longer than 8,000 characters cannot be trusted from the panel at all; inspect it in a terminal. Your choice is remembered for that folder and those exact settings; if
 they change, you are asked again. The standard Git LFS settings do not need review.
 
 A repository whose `.git` points at a network share, links elsewhere, or names objects outside local storage is shown as an

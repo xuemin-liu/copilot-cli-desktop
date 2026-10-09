@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, fitLines, looksSensitivePath, maskSecrets } from './git-prompt.js'
+import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, fitLines, listNames, looksSensitivePath, maskSecrets } from './git-prompt.js'
 import type { GitDiffView } from './git-types.js'
 
 const textDiff = (text: string, extra: Partial<GitDiffView> = {}): GitDiffView => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 0, ...extra })
@@ -91,4 +91,49 @@ test('the commit-message prompt withholds secrets files and masks values in the 
   assert.doesNotMatch(prompt, /zzz|ghp_abcdef/)
   assert.match(prompt, /contents withheld/)
   assert.match(prompt, /replaced with \[REDACTED\]/)
+})
+
+test('listNames keeps whole names and counts what it left out', () => {
+  assert.equal(listNames(['a.ts', 'b.ts'], 100), 'a.ts, b.ts')
+  const many = Array.from({ length: 50 }, (_item, index) => `src/file-${index}.ts`)
+  const listed = listNames(many, 100)
+  assert.match(listed, /, and \d+ more$/)
+  assert.ok(listed.length < 160)
+  assert.equal(listNames([], 100), '')
+})
+
+test('staged files whose diffs were not read are still named and counted', () => {
+  const read = Array.from({ length: 30 }, (_item, index) => ({ path: `extra-${index}.txt`, diff: textDiff(`+line ${index}`) }))
+  const prompt = composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: read, omitted: ['extra-30.txt'] })
+  // The composer shows as many diffs as fit; every other file, including the one never read, is counted and named.
+  const shown = (prompt.match(/^### /gm) ?? []).length
+  const stated = Number(/(\d+) more staged files? not shown/.exec(prompt)?.[1])
+  assert.equal(shown + stated, 31, `${shown} shown + ${stated} stated`)
+  assert.ok(prompt.includes('extra-30.txt'), 'the last file appears in the prompt')
+  assert.ok(prompt.length <= PROMPT_BUDGET)
+})
+
+test('the omitted count adds up whatever mix of budget cuts and unread files there is', () => {
+  const read = Array.from({ length: 30 }, (_item, index) => ({ path: `big-${index}.txt`, diff: textDiff(manyLines(80)) }))
+  const omitted = Array.from({ length: 17 }, (_item, index) => `unread-${index}.txt`)
+  const prompt = composeCommitMessagePrompt({ repoName: 'app', branch: null, parts: read, omitted })
+  const shown = (prompt.match(/^### /gm) ?? []).length
+  const stated = Number(/(\d+) more staged files? not shown/.exec(prompt)?.[1])
+  assert.equal(shown + stated, 47, `${shown} shown + ${stated} stated`)
+  assert.ok(prompt.length <= PROMPT_BUDGET)
+  assert.match(prompt, /unread-0\.txt/)
+})
+
+test('a very long list of unread files is counted exactly and still fits the budget', () => {
+  const omitted = Array.from({ length: 400 }, (_item, index) => `generated/path/to/file-number-${index}.ts`)
+  const prompt = composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: [{ path: 'a.ts', diff: textDiff('+x') }], omitted })
+  assert.match(prompt, /400 more staged files not shown: /)
+  assert.match(prompt, /, and \d+ more\./)
+  assert.ok(prompt.length <= PROMPT_BUDGET)
+})
+
+test('a cut-off status list is called out, because there may be staged files nobody saw', () => {
+  const prompt = composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: [{ path: 'a.ts', diff: textDiff('+x') }], listTruncated: true })
+  assert.match(prompt, /status list was cut off/)
+  assert.doesNotMatch(composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: [{ path: 'a.ts', diff: textDiff('+x') }] }), /cut off/)
 })

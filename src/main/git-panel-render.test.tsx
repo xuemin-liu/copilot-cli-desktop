@@ -3,6 +3,7 @@ import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js'
 import { GitPanel } from '../renderer/components/GitPanel.js'
+import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
 import type { GitDiffView as GitDiff } from './git-types.js'
 
@@ -77,4 +78,27 @@ test('the panel starts in a loading state with its controls labelled', () => {
   assert.match(html, /aria-label="Close Git panel"/)
   const narrow = renderToStaticMarkup(<GitPanel profileId="0123456789abcdef" promptTarget={null} takeover onClose={() => undefined} />)
   assert.match(narrow, /Close Git panel and return to the session/)
+})
+
+test('the review card shows every setting in full, with hidden padding spelled out', () => {
+  const hidden = `cat${' '.repeat(220)}; echo HIDDEN-COMMAND > review-marker.txt`
+  const html = renderToStaticMarkup(<GitReviewCard items={[{ key: 'filter.review.clean', value: hidden }]} working={false} onTrust={() => undefined} />)
+  assert.match(html, /HIDDEN-COMMAND &gt; review-marker\.txt/, 'the command after the padding is on screen')
+  assert.match(html, /⟦220 spaces⟧/)
+  assert.match(html, /223 characters|2\d\d characters, shown in full/)
+  assert.doesNotMatch(html, /cat …|cat…/, 'nothing is cut short')
+  assert.doesNotMatch(html, /<button[^>]*disabled/, 'a reviewable setting can be trusted')
+})
+
+test('review card values are text, with line breaks and invisible characters named', () => {
+  const html = renderToStaticMarkup(<GitReviewCard items={[{ key: 'core.sshcommand', value: `ssh\n<script>alert(1)</script>${String.fromCharCode(0x200b)}` }]} working={false} onTrust={() => undefined} />)
+  assert.doesNotMatch(html, /<script>/)
+  assert.match(html, /ssh⟦newline⟧&lt;script&gt;alert\(1\)&lt;\/script&gt;⟦U\+200B⟧/)
+})
+
+test('a setting too long to review cannot be trusted from the card', () => {
+  const html = renderToStaticMarkup(<GitReviewCard items={[{ key: 'filter.big.clean', value: 'x'.repeat(8_001) }]} working={false} onTrust={() => undefined} />)
+  assert.match(html, /too long to review properly/)
+  assert.match(html, /<button[^>]*disabled[^>]*>Trust this repository/)
+  assert.match(renderToStaticMarkup(<GitReviewCard items={[{ key: 'a.b', value: 'c' }]} working onTrust={() => undefined} />), /<button[^>]*disabled/, 'also disabled while a request is in flight')
 })
