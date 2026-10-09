@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
-import type { GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
+import type { GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt } from '../../main/git-prompt.js'
+import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
+import { GitCommitBox } from './GitCommitBox.js'
 import { GitDiffView } from './GitDiffView.js'
 import { GitReviewCard } from './GitReviewCard.js'
 
@@ -61,11 +63,11 @@ const stateLabel = (repo: GitRepoSummary): string =>
   repo.state === 'needs-review' ? 'Needs review' : repo.state === 'error' ? 'Error'
     : repo.changeCount > 0 ? `${repo.changeCount} change${repo.changeCount === 1 ? '' : 's'}` : 'Clean'
 
-function RepoRow({ repo, selected, onSelect }: { repo: GitRepoSummary; selected: boolean; onSelect(): void }): JSX.Element {
+export function RepoRow({ repo, selected, onSelect, disabled = false }: { repo: GitRepoSummary; selected: boolean; onSelect(): void; disabled?: boolean }): JSX.Element {
   const tone = repo.state === 'needs-review' ? 'review' : repo.state === 'error' ? 'error' : repo.changeCount > 0 ? 'dirty' : (repo.behind ?? 0) > 0 ? 'behind' : 'clean'
   return (
-    <button type="button" className={`git-repo git-repo-${tone}${selected ? ' git-repo-selected' : ''}`} aria-pressed={selected} onClick={onSelect}
-      title={repo.relativePath === '.' ? repo.name : repo.relativePath}>
+    <button type="button" className={`git-repo git-repo-${tone}${selected ? ' git-repo-selected' : ''}`} aria-pressed={selected} onClick={onSelect} disabled={disabled}
+      title={disabled ? 'Wait for the running Git operation to finish, or cancel it, before switching repositories' : repo.relativePath === '.' ? repo.name : repo.relativePath}>
       <span className="git-repo-dot" aria-hidden="true" />
       <span className="git-repo-name">{repo.name}{repo.kind === 'parent' && <em> (parent)</em>}</span>
       <span className="git-repo-meta">{[repo.branch ?? (repo.detached ? 'detached' : ''), stateLabel(repo), (repo.behind ?? 0) > 0 ? `↓${repo.behind}` : ''].filter(Boolean).join(' · ')}</span>
@@ -79,27 +81,52 @@ function fileParts(path: string): { name: string; folder: string } {
   return { name: path.endsWith('/') ? `${name}/` : name, folder: parts.join('/') }
 }
 
-function EntryRow({ entry, code, selected, onSelect }: { entry: GitEntryView; code: string; selected: boolean; onSelect(): void }): JSX.Element {
+interface RowAction {
+  /** The button's visible symbol and its accessible verb, for example "+" and "Stage". */
+  symbol: string
+  verb: string
+  disabled: boolean
+  run(entry: GitEntryView): void
+}
+
+function EntryRow({ entry, code, selected, onSelect, action }: { entry: GitEntryView; code: string; selected: boolean; onSelect(): void; action?: RowAction | undefined }): JSX.Element {
   const { name, folder } = fileParts(entry.path)
   return (
-    <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}`} aria-pressed={selected} onClick={onSelect}
-      title={entry.originalPath ? `${entry.originalPath} → ${entry.path}` : entry.path}>
-      <span className={`git-code git-code-${code === '?' ? 'untracked' : code}`} aria-hidden="true">{code}</span>
-      <span className="git-entry-name">{name}</span>
-      {folder && <span className="git-entry-folder">{folder}</span>}
-    </button>
+    <div className="git-entry-row">
+      <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}`} aria-pressed={selected} onClick={onSelect}
+        title={entry.originalPath ? `${entry.originalPath} → ${entry.path}` : entry.path}>
+        <span className={`git-code git-code-${code === '?' ? 'untracked' : code}`} aria-hidden="true">{code}</span>
+        <span className="git-entry-name">{name}</span>
+        {folder && <span className="git-entry-folder">{folder}</span>}
+      </button>
+      {action && (
+        <button type="button" className="git-entry-action" disabled={action.disabled} aria-label={`${action.verb} ${entry.path}`} title={`${action.verb} ${entry.path}`}
+          onClick={() => action.run(entry)}>{action.symbol}</button>
+      )}
+    </div>
   )
 }
 
-function EntryGroup({ title, entries, codeOf, staged, selection, onSelect }: {
+interface GroupAction {
+  label: string
+  title: string
+  disabled: boolean
+  run(): void
+}
+
+function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAction, groupAction }: {
   title: string; entries: GitEntryView[]; codeOf(entry: GitEntryView): string; staged: boolean; selection: Selection | null; onSelect(entry: GitEntryView, staged: boolean): void
+  rowAction?: RowAction; groupAction?: GroupAction
 }): JSX.Element | null {
   if (entries.length === 0) return null
   return (
     <section className="git-group" aria-label={title}>
-      <h3>{title} ({entries.length})</h3>
+      <div className="git-group-head">
+        <h3>{title} ({entries.length})</h3>
+        {groupAction && <button type="button" className="git-group-action" disabled={groupAction.disabled} title={groupAction.title} onClick={groupAction.run}>{groupAction.label}</button>}
+      </div>
       {entries.map(entry => (
-        <EntryRow key={`${staged ? 's' : 'u'}:${entry.path}`} entry={entry} code={codeOf(entry)}
+        <EntryRow key={`${staged ? 's' : 'u'}:${entry.path}`} entry={entry} code={codeOf(entry)} action={rowAction}
           selected={selection?.path === entry.path && selection.staged === staged} onSelect={() => onSelect(entry, staged)} />
       ))}
     </section>
@@ -125,6 +152,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [notice, setNotice] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
+  // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
+  const [messages, setMessages] = useState<Record<string, string>>({})
+  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit'; repoId: string } | null>(null)
+  // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
+  const operationRepo = useRef<string | null>(null)
+  const [progress, setProgress] = useState('')
+  const [output, setOutput] = useState('')
+  const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
 
   const repo = view ? pickRepo(view, storedRepo) : null
   const ready = repo?.state === 'ready'
@@ -195,6 +230,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   }
 
   const chooseRepo = (next: GitRepoSummary): void => {
+    if (operation) return
+    setHooks(null)
     setStoredRepo(next.relativePath)
     setSelection(null)
     setNotice(null)
@@ -231,6 +268,55 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setWorking(false))
   }
 
+  // What a running write prints (a commit hook's messages, say) appears as it arrives.
+  useEffect(() => window.copilotDesktop.onGitProgress(payload => {
+    if (payload.profileId === profileId && payload.event.repoId === operationRepo.current) setProgress(previous => appendOutput(previous, payload.event.text))
+  }), [profileId])
+
+  const messageKey = repo?.relativePath ?? ''
+  const message = messages[messageKey] ?? ''
+  const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
+
+  /** Run one write, show its outcome, and take the fresh status it returns. */
+  const runWrite = (kind: 'stage' | 'unstage' | 'commit', owner: { id: string; key: string }, task: () => Promise<GitOperationResult>): void => {
+    operationRepo.current = owner.id
+    setOperation({ kind, repoId: owner.id })
+    setProgress('')
+    setOutput('')
+    setActionError(null)
+    setNotice(null)
+    setHooks(null)
+    task().then((result: GitOperationResult) => {
+      if (result.status) setStatus(result.status)
+      if (result.ok) {
+        setNotice(result.message)
+        // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
+        if (kind === 'commit') setMessages(current => ({ ...current, [owner.key]: '' }))
+      } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
+        setHooks({ names: result.hooks, hash: result.hooksHash })
+      } else {
+        setActionError(result.message)
+      }
+      setOutput(result.ok ? '' : readableOutput(result.output))
+    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => { operationRepo.current = null; setOperation(null) })
+  }
+
+  const changeIndex = (kind: 'stage' | 'unstage', entries: readonly GitEntryView[]): void => {
+    if (!repo || !currentStatus || entries.length === 0) return
+    const generation = currentStatus.generation
+    const ids = entries.map(entry => entry.id)
+    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
+  }
+
+  const commit = (approvedHooksHash: string | null): void => {
+    if (!repo || !currentStatus) return
+    const generation = currentStatus.generation
+    runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitCommit(profileId, repo.id, message, generation, approvedHooksHash))
+  }
+
+  // Cancel the repository that owns the running write, not whichever one is selected.
+  const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
+
   const pickEntry = (entry: GitEntryView, staged: boolean): void => { setSelection({ path: entry.path, staged }); setNotice(null) }
   const canInsert = promptTarget !== null
 
@@ -255,7 +341,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
       {view && view.repos.length > 1 && (
         <div className="git-repos" role="group" aria-label="Repositories">
-          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo?.id} onSelect={() => chooseRepo(item)} />)}
+          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo?.id} disabled={operation !== null && item.id !== repo?.id} onSelect={() => chooseRepo(item)} />)}
         </div>
       )}
 
@@ -289,21 +375,28 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                   {currentStatus && currentStatus.totalEntries === 0 && <p className="git-message" role="status">Nothing to commit. The working tree is clean.</p>}
                   {currentStatus && (
                     <div className="git-files">
-                      <EntryGroup title="Conflicts" entries={currentStatus.conflicted} codeOf={() => 'U'} staged={false} selection={selection} onSelect={pickEntry} />
-                      <EntryGroup title="Staged" entries={currentStatus.staged} codeOf={entry => entry.index} staged selection={selection} onSelect={pickEntry} />
-                      <EntryGroup title="Changes" entries={currentStatus.unstaged} codeOf={entry => entry.worktree} staged={false} selection={selection} onSelect={pickEntry} />
-                      <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} onSelect={pickEntry} />
+                      <EntryGroup title="Conflicts" entries={currentStatus.conflicted} codeOf={() => 'U'} staged={false} selection={selection} onSelect={pickEntry}
+                        rowAction={{ symbol: '✓', verb: 'Mark resolved:', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }} />
+                      <EntryGroup title="Staged" entries={currentStatus.staged} codeOf={entry => entry.index} staged selection={selection} onSelect={pickEntry}
+                        rowAction={{ symbol: '−', verb: 'Unstage', disabled: operation !== null, run: entry => changeIndex('unstage', [entry]) }}
+                        groupAction={{ label: 'Unstage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only unstage the files shown' : 'Unstage every staged file', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('unstage', currentStatus.staged) }} />
+                      <EntryGroup title="Changes" entries={currentStatus.unstaged} codeOf={entry => entry.worktree} staged={false} selection={selection} onSelect={pickEntry}
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }}
+                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every changed file (not untracked ones)', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.unstaged) }} />
+                      <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} onSelect={pickEntry}
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }}
+                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every untracked file', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.untracked) }} />
                       {currentStatus.truncated && <p className="git-note" role="status">Showing the first {currentStatus.staged.length + currentStatus.unstaged.length + currentStatus.untracked.length} of {currentStatus.totalEntries.toLocaleString()} changed files.</p>}
                     </div>
                   )}
 
-                  {currentStatus && currentStatus.staged.length > 0 && (
-                    <div className="git-actions">
-                      <button type="button" disabled={!canInsert || working} onClick={draftMessage}
-                        title={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}>
-                        Draft commit message with Copilot
-                      </button>
-                    </div>
+                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null) && (
+                    <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
+                      message={message} onMessageChange={setMessage} busy={operation?.kind ?? null} progress={progress}
+                      canDraft={canInsert && currentStatus.staged.length > 0 && !working}
+                      draftTitle={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}
+                      onDraft={draftMessage} onCommit={() => commit(null)} onCancel={cancelWrite}
+                      hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)} />
                   )}
 
                   {selection && (
@@ -348,6 +441,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
           )}
 
           {actionError && <p className="git-message git-message-error" role="alert">{actionError}</p>}
+          {output && <pre className="git-output" aria-label="What Git printed">{output}</pre>}
           {notice && <p className="git-message git-message-info" role="status">{notice}</p>}
         </div>
       )}

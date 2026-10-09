@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js'
-import { GitPanel } from '../renderer/components/GitPanel.js'
+import { GitPanel, RepoRow } from '../renderer/components/GitPanel.js'
+import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
-import type { GitDiffView as GitDiff } from './git-types.js'
+import type { GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
 
 const diff = (text: string, extra: Partial<GitDiff> = {}): GitDiff => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 1, ...extra })
 
@@ -101,4 +102,60 @@ test('a setting too long to review cannot be trusted from the card', () => {
   assert.match(html, /too long to review properly/)
   assert.match(html, /<button[^>]*disabled[^>]*>Trust this repository/)
   assert.match(renderToStaticMarkup(<GitReviewCard items={[{ key: 'a.b', value: 'c' }]} working onTrust={() => undefined} />), /<button[^>]*disabled/, 'also disabled while a request is in flight')
+})
+
+const commitBox = (overrides: Partial<Parameters<typeof GitCommitBox>[0]> = {}): string => renderToStaticMarkup(
+  <GitCommitBox stagedCount={2} conflictCount={0} message="feat: a thing" onMessageChange={() => undefined} busy={null} progress="" canDraft draftTitle="draft"
+    onDraft={() => undefined} onCommit={() => undefined} onCancel={() => undefined} hooks={null} onApproveHooks={() => undefined} onDismissHooks={() => undefined} {...overrides} />)
+
+test('Commit says exactly what it is waiting for', () => {
+  assert.equal(commitBlocker(2, 0, 'msg'), null)
+  assert.match(commitBlocker(0, 0, 'msg') ?? '', /Stage the files/)
+  assert.match(commitBlocker(2, 0, '   ') ?? '', /Write a commit message/)
+  assert.match(commitBlocker(2, 1, 'msg') ?? '', /Resolve the conflicts/)
+  assert.match(commitBlocker(0, 1, '') ?? '', /Resolve the conflicts/, 'conflicts come first')
+})
+
+test('the commit box offers Commit with the file count, and disables it with a reason when it cannot', () => {
+  const ready = commitBox()
+  assert.match(ready, /Commit 2 files/)
+  assert.doesNotMatch(ready, /<button[^>]*disabled[^>]*>Commit 2 files/)
+  assert.match(commitBox({ stagedCount: 1 }), /Commit 1 file</)
+  const empty = commitBox({ message: '' })
+  assert.match(empty, /<button[^>]*disabled[^>]*>Commit 2 files/)
+  assert.match(empty, /Write a commit message\./)
+  assert.match(commitBox({ stagedCount: 0 }), /Stage the files you want to commit\./)
+  assert.match(commitBox({ conflictCount: 2 }), /Resolve the conflicts/)
+})
+
+test('while Git works the box shows its output, offers Cancel and locks the message', () => {
+  const working = commitBox({ busy: 'commit', progress: 'lint: checking 12 files\n' })
+  assert.match(working, /Committing…/)
+  assert.match(working, />Cancel</)
+  assert.match(working, /lint: checking 12 files/)
+  assert.match(working, /<textarea[^>]*disabled/)
+  assert.doesNotMatch(commitBox(), />Cancel</, 'nothing to cancel when idle')
+  assert.doesNotMatch(commitBox({ busy: 'stage', progress: '' }), /git-progress/, 'no empty output box')
+})
+
+test('an unapproved hook is named in full and must be allowed before the commit goes ahead', () => {
+  const html = commitBox({ hooks: ['pre-commit', `evil${String.fromCharCode(0x200b)}-hook`] })
+  assert.match(html, /role="alertdialog"/)
+  assert.match(html, /pre-commit, evil⟦U\+200B⟧-hook/, 'an invisible character in a hook name is spelled out')
+  assert.match(html, />Allow these hooks and commit</)
+  assert.match(html, /Don&#x27;t commit|Don&rsquo;t commit|Don’t commit/)
+  assert.match(html, /<button[^>]*disabled[^>]*>Commit 2 files/, 'Commit itself waits for the approval')
+})
+
+const summary = (overrides: Partial<GitRepoSummary> = {}): GitRepoSummary => ({
+  id: 'repo-2', name: 'beta', relativePath: 'beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
+  changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], configHash: null, ...overrides,
+})
+
+test('a repository row is disabled, with the reason, while a write runs elsewhere', () => {
+  const idle = renderToStaticMarkup(<RepoRow repo={summary()} selected={false} onSelect={() => undefined} />)
+  assert.doesNotMatch(idle, /<button[^>]*disabled/)
+  const locked = renderToStaticMarkup(<RepoRow repo={summary()} selected={false} disabled onSelect={() => undefined} />)
+  assert.match(locked, /<button[^>]*disabled/)
+  assert.match(locked, /Wait for the running Git operation to finish, or cancel it/)
 })

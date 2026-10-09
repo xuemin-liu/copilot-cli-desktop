@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  boundText, groupStatusEntries, isSupportedGitVersion, parseGitVersion, parseLog, parseNumstat, parseStatusV2, splitNul,
+  boundText, groupStatusEntries, isSupportedGitVersion, parseGitVersion, parseLog, parseNumstat, parseStagedRaw, parseStatusV2, splitNul,
 } from './git-parse.js'
 
 const rec = (...parts: string[]): string => parts.join('\0') + '\0'
@@ -136,4 +136,30 @@ test('parseLog reads fields, refs and merge parents', () => {
   assert.equal(entries[1]?.subject, 'Initial')
   assert.deepEqual(entries[1]?.parents, [])
   assert.deepEqual(parseLog('garbage\0'), [])
+})
+
+test('staged entries carry the object id of the staged version, so restaging different content is a different list', () => {
+  const idA = 'a'.repeat(40)
+  const idB = 'b'.repeat(40)
+  const status = parseStatusV2(rec(
+    `1 M. N... 100644 100644 100644 ${H} ${idA} staged.ts`,
+    `1 .M N... 100644 100644 100644 ${H} ${idB} edited.ts`,
+    `2 R. N... 100644 100644 100644 ${H} ${idB} R100 to.txt`, 'from.txt',
+    '? new.ts',
+    `u UU N... 100644 100644 100644 100644 ${H} ${H} ${T} merge.ts`,
+  ))
+  assert.deepEqual(status.entries.map(entry => entry.indexOid), [idA, null, idB, null, null], 'only entries with something staged have one')
+  const restaged = parseStatusV2(rec(`1 M. N... 100644 100644 100644 ${H} ${idB} staged.ts`))
+  assert.notDeepEqual(restaged.entries[0], status.entries[0], 'the same name with different staged content is a different entry')
+})
+
+test('parseStagedRaw reads modes and paths, including a submodule entry and a path with spaces', () => {
+  const oid = 'a'.repeat(40)
+  const output = `:100644 100644 ${oid} ${oid} M\0a.txt\0:160000 160000 ${oid} ${oid} M\0sub\0:000000 100644 ${'0'.repeat(40)} ${oid} A\0dir/with space.txt\0`
+  assert.deepEqual(parseStagedRaw(output), [
+    { path: 'a.txt', oldMode: '100644', newMode: '100644' },
+    { path: 'sub', oldMode: '160000', newMode: '160000' },
+    { path: 'dir/with space.txt', oldMode: '000000', newMode: '100644' },
+  ])
+  assert.deepEqual(parseStagedRaw(''), [])
 })

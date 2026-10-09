@@ -42,9 +42,10 @@ handle, only input/output/resize events.
   with step reports and screenshots.
 - **Git panel** (Ctrl+Shift+G) shows the repositories in your project folder beside the
   session: branch, changed files, diffs and history, updated as Copilot works. It can
-  add a diff, or a request for a commit message, to the prompt box. It is read-only in
-  this release, and repositories whose own settings can run programs wait for your review
-  before anything is read. See [the Git panel](docs/git-panel.md).
+  add a diff, or a request for a commit message, to the prompt box. It can stage and
+  unstage files and make local commits (a repository's own hooks need your approval first);
+  fetch, pull and push come later. Repositories whose own settings can run programs wait for
+  your review before anything is read. See [the Git panel](docs/git-panel.md).
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a

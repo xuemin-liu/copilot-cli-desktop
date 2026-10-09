@@ -29,6 +29,15 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   gitClose: (profileId) => ipcRenderer.invoke('desktop:git-close', profileId),
   gitRescan: (profileId) => ipcRenderer.invoke('desktop:git-rescan', profileId),
   gitTrust: (profileId, repoId, configHash) => ipcRenderer.invoke('desktop:git-trust', profileId, repoId, configHash),
+  gitStage: (profileId, repoId, entryIds, generation) => ipcRenderer.invoke('desktop:git-stage', profileId, repoId, entryIds, generation),
+  gitUnstage: (profileId, repoId, entryIds, generation) => ipcRenderer.invoke('desktop:git-unstage', profileId, repoId, entryIds, generation),
+  gitCommit: (profileId, repoId, message, generation, approvedHooksHash) => ipcRenderer.invoke('desktop:git-commit', profileId, repoId, message, generation, approvedHooksHash ?? null),
+  gitCancel: (profileId, repoId) => ipcRenderer.invoke('desktop:git-cancel', profileId, repoId),
+  onGitProgress: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on('desktop:git-progress', handler)
+    return () => ipcRenderer.removeListener('desktop:git-progress', handler)
+  },
   gitStatus: (profileId, repoId) => ipcRenderer.invoke('desktop:git-status', profileId, repoId),
   gitDiff: (profileId, repoId, entryId, staged) => ipcRenderer.invoke('desktop:git-diff', profileId, repoId, entryId, staged),
   gitLog: (profileId, repoId, limit, skip) => ipcRenderer.invoke('desktop:git-log', profileId, repoId, limit, skip),

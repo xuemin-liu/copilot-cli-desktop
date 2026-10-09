@@ -58,10 +58,11 @@ export function buildGitEnvironment(base: NodeJS.ProcessEnv = process.env, optio
  * Arguments placed before the subcommand. `-c` outranks every config file, so these hold even
  * when the repository's own config says otherwise.
  *
- * `core.hooksPath` is only redirected for reads. Writes run the user's own hooks, as they would
- * from a terminal.
+ * `core.hooksPath` is redirected to an empty folder for reads, and for any command that asks for `disableHooks` (staging has
+ * no use for the repository's hooks). A commit runs the repository's own hooks, as it would from a terminal, but only after
+ * the user has approved them.
  */
-export function gitArgsPrefix(kind: GitCommandKind, hooksDirectory: string): string[] {
+export function gitArgsPrefix(kind: GitCommandKind, hooksDirectory: string, disableHooks = false): string[] {
   const prefix = [
     '--no-pager',
     '--no-optional-locks',
@@ -74,7 +75,7 @@ export function gitArgsPrefix(kind: GitCommandKind, hooksDirectory: string): str
     '-c', 'maintenance.auto=false',
     '-c', 'i18n.logOutputEncoding=UTF-8',
   ]
-  if (kind === 'read') prefix.push('-c', `core.hooksPath=${hooksDirectory}`)
+  if (kind === 'read' || disableHooks) prefix.push('-c', `core.hooksPath=${hooksDirectory}`)
   return prefix
 }
 

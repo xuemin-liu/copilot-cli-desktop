@@ -1,8 +1,9 @@
 # Git panel
 
 The Git panel shows the state of the Git repositories in your project folder next to the session, so you can review what
-Copilot changed without leaving the app. It is **read-only** in this release: you can look and hand context to Copilot, but
-staging, committing and syncing are done in the terminal (or by Copilot). See the [plan](git-panel-plan.md) for what comes next.
+Copilot changed without leaving the app. You can review changes, stage and unstage files, make local commits and hand context
+to Copilot. Fetch, pull, push, branches and discarding changes are not in the panel yet and are still done in the terminal (or by
+Copilot). See the [plan](git-panel-plan.md) for what comes next.
 
 Open it from the Git icon in the session header, or with **Ctrl+Shift+G** (the key is handled before the terminal or the
 debug browser sees it). Close it the same way. Its width and open state are remembered.
@@ -19,6 +20,25 @@ debug browser sees it). Close it the same way. Its width and open state are reme
   and very large files show a notice instead of content.
 - **History.** The latest commits, 50 at a time. **Load more** waits for the page in flight, so a double click never lists a
   commit twice or skips one.
+
+## Staging and committing
+
+- **Stage and unstage** with the **+** and **−** button on each file, or **Stage all** / **Unstage all** on a group. Folders of
+  untracked files stage as a whole. A conflicted file has a **✓** that marks it resolved. Only the files you can see are acted
+  on: when the list is cut off at 5,000 files, the group-wide buttons are disabled rather than doing half the job.
+- **Commit** takes the message you type (Ctrl+Enter also commits) and records exactly that text, whatever it contains. It is
+  refused, with a reason, when nothing is staged, the message is empty or conflicts are unresolved.
+- Git has to know who you are. If `user.name` or `user.email` is missing the panel says so and shows the two commands to run;
+  it never changes your Git configuration.
+- **Hooks.** A commit runs the repository's own hook files (`pre-commit`, `commit-msg`, and the few others a commit can
+  trigger). A repository can arrive with hooks you have never seen, so the first commit lists them and waits for you to allow
+  them. Your approval is remembered for those exact files and asked again if any of them changes. Staging never runs hooks.
+- While a commit runs, whatever the hooks print appears under the message box, and **Cancel** stops the whole process tree. If
+  Git left a lock file behind after a cancel, the message says which file to delete; the panel never deletes it for you.
+- Writes happen one at a time per repository. If another program (Copilot, an editor) is using the repository, the panel waits up
+  to ten seconds for its `index.lock` and then says that another Git process is busy.
+- Every write quotes the file list you were looking at. If the list changed in the meantime, the request is refused and the
+  list refreshes, so a click can never stage or unstage a different file than the one you meant.
 
 ## Giving context to Copilot
 
@@ -54,7 +74,11 @@ error and is never opened. This is checked again before every command, not only 
   closing the panel stops all of it.
 - Only the main window has the panel; a session popped out to its own window does not.
 - A very narrow window gives the panel the whole area instead of squeezing the terminal; closing it returns the session.
-- Network operations (fetch, pull, push), staging, committing and branch switching are not in the panel yet.
+- Fetch, pull, push, branch switching, amending and discarding changes are not in the panel yet.
+- Git reads your identity from its configuration, not from `GIT_AUTHOR_NAME`-style environment variables, which the panel
+  deliberately does not pass on to Git.
+- Submodules are not listed (reading them would run Git inside another repository). If a submodule update is staged, Commit is refused
+  with the paths named, instead of including changes the list never showed; unstage it or commit from a terminal.
 
 ## Checks
 

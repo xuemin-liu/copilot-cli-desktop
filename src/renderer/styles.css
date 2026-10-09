@@ -1147,3 +1147,29 @@ button:disabled {
 .git-log-refs { color: #91c8bc; font-size: 11px; overflow-wrap: anywhere; }
 .git-log-meta { color: #929baa; font-size: 11px; }
 .git-history > button { margin: 0 10px 10px; align-self: flex-start; }
+
+/* ---- Git panel: staging and commit ---- */
+.git-entry-row { display: flex; align-items: center; gap: 2px; }
+.git-entry-row .git-entry { flex: 1; min-width: 0; width: auto; }
+.git-entry-action { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #9ca4b3; font-size: 15px; line-height: 1; opacity: 0.55; }
+.git-entry-row:hover .git-entry-action, .git-entry-action:focus-visible { opacity: 1; background: #1b2740; color: #e6edf3; }
+.git-entry-action:disabled { opacity: 0.25; }
+.git-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.git-group-head h3 { flex: 1; min-width: 0; }
+.git-group-action { flex: none; padding: 1px 6px; margin: 6px 4px 0 0; border: 0; border-radius: 4px; background: transparent; color: #a9c9ff; font-size: 11px; }
+.git-group-action:hover:not(:disabled) { background: #1b2740; }
+.git-group-action:disabled { color: #596477; }
+
+.git-commit { display: flex; flex-direction: column; gap: 6px; margin: 10px 6px 0; padding: 8px; border: 1px solid #252a33; border-radius: 6px; background: #0e131c; }
+.git-commit textarea { width: 100%; resize: vertical; min-height: 54px; max-height: 40vh; padding: 6px 8px; border: 1px solid #364153; border-radius: 5px; background: #080b12; color: #e6edf3; font: inherit; line-height: 1.45; }
+.git-commit textarea:focus-visible { outline: 1px solid #4f88ff; border-color: #4f88ff; }
+.git-commit textarea:disabled { opacity: 0.6; }
+.git-commit-row { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.git-commit-row button { padding: 4px 9px; font-size: 11.5px; }
+.git-commit-row .git-commit-button { min-height: 28px; padding: 0 12px; font-size: 12px; }
+.git-progress, .git-output { margin: 0; padding: 6px 8px; max-height: 28vh; overflow: auto; border-radius: 4px; background: #080b12; color: #c8d3e3; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.git-output { margin: 4px 10px 0; background: #1c1117; color: #ffc7ce; }
+.git-hooks { padding: 8px 10px; border: 1px solid #5a3d1a; border-radius: 6px; background: #2a2418; color: #e6d3b3; line-height: 1.45; }
+.git-hooks p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.git-hooks-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.git-hooks-actions .primary-button { min-height: 28px; font-size: 12px; padding: 0 12px; }

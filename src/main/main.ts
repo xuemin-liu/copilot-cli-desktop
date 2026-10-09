@@ -251,6 +251,10 @@ function gitServiceInstance(): GitService | null {
     },
     trustStore: new GitTrustStore(join(app.getPath('userData'), 'git-trust.json')),
     resolveProject: (profileId) => desktopConfig.profiles.find((profile) => profile.id === profileId)?.path ?? null,
+    onProgress: (subscriberId, profileId, event) => {
+      const window = mainWindow
+      if (window && !window.isDestroyed() && window.webContents.id === subscriberId) window.webContents.send('desktop:git-progress', { profileId, event })
+    },
     onChanged: (subscriberId, profileId, view) => {
       const window = mainWindow
       if (window && !window.isDestroyed() && window.webContents.id === subscriberId) window.webContents.send('desktop:git-changed', { profileId, view })

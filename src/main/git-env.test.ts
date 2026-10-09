@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { diffArgs, logArgs, statusArgs } from './git-commands.js'
+import { commitArgs, configGetArgs, diffArgs, gitPathArgs, logArgs, stageArgs, statusArgs, unstageArgs } from './git-commands.js'
 import { assertGitArgument, buildGitEnvironment, ceilingDirectories, gitArgsPrefix } from './git-env.js'
 
 test('the environment is an allowlist: repository-steering GIT_* variables and loader hooks are dropped', () => {
@@ -77,4 +77,22 @@ test('status, diff and log arguments carry the read-safety flags', () => {
   assert.throws(() => logArgs({ limit: -1 }), /out of range/)
   assert.throws(() => logArgs({ limit: 10, skip: 1.5 }), /out of range/)
   assert.throws(() => diffArgs({ staged: false, path: 'a\0b' }), /NUL/)
+})
+
+test('write commands take their paths and message from stdin, never from arguments', () => {
+  assert.deepEqual(stageArgs(), ['add', '--pathspec-from-file=-', '--pathspec-file-nul'])
+  assert.deepEqual(unstageArgs(true), ['restore', '--staged', '--pathspec-from-file=-', '--pathspec-file-nul'])
+  assert.ok(unstageArgs(false).includes('rm') && unstageArgs(false).includes('--cached') && unstageArgs(false).includes('--pathspec-from-file=-'), 'before the first commit there is no HEAD to restore from')
+  assert.deepEqual(commitArgs(), ['commit', '-F', '-'])
+  assert.equal(commitArgs().includes('--no-verify'), false, 'hooks are never skipped')
+  assert.deepEqual(gitPathArgs('hooks'), ['rev-parse', '--git-path', 'hooks'])
+  assert.deepEqual(configGetArgs('user.name'), ['config', '--get', 'user.name'])
+  assert.throws(() => gitPathArgs('a\0b'), /NUL/)
+  assert.throws(() => configGetArgs('user.name\0x'), /NUL/)
+})
+
+test('hooks can be switched off for a write without touching reads', () => {
+  assert.equal(gitArgsPrefix('write', 'C:\empty', true).includes('core.hooksPath=C:\empty'), true)
+  assert.equal(gitArgsPrefix('write', 'C:\empty').some(arg => arg.startsWith('core.hooksPath')), false)
+  assert.equal(gitArgsPrefix('read', 'C:\empty').includes('core.hooksPath=C:\empty'), true)
 })
