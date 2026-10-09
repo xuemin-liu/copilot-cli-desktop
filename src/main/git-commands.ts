@@ -80,3 +80,45 @@ export function logArgs(options: { limit: number; skip?: number }): string[] {
     `--format=${GIT_LOG_FORMAT}`,
   ]
 }
+
+// ---- network ------------------------------------------------------------------------------------------------------------
+
+/** The configured remote names, one per line. */
+export function remoteListArgs(): string[] {
+  return ['remote']
+}
+
+/** Every address a remote uses, after `url.<base>.insteadOf` rewriting: the push addresses when `forPush`, otherwise the fetch ones. */
+export function remoteUrlArgs(remote: string, forPush: boolean): string[] {
+  assertGitArgument(remote, 'remote name')
+  return ['remote', 'get-url', ...(forPush ? ['--push'] : []), '--all', '--', remote]
+}
+
+/**
+ * Update the remote-tracking branches from one remote. Submodules are never fetched (that would run git in other repositories),
+ * and nothing is pruned or written outside `refs/remotes`.
+ */
+export function fetchArgs(remote: string): string[] {
+  assertGitArgument(remote, 'remote name')
+  return ['fetch', '--no-recurse-submodules', '--', remote]
+}
+
+/** Move the current branch to its upstream only when that is a fast-forward; anything else is refused and changes nothing. */
+export function fastForwardArgs(): string[] {
+  return ['merge', '--ff-only', '--no-edit', '--no-autostash', '--no-verify', '@{upstream}']
+}
+
+/**
+ * Push one branch to one named branch with an explicit refspec, which also overrides any `remote.<name>.push` the repository
+ * configures. There is no `+` in it and no `--force`, so a push the remote would have to overwrite is refused.
+ */
+export function pushArgs(remote: string, branch: string, remoteBranch: string, setUpstream: boolean): string[] {
+  assertGitArgument(remote, 'remote name')
+  assertGitArgument(branch, 'branch name')
+  assertGitArgument(remoteBranch, 'branch name')
+  return [
+    'push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no',
+    ...(setUpstream ? ['--set-upstream'] : []),
+    '--', remote, `refs/heads/${branch}:refs/heads/${remoteBranch}`,
+  ]
+}

@@ -10,6 +10,7 @@ export function redactDiagnosticText(value: string): string {
     .replace(/\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi, '$1[REDACTED]')
     .replace(/([?&](?:api[_-]?key|access[_-]?token|token)=)[^&#\s]*/gi, '$1[REDACTED]')
     .replace(/(https?:\/\/)[^@\s/]+@/gi, '$1[REDACTED]@')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/:]*:[^@\s/]*@/gi, '$1[REDACTED]@')
     .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED]')
     .replace(/\bgh[opsur]_[A-Za-z0-9]{16,}\b/g, '[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED]')

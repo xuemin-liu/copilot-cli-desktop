@@ -104,6 +104,13 @@ export type GitOperationFailure =
   | 'nothing-staged'
   | 'hidden-staged'        // the index holds staged entries the panel does not list (a submodule update), so a commit would include unseen changes
   | 'cancelled'
+  | 'auth-required'       // the remote wants credentials the panel does not collect
+  | 'no-remote'           // the repository has no remote to contact, or the one it has is not safe to contact
+  | 'detached'            // there is no current branch to pull or push
+  | 'needs-upstream'      // the branch has no upstream yet; `remotes` lists where it could be published
+  | 'diverged'            // a pull cannot fast-forward
+  | 'rejected'            // the remote refused a push because it has changes the branch lacks
+  | 'hooks-unsupported'   // a hook that would run on push (pre-push) is present, and the panel does not run hooks for push
   | 'failed'               // git exited non-zero; `output` has what it said
 
 export interface GitOperationResult {
@@ -116,6 +123,8 @@ export interface GitOperationResult {
   /** For `hooks-need-approval`: the hooks a commit would run, and the hash to send back to approve exactly these. */
   hooks: string[]
   hooksHash: string | null
+  /** For `needs-upstream`: the remotes the branch could be published to. */
+  remotes: string[]
   /** For a successful commit. */
   commit: { hash: string; subject: string } | null
   /** The repository's status after the operation, so the panel updates in one step. */
@@ -125,7 +134,7 @@ export interface GitOperationResult {
 /** Output from a running write (for example a commit hook), forwarded as it arrives. */
 export interface GitProgressEvent {
   repoId: string
-  operation: 'stage' | 'unstage' | 'commit'
+  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push'
   stream: 'stdout' | 'stderr'
   text: string
 }

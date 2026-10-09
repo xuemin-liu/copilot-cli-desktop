@@ -6,6 +6,8 @@ import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
 import { GitCommitBox } from './GitCommitBox.js'
+import { GitSyncBar } from './GitSyncBar.js'
+import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
 import { GitReviewCard } from './GitReviewCard.js'
 
@@ -154,12 +156,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
   const [messages, setMessages] = useState<Record<string, string>>({})
-  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit'; repoId: string } | null>(null)
+  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | GitSyncKind; repoId: string } | null>(null)
   // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
   const operationRepo = useRef<string | null>(null)
   const [progress, setProgress] = useState('')
   const [output, setOutput] = useState('')
   const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
+  // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
+  const [publish, setPublish] = useState<{ repoKey: string; remotes: string[]; remote: string } | null>(null)
 
   const repo = view ? pickRepo(view, storedRepo) : null
   const ready = repo?.state === 'ready'
@@ -232,6 +236,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const chooseRepo = (next: GitRepoSummary): void => {
     if (operation) return
     setHooks(null)
+    setPublish(null)
     setStoredRepo(next.relativePath)
     setSelection(null)
     setNotice(null)
@@ -278,7 +283,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
-  const runWrite = (kind: 'stage' | 'unstage' | 'commit', owner: { id: string; key: string }, task: () => Promise<GitOperationResult>): void => {
+  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>): void => {
     operationRepo.current = owner.id
     setOperation({ kind, repoId: owner.id })
     setProgress('')
@@ -286,6 +291,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     setActionError(null)
     setNotice(null)
     setHooks(null)
+    setPublish(null)
     task().then((result: GitOperationResult) => {
       if (result.status) setStatus(result.status)
       if (result.ok) {
@@ -294,6 +300,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
         if (kind === 'commit') setMessages(current => ({ ...current, [owner.key]: '' }))
       } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
         setHooks({ names: result.hooks, hash: result.hooksHash })
+      } else if (result.reason === 'needs-upstream' && result.remotes.length > 0) {
+        setPublish({ repoKey: owner.key, remotes: result.remotes, remote: result.remotes.includes('origin') ? 'origin' : result.remotes[0] ?? '' })
       } else {
         setActionError(result.message)
       }
@@ -306,6 +314,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     const generation = currentStatus.generation
     const ids = entries.map(entry => entry.id)
     runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
+  }
+
+  const sync = (kind: GitSyncKind, publishTo: string | null = null): void => {
+    if (!repo) return
+    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitSync(profileId, repo.id, kind, publishTo))
   }
 
   const commit = (approvedHooksHash: string | null): void => {
@@ -355,6 +368,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
               {(repo.behind ?? 0) > 0 && <span className="git-behind">↓{repo.behind}</span>}
               {view && view.repos.length === 1 && <span className="git-branch-state">{stateLabel(repo)}</span>}
             </div>
+          )}
+
+          {ready && (
+            <GitSyncBar upstream={repo.upstream} ahead={repo.ahead ?? 0} behind={repo.behind ?? 0}
+              noBranch={repo.detached || repo.branch === null || repo.headOid === null}
+              locked={operation !== null} running={operation !== null && (operation.kind === 'fetch' || operation.kind === 'pull' || operation.kind === 'push') ? operation.kind : null}
+              progress={progress}
+              publish={publish && publish.repoKey === repo.relativePath ? { branch: repo.branch ?? '', remotes: publish.remotes, remote: publish.remote } : null}
+              onSync={kind => sync(kind)} onChooseRemote={remote => setPublish(current => current ? { ...current, remote } : current)}
+              onPublish={() => { if (publish) sync('push', publish.remote) }} onDismissPublish={() => setPublish(null)} onCancel={cancelWrite} />
           )}
 
           {repo.state === 'needs-review' && <GitReviewCard items={repo.reviewItems} working={working} onTrust={trust} />}

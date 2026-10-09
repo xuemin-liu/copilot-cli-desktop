@@ -18,6 +18,9 @@ export const COMMIT_HOOKS: ReadonlySet<string> = new Set([
   'pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-index-change', 'reference-transaction',
 ])
 
+/** Hooks a push can run. The panel does not run these (see `inspectHooks`): a repository that has one is pushed from a terminal. */
+export const PUSH_HOOKS: ReadonlySet<string> = new Set(['pre-push'])
+
 /** The largest hook that is hashed. Real hooks are a few kilobytes; anything bigger cannot be approved, only run by hand. */
 export const MAX_HOOK_BYTES = 64 * 1024 * 1024
 
@@ -36,10 +39,10 @@ export interface HooksInventory {
 }
 
 /** The hook a file name stands for, or null. `pre-commit`, `pre-commit.exe` and `pre-commit.cmd` count; `pre-commit.sample` does not. */
-export function hookNameOf(fileName: string): string | null {
+export function hookNameOf(fileName: string, names: ReadonlySet<string> = COMMIT_HOOKS): string | null {
   const parts = fileName.toLowerCase().split('.')
   const base = parts[0] ?? ''
-  if (!COMMIT_HOOKS.has(base)) return null
+  if (!names.has(base)) return null
   return parts.length > 1 && parts.at(-1) === 'sample' ? null : base
 }
 
@@ -64,7 +67,12 @@ async function digest(path: string, maxBytes: number): Promise<Digest> {
   return { digest: hash.digest('hex') }
 }
 
-export async function inspectCommitHooks(runner: GitRunner, repoRoot: string, signal?: AbortSignal, maxBytes = MAX_HOOK_BYTES): Promise<HooksInventory> {
+export function inspectCommitHooks(runner: GitRunner, repoRoot: string, signal?: AbortSignal, maxBytes = MAX_HOOK_BYTES): Promise<HooksInventory> {
+  return inspectHooks(runner, repoRoot, COMMIT_HOOKS, signal, maxBytes)
+}
+
+/** The repository's hooks among `names`, with a digest of each one's complete contents. */
+export async function inspectHooks(runner: GitRunner, repoRoot: string, hookNames: ReadonlySet<string>, signal?: AbortSignal, maxBytes = MAX_HOOK_BYTES): Promise<HooksInventory> {
   // Not a read: reads point `core.hooksPath` at an empty folder, which would make git report that folder instead of the
   // repository's real one. `rev-parse` runs no hook, so asking without the override is safe.
   const located = await runner.run({ cwd: repoRoot, args: gitPathArgs('hooks'), kind: 'write', timeoutMs: 15_000, signal })
@@ -81,7 +89,7 @@ export async function inspectCommitHooks(runner: GitRunner, repoRoot: string, si
   const found: Array<[string, string]> = []
   const unverifiable: Array<{ name: string; reason: string }> = []
   for (const name of names.sort()) {
-    if (!hookNameOf(name)) continue
+    if (!hookNameOf(name, hookNames)) continue
     const result = await digest(win32.join(directory, name), maxBytes)
     if ('unverifiable' in result) {
       unverifiable.push({ name, reason: result.unverifiable })

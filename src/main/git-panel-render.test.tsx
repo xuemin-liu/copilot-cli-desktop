@@ -5,6 +5,8 @@ import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js
 import { GitPanel, RepoRow } from '../renderer/components/GitPanel.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
+import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
+import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
 import type { GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
 
@@ -158,4 +160,51 @@ test('a repository row is disabled, with the reason, while a write runs elsewher
   const locked = renderToStaticMarkup(<RepoRow repo={summary()} selected={false} disabled onSelect={() => undefined} />)
   assert.match(locked, /<button[^>]*disabled/)
   assert.match(locked, /Wait for the running Git operation to finish, or cancel it/)
+})
+
+const syncBar = (extra: Partial<GitSyncBarProps> = {}): string => renderToStaticMarkup(
+  <GitSyncBar upstream="origin/main" ahead={2} behind={3} noBranch={false} locked={false} running={null} progress="" publish={null}
+    onSync={() => undefined} onChooseRemote={() => undefined} onPublish={() => undefined} onDismissPublish={() => undefined} onCancel={() => undefined} {...extra} />)
+
+test('the sync bar offers Fetch, Pull and Push with the commit counts, and says why one is unavailable', () => {
+  const ready = syncBar()
+  assert.match(ready, />Fetch</)
+  assert.match(ready, />Pull ↓3</)
+  assert.match(ready, />Push ↑2</)
+  assert.doesNotMatch(ready, /<button[^>]*disabled/)
+  assert.doesNotMatch(ready, />Cancel</, 'nothing to cancel when idle')
+  assert.match(syncBar({ behind: 0 }), /<button[^>]*disabled[^>]*>Pull</)
+  assert.match(syncBar({ ahead: 0 }), /<button[^>]*disabled[^>]*>Push</)
+  assert.equal(pullBlocker('origin/main', 0, false), 'Nothing to pull. Fetch first to look for new commits.')
+  assert.equal(pullBlocker(null, 0, false), 'This branch has no upstream to pull from.')
+  assert.equal(pushBlocker('origin/main', 0, false), 'Nothing to push.')
+  assert.match(pullBlocker('origin/main', 2, true) ?? '', /no current branch/)
+  assert.match(pushBlocker(null, 0, true) ?? '', /no current branch/)
+})
+
+test('a branch with no upstream offers Publish instead of Push, even with nothing ahead', () => {
+  const bar = syncBar({ upstream: null, ahead: 0, behind: 0 })
+  assert.match(bar, />Publish…</)
+  assert.doesNotMatch(bar, /<button[^>]*disabled[^>]*>Publish/)
+  assert.match(bar, /<button[^>]*disabled[^>]*>Pull</)
+})
+
+test('while a network command runs everything is locked except Cancel, which comes with the output', () => {
+  const running = syncBar({ locked: true, running: 'fetch', progress: 'Receiving objects: 40%\n' })
+  assert.match(running, />Fetching…</)
+  assert.match(running, />Cancel</)
+  assert.match(running, /Receiving objects: 40%/)
+  assert.equal((running.match(/<button[^>]*disabled/g) ?? []).length, 3, 'Fetch, Pull and Push are all locked')
+  assert.match(syncBar({ locked: true, running: 'push' }), />Pushing…</)
+  assert.doesNotMatch(syncBar({ locked: true, running: null }), />Cancel</, 'a stage or commit has its own Cancel')
+})
+
+test('publishing a branch names the branch and the remote, and is a separate confirmation', () => {
+  const asking = syncBar({ upstream: null, publish: { branch: 'feature/x', remotes: ['origin', 'fork'], remote: 'fork' } })
+  assert.match(asking, /Publish “feature\/x”\?/)
+  assert.match(asking, /not on any remote yet/)
+  assert.match(asking, /<option value="fork" selected="">fork<\/option>/)
+  assert.match(asking, /Publish to fork</)
+  assert.match(asking, />Not now</)
+  assert.doesNotMatch(syncBar(), /alertdialog/, 'no prompt unless a push asked for one')
 })
