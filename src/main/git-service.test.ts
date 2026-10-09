@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createServer } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -22,10 +26,14 @@ interface Harness {
   events: GitProjectView[]
   /** Subcommands the runner was asked to run, for example `status` or `config`. */
   calls: string[]
+  /** Every command the runner was given, with its options. */
+  runs: GitRunOptions[]
   trustStore: GitTrustStore
   project: string
   /** Runs the action once, right after the first commit attempt fails on the index lock and before the next attempt is prepared. */
   whenCommitBlocked(action: () => void): void
+  /** Runs the action once, right after the first command that `matches` finishes and before the code that ran it carries on. */
+  afterCommand(matches: (options: GitRunOptions) => boolean, action: () => void): void
 }
 
 /** Wraps the real runner so tests can see which git commands ran. */
@@ -45,8 +53,12 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
   setup(fixture, project)
   const events: GitProjectView[] = []
   const calls: string[] = []
+  const runs: GitRunOptions[] = []
   let blocked: (() => void) | null = null
+  let after: { matches: (options: GitRunOptions) => boolean; action: () => void } | null = null
   const afterRun = (options: GitRunOptions, result: GitRunResult): void => {
+    runs.push(options)
+    if (after?.matches(options)) { const { action } = after; after = null; action() }
     if (blocked && options.args[0] === 'commit' && isIndexLockFailure(result)) { const action = blocked; blocked = null; action() }
   }
   const trustStore = new GitTrustStore(join(fixture.root, 'git-trust.json'))
@@ -60,7 +72,7 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
     ...extra,
   })
   t.after(async () => { await service.dispose(); fixture.cleanup() })
-  return { fixture, service, events, calls, trustStore, project, whenCommitBlocked: action => { blocked = action } }
+  return { fixture, service, events, calls, runs, trustStore, project, whenCommitBlocked: action => { blocked = action }, afterCommand: (matches, action) => { after = { matches, action } } }
 }
 
 async function waitFor<T>(read: () => T | undefined | false, timeoutMs = 8_000): Promise<T> {
@@ -1009,4 +1021,417 @@ test('a staged rename is listed under both names, so a commit with it is not ref
   const current = await status()
   const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
   assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+})
+
+// ---- fetch, pull and push ---------------------------------------------------------------------------------------------------
+
+/** A bare remote with the project's branch pushed to it, and a clone of it that stands for a colleague. */
+function withRemote(f: GitFixture, project: string): void {
+  const remote = join(f.root, 'remote.git')
+  mkdirSync(remote)
+  f.plain(remote, 'init', '-q', '--bare')
+  f.plain(project, 'remote', 'add', 'origin', remote)
+  f.plain(project, 'push', '-q', '-u', 'origin', 'main')
+  f.plain(f.root, 'clone', '-q', remote, 'other')
+}
+
+/** The colleague commits a file and pushes it. */
+function colleaguePushes(f: GitFixture, name: string, text: string): void {
+  const other = join(f.root, 'other')
+  writeFileSync(join(other, name), text)
+  f.plain(other, 'add', '.'); f.plain(other, 'commit', '-q', '-m', `add ${name}`); f.plain(other, 'push', '-q', 'origin', 'HEAD')
+}
+
+/** The branch and commit a person looking at the panel right now would be acting on. */
+const seen = (h: Harness): { branch: string; headOid: string } => ({
+  branch: h.fixture.plain(h.project, 'branch', '--show-current').trim(),
+  headOid: h.fixture.plain(h.project, 'rev-parse', 'HEAD').trim(),
+})
+
+const remoteHead = (h: Harness, branch = 'main'): string => h.fixture.plain(join(h.fixture.root, 'remote.git'), 'rev-parse', `refs/heads/${branch}`).trim()
+const localHead = (h: Harness): string => h.fixture.plain(h.project, 'rev-parse', 'HEAD').trim()
+
+const withOrigin = (t: test.TestContext, extra?: (f: GitFixture, project: string) => void, options: Partial<GitServiceOptions> = {}) =>
+  harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); withRemote(f, project); extra?.(f, project) }, options)
+
+test('fetch brings in what the remote has, tells how far behind the branch is, and leaves the files alone', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId, status } = await open(h)
+  assert.equal((await status()).summary.behind, 0)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const result = await h.service.fetch(SUBSCRIBER, PROFILE, repoId)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(result.message, 'Fetched origin.')
+  assert.equal(result.status!.summary.behind, 1)
+  assert.equal(existsSync(join(h.project, 'theirs.txt')), false, 'a fetch changes no file')
+})
+
+test('pull fast-forwards to the upstream and nothing else', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const result = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.match(result.message, /Fast-forwarded main/)
+  assert.equal(readFileSync(join(h.project, 'theirs.txt'), 'utf8').replace(/\r/g, ''), 'x\n')
+  assert.equal(result.status!.summary.behind, 0)
+  const again = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  assert.deepEqual([again.ok, again.message], [true, 'Already up to date.'])
+})
+
+test('a pull that cannot fast-forward changes nothing and says so', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
+  })
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const before = localHead(h)
+  const result = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  assert.deepEqual([result.ok, result.reason], [false, 'diverged'])
+  assert.match(result.message, /Nothing was changed/)
+  assert.equal(localHead(h), before)
+  assert.equal(existsSync(join(h.project, 'theirs.txt')), false)
+})
+
+test('pull does not run the repository\'s hooks', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-pull-hook-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withOrigin(t, (f, project) => {
+    for (const name of ['post-merge', 'post-checkout', 'reference-transaction']) hookFile(project, name, `echo ${name} >> "${shellPath(marker)}"`)
+  })
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const result = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(existsSync(marker), false, 'no hook ran')
+})
+
+test('push sends the branch to its upstream', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  writeFileSync(join(h.project, 'mine.txt'), 'm\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'mine')
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(result.message, 'Pushed main to origin/main.')
+  assert.equal(remoteHead(h), localHead(h))
+  assert.equal(result.status!.summary.ahead, 0)
+  const again = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.deepEqual([again.ok, again.message], [true, 'Everything is already up to date.'])
+})
+
+test('a push the remote would have to overwrite is refused, even when the repository configures a forced push', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
+    f.plain(project, 'config', 'remote.origin.push', '+refs/heads/*:refs/heads/*')
+  })
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const theirs = remoteHead(h)
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.deepEqual([result.ok, result.reason], [false, 'rejected'])
+  assert.match(result.message, /never forces/)
+  assert.equal(remoteHead(h), theirs, 'the remote kept its own commit')
+})
+
+test('a branch with no upstream is only published after the remote is chosen', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'feature')
+    writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
+  })
+  const { repoId } = await open(h)
+  const asked = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.deepEqual([asked.ok, asked.reason, asked.remotes], [false, 'needs-upstream', ['origin']])
+  assert.throws(() => h.fixture.plain(join(h.fixture.root, 'remote.git'), 'rev-parse', '--verify', 'refs/heads/feature'), 'nothing was pushed yet')
+  await assert.rejects(h.service.push(SUBSCRIBER, PROFILE, repoId, 'elsewhere', seen(h)), /not a remote/)
+  const done = await h.service.push(SUBSCRIBER, PROFILE, repoId, 'origin', seen(h))
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+  assert.match(done.message, /Published feature to origin/)
+  assert.equal(remoteHead(h, 'feature'), localHead(h))
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/feature')
+})
+
+test('a branch that tracks a differently named branch is not pushed by the panel', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'feature', '--track', 'origin/main')
+    writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
+  })
+  const { repoId } = await open(h)
+  const before = remoteHead(h)
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.equal(result.ok, false)
+  assert.match(result.message, /differently named branch/)
+  assert.equal(remoteHead(h), before)
+})
+
+test('pull and push need a branch, fetch does not', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => f.plain(project, 'checkout', '-q', '--detach'))
+  const { repoId } = await open(h)
+  for (const operation of ['pull', 'push'] as const) {
+    const result = await (operation === 'pull' ? h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h)) : h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h)))
+    assert.deepEqual([result.ok, result.reason], [false, 'detached'], operation)
+  }
+  assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true)
+})
+
+test('a remote that points at a network share or runs a program is never contacted', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-ext-remote-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  for (const address of ['\\\\attacker.invalid\\share\\r.git', '//attacker.invalid/share/r.git', 'file://attacker.invalid/share/r.git', `ext::sh -c "echo x > ${shellPath(marker)}"`, 'ssh://-oProxyCommand=calc/x']) {
+    h.fixture.plain(h.project, 'config', 'remote.origin.url', address)
+    for (const result of [await h.service.fetch(SUBSCRIBER, PROFILE, repoId), await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h)), await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))]) {
+      assert.deepEqual([result.ok, result.reason], [false, 'no-remote'], address)
+      assert.match(result.message, /will not contact it/)
+    }
+  }
+  assert.equal(h.calls.includes('fetch') || h.calls.includes('push'), false, 'no network command was started')
+  assert.equal(existsSync(marker), false)
+})
+
+test('a push is refused while the repository has a pre-push hook, which the panel does not run', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-prepush-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withOrigin(t, (f, project) => hookFile(project, 'pre-push', `echo ran >> "${shellPath(marker)}"`))
+  const { repoId } = await open(h)
+  writeFileSync(join(h.project, 'mine.txt'), 'm\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'mine')
+  const before = remoteHead(h)
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))
+  assert.deepEqual([result.ok, result.reason, result.hooks], [false, 'hooks-unsupported', ['pre-push']])
+  assert.equal(remoteHead(h), before)
+  assert.equal(existsSync(marker), false)
+  assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true, 'a fetch has no hook to skip')
+})
+
+/** A local web server that answers every request with `handler`, for the failures that need a real network peer. */
+async function serve(t: test.TestContext, handler: (request: IncomingMessage, response: ServerResponse) => void): Promise<{ port: number; requests: () => number }> {
+  let count = 0
+  const sockets = new Set<Socket>()
+  const server = createServer((request, response) => { count++; handler(request, response) })
+  server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { for (const socket of sockets) socket.destroy(); server.close() })
+  return { port: (server.address() as AddressInfo).port, requests: () => count }
+}
+
+test('a remote that wants credentials fails fast with the terminal hint, and no secret reaches the result or the progress', { skip }, async (t) => {
+  const server = await serve(t, (_request, response) => { response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="x"' }); response.end() })
+  const progress: string[] = []
+  const h = await withOrigin(t, (f, project) => f.plain(project, 'config', 'remote.origin.url', `http://someone:hunter2secret@127.0.0.1:${server.port}/r.git`),
+    { onProgress: (_subscriber, _profile, event) => { progress.push(event.text) } })
+  const { repoId } = await open(h)
+  const started = Date.now()
+  for (const result of [await h.service.fetch(SUBSCRIBER, PROFILE, repoId), await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h)), await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))]) {
+    assert.deepEqual([result.ok, result.reason], [false, 'auth-required'])
+    assert.match(result.message, /Authentication required.*terminal.*git fetch/s)
+    assert.equal(`${result.message}${result.output}`.includes('hunter2secret'), false)
+  }
+  assert.ok(Date.now() - started < 30_000, 'it did not wait for a prompt')
+  assert.equal(progress.join('').includes('hunter2secret'), false)
+  assert.ok(server.requests() > 0, 'the server really was contacted')
+})
+
+test('Cancel stops a fetch that is waiting for a slow remote', { skip }, async (t) => {
+  const server = await serve(t, () => { /* never answers */ })
+  const h = await withOrigin(t, (f, project) => f.plain(project, 'config', 'remote.origin.url', `http://127.0.0.1:${server.port}/r.git`))
+  const { repoId } = await open(h)
+  const running = h.service.fetch(SUBSCRIBER, PROFILE, repoId)
+  await waitFor(() => server.requests() > 0)
+  const started = Date.now()
+  h.service.cancel(SUBSCRIBER, PROFILE, repoId)
+  const result = await running
+  assert.deepEqual([result.ok, result.reason, result.message], [false, 'cancelled', 'Cancelled.'])
+  assert.ok(Date.now() - started < 15_000)
+})
+
+test('network commands run with prompts off, only the supported transports, and SSH batch mode unless the user has their own SSH command', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true)
+  const first = h.runs.filter(run => run.kind === 'network').at(-1)!
+  assert.equal(first.environment?.sshBatchMode, true)
+  assert.equal(first.environment?.extra?.GIT_ALLOW_PROTOCOL, 'http:https:ssh:git:file')
+  assert.equal(first.disableHooks, true)
+
+  h.fixture.plain(h.project, 'config', '--global', 'core.sshCommand', 'ssh -i somewhere')
+  assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true)
+  assert.equal(h.runs.filter(run => run.kind === 'network').at(-1)!.environment?.sshBatchMode, false, 'GIT_SSH_COMMAND would have overridden the user\'s own')
+})
+
+// ---- what a fetch may write, and what a confirmation covers --------------------------------------------------------------------
+
+test('a fetch whose configured refspec would overwrite a local branch is refused, and the branch is untouched', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'branch', 'backup')
+    writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'local work')
+    f.plain(project, 'branch', '-f', 'backup', 'HEAD')
+    f.plain(project, 'config', '--add', 'remote.origin.fetch', '+refs/heads/main:refs/heads/backup')
+  })
+  const { repoId } = await open(h)
+  const backup = h.fixture.plain(h.project, 'rev-parse', 'backup').trim()
+  const fetched = await h.service.fetch(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual([fetched.ok, fetched.reason], [false, 'no-remote'])
+  assert.match(fetched.message, /writes outside its remote-tracking branches/)
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'backup').trim(), backup, 'the local branch kept its commit')
+  const pulled = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  assert.deepEqual([pulled.ok, pulled.reason], [false, 'no-remote'], 'the fetch inside a pull is held to the same rule')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'backup').trim(), backup)
+  assert.equal(h.calls.includes('fetch'), false, 'no fetch was started')
+})
+
+test('a fetch never prunes or writes tags, whatever the repository configures, and still follows a valid single-branch setup', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    // The remote has a branch that exists locally as a remote-tracking branch; the colleague deletes it after the first fetch.
+    f.plain(join(f.root, 'other'), 'push', '-q', 'origin', 'HEAD:refs/heads/obsolete')
+    f.plain(project, 'fetch', '-q', 'origin')
+    f.plain(join(f.root, 'other'), 'push', '-q', 'origin', '--delete', 'obsolete')
+    f.plain(project, 'config', 'fetch.prune', 'true'); f.plain(project, 'config', 'fetch.pruneTags', 'true'); f.plain(project, 'config', 'remote.origin.prune', 'true')
+    f.plain(project, 'config', '--unset-all', 'remote.origin.fetch')
+    f.plain(project, 'config', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main')
+  })
+  const { repoId } = await open(h)
+  assert.match(h.fixture.plain(h.project, 'branch', '-r'), /origin\/obsolete/)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  h.fixture.plain(join(h.fixture.root, 'other'), 'tag', 'v1'); h.fixture.plain(join(h.fixture.root, 'other'), 'push', '-q', 'origin', 'v1')
+  const result = await h.service.fetch(SUBSCRIBER, PROFILE, repoId)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(result.status!.summary.behind, 1, 'the configured single-branch refspec was followed')
+  assert.match(h.fixture.plain(h.project, 'branch', '-r'), /origin\/obsolete/, 'nothing was pruned')
+  assert.equal(h.fixture.plain(h.project, 'tag', '--list').trim(), '', 'no tag was written')
+})
+
+test('fetch settings are held to the remote\'s own namespace, one value at a time', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  for (const spec of ['+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*', '+refs/heads/*:refs/remotes/fork/*']) {
+    h.fixture.plain(h.project, 'config', '--replace-all', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+    h.fixture.plain(h.project, 'config', '--add', 'remote.origin.fetch', spec)
+    const result = await h.service.fetch(SUBSCRIBER, PROFILE, repoId)
+    assert.deepEqual([result.ok, result.reason], [false, 'no-remote'], spec)
+  }
+  h.fixture.plain(h.project, 'config', '--replace-all', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+  assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true, 'the standard setting is fine')
+})
+
+test('a confirmation made for one branch does not publish another', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'safe')
+    writeFileSync(join(project, 's.txt'), 's\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'safe work')
+    f.plain(project, 'checkout', '-q', '-b', 'private')
+    writeFileSync(join(project, 'p.txt'), 'secret\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'private work')
+    f.plain(project, 'checkout', '-q', 'safe')
+  })
+  const { repoId } = await open(h)
+  const confirmed = seen(h)
+  assert.equal(confirmed.branch, 'safe')
+  // After the confirmation was shown, something else switches branches.
+  h.fixture.plain(h.project, 'checkout', '-q', 'private')
+  await assert.rejects(h.service.push(SUBSCRIBER, PROFILE, repoId, 'origin', confirmed), GitStaleError)
+  assert.throws(() => remoteHead(h, 'private'), 'the private branch was not published')
+  assert.throws(() => remoteHead(h, 'safe'), 'and neither was the confirmed one: nothing was sent')
+  // Back on the confirmed branch it goes through.
+  h.fixture.plain(h.project, 'checkout', '-q', 'safe')
+  const done = await h.service.push(SUBSCRIBER, PROFILE, repoId, 'origin', confirmed)
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+  assert.equal(remoteHead(h, 'safe'), h.fixture.plain(h.project, 'rev-parse', 'safe').trim())
+  assert.throws(() => remoteHead(h, 'private'))
+})
+
+test('a push or pull is for the commit that was shown: a new commit, or a missing confirmation, stops it', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
+  })
+  const { repoId } = await open(h)
+  const shown = seen(h)
+  const before = remoteHead(h)
+  writeFileSync(join(h.project, 'later.txt'), 'l\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'committed after the click')
+  await assert.rejects(h.service.push(SUBSCRIBER, PROFILE, repoId, null, shown), /branch changed/)
+  await assert.rejects(h.service.pull(SUBSCRIBER, PROFILE, repoId, shown), /branch changed/)
+  assert.equal(remoteHead(h), before, 'nothing was sent')
+  await assert.rejects(h.service.push(SUBSCRIBER, PROFILE, repoId, null, null as never), /branch changed/)
+  assert.equal((await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))).ok, true)
+})
+
+// ---- the binding holds for the whole operation, not only at the start ------------------------------------------------------------
+
+test('a pull does not merge into another branch when the branch is switched while its fetch runs', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'private')
+    writeFileSync(join(project, 'p.txt'), 'p\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'private work')
+    f.plain(project, 'push', '-q', '-u', 'origin', 'private')
+    f.plain(project, 'checkout', '-q', 'main')
+    const other = join(f.root, 'other')
+    f.plain(other, 'fetch', '-q', 'origin')
+    f.plain(other, 'checkout', '-q', 'private')
+    writeFileSync(join(other, 'q.txt'), 'q\n'); f.plain(other, 'add', '.'); f.plain(other, 'commit', '-q', '-m', 'more private work'); f.plain(other, 'push', '-q', 'origin', 'private')
+    f.plain(other, 'checkout', '-q', 'main')
+  })
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const confirmed = seen(h)
+  const privateBefore = h.fixture.plain(h.project, 'rev-parse', 'private').trim()
+  // While the fetch is finishing, another tool switches branches.
+  h.afterCommand(options => options.args[0] === 'fetch', () => h.fixture.plain(h.project, 'checkout', '-q', 'private'))
+  await assert.rejects(h.service.pull(SUBSCRIBER, PROFILE, repoId, confirmed), /branch changed while the pull was running/)
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'private').trim(), privateBefore, 'the branch that became current was not advanced')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'main').trim(), confirmed.headOid, 'and the confirmed one was not touched either')
+  assert.equal(existsSync(join(h.project, 'q.txt')), false)
+})
+
+test('a commit made while a pull fetches also stops the merge, and the merge names the confirmed upstream', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const confirmed = seen(h)
+  h.afterCommand(options => options.args[0] === 'fetch', () => {
+    writeFileSync(join(h.project, 'late.txt'), 'l\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'committed during the fetch')
+  })
+  await assert.rejects(h.service.pull(SUBSCRIBER, PROFILE, repoId, confirmed), GitStaleError)
+  assert.equal(h.runs.some(run => run.args[0] === 'merge'), false, 'no merge was started')
+  // A normal pull merges the full remote-tracking ref, never `@{upstream}`.
+  const fresh = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  const merge = h.runs.find(run => run.args[0] === 'merge')
+  assert.ok(merge, fresh.message)
+  assert.equal(merge.args.at(-1), 'refs/remotes/origin/main')
+  assert.equal(merge.args.includes('@{upstream}'), false)
+})
+
+test('a push sends the commit that was confirmed, not one added to the branch afterwards', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'confirmed')
+  })
+  const { repoId } = await open(h)
+  const confirmed = seen(h)
+  // After the checks and before git starts, a new commit lands on the branch.
+  h.afterCommand(options => options.args.includes('core.sshcommand'), () => {
+    writeFileSync(join(h.project, 'secret.txt'), 'not confirmed\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'added after the click')
+  })
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, confirmed)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(remoteHead(h), confirmed.headOid, 'the remote has the confirmed commit')
+  assert.notEqual(localHead(h), confirmed.headOid, 'the later commit exists only locally')
+  assert.equal(result.status!.summary.ahead, 1, 'and is still waiting to be pushed')
+  assert.throws(() => h.fixture.plain(join(h.fixture.root, 'remote.git'), 'cat-file', '-e', localHead(h)), 'the unconfirmed commit never reached the remote')
+})
+
+test('publishing sends the confirmed commit and then makes the branch follow it', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'feature')
+    writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
+  })
+  const { repoId } = await open(h)
+  const confirmed = seen(h)
+  h.afterCommand(options => options.args.includes('core.sshcommand'), () => {
+    writeFileSync(join(h.project, 'later.txt'), 'l\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'later')
+  })
+  const done = await h.service.push(SUBSCRIBER, PROFILE, repoId, 'origin', confirmed)
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+  assert.equal(remoteHead(h, 'feature'), confirmed.headOid)
+  assert.equal(h.fixture.plain(h.project, 'config', 'branch.feature.remote').trim(), 'origin')
+  assert.equal(h.fixture.plain(h.project, 'config', 'branch.feature.merge').trim(), 'refs/heads/feature')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/feature')
+  assert.equal(done.status!.summary.ahead, 1, 'the later commit is the one still to push')
 })

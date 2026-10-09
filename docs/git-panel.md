@@ -40,6 +40,39 @@ debug browser sees it). Close it the same way. Its width and open state are reme
 - Every write quotes the file list you were looking at. If the list changed in the meantime, the request is refused and the
   list refreshes, so a click can never stage or unstage a different file than the one you meant.
 
+## Fetch, pull and push
+
+Under the branch name are **Fetch**, **Pull** and **Push**. Each runs one Git command for the selected repository, shows what
+Git prints while it runs, and has a **Cancel** that stops the whole process tree. Two minutes is the limit.
+
+- **Fetch** updates the remote-tracking branches from the branch's remote (or `origin`, or the only remote). It changes no file in
+  your folder, never prunes (whatever `fetch.prune` says) and writes no tags. A fetch applies every `remote.<name>.fetch` setting
+  the repository has, so one that would write anywhere but under `refs/remotes/<name>/` (a local branch, a tag, another remote's
+  branches) is refused, and says which setting. The `↑` and `↓` counts update afterwards.
+- **Pull** is fetch followed by a **fast-forward only** merge of the upstream. If the branches have each moved on, nothing changes
+  and the panel says so; merging or rebasing is left to you in a terminal. Git itself refuses a pull that would overwrite local changes.
+- **Push** sends the confirmed commit of the current branch to the branch of the same name on its upstream, with an explicit refspec,
+  so a push the remote would have to overwrite is refused (the panel never forces, and ignores a configured `+` refspec). A branch that tracks a
+  differently named branch is not pushed from the panel.
+- **Publish…** replaces Push for a branch with no upstream. It asks which remote, says what it will do, and sends nothing until you
+  confirm; then the branch is pushed and becomes that branch's upstream.
+- **A click is for the branch and commit on screen.** Pull, Push and the Publish confirmation carry the branch and its commit; if
+  another terminal or Copilot has switched branches or committed since, the request is refused and nothing is sent, so a
+  confirmation for one branch can never publish another. The check is repeated while the command runs: a pull looks again after
+  its fetch and before every merge attempt, and merges the confirmed branch's own upstream rather than whatever is current; a push
+  sends the confirmed commit by id, so a commit added a moment later stays local and shows as still to push.
+- **Credentials are never collected.** Git runs with prompts off, so a remote that wants a password or a key passphrase fails
+  within seconds with "Authentication required", and the message says to run `git fetch` once in a terminal. Credentials Git has
+  saved (Credential Manager, an SSH agent) are used as usual. Unless you have set `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`
+  yourself, SSH runs in batch mode, so an unknown host key or a passphrase fails instead of waiting.
+- **Addresses are checked first, every time.** A repository chooses its own remote address, so before contacting one the panel
+  resolves it (after any `insteadOf` rewrite) and refuses a network share (`\\server\share`, `//server/share`, `file://server/...`),
+  a `name::address` helper such as `ext::`, an unknown protocol and a host that starts with `-`. Network commands may use only
+  `http`, `https`, `ssh`, `git` and `file`.
+- **Hooks are not run.** Fetch, pull and push run with the repository's hooks switched off. A repository with a `pre-push` hook is
+  not pushed from the panel at all, so a check you rely on is never skipped silently; push from a terminal.
+- Remote addresses are redacted (user names with passwords, tokens) before they reach the panel, a result or a log.
+
 ## Giving context to Copilot
 
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
@@ -74,7 +107,10 @@ error and is never opened. This is checked again before every command, not only 
   closing the panel stops all of it.
 - Only the main window has the panel; a session popped out to its own window does not.
 - A very narrow window gives the panel the whole area instead of squeezing the terminal; closing it returns the session.
-- Fetch, pull, push, branch switching, amending and discarding changes are not in the panel yet.
+- Branch switching, amending and discarding changes are not in the panel yet, and neither is a sidebar summary (it would need
+  Git to run in the background while the panel is closed, which the panel deliberately does not do).
+- Pull changes the files in your folder. The panel does not check whether a Copilot session is working there; a fast-forward only
+  touches files that differ between the two commits, and Git refuses it when a local change is in the way.
 - Git reads your identity from its configuration, not from `GIT_AUTHOR_NAME`-style environment variables, which the panel
   deliberately does not pass on to Git.
 - Submodules are not listed (reading them would run Git inside another repository). If a submodule update is staged, Commit is refused

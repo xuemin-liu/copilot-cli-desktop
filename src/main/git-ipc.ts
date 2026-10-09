@@ -24,6 +24,21 @@ const REPO_ID = /^repo-[1-9]\d{0,8}$/
 const ENTRY_ID = /^e\d{1,9}-\d{1,6}$/
 const CONFIG_HASH = /^[0-9a-f]{64}$/
 
+/** A remote's name: printable, not an option, short. The service also requires it to be one of the repository's remotes. */
+function expectedBranchArg(value: unknown): { branch: string; headOid: string } {
+  const entry = value as { branch?: unknown; headOid?: unknown } | null
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error('Invalid branch')
+  const { branch, headOid } = entry
+  if (typeof branch !== 'string' || branch.length < 1 || branch.length > 255 || [...branch].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) throw new Error('Invalid branch')
+  if (typeof headOid !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headOid)) throw new Error('Invalid commit')
+  return { branch, headOid }
+}
+
+function remoteNameArg(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 200 || value.startsWith('-') || [...value].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) throw new Error('Invalid remote')
+  return value
+}
+
 function profileIdArg(value: unknown): string {
   if (typeof value !== 'string' || !PROFILE_ID.test(value)) throw new Error('Invalid workspace')
   return value
@@ -96,6 +111,19 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     if (typeof message !== 'string' || message.trim() === '' || message.length > 100_000 || message.includes('\0')) throw new Error('Invalid commit message')
     if (approvedHooksHash !== null && (typeof approvedHooksHash !== 'string' || !CONFIG_HASH.test(approvedHooksHash))) throw new Error('Invalid hooks approval')
     return service.commit(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), message, boundedInteger(generation, 'file list version', 0, 1_000_000_000), approvedHooksHash)
+  })
+  handle('desktop:git-sync', (service, event, profileId: unknown, repoId: unknown, operation: unknown, remote: unknown, expected: unknown) => {
+    if (operation !== 'fetch' && operation !== 'pull' && operation !== 'push') throw new Error('Invalid operation')
+    const remoteName = remote === null ? null : remoteNameArg(remote)
+    if (remoteName !== null && operation !== 'push') throw new Error('Only a push takes a remote')
+    const args = [event.sender.id, profileIdArg(profileId), repoIdArg(repoId)] as const
+    if (operation === 'fetch') {
+      if (expected !== null) throw new Error('A fetch is not tied to a branch')
+      return service.fetch(...args)
+    }
+    // A pull or push belongs to the branch, at the commit, that the person was looking at when they asked.
+    const seen = expectedBranchArg(expected)
+    return operation === 'push' ? service.push(...args, remoteName, seen) : service.pull(...args, seen)
   })
   handle('desktop:git-cancel', (service, event, profileId: unknown, repoId: unknown) => { service.cancel(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)) })
   handle('desktop:git-log', (service, event, profileId: unknown, repoId: unknown, limit: unknown, skip: unknown) =>

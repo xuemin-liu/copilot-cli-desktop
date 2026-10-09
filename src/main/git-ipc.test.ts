@@ -14,6 +14,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
     subscribe: record('subscribe'), unsubscribe: record('unsubscribe'), unsubscribeAll: record('unsubscribeAll'), rescan: record('rescan'),
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
+    fetch: record('fetch'), pull: record('pull'), push: record('push'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -38,7 +39,7 @@ test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
     'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
-    'desktop:git-stage', 'desktop:git-status', 'desktop:git-trust', 'desktop:git-unstage',
+    'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage',
   ])
 })
 
@@ -153,8 +154,38 @@ test('cancel takes only a workspace and a repository, and the write channels are
   call('desktop:git-cancel', sender(), PROFILE, 'repo-2')
   assert.deepEqual(calls, [['cancel', 1, PROFILE, 'repo-2']])
   assert.throws(() => call('desktop:git-cancel', sender(), PROFILE, 'repo-0'), /Invalid repository/)
-  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel']) {
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync']) {
     assert.ok(handlers.has(channel), channel)
     assert.throws(() => call(channel, sender(2), PROFILE, 'repo-1', ['e1-0'], 1, null), /main window/, channel)
   }
+})
+
+const OID = 'a'.repeat(40)
+const SEEN = { branch: 'main', headOid: OID }
+
+test('sync accepts only the three operations, a remote only for a push, and the branch a pull or push was asked for', () => {
+  const { call, sender, calls } = setup()
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null, null)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'pull', null, SEEN)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', null, SEEN)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', 'origin', { branch: 'feature/x', headOid: 'b'.repeat(64) })
+  assert.deepEqual(calls, [['fetch', 1, PROFILE, 'repo-1'], ['pull', 1, PROFILE, 'repo-1', SEEN], ['push', 1, PROFILE, 'repo-1', null, SEEN], ['push', 1, PROFILE, 'repo-1', 'origin', { branch: 'feature/x', headOid: 'b'.repeat(64) }]])
+  calls.length = 0
+  for (const bad of ['force-push', 'clone', '', 5, null, undefined]) {
+    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', bad, null, SEEN), /Invalid operation/, String(bad))
+  }
+  for (const bad of ['', '-oProxyCommand=x', 'a\0b', 'a\nb', 'x'.repeat(201), 5, undefined]) {
+    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', bad, SEEN), /Invalid remote/, String(bad))
+  }
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', 'origin', null), /Only a push takes a remote/)
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-0', 'fetch', null, null), /Invalid repository/)
+  // A pull or push must say which branch and commit it was asked for; a fetch must not.
+  for (const operation of ['pull', 'push']) {
+    for (const bad of [undefined, null, 'main', [], {}, { branch: 'main' }, { headOid: OID }, { branch: '', headOid: OID }, { branch: 'a\nb', headOid: OID }, { branch: 'x'.repeat(256), headOid: OID },
+      { branch: 'main', headOid: 'zz' }, { branch: 'main', headOid: 'A'.repeat(40) }, { branch: 'main', headOid: 'a'.repeat(39) }, { branch: 5, headOid: OID }]) {
+      assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', operation, null, bad), /Invalid (branch|commit)/, `${operation} ${JSON.stringify(bad)}`)
+    }
+  }
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null, SEEN), /not tied to a branch/)
+  assert.equal(calls.length, 0, 'nothing reached the service')
 })

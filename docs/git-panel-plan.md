@@ -1,8 +1,9 @@
 # Git side tab plan
 
-Status: revision 6. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66) and phase 1b (panel UI, #67) are merged;
+Status: revision 7. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67) and phase 2
+(stage, unstage, local commit, #68) are merged;
 results are in [git-panel-spikes.md](git-panel-spikes.md) and the user-facing behavior is in [git-panel.md](git-panel.md).
-**Phase 2 (stage, unstage, local commit) is built on `feat/git-panel-phase2`.** Phases 3 and 4 have not started. Revision 2 came from an independent review (see
+**Phase 3 (fetch, pull, push) is built on `feat/git-panel-phase3`.** Phase 4 has not started. Revision 2 came from an independent review (see
 [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
@@ -397,8 +398,59 @@ Not in phase 2: amending, discarding, and any network operation.
 
 ### Phase 3 — network
 
-Fetch, pull `--ff-only`, push (set upstream after confirmation). Credential-failure UX.
-Optional sidebar status setting.
+Fetch, pull `--ff-only`, push (set upstream after confirmation), and the credential-failure message. Built as one IPC channel
+(`desktop:git-sync`: `fetch`, `pull` or `push`, plus a remote name for a first push), one service method that all three share,
+and a sync bar under the branch name. The design decisions, each with a test that fails without it:
+
+- **The address is checked before every contact.** It comes from the repository's own config, so `remote get-url` resolves it
+  (after `insteadOf`/`pushInsteadOf`) and `checkRemoteUrl` refuses a network share (`\\server\share`, `//server/share`,
+  `file://server/..`, `file:////server/..`; Windows would send credentials to open it), a `name::address` helper (`ext::` runs a
+  program), an unknown protocol, and a host that starts with `-` (`ssh` reads it as an option). On top of that,
+  `GIT_ALLOW_PROTOCOL=http:https:ssh:git:file` limits what git itself will start.
+- **Pull is fetch, then `merge --ff-only @{upstream}`.** Two commands, so each has its own failure meaning, the second one waits
+  for `index.lock` like every write, and the trust gate is checked again between them. A pull that cannot fast-forward changes
+  nothing ("diverged"); merging and rebasing stay in the terminal.
+- **Push uses an explicit refspec** (`refs/heads/<b>:refs/heads/<b>`), which overrides `remote.<name>.push`, and never a `+` or
+  `--force`. It also passes `--no-recurse-submodules --no-follow-tags --signed=no`, so config cannot make a push do more (push
+  submodules, run `gpg`). A branch whose upstream has a different name is refused: git's own `push.default=simple` refuses the
+  same, and pushing it from a button would hide where it goes.
+- **A branch without an upstream asks first.** `needs-upstream` carries the remote names; the panel shows a confirmation naming
+  the branch and remote, and only then sends `--set-upstream`. The remote must be one of the repository's configured remotes.
+- **Hooks.** Network commands run with `core.hooksPath` redirected, so `post-merge`, `post-checkout` and `reference-transaction`
+  do not run on a pull. A `pre-push` hook is a guard, so a repository that has one is refused (`hooks-unsupported`) rather than
+  pushed around it. (Approving it like a commit hook is possible later; the approval store holds one hash per repository today.)
+- **No credentials, fast.** `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and `SSH_ASKPASS_REQUIRE=never` were already set;
+  `GIT_SSH_COMMAND=ssh -o BatchMode=yes` is added only when `core.sshCommand` (read from the effective config, including the
+  global one) is unset and the user has no `GIT_SSH`/`GIT_SSH_COMMAND`, because that variable outranks the setting. Failures
+  that mean "credentials or host key" (`terminal prompts disabled`, `Authentication failed`, `Permission denied (`, `Host key
+  verification failed`, HTTP 401/403 and a few more) become `auth-required` with "run `git fetch` in a terminal".
+- **A fetch writes only where it says it does.** It applies every `remote.<name>.fetch`, so those settings are read first
+  (`checkFetchRefspecs`) and a destination outside `refs/remotes/<remote>/` refuses the fetch; the command also overrides pruning
+  (`--no-prune --no-prune-tags`, against `fetch.prune`) and writes no tags. Found by the first review: a configured
+  `+refs/heads/main:refs/heads/backup` reset a local branch. Git itself refuses `--mirror` together with a refspec, so a
+  `remote.<name>.mirror` setting cannot turn the explicit push into a mirror.
+- **Confirmations are bound to what was shown.** `desktop:git-sync` carries the branch and its commit for a pull or push, and main
+  compares them with the freshly read state before doing anything (`GitStaleError`), so a confirmation for one branch cannot
+  publish the branch another tool switched to. The Publish dialog keeps the branch and commit it was asked about and hides if
+  they change. The second review round showed that a check at the start is not enough, because a fetch can take two minutes: a pull
+  now re-reads the current branch and commit after the fetch and before every merge attempt (`GitStaleError` if they differ) and
+  merges the confirmed branch's tracking ref by its full name instead of `@{upstream}`; a push uses the confirmed commit id as the
+  refspec source instead of the branch name, so nothing committed after the click is sent. Because `--set-upstream` needs a branch
+  name as its source, a publish writes `branch.<name>.remote` and `.merge` itself after the push succeeds. The remaining window is
+  the few milliseconds between the re-read and git's own ref update on a pull; git offers no compare-and-swap for a merge.
+- **Redaction.** `redactDiagnosticText` now also removes `user:password@` from any scheme (`ssh://`, `git://`), and the progress
+  stream is redacted as well as the final result.
+- **Cancel and limits.** Same cancel and process-tree kill as a commit; 120 seconds for the network; one write at a time per
+  repository, and the repository list stays locked while one runs.
+
+Not in phase 3, on purpose:
+
+- **The optional sidebar status setting.** It needs git to poll in the background while the panel is closed, which the panel
+  promises not to do. It can come later as an explicit opt-in with its own budget.
+- **Gating Pull on session activity.** The plan gates `checkout` (phase 4) because it can rewrite many files under a working
+  agent. A fast-forward only touches files that differ between two commits and git refuses it when a local change is in the way;
+  if that proves too loose in practice, the activity check built for checkout can be applied to Pull too.
+- Approving a `pre-push` hook, pushing a differently named upstream, pruning, tags, force.
 
 ### Phase 4 — branches and destructive actions
 

@@ -1,6 +1,6 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { commitArgs, configGetArgs, diffArgs, logArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
-import { inspectCommitHooks } from './git-hooks.js'
+import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
@@ -15,6 +15,8 @@ import { readUntrackedFile } from './git-untracked.js'
 import type {
   GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
 } from './git-types.js'
+import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
+import type { SyncOperation } from './git-sync.js'
 import { realPathNative } from './real-path.js'
 
 export interface GitRuntime {
@@ -127,6 +129,12 @@ export function isIndexLockFailure(result: GitRunResult): boolean {
 }
 
 /** What git and its hooks printed, redacted and cut to the last few thousand characters. */
+/** The branch, and the commit on it, that a pull or push was asked for. */
+export interface ExpectedBranch {
+  branch: string
+  headOid: string
+}
+
 function tailOutput(result: GitRunResult): string {
   const text = redactDiagnosticText(`${result.stdout.toString('utf8')}${result.stderr}`).replace(/\r\n/g, '\n').trim()
   return text.length > 4_000 ? `…${text.slice(-3_999)}` : text
@@ -643,7 +651,8 @@ export class GitService {
   }
 
   private emitter(subscriberId: number, profileId: string, repoId: string, operation: GitProgressEvent['operation']): (stream: 'stdout' | 'stderr', text: string) => void {
-    return (stream, text) => this.options.onProgress?.(subscriberId, profileId, { repoId, operation, stream, text: text.slice(0, 4_000) })
+    // What git prints can include the address it is talking to, with credentials in it.
+    return (stream, text) => this.options.onProgress?.(subscriberId, profileId, { repoId, operation, stream, text: redactDiagnosticText(text).slice(0, 4_000) })
   }
 
   /** A refresh that is certain to start after a write finished, then the repository's fresh status. */
@@ -661,17 +670,178 @@ export class GitService {
   }
 
   private outcome(overrides: Partial<GitOperationResult> & Pick<GitOperationResult, 'ok' | 'message'>): GitOperationResult {
-    return { reason: null, output: '', hooks: [], hooksHash: null, commit: null, status: null, ...overrides }
+    return { reason: null, output: '', hooks: [], hooksHash: null, remotes: [], commit: null, status: null, ...overrides }
   }
 
   /** A failed command as a result: busy, cancelled, timed out or failed, with what git said. */
   private failure(result: GitRunResult, root: string, what: string): Omit<GitOperationResult, 'status'> {
     const output = tailOutput(result)
-    const base = { ok: false, hooks: [], hooksHash: null, commit: null, output }
+    const base = { ok: false, hooks: [], hooksHash: null, remotes: [], commit: null, output }
     if (result.cancelled) return { ...base, reason: 'cancelled', message: 'Cancelled. If Git left a lock file behind, delete .git/index.lock in this repository before trying again.' }
     if (result.timedOut) return { ...base, reason: 'failed', message: `${what} timed out. If Git left a lock file behind, delete .git/index.lock in this repository before trying again.` }
     if (isIndexLockFailure(result)) return { ...base, reason: 'busy', message: 'Another Git process is using this repository (it holds .git/index.lock). Wait for it to finish; if none is running, delete that file yourself.' }
     return { ...base, reason: 'failed', message: describeFailure(result, what, root) }
+  }
+
+  // ---- network ------------------------------------------------------------------------------------------------------
+
+  fetch(subscriberId: number, profileId: string, repoId: string): Promise<GitOperationResult> {
+    return this.sync('fetch', subscriberId, profileId, repoId, null, null)
+  }
+
+  /** Pull into the branch the person was looking at (`expected`); if the current branch or its commit is different now, nothing happens. */
+  pull(subscriberId: number, profileId: string, repoId: string, expected: ExpectedBranch): Promise<GitOperationResult> {
+    return this.sync('pull', subscriberId, profileId, repoId, null, expected)
+  }
+
+  /**
+   * Push the branch the person was looking at (`expected`) to its upstream. A branch with none is refused with the remotes it could
+   * be published to; sending one of them publishes it. A confirmation made for one branch or commit never pushes another.
+   */
+  push(subscriberId: number, profileId: string, repoId: string, publishTo: string | null, expected: ExpectedBranch): Promise<GitOperationResult> {
+    return this.sync('push', subscriberId, profileId, repoId, publishTo, expected)
+  }
+
+  private async sync(operation: SyncOperation, subscriberId: number, profileId: string, repoId: string, publishTo: string | null, expected: ExpectedBranch | null): Promise<GitOperationResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    return this.enqueueWrite(repo, async signal => {
+      await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
+      const root = repo.discovered.root
+      const branch = repo.status?.branch
+      if (!branch) throw new Error('This repository is not available')
+      const refused = (reason: GitOperationResult['reason'], text: string, extra: Partial<GitOperationResult> = {}): GitOperationResult =>
+        this.outcome({ ok: false, reason, message: text, status: repo.statusView, ...extra })
+      const read = async (args: string[]): Promise<string | null> => {
+        const result = await runtime.runner.run({ cwd: root, args, signal, timeoutMs: 15_000 })
+        return gitSucceeded(result) ? result.stdout.toString('utf8').trim() : null
+      }
+
+      const remotes = ((await read(remoteListArgs())) ?? '').split(/\r?\n/).map(name => name.trim()).filter(name => name !== '' && !name.startsWith('-'))
+      const onBranch = !branch.detached && branch.head !== null
+      if (operation !== 'fetch') {
+        if (!onBranch) return refused('detached', `There is no current branch to ${operation}. Switch to a branch in a terminal first.`)
+        if (branch.oid === null) return refused('failed', `There are no commits on this branch yet, so there is nothing to ${operation}.`)
+        // What the person confirmed was a branch at a commit. Another terminal or Copilot may have switched or committed since.
+        if (!expected || expected.branch !== branch.head || expected.headOid !== branch.oid) {
+          throw new GitStaleError('The branch changed since you last looked. Check it, then try again.')
+        }
+      }
+      const head = branch.head ?? ''
+      const upstreamRemote = onBranch ? await read(configGetArgs(`branch.${head}.remote`)) : null
+      const upstreamMerge = onBranch ? await read(configGetArgs(`branch.${head}.merge`)) : null
+
+      let remote: string | null
+      let remoteBranch = head
+      let setUpstream = false
+      let upstreamRef: string | null = null
+      if (operation === 'fetch') {
+        remote = upstreamRemote && remotes.includes(upstreamRemote) ? upstreamRemote
+          : remotes.includes('origin') ? 'origin'
+          : remotes.length === 1 ? remotes[0] ?? null : null
+        if (!remote) return refused('no-remote', remotes.length === 0 ? 'This repository has no remote to fetch from.' : 'This repository has several remotes and none is this branch\'s upstream. Fetch from a terminal.')
+      } else if (branch.upstream !== null && upstreamRemote && upstreamMerge?.startsWith('refs/heads/')) {
+        remote = remotes.includes(upstreamRemote) ? upstreamRemote : null
+        if (!remote) return refused('no-remote', `This branch's upstream is on "${upstreamRemote}", which is not a remote of this repository.`)
+        remoteBranch = upstreamMerge.slice('refs/heads/'.length)
+        if (operation === 'push' && remoteBranch !== head) {
+          return refused('failed', `This branch tracks "${remoteBranch}" on ${remote}, a differently named branch. Push from a terminal, where you can see exactly what goes where.`)
+        }
+      } else if (operation === 'pull') {
+        return refused('no-remote', upstreamRemote === '.' ? 'This branch tracks a local branch, so there is nothing to pull from a remote.' : 'This branch has no upstream to pull from.')
+      } else if (publishTo === null) {
+        return refused(remotes.length === 0 ? 'no-remote' : 'needs-upstream',
+          remotes.length === 0 ? 'This repository has no remote to publish to.' : `The branch "${head}" has not been published yet. Choose where to publish it.`, { remotes })
+      } else {
+        if (!remotes.includes(publishTo)) throw new Error('That is not a remote of this repository')
+        remote = publishTo
+        setUpstream = true
+      }
+
+      // The address comes from the repository's own config, so it is checked each time, after `insteadOf` rewriting.
+      const addresses = await read(remoteUrlArgs(remote, operation === 'push'))
+      if (addresses === null || addresses === '') return refused('no-remote', `The remote "${remote}" has no address.`)
+      for (const address of addresses.split(/\r?\n/)) {
+        const verdict = checkRemoteUrl(address)
+        if (!verdict.ok) return refused('no-remote', `The remote "${remote}" ${verdict.reason}, so the panel will not contact it. Use a terminal if you trust it.`)
+      }
+      if (operation === 'pull') {
+        // The remote-tracking branch of the confirmed branch, named now: the merge must not resolve `@{upstream}` for whatever is current later.
+        upstreamRef = await read(upstreamRefArgs(head))
+        if (!upstreamRef?.startsWith('refs/remotes/')) return refused('no-remote', 'This branch\'s upstream is not a remote-tracking branch, so there is nothing to pull from.')
+      }
+      if (operation !== 'push') {
+        // A fetch writes wherever the repository's refspecs say, so they must say "only my own remote-tracking branches".
+        const specs = (await read(fetchRefspecsArgs(remote))) ?? ''
+        const scope = checkFetchRefspecs(remote, specs.split(/\r?\n/))
+        if (!scope.ok) return refused('no-remote', `The remote "${remote}" ${scope.reason}, so the panel will not fetch it. Fetch from a terminal if you trust it.`)
+      }
+      if (operation === 'push') {
+        const hooks = await inspectHooks(runtime.runner, root, PUSH_HOOKS, signal, this.options.maxHookBytes)
+        if (hooks.hooks.length > 0) return refused('hooks-unsupported', 'This repository has a pre-push hook, which the panel does not run, so it will not push around it. Push from a terminal.', { hooks: hooks.hooks })
+      }
+
+      // Fail instead of waiting for a host-key or passphrase prompt nobody can answer. `GIT_SSH_COMMAND` outranks `core.sshCommand`, so only when that is unset.
+      const sshCommand = await runtime.runner.run({ cwd: root, args: configGetArgs('core.sshcommand'), signal, timeoutMs: 15_000 })
+      const environment = { sshBatchMode: sshCommand.exitCode === 1, extra: { GIT_ALLOW_PROTOCOL: ALLOWED_PROTOCOLS } }
+      const emit = this.emitter(subscriberId, profileId, repoId, operation)
+      const network = (args: string[]): Promise<GitRunResult> =>
+        runtime.runner.run({ cwd: root, kind: 'network', disableHooks: true, args, signal, environment, timeoutMs: 120_000, onOutput: emit })
+
+      const syncFailure = async (result: GitRunResult): Promise<GitOperationResult> => {
+        const status = await this.statusAfterWrite(project, repo)
+        const output = tailOutput(result)
+        if (result.cancelled) return this.outcome({ ok: false, reason: 'cancelled', message: 'Cancelled.', output, status })
+        if (result.timedOut) return this.outcome({ ok: false, reason: 'failed', message: `${operation} timed out after two minutes. Check the connection and try again.`, output, status })
+        if (isIndexLockFailure(result)) return { ...this.failure(result, root, `git ${operation}`), status }
+        const failed = describeSyncFailure(result, operation)
+        return this.outcome({ ok: false, reason: failed.reason, message: failed.message, output, status })
+      }
+
+      if (operation === 'fetch') {
+        const result = await network(fetchArgs(remote))
+        if (!gitSucceeded(result)) return syncFailure(result)
+        const status = await this.statusAfterWrite(project, repo)
+        return this.outcome({ ok: true, message: `Fetched ${remote}.`, output: tailOutput(result), status })
+      }
+      if (operation === 'pull') {
+        const fetched = await network(fetchArgs(remote))
+        if (!gitSucceeded(fetched)) return syncFailure(fetched)
+        const merged = await this.runWithLockWait(runtime, {
+          cwd: root, kind: 'write', disableHooks: true, args: fastForwardArgs(upstreamRef ?? ''), signal, timeoutMs: 120_000, onOutput: emit,
+        }, async () => {
+          await this.requireGate(project, repo, runtime, signal)
+          // The fetch may have taken a while, and a merge changes whichever branch is current. Before every attempt it must still be
+          // the branch, at the commit, that the person asked to pull into.
+          if ((await read(headRefArgs())) !== `refs/heads/${head}` || (await read(['rev-parse', 'HEAD'])) !== branch.oid) {
+            throw new GitStaleError('The branch changed while the pull was running. Nothing was merged. Check it, then try again.')
+          }
+        })
+        if (!gitSucceeded(merged)) return syncFailure(merged)
+        const status = await this.statusAfterWrite(project, repo)
+        const output = tailOutput(merged)
+        return this.outcome({ ok: true, message: /already up to date/i.test(output) ? 'Already up to date.' : `Fast-forwarded ${head} to ${branch.upstream ?? remote}.`, output, status })
+      }
+      // The commit that was confirmed, by id: a commit added to the branch after the click is not sent.
+      const pushed = await network(pushArgs(remote, branch.oid ?? '', remoteBranch))
+      if (!gitSucceeded(pushed)) return syncFailure(pushed)
+      let upstreamNote = ''
+      if (setUpstream) {
+        // `push --set-upstream` needs a branch name as its source, so the upstream is written by name once the push has succeeded.
+        for (const args of upstreamConfigArgs(head, remote, remoteBranch)) {
+          const written = await runtime.runner.run({ cwd: root, kind: 'write', disableHooks: true, args, signal, timeoutMs: 15_000 })
+          if (!gitSucceeded(written)) { upstreamNote = ' The branch was pushed, but its upstream could not be saved; set it in a terminal.'; break }
+        }
+      }
+      const status = await this.statusAfterWrite(project, repo)
+      const output = tailOutput(pushed)
+      const message = (/everything up-to-date/i.test(output) ? 'Everything is already up to date.'
+        : setUpstream ? `Published ${head} to ${remote} and set it as the upstream.` : `Pushed ${head} to ${remote}/${remoteBranch}.`) + upstreamNote
+      return this.outcome({ ok: true, message, output, status })
+    })
   }
 
   /** Which entries a stage or unstage request means, checked against the exact list the person was looking at. */

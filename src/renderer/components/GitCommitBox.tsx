@@ -7,7 +7,7 @@ export interface GitCommitBoxProps {
   message: string
   onMessageChange(value: string): void
   /** The write running now, or null. While one runs, nothing else can be started. */
-  busy: 'stage' | 'unstage' | 'commit' | null
+  busy: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | null
   /** What the running write (a commit hook, usually) has printed so far. */
   progress: string
   canDraft: boolean
@@ -34,6 +34,8 @@ export function GitCommitBox(props: GitCommitBoxProps): JSX.Element {
   const { stagedCount, conflictCount, message, busy, hooks } = props
   const blocker = commitBlocker(stagedCount, conflictCount, message)
   const canCommit = blocker === null && busy === null && hooks === null
+  // Fetch, pull and push show their own output and Cancel in the sync bar.
+  const writing = busy === 'stage' || busy === 'unstage' || busy === 'commit'
   return (
     <section className="git-commit" aria-label="Commit">
       <textarea aria-label="Commit message" placeholder="Commit message (Ctrl+Enter to commit)" rows={3} maxLength={100_000} value={message}
@@ -55,13 +57,13 @@ export function GitCommitBox(props: GitCommitBoxProps): JSX.Element {
 
       <div className="git-commit-row">
         <button type="button" disabled={!props.canDraft || busy !== null} onClick={props.onDraft} title={props.draftTitle}>Draft with Copilot</button>
-        {busy !== null && <button type="button" onClick={props.onCancel} title="Stop what Git is doing now">Cancel</button>}
+        {writing && <button type="button" onClick={props.onCancel} title="Stop what Git is doing now">Cancel</button>}
         <button type="button" className="primary-button git-commit-button" disabled={!canCommit} onClick={props.onCommit}>
           {busy === 'commit' ? 'Committing…' : `Commit ${stagedCount} file${stagedCount === 1 ? '' : 's'}`}
         </button>
       </div>
       {blocker && busy === null && hooks === null && <p className="git-note">{blocker}</p>}
-      {busy !== null && props.progress.trim() !== '' && <pre className="git-progress" aria-live="polite" aria-label="Output while Git works">{props.progress}</pre>}
+      {writing && props.progress.trim() !== '' && <pre className="git-progress" aria-live="polite" aria-label="Output while Git works">{props.progress}</pre>}
     </section>
   )
 }
