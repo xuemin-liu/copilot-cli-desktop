@@ -25,6 +25,18 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   browserPickCancel: (tabId) => ipcRenderer.invoke('desktop:browser-pick-cancel', tabId),
   browserExport: (tabId, kind) => ipcRenderer.invoke('desktop:browser-export', tabId, kind),
   browserBounds: (tabId, bounds) => ipcRenderer.invoke('desktop:browser-bounds', tabId, bounds),
+  gitOpen: (profileId) => ipcRenderer.invoke('desktop:git-open', profileId),
+  gitClose: (profileId) => ipcRenderer.invoke('desktop:git-close', profileId),
+  gitRescan: (profileId) => ipcRenderer.invoke('desktop:git-rescan', profileId),
+  gitTrust: (profileId, repoId, configHash) => ipcRenderer.invoke('desktop:git-trust', profileId, repoId, configHash),
+  gitStatus: (profileId, repoId) => ipcRenderer.invoke('desktop:git-status', profileId, repoId),
+  gitDiff: (profileId, repoId, entryId, staged) => ipcRenderer.invoke('desktop:git-diff', profileId, repoId, entryId, staged),
+  gitLog: (profileId, repoId, limit, skip) => ipcRenderer.invoke('desktop:git-log', profileId, repoId, limit, skip),
+  onGitChanged: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on('desktop:git-changed', handler)
+    return () => ipcRenderer.removeListener('desktop:git-changed', handler)
+  },
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   createTab: (resumeMode, profileId) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId),

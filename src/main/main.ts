@@ -73,6 +73,11 @@ import {
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
 import { spawnNodePty } from './node-pty-backend.js'
+import { GitService } from './git-service.js'
+import { GitRunner, resolveGitExecutable } from './git-runner.js'
+import { GitTrustStore } from './git-trust.js'
+import { registerGitIpc } from './git-ipc.js'
+import type { GitIpcEvent } from './git-ipc.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import { describeSessionPermission, type SessionPermissionMode } from './permission-modes.js'
@@ -226,6 +231,29 @@ const profilesWithSessionTabs = new Set<string>()
 const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
 const restoringTabIds = new Set<string>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+
+// The Git panel's service. Created on first use, and never again once shutdown starts, so no git process can
+// start while the app is closing. It runs git only while a renderer has the panel open.
+let gitService: GitService | null = null
+let gitServiceStopped = false
+function gitServiceInstance(): GitService | null {
+  if (gitServiceStopped || shuttingDown()) return null
+  gitService ??= new GitService({
+    getRuntime: async () => {
+      const executable = await resolveGitExecutable()
+      return executable ? { executable, runner: new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') }) } : null
+    },
+    trustStore: new GitTrustStore(join(app.getPath('userData'), 'git-trust.json')),
+    resolveProject: (profileId) => desktopConfig.profiles.find((profile) => profile.id === profileId)?.path ?? null,
+    onChanged: (subscriberId, profileId, view) => {
+      const window = mainWindow
+      if (window && !window.isDestroyed() && window.webContents.id === subscriberId) window.webContents.send('desktop:git-changed', { profileId, view })
+    },
+    // Hidden or minimized windows (including tray mode), shutdown and migration all pause refreshing.
+    shouldPause: () => shuttingDown() || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized(),
+  })
+  return gitService
+}
 
 // Serializes every operation that stops/replaces/removes a tab's managed
 // session (restart, close, and the global stop-all used by quit/update
@@ -998,6 +1026,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activity: session.activity } : tab) }
     syncTabState()
     broadcastState()
+    // A session doing something probably changed files; the Git panel (if open) refreshes shortly.
+    const profileId = tabsState.tabs.find((tab) => tab.id === id)?.workspaceProfileId
+    if (profileId) gitService?.requestRefresh(profileId)
   })
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
@@ -1907,6 +1938,12 @@ function createWindow(
     if (showOnReady) window.show()
   })
   window.on('focus', refreshMenus)
+  window.on('focus', () => { if (desktopConfig.activeProfileId) gitService?.requestRefresh(desktopConfig.activeProfileId) })
+  // A hidden window (tray mode) or a minimized one must not keep running git.
+  window.on('hide', () => gitService?.setPaused(true))
+  window.on('minimize', () => gitService?.setPaused(true))
+  window.on('show', () => gitService?.setPaused(false))
+  window.on('restore', () => gitService?.setPaused(false))
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, targetUrl) => {
     if (targetUrl !== shellUrl()) event.preventDefault()
@@ -2182,6 +2219,12 @@ ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown
 ipcMain.handle('desktop:get-state', (event) => {
   assertTrustedIpcSender(event)
   return snapshot(sessionWindowId(event.sender))
+})
+registerGitIpc({
+  ipcMain: ipcMain as unknown as Parameters<typeof registerGitIpc>[0]['ipcMain'],
+  service: gitServiceInstance,
+  assertTrustedSender: (event: GitIpcEvent) => assertTrustedIpcSender(event as unknown as IpcMainInvokeEvent),
+  isMainWindowSender: (event: GitIpcEvent) => mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.webContents.id === event.sender.id,
 })
 ipcMain.handle('desktop:pop-out-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
@@ -2867,6 +2910,9 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', (event) => {
   explicitQuitRequested = true
+  // Stop the Git panel first: it aborts every git process it started and refuses new ones.
+  gitServiceStopped = true
+  void gitService?.dispose()
   if (installInProgress && !preparingUpdate) dismissClosePromptForUpdate()
   if (closePromptWindow && !closePromptWindow.isDestroyed()) {
     event.preventDefault()
