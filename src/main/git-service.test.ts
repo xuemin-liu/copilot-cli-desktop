@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
@@ -843,16 +844,20 @@ test('a commit also notices a change that lands while it waits for the index loc
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
-  }, { lockWaitMs: 3_000, lockPollMs: 100 })
+  }, { lockWaitMs: 5_000, lockPollMs: 100 })
   const { repoId, status } = await open(h)
   const seen = await status()
+  // git cannot stage while the lock is held, so the other tool's finished index is prepared on the side and swapped in while the lock is still held.
+  const index = join(h.project, '.git', 'index')
+  const sideIndex = join(h.project, '.git', 'index.side')
+  copyFileSync(index, sideIndex)
+  writeFileSync(join(h.project, 'late.txt'), 'x\n')
+  execFileSync(h.fixture.git.path, ['add', 'late.txt'], { cwd: h.project, env: { ...h.fixture.env, GIT_INDEX_FILE: sideIndex }, stdio: 'ignore' })
+  rmSync(join(h.project, 'late.txt'))
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  setTimeout(() => {
-    rmSync(lock, { force: true })
-    writeFileSync(join(h.project, 'late.txt'), 'x\n')
-    h.fixture.plain(h.project, 'add', 'late.txt')
-  }, 350)
+  setTimeout(() => { writeFileSync(join(h.project, 'late.txt'), 'x\n'); copyFileSync(sideIndex, index) }, 300)
+  setTimeout(() => rmSync(lock, { force: true }), 1_000)
   await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', seen.generation, null), /staged files changed while the commit was waiting/)
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
 })
@@ -870,4 +875,98 @@ test('before the first commit, a file staged and then edited again can still be 
   assert.equal(unstaged.status!.staged.length, 0)
   assert.deepEqual(unstaged.status!.untracked.map(item => item.path), ['a.txt'])
   assert.equal(readFileSync(join(h.project, 'a.txt'), 'utf8'), 'second, edited after staging\n', 'the working file keeps the edit')
+})
+
+// ---- the lock wait must not outlive the checks that were made before it --------------------------------------------
+
+const lockWaitHarness = (t: test.TestContext, setup: (f: GitFixture, project: string) => void) =>
+  harness(t, setup, { lockWaitMs: 5_000, lockPollMs: 100 })
+
+test('a hook swapped while the commit waits for the index lock is not run on the old approval', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-lockwait-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await lockWaitHarness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+    hookFile(project, 'pre-commit', `echo OLD >> "${shellPath(marker)}"`)
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  assert.equal(asked.reason, 'hooks-need-approval')
+
+  // The person approves OLD. Something else holds the index lock, so the commit waits and retries.
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  // The change lands while the lock is still held and the lock goes later, so every attempt that can succeed comes after the change.
+  setTimeout(() => hookFile(h.project, 'pre-commit', `echo NEW >> "${shellPath(marker)}"`), 300)
+  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash)
+  assert.deepEqual([result.ok, result.reason], [false, 'hooks-need-approval'], 'the changed hook asks again')
+  assert.notEqual(result.hooksHash, asked.hooksHash)
+  assert.equal(existsSync(marker), false, 'neither the old nor the new hook ran')
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
+})
+
+test('a hook that appears while the commit waits for the lock needs approval too', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-appeared-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await lockWaitHarness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  setTimeout(() => hookFile(h.project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`), 300)
+  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  assert.deepEqual([result.ok, result.reason, result.hooks], [false, 'hooks-need-approval', ['pre-commit']])
+  assert.equal(existsSync(marker), false, 'the new hook did not run')
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
+})
+
+test('repository settings that start naming a program while the commit waits stop it', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-settings-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await lockWaitHarness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+    hookFile(project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`)
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  setTimeout(() => h.fixture.plain(h.project, 'config', 'core.sshCommand', 'ssh -i somewhere'), 300)
+  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash), /need review|not available/)
+  assert.equal(existsSync(marker), false, 'the approved hook did not run once the settings needed review again')
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
+})
+
+test('a commit whose hooks stay approved still goes through after waiting for a lock', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-ok-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await lockWaitHarness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+    hookFile(project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`)
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  setTimeout(() => rmSync(lock, { force: true }), 350)
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(existsSync(marker), true)
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '2')
 })

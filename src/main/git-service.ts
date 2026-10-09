@@ -1,6 +1,7 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { commitArgs, configGetArgs, diffArgs, logArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
 import { inspectCommitHooks } from './git-hooks.js'
+import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
 import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStatusV2 } from './git-parse.js'
@@ -56,6 +57,14 @@ export class GitCancelledError extends Error {
   constructor() {
     super('Cancelled')
     this.name = 'GitCancelledError'
+  }
+}
+
+/** Carries a finished refusal out of the lock-wait loop, so a check that fails on a retry still ends as a normal result. */
+class WriteRefused extends Error {
+  constructor(readonly result: GitOperationResult) {
+    super(result.message)
+    this.name = 'WriteRefused'
   }
 }
 
@@ -752,26 +761,43 @@ export class GitService {
         }
       }
 
-      const inventory = await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes)
-      if (inventory.unverifiable.length > 0) {
-        const named = inventory.unverifiable.map(hook => `${hook.name} (${hook.reason})`).join('; ')
-        return refused('hooks-unverifiable', `This repository has a hook that cannot be checked, so it cannot be approved: ${named}. Commit from a terminal if you trust it.`, { hooks: inventory.hooks })
-      }
-      if (inventory.hooks.length > 0 && !(await this.options.trustStore.areHooksApproved(root, inventory.hash))) {
-        if (approvedHooksHash !== inventory.hash) {
-          return refused('hooks-need-approval', `This repository has hooks that a commit would run: ${inventory.hooks.join(', ')}.`, { hooks: inventory.hooks, hooksHash: inventory.hash })
+      /** Whether the hooks a commit would run now are ones the person has approved. Null means yes; otherwise the refusal. */
+      const hooksProblem = async (found: HooksInventory, approvedHash: string | null): Promise<GitOperationResult | null> => {
+        if (found.unverifiable.length > 0) {
+          const named = found.unverifiable.map(hook => `${hook.name} (${hook.reason})`).join('; ')
+          return refused('hooks-unverifiable', `This repository has a hook that cannot be checked, so it cannot be approved: ${named}. Commit from a terminal if you trust it.`, { hooks: found.hooks })
         }
-        await this.options.trustStore.approveHooks(root, inventory.hash)
+        if (found.hooks.length === 0 || await this.options.trustStore.areHooksApproved(root, found.hash)) return null
+        if (approvedHash !== found.hash) {
+          return refused('hooks-need-approval', `This repository has hooks that a commit would run: ${found.hooks.join(', ')}.`, { hooks: found.hooks, hooksHash: found.hash })
+        }
+        await this.options.trustStore.approveHooks(root, found.hash)
+        return null
       }
+      const inventory = await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes)
+      const unapproved = await hooksProblem(inventory, approvedHooksHash)
+      if (unapproved) return unapproved
 
-      const result = await this.runWithLockWait(runtime, {
-        cwd: root, kind: 'write', args: commitArgs(), stdin: message, signal, timeoutMs: 600_000,
-        onOutput: this.emitter(subscriberId, profileId, repoId, 'commit'),
-      }, async () => {
-        // The identity, hook and lock checks above take time, and so can waiting for a lock. If anything was staged or restaged
-        // meanwhile, the commit would record something the person never saw.
-        if (await stagedNow() !== staged) throw new GitStaleError('The staged files changed while the commit was waiting. Review them and commit again.')
-      })
+      let result: GitRunResult
+      try {
+        result = await this.runWithLockWait(runtime, {
+          cwd: root, kind: 'write', args: commitArgs(), stdin: message, signal, timeoutMs: 600_000,
+          onOutput: this.emitter(subscriberId, profileId, repoId, 'commit'),
+        }, async () => {
+          // Everything above was checked once, and waiting for a lock can take seconds. Before every attempt, the commit must
+          // still be the one that was reviewed: the same staged contents, the same trusted settings and pointers, and hooks
+          // that are still approved. Anything else ends the commit, or asks again, instead of running what changed meanwhile.
+          await this.requireGate(project, repo, runtime, signal)
+          const refusal = await hooksProblem(await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes), null)
+          if (refusal) throw new WriteRefused(refusal)
+          // Last, because it is the check that must stay closest to the attempt: the slower checks above must not leave a gap
+          // in which something else gets staged.
+          if (await stagedNow() !== staged) throw new GitStaleError('The staged files changed while the commit was waiting. Review them and commit again.')
+        })
+      } catch (error) {
+        if (error instanceof WriteRefused) return error.result
+        throw error
+      }
       const fresh = await this.statusAfterWrite(project, repo)
       if (!gitSucceeded(result)) return { ...this.failure(result, root, 'git commit'), status: fresh }
       const latest = await runtime.runner.run({ cwd: root, args: logArgs({ limit: 1 }), signal: new AbortController().signal }).then(run => gitSucceeded(run) ? parseLog(run.stdout.toString('utf8'))[0] : undefined, () => undefined)
