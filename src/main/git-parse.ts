@@ -42,6 +42,11 @@ export interface GitStatusEntry {
   submodule: boolean
   /** An untracked directory collapsed into one entry (`dir/`). */
   isDirectory: boolean
+  /**
+   * The object id of the staged version (null for entries with nothing staged or no single version). It is part of what the
+   * file-list version covers, so re-staging different content under the same name is a different list.
+   */
+  indexOid: string | null
 }
 
 export interface GitBranchInfo {
@@ -70,6 +75,11 @@ export interface GitStatus {
 export const DEFAULT_MAX_STATUS_ENTRIES = 5_000
 
 const STATUS_CODES = new Set(['.', 'M', 'T', 'A', 'D', 'R', 'C', 'U'])
+
+/** The staged object id from a porcelain v2 record, or null when nothing is staged for the file. */
+function indexOid(field: string | undefined, indexCode: string | undefined): string | null {
+  return field !== undefined && /^[0-9a-f]{40,64}$/.test(field) && indexCode !== undefined && indexCode !== '.' ? field : null
+}
 
 function statusCode(value: string | undefined): GitStatusCode {
   return value !== undefined && STATUS_CODES.has(value) ? value as GitStatusCode : '.'
@@ -126,20 +136,20 @@ export function parseStatusV2(output: string, maxEntries = DEFAULT_MAX_STATUS_EN
       const parsed = leadingFields(record, 8)
       if (!parsed || parsed.rest === '') { malformed++; continue }
       const xy = parsed.fields[1] ?? '..'
-      add({ kind: 'changed', path: parsed.rest, originalPath: null, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'changed', indexOid: indexOid(parsed.fields[7], xy[0]), path: parsed.rest, originalPath: null, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if (type === '2') {
       const parsed = leadingFields(record, 9)
       const original = records[++position]
       if (!parsed || parsed.rest === '' || original === undefined) { malformed++; continue }
       const xy = parsed.fields[1] ?? '..'
-      add({ kind: 'renamed', path: parsed.rest, originalPath: original, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'renamed', indexOid: indexOid(parsed.fields[7], xy[0]), path: parsed.rest, originalPath: original, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if (type === 'u') {
       const parsed = leadingFields(record, 10)
       if (!parsed || parsed.rest === '') { malformed++; continue }
-      add({ kind: 'unmerged', path: parsed.rest, originalPath: null, index: 'U', worktree: 'U', submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'unmerged', indexOid: null, path: parsed.rest, originalPath: null, index: 'U', worktree: 'U', submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if ((type === '?' || type === '!') && record[1] === ' ' && record.length > 2) {
       const path = record.slice(2)
-      add({ kind: type === '?' ? 'untracked' : 'ignored', path, originalPath: null, index: '.', worktree: type, submodule: false, isDirectory: path.endsWith('/') })
+      add({ kind: type === '?' ? 'untracked' : 'ignored', indexOid: null, path, originalPath: null, index: '.', worktree: type, submodule: false, isDirectory: path.endsWith('/') })
     } else if (record !== '') malformed++
   }
   return { branch, entries, totalEntries, truncated: totalEntries > entries.length, malformed, lossyPaths: output.includes('�') }

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { lstat, open, readdir } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { lstat, readdir } from 'node:fs/promises'
 import { win32 } from 'node:path'
 import { gitPathArgs } from './git-commands.js'
 import { isLocalFilesystemPath } from './external-targets.js'
@@ -17,14 +18,20 @@ export const COMMIT_HOOKS: ReadonlySet<string> = new Set([
   'pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-index-change', 'reference-transaction',
 ])
 
-const MAX_HOOK_BYTES = 512 * 1024
+/** The largest hook that is hashed. Real hooks are a few kilobytes; anything bigger cannot be approved, only run by hand. */
+export const MAX_HOOK_BYTES = 64 * 1024 * 1024
 
 export interface HooksInventory {
   /** Folder git will look in. */
   directory: string
   /** Names of the hooks present, sorted. Empty when a commit would run no repository program. */
   hooks: string[]
-  /** Changes if a hook is added, removed or edited, or the folder moves. */
+  /**
+   * Hooks whose contents cannot be fully verified: a link (its target can change without the link changing), a file that is
+   * not a regular file, or one too large to hash. Approval is of exact contents, so these can never be approved.
+   */
+  unverifiable: Array<{ name: string; reason: string }>
+  /** Changes if a hook is added, removed or edited in any byte, or the folder moves. */
   hash: string
 }
 
@@ -36,23 +43,28 @@ export function hookNameOf(fileName: string): string | null {
   return parts.length > 1 && parts.at(-1) === 'sample' ? null : base
 }
 
-async function digest(path: string): Promise<string> {
+type Digest = { digest: string } | { unverifiable: string }
+
+/** SHA-256 of the whole file, read as a stream so size is no reason to look at less than all of it. */
+async function digest(path: string, maxBytes: number): Promise<Digest> {
   const info = await lstat(path)
-  // A link can point anywhere and still be what git runs, so it is part of the inventory as what it is.
-  if (info.isSymbolicLink()) return 'link'
-  if (!info.isFile()) return `not-a-file`
-  if (info.size > MAX_HOOK_BYTES) return `too-large:${info.size}`
-  const handle = await open(path, 'r')
-  try {
-    const buffer = Buffer.alloc(info.size)
-    await handle.read(buffer, 0, buffer.length, 0)
-    return createHash('sha256').update(buffer).digest('hex')
-  } finally {
-    await handle.close().catch(() => undefined)
-  }
+  if (info.isSymbolicLink()) return { unverifiable: 'it is a link, and a link\'s target can change without the link changing' }
+  if (!info.isFile()) return { unverifiable: 'it is not a regular file' }
+  if (info.size > maxBytes) return { unverifiable: `it is larger than ${Math.round(maxBytes / (1024 * 1024))} MB, too large to check` }
+  const hash = createHash('sha256')
+  let read = 0
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(path)
+    stream.on('data', chunk => { read += chunk.length; hash.update(chunk) })
+    stream.on('error', reject)
+    stream.on('end', resolve)
+  })
+  // A file that grew past the limit while it was being read was not fully checked either.
+  if (read > maxBytes) return { unverifiable: 'it changed while it was being read' }
+  return { digest: hash.digest('hex') }
 }
 
-export async function inspectCommitHooks(runner: GitRunner, repoRoot: string, signal?: AbortSignal): Promise<HooksInventory> {
+export async function inspectCommitHooks(runner: GitRunner, repoRoot: string, signal?: AbortSignal, maxBytes = MAX_HOOK_BYTES): Promise<HooksInventory> {
   // Not a read: reads point `core.hooksPath` at an empty folder, which would make git report that folder instead of the
   // repository's real one. `rev-parse` runs no hook, so asking without the override is safe.
   const located = await runner.run({ cwd: repoRoot, args: gitPathArgs('hooks'), kind: 'write', timeoutMs: 15_000, signal })
@@ -67,10 +79,17 @@ export async function inspectCommitHooks(runner: GitRunner, repoRoot: string, si
     if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
   }
   const found: Array<[string, string]> = []
+  const unverifiable: Array<{ name: string; reason: string }> = []
   for (const name of names.sort()) {
-    const hook = hookNameOf(name)
-    if (hook) found.push([name, await digest(win32.join(directory, name))])
+    if (!hookNameOf(name)) continue
+    const result = await digest(win32.join(directory, name), maxBytes)
+    if ('unverifiable' in result) {
+      unverifiable.push({ name, reason: result.unverifiable })
+      found.push([name, `unverifiable: ${result.unverifiable}`])
+    } else {
+      found.push([name, result.digest])
+    }
   }
   const hash = createHash('sha256').update(JSON.stringify([directory.toLowerCase(), found])).digest('hex')
-  return { directory, hooks: [...new Set(found.map(([name]) => name))], hash }
+  return { directory, hooks: [...new Set(found.map(([name]) => name))], unverifiable, hash }
 }

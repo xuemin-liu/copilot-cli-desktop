@@ -1,5 +1,5 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { commitArgs, configGetArgs, diffArgs, logArgs, stageArgs, statusArgs, unstageArgs } from './git-commands.js'
+import { commitArgs, configGetArgs, diffArgs, logArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
 import { inspectCommitHooks } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
@@ -33,6 +33,8 @@ export interface GitServiceOptions {
   /** How long a write waits for another process's `index.lock` before saying so. */
   lockWaitMs?: number
   lockPollMs?: number
+  /** The largest hook that can be hashed for approval; a bigger one can never be approved. Tests lower it. */
+  maxHookBytes?: number
   /** True while refreshing must not start (shutdown, migration, window hidden). Checked before every refresh. */
   shouldPause?(): boolean
   discover?: typeof discoverRepos
@@ -620,9 +622,11 @@ export class GitService {
   }
 
   /** git takes `index.lock` for the duration of a write; another process (Copilot, a hook) may hold it for a moment. */
-  private async runWithLockWait(runtime: GitRuntime, options: GitRunOptions): Promise<GitRunResult> {
+  private async runWithLockWait(runtime: GitRuntime, options: GitRunOptions, before?: () => Promise<void>): Promise<GitRunResult> {
     const deadline = Date.now() + (this.options.lockWaitMs ?? 10_000)
     for (;;) {
+      // Whatever the caller checked must still hold at the moment of each attempt, not only before the first wait.
+      if (before) await before()
       const result = await runtime.runner.run(options)
       if (!isIndexLockFailure(result) || Date.now() >= deadline || options.signal?.aborted) return result
       await new Promise(resolve => setTimeout(resolve, this.options.lockPollMs ?? 400))
@@ -639,6 +643,12 @@ export class GitService {
     if (project.refreshing) await project.refreshing.catch(() => undefined)
     await this.refreshProject(project, true).catch(() => undefined)
     return repo.statusView
+  }
+
+  /** Read the repository again inside the write queue, so a request is judged against the index as it is now, not as it was cached. */
+  private async freshenBeforeWrite(project: ProjectRuntime, repo: RepoRuntime): Promise<void> {
+    await this.statusAfterWrite(project, repo)
+    if (repo.state !== 'ready') throw new Error('This repository is not available')
   }
 
   private outcome(overrides: Partial<GitOperationResult> & Pick<GitOperationResult, 'ok' | 'message'>): GitOperationResult {
@@ -688,6 +698,7 @@ export class GitService {
     return this.enqueueWrite(repo, async signal => {
       // Everything is checked again now that this write has its turn: the list or the settings may have changed while it waited.
       await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
       const entries = this.writableEntries(repo, entryIds, generation, operation)
       const paths = [...new Set(entries.flatMap(entry => operation === 'unstage' && entry.originalPath ? [entry.path, entry.originalPath] : [entry.path]))]
       const root = repo.discovered.root
@@ -718,8 +729,16 @@ export class GitService {
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     return this.enqueueWrite(repo, async signal => {
       await this.requireGate(project, repo, runtime, signal)
-      if (repo.generation !== generation) throw new GitStaleError()
+      // The cached list may be older than the index (another terminal, an editor, Copilot): read it again before comparing.
+      await this.freshenBeforeWrite(project, repo)
+      if (repo.generation !== generation) throw new GitStaleError('The staged files changed since you last looked. Review them and commit again.')
       const root = repo.discovered.root
+      const stagedNow = async (): Promise<string> => {
+        const raw = await runtime.runner.run({ cwd: root, args: stagedRawArgs(), signal })
+        if (!gitSucceeded(raw)) throw new Error('Could not read what is staged')
+        return raw.stdout.toString('utf8')
+      }
+      const staged = await stagedNow()
       const refused = (reason: GitOperationResult['reason'], text: string, extra: Partial<GitOperationResult> = {}): GitOperationResult =>
         this.outcome({ ok: false, reason, message: text, status: repo.statusView, ...extra })
       const status = repo.status
@@ -733,7 +752,11 @@ export class GitService {
         }
       }
 
-      const inventory = await inspectCommitHooks(runtime.runner, root, signal)
+      const inventory = await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes)
+      if (inventory.unverifiable.length > 0) {
+        const named = inventory.unverifiable.map(hook => `${hook.name} (${hook.reason})`).join('; ')
+        return refused('hooks-unverifiable', `This repository has a hook that cannot be checked, so it cannot be approved: ${named}. Commit from a terminal if you trust it.`, { hooks: inventory.hooks })
+      }
       if (inventory.hooks.length > 0 && !(await this.options.trustStore.areHooksApproved(root, inventory.hash))) {
         if (approvedHooksHash !== inventory.hash) {
           return refused('hooks-need-approval', `This repository has hooks that a commit would run: ${inventory.hooks.join(', ')}.`, { hooks: inventory.hooks, hooksHash: inventory.hash })
@@ -744,6 +767,10 @@ export class GitService {
       const result = await this.runWithLockWait(runtime, {
         cwd: root, kind: 'write', args: commitArgs(), stdin: message, signal, timeoutMs: 600_000,
         onOutput: this.emitter(subscriberId, profileId, repoId, 'commit'),
+      }, async () => {
+        // The identity, hook and lock checks above take time, and so can waiting for a lock. If anything was staged or restaged
+        // meanwhile, the commit would record something the person never saw.
+        if (await stagedNow() !== staged) throw new GitStaleError('The staged files changed while the commit was waiting. Review them and commit again.')
       })
       const fresh = await this.statusAfterWrite(project, repo)
       if (!gitSucceeded(result)) return { ...this.failure(result, root, 'git commit'), status: fresh }

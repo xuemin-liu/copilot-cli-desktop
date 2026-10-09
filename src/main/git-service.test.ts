@@ -754,3 +754,120 @@ test('isIndexLockFailure recognises git\'s lock message and nothing else', () =>
   assert.equal(isIndexLockFailure(run(0, "warning: index.lock File exists (but it worked)")), false)
   assert.equal(isIndexLockFailure(run(1, 'error: pathspec did not match')), false)
 })
+
+// ---- review fixes on phase 2 ------------------------------------------------------------------------------------
+
+test('replacing an approved oversized hook with different contents of the same size needs a new approval', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-big-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const hookText = (word: string): string => `#!/bin/sh\n#${'x'.repeat(524_300)}\necho ${word} >> "${shellPath(marker)}"\n`
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+    mkdirSync(join(project, '.git', 'hooks'), { recursive: true })
+    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), hookText('OLD'))
+  })
+  assert.ok(hookText('OLD').length > 512 * 1024, 'the hook is larger than the old hashing limit')
+  const { repoId, status } = await open(h)
+  let current = await status()
+  const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'first', current.generation, null)
+  assert.equal(asked.reason, 'hooks-need-approval')
+  assert.equal((await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'first', current.generation, asked.hooksHash)).ok, true)
+  assert.equal(readFileSync(marker, 'utf8').trim(), 'OLD')
+
+  // Same size, different contents: the replacement must not inherit the approval.
+  writeFileSync(join(h.project, '.git', 'hooks', 'pre-commit'), hookText('NEW'))
+  assert.equal(hookText('NEW').length, hookText('OLD').length)
+  writeFileSync(join(h.project, 'a.txt'), 'three\n'); h.fixture.plain(h.project, 'add', '.')
+  current = await status()
+  const again = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'second', current.generation, null)
+  assert.equal(again.reason, 'hooks-need-approval', 'a same-size edit is a new question')
+  assert.notEqual(again.hooksHash, asked.hooksHash)
+  assert.equal(readFileSync(marker, 'utf8').trim(), 'OLD', 'the replacement did not run')
+})
+
+test('a hook that cannot be fully checked can never be approved, and a commit refuses to run it', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-unverifiable-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+    mkdirSync(join(project, '.git', 'hooks'), { recursive: true })
+    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n#${'x'.repeat(2_000)}\necho ran > "${shellPath(marker)}"\n`)
+  }, { maxHookBytes: 1_000 })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'try', current.generation, 'a'.repeat(64))
+  assert.deepEqual([result.ok, result.reason], [false, 'hooks-unverifiable'])
+  assert.match(result.message, /pre-commit.*too large to check/s)
+  assert.equal(existsSync(marker), false, 'the hook did not run')
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
+})
+
+test('a commit refuses files that were staged after the panel last looked, and so does restaging different content', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+  })
+  const { repoId, status } = await open(h)
+  const seen = await status()
+  assert.deepEqual(seen.staged.map(item => item.path), ['a.txt'])
+
+  // Another program stages an unseen file without the panel being told: the cached list is now out of date.
+  writeFileSync(join(h.project, 'not-reviewed.txt'), 'x\n'); h.fixture.plain(h.project, 'add', 'not-reviewed.txt')
+  await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', seen.generation, null), /staged files changed/)
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
+
+  // The same file name with different staged content is a different list too.
+  const second = await status()
+  writeFileSync(join(h.project, 'a.txt'), 'three\n'); h.fixture.plain(h.project, 'add', 'a.txt')
+  await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', second.generation, null), GitStaleError)
+  const third = await status()
+  assert.notEqual(third.generation, second.generation, 'the file-list version covers the staged content')
+  const ok = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', third.generation, null)
+  assert.equal(ok.ok, true, `${ok.reason}: ${ok.message}`)
+  assert.equal(h.fixture.plain(h.project, 'show', '--name-only', '--format=', 'HEAD').trim().split(/\r?\n/).sort().join(','), 'a.txt,not-reviewed.txt')
+})
+
+test('staging after an unseen external change is refused for the same reason', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n') })
+  const { repoId, status } = await open(h)
+  const seen = await status()
+  writeFileSync(join(h.project, 'other.txt'), 'x\n'); h.fixture.plain(h.project, 'add', 'other.txt')
+  await assert.rejects(h.service.stage(SUBSCRIBER, PROFILE, repoId, [idOf(seen, 'a.txt')], seen.generation), GitStaleError)
+})
+
+test('a commit also notices a change that lands while it waits for the index lock', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
+  }, { lockWaitMs: 3_000, lockPollMs: 100 })
+  const { repoId, status } = await open(h)
+  const seen = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  setTimeout(() => {
+    rmSync(lock, { force: true })
+    writeFileSync(join(h.project, 'late.txt'), 'x\n')
+    h.fixture.plain(h.project, 'add', 'late.txt')
+  }, 350)
+  await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', seen.generation, null), /staged files changed while the commit was waiting/)
+  assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
+})
+
+test('before the first commit, a file staged and then edited again can still be unstaged, and the edit is kept', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'first\n') })
+  const { repoId, status } = await open(h)
+  let current = await status()
+  const staged = await h.service.stage(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.equal(staged.ok, true, staged.message)
+  writeFileSync(join(h.project, 'a.txt'), 'second, edited after staging\n')
+  current = await status()
+  const unstaged = await h.service.unstage(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.equal(unstaged.ok, true, `${unstaged.reason}: ${unstaged.message} ${unstaged.output}`)
+  assert.equal(unstaged.status!.staged.length, 0)
+  assert.deepEqual(unstaged.status!.untracked.map(item => item.path), ['a.txt'])
+  assert.equal(readFileSync(join(h.project, 'a.txt'), 'utf8'), 'second, edited after staging\n', 'the working file keeps the edit')
+})

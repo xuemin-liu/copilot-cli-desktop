@@ -137,3 +137,18 @@ test('parseLog reads fields, refs and merge parents', () => {
   assert.deepEqual(entries[1]?.parents, [])
   assert.deepEqual(parseLog('garbage\0'), [])
 })
+
+test('staged entries carry the object id of the staged version, so restaging different content is a different list', () => {
+  const idA = 'a'.repeat(40)
+  const idB = 'b'.repeat(40)
+  const status = parseStatusV2(rec(
+    `1 M. N... 100644 100644 100644 ${H} ${idA} staged.ts`,
+    `1 .M N... 100644 100644 100644 ${H} ${idB} edited.ts`,
+    `2 R. N... 100644 100644 100644 ${H} ${idB} R100 to.txt`, 'from.txt',
+    '? new.ts',
+    `u UU N... 100644 100644 100644 100644 ${H} ${H} ${T} merge.ts`,
+  ))
+  assert.deepEqual(status.entries.map(entry => entry.indexOid), [idA, null, idB, null, null], 'only entries with something staged have one')
+  const restaged = parseStatusV2(rec(`1 M. N... 100644 100644 100644 ${H} ${idB} staged.ts`))
+  assert.notDeepEqual(restaged.entries[0], status.entries[0], 'the same name with different staged content is a different entry')
+})

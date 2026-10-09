@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js'
-import { GitPanel } from '../renderer/components/GitPanel.js'
+import { GitPanel, RepoRow } from '../renderer/components/GitPanel.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
-import type { GitDiffView as GitDiff } from './git-types.js'
+import type { GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
 
 const diff = (text: string, extra: Partial<GitDiff> = {}): GitDiff => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 1, ...extra })
 
@@ -145,4 +145,17 @@ test('an unapproved hook is named in full and must be allowed before the commit 
   assert.match(html, />Allow these hooks and commit</)
   assert.match(html, /Don&#x27;t commit|Don&rsquo;t commit|Don’t commit/)
   assert.match(html, /<button[^>]*disabled[^>]*>Commit 2 files/, 'Commit itself waits for the approval')
+})
+
+const summary = (overrides: Partial<GitRepoSummary> = {}): GitRepoSummary => ({
+  id: 'repo-2', name: 'beta', relativePath: 'beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
+  changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], configHash: null, ...overrides,
+})
+
+test('a repository row is disabled, with the reason, while a write runs elsewhere', () => {
+  const idle = renderToStaticMarkup(<RepoRow repo={summary()} selected={false} onSelect={() => undefined} />)
+  assert.doesNotMatch(idle, /<button[^>]*disabled/)
+  const locked = renderToStaticMarkup(<RepoRow repo={summary()} selected={false} disabled onSelect={() => undefined} />)
+  assert.match(locked, /<button[^>]*disabled/)
+  assert.match(locked, /Wait for the running Git operation to finish, or cancel it/)
 })

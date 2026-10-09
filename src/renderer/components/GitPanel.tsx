@@ -63,11 +63,11 @@ const stateLabel = (repo: GitRepoSummary): string =>
   repo.state === 'needs-review' ? 'Needs review' : repo.state === 'error' ? 'Error'
     : repo.changeCount > 0 ? `${repo.changeCount} change${repo.changeCount === 1 ? '' : 's'}` : 'Clean'
 
-function RepoRow({ repo, selected, onSelect }: { repo: GitRepoSummary; selected: boolean; onSelect(): void }): JSX.Element {
+export function RepoRow({ repo, selected, onSelect, disabled = false }: { repo: GitRepoSummary; selected: boolean; onSelect(): void; disabled?: boolean }): JSX.Element {
   const tone = repo.state === 'needs-review' ? 'review' : repo.state === 'error' ? 'error' : repo.changeCount > 0 ? 'dirty' : (repo.behind ?? 0) > 0 ? 'behind' : 'clean'
   return (
-    <button type="button" className={`git-repo git-repo-${tone}${selected ? ' git-repo-selected' : ''}`} aria-pressed={selected} onClick={onSelect}
-      title={repo.relativePath === '.' ? repo.name : repo.relativePath}>
+    <button type="button" className={`git-repo git-repo-${tone}${selected ? ' git-repo-selected' : ''}`} aria-pressed={selected} onClick={onSelect} disabled={disabled}
+      title={disabled ? 'Wait for the running Git operation to finish, or cancel it, before switching repositories' : repo.relativePath === '.' ? repo.name : repo.relativePath}>
       <span className="git-repo-dot" aria-hidden="true" />
       <span className="git-repo-name">{repo.name}{repo.kind === 'parent' && <em> (parent)</em>}</span>
       <span className="git-repo-meta">{[repo.branch ?? (repo.detached ? 'detached' : ''), stateLabel(repo), (repo.behind ?? 0) > 0 ? `↓${repo.behind}` : ''].filter(Boolean).join(' · ')}</span>
@@ -154,7 +154,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
   const [messages, setMessages] = useState<Record<string, string>>({})
-  const [operation, setOperation] = useState<'stage' | 'unstage' | 'commit' | null>(null)
+  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit'; repoId: string } | null>(null)
+  // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
+  const operationRepo = useRef<string | null>(null)
   const [progress, setProgress] = useState('')
   const [output, setOutput] = useState('')
   const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
@@ -228,6 +230,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   }
 
   const chooseRepo = (next: GitRepoSummary): void => {
+    if (operation) return
+    setHooks(null)
     setStoredRepo(next.relativePath)
     setSelection(null)
     setNotice(null)
@@ -266,16 +270,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
   // What a running write prints (a commit hook's messages, say) appears as it arrives.
   useEffect(() => window.copilotDesktop.onGitProgress(payload => {
-    if (payload.profileId === profileId && payload.event.repoId === repo?.id) setProgress(previous => appendOutput(previous, payload.event.text))
-  }), [profileId, repo?.id])
+    if (payload.profileId === profileId && payload.event.repoId === operationRepo.current) setProgress(previous => appendOutput(previous, payload.event.text))
+  }), [profileId])
 
   const messageKey = repo?.relativePath ?? ''
   const message = messages[messageKey] ?? ''
   const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
-  const runWrite = (kind: 'stage' | 'unstage' | 'commit', task: () => Promise<GitOperationResult>): void => {
-    setOperation(kind)
+  const runWrite = (kind: 'stage' | 'unstage' | 'commit', owner: { id: string; key: string }, task: () => Promise<GitOperationResult>): void => {
+    operationRepo.current = owner.id
+    setOperation({ kind, repoId: owner.id })
     setProgress('')
     setOutput('')
     setActionError(null)
@@ -285,30 +290,32 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       if (result.status) setStatus(result.status)
       if (result.ok) {
         setNotice(result.message)
-        if (kind === 'commit') setMessage('')
+        // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
+        if (kind === 'commit') setMessages(current => ({ ...current, [owner.key]: '' }))
       } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
         setHooks({ names: result.hooks, hash: result.hooksHash })
       } else {
         setActionError(result.message)
       }
       setOutput(result.ok ? '' : readableOutput(result.output))
-    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setOperation(null))
+    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => { operationRepo.current = null; setOperation(null) })
   }
 
   const changeIndex = (kind: 'stage' | 'unstage', entries: readonly GitEntryView[]): void => {
     if (!repo || !currentStatus || entries.length === 0) return
     const generation = currentStatus.generation
     const ids = entries.map(entry => entry.id)
-    runWrite(kind, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
+    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
   }
 
   const commit = (approvedHooksHash: string | null): void => {
     if (!repo || !currentStatus) return
     const generation = currentStatus.generation
-    runWrite('commit', () => window.copilotDesktop.gitCommit(profileId, repo.id, message, generation, approvedHooksHash))
+    runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitCommit(profileId, repo.id, message, generation, approvedHooksHash))
   }
 
-  const cancelWrite = (): void => { if (repo) void window.copilotDesktop.gitCancel(profileId, repo.id).catch(() => undefined) }
+  // Cancel the repository that owns the running write, not whichever one is selected.
+  const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
 
   const pickEntry = (entry: GitEntryView, staged: boolean): void => { setSelection({ path: entry.path, staged }); setNotice(null) }
   const canInsert = promptTarget !== null
@@ -334,7 +341,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
       {view && view.repos.length > 1 && (
         <div className="git-repos" role="group" aria-label="Repositories">
-          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo?.id} onSelect={() => chooseRepo(item)} />)}
+          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo?.id} disabled={operation !== null && item.id !== repo?.id} onSelect={() => chooseRepo(item)} />)}
         </div>
       )}
 
@@ -385,7 +392,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
                   {currentStatus && (currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null) && (
                     <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
-                      message={message} onMessageChange={setMessage} busy={operation} progress={progress}
+                      message={message} onMessageChange={setMessage} busy={operation?.kind ?? null} progress={progress}
                       canDraft={canInsert && currentStatus.staged.length > 0 && !working}
                       draftTitle={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}
                       onDraft={draftMessage} onCommit={() => commit(null)} onCancel={cancelWrite}

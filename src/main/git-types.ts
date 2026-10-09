@@ -99,6 +99,7 @@ export type GitOperationFailure =
   | 'busy'                 // another git process holds the repository's index lock
   | 'identity-missing'     // git has no user.name / user.email
   | 'hooks-need-approval'  // the repository has hooks a commit would run
+  | 'hooks-unverifiable'   // a hook cannot be fully checked (a link, too large), so it can never be approved
   | 'conflicts'            // unresolved conflicts are present
   | 'nothing-staged'
   | 'cancelled'
