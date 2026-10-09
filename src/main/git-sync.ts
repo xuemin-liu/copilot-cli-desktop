@@ -46,6 +46,27 @@ export function checkRemoteUrl(url: string): RemoteUrlVerdict {
   return { ok: true }
 }
 
+/**
+ * Whether the fetch refspecs a remote is configured with write only into its own remote-tracking branches. A fetch applies every
+ * `remote.<name>.fetch` the repository has, so `+refs/heads/main:refs/heads/backup` would reset a local branch, and a refspec
+ * that writes under `refs/tags` or another remote's namespace changes more than "fetch" promises.
+ */
+export function checkFetchRefspecs(remote: string, refspecs: readonly string[]): RemoteUrlVerdict {
+  const inside = `refs/remotes/${remote}/`
+  for (const raw of refspecs) {
+    const spec = raw.trim()
+    if (spec === '' || spec.startsWith('^')) continue // negative refspecs only exclude
+    const body = spec.startsWith('+') ? spec.slice(1) : spec
+    const colon = body.indexOf(':')
+    if (colon === -1) continue // no destination: the result goes to FETCH_HEAD only
+    const destination = body.slice(colon + 1)
+    if (!destination.startsWith(inside) || destination.includes(':') || destination.includes('..') || destination.includes('\\')) {
+      return { ok: false, reason: `has the fetch setting "${spec}", which writes outside its remote-tracking branches` }
+    }
+  }
+  return { ok: true }
+}
+
 export type SyncOperation = 'fetch' | 'pull' | 'push'
 
 export type SyncFailureReason = 'auth-required' | 'rejected' | 'diverged' | 'failed'

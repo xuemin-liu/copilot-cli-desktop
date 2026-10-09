@@ -1,5 +1,5 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
+import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
@@ -15,7 +15,7 @@ import { readUntrackedFile } from './git-untracked.js'
 import type {
   GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
 } from './git-types.js'
-import { ALLOWED_PROTOCOLS, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
+import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
 import { realPathNative } from './real-path.js'
 
@@ -129,6 +129,12 @@ export function isIndexLockFailure(result: GitRunResult): boolean {
 }
 
 /** What git and its hooks printed, redacted and cut to the last few thousand characters. */
+/** The branch, and the commit on it, that a pull or push was asked for. */
+export interface ExpectedBranch {
+  branch: string
+  headOid: string
+}
+
 function tailOutput(result: GitRunResult): string {
   const text = redactDiagnosticText(`${result.stdout.toString('utf8')}${result.stderr}`).replace(/\r\n/g, '\n').trim()
   return text.length > 4_000 ? `…${text.slice(-3_999)}` : text
@@ -680,19 +686,23 @@ export class GitService {
   // ---- network ------------------------------------------------------------------------------------------------------
 
   fetch(subscriberId: number, profileId: string, repoId: string): Promise<GitOperationResult> {
-    return this.sync('fetch', subscriberId, profileId, repoId, null)
+    return this.sync('fetch', subscriberId, profileId, repoId, null, null)
   }
 
-  pull(subscriberId: number, profileId: string, repoId: string): Promise<GitOperationResult> {
-    return this.sync('pull', subscriberId, profileId, repoId, null)
+  /** Pull into the branch the person was looking at (`expected`); if the current branch or its commit is different now, nothing happens. */
+  pull(subscriberId: number, profileId: string, repoId: string, expected: ExpectedBranch): Promise<GitOperationResult> {
+    return this.sync('pull', subscriberId, profileId, repoId, null, expected)
   }
 
-  /** Push the current branch to its upstream. A branch with none is refused with the remotes it could be published to; sending one of them publishes it. */
-  push(subscriberId: number, profileId: string, repoId: string, publishTo: string | null): Promise<GitOperationResult> {
-    return this.sync('push', subscriberId, profileId, repoId, publishTo)
+  /**
+   * Push the branch the person was looking at (`expected`) to its upstream. A branch with none is refused with the remotes it could
+   * be published to; sending one of them publishes it. A confirmation made for one branch or commit never pushes another.
+   */
+  push(subscriberId: number, profileId: string, repoId: string, publishTo: string | null, expected: ExpectedBranch): Promise<GitOperationResult> {
+    return this.sync('push', subscriberId, profileId, repoId, publishTo, expected)
   }
 
-  private async sync(operation: SyncOperation, subscriberId: number, profileId: string, repoId: string, publishTo: string | null): Promise<GitOperationResult> {
+  private async sync(operation: SyncOperation, subscriberId: number, profileId: string, repoId: string, publishTo: string | null, expected: ExpectedBranch | null): Promise<GitOperationResult> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
@@ -715,6 +725,10 @@ export class GitService {
       if (operation !== 'fetch') {
         if (!onBranch) return refused('detached', `There is no current branch to ${operation}. Switch to a branch in a terminal first.`)
         if (branch.oid === null) return refused('failed', `There are no commits on this branch yet, so there is nothing to ${operation}.`)
+        // What the person confirmed was a branch at a commit. Another terminal or Copilot may have switched or committed since.
+        if (!expected || expected.branch !== branch.head || expected.headOid !== branch.oid) {
+          throw new GitStaleError('The branch changed since you last looked. Check it, then try again.')
+        }
       }
       const head = branch.head ?? ''
       const upstreamRemote = onBranch ? await read(configGetArgs(`branch.${head}.remote`)) : null
@@ -752,6 +766,12 @@ export class GitService {
       for (const address of addresses.split(/\r?\n/)) {
         const verdict = checkRemoteUrl(address)
         if (!verdict.ok) return refused('no-remote', `The remote "${remote}" ${verdict.reason}, so the panel will not contact it. Use a terminal if you trust it.`)
+      }
+      if (operation !== 'push') {
+        // A fetch writes wherever the repository's refspecs say, so they must say "only my own remote-tracking branches".
+        const specs = (await read(fetchRefspecsArgs(remote))) ?? ''
+        const scope = checkFetchRefspecs(remote, specs.split(/\r?\n/))
+        if (!scope.ok) return refused('no-remote', `The remote "${remote}" ${scope.reason}, so the panel will not fetch it. Fetch from a terminal if you trust it.`)
       }
       if (operation === 'push') {
         const hooks = await inspectHooks(runtime.runner, root, PUSH_HOOKS, signal, this.options.maxHookBytes)

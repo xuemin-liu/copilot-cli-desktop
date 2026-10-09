@@ -424,6 +424,15 @@ and a sync bar under the branch name. The design decisions, each with a test tha
   global one) is unset and the user has no `GIT_SSH`/`GIT_SSH_COMMAND`, because that variable outranks the setting. Failures
   that mean "credentials or host key" (`terminal prompts disabled`, `Authentication failed`, `Permission denied (`, `Host key
   verification failed`, HTTP 401/403 and a few more) become `auth-required` with "run `git fetch` in a terminal".
+- **A fetch writes only where it says it does.** It applies every `remote.<name>.fetch`, so those settings are read first
+  (`checkFetchRefspecs`) and a destination outside `refs/remotes/<remote>/` refuses the fetch; the command also overrides pruning
+  (`--no-prune --no-prune-tags`, against `fetch.prune`) and writes no tags. Found by the first review: a configured
+  `+refs/heads/main:refs/heads/backup` reset a local branch. Git itself refuses `--mirror` together with a refspec, so a
+  `remote.<name>.mirror` setting cannot turn the explicit push into a mirror.
+- **Confirmations are bound to what was shown.** `desktop:git-sync` carries the branch and its commit for a pull or push, and main
+  compares them with the freshly read state before doing anything (`GitStaleError`), so a confirmation for one branch cannot
+  publish the branch another tool switched to. The Publish dialog keeps the branch and commit it was asked about and hides if
+  they change. Also from the first review.
 - **Redaction.** `redactDiagnosticText` now also removes `user:password@` from any scheme (`ssh://`, `git://`), and the progress
   stream is redacted as well as the final result.
 - **Cancel and limits.** Same cancel and process-tree kill as a commit; 120 seconds for the network; one write at a time per

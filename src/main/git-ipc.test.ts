@@ -160,21 +160,32 @@ test('cancel takes only a workspace and a repository, and the write channels are
   }
 })
 
-test('sync accepts only the three operations, a remote only for a push, and a printable remote name', () => {
+const OID = 'a'.repeat(40)
+const SEEN = { branch: 'main', headOid: OID }
+
+test('sync accepts only the three operations, a remote only for a push, and the branch a pull or push was asked for', () => {
   const { call, sender, calls } = setup()
-  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null)
-  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'pull', null)
-  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', null)
-  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', 'origin')
-  assert.deepEqual(calls, [['fetch', 1, PROFILE, 'repo-1'], ['pull', 1, PROFILE, 'repo-1'], ['push', 1, PROFILE, 'repo-1', null], ['push', 1, PROFILE, 'repo-1', 'origin']])
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null, null)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'pull', null, SEEN)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', null, SEEN)
+  call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', 'origin', { branch: 'feature/x', headOid: 'b'.repeat(64) })
+  assert.deepEqual(calls, [['fetch', 1, PROFILE, 'repo-1'], ['pull', 1, PROFILE, 'repo-1', SEEN], ['push', 1, PROFILE, 'repo-1', null, SEEN], ['push', 1, PROFILE, 'repo-1', 'origin', { branch: 'feature/x', headOid: 'b'.repeat(64) }]])
   calls.length = 0
   for (const bad of ['force-push', 'clone', '', 5, null, undefined]) {
-    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', bad, null), /Invalid operation/, String(bad))
+    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', bad, null, SEEN), /Invalid operation/, String(bad))
   }
   for (const bad of ['', '-oProxyCommand=x', 'a\0b', 'a\nb', 'x'.repeat(201), 5, undefined]) {
-    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', bad), /Invalid remote/, String(bad))
+    assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'push', bad, SEEN), /Invalid remote/, String(bad))
   }
-  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', 'origin'), /Only a push takes a remote/)
-  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-0', 'fetch', null), /Invalid repository/)
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', 'origin', null), /Only a push takes a remote/)
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-0', 'fetch', null, null), /Invalid repository/)
+  // A pull or push must say which branch and commit it was asked for; a fetch must not.
+  for (const operation of ['pull', 'push']) {
+    for (const bad of [undefined, null, 'main', [], {}, { branch: 'main' }, { headOid: OID }, { branch: '', headOid: OID }, { branch: 'a\nb', headOid: OID }, { branch: 'x'.repeat(256), headOid: OID },
+      { branch: 'main', headOid: 'zz' }, { branch: 'main', headOid: 'A'.repeat(40) }, { branch: 'main', headOid: 'a'.repeat(39) }, { branch: 5, headOid: OID }]) {
+      assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', operation, null, bad), /Invalid (branch|commit)/, `${operation} ${JSON.stringify(bad)}`)
+    }
+  }
+  assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null, SEEN), /not tied to a branch/)
   assert.equal(calls.length, 0, 'nothing reached the service')
 })

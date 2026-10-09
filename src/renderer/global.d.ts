@@ -49,7 +49,7 @@ export interface CopilotDesktopBridge {
   gitStage(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitUnstage(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitCommit(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null): Promise<GitOperationResult>
-  gitSync(profileId: string, repoId: string, operation: 'fetch' | 'pull' | 'push', remote: string | null): Promise<GitOperationResult>
+  gitSync(profileId: string, repoId: string, operation: 'fetch' | 'pull' | 'push', remote: string | null, expected: { branch: string; headOid: string } | null): Promise<GitOperationResult>
   gitCancel(profileId: string, repoId: string): Promise<void>
   onGitProgress(listener: (payload: { profileId: string; event: GitProgressEvent }) => void): () => void
   gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean): Promise<GitDiffView>

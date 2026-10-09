@@ -94,13 +94,20 @@ export function remoteUrlArgs(remote: string, forPush: boolean): string[] {
   return ['remote', 'get-url', ...(forPush ? ['--push'] : []), '--all', '--', remote]
 }
 
+/** The fetch refspecs the repository configures for a remote, one per line. They decide where a fetch writes. */
+export function fetchRefspecsArgs(remote: string): string[] {
+  assertGitArgument(remote, 'remote name')
+  return ['config', '--get-all', `remote.${remote}.fetch`]
+}
+
 /**
  * Update the remote-tracking branches from one remote. Submodules are never fetched (that would run git in other repositories),
- * and nothing is pruned or written outside `refs/remotes`.
+ * nothing is pruned (whatever `fetch.prune` or `remote.<name>.prune` say) and no tag is written. Where the fetch writes is
+ * decided by the remote's configured refspecs, which the caller has checked stay inside `refs/remotes/<remote>/`.
  */
 export function fetchArgs(remote: string): string[] {
   assertGitArgument(remote, 'remote name')
-  return ['fetch', '--no-recurse-submodules', '--', remote]
+  return ['fetch', '--no-recurse-submodules', '--no-prune', '--no-prune-tags', '--no-tags', '--', remote]
 }
 
 /** Move the current branch to its upstream only when that is a fast-forward; anything else is refused and changes nothing. */

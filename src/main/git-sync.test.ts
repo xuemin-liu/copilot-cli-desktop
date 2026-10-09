@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { fastForwardArgs, fetchArgs, pushArgs, remoteUrlArgs } from './git-commands.js'
-import { ALLOWED_PROTOCOLS, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
+import { fastForwardArgs, fetchArgs, fetchRefspecsArgs, pushArgs, remoteUrlArgs } from './git-commands.js'
+import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { GitRunResult } from './git-runner.js'
 
 const failed = (stderr: string): GitRunResult => ({ exitCode: 128, stdout: Buffer.alloc(0), stderr, stdoutTruncated: false, timedOut: false, cancelled: false, durationMs: 1 })
@@ -80,12 +80,12 @@ test('credentials inside an address are removed whatever the scheme', () => {
 })
 
 test('no network command forces anything, prunes, recurses into submodules or reads its target as an option', () => {
-  assert.deepEqual(fetchArgs('origin'), ['fetch', '--no-recurse-submodules', '--', 'origin'])
+  assert.deepEqual(fetchArgs('origin'), ['fetch', '--no-recurse-submodules', '--no-prune', '--no-prune-tags', '--no-tags', '--', 'origin'])
   const push = pushArgs('origin', 'main', 'main', false)
   assert.deepEqual(push, ['push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no', '--', 'origin', 'refs/heads/main:refs/heads/main'])
   assert.ok(pushArgs('origin', 'main', 'main', true).includes('--set-upstream'))
   for (const args of [fetchArgs('origin'), push, fastForwardArgs()]) {
-    assert.equal(args.some(arg => /force|^\+|prune|--mirror|--delete/.test(arg)), false, args.join(' '))
+    assert.equal(args.some(arg => /force|^\+|^--prune|--mirror|--delete/.test(arg)), false, args.join(' '))
   }
   assert.ok(fastForwardArgs().includes('--ff-only'))
   // A refspec is never forced: its source does not start with `+`.
@@ -93,4 +93,25 @@ test('no network command forces anything, prunes, recurses into submodules or re
   assert.deepEqual(remoteUrlArgs('origin', true), ['remote', 'get-url', '--push', '--all', '--', 'origin'])
   assert.deepEqual(remoteUrlArgs('origin', false), ['remote', 'get-url', '--all', '--', 'origin'])
   assert.throws(() => fetchArgs('a\0b'), /NUL/)
+})
+
+test('fetch settings that stay inside the remote\'s own tracking branches are accepted, anything else is refused', () => {
+  for (const specs of [
+    [], [''], ['+refs/heads/*:refs/remotes/origin/*'], ['refs/heads/*:refs/remotes/origin/*'], ['+refs/heads/main:refs/remotes/origin/main'],
+    ['+refs/heads/*:refs/remotes/origin/*', '+refs/pull/*/head:refs/remotes/origin/pr/*'], ['refs/heads/main'], ['^refs/heads/secret', '+refs/heads/*:refs/remotes/origin/*'],
+  ]) assert.deepEqual(checkFetchRefspecs('origin', specs), { ok: true }, JSON.stringify(specs))
+  for (const spec of [
+    '+refs/heads/main:refs/heads/backup', '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*', '+refs/heads/*:refs/remotes/fork/*', '+refs/heads/*:refs/remotes/origin2/*',
+    '+refs/heads/main:refs/remotes/origin/../../heads/x', ':refs/heads/x', '+refs/heads/*:refs/remotes/origin/*:refs/heads/y', 'refs/heads/x:refs/remotes/origin' + String.fromCharCode(92) + 'x', '+refs/heads/*:HEAD',
+  ]) {
+    const verdict = checkFetchRefspecs('origin', ['+refs/heads/*:refs/remotes/origin/*', spec])
+    assert.equal(verdict.ok, false, spec)
+    if (!verdict.ok) assert.match(verdict.reason, /writes outside its remote-tracking branches/)
+  }
+})
+
+test('a fetch overrides pruning and tags, and its refspec lookup is a plain config read', () => {
+  const args = fetchArgs('origin')
+  for (const flag of ['--no-recurse-submodules', '--no-prune', '--no-prune-tags', '--no-tags']) assert.ok(args.includes(flag), flag)
+  assert.deepEqual(fetchRefspecsArgs('origin'), ['config', '--get-all', 'remote.origin.fetch'])
 })

@@ -46,7 +46,9 @@ Under the branch name are **Fetch**, **Pull** and **Push**. Each runs one Git co
 Git prints while it runs, and has a **Cancel** that stops the whole process tree. Two minutes is the limit.
 
 - **Fetch** updates the remote-tracking branches from the branch's remote (or `origin`, or the only remote). It changes no file in
-  your folder and never prunes. The `↑` and `↓` counts update afterwards.
+  your folder, never prunes (whatever `fetch.prune` says) and writes no tags. A fetch applies every `remote.<name>.fetch` setting
+  the repository has, so one that would write anywhere but under `refs/remotes/<name>/` (a local branch, a tag, another remote's
+  branches) is refused, and says which setting. The `↑` and `↓` counts update afterwards.
 - **Pull** is fetch followed by a **fast-forward only** merge of the upstream. If the branches have each moved on, nothing changes
   and the panel says so; merging or rebasing is left to you in a terminal. Git itself refuses a pull that would overwrite local changes.
 - **Push** sends the current branch to the branch of the same name on its upstream, with an explicit refspec, so a push the remote
@@ -54,6 +56,9 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   differently named branch is not pushed from the panel.
 - **Publish…** replaces Push for a branch with no upstream. It asks which remote, says what it will do, and sends nothing until you
   confirm; then the branch is pushed and becomes that branch's upstream.
+- **A click is for the branch and commit on screen.** Pull, Push and the Publish confirmation carry the branch and its commit; if
+  another terminal or Copilot has switched branches or committed since, the request is refused and nothing is sent, so a
+  confirmation for one branch can never publish another.
 - **Credentials are never collected.** Git runs with prompts off, so a remote that wants a password or a key passphrase fails
   within seconds with "Authentication required", and the message says to run `git fetch` once in a terminal. Credentials Git has
   saved (Credential Manager, an SSH agent) are used as usual. Unless you have set `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`
