@@ -6,6 +6,7 @@ import { boundText, groupStatusEntries, parseLog, parseNumstat, parseStatusV2 } 
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunResult, GitRunner } from './git-runner.js'
+import { isReviewable } from './git-review-format.js'
 import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
@@ -440,6 +441,8 @@ export class GitService {
       upstream: branch?.upstream ?? null,
       ahead: branch?.ahead ?? null,
       behind: branch?.behind ?? null,
+      generation: repo.generation,
+      headOid: branch?.oid ?? null,
       changeCount: repo.status ? repo.status.entries.filter(entry => entry.kind !== 'ignored').length + Math.max(0, repo.status.totalEntries - repo.status.entries.length) : 0,
       error: repo.error,
       reviewItems: repo.state === 'needs-review' ? repo.scan?.items ?? [] : [],
@@ -561,6 +564,8 @@ export class GitService {
     if (repo.state !== 'needs-review' || !repo.scan || repo.scan.hash !== configHash) {
       throw new GitStaleError('The repository settings changed. Review them again.')
     }
+    // What is trusted is the hash of the complete values, so every value must be short enough to have been shown in full.
+    if (!isReviewable(repo.scan.items)) throw new Error('A setting in this repository is too long to review, so it cannot be trusted from the panel')
     await this.options.trustStore.trust(repo.discovered.root, configHash)
     await this.refreshProject(project, true)
     return this.viewOf(project)

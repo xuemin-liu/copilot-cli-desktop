@@ -26,6 +26,8 @@
     "links:check": "node scripts/terminal-links-check.mjs",
     "sidebar:check": "node scripts/sidebar-projects-check.mjs",
     "git:check": "node scripts/git-ipc-check.mjs",
+    "git-panel:check": "node scripts/git-panel-check.mjs",
+    "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",

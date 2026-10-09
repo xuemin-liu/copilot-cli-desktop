@@ -40,6 +40,11 @@ handle, only input/output/resize events.
   through `copilot-desktop browser` commands, without an MCP server. Testing mode
   lets the assistant run user-described web-app workflows and check expected results,
   with step reports and screenshots.
+- **Git panel** (Ctrl+Shift+G) shows the repositories in your project folder beside the
+  session: branch, changed files, diffs and history, updated as Copilot works. It can
+  add a diff, or a request for a commit message, to the prompt box. It is read-only in
+  this release, and repositories whose own settings can run programs wait for your review
+  before anything is read. See [the Git panel](docs/git-panel.md).
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a
@@ -272,6 +277,7 @@ available, but requires all active sessions to be closed.
   the official Windows WinGet package. Verified npm installations remain
   supported for launch, but the desktop never runs npm lifecycle scripts to install one.
   Neither is required to build, typecheck, or run the unit tests.
+- Git for Windows 2.30 or newer, only for the Git panel. Everything else works without it.
 
 `node-pty` 1.x's native addon is built on `node-addon-api` (N-API), which is
 ABI-stable across Node.js and Electron — no `@electron/rebuild` or other

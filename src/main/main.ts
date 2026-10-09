@@ -236,6 +236,12 @@ const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
 // start while the app is closing. It runs git only while a renderer has the panel open.
 let gitService: GitService | null = null
 let gitServiceStopped = false
+/** Ask the main window to open or close the Git panel (keyboard shortcut, including from the native browser view). */
+function toggleGitPanel(): void {
+  const window = mainWindow
+  if (window && !window.isDestroyed()) window.webContents.send('desktop:git-toggle')
+}
+
 function gitServiceInstance(): GitService | null {
   if (gitServiceStopped || shuttingDown()) return null
   gitService ??= new GitService({
@@ -1941,6 +1947,13 @@ function createWindow(
   window.on('focus', () => { if (desktopConfig.activeProfileId) gitService?.requestRefresh(desktopConfig.activeProfileId) })
   // A hidden window (tray mode) or a minimized one must not keep running git.
   window.on('hide', () => gitService?.setPaused(true))
+  // Ctrl+Shift+G toggles the Git panel. Handled here, before the page sees the key, so the terminal never receives ^G.
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || !input.shift || !(input.control || input.meta)) return
+    if (input.key.toLowerCase() !== 'g') return
+    event.preventDefault()
+    toggleGitPanel()
+  })
   window.on('minimize', () => gitService?.setPaused(true))
   window.on('show', () => gitService?.setPaused(false))
   window.on('restore', () => gitService?.setPaused(false))
@@ -2149,6 +2162,7 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
     browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition, tabId,
+      onAppShortcut: () => toggleGitPanel(),
       reportError: message => { void writeAppLog(message).catch(() => {}) } })
     sessionBrowsers.set(tabId, browser)
   }

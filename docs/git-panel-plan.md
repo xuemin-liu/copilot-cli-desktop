@@ -1,9 +1,9 @@
 # Git side tab plan
 
-Status: revision 4. Phase 0 (spikes, runner, parsers) is merged (#65); results are in
-[git-panel-spikes.md](git-panel-spikes.md). Phase 1 is split in two: **1a, the main-process backend** (discovery, trust
-gate, service, IPC, Electron check) is done on `feat/git-panel-phase1a`; **1b, the panel UI** has not started. Revision 2
-came from an independent review (see [Review log](#review-log)).
+Status: revision 5. Phase 0 (spikes, runner, parsers, #65) and phase 1a (backend, #66) are merged; results are in
+[git-panel-spikes.md](git-panel-spikes.md). **Phase 1b, the panel UI, is built on `feat/git-panel-phase1b`** and described
+in [git-panel.md](git-panel.md). Phases 2 to 4 have not started. Revision 2 came from an independent review (see
+[Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
 
@@ -479,9 +479,11 @@ the pinned minimum version also gets one run.
 Results are in [git-panel-spikes.md](git-panel-spikes.md).
 
 1. **Shortcut delivery — decided, proof in phase 1.** Handle it with `before-input-event` on the main window
-   (independent of xterm) and forward it from the native browser view. The browser view already uses
-   `Ctrl+G` / `Ctrl+Shift+G` for find next/previous while a find is open, so find wins there. The phase 1
-   Electron check must press the shortcut with the terminal focused and with the browser focused.
+   (independent of xterm) and forward it from the native browser view, where `Ctrl+Shift+G` had no meaning
+   (find-next is `Ctrl+G`/`F3`, find-previous is `Shift+F3`), so it toggles the panel in every state. Implemented in
+   1b: the browser-view half is asserted in `browser-basics-check`, and the main-window half in `git-ipc-check` (the real
+   main process receives the key and the page gets the toggle; near-miss chords do not). Not covered: a live xterm
+   holding focus, which `before-input-event` pre-empts by design.
 2. **`GIT_CEILING_DIRECTORIES` on Windows — works.** A proper-ancestor ceiling stops discovery at that folder;
    a ceiling equal to the working folder is ignored; slash style does not matter.
 3. **Credential prompts — fail fast.** Exit 128 in about 0.5 s with "terminal prompts disabled" and no

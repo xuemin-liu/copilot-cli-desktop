@@ -20,9 +20,10 @@ What the code shows:
 Decision: handle the shortcut with `before-input-event` on the main window's `webContents`, forward the same
 key from the native browser view, and call `preventDefault()` so xterm never sends `^G` to Copilot.
 
-**Collision found:** the browser view already treats `Ctrl+G` / `Ctrl+Shift+G` as find next / previous while a
-find is active. Inside the browser view, find wins while a search is open; otherwise the key toggles the panel.
-If that proves confusing, switch to a different chord (the plan only needs one).
+**No collision (correction).** An earlier version of this note said the browser view already uses `Ctrl+Shift+G` as
+find-previous. That was a misreading: the browser view's find-next is `Ctrl+G` and `F3` (guarded by `!input.shift`), and
+find-previous is `Shift+F3`. `Ctrl+Shift+G` had no meaning there, so it toggles the Git panel in every state, including
+while a search is open, and leaves the search alone. The basics check asserts this.
 
 Phase 1's Electron check must press the shortcut with the terminal focused and with the browser view focused.
 

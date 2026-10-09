@@ -433,3 +433,13 @@ test('the status summary follows a branch change even when the file list does no
   assert.equal(after.summary.branch, 'second-branch')
   assert.equal(after.generation, before.generation, 'entry ids stay valid when the file list is unchanged')
 })
+
+test('a setting too long to have been shown in full cannot be trusted, even if asked directly', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); f.plain(project, 'config', 'core.sshCommand', `ssh${' '.repeat(9_000)}-i key`) })
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(repo.state, 'needs-review')
+  assert.ok((repo.reviewItems[0]?.value.length ?? 0) > 8_000)
+  await assert.rejects(h.service.trust(SUBSCRIBER, PROFILE, repo.id, repo.configHash!), /too long to review/)
+  assert.equal(repoAt(await h.service.rescan(SUBSCRIBER, PROFILE), '.')?.state, 'needs-review', 'still not trusted')
+  assert.equal(await h.trustStore.isTrusted(realpathSync.native(h.project), repo.configHash!), false)
+})

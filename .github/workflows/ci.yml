@@ -36,6 +36,8 @@ jobs:
         run: corepack pnpm sidebar:check
       - name: Git panel IPC check
         run: corepack pnpm git:check
+      - name: Git panel UI check
+        run: corepack pnpm git-panel:check
       - name: Browser and native Local Overrides integration check
         run: corepack pnpm browser:check
       - name: Browser testing at 125% display scale
@@ -52,6 +54,7 @@ jobs:
             test-results/browser-testing/
             test-results/sidebar-projects-check/
             test-results/git-ipc/
+            test-results/git-panel/
           if-no-files-found: ignore
           retention-days: 7
       - name: Migration round-trip smoke test
