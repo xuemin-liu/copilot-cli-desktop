@@ -24,14 +24,16 @@ interface Harness {
   calls: string[]
   trustStore: GitTrustStore
   project: string
+  /** Runs the action once, right after the first commit attempt fails on the index lock and before the next attempt is prepared. */
+  whenCommitBlocked(action: () => void): void
 }
 
 /** Wraps the real runner so tests can see which git commands ran. */
-function countingRunner(fixture: GitFixture, calls: string[]): GitRunner {
+function countingRunner(fixture: GitFixture, calls: string[], afterRun?: (options: GitRunOptions, result: GitRunResult) => void): GitRunner {
   return {
     run: (options: GitRunOptions): Promise<GitRunResult> => {
       calls.push(String(options.args[0]))
-      return fixture.runner.run(options)
+      return fixture.runner.run(options).then(result => { afterRun?.(options, result); return result })
     },
   } as unknown as GitRunner
 }
@@ -43,9 +45,13 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
   setup(fixture, project)
   const events: GitProjectView[] = []
   const calls: string[] = []
+  let blocked: (() => void) | null = null
+  const afterRun = (options: GitRunOptions, result: GitRunResult): void => {
+    if (blocked && options.args[0] === 'commit' && isIndexLockFailure(result)) { const action = blocked; blocked = null; action() }
+  }
   const trustStore = new GitTrustStore(join(fixture.root, 'git-trust.json'))
   const service = new GitService({
-    getRuntime: async () => ({ runner: countingRunner(fixture, calls), executable: fixture.git }),
+    getRuntime: async () => ({ runner: countingRunner(fixture, calls, afterRun), executable: fixture.git }),
     trustStore,
     resolveProject: (profileId) => profileId === PROFILE ? project : null,
     onChanged: (_subscriber, _profile, view) => { events.push(view) },
@@ -54,7 +60,7 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
     ...extra,
   })
   t.after(async () => { await service.dispose(); fixture.cleanup() })
-  return { fixture, service, events, calls, trustStore, project }
+  return { fixture, service, events, calls, trustStore, project, whenCommitBlocked: action => { blocked = action } }
 }
 
 async function waitFor<T>(read: () => T | undefined | false, timeoutMs = 8_000): Promise<T> {
@@ -856,8 +862,8 @@ test('a commit also notices a change that lands while it waits for the index loc
   rmSync(join(h.project, 'late.txt'))
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  setTimeout(() => { writeFileSync(join(h.project, 'late.txt'), 'x\n'); copyFileSync(sideIndex, index) }, 300)
-  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  // The other tool finishes its change and lets go of the lock only after the commit has really failed on the lock once.
+  h.whenCommitBlocked(() => { writeFileSync(join(h.project, 'late.txt'), 'x\n'); copyFileSync(sideIndex, index); rmSync(lock, { force: true }) })
   await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', seen.generation, null), /staged files changed while the commit was waiting/)
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
 })
@@ -899,9 +905,8 @@ test('a hook swapped while the commit waits for the index lock is not run on the
   // The person approves OLD. Something else holds the index lock, so the commit waits and retries.
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  // The change lands while the lock is still held and the lock goes later, so every attempt that can succeed comes after the change.
-  setTimeout(() => hookFile(h.project, 'pre-commit', `echo NEW >> "${shellPath(marker)}"`), 300)
-  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  // The change lands, and the lock goes, only after the commit has really failed on the lock once.
+  h.whenCommitBlocked(() => { hookFile(h.project, 'pre-commit', `echo NEW >> "${shellPath(marker)}"`); rmSync(lock, { force: true }) })
   const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash)
   assert.deepEqual([result.ok, result.reason], [false, 'hooks-need-approval'], 'the changed hook asks again')
   assert.notEqual(result.hooksHash, asked.hooksHash)
@@ -921,8 +926,7 @@ test('a hook that appears while the commit waits for the lock needs approval too
   const current = await status()
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  setTimeout(() => hookFile(h.project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`), 300)
-  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  h.whenCommitBlocked(() => { hookFile(h.project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`); rmSync(lock, { force: true }) })
   const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
   assert.deepEqual([result.ok, result.reason, result.hooks], [false, 'hooks-need-approval', ['pre-commit']])
   assert.equal(existsSync(marker), false, 'the new hook did not run')
@@ -943,8 +947,7 @@ test('repository settings that start naming a program while the commit waits sto
   const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  setTimeout(() => h.fixture.plain(h.project, 'config', 'core.sshCommand', 'ssh -i somewhere'), 300)
-  setTimeout(() => rmSync(lock, { force: true }), 1_000)
+  h.whenCommitBlocked(() => { h.fixture.plain(h.project, 'config', 'core.sshCommand', 'ssh -i somewhere'); rmSync(lock, { force: true }) })
   await assert.rejects(h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash), /need review|not available/)
   assert.equal(existsSync(marker), false, 'the approved hook did not run once the settings needed review again')
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
@@ -964,7 +967,7 @@ test('a commit whose hooks stay approved still goes through after waiting for a 
   const asked = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, null)
   const lock = join(h.project, '.git', 'index.lock')
   writeFileSync(lock, '')
-  setTimeout(() => rmSync(lock, { force: true }), 350)
+  h.whenCommitBlocked(() => rmSync(lock, { force: true }))
   const result = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'msg', current.generation, asked.hooksHash)
   assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
   assert.equal(existsSync(marker), true)
