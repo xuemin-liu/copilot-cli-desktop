@@ -77,6 +77,8 @@ error and is never opened. This is checked again before every command, not only 
 - Fetch, pull, push, branch switching, amending and discarding changes are not in the panel yet.
 - Git reads your identity from its configuration, not from `GIT_AUTHOR_NAME`-style environment variables, which the panel
   deliberately does not pass on to Git.
+- Submodules are not listed (reading them would run Git inside another repository). If a submodule update is staged, Commit is refused
+  with the paths named, instead of including changes the list never showed; unstage it or commit from a terminal.
 
 ## Checks
 
