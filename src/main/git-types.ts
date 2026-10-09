@@ -32,6 +32,10 @@ export interface GitRepoSummary {
   behind: number | null
   /** Changed, staged, untracked and conflicted files (ignored files excluded). */
   changeCount: number
+  /** Changes whenever the file list changes, so a view that shows the list knows to reload it. */
+  generation: number
+  /** Current commit id (null before the first commit); changes with every commit, so history views know to reload. */
+  headOid: string | null
   error: string | null
   reviewItems: GitReviewItem[]
   /** Pass back to `trust` so the user trusts exactly the config they were shown. */

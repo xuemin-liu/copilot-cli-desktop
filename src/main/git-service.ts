@@ -440,6 +440,8 @@ export class GitService {
       upstream: branch?.upstream ?? null,
       ahead: branch?.ahead ?? null,
       behind: branch?.behind ?? null,
+      generation: repo.generation,
+      headOid: branch?.oid ?? null,
       changeCount: repo.status ? repo.status.entries.filter(entry => entry.kind !== 'ignored').length + Math.max(0, repo.status.totalEntries - repo.status.entries.length) : 0,
       error: repo.error,
       reviewItems: repo.state === 'needs-review' ? repo.scan?.items ?? [] : [],

@@ -138,6 +138,19 @@ if (!process.versions.electron) {
     assert.equal(reopened.repos.find(repo => repo.relativePath === 'gamma').state, 'ready', 'the trust decision survives a reload')
     results.reloadTeardown = true
 
+    // Ctrl+Shift+G reaches the page as a toggle, handled in the main process before the page sees the key. Near misses do not.
+    await inPage(`window.__toggles = 0; window.__offToggle = window.copilotDesktop.onGitToggle(() => { window.__toggles++ })`)
+    const press = (keyCode, modifiers) => { main.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers }); main.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers }) }
+    press('G', ['control', 'shift'])
+    for (let attempt = 0; attempt < 50 && await inPage('return window.__toggles') < 1; attempt++) await new Promise(accept => setTimeout(accept, 50))
+    assert.equal(await inPage('return window.__toggles'), 1, 'Ctrl+Shift+G toggles the Git panel')
+    press('G', ['control'])
+    press('H', ['control', 'shift'])
+    press('G', ['shift'])
+    await new Promise(accept => setTimeout(accept, 300))
+    assert.equal(await inPage('return window.__toggles'), 1, 'Ctrl+G, Ctrl+Shift+H and Shift+G do not')
+    results.shortcut = true
+
     await writeFile(join(process.env.GIT_IPC_CHECK_ARTIFACTS, 'result.json'), JSON.stringify({ passed: true, ...results }, null, 2))
     app.quit()
   }

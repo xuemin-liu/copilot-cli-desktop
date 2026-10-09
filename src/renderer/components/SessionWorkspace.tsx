@@ -4,7 +4,7 @@ import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { TerminalPane } from './TerminalPane.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
-import { ForkIcon } from './Icons.js'
+import { ForkIcon, GitBranchIcon } from './Icons.js'
 
 interface SessionWorkspaceProps {
   tabs: DesktopSessionTab[]
@@ -18,6 +18,9 @@ interface SessionWorkspaceProps {
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
   obscured?: boolean
+  /** Git panel toggle in the main session's header. Omitted where the panel is not available. */
+  gitOpen?: boolean
+  onToggleGit?: () => void
 }
 
 function savedSplit(): number {
@@ -27,7 +30,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, obscured = false }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, obscured = false, gitOpen = false, onToggleGit }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const areaRef = useRef<HTMLDivElement>(null)
@@ -61,6 +64,10 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
             <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id)} obscured={obscured} renderHeader={browserToggle => <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}</span>
+              {onToggleGit && !tab.sideChat && (
+                <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
+                  title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
+              )}
               {browserToggle}
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.sideChat ? (

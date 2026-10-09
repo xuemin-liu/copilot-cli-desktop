@@ -1,5 +1,8 @@
 {
   "extends": "./tsconfig.json",
+  "files": [
+    "src/renderer/global.d.ts"
+  ],
   "exclude": [
     "src/renderer/**/*"
   ]

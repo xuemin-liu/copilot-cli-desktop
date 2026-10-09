@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
 import type { DesktopState } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
+import { GitPanel } from './components/GitPanel.js'
+import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.js'
 import { OperationError } from './components/OperationError.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
@@ -21,6 +23,17 @@ const EMPTY_STATE: DesktopState = {
   error: null,
 }
 
+function readStoredGitOpen(): boolean {
+  try { return localStorage.getItem('git-panel-open') === 'true' } catch { return false }
+}
+
+function readStoredGitWidth(): number {
+  try {
+    const value = Number(localStorage.getItem('git-panel-width'))
+    return Number.isFinite(value) && value > 0 ? value : GIT_PANEL_DEFAULT_WIDTH
+  } catch { return GIT_PANEL_DEFAULT_WIDTH }
+}
+
 type InputDialog =
   | { kind: 'rename'; tabId: string; value: string; pending: boolean; error: string | null }
   | { kind: 'remote'; value: string; pending: boolean; error: string | null }
@@ -32,11 +45,26 @@ export function App(): JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
   const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(false)
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
+  const [gitOpen, setGitOpen] = useState(readStoredGitOpen)
+  const [gitWidth, setGitWidth] = useState(readStoredGitWidth)
+  // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
+  const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)
   const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
+  }
+  const toggleGit = useCallback((): void => {
+    setGitOpen((open) => {
+      const next = !open
+      try { localStorage.setItem('git-panel-open', String(next)) } catch { /* Keep the in-memory state. */ }
+      return next
+    })
+  }, [])
+  const changeGitWidth = (width: number): void => {
+    setGitWidth(width)
+    try { localStorage.setItem('git-panel-width', String(Math.round(width))) } catch { /* Keep the in-memory width. */ }
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -82,6 +110,9 @@ export function App(): JSX.Element {
     }
   }, [])
 
+  // Ctrl+Shift+G is handled in the main process, before the terminal sees it, and arrives here.
+  useEffect(() => window.copilotDesktop.onGitToggle(() => { if (gitPanelAvailable.current) toggleGit() }), [toggleGit])
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = event.ctrlKey || event.metaKey
@@ -120,7 +151,13 @@ export function App(): JSX.Element {
       onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
   }
 
+  // "Add to prompt" fills the active session's prompt box, unless that session lives in another window.
+  const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
+    ? { id: activeTab.id, title: activeTab.title } : null
+
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
+  gitPanelAvailable.current = viewMode === 'desktop' && state.activeProfileId !== null
 
   if (viewMode === 'loading') {
     return (
@@ -206,7 +243,11 @@ export function App(): JSX.Element {
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
+          <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
+            panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
+              promptTarget={promptTarget} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            gitOpen={gitOpen} onToggleGit={toggleGit}
             obscured={inputDialog !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
@@ -215,6 +256,7 @@ export function App(): JSX.Element {
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
             onCreate={() => handleOperation(window.copilotDesktop.createTab())}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
+          </ProjectDock>
           </>
         )}
       </main>

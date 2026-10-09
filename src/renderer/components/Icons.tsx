@@ -47,3 +47,13 @@ export function BrowserIcon(): JSX.Element {
     <path d="M1.75 6h12.5M4 4.4h.01M6 4.4h.01" />
   </Icon>
 }
+
+/** Two commits joined to a branch: the Git panel. */
+export function GitBranchIcon(): JSX.Element {
+  return <Icon>
+    <circle cx="4.5" cy="3.5" r="1.5" />
+    <circle cx="4.5" cy="12.5" r="1.5" />
+    <circle cx="11.5" cy="5.5" r="1.5" />
+    <path d="M4.5 5v6M11.5 7c0 3-4.5 2.2-7 4.2" />
+  </Icon>
+}

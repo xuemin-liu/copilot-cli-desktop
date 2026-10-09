@@ -48,8 +48,9 @@ if (!process.versions.electron) {
     const endpoint = join(artifacts, 'control.json')
     const notices = []
     const menus = []
+    const appShortcuts = []
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint,
-      notify: name => notices.push(name), showMenu: menu => menus.push(menu) })
+      notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: menu => menus.push(menu) })
     try {
       browser.setBounds({ x: 0, y: 0, width: 800, height: 600 }); window.showInactive()
       await browser.open()
@@ -85,9 +86,19 @@ if (!process.versions.electron) {
       assert.equal(browser.snapshot.find.matches, 0)
       browser.find('hello')
       await until(() => browser.snapshot.find?.matches === 2, 'matches again')
+      // Ctrl+Shift+G belongs to the app even while a search is open: it toggles the Git panel and leaves the search alone.
+      // (Find-next is Ctrl+G and F3; find-previous is Shift+F3.)
+      appShortcuts.length = 0
+      const activeBefore = browser.snapshot.find.active
+      key('g', ['control', 'shift']); await until(() => appShortcuts.length === 1, 'Ctrl+Shift+G asks the app to toggle the Git panel during a search')
+      assert.equal(browser.snapshot.find.active, activeBefore, 'the search did not move')
+      appShortcuts.length = 0
       notices.length = 0
       key('Escape'); await until(() => browser.snapshot.find === undefined, 'Esc closes find')
       assert.ok(notices.includes('find-close'))
+      // And with no search open.
+      key('g', ['control', 'shift']); await until(() => appShortcuts.length === 1, 'Ctrl+Shift+G asks the app to toggle the Git panel')
+      assert.deepEqual(appShortcuts, ['git-toggle'])
       browser.find('hello'); await until(() => browser.snapshot.find?.matches === 2, 'find before navigating')
       await browser.navigate(`${base}/second`); await loaded()
       assert.equal(browser.snapshot.find, undefined, 'navigating ends the search')

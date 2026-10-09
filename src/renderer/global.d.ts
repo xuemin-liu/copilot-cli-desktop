@@ -48,6 +48,7 @@ export interface CopilotDesktopBridge {
   gitStatus(profileId: string, repoId: string): Promise<GitRepoStatusView>
   gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean): Promise<GitDiffView>
   gitLog(profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]>
+  onGitToggle(listener: () => void): () => void
   onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
