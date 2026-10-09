@@ -15,6 +15,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
+    getBranches: record('getBranches'), createBranch: record('createBranch'), switchBranch: record('switchBranch'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -38,7 +39,7 @@ const PROFILE = '0123456789abcdef'
 test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
-    'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
+    'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
     'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage',
   ])
 })
@@ -154,7 +155,7 @@ test('cancel takes only a workspace and a repository, and the write channels are
   call('desktop:git-cancel', sender(), PROFILE, 'repo-2')
   assert.deepEqual(calls, [['cancel', 1, PROFILE, 'repo-2']])
   assert.throws(() => call('desktop:git-cancel', sender(), PROFILE, 'repo-0'), /Invalid repository/)
-  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync']) {
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync', 'desktop:git-branch']) {
     assert.ok(handlers.has(channel), channel)
     assert.throws(() => call(channel, sender(2), PROFILE, 'repo-1', ['e1-0'], 1, null), /main window/, channel)
   }
@@ -187,5 +188,24 @@ test('sync accepts only the three operations, a remote only for a push, and the 
     }
   }
   assert.throws(() => call('desktop:git-sync', sender(), PROFILE, 'repo-1', 'fetch', null, SEEN), /not tied to a branch/)
+  assert.equal(calls.length, 0, 'nothing reached the service')
+})
+
+test('branch changes carry the branch name and the head the person saw, and nothing else gets through', () => {
+  const { call, sender, calls } = setup()
+  const seen = { branch: 'main', headOid: OID }
+  call('desktop:git-branches', sender(), PROFILE, 'repo-1')
+  call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'create', 'feature/x', seen)
+  call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'switch', 'other', { branch: null, headOid: 'b'.repeat(64) })
+  assert.deepEqual(calls, [['getBranches', 1, PROFILE, 'repo-1'], ['createBranch', 1, PROFILE, 'repo-1', 'feature/x', seen], ['switchBranch', 1, PROFILE, 'repo-1', 'other', { branch: null, headOid: 'b'.repeat(64) }]])
+  calls.length = 0
+  for (const bad of ['delete', 'force', '', 5, null, undefined]) assert.throws(() => call('desktop:git-branch', sender(), PROFILE, 'repo-1', bad, 'x', seen), /Invalid operation/, String(bad))
+  for (const bad of ['', '-f', '--force', 'a\0b', 'a\nb', 'x'.repeat(256), 5, null, undefined]) {
+    assert.throws(() => call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'switch', bad, seen), /Invalid branch name/, String(bad))
+  }
+  for (const bad of [undefined, null, 'main', [], {}, { branch: 'main' }, { headOid: OID }, { branch: '', headOid: OID }, { branch: 5, headOid: OID }, { branch: 'main', headOid: 'zz' }, { branch: 'main', headOid: 'A'.repeat(40) }]) {
+    assert.throws(() => call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'switch', 'x', bad), /Invalid (branch|commit)/, JSON.stringify(bad))
+  }
+  assert.throws(() => call('desktop:git-branches', sender(), PROFILE, 'repo-0'), /Invalid repository/)
   assert.equal(calls.length, 0, 'nothing reached the service')
 })

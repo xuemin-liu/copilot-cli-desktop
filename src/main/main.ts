@@ -74,6 +74,7 @@ import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
+import { projectActivity } from './git-branch.js'
 import { GitRunner, resolveGitExecutable } from './git-runner.js'
 import { GitTrustStore } from './git-trust.js'
 import { registerGitIpc } from './git-ipc.js'
@@ -258,6 +259,17 @@ function gitServiceInstance(): GitService | null {
     onChanged: (subscriberId, profileId, view) => {
       const window = mainWindow
       if (window && !window.isDestroyed() && window.webContents.id === subscriberId) window.webContents.send('desktop:git-changed', { profileId, view })
+    },
+    // A branch switch rewrites files, so it is refused while a session in the project is working and otherwise confirmed in a native window.
+    sessionActivity: (profileId) => projectActivity(tabsState.tabs, profileId, Date.now()),
+    confirm: async (_profileId, request) => {
+      const window = mainWindow
+      if (!window || window.isDestroyed()) return false
+      const answer = await dialog.showMessageBox(window, {
+        type: 'question', buttons: [request.confirmLabel, 'Cancel'], defaultId: 1, cancelId: 1, noLink: true,
+        title: request.title, message: request.title, detail: request.detail,
+      })
+      return answer.response === 0
     },
     // Hidden or minimized windows (including tray mode), shutdown and migration all pause refreshing.
     shouldPause: () => shuttingDown() || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized(),

@@ -73,6 +73,27 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   not pushed from the panel at all, so a check you rely on is never skipped silently; push from a terminal.
 - Remote addresses are redacted (user names with passwords, tokens) before they reach the panel, a result or a log.
 
+## Branches
+
+The **Branches** tab lists the local branches of the selected repository, newest commit first: the current one is marked, and each
+shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upstream gone") and its last commit.
+
+- **Create and switch** makes a branch at the current commit, without tracking anything, and moves to it. No file changes, so
+  nothing is asked. The name is checked by the panel and then by Git (`check-ref-format`); a name that starts with `-`, contains
+  spaces or `~ ^ : ? * [ \ .. @{`, ends in `.lock` or `/`, or already exists creates nothing.
+- **Switch** changes the files in your folder to another local branch. Because that rewrites files, it is:
+  - **refused while a Copilot session is working in the project** (one that is working, starting, waiting for you to approve
+    something, or, with no activity signal, was active in the last minute), and you are not even asked;
+  - **confirmed in a native window** that names the branches and how many uncommitted changes stay in the folder, and checked again
+    after you answer, because a session may have started working while the window was open;
+  - **refused by Git, with nothing changed,** if your uncommitted changes would be overwritten. The panel never passes `--force`,
+    `--merge` or `--discard-changes`, and never creates a branch from a remote one by accident (`--no-guess`).
+- Like a pull or push, a branch change is for the branch and commit on screen. If another terminal or Copilot has switched or
+  committed since, it is refused and nothing moves, and it is re-checked right before Git runs (after the confirmation and on every
+  wait for `index.lock`).
+- The repository's hooks are not run by a switch (`post-checkout` is skipped), and submodules are not touched.
+- Remote branches are not listed, and branches cannot be deleted or renamed here yet.
+
 ## Giving context to Copilot
 
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
@@ -107,7 +128,7 @@ error and is never opened. This is checked again before every command, not only 
   closing the panel stops all of it.
 - Only the main window has the panel; a session popped out to its own window does not.
 - A very narrow window gives the panel the whole area instead of squeezing the terminal; closing it returns the session.
-- Branch switching, amending and discarding changes are not in the panel yet, and neither is a sidebar summary (it would need
+- Amending and discarding changes are not in the panel yet, and neither is a sidebar summary (it would need
   Git to run in the background while the panel is closed, which the panel deliberately does not do).
 - Pull changes the files in your folder. The panel does not check whether a Copilot session is working there; a fast-forward only
   touches files that differ between the two commits, and Git refuses it when a local change is in the way.

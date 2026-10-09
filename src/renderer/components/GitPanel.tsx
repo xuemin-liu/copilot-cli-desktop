@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
-import type { GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt } from '../../main/git-prompt.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
 import { GitCommitBox } from './GitCommitBox.js'
 import { GitSyncBar } from './GitSyncBar.js'
+import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
 import { GitReviewCard } from './GitReviewCard.js'
@@ -22,7 +23,7 @@ export interface GitPanelProps {
   insert?: (tabId: string, text: string) => void
 }
 
-type Tab = 'changes' | 'history'
+type Tab = 'changes' | 'history' | 'branches'
 interface Selection { path: string; staged: boolean }
 
 const repoStorageKey = (profileId: string): string => `git-repo:${profileId}`
@@ -156,12 +157,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
   const [messages, setMessages] = useState<Record<string, string>>({})
-  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | GitSyncKind; repoId: string } | null>(null)
+  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | 'branch' | GitSyncKind; repoId: string } | null>(null)
   // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
   const operationRepo = useRef<string | null>(null)
   const [progress, setProgress] = useState('')
   const [output, setOutput] = useState('')
   const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
+  // Branches: the list for the selected repository, the name being typed, and a counter that reloads the list after a change.
+  const [branches, setBranches] = useState<{ repoId: string; headOid: string | null; items: GitBranchView[] } | null>(null)
+  const [branchError, setBranchError] = useState<string | null>(null)
+  const [newBranch, setNewBranch] = useState('')
+  const [branchReload, setBranchReload] = useState(0)
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
 
@@ -215,6 +221,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setLogError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Branches.
+  useEffect(() => {
+    if (tab !== 'branches' || !repo || repo.state !== 'ready') return
+    let stale = false
+    window.copilotDesktop.gitBranches(profileId, repo.id)
+      .then(items => { if (!stale) { setBranches({ repoId: repo.id, headOid: repo.headOid, items }); setBranchError(null) } })
+      .catch((cause: unknown) => { if (!stale) setBranchError(errorMessage(cause)) })
+    return () => { stale = true }
+  }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload]) // eslint-disable-line react-hooks/exhaustive-deps
   const loadMore = (): void => {
     if (!repo || !log || moreRequest.current !== null) return
     const { repoId, headOid } = log
@@ -283,7 +298,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
-  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
+  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | 'branch' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
     operationRepo.current = owner.id
     setOperation({ kind, repoId: owner.id })
     setProgress('')
@@ -299,6 +314,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
         setNotice(result.message)
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
         if (kind === 'commit') setMessages(current => ({ ...current, [owner.key]: '' }))
+        if (kind === 'branch') setNewBranch('')
       } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
         setHooks({ names: result.hooks, hash: result.hooksHash })
       } else if (result.reason === 'needs-upstream' && result.remotes.length > 0) {
@@ -307,7 +323,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
         setActionError(result.message)
       }
       setOutput(result.ok ? '' : readableOutput(result.output))
-    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => { operationRepo.current = null; setOperation(null) })
+    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => {
+      operationRepo.current = null
+      setOperation(null)
+      if (kind === 'branch') setBranchReload(count => count + 1)
+    })
   }
 
   const changeIndex = (kind: 'stage' | 'unstage', entries: readonly GitEntryView[]): void => {
@@ -323,6 +343,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     const expected = kind === 'fetch' ? null : seen ?? (repo.branch !== null && repo.headOid !== null ? { branch: repo.branch, headOid: repo.headOid } : null)
     if (kind !== 'fetch' && expected === null) return
     runWrite(kind, { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitSync(profileId, repo.id, kind, publishTo, expected), expected)
+  }
+
+  // A branch change is for the branch, at the commit, that was on screen when the person clicked; main refuses if that has moved.
+  const changeBranch = (action: 'create' | 'switch', name: string): void => {
+    if (!repo || repo.headOid === null) return
+    const expected = { branch: repo.detached ? null : repo.branch, headOid: repo.headOid }
+    runWrite('branch', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitBranch(profileId, repo.id, action, name, expected))
   }
 
   const commit = (approvedHooksHash: string | null): void => {
@@ -393,6 +420,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
               <div className="git-tabs" role="tablist" aria-label="Repository views">
                 <button type="button" role="tab" aria-selected={tab === 'changes'} onClick={() => setTab('changes')}>Changes{repo.changeCount > 0 ? ` (${repo.changeCount})` : ''}</button>
                 <button type="button" role="tab" aria-selected={tab === 'history'} onClick={() => setTab('history')}>History</button>
+                <button type="button" role="tab" aria-selected={tab === 'branches'} onClick={() => setTab('branches')}>Branches</button>
               </div>
 
               {statusError && <p className="git-message git-message-error" role="alert">{statusError}</p>}
@@ -444,6 +472,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                   )}
                   {!selection && currentStatus && currentStatus.totalEntries > 0 && <p className="git-note">Select a file to see its diff.</p>}
                 </div>
+              )}
+
+              {tab === 'branches' && (
+                <GitBranchList branches={branches && branches.repoId === repo.id ? branches.items : null} error={branchError}
+                  locked={operation !== null || repo.headOid === null}
+                  lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
+                  newName={newBranch} onNewNameChange={setNewBranch}
+                  onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
               )}
 
               {tab === 'history' && (

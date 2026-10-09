@@ -151,3 +151,34 @@ export function upstreamConfigArgs(branch: string, remote: string, remoteBranch:
   assertGitArgument(remoteBranch, 'branch name')
   return [['config', `branch.${branch}.remote`, remote], ['config', `branch.${branch}.merge`, `refs/heads/${remoteBranch}`]]
 }
+
+// ---- branches -----------------------------------------------------------------------------------------------------------
+
+/** The local branches, newest commit first, one per line with fields separated by code 31 (see `parseBranches`). */
+export function branchListArgs(): string[] {
+  return [
+    'for-each-ref', '--count=500', '--sort=-committerdate',
+    '--format=%(HEAD)%1f%(refname:short)%1f%(objectname)%1f%(upstream:short)%1f%(upstream:track,nobracket)%1f%(committerdate:unix)%1f%(subject)',
+    'refs/heads',
+  ]
+}
+
+/** Git's own verdict on a branch name, as the full ref (so `@{-1}` and other shorthand are never expanded). */
+export function refFormatArgs(name: string): string[] {
+  assertGitArgument(name, 'branch name')
+  return ['check-ref-format', `refs/heads/${name}`]
+}
+
+/** Never `--force`, `--merge` or `--discard-changes`: git refuses, and changes nothing, when local changes would be overwritten. */
+export function switchArgs(branch: string): string[] {
+  assertGitArgument(branch, 'branch name')
+  if (branch.startsWith('-')) throw new Error('A branch name cannot start with "-"')
+  return ['switch', '--no-guess', '--no-recurse-submodules', branch]
+}
+
+/** A new branch at the current commit, without tracking anything, then switch to it. */
+export function createBranchArgs(name: string): string[] {
+  assertGitArgument(name, 'branch name')
+  if (name.startsWith('-')) throw new Error('A branch name cannot start with "-"')
+  return ['switch', '--no-guess', '--no-recurse-submodules', '--no-track', '--create', name]
+}

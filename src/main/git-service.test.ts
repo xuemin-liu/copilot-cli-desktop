@@ -1435,3 +1435,193 @@ test('publishing sends the confirmed commit and then makes the branch follow it'
   assert.equal(h.fixture.plain(h.project, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/feature')
   assert.equal(done.status!.summary.ahead, 1, 'the later commit is the one still to push')
 })
+
+// ---- branches ------------------------------------------------------------------------------------------------------------------
+
+/** The current branch (null while detached) and its commit, as the panel would send them. */
+const headOf = (h: Harness): { branch: string | null; headOid: string } => ({
+  branch: h.fixture.plain(h.project, 'branch', '--show-current').trim() || null,
+  headOid: h.fixture.plain(h.project, 'rev-parse', 'HEAD').trim(),
+})
+const currentBranch = (h: Harness): string => h.fixture.plain(h.project, 'branch', '--show-current').trim()
+const commitFile = (f: GitFixture, project: string, name: string, text: string): void => {
+  writeFileSync(join(project, name), text); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', `add ${name}`)
+}
+
+/** A project with branches `main` and `feature` (one commit ahead of main), on main. */
+const withFeature = (t: test.TestContext, extra: Partial<GitServiceOptions> = {}, setup?: (f: GitFixture, project: string) => void) =>
+  harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    f.plain(project, 'checkout', '-q', '-b', 'feature'); commitFile(f, project, 'feature.txt', 'f\n')
+    f.plain(project, 'checkout', '-q', 'main')
+    setup?.(f, project)
+  }, { sessionActivity: () => ({ busy: false, detail: '' }), confirm: async () => true, ...extra })
+
+test('the branch list shows the current branch, upstream distance and last commit, newest first', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'topic'); commitFile(f, project, 't.txt', 't\n')
+    f.plain(project, 'checkout', '-q', 'main'); commitFile(f, project, 'm.txt', 'm\n')   // main is now one ahead of origin/main and the newest
+  })
+  const { repoId } = await open(h)
+  const branches = await h.service.getBranches(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual(branches.map(branch => branch.name), ['main', 'topic'])
+  const [main, topic] = branches
+  assert.deepEqual([main!.current, main!.upstream, main!.ahead, main!.behind, main!.subject], [true, 'origin/main', 1, 0, 'add m.txt'])
+  assert.deepEqual([topic!.current, topic!.upstream, topic!.ahead, topic!.behind, topic!.upstreamGone], [false, null, null, null, false])
+  assert.equal(main!.oid, localHead(h))
+  assert.ok(typeof main!.committedAt === 'number')
+})
+
+test('creating a branch makes it at the current commit, switches to it, and leaves the files alone', { skip }, async (t) => {
+  const h = await withFeature(t, {}, (f, project) => writeFileSync(join(project, 'a.txt'), 'edited\n'))
+  const { repoId } = await open(h)
+  const expected = headOf(h)
+  const result = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'work/new-idea', expected)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(result.message, 'Created and switched to work/new-idea.')
+  assert.equal(currentBranch(h), 'work/new-idea')
+  assert.equal(localHead(h), expected.headOid)
+  assert.equal(readFileSync(join(h.project, 'a.txt'), 'utf8').replace(/\r/g, ''), 'edited\n', 'the uncommitted edit is untouched')
+  assert.throws(() => h.fixture.plain(h.project, 'config', '--get', 'branch.work/new-idea.remote'), 'it follows nothing')
+  assert.equal(result.status!.summary.branch, 'work/new-idea')
+})
+
+test('a branch name that Git or the panel would not accept creates nothing', { skip }, async (t) => {
+  const h = await withFeature(t)
+  const { repoId } = await open(h)
+  const before = h.fixture.plain(h.project, 'branch', '--list').trim()
+  for (const name of ['', '  ', 'has space', 'a..b', 'x.lock', '/lead', 'trail/', 'bad~name', 'bad^name', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b', '@', 'HEAD', 'a@{b', '.hidden.', 'x'.repeat(201), 'feature', 'main']) {
+    const result = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, name, headOf(h))
+    assert.deepEqual([result.ok, result.reason], [false, 'failed'], JSON.stringify(name))
+  }
+  assert.equal(h.fixture.plain(h.project, 'branch', '--list').trim(), before, 'no branch appeared')
+  assert.equal(currentBranch(h), 'main')
+})
+
+test('a branch change is for the branch and commit that were on screen, and a stale one never opens a confirmation', { skip }, async (t) => {
+  let asked = 0
+  const h = await withFeature(t, { confirm: async () => { asked++; return true } })
+  const { repoId } = await open(h)
+  const shown = headOf(h)
+  commitFile(h.fixture, h.project, 'later.txt', 'l\n')
+  await assert.rejects(h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'x', shown), GitStaleError)
+  await assert.rejects(h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', shown), GitStaleError)
+  h.fixture.plain(h.project, 'checkout', '-q', 'feature')
+  await assert.rejects(h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'main', shown), GitStaleError)
+  assert.equal(currentBranch(h), 'feature', 'nothing moved')
+  assert.equal(asked, 0, 'the person was not asked to confirm something that could not happen')
+})
+
+test('switching asks first, then moves the files to the other branch', { skip }, async (t) => {
+  const asked: Array<{ title: string; detail: string; confirmLabel: string }> = []
+  const h = await withFeature(t, { confirm: async (_profile, request) => { asked.push(request); return true } }, (_f, project) => writeFileSync(join(project, 'notes.txt'), 'mine\n'))
+  const { repoId } = await open(h)
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(result.message, 'Switched to feature.')
+  assert.equal(currentBranch(h), 'feature')
+  assert.equal(existsSync(join(h.project, 'feature.txt')), true, 'the other branch\'s files are there')
+  assert.equal(existsSync(join(h.project, 'notes.txt')), true, 'an untracked file is carried along')
+  assert.equal(asked.length, 1)
+  assert.equal(asked[0]!.title, 'Switch to "feature"?')
+  assert.match(asked[0]!.detail, /"main" to "feature"/)
+  assert.match(asked[0]!.detail, /1 uncommitted change stay/)
+  assert.equal(asked[0]!.confirmLabel, 'Switch branch')
+})
+
+test('declining the confirmation, or having no way to ask, switches nothing', { skip }, async (t) => {
+  let answer = false
+  const h = await withFeature(t, { confirm: async () => answer })
+  const { repoId } = await open(h)
+  const declined = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.deepEqual([declined.ok, declined.reason, declined.message], [false, 'cancelled', 'Not switched.'])
+  assert.equal(currentBranch(h), 'main')
+  answer = true
+  assert.equal((await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))).ok, true)
+
+  const unasked = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); f.plain(project, 'branch', 'other') }, { sessionActivity: () => ({ busy: false, detail: '' }) })
+  const second = await open(unasked)
+  const refused = await unasked.service.switchBranch(SUBSCRIBER, PROFILE, second.repoId, 'other', headOf(unasked))
+  assert.deepEqual([refused.ok, refused.reason], [false, 'failed'])
+  assert.match(refused.message, /needs a confirmation window/)
+  assert.equal(currentBranch(unasked), 'main')
+})
+
+test('a switch is refused while a Copilot session is working in the project, and the person is not even asked', { skip }, async (t) => {
+  let asked = 0
+  const h = await withFeature(t, { sessionActivity: () => ({ busy: true, detail: '"Main session" is working' }), confirm: async () => { asked++; return true } })
+  const { repoId } = await open(h)
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.deepEqual([result.ok, result.reason], [false, 'agent-working'])
+  assert.match(result.message, /"Main session" is working\. Switching branches rewrites files under it/)
+  assert.equal(asked, 0)
+  assert.equal(currentBranch(h), 'main')
+  // Creating a branch changes no file, so it is not held up.
+  assert.equal((await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'idea', headOf(h))).ok, true)
+})
+
+test('a session that starts working while the confirmation is open stops the switch', { skip }, async (t) => {
+  let busy = false
+  const h = await withFeature(t, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' }, confirm: async () => { busy = true; return true } })
+  const { repoId } = await open(h)
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.deepEqual([result.ok, result.reason], [false, 'agent-working'])
+  assert.equal(currentBranch(h), 'main')
+})
+
+test('a branch switched elsewhere while the confirmation is open is not switched again', { skip }, async (t) => {
+  let h!: Harness
+  h = await withFeature(t, { confirm: async () => { h.fixture.plain(h.project, 'checkout', '-q', 'feature'); return true } }, (f, project) => f.plain(project, 'branch', 'third'))
+  const { repoId } = await open(h)
+  await assert.rejects(h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'third', headOf(h)), /branch changed while you were deciding/)
+  assert.equal(currentBranch(h), 'feature', 'it stayed where the other tool put it')
+})
+
+test('uncommitted changes that would be overwritten stop the switch, and nothing is lost', { skip }, async (t) => {
+  const h = await withFeature(t, {}, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my unsaved work\n'))
+  // `feature` changes a.txt too.
+  h.fixture.plain(h.project, 'stash', '-q'); h.fixture.plain(h.project, 'checkout', '-q', 'feature')
+  writeFileSync(join(h.project, 'a.txt'), 'feature version\n'); h.fixture.plain(h.project, 'commit', '-q', '-am', 'feature edits a.txt'); h.fixture.plain(h.project, 'checkout', '-q', 'main')
+  h.fixture.plain(h.project, 'stash', 'pop', '-q')
+  const { repoId } = await open(h)
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.deepEqual([result.ok, result.reason], [false, 'local-changes'])
+  assert.match(result.message, /would be overwritten.*Nothing was changed/)
+  assert.equal(currentBranch(h), 'main')
+  assert.equal(readFileSync(join(h.project, 'a.txt'), 'utf8').replace(/\r/g, ''), 'my unsaved work\n', 'the edit is intact')
+  assert.ok(h.runs.every(run => !run.args.some(arg => ['--force', '-f', '--merge', '-m', '--discard-changes'].includes(arg))), 'never forced')
+})
+
+test('the target must be a local branch that exists and is not the current one', { skip }, async (t) => {
+  const h = await withFeature(t)
+  const { repoId } = await open(h)
+  for (const [name, pattern] of [['nope', /no local branch "nope"/], ['main', /already on "main"/], ['origin/main', /no local branch/], ['refs/heads/feature', /no local branch/]] as const) {
+    const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, name, headOf(h))
+    assert.equal(result.ok, false, name)
+    assert.match(result.message, pattern, name)
+  }
+  assert.equal(h.runs.some(run => run.args[0] === 'switch'), false, 'no switch was started')
+})
+
+test('a switch runs no repository hook, and works from a detached HEAD', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-switch-hook-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withFeature(t, {}, (f, project) => {
+    f.plain(project, 'checkout', '-q', '--detach')
+    hookFile(project, 'post-checkout', `echo ran >> "${shellPath(marker)}"`)   // after the setup's own checkout
+  })
+  const { repoId } = await open(h)
+  const result = await h.service.switchBranch(SUBSCRIBER, PROFILE, repoId, 'feature', headOf(h))
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(currentBranch(h), 'feature')
+  assert.equal(existsSync(marker), false, 'post-checkout did not run')
+})
+
+test('before the first commit there is no branch to create or leave', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q') }, { sessionActivity: () => ({ busy: false, detail: '' }), confirm: async () => true })
+  const { repoId } = await open(h)
+  const result = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'x', { branch: 'main', headOid: 'a'.repeat(40) })
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /no commits yet/)
+})
