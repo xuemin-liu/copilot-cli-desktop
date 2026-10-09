@@ -51,14 +51,16 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   branches) is refused, and says which setting. The `↑` and `↓` counts update afterwards.
 - **Pull** is fetch followed by a **fast-forward only** merge of the upstream. If the branches have each moved on, nothing changes
   and the panel says so; merging or rebasing is left to you in a terminal. Git itself refuses a pull that would overwrite local changes.
-- **Push** sends the current branch to the branch of the same name on its upstream, with an explicit refspec, so a push the remote
-  would have to overwrite is refused (the panel never forces, and ignores a configured `+` refspec). A branch that tracks a
+- **Push** sends the confirmed commit of the current branch to the branch of the same name on its upstream, with an explicit refspec,
+  so a push the remote would have to overwrite is refused (the panel never forces, and ignores a configured `+` refspec). A branch that tracks a
   differently named branch is not pushed from the panel.
 - **Publish…** replaces Push for a branch with no upstream. It asks which remote, says what it will do, and sends nothing until you
   confirm; then the branch is pushed and becomes that branch's upstream.
 - **A click is for the branch and commit on screen.** Pull, Push and the Publish confirmation carry the branch and its commit; if
   another terminal or Copilot has switched branches or committed since, the request is refused and nothing is sent, so a
-  confirmation for one branch can never publish another.
+  confirmation for one branch can never publish another. The check is repeated while the command runs: a pull looks again after
+  its fetch and before every merge attempt, and merges the confirmed branch's own upstream rather than whatever is current; a push
+  sends the confirmed commit by id, so a commit added a moment later stays local and shows as still to push.
 - **Credentials are never collected.** Git runs with prompts off, so a remote that wants a password or a key passphrase fails
   within seconds with "Authentication required", and the message says to run `git fetch` once in a terminal. Credentials Git has
   saved (Credential Manager, an SSH agent) are used as usual. Unless you have set `core.sshCommand`, `GIT_SSH_COMMAND` or `GIT_SSH`

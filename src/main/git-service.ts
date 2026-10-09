@@ -1,5 +1,5 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs } from './git-commands.js'
+import { commitArgs, configGetArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
@@ -732,20 +732,21 @@ export class GitService {
       }
       const head = branch.head ?? ''
       const upstreamRemote = onBranch ? await read(configGetArgs(`branch.${head}.remote`)) : null
-      const upstreamRef = onBranch ? await read(configGetArgs(`branch.${head}.merge`)) : null
+      const upstreamMerge = onBranch ? await read(configGetArgs(`branch.${head}.merge`)) : null
 
       let remote: string | null
       let remoteBranch = head
       let setUpstream = false
+      let upstreamRef: string | null = null
       if (operation === 'fetch') {
         remote = upstreamRemote && remotes.includes(upstreamRemote) ? upstreamRemote
           : remotes.includes('origin') ? 'origin'
           : remotes.length === 1 ? remotes[0] ?? null : null
         if (!remote) return refused('no-remote', remotes.length === 0 ? 'This repository has no remote to fetch from.' : 'This repository has several remotes and none is this branch\'s upstream. Fetch from a terminal.')
-      } else if (branch.upstream !== null && upstreamRemote && upstreamRef?.startsWith('refs/heads/')) {
+      } else if (branch.upstream !== null && upstreamRemote && upstreamMerge?.startsWith('refs/heads/')) {
         remote = remotes.includes(upstreamRemote) ? upstreamRemote : null
         if (!remote) return refused('no-remote', `This branch's upstream is on "${upstreamRemote}", which is not a remote of this repository.`)
-        remoteBranch = upstreamRef.slice('refs/heads/'.length)
+        remoteBranch = upstreamMerge.slice('refs/heads/'.length)
         if (operation === 'push' && remoteBranch !== head) {
           return refused('failed', `This branch tracks "${remoteBranch}" on ${remote}, a differently named branch. Push from a terminal, where you can see exactly what goes where.`)
         }
@@ -766,6 +767,11 @@ export class GitService {
       for (const address of addresses.split(/\r?\n/)) {
         const verdict = checkRemoteUrl(address)
         if (!verdict.ok) return refused('no-remote', `The remote "${remote}" ${verdict.reason}, so the panel will not contact it. Use a terminal if you trust it.`)
+      }
+      if (operation === 'pull') {
+        // The remote-tracking branch of the confirmed branch, named now: the merge must not resolve `@{upstream}` for whatever is current later.
+        upstreamRef = await read(upstreamRefArgs(head))
+        if (!upstreamRef?.startsWith('refs/remotes/')) return refused('no-remote', 'This branch\'s upstream is not a remote-tracking branch, so there is nothing to pull from.')
       }
       if (operation !== 'push') {
         // A fetch writes wherever the repository's refspecs say, so they must say "only my own remote-tracking branches".
@@ -805,19 +811,35 @@ export class GitService {
         const fetched = await network(fetchArgs(remote))
         if (!gitSucceeded(fetched)) return syncFailure(fetched)
         const merged = await this.runWithLockWait(runtime, {
-          cwd: root, kind: 'write', disableHooks: true, args: fastForwardArgs(), signal, timeoutMs: 120_000, onOutput: emit,
-        }, async () => { await this.requireGate(project, repo, runtime, signal) })
+          cwd: root, kind: 'write', disableHooks: true, args: fastForwardArgs(upstreamRef ?? ''), signal, timeoutMs: 120_000, onOutput: emit,
+        }, async () => {
+          await this.requireGate(project, repo, runtime, signal)
+          // The fetch may have taken a while, and a merge changes whichever branch is current. Before every attempt it must still be
+          // the branch, at the commit, that the person asked to pull into.
+          if ((await read(headRefArgs())) !== `refs/heads/${head}` || (await read(['rev-parse', 'HEAD'])) !== branch.oid) {
+            throw new GitStaleError('The branch changed while the pull was running. Nothing was merged. Check it, then try again.')
+          }
+        })
         if (!gitSucceeded(merged)) return syncFailure(merged)
         const status = await this.statusAfterWrite(project, repo)
         const output = tailOutput(merged)
         return this.outcome({ ok: true, message: /already up to date/i.test(output) ? 'Already up to date.' : `Fast-forwarded ${head} to ${branch.upstream ?? remote}.`, output, status })
       }
-      const pushed = await network(pushArgs(remote, head, remoteBranch, setUpstream))
+      // The commit that was confirmed, by id: a commit added to the branch after the click is not sent.
+      const pushed = await network(pushArgs(remote, branch.oid ?? '', remoteBranch))
       if (!gitSucceeded(pushed)) return syncFailure(pushed)
+      let upstreamNote = ''
+      if (setUpstream) {
+        // `push --set-upstream` needs a branch name as its source, so the upstream is written by name once the push has succeeded.
+        for (const args of upstreamConfigArgs(head, remote, remoteBranch)) {
+          const written = await runtime.runner.run({ cwd: root, kind: 'write', disableHooks: true, args, signal, timeoutMs: 15_000 })
+          if (!gitSucceeded(written)) { upstreamNote = ' The branch was pushed, but its upstream could not be saved; set it in a terminal.'; break }
+        }
+      }
       const status = await this.statusAfterWrite(project, repo)
       const output = tailOutput(pushed)
-      const message = /everything up-to-date/i.test(output) ? 'Everything is already up to date.'
-        : setUpstream ? `Published ${head} to ${remote} and set it as the upstream.` : `Pushed ${head} to ${remote}/${remoteBranch}.`
+      const message = (/everything up-to-date/i.test(output) ? 'Everything is already up to date.'
+        : setUpstream ? `Published ${head} to ${remote} and set it as the upstream.` : `Pushed ${head} to ${remote}/${remoteBranch}.`) + upstreamNote
       return this.outcome({ ok: true, message, output, status })
     })
   }

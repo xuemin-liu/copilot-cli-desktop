@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { fastForwardArgs, fetchArgs, fetchRefspecsArgs, pushArgs, remoteUrlArgs } from './git-commands.js'
+import { fastForwardArgs, fetchArgs, fetchRefspecsArgs, pushArgs, remoteUrlArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { GitRunResult } from './git-runner.js'
 
@@ -81,18 +81,30 @@ test('credentials inside an address are removed whatever the scheme', () => {
 
 test('no network command forces anything, prunes, recurses into submodules or reads its target as an option', () => {
   assert.deepEqual(fetchArgs('origin'), ['fetch', '--no-recurse-submodules', '--no-prune', '--no-prune-tags', '--no-tags', '--', 'origin'])
-  const push = pushArgs('origin', 'main', 'main', false)
-  assert.deepEqual(push, ['push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no', '--', 'origin', 'refs/heads/main:refs/heads/main'])
-  assert.ok(pushArgs('origin', 'main', 'main', true).includes('--set-upstream'))
-  for (const args of [fetchArgs('origin'), push, fastForwardArgs()]) {
-    assert.equal(args.some(arg => /force|^\+|^--prune|--mirror|--delete/.test(arg)), false, args.join(' '))
+  const commit = 'a'.repeat(40)
+  const push = pushArgs('origin', commit, 'main')
+  assert.deepEqual(push, ['push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no', '--', 'origin', `${commit}:refs/heads/main`])
+  for (const args of [fetchArgs('origin'), push, fastForwardArgs('refs/remotes/origin/main')]) {
+    assert.equal(args.some(arg => /force|^\+|^--prune|--mirror|--delete|--set-upstream/.test(arg)), false, args.join(' '))
   }
-  assert.ok(fastForwardArgs().includes('--ff-only'))
+  assert.ok(fastForwardArgs('refs/remotes/origin/main').includes('--ff-only'))
   // A refspec is never forced: its source does not start with `+`.
   assert.equal(push.at(-1)!.startsWith('+'), false)
   assert.deepEqual(remoteUrlArgs('origin', true), ['remote', 'get-url', '--push', '--all', '--', 'origin'])
   assert.deepEqual(remoteUrlArgs('origin', false), ['remote', 'get-url', '--all', '--', 'origin'])
   assert.throws(() => fetchArgs('a\0b'), /NUL/)
+})
+
+test('a push names the commit it sends by id, and a pull names the upstream it merges in full', () => {
+  for (const bad of ['main', 'refs/heads/main', '', 'A'.repeat(40), 'a'.repeat(39), 'a'.repeat(40) + ' --force']) {
+    assert.throws(() => pushArgs('origin', bad, 'main'), /full id of the commit/, bad)
+  }
+  assert.ok(pushArgs('origin', 'b'.repeat(64), 'main').at(-1)!.startsWith('b'.repeat(64)), 'a 64-character id (sha256 repositories) is fine')
+  assert.ok(fastForwardArgs('refs/remotes/origin/main').includes('refs/remotes/origin/main'))
+  assert.equal(fastForwardArgs('refs/remotes/origin/main').includes('@{upstream}'), false)
+  for (const bad of ['@{upstream}', 'origin/main', 'refs/heads/main', '']) assert.throws(() => fastForwardArgs(bad), /remote-tracking/, bad)
+  assert.deepEqual(upstreamRefArgs('feature/x'), ['rev-parse', '--symbolic-full-name', 'feature/x@{upstream}'])
+  assert.deepEqual(upstreamConfigArgs('feature/x', 'origin', 'feature/x'), [['config', 'branch.feature/x.remote', 'origin'], ['config', 'branch.feature/x.merge', 'refs/heads/feature/x']])
 })
 
 test('fetch settings that stay inside the remote\'s own tracking branches are accepted, anything else is refused', () => {

@@ -32,6 +32,8 @@ interface Harness {
   project: string
   /** Runs the action once, right after the first commit attempt fails on the index lock and before the next attempt is prepared. */
   whenCommitBlocked(action: () => void): void
+  /** Runs the action once, right after the first command that `matches` finishes and before the code that ran it carries on. */
+  afterCommand(matches: (options: GitRunOptions) => boolean, action: () => void): void
 }
 
 /** Wraps the real runner so tests can see which git commands ran. */
@@ -53,8 +55,10 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
   const calls: string[] = []
   const runs: GitRunOptions[] = []
   let blocked: (() => void) | null = null
+  let after: { matches: (options: GitRunOptions) => boolean; action: () => void } | null = null
   const afterRun = (options: GitRunOptions, result: GitRunResult): void => {
     runs.push(options)
+    if (after?.matches(options)) { const { action } = after; after = null; action() }
     if (blocked && options.args[0] === 'commit' && isIndexLockFailure(result)) { const action = blocked; blocked = null; action() }
   }
   const trustStore = new GitTrustStore(join(fixture.root, 'git-trust.json'))
@@ -68,7 +72,7 @@ async function harness(t: test.TestContext, setup: (fixture: GitFixture, project
     ...extra,
   })
   t.after(async () => { await service.dispose(); fixture.cleanup() })
-  return { fixture, service, events, calls, runs, trustStore, project, whenCommitBlocked: action => { blocked = action } }
+  return { fixture, service, events, calls, runs, trustStore, project, whenCommitBlocked: action => { blocked = action }, afterCommand: (matches, action) => { after = { matches, action } } }
 }
 
 async function waitFor<T>(read: () => T | undefined | false, timeoutMs = 8_000): Promise<T> {
@@ -1349,4 +1353,85 @@ test('a push or pull is for the commit that was shown: a new commit, or a missin
   assert.equal(remoteHead(h), before, 'nothing was sent')
   await assert.rejects(h.service.push(SUBSCRIBER, PROFILE, repoId, null, null as never), /branch changed/)
   assert.equal((await h.service.push(SUBSCRIBER, PROFILE, repoId, null, seen(h))).ok, true)
+})
+
+// ---- the binding holds for the whole operation, not only at the start ------------------------------------------------------------
+
+test('a pull does not merge into another branch when the branch is switched while its fetch runs', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'private')
+    writeFileSync(join(project, 'p.txt'), 'p\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'private work')
+    f.plain(project, 'push', '-q', '-u', 'origin', 'private')
+    f.plain(project, 'checkout', '-q', 'main')
+    const other = join(f.root, 'other')
+    f.plain(other, 'fetch', '-q', 'origin')
+    f.plain(other, 'checkout', '-q', 'private')
+    writeFileSync(join(other, 'q.txt'), 'q\n'); f.plain(other, 'add', '.'); f.plain(other, 'commit', '-q', '-m', 'more private work'); f.plain(other, 'push', '-q', 'origin', 'private')
+    f.plain(other, 'checkout', '-q', 'main')
+  })
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const confirmed = seen(h)
+  const privateBefore = h.fixture.plain(h.project, 'rev-parse', 'private').trim()
+  // While the fetch is finishing, another tool switches branches.
+  h.afterCommand(options => options.args[0] === 'fetch', () => h.fixture.plain(h.project, 'checkout', '-q', 'private'))
+  await assert.rejects(h.service.pull(SUBSCRIBER, PROFILE, repoId, confirmed), /branch changed while the pull was running/)
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'private').trim(), privateBefore, 'the branch that became current was not advanced')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'main').trim(), confirmed.headOid, 'and the confirmed one was not touched either')
+  assert.equal(existsSync(join(h.project, 'q.txt')), false)
+})
+
+test('a commit made while a pull fetches also stops the merge, and the merge names the confirmed upstream', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
+  const confirmed = seen(h)
+  h.afterCommand(options => options.args[0] === 'fetch', () => {
+    writeFileSync(join(h.project, 'late.txt'), 'l\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'committed during the fetch')
+  })
+  await assert.rejects(h.service.pull(SUBSCRIBER, PROFILE, repoId, confirmed), GitStaleError)
+  assert.equal(h.runs.some(run => run.args[0] === 'merge'), false, 'no merge was started')
+  // A normal pull merges the full remote-tracking ref, never `@{upstream}`.
+  const fresh = await h.service.pull(SUBSCRIBER, PROFILE, repoId, seen(h))
+  const merge = h.runs.find(run => run.args[0] === 'merge')
+  assert.ok(merge, fresh.message)
+  assert.equal(merge.args.at(-1), 'refs/remotes/origin/main')
+  assert.equal(merge.args.includes('@{upstream}'), false)
+})
+
+test('a push sends the commit that was confirmed, not one added to the branch afterwards', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'confirmed')
+  })
+  const { repoId } = await open(h)
+  const confirmed = seen(h)
+  // After the checks and before git starts, a new commit lands on the branch.
+  h.afterCommand(options => options.args.includes('core.sshcommand'), () => {
+    writeFileSync(join(h.project, 'secret.txt'), 'not confirmed\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'added after the click')
+  })
+  const result = await h.service.push(SUBSCRIBER, PROFILE, repoId, null, confirmed)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(remoteHead(h), confirmed.headOid, 'the remote has the confirmed commit')
+  assert.notEqual(localHead(h), confirmed.headOid, 'the later commit exists only locally')
+  assert.equal(result.status!.summary.ahead, 1, 'and is still waiting to be pushed')
+  assert.throws(() => h.fixture.plain(join(h.fixture.root, 'remote.git'), 'cat-file', '-e', localHead(h)), 'the unconfirmed commit never reached the remote')
+})
+
+test('publishing sends the confirmed commit and then makes the branch follow it', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'feature')
+    writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
+  })
+  const { repoId } = await open(h)
+  const confirmed = seen(h)
+  h.afterCommand(options => options.args.includes('core.sshcommand'), () => {
+    writeFileSync(join(h.project, 'later.txt'), 'l\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'later')
+  })
+  const done = await h.service.push(SUBSCRIBER, PROFILE, repoId, 'origin', confirmed)
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+  assert.equal(remoteHead(h, 'feature'), confirmed.headOid)
+  assert.equal(h.fixture.plain(h.project, 'config', 'branch.feature.remote').trim(), 'origin')
+  assert.equal(h.fixture.plain(h.project, 'config', 'branch.feature.merge').trim(), 'refs/heads/feature')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/feature')
+  assert.equal(done.status!.summary.ahead, 1, 'the later commit is the one still to push')
 })

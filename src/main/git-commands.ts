@@ -110,22 +110,44 @@ export function fetchArgs(remote: string): string[] {
   return ['fetch', '--no-recurse-submodules', '--no-prune', '--no-prune-tags', '--no-tags', '--', remote]
 }
 
-/** Move the current branch to its upstream only when that is a fast-forward; anything else is refused and changes nothing. */
-export function fastForwardArgs(): string[] {
-  return ['merge', '--ff-only', '--no-edit', '--no-autostash', '--no-verify', '@{upstream}']
+/** The remote-tracking branch a local branch follows, as a full ref name. */
+export function upstreamRefArgs(branch: string): string[] {
+  assertGitArgument(branch, 'branch name')
+  return ['rev-parse', '--symbolic-full-name', `${branch}@{upstream}`]
+}
+
+/** The ref `HEAD` points at (fails when it is detached). */
+export function headRefArgs(): string[] {
+  return ['symbolic-ref', '--quiet', 'HEAD']
 }
 
 /**
- * Push one branch to one named branch with an explicit refspec, which also overrides any `remote.<name>.push` the repository
- * configures. There is no `+` in it and no `--force`, so a push the remote would have to overwrite is refused.
+ * Move the current branch to the given remote-tracking branch only when that is a fast-forward; anything else is refused and
+ * changes nothing. The ref is named in full, never `@{upstream}`, so it is the upstream of the branch that was confirmed rather
+ * than of whichever branch is current when the command runs.
  */
-export function pushArgs(remote: string, branch: string, remoteBranch: string, setUpstream: boolean): string[] {
+export function fastForwardArgs(upstreamRef: string): string[] {
+  assertGitArgument(upstreamRef, 'upstream')
+  if (!upstreamRef.startsWith('refs/remotes/')) throw new Error('A pull can only follow a remote-tracking branch')
+  return ['merge', '--ff-only', '--no-edit', '--no-autostash', '--no-verify', upstreamRef]
+}
+
+/**
+ * Push one commit to one named branch with an explicit refspec, which also overrides any `remote.<name>.push` the repository
+ * configures. The source is the commit id the person confirmed, not the branch name, so a commit added to the branch after
+ * the confirmation is not sent. There is no `+` in it and no `--force`, so a push the remote would have to overwrite is refused.
+ */
+export function pushArgs(remote: string, commit: string, remoteBranch: string): string[] {
   assertGitArgument(remote, 'remote name')
-  assertGitArgument(branch, 'branch name')
   assertGitArgument(remoteBranch, 'branch name')
-  return [
-    'push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no',
-    ...(setUpstream ? ['--set-upstream'] : []),
-    '--', remote, `refs/heads/${branch}:refs/heads/${remoteBranch}`,
-  ]
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(commit)) throw new Error('A push needs the full id of the commit to send')
+  return ['push', '--no-recurse-submodules', '--no-follow-tags', '--signed=no', '--', remote, `${commit}:refs/heads/${remoteBranch}`]
+}
+
+/** The two settings `git push --set-upstream` would write: where a branch pulls from. Written by name after a successful publish. */
+export function upstreamConfigArgs(branch: string, remote: string, remoteBranch: string): string[][] {
+  assertGitArgument(branch, 'branch name')
+  assertGitArgument(remote, 'remote name')
+  assertGitArgument(remoteBranch, 'branch name')
+  return [['config', `branch.${branch}.remote`, remote], ['config', `branch.${branch}.merge`, `refs/heads/${remoteBranch}`]]
 }

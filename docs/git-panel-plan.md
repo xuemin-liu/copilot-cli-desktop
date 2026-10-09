@@ -432,7 +432,12 @@ and a sync bar under the branch name. The design decisions, each with a test tha
 - **Confirmations are bound to what was shown.** `desktop:git-sync` carries the branch and its commit for a pull or push, and main
   compares them with the freshly read state before doing anything (`GitStaleError`), so a confirmation for one branch cannot
   publish the branch another tool switched to. The Publish dialog keeps the branch and commit it was asked about and hides if
-  they change. Also from the first review.
+  they change. The second review round showed that a check at the start is not enough, because a fetch can take two minutes: a pull
+  now re-reads the current branch and commit after the fetch and before every merge attempt (`GitStaleError` if they differ) and
+  merges the confirmed branch's tracking ref by its full name instead of `@{upstream}`; a push uses the confirmed commit id as the
+  refspec source instead of the branch name, so nothing committed after the click is sent. Because `--set-upstream` needs a branch
+  name as its source, a publish writes `branch.<name>.remote` and `.merge` itself after the push succeeds. The remaining window is
+  the few milliseconds between the re-read and git's own ref update on a pull; git offers no compare-and-swap for a merge.
 - **Redaction.** `redactDiagnosticText` now also removes `user:password@` from any scheme (`ssh://`, `git://`), and the progress
   stream is redacted as well as the final result.
 - **Cancel and limits.** Same cancel and process-tree kill as a commit; 120 seconds for the network; one write at a time per
