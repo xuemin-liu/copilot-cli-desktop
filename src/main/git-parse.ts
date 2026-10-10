@@ -307,16 +307,17 @@ export function parseBranches(output: string, max = 500): GitBranchEntry[] {
 }
 
 /**
- * The remote branches named by `publishedRefsArgs()` output, as `origin/main`. A remote's `HEAD` (`origin/HEAD`) only points at one of
- * its branches, so it is not a branch of its own and is left out.
+ * The remote branches named by `publishedRefsArgs()` output, as `origin/main`. A symbolic ref (`origin/HEAD`, which points at one of the
+ * remote's branches) is not a branch of its own and is left out; a real branch that happens to be called `feature/HEAD` is kept,
+ * which is why the ref's symbolic target is asked for instead of guessing from the name.
  */
 export function parsePublishedRefs(output: string, max = 20): string[] {
   const names: string[] = []
   for (const line of output.split(String.fromCharCode(10))) {
-    const ref = line.trim()
-    if (!ref.startsWith('refs/remotes/')) continue
+    const [ref = '', symref = ''] = line.replace(String.fromCharCode(13), '').split(String.fromCharCode(31))
+    if (!ref.startsWith('refs/remotes/') || symref.trim() !== '') continue
     const name = ref.slice('refs/remotes/'.length)
-    if (name === '' || name.endsWith('/HEAD')) continue
+    if (name === '') continue
     if (!names.includes(name)) names.push(name)
     if (names.length >= max) break
   }

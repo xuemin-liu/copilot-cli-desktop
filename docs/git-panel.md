@@ -54,6 +54,11 @@ parent and author, and the history is no longer.
   published" test are checked again right before Git runs, including after every wait for `index.lock`.
 - **Hooks are treated like a commit's** and need the same approval, and `post-rewrite` (which Git runs after an amend) is among the
   hooks that are listed and approved.
+- **If Git cannot answer, the answer is no.** A failed, timed-out or cut-short read of "is it published?" (or of whether the commit is a
+  merge) refuses the amend rather than assuming the commit is local; the Amend control shows the error. A remote branch whose name merely
+  ends in `HEAD` (`origin/feature/HEAD`) counts as a published branch; only the remote's own `HEAD` pointer is ignored.
+- **The message is loaded whole or not at all.** The box is prefilled with the complete last message; one longer than the 100,000
+  characters an amend accepts is refused ("too long to edit here") instead of being shortened and then silently saved that way.
 - It needs something to change: stage files or change the message. A message-only amend works with nothing staged. Git's refusal
   to make a commit empty stays, except that an already-empty commit can have its message changed.
 - The same checks as a commit apply: unresolved conflicts, an unseen staged submodule update, and Git needing to know who you are.

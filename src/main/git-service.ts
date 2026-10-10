@@ -1197,12 +1197,14 @@ export class GitService {
     if (!gitSucceeded(parents)) throw new Error('There is no commit yet')
     const [oid = '', ...parentIds] = parents.stdout.toString('utf8').trim().split(' ')
     const message = await run(headMessageArgs())
+    // A read that failed, timed out or was cut short is an error, never "nothing": an empty list would mean "not published".
+    if (!gitSucceeded(message)) throw new Error('Could not read the message of the last commit')
     const published = await run(publishedRefsArgs())
-    return {
-      oid, isMerge: parentIds.length > 1,
-      message: gitSucceeded(message) ? message.stdout.toString('utf8').replace(/\r\n/g, '\n').trimEnd().slice(0, 10_000) : '',
-      publishedTo: gitSucceeded(published) ? parsePublishedRefs(published.stdout.toString('utf8')) : [],
-    }
+    if (!gitSucceeded(published)) throw new Error('Could not tell where the last commit is published')
+    // The message becomes the editable text of the amend, so it is loaded whole or not at all: a shortened copy would silently replace it.
+    const full = message.stdout.toString('utf8').replace(/\r\n/g, '\n').trimEnd()
+    if (full.length > 100_000) throw new Error('The last commit message is too long to edit here. Amend it from a terminal.')
+    return { oid, isMerge: parentIds.length > 1, message: full, publishedTo: parsePublishedRefs(published.stdout.toString('utf8')) }
   }
 
   async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, amend: ExpectedHead | null = null): Promise<GitOperationResult> {
@@ -1232,10 +1234,13 @@ export class GitService {
       // Amending rewrites the last commit, so it must be the one the person was looking at, it must be local, and it must be an
       // ordinary commit. Each of these is checked again before every attempt below.
       const run = (args: string[]): Promise<GitRunResult> => runtime.runner.run({ cwd: root, args, signal, timeoutMs: 15_000 })
-      const publishedRefs = async (): Promise<string[]> => {
+      // Null when Git could not answer: an unknown publication status is never treated as "not published".
+      const publishedRefs = async (): Promise<string[] | null> => {
         const found = await run(publishedRefsArgs())
-        return gitSucceeded(found) ? parsePublishedRefs(found.stdout.toString('utf8')) : []
+        return gitSucceeded(found) ? parsePublishedRefs(found.stdout.toString('utf8')) : null
       }
+      const publicationUnknown = (): GitOperationResult =>
+        refused('failed', 'Git could not say whether the last commit has been published, so it will not be amended. Try again.')
       const publishedRefusal = (names: string[]): GitOperationResult =>
         refused('published', `This commit is already on ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} more` : ''}. Amending it would rewrite history others may have, and a push of it would need a force push, which the panel never does. Make a new commit instead.`)
       let headIsEmpty = false
@@ -1243,8 +1248,10 @@ export class GitService {
         if (status.branch.oid === null) return refused('failed', 'There is no commit to amend.')
         if (amend.branch !== status.branch.head || amend.headOid !== status.branch.oid) throw new GitStaleError('The last commit changed since you looked. Check it, then try again.')
         const parents = await run(headParentsArgs())
-        if (gitSucceeded(parents) && parents.stdout.toString('utf8').trim().split(' ').length > 2) return refused('failed', 'The last commit is a merge. Amend it from a terminal.')
+        if (!gitSucceeded(parents)) return refused('failed', 'Git could not read the last commit, so it will not be amended. Try again.')
+        if (parents.stdout.toString('utf8').trim().split(' ').length > 2) return refused('failed', 'The last commit is a merge. Amend it from a terminal.')
         const names = await publishedRefs()
+        if (names === null) return publicationUnknown()
         if (names.length > 0) return publishedRefusal(names)
         const trees = await run(headTreesArgs())
         const [headTree, parentTree] = trees.stdout.toString('utf8').trim().split(String.fromCharCode(10)).map(line => line.trim())
@@ -1309,6 +1316,7 @@ export class GitService {
             const oid = await run(['rev-parse', 'HEAD'])
             if (head !== amend.branch || oid.stdout.toString('utf8').trim() !== amend.headOid) throw new GitStaleError('The last commit changed while the amend was waiting. Nothing was amended. Check it, then try again.')
             const names = await publishedRefs()
+            if (names === null) throw new WriteRefused(publicationUnknown())
             if (names.length > 0) throw new WriteRefused(publishedRefusal(names))
           }
           const refusal = await hooksProblem(await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes), null)

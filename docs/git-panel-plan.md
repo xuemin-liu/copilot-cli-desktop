@@ -471,6 +471,11 @@ refusal, the identity check and the hook approval. What it adds, each with a tes
 - **Bound to the commit on screen, repeatedly.** The request carries the branch and commit id, compared after the queue turn, and
   again in the per-attempt callback together with the published test, because `commit --amend` rewrites whatever `HEAD` is when it
   runs and a lock wait or a fetch can change that (the lesson of phases 3 and 4).
+- **Fail closed on every read.** The first review found three places where "could not tell" became "fine": a failed or timed-out
+  `for-each-ref --contains` read as "not published" (so a shared commit could be rewritten, in the first guard and in the per-attempt
+  one), a ref whose *name* ended in `/HEAD` was dropped as if it were the remote's `HEAD` pointer (the symbolic target, `%(symref)`, is
+  asked for instead), and the message used for the prefill was cut at 10,000 characters and then saved as the new message. Reads now
+  return "unknown" and the amend refuses; the message is whole or an error. The merge-detection read fails closed too.
 - **`post-rewrite` joins the commit hooks** that are inventoried and approved: an amend runs it, and without that a repository's
   hook could run unapproved. An existing approval is asked for again once, as the inventory changes.
 - **Git's guard against empty commits stays,** except `--allow-empty` is passed when the last commit is already empty (its tree

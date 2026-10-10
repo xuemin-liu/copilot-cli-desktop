@@ -48,9 +48,12 @@ export function headParentsArgs(): string[] {
   return ['rev-list', '--parents', '-n', '1', 'HEAD']
 }
 
-/** Remote-tracking branches that already contain HEAD: if there are any, the commit has been published. */
+/**
+ * Remote-tracking refs that already contain HEAD: if there are any, the commit has been published. Each line is the ref, then (after
+ * code 31) its symbolic target, which is set only for a pointer such as `origin/HEAD` and never for a branch that is merely called HEAD.
+ */
 export function publishedRefsArgs(): string[] {
-  return ['for-each-ref', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes']
+  return ['for-each-ref', '--contains', 'HEAD', '--format=%(refname)%1f%(symref)', 'refs/remotes']
 }
 
 /**

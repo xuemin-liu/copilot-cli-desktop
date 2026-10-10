@@ -152,7 +152,7 @@ export interface GitBranchView {
 /** What the Amend control needs to know about the last commit. */
 export interface GitHeadCommitView {
   oid: string
-  /** The full message, cut at 10,000 characters. */
+  /** The full message (a longer one than the 100,000 characters an amend accepts is an error, not a shortened copy). */
   message: string
   /** A merge commit is not amended from the panel. */
   isMerge: boolean
