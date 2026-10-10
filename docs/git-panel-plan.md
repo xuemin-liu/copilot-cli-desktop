@@ -471,6 +471,13 @@ missing means the discard is refused: it fails closed. Decisions, each with a te
   design guarantees instead is that **the copy saved is exactly what the restore throws away**: the copy is made after the answer,
   from the file on disk, each file is measured before and after its copy (a change stops the discard), and the restore follows
   immediately. Work an agent added after the person looked is therefore in the copy.
+- **Check, ask, check again, and again before every attempt.** The first review round found that "again" was not enough: a restore can
+  wait ten seconds for `index.lock`, and the copy, the session check and the path checks had been made once before it. They now run
+  in the per-attempt callback; the copy is made there too and is re-made when the files' stamps (size and modification time) differ
+  from the ones it recorded, so new work is saved rather than overwritten by an older copy. The review also showed that a
+  junction in a *parent* folder passes a leaf-only check and that Git does not stop a write through it: every folder above a path
+  is now `lstat`ed (a link anywhere is refused) and the nearest existing one must resolve inside the repository, for tracked and
+  untracked paths alike. Each untracked item is re-checked immediately before it is moved.
 - **Check, ask, check again.** Everything that can make a discard unsafe (session working, copies too large or not regular files,
   an untracked folder that holds a repository or is too big to inspect, unsafe names, links) is evaluated before the window opens,
   so nothing impossible is offered, and again after it closes together with the trust gate, the list version and the session.

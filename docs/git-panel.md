@@ -89,9 +89,13 @@ panel that destroys work, so it is built around three promises:
 - **It is refused when it cannot be done safely**, with nothing changed:
   - while a Copilot session is working in the project (and re-checked after you answer, because a session may have started);
   - for a file that is too large to copy (25 MB, 200 MB in total), a link, a name Windows could misread (a reserved device name, a
-    stream, `..`), or a path that resolves outside the repository;
+    stream, `..`), or a path that resolves outside the repository. A **link or junction in any folder above** a file counts too
+    (Git does not notice a Windows junction, so a restore through one would overwrite a file outside the repository);
   - for an untracked **folder that contains a git repository** (that would delete a whole history), a folder with more than 20,000
     items, and anything inside a `.git` folder. One refusal stops the whole request, so a mixed selection is all-or-nothing.
+- **Waiting for another Git process does not weaken any of this.** A restore can wait for `index.lock` for seconds, so before every
+  attempt the repository's settings, the session, and the paths are checked again, and the saved copy is renewed if a file changed
+  (a copy made earlier is never trusted over newer work). Each untracked item is checked once more right before it is moved.
 - Only the working-tree change is discarded: a file that is also staged keeps its staged version. Conflicted files, submodules and
   files that were only added with `git add -N` have no Discard button. The file list you were looking at is part of the request, so
   a list that changed (including while the window was open) is refused.

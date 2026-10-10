@@ -485,8 +485,10 @@ ${point.missing}`)
 
     await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "slow.txt")', 'the untracked file is listed')
     await click('button[aria-label="Discard slow.txt"]')
-    await until('/Discarded 1 change/.test(document.querySelector(".git-message-info")?.innerText || "")', 'the untracked file was discarded')
-    assert.equal(existsSync(join(alpha, 'slow.txt')), false)
+    // The notice from the previous discard may still be on screen for a moment, so wait for the file itself to be gone.
+    for (let waited = 0; existsSync(join(alpha, 'slow.txt')) && waited < 12_000; waited += 50) await delay(50)
+    assert.equal(existsSync(join(alpha, 'slow.txt')), false, 'the untracked file was discarded')
+    await until('/Discarded 1 change/.test(document.querySelector(".git-message-info")?.innerText || "")', 'the untracked discard was reported')
     assert.equal((await readdir(bin)).length, 1, 'it is in the bin')
 
     await writeFile(join(alpha, 'keep.txt'), 'keep me\n')

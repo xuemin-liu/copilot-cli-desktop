@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot } from './git-discard.js'
+import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 
 function workspace(t: test.TestContext): { root: string; repo: string; snapshots: string } {
   const root = mkdtempSync(join(tmpdir(), 'git-discard-'))
@@ -106,4 +106,36 @@ test('a folder holding a git repository, a git folder, a link or an unsafe name 
   try { symlinkSync(join(root, 'outside'), join(repo, 'jump'), 'junction') } catch { linked = false }
   if (linked) await refuse('jump', /is a link/)
   assert.equal(existsSync(join(repo, 'vendored', 'lib', '.git', 'HEAD')), true, 'checking deletes nothing')
+})
+
+test('a junction or link anywhere above a tracked or untracked path is refused, wherever it is, and the target is never opened', async (t) => {
+  const { root, repo, snapshots } = workspace(t)
+  const outside = join(root, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'a.txt'), 'outside'); mkdirSync(join(outside, 'deeper')); writeFileSync(join(outside, 'deeper', 'b.txt'), 'b')
+  mkdirSync(join(repo, 'real')); writeFileSync(join(repo, 'real', 'ok.txt'), 'ok')
+  let linked = true
+  try { symlinkSync(outside, join(repo, 'parent'), 'junction'); symlinkSync(outside, join(repo, 'real', 'inner'), 'junction') } catch { linked = false }
+  if (!linked) { t.skip('links cannot be created here'); return }
+  for (const path of ['parent/a.txt', 'parent/deeper/b.txt', 'real/inner/a.txt', 'parent/missing.txt']) {
+    assert.match((await checkSnapshotable(repo, [path]))[0] ?? '', /inside a folder that is a link/, path)
+    await assert.rejects(saveSnapshot(snapshots, repo, [path], new Date()), DiscardRefused, path)
+    const trash = await checkTrashable(repo, path)
+    assert.equal(trash.ok, false, path)
+  }
+  assert.deepEqual(await checkSnapshotable(repo, ['real/ok.txt', 'real/missing/deleted.txt']), [], 'ordinary folders, including ones that do not exist yet, are fine')
+  assert.deepEqual(readdirSync(snapshots), [], 'nothing was copied')
+  assert.equal(readFileSync(join(outside, 'a.txt'), 'utf8'), 'outside')
+})
+
+test('stamps say whether a file looks the same as when it was copied', async (t) => {
+  const { repo, snapshots } = workspace(t)
+  writeFileSync(join(repo, 'a.txt'), 'one'); writeFileSync(join(repo, 'b.txt'), 'two')
+  const snapshot = await saveSnapshot(snapshots, repo, ['a.txt', 'b.txt', 'gone.txt'], new Date(0))
+  assert.deepEqual(await stampFiles(repo, ['a.txt', 'b.txt', 'gone.txt']), snapshot.stamps, 'unchanged files match their copy')
+  assert.equal(snapshot.stamps['gone.txt'], 'missing')
+  writeFileSync(join(repo, 'a.txt'), 'one, more')
+  const later = await stampFiles(repo, ['a.txt', 'b.txt', 'gone.txt'])
+  assert.notEqual(later['a.txt'], snapshot.stamps['a.txt'])
+  assert.equal(later['b.txt'], snapshot.stamps['b.txt'])
+  utimesSync(join(repo, 'b.txt'), new Date(), new Date(Date.now() + 120_000))
+  assert.notEqual((await stampFiles(repo, ['b.txt']))['b.txt'], snapshot.stamps['b.txt'], 'a new modification time counts as a change')
 })

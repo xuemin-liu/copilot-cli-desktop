@@ -1,7 +1,8 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { branchListArgs, commitArgs, configGetArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
-import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot } from './git-discard.js'
+import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
+import type { Snapshot } from './git-discard.js'
 import type { ProjectActivity } from './git-branch.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
@@ -1063,31 +1064,60 @@ export class GitService {
 
       let note = ''
       if (tracked.length > 0) {
-        // The copy is made from what is on disk right now, so it is exactly what the restore below throws away.
-        let snapshot
-        try { snapshot = await saveSnapshot(this.options.snapshotDirectory ?? '', root, tracked, this.options.now?.() ?? new Date(), limits) } catch (error) {
-          if (error instanceof DiscardRefused) return refused('failed', `${error.message}`)
+        // Restoring can wait for `index.lock` for seconds, so nothing decided earlier is trusted at the moment of an attempt. Before
+        // every attempt: the trust gate, the session, and the paths (a link may have appeared) are checked again, and the saved copy
+        // is of the files as they are now. A copy made for an earlier attempt is reused only if the files still look the same,
+        // otherwise a new one is made, so work added during the wait is in a copy and never overwritten by an older one.
+        let kept: Snapshot | null = null
+        let result: GitRunResult
+        try {
+          result = await this.runWithLockWait(runtime, {
+            cwd: root, kind: 'write', disableHooks: true, args: restoreArgs(), stdin: `${tracked.join('\0')}\0`, signal, timeoutMs: 120_000,
+            onOutput: this.emitter(subscriberId, profileId, repoId, 'discard'),
+          }, async () => {
+            await this.requireGate(project, repo, runtime, signal)
+            const stillBusy = working()
+            if (stillBusy) throw new WriteRefused(stillBusy)
+            const problems = await checkSnapshotable(root, tracked, limits)
+            if (problems.length > 0) throw new WriteRefused(blocked(problems))
+            const stamps = await stampFiles(root, tracked)
+            const current = kept as Snapshot | null
+            if (current === null || tracked.some(path => current.stamps[path] !== stamps[path])) {
+              try {
+                kept = await saveSnapshot(this.options.snapshotDirectory ?? '', root, tracked, this.options.now?.() ?? new Date(), limits)
+              } catch (error) {
+                if (error instanceof DiscardRefused) throw new WriteRefused(refused('failed', error.message))
+                throw error
+              }
+            }
+          })
+        } catch (error) {
+          if (error instanceof WriteRefused) return error.result
           throw error
         }
         await pruneSnapshots(this.options.snapshotDirectory ?? '')
-        const result = await this.runWithLockWait(runtime, {
-          cwd: root, kind: 'write', disableHooks: true, args: restoreArgs(), stdin: `${tracked.join('\0')}\0`, signal, timeoutMs: 120_000,
-          onOutput: this.emitter(subscriberId, profileId, repoId, 'discard'),
-        }, async () => { await this.requireGate(project, repo, runtime, signal) })
+        const snapshot = kept as Snapshot | null
         if (!gitSucceeded(result)) {
           const status = await this.statusAfterWrite(project, repo)
           const failed = this.failure(result, root, 'git restore')
-          return { ...failed, message: `${failed.message} A copy of the files is in ${snapshot.directory}.`, status }
+          return { ...failed, message: `${failed.message}${snapshot ? ` A copy of the files is in ${snapshot.directory}.` : ''}`, status }
         }
-        if (snapshot.files > 0) note = snapshot.files === 1 ? ` A copy of the changed file is saved in ${snapshot.directory}.` : ` Copies of the ${snapshot.files} changed files are saved in ${snapshot.directory}.`
+        if (snapshot && snapshot.files > 0) note = snapshot.files === 1 ? ` A copy of the changed file is saved in ${snapshot.directory}.` : ` Copies of the ${snapshot.files} changed files are saved in ${snapshot.directory}.`
       }
-      const failures: string[] = []
-      for (const absolute of second.trash) {
-        try { await this.options.trash?.(absolute) } catch (error) { failures.push(`${absolute}: ${redactDiagnosticText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`) }
+      // Each untracked item is checked once more right before it is moved: the restore above may have waited, and a folder can have
+      // been replaced by a link, or a session may have started, since the checks before the window.
+      const problems: string[] = []
+      let moved = 0
+      for (const path of untracked) {
+        const busyNow = working()
+        if (busyNow) { problems.push(`${busyNow.message.split('.')[0]}`); break }
+        const verdict = await checkTrashable(root, path)
+        if (!verdict.ok) { problems.push(verdict.reason); continue }
+        try { await this.options.trash?.(verdict.absolute); moved++ } catch (error) { problems.push(`${path}: ${redactDiagnosticText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`) }
       }
       const status = await this.statusAfterWrite(project, repo)
-      if (failures.length > 0) {
-        return this.outcome({ ok: false, reason: 'failed', message: `${failures.length} of ${untracked.length} untracked item${untracked.length === 1 ? '' : 's'} could not be moved to the Recycle Bin: ${failures[0]}.${note}`, status })
+      if (problems.length > 0) {
+        return this.outcome({ ok: false, reason: 'failed', message: `${untracked.length - moved} of ${untracked.length} untracked item${untracked.length === 1 ? '' : 's'} ${untracked.length - moved === 1 ? 'was' : 'were'} not moved to the Recycle Bin: ${problems[0]}.${note}`, status })
       }
       return this.outcome({ ok: true, message: `Discarded ${entries.length} change${entries.length === 1 ? '' : 's'}.${note}`, status })
     })

@@ -36,9 +36,47 @@ export interface Snapshot {
   directory: string
   files: number
   bytes: number
+  /** How each file looked (size and modification time) when it was copied, so a later attempt can tell whether the copy is still current. */
+  stamps: Record<string, string>
 }
 
 const stamp = (date: Date): string => date.toISOString().replace(/[:.]/g, '-')
+
+/** How a file looks right now: `<size>:<mtime>`, or `missing`. Two equal stamps mean the copy made at the first is still of the file. */
+export async function stampFiles(repoRoot: string, relativePaths: readonly string[]): Promise<Record<string, string>> {
+  const stamps: Record<string, string> = {}
+  for (const relativePath of relativePaths) {
+    const file = repoFile(repoRoot, relativePath)
+    const info = file.ok ? await lstat(file.absolute).catch(() => null) : null
+    stamps[relativePath] = info === null ? 'missing' : `${info.size}:${info.mtimeMs}`
+  }
+  return stamps
+}
+
+/**
+ * Whether the folders above a path are plain folders inside the repository. A junction or link in the middle of a path sends a
+ * read or a write somewhere else (Git itself does not notice a Windows junction), so it is refused wherever it is, and the nearest
+ * existing folder must resolve inside the repository. A missing folder is fine: a restore creates it.
+ */
+async function ancestorProblem(repoRoot: string, relativePath: string): Promise<string | null> {
+  const segments = safeRepoSegments(relativePath)
+  if (!segments) return `"${relativePath}" has a name that is not safe to touch`
+  let current = repoRoot
+  for (const segment of segments.slice(0, -1)) {
+    current = win32.join(current, segment)
+    const info = await lstat(current).catch(() => null)
+    if (info === null) return null
+    if (info.isSymbolicLink()) return `"${relativePath}" is inside a folder that is a link, so it could reach outside the repository`
+    if (!info.isDirectory()) return `"${relativePath}" is inside something that is not a folder`
+  }
+  try {
+    const [root, resolved] = await Promise.all([realPathNative(repoRoot), realPathNative(current)])
+    if (!isPathWithinRoot(root, resolved)) return `"${relativePath}" resolves outside the repository`
+  } catch {
+    return `"${relativePath}" could not be resolved`
+  }
+  return null
+}
 
 /** The path of a repository file, resolved inside the repository, or the reason it cannot be used. */
 function repoFile(repoRoot: string, relativePath: string): { ok: true; absolute: string } | { ok: false; reason: string } {
@@ -61,6 +99,8 @@ export async function checkSnapshotable(repoRoot: string, relativePaths: readonl
   for (const relativePath of relativePaths) {
     const file = repoFile(repoRoot, relativePath)
     if (!file.ok) { problems.push(file.reason); continue }
+    const above = await ancestorProblem(repoRoot, relativePath)
+    if (above) { problems.push(above); continue }
     const info = await lstat(file.absolute).catch(() => null)
     if (info === null) continue
     if (info.isSymbolicLink() || !info.isFile()) { problems.push(`"${relativePath}" is not a regular file, so a copy cannot be saved`); continue }
@@ -84,11 +124,13 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
   if (!isPathWithinRoot(snapshotRoot, directory)) throw new DiscardRefused('The place for saved copies is not usable')
   await mkdir(directory, { recursive: true })
   const saved: Array<{ path: string; bytes: number }> = []
+  const stamps: Record<string, string> = {}
   let bytes = 0
   for (const relativePath of relativePaths) {
     const file = repoFile(repoRoot, relativePath)
     if (!file.ok) throw new DiscardRefused(file.reason)
     const before = await lstat(file.absolute).catch(() => null)
+    stamps[relativePath] = before === null ? 'missing' : `${before.size}:${before.mtimeMs}`
     if (before === null) continue
     const target = win32.join(directory, 'files', ...(safeRepoSegments(relativePath) ?? []))
     if (!isPathWithinRoot(directory, target)) throw new DiscardRefused(`"${relativePath}" cannot be saved safely`)
@@ -101,7 +143,7 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
     bytes += before.size
   }
   await writeFile(win32.join(directory, 'manifest.json'), JSON.stringify({ repository: repoRoot, savedAt: now.toISOString(), files: saved }, null, 2), 'utf8')
-  return { directory, files: saved.length, bytes }
+  return { directory, files: saved.length, bytes, stamps }
 }
 
 /** Remove the oldest saved copies beyond `keep`. Only folders this module created (by name) inside `snapshotRoot` are ever touched. */
@@ -127,6 +169,8 @@ export async function checkTrashable(repoRoot: string, relativePath: string): Pr
   if (!file.ok) return file
   const segments = safeRepoSegments(relativePath) ?? []
   if (segments.some(segment => segment.toLowerCase() === '.git')) return { ok: false, reason: `"${relativePath}" is inside a git folder` }
+  const above = await ancestorProblem(repoRoot, relativePath)
+  if (above) return { ok: false, reason: above }
   const info = await lstat(file.absolute).catch(() => null)
   if (info === null) return { ok: false, reason: `"${relativePath}" no longer exists` }
   if (info.isSymbolicLink()) return { ok: false, reason: `"${relativePath}" is a link, so it is not deleted from the panel` }

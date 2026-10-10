@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
@@ -1875,7 +1875,7 @@ test('if one untracked item cannot be moved, the rest still are, the tracked res
   const current = await status()
   const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)], current.generation)
   assert.deepEqual([result.ok, result.reason], [false, 'failed'])
-  assert.match(result.message, /1 of 2 untracked items could not be moved to the Recycle Bin: .*in use by another process/)
+  assert.match(result.message, /1 of 2 untracked items was not moved to the Recycle Bin: .*in use by another process/)
   assert.match(result.message, /A copy of the changed file is saved in/)
   assert.equal(text(join(h.project, 'a.txt')), 'one\n', 'the tracked file was restored')
   assert.equal(readdirSync(kit.bin).length, 1, 'the other item is in the bin')
@@ -1895,4 +1895,82 @@ test('a long list is shown in part, and discarding many files at once works', { 
   assert.match(kit.asked[0]!.detail, /…and 3 more/)
   assert.equal(result.status!.unstaged.length, 0)
   for (let index = 0; index < 15; index++) assert.equal(text(join(h.project, `f${String(index).padStart(2, '0')}.txt`)), 'orig\n')
+})
+
+// ---- the discard holds across the whole operation (review of phase 4b) ------------------------------------------------------------
+
+test('a tracked path that runs through a junction out of the repository is refused, and the outside file is untouched', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const outside = mkdtempSync(join(tmpdir(), 'git-discard-outside-'))
+  t.after(() => rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  writeFileSync(join(outside, 'a.txt'), 'outside file, deliberately a different length from the repository version\n')
+  const h = await harness(t, (f, project) => {
+    mkdirSync(join(project, 'parent'))
+    committed(f, project, { 'parent/a.txt': 'repo version\n', 'other.txt': 'o\n' })
+    rmSync(join(project, 'parent'), { recursive: true, force: true })
+    symlinkSync(outside, join(project, 'parent'), 'junction')
+  }, kit.options)
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const entry = [...current.unstaged, ...current.untracked].find(item => item.path.startsWith('parent'))
+  assert.ok(entry, `the panel lists something under parent: ${JSON.stringify([...current.unstaged, ...current.untracked].map(item => item.path))}`)
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [entry.id], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /link|outside the repository|not safe/i)
+  assert.equal(kit.asked.length, 0, 'the person is not asked about something unsafe')
+  assert.equal(text(join(outside, 'a.txt')), 'outside file, deliberately a different length from the repository version\n', 'the file the junction points at was not overwritten')
+  assert.deepEqual(savedCopies(kit), [])
+})
+
+test('work added while the restore waits for the index lock is saved too, not overwritten by an older copy', { skip }, async (t) => {
+  const kit = discardKit(t)
+  let h!: Harness
+  h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'first edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  // The first restore fails on the lock; before the next attempt the file gets new work, and the lock goes.
+  h.afterCommand(options => options.args[0] === 'restore', () => { writeFileSync(join(h.project, 'a.txt'), 'first edit\nand new work done during the wait\n'); rmSync(lock, { force: true }) })
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(text(join(h.project, 'a.txt')), 'one\n')
+  const copies = savedCopies(kit).map(name => text(join(kit.snapshots, name, 'files', 'a.txt')))
+  assert.ok(copies.includes('first edit\nand new work done during the wait\n'), `a copy holds the new work: ${JSON.stringify(copies)}`)
+  assert.match(result.message, /saved in/)
+})
+
+test('a session that starts working while the restore waits for the index lock stops it', { skip }, async (t) => {
+  let busy = false
+  const kit = discardKit(t, () => true, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' } })
+  let h!: Harness
+  h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  h.afterCommand(options => options.args[0] === 'restore', () => { busy = true; rmSync(lock, { force: true }) })
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt')], current.generation)
+  assert.deepEqual([result.ok, result.reason], [false, 'agent-working'])
+  assert.equal(text(join(h.project, 'a.txt')), 'my edit\n', 'the file was not restored while the session worked')
+})
+
+test('an untracked item that is swapped for a link after the checks is not moved', { skip }, async (t) => {
+  const kit = discardKit(t)
+  const outside = mkdtempSync(join(tmpdir(), 'git-discard-outside-'))
+  t.after(() => rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  writeFileSync(join(outside, 'precious.txt'), 'precious\n')
+  let h!: Harness
+  h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); mkdirSync(join(project, 'scratch')); writeFileSync(join(project, 'scratch', 'x.txt'), 'x\n') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  // While the tracked restore waits on the lock, the untracked folder is replaced by a junction to a folder outside.
+  h.afterCommand(options => options.args[0] === 'restore', () => { rmSync(join(h.project, 'scratch'), { recursive: true, force: true }); symlinkSync(outside, join(h.project, 'scratch'), 'junction'); rmSync(lock, { force: true }) })
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)], current.generation)
+  assert.equal(result.ok, false)
+  assert.match(result.message, /is a link/)
+  assert.deepEqual(kit.trashed, [], 'the junction was not sent to the bin')
+  assert.equal(existsSync(join(outside, 'precious.txt')), true, 'nothing outside was touched')
 })
