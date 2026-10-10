@@ -1999,3 +1999,307 @@ test('a file named __proto__ is tracked like any other while the restore waits f
   assert.equal(holds('__proto__', 'first edit\nand new work done during the wait\n'), true, 'a copy holds the work written to __proto__ during the wait')
   assert.equal(text(join(h.project, 'constructor')), 'c\n', 'the other special name was discarded too')
 })
+
+// ---- amend ---------------------------------------------------------------------------------------------------------------------
+
+const headField = (h: Harness, format: string): string => h.fixture.plain(h.project, 'log', '-1', `--format=${format}`).trim()
+const commitCount = (h: Harness): number => Number(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim())
+
+/** A project with two local commits ("init" and "second work"), nothing pushed. */
+const withTwoCommits = (t: test.TestContext, setup?: (f: GitFixture, project: string) => void, options: Partial<GitServiceOptions> = {}) =>
+  harness(t, (f, project) => {
+    committed(f, project, { 'a.txt': 'one\n' })
+    commitFile(f, project, 'second.txt', 's\n')
+    setup?.(f, project)
+  }, options)
+
+test('amending adds what is staged to the last commit and can change its message, keeping its parent and author', { skip }, async (t) => {
+  const h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const parent = h.fixture.plain(h.project, 'rev-parse', 'HEAD~1').trim()
+  const before = localHead(h)
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'a better message', current.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.match(result.message, /^Amended [0-9a-f]{7}: a better message$/)
+  assert.notEqual(localHead(h), before, 'the commit was replaced')
+  assert.equal(commitCount(h), 2, 'the history is as long as before')
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'HEAD~1').trim(), parent, 'same parent')
+  assert.equal(headField(h, '%s'), 'a better message')
+  assert.deepEqual(h.fixture.plain(h.project, 'ls-tree', '--name-only', 'HEAD').trim().split(/\r?\n/).sort(), ['a.txt', 'extra.txt', 'second.txt'])
+  assert.equal(headField(h, '%an'), 'Test', 'the author is kept')
+  assert.equal(result.status!.staged.length, 0)
+})
+
+test('a message-only amend works with nothing staged, and nothing to change is refused', { skip }, async (t) => {
+  const h = await withTwoCommits(t)
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const same = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'add second.txt\n', current.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.deepEqual([same.ok, same.reason], [false, 'nothing-staged'])
+  assert.match(same.message, /nothing to amend/)
+  const before = localHead(h)
+  assert.equal(before, localHead(h), 'nothing moved')
+  const renamed = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'reworded', current.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.equal(renamed.ok, true, `${renamed.reason}: ${renamed.message}`)
+  assert.equal(headField(h, '%s'), 'reworded')
+  assert.notEqual(localHead(h), before)
+})
+
+test('a commit that is already on a remote branch is never amended', { skip }, async (t) => {
+  const h = await withOrigin(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const before = localHead(h)
+  const refused = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'rewrite shared history', current.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.deepEqual([refused.ok, refused.reason], [false, 'published'])
+  assert.match(refused.message, /already on origin\/main.*force push.*Make a new commit instead/)
+  assert.equal(localHead(h), before)
+  // A local commit on top of it is not published, so that one can be amended.
+  const committedNow = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'local only', current.generation, null)
+  assert.equal(committedNow.ok, true, committedNow.message)
+  const next = await status()
+  const amended = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'local only, reworded', next.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.equal(amended.ok, true, `${amended.reason}: ${amended.message}`)
+  assert.equal(h.fixture.plain(h.project, 'rev-parse', 'HEAD~1').trim(), before, 'it sits on the published commit, untouched')
+})
+
+test('an amend is for the commit that was on screen', { skip }, async (t) => {
+  const h = await withTwoCommits(t)
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  commitFile(h.fixture, h.project, 'later.txt', 'l\n')
+  await assert.rejects(h.service.amend(SUBSCRIBER, PROFILE, repoId, 'x', current.generation, null, shown), GitStaleError)
+  assert.equal(headField(h, '%s'), 'add later.txt', 'the newer commit was not touched')
+  const unborn = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
+  const second = await open(unborn)
+  const none = await unborn.service.amend(SUBSCRIBER, PROFILE, second.repoId, 'x', (await second.status()).generation, null, { branch: 'main', headOid: 'a'.repeat(40) })
+  assert.deepEqual([none.ok, none.reason], [false, 'failed'])
+  assert.match(none.message, /no commit to amend/)
+})
+
+test('a commit that moves while the amend waits for the index lock is not amended', { skip }, async (t) => {
+  let h!: Harness
+  h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  h.afterCommand(options => options.args[0] === 'commit', () => {
+    const moved = h.fixture.plain(h.project, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'someone else moved the branch').trim()
+    h.fixture.plain(h.project, 'update-ref', 'refs/heads/main', moved)
+    rmSync(lock, { force: true })
+  })
+  await assert.rejects(h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown), /changed while the amend was waiting/)
+  assert.equal(headField(h, '%s'), 'someone else moved the branch', 'the other commit was not rewritten')
+})
+
+test('a commit that gets published while the amend waits for the index lock is not amended', { skip }, async (t) => {
+  let h!: Harness
+  h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  const before = localHead(h)
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  h.afterCommand(options => options.args[0] === 'commit', () => { h.fixture.plain(h.project, 'update-ref', 'refs/remotes/origin/main', before); rmSync(lock, { force: true }) })
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown)
+  assert.deepEqual([result.ok, result.reason], [false, 'published'])
+  assert.equal(localHead(h), before)
+})
+
+test('a merge commit is not amended from the panel', { skip }, async (t) => {
+  const h = await withTwoCommits(t, (f, project) => {
+    f.plain(project, 'checkout', '-q', '-b', 'side'); commitFile(f, project, 'side.txt', 's\n')
+    f.plain(project, 'checkout', '-q', 'main'); commitFile(f, project, 'main2.txt', 'm\n')
+    f.plain(project, 'merge', '--no-ff', '-q', '-m', 'merge side', 'side')
+  })
+  const { repoId, status } = await open(h)
+  const before = localHead(h)
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'rewrite the merge', (await status()).generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /merge/)
+  assert.equal(localHead(h), before)
+})
+
+test('an amend runs the repository\'s hooks, including post-rewrite, only after they are approved', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-hooks-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withTwoCommits(t, (f, project) => {
+    hookFile(project, 'pre-commit', `echo pre-commit >> "${shellPath(marker)}"`)
+    hookFile(project, 'post-rewrite', `echo post-rewrite >> "${shellPath(marker)}"`)
+    writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  const asked = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown)
+  assert.deepEqual([asked.ok, asked.reason], [false, 'hooks-need-approval'])
+  assert.deepEqual(asked.hooks, ['post-rewrite', 'pre-commit'], 'post-rewrite is among the hooks that need approval')
+  assert.equal(existsSync(marker), false, 'nothing ran before approval')
+  const done = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, asked.hooksHash, shown)
+  assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
+  assert.deepEqual(readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).sort(), ['post-rewrite', 'pre-commit'])
+})
+
+test('the last commit is described for the Amend control: its message, whether it is a merge, and where it is published', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId } = await open(h)
+  const info = await h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual([info.oid, info.message, info.isMerge, info.publishedTo], [localHead(h), 'init', false, ['origin/main']])
+  commitFile(h.fixture, h.project, 'later.txt', 'l\n')
+  const local = await h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual([local.message, local.publishedTo], ['add later.txt', []])
+  const unborn = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
+  const second = await open(unborn)
+  await assert.rejects(unborn.service.getHeadCommit(SUBSCRIBER, PROFILE, second.repoId), /no commit yet/)
+})
+
+test('an empty commit can be reworded, but an amend that would empty an ordinary commit is still refused by Git', { skip }, async (t) => {
+  const h = await withTwoCommits(t, (f, project) => f.plain(project, 'commit', '--allow-empty', '-q', '-m', 'empty one'))
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const reworded = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'empty one, reworded', current.generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.equal(reworded.ok, true, `${reworded.reason}: ${reworded.message}`)
+  assert.equal(headField(h, '%s'), 'empty one, reworded')
+
+  // The commit before it adds second.txt: staging its removal and amending would leave an empty commit.
+  const other = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); commitFile(f, project, 'second.txt', 's\n'); f.plain(project, 'rm', '-q', 'second.txt') })
+  const second = await open(other)
+  const before = localHead(other)
+  const emptied = await other.service.amend(SUBSCRIBER, PROFILE, second.repoId, 'add second.txt', (await second.status()).generation, null, headOf(other) as { branch: string; headOid: string })
+  assert.deepEqual([emptied.ok, emptied.reason], [false, 'failed'])
+  assert.match(`${emptied.message} ${emptied.output}`, /empty/)
+  assert.equal(localHead(other), before, 'nothing was rewritten')
+  assert.ok(other.runs.every(run => !run.args.includes('--allow-empty')), 'the guard was not switched off for an ordinary commit')
+})
+
+test('a refused amend never asks the person to approve hooks first', { skip }, async (t) => {
+  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-refused-${process.pid}.marker`)
+  rmSync(marker, { force: true })
+  t.after(() => rmSync(marker, { force: true }))
+  const h = await withOrigin(t, (f, project) => {
+    hookFile(project, 'pre-commit', `echo ran >> "${shellPath(marker)}"`)
+    writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.')
+  })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  // The commit is published: the answer is "published", not a question about hooks that would never run.
+  const published = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown)
+  assert.deepEqual([published.ok, published.reason, published.hooks], [false, 'published', []])
+  assert.equal(published.hooksHash, null)
+  // A local commit on top: the next amend is for it, and a stale request is refused before hooks are mentioned either.
+  const committedNow = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'local only', current.generation, null)
+  assert.deepEqual([committedNow.ok, committedNow.reason], [false, 'hooks-need-approval'])
+  const approved = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'local only', current.generation, committedNow.hooksHash)
+  assert.equal(approved.ok, true, `${approved.reason}: ${approved.message}`)
+  const next = await status()
+  const oldShown = shown
+  // The hook changes after its approval, so an amend would have to ask again; a stale request is refused before it gets that far.
+  hookFile(h.project, 'pre-commit', `echo changed >> "${shellPath(marker)}"`)
+  await assert.rejects(h.service.amend(SUBSCRIBER, PROFILE, repoId, 'x', next.generation, null, oldShown), GitStaleError)
+  assert.equal(readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).length, 1, 'the hook ran once, for the approved commit only')
+})
+
+// ---- amend reads fail closed, and see the real remote branches (review of phase 4c) -------------------------------------------------
+
+/** A runtime whose runner makes the commands `fails` matches time out, the way a slow disk or a killed process would. */
+function failingRuntime(fixture: GitFixture, fails: (options: GitRunOptions) => boolean): GitServiceOptions['getRuntime'] {
+  const runner = {
+    run: (options: GitRunOptions): Promise<GitRunResult> => fails(options)
+      ? Promise.resolve({ exitCode: null, stdout: Buffer.alloc(0), stderr: '', stdoutTruncated: false, timedOut: true, cancelled: false, durationMs: 1 })
+      : fixture.runner.run(options),
+  } as unknown as GitRunner
+  return async () => ({ runner, executable: fixture.git })
+}
+
+test('an amend is refused, and nothing is rewritten, when Git cannot say whether the commit is published', { skip }, async (t) => {
+  let broken = false
+  let fixtureRef: GitFixture | null = null
+  const h = await withOrigin(t, (f, project) => { fixtureRef = f; writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') },
+    { getRuntime: async () => failingRuntime(fixtureRef!, options => broken && options.args.includes('--contains'))() })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  const before = localHead(h)
+  broken = true
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /could not say whether the last commit has been published/)
+  assert.equal(localHead(h), before, 'the shared commit was not rewritten')
+  await assert.rejects(h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId), /Could not tell where the last commit is published/)
+})
+
+test('a read that fails during the lock wait does not let an amend through either', { skip }, async (t) => {
+  let fixtureRef: GitFixture | null = null
+  let lock = ''
+  let commitAttempts = 0
+  // The publication query works until the first commit attempt has failed on the lock; after that it times out, and the lock is released.
+  const fails = (options: GitRunOptions): boolean => {
+    // The lock stays long enough for the first attempt to fail on it; the second attempt's checks run before the lock matters.
+    if (options.args[0] === 'commit' && ++commitAttempts === 1) setTimeout(() => rmSync(lock, { force: true }), 3_000).unref()
+    return commitAttempts > 0 && options.args.includes('--contains')
+  }
+  const h = await withTwoCommits(t, (f, project) => { fixtureRef = f; writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') },
+    { getRuntime: async () => failingRuntime(fixtureRef!, fails)() })
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const shown = headOf(h) as { branch: string; headOid: string }
+  const before = localHead(h)
+  lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', current.generation, null, shown)
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.equal(localHead(h), before)
+})
+
+test('a remote branch whose name ends in HEAD counts as published; only the remote\'s own HEAD pointer does not', { skip }, async (t) => {
+  const h = await withOrigin(t)
+  const { repoId, status } = await open(h)
+  commitFile(h.fixture, h.project, 'later.txt', 'l\n')
+  h.fixture.plain(h.project, 'push', '-q', 'origin', 'HEAD:refs/heads/feature/HEAD')
+  h.fixture.plain(h.project, 'remote', 'set-head', 'origin', 'main')
+  const info = await h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId)
+  assert.deepEqual(info.publishedTo, ['origin/feature/HEAD'], 'the real branch is listed, the origin/HEAD pointer is not')
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'rewrite shared history', (await status()).generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.deepEqual([result.ok, result.reason], [false, 'published'])
+  assert.match(result.message, /already on origin\/feature\/HEAD/)
+})
+
+test('the last message is loaded and amended in full, and one too long to edit is refused instead of shortened', { skip }, async (t) => {
+  const long = `subject line\n\n${Array.from({ length: 380 }, () => 'a long paragraph of explanation.').join(' ')}\n\nthe very last line\n`
+  assert.ok(long.length > 12_000)
+  const h = await withTwoCommits(t, (f, project) => {
+    writeFileSync(join(project, 'msg.txt'), long); f.plain(project, 'commit', '--allow-empty', '-q', '-F', 'msg.txt')
+    writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.')
+  })
+  const { repoId, status } = await open(h)
+  const info = await h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId)
+  assert.equal(info.message, long.trimEnd(), 'the whole message, including its last line')
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, info.message, (await status()).generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(h.fixture.plain(h.project, 'log', '-1', '--format=%B').replace(/\r/g, '').trimEnd(), long.trimEnd(), 'accepting the prefill keeps the original message')
+
+  const huge = await withTwoCommits(t, (f, project) => {
+    writeFileSync(join(project, 'huge.txt'), 'x'.repeat(100_500)); f.plain(project, 'commit', '--allow-empty', '-q', '-F', 'huge.txt')
+  })
+  const second = await open(huge)
+  await assert.rejects(huge.service.getHeadCommit(SUBSCRIBER, PROFILE, second.repoId), /too long to edit here/)
+})
+
+test('an amend is refused when Git cannot read the last commit well enough to tell whether it is a merge', { skip }, async (t) => {
+  let fixtureRef: GitFixture | null = null
+  const h = await withTwoCommits(t, (f, project) => { fixtureRef = f; writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') },
+    { getRuntime: async () => failingRuntime(fixtureRef!, options => options.args.includes('--parents'))() })
+  const { repoId, status } = await open(h)
+  const before = localHead(h)
+  const result = await h.service.amend(SUBSCRIBER, PROFILE, repoId, 'amended', (await status()).generation, null, headOf(h) as { branch: string; headOid: string })
+  assert.deepEqual([result.ok, result.reason], [false, 'failed'])
+  assert.match(result.message, /could not read the last commit/)
+  assert.equal(localHead(h), before)
+})

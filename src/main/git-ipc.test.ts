@@ -15,7 +15,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
-    getBranches: record('getBranches'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'),
+    getBranches: record('getBranches'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'), amend: record('amend'), getHeadCommit: record('getHeadCommit'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -39,7 +39,7 @@ const PROFILE = '0123456789abcdef'
 test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
-    'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
+    'desktop:git-amend', 'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-head-commit', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
     'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage',
   ])
 })
@@ -155,7 +155,7 @@ test('cancel takes only a workspace and a repository, and the write channels are
   call('desktop:git-cancel', sender(), PROFILE, 'repo-2')
   assert.deepEqual(calls, [['cancel', 1, PROFILE, 'repo-2']])
   assert.throws(() => call('desktop:git-cancel', sender(), PROFILE, 'repo-0'), /Invalid repository/)
-  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync', 'desktop:git-branch', 'desktop:git-discard']) {
+  for (const channel of ['desktop:git-stage', 'desktop:git-unstage', 'desktop:git-commit', 'desktop:git-cancel', 'desktop:git-sync', 'desktop:git-branch', 'desktop:git-discard', 'desktop:git-amend']) {
     assert.ok(handlers.has(channel), channel)
     assert.throws(() => call(channel, sender(2), PROFILE, 'repo-1', ['e1-0'], 1, null), /main window/, channel)
   }
@@ -220,5 +220,26 @@ test('discard takes only file ids and the file list version the person saw', () 
   }
   for (const bad of [-1, 1.5, '3', null, undefined, 2_000_000_000]) assert.throws(() => call('desktop:git-discard', sender(), PROFILE, 'repo-1', ['e3-0'], bad), /Invalid file list version/, String(bad))
   assert.throws(() => call('desktop:git-discard', sender(), PROFILE, 'repo-0', ['e3-0'], 3), /Invalid repository/)
+  assert.equal(calls.length, 0, 'nothing reached the service')
+})
+
+test('amend carries the message, the file list version, the hooks approval and the commit that was on screen', () => {
+  const { call, sender, calls } = setup()
+  const seen = { branch: 'main', headOid: OID }
+  call('desktop:git-head-commit', sender(), PROFILE, 'repo-1')
+  call('desktop:git-amend', sender(), PROFILE, 'repo-1', 'fix: reworded', 4, null, seen)
+  call('desktop:git-amend', sender(), PROFILE, 'repo-1', 'fix: reworded', 4, 'a'.repeat(64), { branch: null, headOid: 'b'.repeat(64) })
+  assert.deepEqual(calls.map(entry => entry[0]), ['getHeadCommit', 'amend', 'amend'])
+  assert.deepEqual(calls[1]!.slice(1), [1, PROFILE, 'repo-1', 'fix: reworded', 4, null, seen])
+  calls.length = 0
+  for (const bad of ['', '   ', 'a\0b', 'x'.repeat(100_001), 5, null, undefined]) {
+    assert.throws(() => call('desktop:git-amend', sender(), PROFILE, 'repo-1', bad, 4, null, seen), /Invalid commit message/, JSON.stringify(bad)?.slice(0, 30))
+  }
+  for (const bad of ['', 'abc', 'G'.repeat(64), 5, undefined]) assert.throws(() => call('desktop:git-amend', sender(), PROFILE, 'repo-1', 'ok', 4, bad, seen), /Invalid hooks approval/, JSON.stringify(bad))
+  assert.throws(() => call('desktop:git-amend', sender(), PROFILE, 'repo-1', 'ok', -1, null, seen), /Invalid file list version/)
+  for (const bad of [undefined, null, 'main', {}, { branch: 'main' }, { headOid: OID }, { branch: 'main', headOid: 'zz' }]) {
+    assert.throws(() => call('desktop:git-amend', sender(), PROFILE, 'repo-1', 'ok', 4, null, bad), /Invalid (branch|commit)/, JSON.stringify(bad))
+  }
+  assert.throws(() => call('desktop:git-head-commit', sender(), PROFILE, 'repo-0'), /Invalid repository/)
   assert.equal(calls.length, 0, 'nothing reached the service')
 })

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RECENT_ACTIVITY_MS, branchNameProblem, describeSwitchFailure, projectActivity } from './git-branch.js'
 import { branchListArgs, createBranchArgs, refFormatArgs, switchArgs } from './git-commands.js'
-import { parseBranches } from './git-parse.js'
+import { parseBranches, parsePublishedRefs } from './git-parse.js'
 import type { GitRunResult } from './git-runner.js'
 import type { DesktopSessionTab } from './types.js'
 
@@ -113,4 +113,18 @@ test('branch commands never force or merge, never recurse into submodules, and r
   assert.deepEqual(refFormatArgs('@{-1}'), ['check-ref-format', 'refs/heads/@{-1}'], 'shorthand is checked as a literal name')
   assert.ok(branchListArgs().includes('refs/heads'))
   assert.ok(branchListArgs().includes('--count=500'))
+})
+
+test('published refs are remote branches, without symbolic pointers such as the remote HEAD', () => {
+  const lf = String.fromCharCode(10)
+  const unit = String.fromCharCode(31)
+  const line = (ref: string, symref = ''): string => `${ref}${unit}${symref}`
+  assert.deepEqual(parsePublishedRefs([
+    line('refs/remotes/origin/HEAD', 'refs/remotes/origin/main'), line('refs/remotes/origin/main'), line('refs/remotes/fork/feature/x'), line('refs/remotes/origin/main'),
+    line('refs/heads/local'), line('refs/remotes/'), '',
+  ].join(lf)), ['origin/main', 'fork/feature/x'])
+  // A real branch that is merely called HEAD is a branch.
+  assert.deepEqual(parsePublishedRefs([line('refs/remotes/origin/feature/HEAD'), line('refs/remotes/origin/HEAD', 'refs/remotes/origin/main')].join(lf)), ['origin/feature/HEAD'])
+  assert.deepEqual(parsePublishedRefs(''), [])
+  assert.equal(parsePublishedRefs(Array.from({ length: 30 }, (_, index) => line(`refs/remotes/origin/b${index}`)).join(lf)).length, 20, 'capped')
 })

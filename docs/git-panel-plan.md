@@ -1,10 +1,10 @@
 # Git side tab plan
 
-Status: revision 9. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67), phase 2
-(stage, unstage, local commit, #68), phase 3 (fetch, pull, push, #69) and phase 4a (branches, #70) are merged;
+Status: revision 10. Phase 0 (spikes, runner, parsers, #65), phase 1a (backend, #66), phase 1b (panel UI, #67), phase 2
+(stage, unstage, local commit, #68), phase 3 (fetch, pull, push, #69), phase 4a (branches, #70) and phase 4b (discard, #71) are merged;
 results are in [git-panel-spikes.md](git-panel-spikes.md) and the user-facing behavior is in [git-panel.md](git-panel.md).
-**Phase 4 is split in three: 4a (branches) is merged; 4b (discard: per-file and "Discard all", with saved copies, native confirmation
-and the Recycle Bin for untracked files) is built on `feat/git-panel-phase4b`; 4c (amend) has not started.** Revision 2 came from an independent review (see
+**Phase 4 is split in three: 4a (branches) and 4b (discard) are merged; 4c (amend) is built on `feat/git-panel-phase4c`.** The plan's
+list of phases is complete with 4c; what remains is the optional sidebar status setting and the "Later" items. Revision 2 came from an independent review (see
 [Review log](#review-log)).
 
 ![Git side tab mockup](git-panel-mockup.svg)
@@ -458,6 +458,31 @@ Not in phase 3, on purpose:
 Branch list, create, checkout (gated as above), amend, per-file discard with snapshot and
 native confirmation. "Discard all" and untracked deletion last. Delivered in two pull requests: **4a (branches)** and **4b (amend and
 discard)**, so the riskiest, data-losing half gets its own review.
+
+#### Phase 4c — amend
+
+Amend is a mode of the existing commit path, not a second implementation (`desktop:git-amend` and a read, `desktop:git-head-commit`,
+that gives the box the last message and where it is published), so it inherits the staged-contents comparison, the hidden-staged
+refusal, the identity check and the hook approval. What it adds, each with a test that fails without it:
+
+- **Only an unpublished commit.** `for-each-ref --contains HEAD refs/remotes` (a remote's `HEAD` pointer is not a branch and is
+  ignored); any hit refuses with `published`, because the only way to publish the result would be a force push. Merge commits are
+  refused (`rev-list --parents`).
+- **Bound to the commit on screen, repeatedly.** The request carries the branch and commit id, compared after the queue turn, and
+  again in the per-attempt callback together with the published test, because `commit --amend` rewrites whatever `HEAD` is when it
+  runs and a lock wait or a fetch can change that (the lesson of phases 3 and 4).
+- **Fail closed on every read.** The first review found three places where "could not tell" became "fine": a failed or timed-out
+  `for-each-ref --contains` read as "not published" (so a shared commit could be rewritten, in the first guard and in the per-attempt
+  one), a ref whose *name* ended in `/HEAD` was dropped as if it were the remote's `HEAD` pointer (the symbolic target, `%(symref)`, is
+  asked for instead), and the message used for the prefill was cut at 10,000 characters and then saved as the new message. Reads now
+  return "unknown" and the amend refuses; the message is whole or an error. The merge-detection read fails closed too.
+- **`post-rewrite` joins the commit hooks** that are inventoried and approved: an amend runs it, and without that a repository's
+  hook could run unapproved. An existing approval is asked for again once, as the inventory changes.
+- **Git's guard against empty commits stays,** except `--allow-empty` is passed when the last commit is already empty (its tree
+  equals its parent's), which is what lets such a commit be reworded. The Electron check found this one.
+- **UI:** a checkbox in the commit box (or an "Amend last commit…" button when the box is closed), the last message prefilled only
+  once the info for the *current* commit has loaded (also found by the Electron check: a stale cache from the previous commit
+  prefilled the wrong text), and a disabled button with the reason for a published or merge commit.
 
 #### Phase 4b — discard
 

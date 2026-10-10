@@ -1,5 +1,5 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, configGetArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
@@ -8,7 +8,7 @@ import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
 import { discoverRepos, inspectGitEntry } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
-import { boundText, groupStatusEntries, parseBranches, parseLog, parseNumstat, parseStagedRaw, parseStatusV2 } from './git-parse.js'
+import { boundText, groupStatusEntries, parseBranches, parseLog, parseNumstat, parsePublishedRefs, parseStagedRaw, parseStatusV2 } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
@@ -17,7 +17,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitConfirmRequest, GitDiffView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
+  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -1178,7 +1178,36 @@ export class GitService {
    * the person has not approved would run, or when conflicts are unresolved. The message goes in on stdin, hooks run only
    * after approval, and the exit code decides success.
    */
-  async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null): Promise<GitOperationResult> {
+  /** Amend the last commit with what is staged and the given message. See `commit`; the commit must be the one on screen, and not published. */
+  amend(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, expected: ExpectedHead): Promise<GitOperationResult> {
+    return this.commit(subscriberId, profileId, repoId, message, generation, approvedHooksHash, expected)
+  }
+
+  /** The last commit as the Amend control needs it. A read: it runs no hook and changes nothing. */
+  async getHeadCommit(subscriberId: number, profileId: string, repoId: string): Promise<GitHeadCommitView> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
+    const signal = project.abort.signal
+    const root = repo.discovered.root
+    const run = (args: string[]): Promise<GitRunResult> => runtime.runner.run({ cwd: root, args, signal, timeoutMs: 15_000 })
+    const parents = await run(headParentsArgs())
+    if (!gitSucceeded(parents)) throw new Error('There is no commit yet')
+    const [oid = '', ...parentIds] = parents.stdout.toString('utf8').trim().split(' ')
+    const message = await run(headMessageArgs())
+    // A read that failed, timed out or was cut short is an error, never "nothing": an empty list would mean "not published".
+    if (!gitSucceeded(message)) throw new Error('Could not read the message of the last commit')
+    const published = await run(publishedRefsArgs())
+    if (!gitSucceeded(published)) throw new Error('Could not tell where the last commit is published')
+    // The message becomes the editable text of the amend, so it is loaded whole or not at all: a shortened copy would silently replace it.
+    const full = message.stdout.toString('utf8').replace(/\r\n/g, '\n').trimEnd()
+    if (full.length > 100_000) throw new Error('The last commit message is too long to edit here. Amend it from a terminal.')
+    return { oid, isMerge: parentIds.length > 1, message: full, publishedTo: parsePublishedRefs(published.stdout.toString('utf8')) }
+  }
+
+  async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, amend: ExpectedHead | null = null): Promise<GitOperationResult> {
     if (typeof message !== 'string' || message.trim() === '') throw new Error('Write a commit message first')
     if (message.length > 100_000 || message.includes('\0')) throw new Error('That commit message is not valid')
     const project = this.projectFor(subscriberId, profileId)
@@ -1202,6 +1231,38 @@ export class GitService {
       const status = repo.status
       if (!status || status.entries.some(entry => entry.kind === 'unmerged')) return refused('conflicts', 'Resolve the conflicts and stage the result before committing.')
 
+      // Amending rewrites the last commit, so it must be the one the person was looking at, it must be local, and it must be an
+      // ordinary commit. Each of these is checked again before every attempt below.
+      const run = (args: string[]): Promise<GitRunResult> => runtime.runner.run({ cwd: root, args, signal, timeoutMs: 15_000 })
+      // Null when Git could not answer: an unknown publication status is never treated as "not published".
+      const publishedRefs = async (): Promise<string[] | null> => {
+        const found = await run(publishedRefsArgs())
+        return gitSucceeded(found) ? parsePublishedRefs(found.stdout.toString('utf8')) : null
+      }
+      const publicationUnknown = (): GitOperationResult =>
+        refused('failed', 'Git could not say whether the last commit has been published, so it will not be amended. Try again.')
+      const publishedRefusal = (names: string[]): GitOperationResult =>
+        refused('published', `This commit is already on ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} more` : ''}. Amending it would rewrite history others may have, and a push of it would need a force push, which the panel never does. Make a new commit instead.`)
+      let headIsEmpty = false
+      if (amend) {
+        if (status.branch.oid === null) return refused('failed', 'There is no commit to amend.')
+        if (amend.branch !== status.branch.head || amend.headOid !== status.branch.oid) throw new GitStaleError('The last commit changed since you looked. Check it, then try again.')
+        const parents = await run(headParentsArgs())
+        if (!gitSucceeded(parents)) return refused('failed', 'Git could not read the last commit, so it will not be amended. Try again.')
+        if (parents.stdout.toString('utf8').trim().split(' ').length > 2) return refused('failed', 'The last commit is a merge. Amend it from a terminal.')
+        const names = await publishedRefs()
+        if (names === null) return publicationUnknown()
+        if (names.length > 0) return publishedRefusal(names)
+        const trees = await run(headTreesArgs())
+        const [headTree, parentTree] = trees.stdout.toString('utf8').trim().split(String.fromCharCode(10)).map(line => line.trim())
+        headIsEmpty = gitSucceeded(trees) && headTree !== undefined && headTree === parentTree
+        const current = await run(headMessageArgs())
+        const unchanged = gitSucceeded(current) && current.stdout.toString('utf8').replace(/\r\n/g, '\n').trimEnd() === message.replace(/\r\n/g, '\n').trimEnd()
+        if (unchanged && !status.entries.some(entry => (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.') && parseStagedRaw(staged).length === 0) {
+          return refused('nothing-staged', 'There is nothing to amend: stage files, or change the message.')
+        }
+      }
+
       // The status view leaves submodules out (reading them would run git inside another repository), so a staged submodule
       // update is in the index but not in the list. A commit must not include what the person was never shown.
       const shown = new Set(status.entries.flatMap(entry => entry.index === '.' ? [] : [entry.path, ...(entry.originalPath ? [entry.originalPath] : [])]))
@@ -1212,7 +1273,7 @@ export class GitService {
         return refused('hidden-staged', `${kind} that this panel does not list would be included in the commit: ${named}. Unstage them, or commit from a terminal.`)
       }
 
-      if (!status.entries.some(entry => (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.')) return refused('nothing-staged', 'There is nothing staged to commit.')
+      if (!amend && !status.entries.some(entry => (entry.kind === 'changed' || entry.kind === 'renamed') && entry.index !== '.')) return refused('nothing-staged', 'There is nothing staged to commit.')
 
       for (const key of ['user.name', 'user.email']) {
         const configured = await runtime.runner.run({ cwd: root, args: configGetArgs(key), signal })
@@ -1241,13 +1302,23 @@ export class GitService {
       let result: GitRunResult
       try {
         result = await this.runWithLockWait(runtime, {
-          cwd: root, kind: 'write', args: commitArgs(), stdin: message, signal, timeoutMs: 600_000,
+          cwd: root, kind: 'write', args: commitArgs(amend !== null, headIsEmpty), stdin: message, signal, timeoutMs: 600_000,
           onOutput: this.emitter(subscriberId, profileId, repoId, 'commit'),
         }, async () => {
           // Everything above was checked once, and waiting for a lock can take seconds. Before every attempt, the commit must
           // still be the one that was reviewed: the same staged contents, the same trusted settings and pointers, and hooks
           // that are still approved. Anything else ends the commit, or asks again, instead of running what changed meanwhile.
           await this.requireGate(project, repo, runtime, signal)
+          if (amend) {
+            // `commit --amend` rewrites whatever HEAD is when it runs, so it is checked right before each attempt.
+            const headRef = await run(headRefArgs())
+            const head = headRef.exitCode === 0 ? headRef.stdout.toString('utf8').trim().replace(/^refs\/heads\//, '') : null
+            const oid = await run(['rev-parse', 'HEAD'])
+            if (head !== amend.branch || oid.stdout.toString('utf8').trim() !== amend.headOid) throw new GitStaleError('The last commit changed while the amend was waiting. Nothing was amended. Check it, then try again.')
+            const names = await publishedRefs()
+            if (names === null) throw new WriteRefused(publicationUnknown())
+            if (names.length > 0) throw new WriteRefused(publishedRefusal(names))
+          }
           const refusal = await hooksProblem(await inspectCommitHooks(runtime.runner, root, signal, this.options.maxHookBytes), null)
           if (refusal) throw new WriteRefused(refusal)
           // Last, because it is the check that must stay closest to the attempt: the slower checks above must not leave a gap
@@ -1259,10 +1330,10 @@ export class GitService {
         throw error
       }
       const fresh = await this.statusAfterWrite(project, repo)
-      if (!gitSucceeded(result)) return { ...this.failure(result, root, 'git commit'), status: fresh }
+      if (!gitSucceeded(result)) return { ...this.failure(result, root, amend ? 'git commit --amend' : 'git commit'), status: fresh }
       const latest = await runtime.runner.run({ cwd: root, args: logArgs({ limit: 1 }), signal: new AbortController().signal }).then(run => gitSucceeded(run) ? parseLog(run.stdout.toString('utf8'))[0] : undefined, () => undefined)
       return this.outcome({
-        ok: true, message: latest ? `Committed ${latest.hash.slice(0, 7)}: ${latest.subject}` : 'Committed.', output: tailOutput(result),
+        ok: true, message: latest ? `${amend ? 'Amended' : 'Committed'} ${latest.hash.slice(0, 7)}: ${latest.subject}` : amend ? 'Amended.' : 'Committed.', output: tailOutput(result),
         commit: latest ? { hash: latest.hash, subject: latest.subject } : null, status: fresh,
       })
     })

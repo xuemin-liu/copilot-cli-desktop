@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
-import type { GitBranchView, GitDiffView as GitDiff, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt } from '../../main/git-prompt.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
 import { GitCommitBox } from './GitCommitBox.js'
+import type { AmendState } from './GitCommitBox.js'
 import { GitSyncBar } from './GitSyncBar.js'
 import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
@@ -187,6 +188,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [branchError, setBranchError] = useState<string | null>(null)
   const [newBranch, setNewBranch] = useState('')
   const [branchReload, setBranchReload] = useState(0)
+  // Amend: whether the box is amending the last commit, and what is known about that commit.
+  const [amending, setAmending] = useState(false)
+  const [headCommit, setHeadCommit] = useState<{ repoId: string; headOid: string; info: GitHeadCommitView } | null>(null)
+  const amendPrefill = useRef(false)
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
 
@@ -240,6 +245,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setLogError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Amend: the last commit's message and where it is published, whenever amending is on and the commit changes.
+  useEffect(() => {
+    if (!amending || !repo || repo.state !== 'ready' || repo.headOid === null) return
+    let stale = false
+    window.copilotDesktop.gitHeadCommit(profileId, repo.id)
+      .then(info => { if (!stale) setHeadCommit({ repoId: repo.id, headOid: info.oid, info }) })
+      .catch((cause: unknown) => { if (!stale) { setActionError(errorMessage(cause)); setAmending(false) } })
+    return () => { stale = true }
+  }, [amending, profileId, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Branches.
   useEffect(() => {
     if (tab !== 'branches' || !repo || repo.state !== 'ready') return
@@ -271,6 +286,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (operation) return
     setHooks(null)
     setPublish(null)
+    setAmending(false)
     setStoredRepo(next.relativePath)
     setSelection(null)
     setNotice(null)
@@ -332,7 +348,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       if (result.ok) {
         setNotice(result.message)
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
-        if (kind === 'commit') setMessages(current => ({ ...current, [owner.key]: '' }))
+        if (kind === 'commit') { setMessages(current => ({ ...current, [owner.key]: '' })); setAmending(false) }
         if (kind === 'branch') setNewBranch('')
       } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch')) {
         setNotice(result.message)
@@ -384,8 +400,35 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const commit = (approvedHooksHash: string | null): void => {
     if (!repo || !currentStatus) return
     const generation = currentStatus.generation
+    // An amend is for the commit that was on screen; main refuses if it has moved.
+    if (amending && repo.headOid !== null) {
+      const expected = { branch: repo.detached ? null : repo.branch, headOid: repo.headOid }
+      runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitAmend(profileId, repo.id, message, generation, approvedHooksHash, expected))
+      return
+    }
     runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitCommit(profileId, repo.id, message, generation, approvedHooksHash))
   }
+
+  // Turning Amend on puts the last message in an empty box (so it can be edited); turning it off removes it again if it is untouched.
+  const toggleAmend = (on: boolean): void => {
+    setAmending(on)
+    setHooks(null)
+    if (on) amendPrefill.current = message.trim() === ''
+    else if (headCommit && headCommit.info.message.trim() === message.trim()) setMessage('')
+  }
+  useEffect(() => {
+    // Only the last commit's own message: the info cached from an earlier commit (before this amend or commit) must never be used.
+    if (!amending || !headCommit || !repo || headCommit.repoId !== repo.id || headCommit.headOid !== repo.headOid || !amendPrefill.current) return
+    amendPrefill.current = false
+    setMessages(current => ({ ...current, [repo.relativePath]: headCommit.info.message }))
+  }, [amending, headCommit, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
+  const amendState: AmendState | null = repo && repo.headOid !== null ? {
+    on: amending,
+    loading: amending && !(headCommit && headCommit.repoId === repo.id && headCommit.headOid === repo.headOid),
+    lastMessage: headCommit && headCommit.repoId === repo.id && headCommit.headOid === repo.headOid ? headCommit.info.message : null,
+    publishedTo: headCommit && headCommit.repoId === repo.id ? headCommit.info.publishedTo : [],
+    isMerge: headCommit?.info.isMerge ?? false,
+  } : null
 
   // Cancel the repository that owns the running write, not whichever one is selected.
   const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
@@ -478,13 +521,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                     </div>
                   )}
 
-                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null) && (
+                  {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null || amending) && amendState && (
+                    <button type="button" className="git-amend-open" onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
+                  )}
+                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null || amending) && (
                     <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
                       message={message} onMessageChange={setMessage} busy={operation?.kind ?? null} progress={progress}
                       canDraft={canInsert && currentStatus.staged.length > 0 && !working}
                       draftTitle={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}
                       onDraft={draftMessage} onCommit={() => commit(null)} onCancel={cancelWrite}
-                      hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)} />
+                      hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)}
+                      amend={amendState} onToggleAmend={toggleAmend} />
                   )}
 
                   {selection && (

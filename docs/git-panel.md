@@ -40,6 +40,29 @@ debug browser sees it). Close it the same way. Its width and open state are reme
 - Every write quotes the file list you were looking at. If the list changed in the meantime, the request is refused and the
   list refreshes, so a click can never stage or unstage a different file than the one you meant.
 
+## Amending the last commit
+
+**Amend last commit…** (or the **Amend the last commit** checkbox in the commit box) replaces the last commit with a new one that has
+what is staged and the message in the box. The box is filled with the last message so it can be edited. It keeps the commit's
+parent and author, and the history is no longer.
+
+- **Only for a commit that exists only on this computer.** If any remote branch already contains it (`origin/main`, say), Amend is
+  disabled and says so: rewriting it would need a force push, which the panel never does. Make a new commit instead. A merge commit
+  is not amended from the panel either.
+- **For the commit on screen.** Like a pull or a branch switch, an amend names the commit it was asked for. If another terminal
+  or Copilot has committed or switched since, it is refused and nothing is rewritten, and the commit, the branch and the "not
+  published" test are checked again right before Git runs, including after every wait for `index.lock`.
+- **Hooks are treated like a commit's** and need the same approval, and `post-rewrite` (which Git runs after an amend) is among the
+  hooks that are listed and approved.
+- **If Git cannot answer, the answer is no.** A failed, timed-out or cut-short read of "is it published?" (or of whether the commit is a
+  merge) refuses the amend rather than assuming the commit is local; the Amend control shows the error. A remote branch whose name merely
+  ends in `HEAD` (`origin/feature/HEAD`) counts as a published branch; only the remote's own `HEAD` pointer is ignored.
+- **The message is loaded whole or not at all.** The box is prefilled with the complete last message; one longer than the 100,000
+  characters an amend accepts is refused ("too long to edit here") instead of being shortened and then silently saved that way.
+- It needs something to change: stage files or change the message. A message-only amend works with nothing staged. Git's refusal
+  to make a commit empty stays, except that an already-empty commit can have its message changed.
+- The same checks as a commit apply: unresolved conflicts, an unseen staged submodule update, and Git needing to know who you are.
+
 ## Fetch, pull and push
 
 Under the branch name are **Fetch**, **Pull** and **Push**. Each runs one Git command for the selected repository, shows what
@@ -157,7 +180,7 @@ error and is never opened. This is checked again before every command, not only 
   closing the panel stops all of it.
 - Only the main window has the panel; a session popped out to its own window does not.
 - A very narrow window gives the panel the whole area instead of squeezing the terminal; closing it returns the session.
-- Amending is not in the panel yet, and neither is a sidebar summary (it would need
+- A sidebar summary is not in the panel (it would need
   Git to run in the background while the panel is closed, which the panel deliberately does not do).
 - Pull changes the files in your folder. The panel does not check whether a Copilot session is working there; a fast-forward only
   touches files that differ between the two commits, and Git refuses it when a local change is in the way.
