@@ -6,13 +6,11 @@ function Icon({ children }: { children: JSX.Element[] | JSX.Element }): JSX.Elem
     strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{children}</svg>
 }
 
-/** Branching line: fork the conversation into a side chat. */
-export function ForkIcon(): JSX.Element {
+/** Two speech bubbles, one answering the other: fork the conversation into a side chat. (Not a branching line, which is the Git panel's.) */
+export function SideChatIcon(): JSX.Element {
   return <Icon>
-    <circle cx="4" cy="3.5" r="1.5" />
-    <circle cx="4" cy="12.5" r="1.5" />
-    <circle cx="12" cy="5.5" r="1.5" />
-    <path d="M4 5v6M12 7c0 2.5-3 2.5-8 4" />
+    <path d="M2 2.5h7.5v4.5H5.2L3.5 8.5V7H2z" />
+    <path d="M6.5 9h7.5v4.5h-1.2V15L11 13.5H6.5z" />
   </Icon>
 }
 
