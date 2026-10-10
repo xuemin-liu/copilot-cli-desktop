@@ -36,19 +36,22 @@ export interface Snapshot {
   directory: string
   files: number
   bytes: number
-  /** How each file looked (size and modification time) when it was copied, so a later attempt can tell whether the copy is still current. */
-  stamps: Record<string, string>
+  /**
+   * How each file looked (size and modification time) when it was copied, so a later attempt can tell whether the copy is still current.
+   * A Map, because file names are arbitrary text: `__proto__` is a valid name, and on a plain object it would not be stored at all.
+   */
+  stamps: Map<string, string>
 }
 
 const stamp = (date: Date): string => date.toISOString().replace(/[:.]/g, '-')
 
 /** How a file looks right now: `<size>:<mtime>`, or `missing`. Two equal stamps mean the copy made at the first is still of the file. */
-export async function stampFiles(repoRoot: string, relativePaths: readonly string[]): Promise<Record<string, string>> {
-  const stamps: Record<string, string> = {}
+export async function stampFiles(repoRoot: string, relativePaths: readonly string[]): Promise<Map<string, string>> {
+  const stamps = new Map<string, string>()
   for (const relativePath of relativePaths) {
     const file = repoFile(repoRoot, relativePath)
     const info = file.ok ? await lstat(file.absolute).catch(() => null) : null
-    stamps[relativePath] = info === null ? 'missing' : `${info.size}:${info.mtimeMs}`
+    stamps.set(relativePath, info === null ? 'missing' : `${info.size}:${info.mtimeMs}`)
   }
   return stamps
 }
@@ -124,13 +127,13 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
   if (!isPathWithinRoot(snapshotRoot, directory)) throw new DiscardRefused('The place for saved copies is not usable')
   await mkdir(directory, { recursive: true })
   const saved: Array<{ path: string; bytes: number }> = []
-  const stamps: Record<string, string> = {}
+  const stamps = new Map<string, string>()
   let bytes = 0
   for (const relativePath of relativePaths) {
     const file = repoFile(repoRoot, relativePath)
     if (!file.ok) throw new DiscardRefused(file.reason)
     const before = await lstat(file.absolute).catch(() => null)
-    stamps[relativePath] = before === null ? 'missing' : `${before.size}:${before.mtimeMs}`
+    stamps.set(relativePath, before === null ? 'missing' : `${before.size}:${before.mtimeMs}`)
     if (before === null) continue
     const target = win32.join(directory, 'files', ...(safeRepoSegments(relativePath) ?? []))
     if (!isPathWithinRoot(directory, target)) throw new DiscardRefused(`"${relativePath}" cannot be saved safely`)

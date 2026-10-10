@@ -1974,3 +1974,28 @@ test('an untracked item that is swapped for a link after the checks is not moved
   assert.deepEqual(kit.trashed, [], 'the junction was not sent to the bin')
   assert.equal(existsSync(join(outside, 'precious.txt')), true, 'nothing outside was touched')
 })
+
+test('a file named __proto__ is tracked like any other while the restore waits for the index lock', { skip }, async (t) => {
+  const kit = discardKit(t)
+  let h!: Harness
+  h = await harness(t, (f, project) => {
+    committed(f, project, { ['__proto__']: 'committed\n', 'constructor': 'c\n', 'a.txt': 'one\n' })
+    writeFileSync(join(project, '__proto__'), 'first edit\n'); writeFileSync(join(project, 'constructor'), 'edit\n')
+  }, kit.options)
+  const { repoId, status } = await open(h)
+  const current = await status()
+  const lock = join(h.project, '.git', 'index.lock')
+  writeFileSync(lock, '')
+  h.afterCommand(options => options.args[0] === 'restore', () => {
+    // Only __proto__ changes: nothing else may be what makes the copy get renewed.
+    writeFileSync(join(h.project, '__proto__'), 'first edit\nand new work done during the wait\n')
+    rmSync(lock, { force: true })
+  })
+  const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, '__proto__'), idOf(current, 'constructor')], current.generation)
+  assert.equal(result.ok, true, `${result.reason}: ${result.message}`)
+  assert.equal(text(join(h.project, '__proto__')), 'committed\n')
+  const copies = savedCopies(kit)
+  const holds = (name: string, content: string): boolean => copies.some(copy => existsSync(join(kit.snapshots, copy, 'files', name)) && text(join(kit.snapshots, copy, 'files', name)) === content)
+  assert.equal(holds('__proto__', 'first edit\nand new work done during the wait\n'), true, 'a copy holds the work written to __proto__ during the wait')
+  assert.equal(text(join(h.project, 'constructor')), 'c\n', 'the other special name was discarded too')
+})

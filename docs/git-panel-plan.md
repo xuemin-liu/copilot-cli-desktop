@@ -478,6 +478,9 @@ missing means the discard is refused: it fails closed. Decisions, each with a te
   junction in a *parent* folder passes a leaf-only check and that Git does not stop a write through it: every folder above a path
   is now `lstat`ed (a link anywhere is refused) and the nearest existing one must resolve inside the repository, for tracked and
   untracked paths alike. Each untracked item is re-checked immediately before it is moved.
+  A second review round found that the stamps were kept in a plain object keyed by file name, so a tracked file called `__proto__`
+  was never stored and its changes went unnoticed: they are a `Map` now, and the commit-message drafts the panel keeps per
+  repository folder are read with an own-property check for the same reason. Any dictionary keyed by a path needs this.
 - **Check, ask, check again.** Everything that can make a discard unsafe (session working, copies too large or not regular files,
   an untracked folder that holds a repository or is too big to inspect, unsafe names, links) is evaluated before the window opens,
   so nothing impossible is offered, and again after it closes together with the trust gate, the list version and the session.

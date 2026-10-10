@@ -85,6 +85,11 @@ function fileParts(path: string): { name: string; folder: string } {
 }
 
 /** Whether Discard applies to an entry: an untracked file or folder, or a tracked file with a working-tree change (not a conflict, a submodule or an added-but-empty file). */
+/** The draft commit message kept for a repository. Folder names are arbitrary text, so `__proto__` or `constructor` must not read the object's own prototype. */
+export function draftOf(drafts: Readonly<Record<string, string>>, key: string): string {
+  return Object.prototype.hasOwnProperty.call(drafts, key) ? drafts[key] ?? '' : ''
+}
+
 export function canDiscard(entry: Pick<GitEntryView, 'kind' | 'worktree' | 'submodule'>): boolean {
   if (entry.kind === 'untracked') return true
   if (entry.submodule) return false
@@ -308,7 +313,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   }), [profileId])
 
   const messageKey = repo?.relativePath ?? ''
-  const message = messages[messageKey] ?? ''
+  const message = draftOf(messages, messageKey)
   const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
 
   /** Run one write, show its outcome, and take the fresh status it returns. */

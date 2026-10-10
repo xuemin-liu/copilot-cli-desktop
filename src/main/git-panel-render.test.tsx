@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js'
-import { GitPanel, RepoRow, canDiscard } from '../renderer/components/GitPanel.js'
+import { GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
@@ -259,4 +259,14 @@ test('Discard applies to working-tree changes and untracked items, not to confli
     ({ kind, worktree: worktree as never, submodule })
   for (const yes of [entry('changed', 'M'), entry('changed', 'T'), entry('changed', 'D'), entry('renamed', 'M'), entry('untracked', '?')]) assert.equal(canDiscard(yes), true, JSON.stringify(yes))
   for (const no of [entry('changed', 'A'), entry('changed', '.'), entry('renamed', 'D'), entry('unmerged', 'U'), entry('ignored', '!'), entry('changed', 'M', true)]) assert.equal(canDiscard(no), false, JSON.stringify(no))
+})
+
+test('a draft message is only ever the one kept for that repository, whatever the folder is called', () => {
+  assert.equal(draftOf({}, 'app'), '')
+  assert.equal(draftOf({ app: 'feat: x' }, 'app'), 'feat: x')
+  for (const name of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    assert.equal(draftOf({}, name), '', `nothing is kept for ${name}`)
+    assert.equal(draftOf({ ['__proto__']: 'kept for the folder named __proto__', [name]: 'draft' }, name), 'draft', name)
+  }
+  assert.equal(draftOf({ ['__proto__']: 'kept for the folder named __proto__' }, '__proto__'), 'kept for the folder named __proto__')
 })

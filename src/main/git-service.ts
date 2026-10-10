@@ -1082,7 +1082,7 @@ export class GitService {
             if (problems.length > 0) throw new WriteRefused(blocked(problems))
             const stamps = await stampFiles(root, tracked)
             const current = kept as Snapshot | null
-            if (current === null || tracked.some(path => current.stamps[path] !== stamps[path])) {
+            if (current === null || tracked.some(path => current.stamps.get(path) !== stamps.get(path))) {
               try {
                 kept = await saveSnapshot(this.options.snapshotDirectory ?? '', root, tracked, this.options.now?.() ?? new Date(), limits)
               } catch (error) {
