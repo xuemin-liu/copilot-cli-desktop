@@ -152,11 +152,13 @@ export interface GitConfirmRequest {
   title: string
   detail: string
   confirmLabel: string
+  /** Something that destroys work: the window says so and makes Cancel the default. */
+  danger?: boolean
 }
 
 export interface GitProgressEvent {
   repoId: string
-  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'switch'
+  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'switch' | 'discard'
   stream: 'stdout' | 'stderr'
   text: string
 }

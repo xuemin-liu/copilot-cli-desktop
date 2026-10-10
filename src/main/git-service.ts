@@ -1,6 +1,8 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, configGetArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, configGetArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
+import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
+import type { Snapshot } from './git-discard.js'
 import type { ProjectActivity } from './git-branch.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
@@ -44,6 +46,14 @@ export interface GitServiceOptions {
   sessionActivity?(profileId: string): ProjectActivity
   /** Ask the person in a native window. Without it, anything that needs a confirmation is refused. */
   confirm?(profileId: string, request: GitConfirmRequest): Promise<boolean>
+  /** A folder the app owns, where a copy of each tracked file is saved before its changes are discarded. Without it none can be. */
+  snapshotDirectory?: string
+  /** Move a file or folder to the Recycle Bin. Without it no untracked item can be discarded. */
+  trash?(absolutePath: string): Promise<void>
+  /** Limits on the saved copies, and the clock; tests lower and fix them. */
+  maxSnapshotFileBytes?: number
+  maxSnapshotTotalBytes?: number
+  now?(): Date
   /** True while refreshing must not start (shutdown, migration, window hidden). Checked before every refresh. */
   shouldPause?(): boolean
   discover?: typeof discoverRepos
@@ -963,6 +973,153 @@ export class GitService {
         return this.outcome({ ok: false, reason: failed.reason, message: failed.message, output: tailOutput(result), status })
       }
       return this.outcome({ ok: true, message: kind === 'create' ? `Created and switched to ${name}.` : `Switched to ${name}.`, output: tailOutput(result), status })
+    })
+  }
+
+  // ---- discard ------------------------------------------------------------------------------------------------------
+
+  /** Which entries a discard request means, checked against the exact list the person was looking at. */
+  private discardableEntries(repo: RepoRuntime, entryIds: readonly string[], generation: number): GitStatusEntry[] {
+    if (repo.generation !== generation) throw new GitStaleError()
+    if (entryIds.length === 0 || entryIds.length > 500) throw new Error('Choose between 1 and 500 files')
+    const chosen: GitStatusEntry[] = []
+    for (const id of new Set(entryIds)) {
+      const entry = repo.entries.get(id)
+      if (!entry) throw new GitStaleError()
+      // Working-tree changes of tracked files, and untracked files and folders. Not conflicts, submodules, or an added-but-empty file.
+      const tracked = !entry.submodule && ((entry.kind === 'changed' && ['M', 'T', 'D'].includes(entry.worktree)) || (entry.kind === 'renamed' && ['M', 'T'].includes(entry.worktree)))
+      if (tracked || entry.kind === 'untracked') chosen.push(entry)
+    }
+    if (chosen.length === 0) throw new Error('There is nothing to discard in that selection')
+    return chosen
+  }
+
+  /**
+   * Throw away working-tree changes. Irreversible by nature, so: a copy of each tracked file is saved to a folder the app owns before
+   * it is restored; untracked files go to the Recycle Bin, never deleted outright, and a folder that holds a git repository is never
+   * touched. The person confirms in a native window that lists the files, and it is refused while a Copilot session is working.
+   * Everything is checked before the window opens (so nothing is offered that cannot be done safely) and again after it closes.
+   */
+  async discard(subscriberId: number, profileId: string, repoId: string, entryIds: readonly string[], generation: number): Promise<GitOperationResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    return this.enqueueWrite(repo, async signal => {
+      await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
+      const entries = this.discardableEntries(repo, entryIds, generation)
+      const root = repo.discovered.root
+      const refused = (reason: GitOperationResult['reason'], text: string): GitOperationResult => this.outcome({ ok: false, reason, message: text, status: repo.statusView })
+      const tracked = entries.filter(entry => entry.kind !== 'untracked').map(entry => entry.path)
+      const untracked = entries.filter(entry => entry.kind === 'untracked').map(entry => entry.path)
+      const limits = {
+        ...(this.options.maxSnapshotFileBytes !== undefined ? { maxFileBytes: this.options.maxSnapshotFileBytes } : {}),
+        ...(this.options.maxSnapshotTotalBytes !== undefined ? { maxTotalBytes: this.options.maxSnapshotTotalBytes } : {}),
+      }
+
+      // Everything the discard needs, checked now and again once the person has answered.
+      const prepare = async (): Promise<{ problems: string[]; trash: string[] }> => {
+        const problems = await checkSnapshotable(root, tracked, limits)
+        const trash: string[] = []
+        for (const path of untracked) {
+          const verdict = await checkTrashable(root, path)
+          if (verdict.ok) trash.push(verdict.absolute); else problems.push(verdict.reason)
+        }
+        return { problems, trash }
+      }
+      const blocked = (problems: string[]): GitOperationResult =>
+        refused('failed', `${problems.slice(0, 3).join('. ')}${problems.length > 3 ? ` (and ${problems.length - 3} more problems)` : ''}. Nothing was discarded.`)
+      const working = (): GitOperationResult | null => {
+        const activity = this.options.sessionActivity?.(profileId)
+        return activity?.busy ? refused('agent-working', `${activity.detail}. Discarding changes files under it. Wait for it to finish, then discard.`) : null
+      }
+
+      if (!this.options.confirm) return refused('failed', 'Discarding needs a confirmation window, which is not available.')
+      if (tracked.length > 0 && !this.options.snapshotDirectory) return refused('failed', 'Discarding tracked changes saves a copy first, and there is no place to keep it.')
+      if (untracked.length > 0 && !this.options.trash) return refused('failed', 'Discarding untracked files moves them to the Recycle Bin, which is not available.')
+      const busy = working()
+      if (busy) return busy
+      const first = await prepare()
+      if (first.problems.length > 0) return blocked(first.problems)
+
+      const shown = [...tracked.map(path => `  ${path}`), ...untracked.map(path => `  ${path}  (untracked)`)]
+      const confirmed = await this.options.confirm(profileId, {
+        title: `Discard ${entries.length} change${entries.length === 1 ? '' : 's'}?`,
+        detail: `${shown.slice(0, 12).join('\n')}${shown.length > 12 ? `\n  …and ${shown.length - 12} more` : ''}\n\n`
+          + (tracked.length > 0 ? `Tracked files go back to their last committed or staged version. A copy of what is on disk now is saved first.\n` : '')
+          + (untracked.length > 0 ? `Untracked items are moved to the Recycle Bin.` : ''),
+        confirmLabel: 'Discard', danger: true,
+      })
+      if (!confirmed) return this.outcome({ ok: false, reason: 'cancelled', message: 'Nothing was discarded.', status: repo.statusView })
+
+      // The window may have been open for a while: the list, the session and the files can all have moved.
+      await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
+      if (repo.generation !== generation) throw new GitStaleError('The file list changed while you were deciding. Nothing was discarded. Check it, then try again.')
+      const later = working()
+      if (later) return later
+      const second = await prepare()
+      if (second.problems.length > 0) return blocked(second.problems)
+
+      let note = ''
+      if (tracked.length > 0) {
+        // Restoring can wait for `index.lock` for seconds, so nothing decided earlier is trusted at the moment of an attempt. Before
+        // every attempt: the trust gate, the session, and the paths (a link may have appeared) are checked again, and the saved copy
+        // is of the files as they are now. A copy made for an earlier attempt is reused only if the files still look the same,
+        // otherwise a new one is made, so work added during the wait is in a copy and never overwritten by an older one.
+        let kept: Snapshot | null = null
+        let result: GitRunResult
+        try {
+          result = await this.runWithLockWait(runtime, {
+            cwd: root, kind: 'write', disableHooks: true, args: restoreArgs(), stdin: `${tracked.join('\0')}\0`, signal, timeoutMs: 120_000,
+            onOutput: this.emitter(subscriberId, profileId, repoId, 'discard'),
+          }, async () => {
+            await this.requireGate(project, repo, runtime, signal)
+            const stillBusy = working()
+            if (stillBusy) throw new WriteRefused(stillBusy)
+            const problems = await checkSnapshotable(root, tracked, limits)
+            if (problems.length > 0) throw new WriteRefused(blocked(problems))
+            const stamps = await stampFiles(root, tracked)
+            const current = kept as Snapshot | null
+            if (current === null || tracked.some(path => current.stamps.get(path) !== stamps.get(path))) {
+              try {
+                kept = await saveSnapshot(this.options.snapshotDirectory ?? '', root, tracked, this.options.now?.() ?? new Date(), limits)
+              } catch (error) {
+                if (error instanceof DiscardRefused) throw new WriteRefused(refused('failed', error.message))
+                throw error
+              }
+            }
+          })
+        } catch (error) {
+          if (error instanceof WriteRefused) return error.result
+          throw error
+        }
+        await pruneSnapshots(this.options.snapshotDirectory ?? '')
+        const snapshot = kept as Snapshot | null
+        if (!gitSucceeded(result)) {
+          const status = await this.statusAfterWrite(project, repo)
+          const failed = this.failure(result, root, 'git restore')
+          return { ...failed, message: `${failed.message}${snapshot ? ` A copy of the files is in ${snapshot.directory}.` : ''}`, status }
+        }
+        if (snapshot && snapshot.files > 0) note = snapshot.files === 1 ? ` A copy of the changed file is saved in ${snapshot.directory}.` : ` Copies of the ${snapshot.files} changed files are saved in ${snapshot.directory}.`
+      }
+      // Each untracked item is checked once more right before it is moved: the restore above may have waited, and a folder can have
+      // been replaced by a link, or a session may have started, since the checks before the window.
+      const problems: string[] = []
+      let moved = 0
+      for (const path of untracked) {
+        const busyNow = working()
+        if (busyNow) { problems.push(`${busyNow.message.split('.')[0]}`); break }
+        const verdict = await checkTrashable(root, path)
+        if (!verdict.ok) { problems.push(verdict.reason); continue }
+        try { await this.options.trash?.(verdict.absolute); moved++ } catch (error) { problems.push(`${path}: ${redactDiagnosticText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`) }
+      }
+      const status = await this.statusAfterWrite(project, repo)
+      if (problems.length > 0) {
+        return this.outcome({ ok: false, reason: 'failed', message: `${untracked.length - moved} of ${untracked.length} untracked item${untracked.length === 1 ? '' : 's'} ${untracked.length - moved === 1 ? 'was' : 'were'} not moved to the Recycle Bin: ${problems[0]}.${note}`, status })
+      }
+      return this.outcome({ ok: true, message: `Discarded ${entries.length} change${entries.length === 1 ? '' : 's'}.${note}`, status })
     })
   }
 

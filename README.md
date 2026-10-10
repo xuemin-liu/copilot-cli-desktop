@@ -46,7 +46,8 @@ handle, only input/output/resize events.
   unstage files, make local commits (a repository's own hooks need your approval first),
   fetch, fast-forward pull and push (never forced, never prompting for credentials), and
   create or switch local branches (a switch is refused while a Copilot session is working
-  and is confirmed first); amending and discarding come later. Repositories whose own settings can run programs wait for
+  and is confirmed first), and discard changes (a copy of each tracked file is saved first,
+  untracked files go to the Recycle Bin, and you confirm in a native window); amending comes later. Repositories whose own settings can run programs wait for
   your review before anything is read. See [the Git panel](docs/git-panel.md).
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with

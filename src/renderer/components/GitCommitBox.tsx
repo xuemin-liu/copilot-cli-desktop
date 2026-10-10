@@ -7,7 +7,7 @@ export interface GitCommitBoxProps {
   message: string
   onMessageChange(value: string): void
   /** The write running now, or null. While one runs, nothing else can be started. */
-  busy: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'branch' | null
+  busy: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'branch' | 'discard' | null
   /** What the running write (a commit hook, usually) has printed so far. */
   progress: string
   canDraft: boolean

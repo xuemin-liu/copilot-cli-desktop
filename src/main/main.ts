@@ -262,11 +262,14 @@ function gitServiceInstance(): GitService | null {
     },
     // A branch switch rewrites files, so it is refused while a session in the project is working and otherwise confirmed in a native window.
     sessionActivity: (profileId) => projectActivity(tabsState.tabs, profileId, Date.now()),
+    // Discarding saves a copy of each tracked file here first, and sends untracked files to the Recycle Bin (never deletes them outright).
+    snapshotDirectory: join(app.getPath('userData'), 'git-discarded'),
+    trash: (absolutePath) => shell.trashItem(absolutePath),
     confirm: async (_profileId, request) => {
       const window = mainWindow
       if (!window || window.isDestroyed()) return false
       const answer = await dialog.showMessageBox(window, {
-        type: 'question', buttons: [request.confirmLabel, 'Cancel'], defaultId: 1, cancelId: 1, noLink: true,
+        type: request.danger ? 'warning' : 'question', buttons: [request.confirmLabel, 'Cancel'], defaultId: 1, cancelId: 1, noLink: true,
         title: request.title, message: request.title, detail: request.detail,
       })
       return answer.response === 0
