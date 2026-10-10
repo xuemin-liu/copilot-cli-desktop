@@ -305,3 +305,20 @@ export function parseBranches(output: string, max = 500): GitBranchEntry[] {
   }
   return result
 }
+
+/**
+ * The remote branches named by `publishedRefsArgs()` output, as `origin/main`. A remote's `HEAD` (`origin/HEAD`) only points at one of
+ * its branches, so it is not a branch of its own and is left out.
+ */
+export function parsePublishedRefs(output: string, max = 20): string[] {
+  const names: string[] = []
+  for (const line of output.split(String.fromCharCode(10))) {
+    const ref = line.trim()
+    if (!ref.startsWith('refs/remotes/')) continue
+    const name = ref.slice('refs/remotes/'.length)
+    if (name === '' || name.endsWith('/HEAD')) continue
+    if (!names.includes(name)) names.push(name)
+    if (names.length >= max) break
+  }
+  return names
+}

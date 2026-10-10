@@ -15,7 +15,7 @@ import type { GitRunner } from './git-runner.js'
 
 /** Hooks a commit can run: the commit sequence itself, the index and reference updates it makes, and nothing else. */
 export const COMMIT_HOOKS: ReadonlySet<string> = new Set([
-  'pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-index-change', 'reference-transaction',
+  'pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-rewrite', 'post-index-change', 'reference-transaction',
 ])
 
 /** Hooks a push can run. The panel does not run these (see `inspectHooks`): a repository that has one is pushed from a terminal. */

@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   gitUnstage: (profileId, repoId, entryIds, generation) => ipcRenderer.invoke('desktop:git-unstage', profileId, repoId, entryIds, generation),
   gitCommit: (profileId, repoId, message, generation, approvedHooksHash) => ipcRenderer.invoke('desktop:git-commit', profileId, repoId, message, generation, approvedHooksHash ?? null),
   gitSync: (profileId, repoId, operation, remote, expected) => ipcRenderer.invoke('desktop:git-sync', profileId, repoId, operation, remote ?? null, expected ?? null),
+  gitHeadCommit: (profileId, repoId) => ipcRenderer.invoke('desktop:git-head-commit', profileId, repoId),
+  gitAmend: (profileId, repoId, message, generation, approvedHooksHash, expected) => ipcRenderer.invoke('desktop:git-amend', profileId, repoId, message, generation, approvedHooksHash ?? null, expected),
   gitDiscard: (profileId, repoId, entryIds, generation) => ipcRenderer.invoke('desktop:git-discard', profileId, repoId, entryIds, generation),
   gitBranches: (profileId, repoId) => ipcRenderer.invoke('desktop:git-branches', profileId, repoId),
   gitBranch: (profileId, repoId, action, name, expected) => ipcRenderer.invoke('desktop:git-branch', profileId, repoId, action, name, expected),

@@ -29,8 +29,28 @@ export function unstageArgs(hasHead: boolean): string[] {
 }
 
 /** Commit the index. The message comes from stdin, so it is never an argument and cannot be read as an option. */
-export function commitArgs(): string[] {
-  return ['commit', '-F', '-']
+export function commitArgs(amend = false, allowEmpty = false): string[] {
+  // `--allow-empty` only for an amend of a commit that is already empty: Git's own refusal to make a commit empty stays otherwise.
+  return amend ? ['commit', '--amend', ...(allowEmpty ? ['--allow-empty'] : []), '-F', '-'] : ['commit', '-F', '-']
+}
+
+/** The tree of HEAD, then the tree of its first parent: equal when the last commit changes nothing. */
+export function headTreesArgs(): string[] {
+  return ['rev-parse', 'HEAD^{tree}', 'HEAD~1^{tree}']
+}
+
+/** The last commit's full message, then the ids of its parents (one line, space separated) on the next record. */
+export function headMessageArgs(): string[] {
+  return ['show', '-s', '--format=%B', 'HEAD']
+}
+
+export function headParentsArgs(): string[] {
+  return ['rev-list', '--parents', '-n', '1', 'HEAD']
+}
+
+/** Remote-tracking branches that already contain HEAD: if there are any, the commit has been published. */
+export function publishedRefsArgs(): string[] {
+  return ['for-each-ref', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes']
 }
 
 /**

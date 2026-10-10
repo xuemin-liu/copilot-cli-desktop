@@ -140,6 +140,13 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     const seen = expectedBranchArg(expected)
     return operation === 'push' ? service.push(...args, remoteName, seen) : service.pull(...args, seen)
   })
+  handle('desktop:git-head-commit', (service, event, profileId: unknown, repoId: unknown) =>
+    service.getHeadCommit(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
+  handle('desktop:git-amend', (service, event, profileId: unknown, repoId: unknown, message: unknown, generation: unknown, approvedHooksHash: unknown, expected: unknown) => {
+    if (typeof message !== 'string' || message.trim() === '' || message.length > 100_000 || message.includes('\0')) throw new Error('Invalid commit message')
+    if (approvedHooksHash !== null && (typeof approvedHooksHash !== 'string' || !CONFIG_HASH.test(approvedHooksHash))) throw new Error('Invalid hooks approval')
+    return service.amend(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), message, boundedInteger(generation, 'file list version', 0, 1_000_000_000), approvedHooksHash, expectedHeadArg(expected))
+  })
   handle('desktop:git-discard', (service, event, profileId: unknown, repoId: unknown, entryIds: unknown, generation: unknown) => {
     if (!Array.isArray(entryIds) || entryIds.length < 1 || entryIds.length > 500) throw new Error('Invalid file selection')
     for (const id of entryIds) if (typeof id !== 'string' || !ENTRY_ID.test(id)) throw new Error('Invalid file')

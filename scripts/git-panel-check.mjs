@@ -507,6 +507,41 @@ ${point.missing}`)
     assert.equal(existsSync(join(alpha, 'keep.txt')), true)
     agentBusy = false
     results.discard = true
+
+    // 17. Amend: an unpushed commit is reworded from the panel; once it is pushed, Amend says it is not possible.
+    await rm(join(alpha, '.git', 'hooks', 'pre-commit'), { force: true })   // the slow hook from step 13 is not what this step is about
+    git(alpha, 'commit', '--allow-empty', '--no-verify', '-q', '-m', 'amend me')
+    const countBefore = gitIn('rev-list', '--count', 'HEAD').trim()
+    const headBeforeAmend = gitIn('rev-parse', 'HEAD').trim()
+    service.requestRefresh(PROFILE)
+    // An earlier step left a draft in the box: clear it, so the box closes and Amend is offered the way a person would find it.
+    await ui('document.querySelector(".git-commit textarea").focus(); document.querySelector(".git-commit textarea").select()')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' })
+    await until('!!document.querySelector(".git-amend-open")', 'Amend is offered when there is a commit')
+    await clickByText('.git-amend-open', 'Amend last commit')
+    await until('document.querySelector(".git-commit textarea")?.value === "amend me"', 'the last message fills the box')
+    assert.equal(await ui('document.querySelector(".git-amend-toggle input").checked'), true)
+    await ui('document.querySelector(".git-commit textarea").select()')
+    window.webContents.insertText('amend me, reworded')
+    await until('document.querySelector(".git-commit textarea").value === "amend me, reworded"', 'new message typed')
+    assert.match(await text('.git-commit-button'), /Amend commit/)
+    await screenshot('amend.png')
+    await click('.git-commit-button')
+    await until('/Amended [0-9a-f]{7}: amend me, reworded/.test(document.querySelector(".git-message-info")?.innerText || "")', 'amend reported')
+    assert.equal(gitIn('log', '-1', '--format=%s').trim(), 'amend me, reworded')
+    assert.equal(gitIn('rev-list', '--count', 'HEAD').trim(), countBefore, 'no commit was added')
+    assert.notEqual(gitIn('rev-parse', 'HEAD').trim(), headBeforeAmend, 'the commit was replaced')
+
+    git(alpha, 'push', '-q', 'origin', 'main')
+    service.requestRefresh(PROFILE)
+    await until('!!document.querySelector(".git-amend-open")', 'Amend can be opened again')
+    await clickByText('.git-amend-open', 'Amend last commit')
+    await until('/already on origin\\/main/.test(document.querySelector(".git-note")?.innerText || "")', 'a pushed commit says why it cannot be amended')
+    assert.equal(await ui('document.querySelector(".git-commit-button").disabled'), true)
+    await screenshot('amend-published.png')
+    await ui('document.querySelector(".git-amend-toggle input").click()')
+    await until('!document.querySelector(".git-commit")', 'turning Amend off closes the box again')
+    results.amend = true
     assert.equal(service.hasSubscribers(), true)
     await click('button[aria-label="Close Git panel"]')
     await until('!!document.querySelector("#closed")', 'panel closed')

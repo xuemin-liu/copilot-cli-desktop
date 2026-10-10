@@ -110,6 +110,7 @@ export type GitOperationFailure =
   | 'needs-upstream'      // the branch has no upstream yet; `remotes` lists where it could be published
   | 'diverged'            // a pull cannot fast-forward
   | 'rejected'            // the remote refused a push because it has changes the branch lacks
+  | 'published'           // the last commit is already on a remote branch, so amending it would rewrite shared history
   | 'agent-working'       // a Copilot session is working in the project, and a branch switch would rewrite files under it
   | 'local-changes'       // uncommitted changes would be overwritten by the switch; git refused and changed nothing
   | 'hooks-unsupported'   // a hook that would run on push (pre-push) is present, and the panel does not run hooks for push
@@ -148,6 +149,17 @@ export interface GitBranchView {
 }
 
 /** What the person is asked before something that rewrites files; shown by the main process in a native window. */
+/** What the Amend control needs to know about the last commit. */
+export interface GitHeadCommitView {
+  oid: string
+  /** The full message, cut at 10,000 characters. */
+  message: string
+  /** A merge commit is not amended from the panel. */
+  isMerge: boolean
+  /** Remote-tracking branches that already contain it. Amending is refused when this is not empty. */
+  publishedTo: string[]
+}
+
 export interface GitConfirmRequest {
   title: string
   detail: string

@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffLineKind } from '../renderer/components/GitDiffView.js'
 import { GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
+import type { AmendState } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
 import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
@@ -110,7 +111,7 @@ test('a setting too long to review cannot be trusted from the card', () => {
 
 const commitBox = (overrides: Partial<Parameters<typeof GitCommitBox>[0]> = {}): string => renderToStaticMarkup(
   <GitCommitBox stagedCount={2} conflictCount={0} message="feat: a thing" onMessageChange={() => undefined} busy={null} progress="" canDraft draftTitle="draft"
-    onDraft={() => undefined} onCommit={() => undefined} onCancel={() => undefined} hooks={null} onApproveHooks={() => undefined} onDismissHooks={() => undefined} {...overrides} />)
+    onDraft={() => undefined} onCommit={() => undefined} onCancel={() => undefined} hooks={null} onApproveHooks={() => undefined} onDismissHooks={() => undefined} amend={null} onToggleAmend={() => undefined} {...overrides} />)
 
 test('Commit says exactly what it is waiting for', () => {
   assert.equal(commitBlocker(2, 0, 'msg'), null)
@@ -269,4 +270,45 @@ test('a draft message is only ever the one kept for that repository, whatever th
     assert.equal(draftOf({ ['__proto__']: 'kept for the folder named __proto__', [name]: 'draft' }, name), 'draft', name)
   }
   assert.equal(draftOf({ ['__proto__']: 'kept for the folder named __proto__' }, '__proto__'), 'kept for the folder named __proto__')
+})
+
+const amendOn = (extra: Partial<AmendState> = {}): AmendState => ({ on: true, loading: false, lastMessage: 'fix: the old message', publishedTo: [], isMerge: false, ...extra })
+
+test('Amend is offered only when there is a commit, and says what it will do', () => {
+  assert.doesNotMatch(commitBox(), /Amend the last commit/, 'no checkbox without a commit to amend')
+  const off = commitBox({ amend: amendOn({ on: false, lastMessage: null }) })
+  assert.match(off, /Amend the last commit/)
+  assert.doesNotMatch(off, /<input[^>]*checked/)
+  assert.match(off, />Commit 2 files</)
+  const on = commitBox({ amend: amendOn(), message: 'fix: better message' })
+  assert.match(on, /<input[^>]*checked/)
+  assert.match(on, />Amend commit \(\+2 files\)</)
+  assert.match(on, /aria-label="Message for the amended commit"/)
+  assert.match(commitBox({ amend: amendOn(), stagedCount: 0, message: 'reworded' }), />Amend commit</, 'a message-only amend has no file count')
+})
+
+test('Amend says why it is unavailable: loading, a merge, a published commit, or nothing to change', () => {
+  const blocker = (amend: AmendState, staged = 1, message = 'new message'): string | null => commitBlocker(staged, 0, message, amend)
+  assert.equal(blocker(amendOn()), null)
+  assert.equal(blocker(amendOn(), 0, 'reworded'), null, 'a changed message is enough')
+  assert.match(blocker(amendOn({ loading: true })) ?? '', /Loading the last commit/)
+  assert.match(blocker(amendOn({ lastMessage: null })) ?? '', /Loading the last commit/)
+  assert.match(blocker(amendOn({ isMerge: true })) ?? '', /is a merge/)
+  assert.match(blocker(amendOn({ publishedTo: ['origin/main', 'origin/dev'] })) ?? '', /already on origin\/main, origin\/dev.*force push/)
+  assert.match(blocker(amendOn(), 0, 'fix: the old message') ?? '', /Stage files, or change the message/)
+  assert.match(blocker(amendOn(), 1, '   ') ?? '', /Write a commit message/)
+  assert.match(commitBlocker(1, 2, 'm', amendOn()) ?? '', /Resolve the conflicts/)
+  // The button is disabled with the reason shown.
+  const published = commitBox({ amend: amendOn({ publishedTo: ['origin/main'] }) })
+  assert.match(published, /<button[^>]*disabled[^>]*>Amend commit/)
+  assert.match(published, /already on origin\/main/)
+  // Ordinary commits are unchanged.
+  assert.equal(commitBlocker(0, 0, 'msg', amendOn({ on: false })), 'Stage the files you want to commit.')
+})
+
+test('an amend that needs hook approval says so', () => {
+  const html = commitBox({ amend: amendOn(), hooks: ['post-rewrite', 'pre-commit'] })
+  assert.match(html, /hooks that an amend would run/)
+  assert.match(html, />Allow these hooks and amend</)
+  assert.match(html, />Don.t amend</)
 })
