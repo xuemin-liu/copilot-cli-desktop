@@ -1174,7 +1174,20 @@ button:disabled {
 .git-diff-stats { display: flex; gap: 8px; padding: 4px 8px 0; font-size: 11px; }
 .git-diff-added { color: #20c9a6; } .git-diff-deleted { color: #ff6b7a; }
 .git-diff-lines { margin: 0; padding: 4px 0 6px; overflow-x: auto; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11.5px; line-height: 1.5; max-height: 55vh; overflow-y: auto; }
+.git-diff-row { display: block; }
 .git-diff-line { display: block; padding: 0 8px; white-space: pre; min-width: max-content; }
+/* Line comments (phase 2 of the agent workbench plan): a gutter button per numbered line, the comment under it. */
+.git-diff-gutter { width: 14px; height: 14px; margin: 0 6px 0 -4px; padding: 0; border: 1px solid #3b4252; border-radius: 3px; background: #1a1f2a; color: #aab1bd; font-size: 10px; line-height: 12px; vertical-align: middle; opacity: 0; cursor: pointer; }
+.git-diff-line:hover .git-diff-gutter, .git-diff-gutter:focus-visible, .git-diff-row-commented .git-diff-gutter { opacity: 1; }
+.git-diff-comment, .git-diff-comment-editor { display: flex; align-items: flex-start; gap: 8px; margin: 2px 8px 6px 24px; padding: 6px 8px; border: 1px solid #2d3340; border-left: 3px solid #4f88ff; border-radius: 5px; background: #121724; white-space: normal; font-family: inherit; font-size: 11.5px; line-height: 1.45; }
+.git-diff-comment-text { flex: 1; min-width: 0; color: #e3e7ee; white-space: pre-wrap; overflow-wrap: anywhere; }
+.git-diff-comment-edit, .git-diff-comment-actions button { padding: 2px 7px; font-size: 11px; }
+.git-diff-comment-editor { flex-direction: column; }
+.git-diff-comment-input { width: 100%; min-height: 40px; resize: vertical; box-sizing: border-box; padding: 5px 7px; border: 1px solid #3b4252; border-radius: 4px; background: #0b0e14; color: #e3e7ee; font-family: inherit; font-size: 11.5px; }
+.git-diff-comment-actions { display: flex; gap: 6px; }
+.git-diff-comments-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-top: 1px solid #252a33; font-size: 11px; color: #929baa; }
+.git-diff-comments-bar button { padding: 4px 9px; font-size: 11px; }
+.git-diff-comments-stale { color: #ffb84d; }
 .git-diff-add { background: #12301f; color: #7fe0b8; }
 .git-diff-del { background: #3a1c28; color: #ff9aa6; }
 .git-diff-hunk { background: #16213a; color: #7f9fd6; }

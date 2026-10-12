@@ -22,7 +22,7 @@ if (!process.versions.electron) {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Git panel app check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log('Git panel in the app: header button, Ctrl+Shift+G with the terminal focused, persistence, narrow-window takeover and an untouched terminal all work.')
+    console.log('Git panel in the app: header button, Add to prompt, line comments, Ctrl+Shift+G with the terminal focused, persistence, narrow-window takeover and an untouched terminal all work.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -125,6 +125,30 @@ if (!process.versions.electron) {
     assert.match(tabId ?? '', /Main session/)
     assert.match(inserted.tabId, /^tab-\d+$/)
     results.addToPrompt = true
+
+    // Comments on diff lines: written under the line with real clicks and keys, sent as a numbered list, never submitted.
+    await ui('[...document.querySelectorAll(".git-diff-line")].find(element => element.textContent.includes("+two")).querySelector(".git-diff-gutter").setAttribute("data-gutter", "")')
+    await click('[data-gutter]')
+    await until('!!document.querySelector(".git-diff-comment-input")', 'comment editor')
+    await ui('(() => { const input = document.querySelector(".git-diff-comment-input"); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "needs a <test>"); input.dispatchEvent(new Event("input", { bubbles: true })) })()')
+    await ui('document.querySelector(".git-diff-comment-actions button").setAttribute("data-save", "")')
+    await click('[data-save]')
+    await until('document.querySelector(".git-diff-comment-text")?.innerText === "needs a <test>"', 'comment shown under its line as text')
+    assert.equal(await ui('document.querySelector(".git-diff-comments-count").innerText'), '1 comment')
+    await writeFile(join(out, 'line-comment.png'), (await main.webContents.capturePage()).toPNG())
+    assert.equal(await ui('window.__inserted.length'), 1, 'writing a comment inserts nothing')
+    await ui('[...document.querySelectorAll(".git-diff-comments-bar button")].find(element => element.innerText.includes("Add comments")).setAttribute("data-send", "")')
+    await click('[data-send]')
+    await until('window.__inserted.length === 2', 'comments inserted')
+    const review = await ui('window.__inserted[1]')
+    assert.equal(review.tabId, inserted.tabId)
+    assert.match(review.text, /^Review comments on `a\.txt` \(unstaged change in `alpha`\)\. Please address each one:\n1\. Line \d+ \(`\+two`\):\n   needs a <test>\n$/)
+    assert.match(await ui('document.querySelector(".git-message-info")?.innerText || ""'), /Added 1 comment to the prompt box of/)
+    await ui('[...document.querySelectorAll(".git-diff-comments-bar button")].find(element => element.innerText === "Clear").setAttribute("data-clear", "")')
+    await click('[data-clear]')
+    await until('!document.querySelector(".git-diff-comments-bar") && !document.querySelector(".git-diff-comment-text")', 'comments cleared')
+    assert.equal(await sameTerminal(), true)
+    results.lineComments = true
 
     // Ctrl+Shift+G with the terminal focused toggles the panel and the terminal never sees ^G.
     await ui('document.querySelector(".xterm-helper-textarea").focus()')
