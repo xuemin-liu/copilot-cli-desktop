@@ -90,7 +90,7 @@ import {
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
-import { forkSessionSnapshot } from './session-fork.js'
+import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -954,6 +954,9 @@ async function buildSessionSpawnPlan(
   sessionTitle: string,
 ): Promise<SessionSpawnPlan> {
   await refreshCopilotResolutionIfChanged()
+  // A tab started right after launch would otherwise be validated against empty capabilities while the startup
+  // probe is still running, and be refused for a launch option the CLI does support.
+  await capabilityProbe?.promise
   const resolution = state.resolution
   if (!resolution || resolution.version === null) {
     throw new Error('The copilot CLI is not available. Resolve it from the diagnostics screen first.')
@@ -1010,7 +1013,7 @@ function finalizeSessionArgs(
   plan: SessionSpawnPlan,
   resumeMode: ResumeMode,
   restoreLastSessionId: string | null,
-): { args: string[]; deterministicSessionId: string | null } {
+): { args: string[]; deterministicSessionId: string | null; discoverFromStore: boolean } {
   const resumeArgs = buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
   const freshSession = !plan.connectSessionId
     && (resumeMode === 'new' || (resumeMode === 'auto-resume' && resumeArgs.length === 0))
@@ -1019,12 +1022,17 @@ function finalizeSessionArgs(
     plan.connectSessionId ? { ...plan.launch, remoteControl: 'inherit', remoteExport: 'inherit' } : plan.launch,
     freshSession,
   )
-  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity ? randomUUID() : restoreLastSessionId
+  // Copilot refuses `--worktree` together with `--session-id`: a worktree session picks its own id, which the desktop
+  // then reads back from the session store. `--name` is still accepted.
+  const worktreeLaunch = freshSession && !plan.connectSessionId && plan.launch.worktree === true
+  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity && !worktreeLaunch ? randomUUID() : restoreLastSessionId
   const identity = plan.connectSessionId
     ? [`--connect=${plan.connectSessionId}`]
-    : freshSession && deterministicSessionId
-      ? [`--session-id=${deterministicSessionId}`, `--name=${plan.sessionTitle}`]
-      : resumeArgs
+    : worktreeLaunch
+      ? [`--name=${plan.sessionTitle}`]
+      : freshSession && deterministicSessionId
+        ? [`--session-id=${deterministicSessionId}`, `--name=${plan.sessionTitle}`]
+        : resumeArgs
   const args = [
     ...plan.prefixArgs,
     // Copilot's top navigation (Sessions, Issues, Pull requests, Gists) is
@@ -1039,7 +1047,7 @@ function finalizeSessionArgs(
       : buildPermissionArgs(plan.permissionPreset, plan.cwd, plan.permissionCapabilities)),
     ...plan.secretArgs,
   ]
-  return { args, deterministicSessionId }
+  return { args, deterministicSessionId: worktreeLaunch ? null : deterministicSessionId, discoverFromStore: worktreeLaunch }
 }
 
 /** Wires a session's lifecycle events to tab state for the given tab id.
@@ -1158,7 +1166,7 @@ async function createSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
-  const { args, deterministicSessionId } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
+  const { args, deterministicSessionId, discoverFromStore } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
 
   const session = new PtySession({
@@ -1169,6 +1177,7 @@ async function createSessionTab(
     spawnPty: spawnNodePty,
     sessionId: deterministicSessionId,
     discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
+    ...(discoverFromStore ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd } } : {}),
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
@@ -1438,6 +1447,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         spawnPty: spawnNodePty,
         sessionId: deterministicSessionId,
         discoverSessionIdFromOutput: deterministicSessionId === null,
+        ...(finalized.discoverFromStore ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd } } : {}),
         monitorSessionPermissions: true,
         ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
       })

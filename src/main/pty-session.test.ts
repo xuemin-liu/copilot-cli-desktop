@@ -304,3 +304,69 @@ test('write() and resize() safely ignore a session that has already exited', asy
   assert.doesNotThrow(() => session.resize(80, 24))
   assert.deepEqual(pty.written, [])
 })
+
+test('a session without an id adopts the new store directory, announces it, and starts monitoring it', async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-store-discovery-'))
+  const root = join(home, 'session-state')
+  await mkdir(root, { recursive: true })
+  const launchCwd = join(root, 'project')
+  try {
+    const pty = new FakePty()
+    const session = new PtySession({
+      file: 'copilot', args: ['--worktree', '--name=t'], cwd: launchCwd, spawnPty: fakeSpawnPty(pty), env: { COPILOT_HOME: home },
+      discoverSessionIdFromStore: { root, since: Date.now(), launchCwd, pollMs: 20, timeoutMs: 5_000 },
+      monitorSessionPermissions: true,
+    })
+    const announced = once(session, 'session-id')
+    await session.start()
+    assert.equal(session.lastSessionId, null)
+    const id = '55555555-5555-4555-8555-555555555555'
+    await mkdir(join(root, id), { recursive: true })
+    await writeFile(join(root, id, 'events.jsonl'),
+      JSON.stringify({ type: 'session.start', data: { startTime: new Date().toISOString(), context: { cwd: join(root, 'project.worktrees', 'w') } } }) + '\n'
+      + JSON.stringify({ type: 'session.permissions_changed', data: { allowAllPermissionMode: 'auto', allowAllPermissions: false } }) + '\n')
+    assert.deepEqual(await announced, [id])
+    assert.equal(session.lastSessionId, id)
+    const mode = await once(session, 'permission-mode')
+    assert.equal(mode[0], 'assisted', 'the monitor was attached to the discovered session')
+    await session.stop()
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('store discovery is cancelled by stop and never overrides an id learned another way', async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-store-discovery-'))
+  const root = join(home, 'session-state')
+  await mkdir(root, { recursive: true })
+  try {
+    const pty = new FakePty()
+    const session = new PtySession({
+      file: 'copilot', args: [], cwd: root, spawnPty: fakeSpawnPty(pty), discoverSessionIdFromOutput: true,
+      discoverSessionIdFromStore: { root, since: Date.now(), launchCwd: root, pollMs: 20, timeoutMs: 5_000 },
+    })
+    await session.start()
+    pty.emit('data', 'session id: 66666666-6666-4666-8666-666666666666\n')
+    assert.equal(session.lastSessionId, '66666666-6666-4666-8666-666666666666')
+    const late = '77777777-7777-4777-8777-777777777777'
+    await mkdir(join(root, late), { recursive: true })
+    await writeFile(join(root, late, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { startTime: new Date().toISOString(), context: { cwd: join(root, 'elsewhere') } } }) + '\n')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(session.lastSessionId, '66666666-6666-4666-8666-666666666666', 'the output-discovered id wins')
+    await session.stop()
+    const stopped = new PtySession({
+      file: 'copilot', args: [], cwd: root, spawnPty: fakeSpawnPty(new FakePty()),
+      discoverSessionIdFromStore: { root, since: Date.now(), launchCwd: root, pollMs: 20, timeoutMs: 5_000 },
+    })
+    await stopped.start()
+    await stopped.stop()
+    await mkdir(join(root, '88888888-8888-4888-8888-888888888888'), { recursive: true })
+    await writeFile(join(root, '88888888-8888-4888-8888-888888888888', 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { startTime: new Date().toISOString(), context: { cwd: join(root, 'elsewhere') } } }) + '\n')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(stopped.lastSessionId, null, 'a stopped session does not adopt a directory that appears later')
+  } finally { await rm(home, { recursive: true, force: true }) }
+})

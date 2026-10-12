@@ -1,7 +1,8 @@
 # Agent workbench plan
 
 Status: revision 3. Revision 1 was reworked after an independent review and revision 2 was approved with
-changes, both folded in (see [Review log](#review-log)). Phase 1 is merged (#73); phase 2 is implemented on `feat/agent-workbench-phase2`.
+changes, both folded in (see [Review log](#review-log)). Phases 1 (#73) and 2 (#74) are merged. The phase 3a spike is done (see the review log); its first
+result is a prerequisite fix, phase 3a-0, on `feat/agent-workbench-phase3a0`.
 
 Four ideas borrowed from [Orca](https://www.onorca.dev/), an open-source "agent development
 environment" built around one git worktree per task, many agents in parallel, and a sidebar
@@ -14,6 +15,7 @@ git actions confirm first and fail closed), and uses surfaces Copilot CLI actual
 | --- | --- | --- |
 | 1 | `feat/agent-workbench-phase1` | A live activity line under each sidebar session: which tool Copilot is running now, and for how long |
 | 2 | `feat/agent-workbench-phase2` | Comments on diff lines in the Git panel, batched into the prompt box |
+| 3a-0 | `feat/agent-workbench-phase3a0` | Fix: a fresh session with the worktree option actually starts (the CLI refuses `--worktree` with `--session-id`), and the desktop learns its id from the session store |
 | 3a | `feat/agent-workbench-phase3a` | Sessions started with `--worktree` show their worktree branch, the Git panel follows them, and the Branches tab lists worktrees |
 | 3b | `feat/agent-workbench-phase3b` | Remove a merged, unused worktree from the Branches tab |
 | 4 | `feat/agent-workbench-phase4` | Fan-out: one prompt pasted into up to five fresh worktree sessions |
@@ -51,9 +53,12 @@ session.usage_checkpoint data.totalPremiumRequests, totalNanoAiu
 Tools overlap: in the local logs most `tool.execution_start` records begin while another tool
 of the same turn is still running, so "the current tool" is a set, not one id.
 
-Copilot's `--worktree` creates the linked worktree under
-`%USERPROFILE%\source\repos\copilot-worktrees\<repo>\<name>` (observed), whose `.git` file names
-`<main repo>\.git\worktrees\<name>`.
+Copilot's `--worktree` creates a linked worktree whose location depends on the CLI version: older local logs
+show `%USERPROFILE%\source\repos\copilot-worktrees\<repo>\<name>`, CLI 1.0.94 creates
+`<parent of repo>\<repo>.worktrees\<name>` (spike, `scripts/worktree-resume-spike.mjs`). Nothing may depend on
+the location: a worktree is recognised only by its `.git` file naming `<main repo>\.git\worktrees\<name>`.
+The CLI refuses `--worktree` together with `--session-id` ("cannot be used with"), so a worktree session's
+id is not chosen by the desktop; `--name` is still accepted.
 
 Everything in this file is **data written by the model, by tools, and by third-party MCP
 servers**, including file paths, command lines and tool titles. Nothing in it is an instruction
@@ -217,15 +222,38 @@ Review comments on src/checkout/validators.ts (unstaged):
 
 Deliberately later: comments on history (committed) diffs, persistence across panel reopen.
 
+## Phase 3a-0 — a worktree session starts, and the desktop learns its id
+
+Found by the spike: for every fresh session the desktop passes `--session-id=<uuid>` (when the CLI
+supports it) so that it can tail the session's event log and resume it later. The CLI refuses that
+flag together with `--worktree`, so the worktree launch option has not worked with any CLI that
+supports session identity. The fix:
+
+- `finalizeSessionArgs` omits `--session-id` (keeps `--name` and `--worktree`) for a fresh worktree
+  launch, and reports that the id must be discovered.
+- `PtySession` gains store discovery: before spawning it snapshots the UUID directories under the
+  session store (`copilotSessionRoot`), then polls (every 500 ms, for at most 90 s, cancelled on exit
+  or stop) for a new directory whose `events.jsonl` starts with a `session.start` record whose
+  `startTime` is not before the spawn and whose `context.cwd` is not the launch folder (a worktree
+  session runs elsewhere). The first match becomes the session id: the same `session-id` event,
+  monitor attachment, usage association and tab update as output discovery. No match leaves the tab
+  as it is today for old CLIs (no monitor, `--continue` on restore).
+- The record is data: only `type`, `startTime` and `context.cwd` are read, from the first 4 KiB,
+  and the directory name must be a UUID.
+- Tests: argument building (worktree fresh has `--name` and `--worktree` and no `--session-id`;
+  resume and non-worktree launches unchanged); store discovery with real temp directories (a new
+  matching directory is adopted, one whose cwd is the launch folder is skipped, a pre-existing one
+  is ignored, stop cancels, timeout gives up); an Electron check mode that launches a real worktree
+  session from a temp repository with the mock model and waits for the tab's session id.
+
 ## Phase 3a — worktree-aware sessions (read-only)
 
-### Spike first (inside the phase, before UI)
+### Spike result
 
-Whether `copilot --resume <id>` returns to the worktree when the desktop spawns it with the
-profile folder as cwd is unknown. The spike runs a real worktree session with the mock model,
-restarts it through the desktop, and reads `session.resume.data.context.cwd`. If a resumed
-session runs in the main repo, the chip is shown only while the log's latest cwd is a worktree,
-and the tab warns "resumed outside its worktree". The result goes in this file's review log.
+`scripts/worktree-resume-spike.mjs` (real CLI 1.0.94, mock model): a session started with
+`--worktree` records the worktree as `session.start.context.cwd`, and `--resume <id>` run from the
+project folder records the same worktree in `session.resume.context.cwd`: a resumed session goes
+back to its worktree. The chip therefore follows the latest `session.start`/`session.resume` cwd.
 
 ### What the user sees
 
@@ -376,6 +404,15 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3a-0 result: shipped as designed, plus one more pre-existing defect found by the real-app check: a
+  tab created right after launch was validated against empty capabilities while the startup probe was
+  still running, and refused for an option the CLI supports. The spawn plan now waits for an in-flight
+  probe. The real-app check (`--worktree` mode) starts a fresh worktree session from a temporary
+  repository with CLI 1.0.96, which creates `<workspace>.worktrees\<name>`.
+- Phase 3a spike: `--resume` returns to the worktree (CLI 1.0.94); worktrees live at
+  `<repo>.worktrees\<name>` in 1.0.94 and elsewhere in older versions; and `--worktree` cannot be
+  combined with `--session-id`, which the desktop passes for every fresh session, so the worktree
+  launch option was broken. Phase 3a-0 was added for that fix, before 3a.
 - Revision 3: the same reviewer approved revision 2 with changes, all applied: 3b's removal
   gate counts every status except `completed`/`crashed`; `timestamp` is top-level; the tool
   allowlist uses the names actually observed (`rg`, `apply_patch`, `web_fetch`); `since` for

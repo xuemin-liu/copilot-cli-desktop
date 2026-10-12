@@ -90,6 +90,24 @@ if (process.versions.electron) {
     const profile = createWorkspaceProfile(workspace, 'read-only')
     profile.name = 'Isolated Electron test'
     profile.tabs = [{ title: 'Main UI test', lastSessionId: sessionId }]
+    if (mode?.flag === '--worktree') {
+      // A fresh worktree session needs a repository to branch from; the tab is created by the check itself.
+      const { execFileSync } = await import('node:child_process')
+      const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') }
+      await writeFile(join(directory, 'gitconfig'), '[user]\n\tname = Check\n\temail = check@example.com\n[init]\n\tdefaultBranch = main\n')
+      const git = (...gitArgs) => execFileSync('git', gitArgs, { cwd: workspace, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      git('init', '-q')
+      await writeFile(join(workspace, 'a.txt'), 'one\n')
+      git('add', '.')
+      git('commit', '-q', '-m', 'init')
+      profile.tabs = []
+      profile.defaultResumeMode = 'new'
+      profile.launch = { ...profile.launch, worktree: true }
+      // Copilot asks to trust the worktree folder; it lives beside the workspace, inside the disposable directory.
+      await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace, directory] }))
+      env.GIT_CONFIG_NOSYSTEM = '1'
+      env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
+    }
     await writeDesktopConfig(join(appData, 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false, provider: { type: 'openai', baseUrl, model: 'ui-check-model', offline: true } })
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
@@ -104,7 +122,7 @@ if (process.versions.electron) {
     if (mode) {
       const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
       assert.equal(result.passed, true, result.error || `${mode.label} regression failed (see ${artifacts})`)
-      assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
+      if (mode.flag !== '--worktree') assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
     }
     const remainingHistory = await readFile(historyPath, 'utf8')
     for (const event of originalHistory.trim().split('\n').map(JSON.parse)) assert.ok(remainingHistory.includes(event.id), 'Original history was changed')
