@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, fitLines, listNames, looksSensitivePath, maskSecrets } from './git-prompt.js'
+import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt, fitLines, listNames, looksSensitivePath, maskSecrets, privateKeyLineRanges } from './git-prompt.js'
+import type { DiffComment } from './git-prompt.js'
 import type { GitDiffView } from './git-types.js'
 
 const textDiff = (text: string, extra: Partial<GitDiffView> = {}): GitDiffView => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 0, ...extra })
@@ -136,4 +137,74 @@ test('a cut-off status list is called out, because there may be staged files nob
   const prompt = composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: [{ path: 'a.ts', diff: textDiff('+x') }], listTruncated: true })
   assert.match(prompt, /status list was cut off/)
   assert.doesNotMatch(composeCommitMessagePrompt({ repoName: 'app', branch: 'main', parts: [{ path: 'a.ts', diff: textDiff('+x') }] }), /cut off/)
+})
+
+const comment = (line: number, text: string, extra: Partial<DiffComment> = {}): DiffComment => ({ side: 'new', line, index: line, quote: `+const value = ${line}`, redacted: false, text, ...extra })
+
+test('review comments are numbered in order, name their line and side, and quote the diff line as inline code', () => {
+  const result = composeReviewCommentsPrompt({ repoName: 'repo', path: 'src/a.ts', staged: false, comments: [
+    comment(45, 'return a typed error object here too'),
+    comment(12, 'drop this', { side: 'old', quote: '-old()' }),
+    comment(52, 'first line\r\nsecond line\u0007 with a bell', { quote: '+has `tick`' }),
+  ] })
+  assert.equal(result.included, 3)
+  assert.equal(result.quotesDropped, false)
+  assert.equal(result.text,
+    'Review comments on `src/a.ts` (unstaged change in `repo`). Please address each one:\n'
+    + '1. Line 45 (`+const value = 45`):\n   return a typed error object here too\n'
+    + '2. Old line 12 (`-old()`):\n   drop this\n'
+    + '3. Line 52 ("+has `tick`"):\n   first line\n   second line with a bell\n')
+  assert.match(composeReviewCommentsPrompt({ repoName: 'r', path: 'a', staged: true, comments: [comment(1, '   ')] }).text, /staged change[\s\S]*\(empty comment\)/)
+})
+
+test('review comments on a secrets file keep the comments but never quote the lines, and masked values are reported', () => {
+  const secret = composeReviewCommentsPrompt({ repoName: 'repo', path: 'config/.env.production', staged: false, comments: [comment(3, 'rotate this', { quote: '+API_KEY=sk-abcdefghijklmnopqrstuvwxyz' })] })
+  assert.doesNotMatch(secret.text, /sk-abcdefghijklmnopqrstuvwxyz|API_KEY/)
+  assert.match(secret.text, /1\. Line 3:\n   rotate this\n/)
+  assert.match(secret.text, /not quoted because this file looks like it holds secrets/)
+  assert.equal(secret.quotesDropped, false)
+  const masked = composeReviewCommentsPrompt({ repoName: 'repo', path: 'src/client.ts', staged: false, comments: [comment(8, 'move to the vault', { quote: '+const token = "ghp_abcdefghijklmnopqrstuvwxyz0123"' })] })
+  assert.doesNotMatch(masked.text, /ghp_abcdefghijklmnopqrstuvwxyz0123/)
+  assert.match(masked.text, /\[REDACTED\]/)
+  assert.match(masked.text, /looked like credentials were replaced/)
+})
+
+test('review comments stay inside the budget by dropping the quotes first, then trailing comments, and say so', () => {
+  const long = (count: number): DiffComment[] => Array.from({ length: count }, (_item, index) => comment(index + 1, `comment ${index}`, { quote: `+${'q'.repeat(190)}` }))
+  const quotesOnly = composeReviewCommentsPrompt({ repoName: 'r', path: 'a.ts', staged: false, comments: long(60) })
+  assert.ok(quotesOnly.text.length <= PROMPT_BUDGET)
+  assert.equal(quotesOnly.included, 60, 'dropping the quotes was enough')
+  assert.equal(quotesOnly.quotesDropped, true)
+  assert.doesNotMatch(quotesOnly.text, /qqqq/)
+  assert.doesNotMatch(quotesOnly.text, /not included/)
+  const many = composeReviewCommentsPrompt({ repoName: 'r', path: 'a.ts', staged: false, comments: Array.from({ length: 400 }, (_item, index) => comment(index + 1, `c${index} ${'x'.repeat(100)}`)) })
+  assert.ok(many.text.length <= PROMPT_BUDGET)
+  assert.ok(many.included > 0 && many.included < 400)
+  assert.match(many.text, new RegExp(`\\[… ${400 - many.included} more comments not included: the prompt box is full\\]`))
+  assert.match(many.text, new RegExp(`${many.included}\\. Line ${many.included}:`))
+  assert.doesNotMatch(many.text, new RegExp(`${many.included + 1}\\. Line`))
+  const huge = composeReviewCommentsPrompt({ repoName: 'r', path: 'a.ts', staged: false, comments: [comment(1, 'y'.repeat(50_000)), comment(2, 'short')] })
+  assert.ok(huge.text.length <= PROMPT_BUDGET)
+  assert.equal(huge.included, 2, 'a single comment is cut to its own bound, not dropped')
+})
+
+test('private-key block ranges are found in a diff, and a comment captured inside one is never quoted', () => {
+  const diffText = [
+    '@@ -1,2 +1,6 @@', ' before', '+-----BEGIN RSA PRIVATE KEY-----', '+MIIEowIBAAKCAQEAu7secretsecretsecret', '+zzzzsecretsecretsecretsecretsecret', '+-----END RSA PRIVATE KEY-----', ' after',
+  ].join('\n') + '\n'
+  assert.deepEqual(privateKeyLineRanges(diffText), [[2, 5]])
+  assert.deepEqual(privateKeyLineRanges('@@ -1 +1 @@\n+-----BEGIN PRIVATE KEY-----\n+unterminated'), [[1, 2]], 'an unterminated block runs to the end')
+  assert.deepEqual(privateKeyLineRanges('@@ -1 +1 @@\n+harmless'), [])
+  const result = composeReviewCommentsPrompt({ repoName: 'r', path: 'config.txt', staged: false, comments: [
+    { side: 'new', line: 3, index: 3, quote: '', redacted: true, text: 'rotate this key' },
+    { side: 'new', line: 6, index: 6, quote: ' after', redacted: false, text: 'and this is fine to quote' },
+  ] })
+  assert.doesNotMatch(result.text, /MIIEow|secretsecret/)
+  assert.match(result.text, /1\. Line 3 \(`\[REDACTED PRIVATE KEY\]`\):\n   rotate this key\n/)
+  assert.match(result.text, /2\. Line 6 \(` after`\):\n   and this is fine to quote\n/)
+  assert.match(result.text, /looked like credentials were replaced/)
+  const unflagged = composeReviewCommentsPrompt({ repoName: 'r', path: 'config.txt', staged: false, comments: [
+    { side: 'new', line: 3, index: 3, quote: '+MIIEowIBAAKCAQEAu7secretsecretsecret', redacted: false, text: 'rotate this key' },
+  ] })
+  assert.match(unflagged.text, /MIIEow/, 'the composer trusts the flag: redaction is decided where the quote is captured (diff-comments.ts)')
 })

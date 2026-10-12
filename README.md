@@ -42,7 +42,7 @@ handle, only input/output/resize events.
   with step reports and screenshots.
 - **Git panel** (Ctrl+Shift+G) shows the repositories in your project folder beside the
   session: branch, changed files, diffs and history, updated as Copilot works. It can
-  add a diff, or a request for a commit message, to the prompt box. It can stage and
+  add a diff, comments on its lines, or a request for a commit message, to the prompt box. It can stage and
   unstage files, make local commits (a repository's own hooks need your approval first),
   fetch, fast-forward pull and push (never forced, never prompting for credentials), and
   create or switch local branches (a switch is refused while a Copilot session is working

@@ -1,7 +1,7 @@
 # Agent workbench plan
 
 Status: revision 3. Revision 1 was reworked after an independent review and revision 2 was approved with
-changes, both folded in (see [Review log](#review-log)). Phase 1 is implemented on `feat/agent-workbench-phase1` (PR pending review).
+changes, both folded in (see [Review log](#review-log)). Phase 1 is merged (#73); phase 2 is implemented on `feat/agent-workbench-phase2`.
 
 Four ideas borrowed from [Orca](https://www.onorca.dev/), an open-source "agent development
 environment" built around one git worktree per task, many agents in parallel, and a sidebar
@@ -361,6 +361,15 @@ Each is a small, independent PR, not part of the phases above:
 ## Review log
 
 - Revision 1: draft.
+- Phase 2 result: shipped as designed, with one change: comments are keyed by file path and side, not by the
+  panel's diff key, because entry ids change with every status generation and the key would have cleared the
+  comments each time the agent touched any file. Staleness is detected by comparing the diff text the comments
+  were written against, not the status generation, which also advances on refreshes that change nothing.
+  Review of the PR added: redaction of a quote inside a private-key block is decided when the comment is
+  captured, from the diff current at that moment (a shared snapshot would mismatch later comments), and every
+  bucket of the repository is reconciled against each complete status so comments on a reverted change never
+  come back; hunk content is classified by first character while the hunk header counts last, so +++ and ---
+  content lines are not taken for file headers.
 - Phase 1 result: shipped as designed. The `--activity` Electron check now also makes the mock
   model call the real CLI's `view` tool and replays the recorded `tool.execution_start` through
   the tracker, so the label contract ("Viewing marker.txt") is checked against the installed

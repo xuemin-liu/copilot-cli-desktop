@@ -150,12 +150,22 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
 
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
   Enter. The text is kept under 11,000 characters and says how many lines were left out.
+- **Comments on diff lines.** Hover a line of the diff and select the **+** in its gutter to write a comment under it
+  (Ctrl+Enter saves, Esc cancels; an existing comment shows **✎** and can be edited or removed). Comments collect under
+  the diff with a count, **Add comments to prompt** and **Clear**. **Add comments to prompt** puts a numbered list in the
+  prompt box, each item naming its line ("Line 45" in the new file, "Old line 12" for a deleted line) and quoting the diff
+  line as it was shown. Nothing is sent. Comments belong to one file and side (staged or working tree); choosing another
+  file keeps them until you return, and they are dropped when the file is no longer changed. If the diff changes under
+  them (Copilot edits the file, say), the bar says so and the line numbers may no longer match: check them before
+  sending. Lines past the panel's 4,000-line display cap cannot be commented on. The list stays under the same 11,000
+  character limit: the quoted lines are dropped first, then trailing comments, and the prompt says how many were left out.
 - **Draft commit message with Copilot** (shown when files are staged) puts a prompt in the box asking for a
   conventional-commit message. It reads up to 30 staged diffs and shares the space between them; every other staged file is
   still named and counted in the prompt, and a note says if the file list itself was cut off, so a message is never drafted
   from part of a commit without saying so.
 - Files that look like they hold secrets (`.env*`, `*.pem`, `*.key`, `id_rsa`, `secrets*`, `.npmrc` and similar) are named
-  but their contents are never added. Values that look like credentials in other files are replaced with `[REDACTED]`.
+  but their contents are never added, and comments on their lines are sent without the quoted line. Values that look like
+  credentials in other files are replaced with `[REDACTED]`, in quoted comment lines too.
   This is a safeguard for the common shapes, not a guarantee.
 - If the active session is open in its own window, the buttons are disabled: the panel lives in the main window.
 

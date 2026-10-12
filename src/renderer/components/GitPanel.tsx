@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
-import { composeCommitMessagePrompt, composeDiffPrompt } from '../../main/git-prompt.js'
+import { composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
@@ -11,6 +11,9 @@ import { GitSyncBar } from './GitSyncBar.js'
 import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
+import type { DiffCommentAnchor } from './GitDiffView.js'
+import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
+import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
 
 export interface GitPanelProps {
@@ -165,6 +168,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [statusError, setStatusError] = useState<string | null>(null)
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
+  // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
+  // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
+  const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
   const [reload, setReload] = useState(0)
   const [log, setLog] = useState<{ repoId: string; headOid: string | null; entries: GitLogEntry[]; done: boolean } | null>(null)
   // The "Load more" request in flight, if any. Only one at a time, and a response only extends the list it was asked for.
@@ -225,6 +231,25 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, diffKey, reload]) // eslint-disable-line react-hooks/exhaustive-deps
+  const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
+  const commentKey = commentTarget ? bucketKey(commentTarget) : null
+  const activeComments = commentKey ? comments.get(commentKey) ?? null : null
+  // A file that is no longer changed on a side loses that side's comments, selected or not: there is no diff for them to
+  // point at, and they must not come back when the file changes again later. Only a complete status list proves absence.
+  useEffect(() => {
+    if (!currentStatus || currentStatus.truncated) return
+    const staged = new Set(currentStatus.staged.map(entry => entry.path))
+    const working = new Set([...currentStatus.unstaged, ...currentStatus.untracked, ...currentStatus.conflicted].map(entry => entry.path))
+    setComments(current => pruneCommentBuckets(current, currentStatus.repoId, (path, isStaged) => (isStaged ? staged : working).has(path)))
+  }, [currentStatus])
+  const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diff.value.text !== activeComments.diffText
+  const changeComment = (key: string, anchor: DiffCommentAnchor, text: string | null): void => {
+    if (!commentKey || !diff || diff.key !== diffKey) return
+    const diffText = diff.value.text
+    setComments(current => updateCommentBucket(current, commentTarget!, diffText, key, anchor, text))
+  }
+  const clearComments = (): void => { if (commentKey) setComments(current => removeCommentBucket(current, commentKey)) }
+
   useEffect(() => {
     const onFocus = (): void => setReload(count => count + 1)
     window.addEventListener('focus', onFocus)
@@ -306,6 +331,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (!repo || !selection || !diff || diff.key !== diffKey || !promptTarget) return
     insert(promptTarget.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: diff.value }))
     setNotice(`Added to the prompt box of “${promptTarget.title}”. Review it and press Enter to send.`)
+  }
+
+  const addCommentsToPrompt = (): void => {
+    if (!repo || !selection || !activeComments || !promptTarget) return
+    const ordered = orderedComments(activeComments)
+    const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered })
+    insert(promptTarget.id, result.text)
+    const left = ordered.length - result.included
+    setNotice(`Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
+      + (left > 0 ? ` ${left} did not fit.` : '') + (result.quotesDropped ? ' The quoted lines were left out to fit.' : '') + ' Review it and press Enter to send.')
   }
 
   const draftMessage = (): void => {
@@ -546,7 +581,20 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       </div>
                       {diffError && <p className="git-message git-message-error" role="alert">{diffError}</p>}
                       {!diffError && selectedEntry === null && <p className="git-message" role="status">That file is no longer changed.</p>}
-                      {!diffError && selectedEntry !== null && diff?.key === diffKey && <GitDiffView diff={diff.value} />}
+                      {!diffError && selectedEntry !== null && diff?.key === diffKey && (
+                        <GitDiffView diff={diff.value} comments={{ items: new Map([...(activeComments?.items ?? [])].map(([key, item]) => [key, item.text])), onChange: changeComment }} />
+                      )}
+                      {!diffError && selectedEntry !== null && activeComments && (
+                        <div className="git-diff-comments-bar">
+                          <span className="git-diff-comments-count">{activeComments.items.size} comment{activeComments.items.size === 1 ? '' : 's'}</span>
+                          {commentsStale && <span className="git-diff-comments-stale" role="status">The diff changed since these were written; check they still apply.</span>}
+                          <button type="button" disabled={!canInsert} onClick={addCommentsToPrompt}
+                            title={canInsert ? `Put these comments in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
+                            Add comments to prompt
+                          </button>
+                          <button type="button" onClick={clearComments} title="Remove every comment on this file">Clear</button>
+                        </div>
+                      )}
                       {!diffError && selectedEntry !== null && diff?.key !== diffKey && <p className="git-message" role="status">Loading diff…</p>}
                     </div>
                   )}
