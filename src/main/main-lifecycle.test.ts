@@ -1298,3 +1298,43 @@ test('remote tabs are never persisted as restorable local sessions', async () =>
     assert.deepEqual(profile.tabs, [])
   })
 })
+
+test('a fresh worktree launch carries --name but no --session-id, and adopts the id the CLI writes to the store', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.launch = { ...profile.launch, worktree: true }
+    profile.defaultResumeMode = 'new'
+    harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true,
+      supportedOptions: ['--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+    const opened = await harness.createMain()
+    const args = harness.spawns[0]!.args
+    const worktreeArg = args.find((arg) => arg.startsWith('--worktree='))
+    assert.ok(worktreeArg, args.join(' '))
+    const worktreeName = worktreeArg.slice('--worktree='.length)
+    assert.match(worktreeName, /^desktop-[a-z0-9-]+-[0-9a-f]{6}$/, 'the desktop names the worktree')
+    assert.ok(args.some((arg) => arg.startsWith('--name=')), 'the session is still named')
+    assert.ok(!args.some((arg) => arg.startsWith('--session-id=')), 'Copilot refuses --session-id with --worktree')
+    assert.ok(!args.some((arg) => arg.startsWith('--resume')), 'a fresh launch does not resume')
+    assert.equal(opened.tabs[0]?.lastSessionId, null)
+
+    // The CLI picks the id and writes the session's log under COPILOT_HOME, which the fixture points at `directory`.
+    const sessionId = '99999999-9999-4999-8999-999999999999'
+    const sessionDirectory = join(directory, 'session-state', sessionId)
+    await mkdir(sessionDirectory, { recursive: true })
+    await writeFile(join(sessionDirectory, 'events.jsonl'),
+      JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: join(directory, 'project.worktrees', worktreeName) } } }) + '\n'
+      + '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"auto","allowAllPermissions":false}}\n')
+    let state = opened
+    for (let attempt = 0; attempt < 60 && state.tabs[0]?.lastSessionId !== sessionId; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      state = await harness.request('desktop:get-state')
+    }
+    assert.equal(state.tabs[0]?.lastSessionId, sessionId, 'the tab learned its id from the store')
+    harness.spawns[0]!.emitData('\u001b[?25h')
+    for (let attempt = 0; attempt < 30 && state.tabs[0]?.sessionPermissionMode !== 'assisted'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      state = await harness.request('desktop:get-state')
+    }
+    assert.equal(state.tabs[0]?.sessionPermissionMode, 'assisted', 'the permission monitor follows the discovered session')
+  })
+})

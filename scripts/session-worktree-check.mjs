@@ -1,0 +1,57 @@
+// A fresh worktree session in the real app: the real CLI creates the worktree and picks the session id; the desktop
+// must learn that id from the session store and start monitoring it. Isolated data, loopback mock model.
+import assert from 'node:assert/strict'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { app, BrowserWindow } from 'electron'
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+async function until(action, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) { const result = await action(); if (result) return result; await delay(200) }
+  throw new Error(`Timed out: ${label}`)
+}
+export async function runWorktreeCheck() {
+  await app.whenReady()
+  const window = await until(() => BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/index.html')), 'renderer')
+  const ui = code => window.webContents.executeJavaScript(code)
+  const state = () => ui('window.copilotDesktop.getState()')
+  const artifacts = process.env.DESKTOP_UI_CHECK_ARTIFACTS
+  await mkdir(artifacts, { recursive: true })
+  const screenshot = async name => writeFile(join(artifacts, `${name}.png`), (await window.webContents.capturePage()).toPNG())
+  try {
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
+    const initial = await state()
+    const profileId = initial.activeProfileId
+    const before = new Set(initial.tabs.map(tab => tab.id))
+    const created = await ui(`window.copilotDesktop.createTab(null, ${JSON.stringify(profileId)})`)
+    const createdId = created.tabs.find(tab => !before.has(tab.id))?.id
+    assert.ok(createdId, 'a tab was created')
+    const running = await until(async () => (await state()).tabs.find(tab => tab.id === createdId && tab.status === 'running'), 'worktree session running')
+    assert.equal(running.lastSessionId, null, 'the desktop could not choose the id')
+    // The real CLI creates the worktree and writes its own session id; the desktop reads it back from the store.
+    const known = await until(async () => { const tab = (await state()).tabs.find(tab => tab.id === running.id); return tab?.lastSessionId ? tab : null }, 'session id discovered from the store', 90_000)
+    assert.match(known.lastSessionId, /^[0-9a-f-]{36}$/)
+    const events = await readFile(join(process.env.COPILOT_HOME, 'session-state', known.lastSessionId, 'events.jsonl'), 'utf8')
+    const start = JSON.parse(events.split('\n')[0])
+    assert.equal(start.type, 'session.start')
+    const cwd = start.data?.context?.cwd ?? ''
+    const workspace = initial.profiles.find(profile => profile.id === profileId).path
+    assert.notEqual(cwd.toLowerCase(), workspace.toLowerCase(), 'a worktree session runs outside the project folder')
+    assert.ok(cwd.toLowerCase().includes('.worktrees') || cwd.toLowerCase().includes('copilot-worktrees'), `worktree cwd: ${cwd}`)
+    assert.match(cwd.split(/[\\/]/).pop(), /^desktop-isolated-electron-test-[0-9a-f]{6}$/, 'the worktree carries the name the desktop chose')
+    assert.equal(known.status, 'running')
+    assert.equal(known.processId, running.processId, 'the same CLI process')
+    // The monitor tails the discovered log: a prompt round-trip through the mock model ends in a recorded idle state.
+    await until(async () => (await ui(`window.copilotDesktop.getTabBacklog(${JSON.stringify(running.id)})`)).includes('open sidebar'), 'prompt ready')
+    await ui(`window.copilotDesktop.writeTab(${JSON.stringify(running.id)}, "Reply with the saved marker.\\r")`)
+    await until(async () => (await state()).tabs.find(tab => tab.id === running.id)?.activity === 'idle', 'turn recorded in the discovered log', 60_000)
+    await screenshot('01-worktree-session')
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sessionId: known.lastSessionId, cwd, cli: (await state()).resolution.version, checks: ['fresh worktree launch without --session-id', 'id discovered from the store', 'session.start cwd is a worktree', 'monitor follows the discovered log through a prompt round-trip'] }, null, 2))
+    console.log('[worktree] PASS: fresh worktree session launched, id discovered from the store: ' + known.lastSessionId)
+  } catch (error) {
+    await screenshot('failure')
+    console.error('[worktree] state', JSON.stringify(await state()))
+    throw error
+  } finally { app.quit() }
+}

@@ -86,7 +86,12 @@ handle, only input/output/resize events.
 - Per-workspace Copilot launch profiles for model, reasoning effort, context
   tier, custom agent, interactive/plan/autopilot/plan-then-autopilot mode,
   AI-credit and continuation limits, worktrees, screen readers, remote control,
-  and session-export privacy.
+  and session-export privacy. A fresh session with the worktree option lets the
+  CLI choose its session id (the CLI refuses `--worktree` together with
+  `--session-id`). The desktop names the worktree and its branch
+  (`desktop-<session title>-<6 hex>`), finds the session that runs in that
+  worktree in the session store within about a minute, then monitors and
+  resumes it as usual.
 - A Copilot management center that can install, repair, and update the official
   CLI; exposes Copilot's native session-start automatic updates with stable and
   prerelease channels; labels sessions still running an older CLI after an

@@ -6,6 +6,8 @@ import { windowsSystemExecutable } from './resolve-copilot.js'
 import { detectApprovalPrompt, extractSessionId } from './approval-heuristic.js'
 import { copilotSessionRoot } from './session-fork.js'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
+import { SessionStoreDiscovery } from './session-store-discovery.js'
+import type { StoreDiscoveryOptions } from './session-store-discovery.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
@@ -31,6 +33,8 @@ export interface PtySessionOptions {
   forceKillTimeoutMs?: number
   sessionId?: string | null
   discoverSessionIdFromOutput?: boolean
+  /** Watch the session store for the new session's directory (a worktree launch cannot be given an id). */
+  discoverSessionIdFromStore?: StoreDiscoveryOptions
   monitorSessionPermissions?: boolean
 }
 
@@ -59,6 +63,7 @@ export class PtySession extends EventEmitter {
   private heuristicBuffer = ''
   private lastKnownSessionId: string | null
   private permissionMonitor: SessionPermissionMonitor | null = null
+  private storeDiscovery: SessionStoreDiscovery | null = null
   private exitHandled = false
   private exitCompletion: Promise<void> | null = null
   private permissionDrain: Promise<void> | null = null
@@ -196,6 +201,11 @@ export class PtySession extends EventEmitter {
     if (this.pty) throw new Error('This session has already started')
     this.setStatus('starting')
     if (this.lastKnownSessionId) await this.attachPermissionMonitor(this.lastKnownSessionId)
+    // The snapshot of what is already in the store must be complete before the spawn, or the new session could be in it.
+    if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromStore) {
+      this.storeDiscovery = new SessionStoreDiscovery(this.options.discoverSessionIdFromStore)
+      await this.storeDiscovery.ready()
+    }
     const spawnCols = this.options.cols
     const spawnRows = this.options.rows
     let pty: PtyLike
@@ -207,10 +217,20 @@ export class PtySession extends EventEmitter {
         rows: spawnRows,
       })
     } catch (error) {
+      this.storeDiscovery?.cancel()
       await this.drainPermissionMonitor()
       throw error
     }
     this.pty = pty
+    if (this.storeDiscovery) {
+      const discovery = this.storeDiscovery
+      void discovery.find().then((sessionId) => {
+        if (sessionId === null || this.storeDiscovery !== discovery || this.lastKnownSessionId !== null || this.exitHandled) return
+        this.lastKnownSessionId = sessionId
+        this.emit('session-id', sessionId)
+        void this.attachPermissionMonitor(sessionId)
+      }).catch((error) => this.emit('permission-monitor-error', `Session store discovery failed: ${String(error)}`))
+    }
     // A resize() that arrives while spawnPty() is still resolving updates
     // this.options (so a later restart still reads the latest size) but has
     // no live pty to forward to yet — this.pty is still null at that point.
@@ -252,6 +272,7 @@ export class PtySession extends EventEmitter {
       if (this.exitHandled) return
       this.exitHandled = true
       this.pty = null
+      this.storeDiscovery?.cancel()
       pty.dispose?.()
       const expected = this.stopping
       this.exitCompletion = this.drainPermissionMonitor().then(() => {
@@ -302,6 +323,7 @@ export class PtySession extends EventEmitter {
       return
     }
     this.stopping = true
+    this.storeDiscovery?.cancel()
     this.setStatus('stopping')
     const exited = new Promise<void>((resolve) => this.once('exit', resolve))
 
