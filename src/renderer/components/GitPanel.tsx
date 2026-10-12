@@ -12,7 +12,7 @@ import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
 import type { DiffCommentAnchor } from './GitDiffView.js'
-import { bucketKey, orderedComments, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
+import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
 
@@ -231,18 +231,22 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, diffKey, reload]) // eslint-disable-line react-hooks/exhaustive-deps
-  const commentKey = repo && selection ? bucketKey(repo.id, selection.path, selection.staged) : null
+  const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
+  const commentKey = commentTarget ? bucketKey(commentTarget) : null
   const activeComments = commentKey ? comments.get(commentKey) ?? null : null
-  // A file that is no longer changed loses its comments: there is no diff for them to point at. Other files keep theirs.
-  const entryGone = selection !== null && currentStatus !== null && selectedEntry === null
+  // A file that is no longer changed on a side loses that side's comments, selected or not: there is no diff for them to
+  // point at, and they must not come back when the file changes again later. Only a complete status list proves absence.
   useEffect(() => {
-    if (entryGone && commentKey) setComments(current => removeCommentBucket(current, commentKey))
-  }, [entryGone, commentKey])
+    if (!currentStatus || currentStatus.truncated) return
+    const staged = new Set(currentStatus.staged.map(entry => entry.path))
+    const working = new Set([...currentStatus.unstaged, ...currentStatus.untracked, ...currentStatus.conflicted].map(entry => entry.path))
+    setComments(current => pruneCommentBuckets(current, currentStatus.repoId, (path, isStaged) => (isStaged ? staged : working).has(path)))
+  }, [currentStatus])
   const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diff.value.text !== activeComments.diffText
   const changeComment = (key: string, anchor: DiffCommentAnchor, text: string | null): void => {
     if (!commentKey || !diff || diff.key !== diffKey) return
     const diffText = diff.value.text
-    setComments(current => updateCommentBucket(current, commentKey, diffText, key, anchor, text))
+    setComments(current => updateCommentBucket(current, commentTarget!, diffText, key, anchor, text))
   }
   const clearComments = (): void => { if (commentKey) setComments(current => removeCommentBucket(current, commentKey)) }
 
@@ -332,7 +336,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const addCommentsToPrompt = (): void => {
     if (!repo || !selection || !activeComments || !promptTarget) return
     const ordered = orderedComments(activeComments)
-    const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered, diffText: activeComments.diffText })
+    const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered })
     insert(promptTarget.id, result.text)
     const left = ordered.length - result.included
     setNotice(`Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`

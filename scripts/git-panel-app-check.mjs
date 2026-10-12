@@ -171,6 +171,17 @@ if (!process.versions.electron) {
     await pickFile('b.txt')
     await until('document.querySelector(".git-diff-comment-text")?.innerText === "second file"', 'clearing one file leaves the other file its comment')
     await pickFile('a.txt')
+    // A file that goes clean while another is selected loses its comments; changing it again starts without them.
+    await writeFile(join(workspace, 'alpha', 'b.txt'), 'alpha\n')
+    await click('[aria-label="Rescan repositories"]')
+    await until('![...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "b.txt")', 'b.txt left the changed list')
+    await writeFile(join(workspace, 'alpha', 'b.txt'), 'alpha\nbeta\n')
+    await click('[aria-label="Rescan repositories"]')
+    await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "b.txt")', 'b.txt changed again')
+    await pickFile('b.txt')
+    await until('/\\+beta/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'b.txt diff shown again')
+    assert.equal(await ui('!!document.querySelector(".git-diff-comments-bar") || !!document.querySelector(".git-diff-comment-text")'), false, 'comments on a reverted change do not come back')
+    await pickFile('a.txt')
     assert.equal(await sameTerminal(), true)
     results.lineComments = true
 
