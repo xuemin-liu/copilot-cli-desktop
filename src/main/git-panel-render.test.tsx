@@ -346,3 +346,18 @@ test('with comments enabled, numbered lines get a gutter button and existing com
   const cut = renderToStaticMarkup(<GitDiffView diff={diff('+a', { truncated: true })} comments={{ items: new Map(), onChange: () => undefined }} />)
   assert.match(cut, /Lines past this point cannot be commented on/)
 })
+
+test('inside a hunk, content starting with +++ or --- is an added or deleted line, not a file header, and counts advance', () => {
+  const numbered = numberDiffLines(['--- a/x.c', '+++ b/x.c', '@@ -1,2 +1,2 @@', '---i;', '-old();', '+++i;', '+new();', '--- a/next-file', '+++ b/next-file'])
+  assert.deepEqual(numbered.map(line => [line.kind, line.oldLine, line.newLine]), [
+    ['meta', null, null], ['meta', null, null], ['hunk', null, null],
+    ['del', 1, null], ['del', 2, null], ['add', null, 1], ['add', null, 2],
+    ['meta', null, null], ['meta', null, null],
+  ])
+  assert.deepEqual(numberDiffLines(['@@ -5 +5 @@', '-a', '+b', 'diff --git a/y b/y']).map(line => [line.kind, line.oldLine, line.newLine]),
+    [['hunk', null, null], ['del', 5, null], ['add', null, 5], ['meta', null, null]], 'a header without counts is one line each side')
+  const html = renderToStaticMarkup(<GitDiffView diff={diff('@@ -1,1 +1,1 @@\n---i;\n+++i;')} comments={{ items: new Map(), onChange: () => undefined }} />)
+  assert.equal(html.match(/git-diff-gutter/g)?.length, 2, 'both content lines can be commented')
+  assert.match(html, /git-diff-del[^>]*>.*aria-label="Comment on old line 1"/)
+  assert.match(html, /git-diff-add[^>]*>.*aria-label="Comment on line 1"/)
+})

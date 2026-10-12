@@ -24,24 +24,33 @@ export interface NumberedDiffLine {
   newLine: number | null
 }
 
-/** Give each diff line its file line numbers from the hunk headers. Headers, metadata and `\ No newline at end of file`
- * markers carry none, and lines before the first hunk header carry none either. */
+/** Give each diff line its file line numbers from the hunk headers. Inside a hunk, a line is content classified by its
+ * first character for as long as the header's counts say the hunk continues (so `+++i;` is an added line, not a file
+ * header); `\ No newline at end of file` markers carry no number. Headers, metadata and lines outside any hunk carry
+ * none either. */
 export function numberDiffLines(lines: readonly string[]): NumberedDiffLine[] {
   let oldNext = 0
   let newNext = 0
-  let inHunk = false
+  let oldLeft = 0
+  let newLeft = 0
   return lines.map(text => {
-    const kind = diffLineKind(text)
-    if (kind === 'hunk') {
-      const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text)
-      inHunk = header !== null
-      if (header) { oldNext = Number(header[1]); newNext = Number(header[2]) }
+    if (oldLeft === 0 && newLeft === 0) {
+      const kind = diffLineKind(text)
+      if (kind === 'hunk') {
+        const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(text)
+        if (header) {
+          oldNext = Number(header[1]); oldLeft = header[2] === undefined ? 1 : Number(header[2])
+          newNext = Number(header[3]); newLeft = header[4] === undefined ? 1 : Number(header[4])
+        }
+      }
       return { text, kind, oldLine: null, newLine: null }
     }
-    if (kind === 'meta' || !inHunk || text.startsWith('\\')) return { text, kind, oldLine: null, newLine: null }
-    if (kind === 'add') return { text, kind, oldLine: null, newLine: newNext++ }
-    if (kind === 'del') return { text, kind, oldLine: oldNext++, newLine: null }
-    return { text, kind, oldLine: oldNext++, newLine: newNext++ }
+    if (text.startsWith('\\')) return { text, kind: 'context', oldLine: null, newLine: null }
+    if (text.startsWith('+') && newLeft > 0) { newLeft -= 1; return { text, kind: 'add', oldLine: null, newLine: newNext++ } }
+    if (text.startsWith('-') && oldLeft > 0) { oldLeft -= 1; return { text, kind: 'del', oldLine: oldNext++, newLine: null } }
+    oldLeft = Math.max(0, oldLeft - 1)
+    newLeft = Math.max(0, newLeft - 1)
+    return { text, kind: 'context', oldLine: oldNext++, newLine: newNext++ }
   })
 }
 

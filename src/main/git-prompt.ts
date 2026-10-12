@@ -139,6 +139,8 @@ export interface DiffComment {
   line: number
   /** The diff line as shown, with its leading +, - or space. Masked and bounded before it is quoted. */
   quote: string
+  /** Index of the line in the diff as shown: orders the comments and places them relative to private-key blocks. */
+  index: number
   text: string
 }
 
@@ -148,6 +150,20 @@ export interface ReviewCommentsPrompt {
   included: number
   /** The quoted diff lines were left out to make the comments fit. */
   quotesDropped: boolean
+}
+
+/** Inclusive line-index ranges of private-key blocks in a diff as shown. A single line from inside such a block has no
+ * BEGIN marker of its own, so the block redaction cannot recognise it; the ranges let a caller withhold it anyway. */
+export function privateKeyLineRanges(diffText: string): Array<[number, number]> {
+  const text = diffText.replace(/\r\n/g, '\n').replace(/\n$/, '')
+  const ranges: Array<[number, number]> = []
+  for (const match of text.matchAll(PRIVATE_KEY_BLOCK)) {
+    const start = match.index ?? 0
+    const end = start + Math.max(0, match[0].length - 1)
+    const lineOf = (offset: number): number => { let line = 0; for (let at = text.indexOf('\n'); at !== -1 && at < offset; at = text.indexOf('\n', at + 1)) line += 1; return line }
+    ranges.push([lineOf(start), lineOf(end)])
+  }
+  return ranges
 }
 
 const MAX_QUOTE_CHARS = 200
@@ -168,9 +184,11 @@ function inlineQuote(text: string): string {
  * whole diff: a secrets-looking file is never quoted, credential-looking values are masked, and the result stays inside
  * the prompt budget by dropping the quotes first, then trailing comments (saying how many were left out).
  */
-export function composeReviewCommentsPrompt(input: { repoName: string; path: string; staged: boolean; comments: readonly DiffComment[] }): ReviewCommentsPrompt {
+export function composeReviewCommentsPrompt(input: { repoName: string; path: string; staged: boolean; comments: readonly DiffComment[]; diffText?: string }): ReviewCommentsPrompt {
   const header = `Review comments on \`${input.path}\` (${input.staged ? 'staged' : 'unstaged'} change in \`${input.repoName}\`). Please address each one:\n`
   const withhold = looksSensitivePath(input.path)
+  const keyRanges = input.diffText === undefined ? [] : privateKeyLineRanges(input.diffText)
+  const insideKey = (index: number): boolean => keyRanges.some(([first, last]) => index >= first && index <= last)
   const build = (count: number, quotes: boolean): string => {
     const notes = new Set<string>()
     if (withhold && quotes) notes.add('The changed lines are not quoted because this file looks like it holds secrets.')
@@ -178,7 +196,7 @@ export function composeReviewCommentsPrompt(input: { repoName: string; path: str
       const where = `${comment.side === 'old' ? 'Old line' : 'Line'} ${comment.line}`
       let quoted = ''
       if (quotes && !withhold) {
-        const masked = maskSecrets(comment.quote.replace(CONTROL_CHARS, ''))
+        const masked = insideKey(comment.index) ? { text: '[REDACTED PRIVATE KEY]', masked: true } : maskSecrets(comment.quote.replace(CONTROL_CHARS, ''))
         if (masked.masked) notes.add('Values that looked like credentials were replaced with [REDACTED].')
         quoted = ` (${inlineQuote(masked.text.length > MAX_QUOTE_CHARS ? `${masked.text.slice(0, MAX_QUOTE_CHARS)}…` : masked.text)})`
       }

@@ -54,10 +54,12 @@ if (!process.versions.electron) {
       await mkdir(repo)
       git(repo, 'init', '-q')
       await writeFile(join(repo, 'a.txt'), 'one\n')
+      await writeFile(join(repo, 'b.txt'), 'alpha\n')
       git(repo, 'add', '.')
       git(repo, 'commit', '-q', '-m', `init ${name}`)
     }
     await writeFile(join(workspace, 'alpha', 'a.txt'), 'one\ntwo\n')
+    await writeFile(join(workspace, 'alpha', 'b.txt'), 'alpha\nbeta\n')
 
     const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const profile = createWorkspaceProfile(workspace)
@@ -137,6 +139,25 @@ if (!process.versions.electron) {
     assert.equal(await ui('document.querySelector(".git-diff-comments-count").innerText'), '1 comment')
     await writeFile(join(out, 'line-comment.png'), (await main.webContents.capturePage()).toPNG())
     assert.equal(await ui('window.__inserted.length'), 1, 'writing a comment inserts nothing')
+    // Each file keeps its own comments: comment on b.txt, come back, and a.txt still has its comment.
+    const pickFile = async name => {
+      await ui(`[...document.querySelectorAll(".git-entry")].forEach(element => element.removeAttribute("data-pick")); [...document.querySelectorAll(".git-entry")].find(element => element.innerText.includes(${JSON.stringify(name)})).setAttribute("data-pick", "")`)
+      await click('[data-pick]')
+      await until(`(document.querySelector(".git-diff-path")?.innerText || "") === ${JSON.stringify(name)}`, `${name} selected`)
+    }
+    await pickFile('b.txt')
+    await until('/\\+beta/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'b.txt diff shown')
+    assert.equal(await ui('!!document.querySelector(".git-diff-comments-bar")'), false, 'another file starts without comments')
+    await ui('[...document.querySelectorAll(".git-diff-line")].find(element => element.textContent.includes("+beta")).querySelector(".git-diff-gutter").setAttribute("data-gutter-b", "")')
+    await click('[data-gutter-b]')
+    await until('!!document.querySelector(".git-diff-comment-input")', 'second comment editor')
+    await ui('(() => { const input = document.querySelector(".git-diff-comment-input"); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, "second file"); input.dispatchEvent(new Event("input", { bubbles: true })) })()')
+    await ui('document.querySelector(".git-diff-comment-actions button").setAttribute("data-save-b", "")')
+    await click('[data-save-b]')
+    await until('document.querySelector(".git-diff-comment-text")?.innerText === "second file"', 'second comment shown')
+    await pickFile('a.txt')
+    await until('document.querySelector(".git-diff-comment-text")?.innerText === "needs a <test>"', 'the first file kept its comment')
+    assert.equal(await ui('document.querySelector(".git-diff-comments-count").innerText'), '1 comment')
     await ui('[...document.querySelectorAll(".git-diff-comments-bar button")].find(element => element.innerText.includes("Add comments")).setAttribute("data-send", "")')
     await click('[data-send]')
     await until('window.__inserted.length === 2', 'comments inserted')
@@ -147,6 +168,9 @@ if (!process.versions.electron) {
     await ui('[...document.querySelectorAll(".git-diff-comments-bar button")].find(element => element.innerText === "Clear").setAttribute("data-clear", "")')
     await click('[data-clear]')
     await until('!document.querySelector(".git-diff-comments-bar") && !document.querySelector(".git-diff-comment-text")', 'comments cleared')
+    await pickFile('b.txt')
+    await until('document.querySelector(".git-diff-comment-text")?.innerText === "second file"', 'clearing one file leaves the other file its comment')
+    await pickFile('a.txt')
     assert.equal(await sameTerminal(), true)
     results.lineComments = true
 

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
-import type { DiffComment } from '../../main/git-prompt.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
@@ -13,6 +12,8 @@ import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
 import type { DiffCommentAnchor } from './GitDiffView.js'
+import { bucketKey, orderedComments, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
+import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
 
 export interface GitPanelProps {
@@ -167,9 +168,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [statusError, setStatusError] = useState<string | null>(null)
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
-  // Comments on the selected diff's lines, kept per file and side (entry ids change with every status generation, so
-  // they are not part of the key). `diffText` is the diff they were written against, to warn when it has changed since.
-  const [comments, setComments] = useState<{ key: string; diffText: string; items: Map<string, DiffComment & { order: number }> } | null>(null)
+  // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
+  // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
+  const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
   const [reload, setReload] = useState(0)
   const [log, setLog] = useState<{ repoId: string; headOid: string | null; entries: GitLogEntry[]; done: boolean } | null>(null)
   // The "Load more" request in flight, if any. Only one at a time, and a response only extends the list it was asked for.
@@ -230,25 +231,20 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, diffKey, reload]) // eslint-disable-line react-hooks/exhaustive-deps
-  const commentKey = repo && selection ? `${repo.id}:${selection.path}:${selection.staged}` : null
-  const activeComments = comments && comments.key === commentKey ? comments : null
-  // A file that is no longer changed loses its comments: there is no diff for them to point at.
+  const commentKey = repo && selection ? bucketKey(repo.id, selection.path, selection.staged) : null
+  const activeComments = commentKey ? comments.get(commentKey) ?? null : null
+  // A file that is no longer changed loses its comments: there is no diff for them to point at. Other files keep theirs.
   const entryGone = selection !== null && currentStatus !== null && selectedEntry === null
   useEffect(() => {
-    if (entryGone) setComments(current => current && current.key === commentKey ? null : current)
+    if (entryGone && commentKey) setComments(current => removeCommentBucket(current, commentKey))
   }, [entryGone, commentKey])
   const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diff.value.text !== activeComments.diffText
   const changeComment = (key: string, anchor: DiffCommentAnchor, text: string | null): void => {
     if (!commentKey || !diff || diff.key !== diffKey) return
     const diffText = diff.value.text
-    setComments(current => {
-      const same = current && current.key === commentKey ? current : null
-      const items = new Map(same?.items ?? [])
-      if (text === null) items.delete(key)
-      else items.set(key, { side: anchor.side, line: anchor.line, quote: anchor.quote, text, order: anchor.order })
-      return items.size === 0 ? null : { key: commentKey, diffText: same?.diffText ?? diffText, items }
-    })
+    setComments(current => updateCommentBucket(current, commentKey, diffText, key, anchor, text))
   }
+  const clearComments = (): void => { if (commentKey) setComments(current => removeCommentBucket(current, commentKey)) }
 
   useEffect(() => {
     const onFocus = (): void => setReload(count => count + 1)
@@ -335,8 +331,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
   const addCommentsToPrompt = (): void => {
     if (!repo || !selection || !activeComments || !promptTarget) return
-    const ordered = [...activeComments.items.values()].sort((left, right) => left.order - right.order)
-    const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered })
+    const ordered = orderedComments(activeComments)
+    const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered, diffText: activeComments.diffText })
     insert(promptTarget.id, result.text)
     const left = ordered.length - result.included
     setNotice(`Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
@@ -592,7 +588,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                             title={canInsert ? `Put these comments in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
                             Add comments to prompt
                           </button>
-                          <button type="button" onClick={() => setComments(null)} title="Remove every comment on this file">Clear</button>
+                          <button type="button" onClick={clearComments} title="Remove every comment on this file">Clear</button>
                         </div>
                       )}
                       {!diffError && selectedEntry !== null && diff?.key !== diffKey && <p className="git-message" role="status">Loading diff…</p>}
