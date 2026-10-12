@@ -1055,6 +1055,12 @@ function wireSessionEvents(id: string, session: PtySession): void {
     const profileId = tabsState.tabs.find((tab) => tab.id === id)?.workspaceProfileId
     if (profileId) gitService?.requestRefresh(profileId)
   })
+  session.on('activity-detail', () => {
+    if (managedTabs.get(id)?.session !== session) return
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activityDetail: session.activityDetail } : tab) }
+    // Tool starts and completions are frequent; ride the debounced broadcast and skip the Git refresh.
+    scheduleActivityBroadcast(id)
+  })
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
@@ -1447,7 +1453,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       throw error
     }
     managedTabs.set(tabId, { session })
-    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null } : candidate) }
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null, activityDetail: null } : candidate) }
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
       cliVersion: plan.cliVersion,

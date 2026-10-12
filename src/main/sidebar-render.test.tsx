@@ -287,3 +287,30 @@ test('Sidebar keeps side chat access restricted even when its workspace allows f
   assert.match(changedModeMarkup, /sidebar-access-read-only/)
   assert.doesNotMatch(changedModeMarkup, />Full computer access/)
 })
+
+test('running sessions show which tools run now with an elapsed clock; compact rows and other states do not', () => {
+  const profile: WorkspaceProfile = {
+    id: 'one', name: 'one', path: 'D:\\one', permissionPreset: 'default', defaultResumeMode: 'new',
+    launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
+  }
+  const base: DesktopSessionTab = {
+    id: 'tools', title: 'Tools', workspaceProfileId: 'one', lastSessionId: null,
+    status: 'running', activity: 'working', processId: 42, cliVersion: '1.0.82', sessionPermissionPreset: 'default',
+    sessionPermissionMode: null, permissionWarning: null, remote: false, lastActivityAt: 1,
+    activityDetail: { kind: 'tools', since: Date.now() - 125_000, tools: [{ title: 'Running command', detail: null }, { title: 'Viewing', detail: 'x.ts' }, { title: 'Searching', detail: null }] },
+  }
+  const thinking = { ...base, id: 'thinking', title: 'Thinking', activityDetail: { kind: 'thinking' as const, since: Date.now() - 3_000 } }
+  const approval = { ...base, id: 'approval', title: 'Approval', status: 'approval-needed' as const }
+  const idle = { ...base, id: 'idle', title: 'Idle', activity: 'idle' as const, activityDetail: null }
+  const markup = renderAccess([profile], base, false, [base, thinking, approval, idle])
+  assert.match(markup, /sidebar-session-activity">Running command, Viewing x\.ts \+1</)
+  assert.match(markup, /aria-label="Tools — Running command, Viewing x\.ts \+1 · 2m \d{1,2}s"/)
+  assert.match(markup, /sidebar-session-status">2m \d{1,2}s</)
+  assert.match(markup, /sidebar-session-activity">Thinking</)
+  assert.match(markup, /aria-label="Approval — Needs approval"/, 'a pending approval hides the tool detail')
+  assert.match(markup, /aria-label="Idle — Idle"/)
+  assert.equal((markup.match(/sidebar-session-activity/g) ?? []).length, 2)
+  const compact = renderAccess([profile], base, true, [base, thinking])
+  assert.doesNotMatch(compact, /sidebar-session-activity/)
+  assert.match(compact, /aria-label="1: Tools — Running command, Viewing x\.ts \+1 · 2m \d{1,2}s — one"/, 'the compact tooltip still carries the detail')
+})

@@ -150,3 +150,37 @@ test('finish waits for an active poll and reads events appended after its size s
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('detail is published after seeding only, on every tool change, and cleared by truncation and oversized records', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'copilot-activity-detail-'))
+  const path = join(directory, 'events.jsonl'), details: string[] = []
+  const line = (type: string, data: object) => JSON.stringify({ type, data, timestamp: '2026-10-12T12:00:00.000Z' }) + '\n'
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, () => {}, (detail) => {
+    details.push(detail === null ? 'none' : detail.kind === 'thinking' ? 'thinking' : detail.tools.map((tool) => `${tool.title}${tool.detail ? ` ${tool.detail}` : ''}`).join('+'))
+  })
+  try {
+    await writeFile(path, line('assistant.turn_start', { turnId: 'old' }) + line('tool.execution_start', { toolCallId: 'h', toolName: 'view', arguments: { path: 'h.ts' } }))
+    await monitor.start()
+    assert.deepEqual(details, [], 'seeding publishes nothing: a historical running tool is not current work')
+    await appendFile(path, line('assistant.turn_end', { turnId: 'old' }) + line('assistant.turn_start', { turnId: '1' }))
+    await monitor.poll()
+    assert.deepEqual(details, ['thinking'])
+    await appendFile(path, line('tool.execution_start', { toolCallId: 'a', toolName: 'powershell', arguments: { command: 'x' } })
+      + line('tool.execution_start', { toolCallId: 'b', toolName: 'edit', arguments: { path: 'D:\\p\\b.ts' } })
+      + line('tool.execution_complete', { toolCallId: 'a' }))
+    await monitor.poll()
+    assert.deepEqual(details, ['thinking', 'Running command', 'Running command+Editing b.ts', 'Editing b.ts'], 'each record publishes the change it makes')
+    await appendFile(path, line('tool.execution_complete', { toolCallId: 'b' }) + line('assistant.message', { content: 'Done' }) + line('assistant.turn_end', { turnId: '1' }))
+    await monitor.poll()
+    assert.deepEqual(details.slice(4), ['thinking', 'none'])
+    await appendFile(path, line('assistant.turn_start', { turnId: '2' }) + line('tool.execution_start', { toolCallId: 'c', toolName: 'rg', arguments: {} }))
+    await monitor.poll()
+    assert.equal(details.at(-1), 'Searching')
+    await writeFile(path, line('assistant.turn_start', { turnId: 'fresh' }))
+    await monitor.poll()
+    assert.deepEqual(details.slice(-2), ['none', 'thinking'], 'a rewritten log clears the detail before the new records are read')
+    await appendFile(path, line('tool.execution_start', { toolCallId: 'd', toolName: 'glob', arguments: {} }) + '{"type":"junk","data":"' + 'x'.repeat(9 * 1024 * 1024))
+    await monitor.poll()
+    assert.equal(details.at(-1), 'none', 'an oversized record invalidates the detail')
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})

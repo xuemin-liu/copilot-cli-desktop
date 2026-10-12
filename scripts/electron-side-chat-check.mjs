@@ -43,12 +43,15 @@ if (process.versions.electron) {
     await mkdir(artifacts, { recursive: true })
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
   }
-  const recordingPath = mode?.flag === '--native-paste' ? join(artifacts, 'model-requests.jsonl') : undefined
+  const recordingPath = mode?.flag === '--native-paste' || mode?.flag === '--activity' ? join(artifacts, 'model-requests.jsonl') : undefined
   if (recordingPath) await writeFile(recordingPath, '')
-  const modelServer = createCheckModelServer({ recordingPath, delayMs: mode?.flag === '--activity' ? 7_000 : 0 })
+  const activityMode = mode?.flag === '--activity'
+  // The activity check makes the model read one workspace file so the real CLI writes a tool record to its event log.
+  const modelServer = createCheckModelServer({ recordingPath, delayMs: activityMode ? 7_000 : 0, toolCall: activityMode ? { name: 'view', arguments: { path: 'marker.txt' } } : undefined })
   let rpc
   try {
     await Promise.all([workspace, appData, copilotHome].map((path) => mkdir(path)))
+    if (activityMode) await writeFile(join(workspace, 'marker.txt'), 'desktop-side-chat-42\n')
     await new Promise((resolveListen) => modelServer.listen(0, '127.0.0.1', resolveListen))
     const address = modelServer.address()
     assert.ok(address && typeof address !== 'string')
