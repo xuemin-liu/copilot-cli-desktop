@@ -9,6 +9,7 @@ import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
+import type { ActivityDetail } from './activity-label.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_LINES = 500
@@ -51,6 +52,7 @@ export class PtySession extends EventEmitter {
   private pty: PtyLike | null = null
   private statusValue: SessionLifecycleStatus = 'starting'
   private activityValue: SessionActivity | null = null
+  private activityDetailValue: ActivityDetail | null = null
   private stopping = false
   private readonly outputLines: string[] = []
   private pendingLine = ''
@@ -77,6 +79,9 @@ export class PtySession extends EventEmitter {
   }
 
   get activity(): SessionActivity | null { return this.activityValue }
+
+  /** Running tools or thinking inside the current turn; null when idle or unknown. */
+  get activityDetail(): ActivityDetail | null { return this.activityDetailValue }
 
   get processId(): number | null {
     return this.pty?.pid ?? null
@@ -161,6 +166,11 @@ export class PtySession extends EventEmitter {
           this.setStatus('running')
         }
         this.emit('activity', activity)
+      },
+      (detail) => {
+        if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
+        this.activityDetailValue = detail
+        this.emit('activity-detail', detail)
       },
     )
     this.permissionMonitor = monitor

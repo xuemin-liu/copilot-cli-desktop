@@ -3,6 +3,7 @@ import type { SessionPermissionMode } from './permission-modes.js'
 import type { ResumeMode } from './resume-args.js'
 import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
+import type { ActivityDetail } from './activity-label.js'
 
 export type RevealPathResult =
   | { ok: true }
@@ -47,6 +48,8 @@ export interface DesktopSessionTab {
   status: SessionLifecycleStatus
   /** Observed task activity; absent when this process has no reliable evidence. */
   activity?: SessionActivity | null
+  /** Running tools or thinking inside the current turn, for the sidebar's activity line. Runtime-only. */
+  activityDetail?: ActivityDetail | null
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null

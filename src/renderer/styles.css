@@ -462,6 +462,29 @@ button:disabled {
 
 .cli-version-outdated { color: #ffb84d; }
 
+/* Second row of a session: which tools Copilot runs right now (phase 1 of the agent workbench plan). */
+.sidebar-session-activity {
+  grid-column: 2 / 4;
+  margin-top: -6px;
+  padding-bottom: 5px;
+  color: #8b93a1;
+  font-size: 10px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-session:has(.sidebar-session-activity) {
+  padding-top: 5px;
+}
+
+.sidebar-session:has(.sidebar-session-activity) .sidebar-status-dot,
+.sidebar-session:has(.sidebar-session-activity) .sidebar-session-title,
+.sidebar-session:has(.sidebar-session-activity) .sidebar-session-status {
+  grid-row: 1;
+}
+
 .sidebar-status-dot {
   width: 7px;
   height: 7px;

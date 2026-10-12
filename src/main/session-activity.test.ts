@@ -49,3 +49,68 @@ test('empty, error, and unsupported response shapes clear working when their tur
     assert.equal(tracker.consume(event('assistant.turn_start', { turnId: '2' })), 'working')
   }
 })
+
+const stamped = (type: string, data: object, timestamp: string | undefined, extra = {}): string => JSON.stringify({ type, data, timestamp, ...extra })
+// strict assert.equal narrows the `tracker.detail` property path; read through a call so later checks see the union again.
+const detailOf = (tracker: SessionActivityTracker) => tracker.detail
+const toolsOf = (tracker: SessionActivityTracker) => { const detail = tracker.detail; return detail?.kind === 'tools' ? detail.tools : [] }
+
+test('detail tracks overlapping tools by call id, falls back to thinking between tools, and clears at turn end', () => {
+  const now = Date.UTC(2026, 9, 12, 12, 0, 0)
+  const at = (ms: number) => new Date(now - ms).toISOString()
+  const tracker = new SessionActivityTracker(() => now)
+  assert.equal(tracker.detail, null)
+  tracker.consume(stamped('assistant.turn_start', { turnId: '1' }, at(10_000)))
+  assert.deepEqual(tracker.detail, { kind: 'thinking', since: now - 10_000 })
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'a', toolName: 'powershell', arguments: { command: 'secret', description: 'secret' } }, at(8_000)))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'b', toolName: 'view', arguments: { path: 'D:\\repo\\src\\x.ts' } }, at(6_000)))
+  assert.deepEqual(tracker.detail, {
+    kind: 'tools', since: now - 8_000,
+    tools: [{ title: 'Running command', detail: null }, { title: 'Viewing', detail: 'x.ts' }],
+  })
+  assert.ok(!JSON.stringify(tracker.detail).includes('secret'), 'shell arguments never reach the detail')
+  tracker.consume(stamped('tool.execution_complete', { toolCallId: 'a' }, at(5_000)))
+  assert.deepEqual(tracker.detail, { kind: 'tools', since: now - 6_000, tools: [{ title: 'Viewing', detail: 'x.ts' }] }, 'the clock follows the earliest tool still running')
+  tracker.consume(stamped('tool.execution_complete', { toolCallId: 'unknown' }, at(4_500)))
+  assert.equal(detailOf(tracker)?.kind, 'tools', 'completing an untracked id changes nothing')
+  tracker.consume(stamped('tool.execution_complete', { toolCallId: 'b' }, at(4_000)))
+  assert.deepEqual(tracker.detail, { kind: 'thinking', since: now - 4_000 })
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'b' }, at(3_000)))
+  assert.deepEqual(tracker.detail, { kind: 'tools', since: now - 3_000, tools: [{ title: 'Running tool', detail: null }] }, 'a reused id is a new tool once the old one completed')
+  tracker.consume(stamped('assistant.message', { content: 'Done' }, at(2_000)))
+  tracker.consume(stamped('assistant.turn_end', { turnId: '1' }, at(1_000)))
+  assert.equal(tracker.detail, null)
+  assert.equal(tracker.activity, 'idle')
+})
+
+test('detail ignores sub-agent and out-of-turn tool records, bounds the running set, and strips bidi text', () => {
+  const now = Date.UTC(2026, 9, 12, 12, 0, 0)
+  const tracker = new SessionActivityTracker(() => now)
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'early', toolName: 'view', arguments: { path: 'a.ts' } }, undefined))
+  assert.equal(tracker.detail, null, 'a tool outside any turn is not current work')
+  tracker.consume(stamped('assistant.turn_start', { turnId: 'main' }, undefined))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'child', toolName: 'view', arguments: { path: 'child.ts' } }, undefined, { agentId: 'sub' }))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'nested', toolName: 'view', arguments: { path: 'nested.ts' }, parentToolCallId: 'p' }, undefined))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: '', toolName: 'view', arguments: { path: 'blank.ts' } }, undefined))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 7, toolName: 'view', arguments: { path: 'number.ts' } }, undefined))
+  assert.deepEqual(tracker.detail, { kind: 'thinking', since: now })
+  for (let index = 0; index < 20; index += 1) {
+    tracker.consume(stamped('tool.execution_start', { toolCallId: `t${index}`, toolName: 'view', arguments: { path: `\u202E${index}.ts\u200B` } }, 'not a date'))
+  }
+  assert.equal(detailOf(tracker)?.kind, 'tools')
+  assert.equal(toolsOf(tracker).length, 16)
+  assert.equal(detailOf(tracker)?.since, now, 'an unparsable timestamp falls back to the clock')
+  assert.ok(toolsOf(tracker).length > 0 && toolsOf(tracker).every((tool) => /^\d+\.ts$/.test(tool.detail ?? '')), 'bidi and zero-width characters are stripped')
+  tracker.consume(stamped('tool.execution_complete', { toolCallId: 't19' }, undefined))
+  assert.equal(toolsOf(tracker).length, 16, 'a tool dropped by the bound cannot be completed')
+  assert.equal(tracker.finishReplay(), null)
+  assert.equal(tracker.detail, null, 'historical running tools are not current work')
+  tracker.consume(stamped('assistant.turn_start', { turnId: 'again' }, undefined))
+  tracker.consume(stamped('tool.execution_start', { toolCallId: 'x', toolName: 'rg', arguments: { pattern: 'p' } }, undefined))
+  assert.equal(detailOf(tracker)?.kind, 'tools')
+  tracker.consume(stamped('abort', {}, undefined))
+  assert.equal(tracker.detail, null)
+  tracker.consume(stamped('assistant.turn_start', { turnId: 'reset' }, undefined))
+  tracker.reset()
+  assert.equal(tracker.detail, null)
+})

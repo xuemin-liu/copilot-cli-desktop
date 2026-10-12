@@ -27,7 +27,7 @@ for supported categories and the separate history compatibility gate.
 | DeepSeek Harness capability | Copilot CLI Desktop equivalent | Status |
 | --- | --- | --- |
 | Rich Chat view | Real Copilot terminal/TUI rendered by xterm.js | Equivalent upstream UI |
-| Trajectory/tool-call view | Copilot CLI renders its own tool execution and approval UI in the terminal | Equivalent upstream TUI; ACP now offers a public-preview structured stream for a future hybrid frontend |
+| Trajectory/tool-call view | Copilot CLI renders its own tool execution and approval UI in the terminal; the sidebar row adds a live line naming the running tools (allowlisted titles, file names only) with an elapsed clock | Equivalent upstream TUI plus a sidebar summary; ACP now offers a public-preview structured stream for a future hybrid frontend |
 | Message composer | Copilot CLI interactive prompt | Equivalent upstream UI |
 | File attachments | “New Session with Attachments…” passes official `--attachment` arguments | Equivalent |
 | Model selector | Per-workspace initial model/reasoning/context settings plus Copilot's native `/model` picker | Equivalent |

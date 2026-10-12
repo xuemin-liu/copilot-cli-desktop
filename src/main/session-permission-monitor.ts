@@ -1,5 +1,6 @@
 import { open, stat } from 'node:fs/promises'
 import { parsePermissionChangedEvent, type SessionPermissionMode } from './permission-modes.js'
+import { sameActivityDetail, type ActivityDetail } from './activity-label.js'
 import { SessionActivityTracker, type SessionActivity } from './session-activity.js'
 
 const READ_CHUNK_BYTES = 64 * 1024
@@ -24,6 +25,7 @@ export class SessionPermissionMonitor {
   private seeding = true
   private seededMode: SessionPermissionMode | null = null
   private readonly activity = new SessionActivityTracker()
+  private lastDetail: ActivityDetail | null = null
 
   constructor(
     private readonly path: string,
@@ -31,6 +33,7 @@ export class SessionPermissionMonitor {
     private readonly pollIntervalMs = 5_000,
     private readonly onDiagnostic: (message: string) => void = () => {},
     private readonly onActivity: (activity: SessionActivity | null) => void = () => {},
+    private readonly onDetail: (detail: ActivityDetail | null) => void = () => {},
   ) {}
 
   start(): Promise<void> {
@@ -44,6 +47,7 @@ export class SessionPermissionMonitor {
     if (!this.stopped && this.seededMode) this.onMode(this.seededMode)
     const activity = this.activity.finishReplay()
     if (!this.stopped && activity) this.onActivity(activity)
+    this.publishDetail()
     if (this.stopped) return
     this.timer = setInterval(() => {
       void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
@@ -90,6 +94,15 @@ export class SessionPermissionMonitor {
     this.activityTimer = null
   }
 
+  /** Detail changes on every tool start and completion, not only when the coarse activity flips. */
+  private publishDetail(): void {
+    if (this.seeding || this.stopped) return
+    const detail = this.activity.detail
+    if (sameActivityDetail(detail, this.lastDetail)) return
+    this.lastDetail = detail
+    this.onDetail(detail)
+  }
+
   private async readAppendedEvents(): Promise<void> {
     let size: number
     try {
@@ -104,6 +117,7 @@ export class SessionPermissionMonitor {
       this.discardPartialRecord = false
       this.activity.reset()
       if (!this.seeding) this.onActivity(null)
+      this.publishDetail()
     }
     if (size === this.offset) return
 
@@ -135,6 +149,7 @@ export class SessionPermissionMonitor {
       const line = buffer.subarray(start, end).toString('utf8').trim()
       const activity = this.activity.consume(line)
       if (!this.seeding && activity !== undefined) this.onActivity(activity)
+      this.publishDetail()
       const mode = parsePermissionChangedEvent(
         line,
         (payload) => this.onDiagnostic(`Unknown session.permissions_changed payload: ${JSON.stringify(payload)}`),
@@ -151,6 +166,7 @@ export class SessionPermissionMonitor {
       this.discardPartialRecord = true
       this.activity.reset()
       if (!this.seeding) this.onActivity(null)
+      this.publishDetail()
       this.onDiagnostic(`Skipped session event exceeding ${MAX_PENDING_RECORD_BYTES} bytes; task activity is unknown`)
     }
   }

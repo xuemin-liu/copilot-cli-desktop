@@ -5,6 +5,7 @@ import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
 import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
+import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   starting: 'Starting',
@@ -181,17 +182,30 @@ export function Sidebar({
         disabled={!canOpenTab} onClick={() => onCreateTab(profile.id)}>+</button>
     </div>
   )
+  const [now, setNow] = useState(() => Date.now())
+  const ticking = tabs.some((tab) => tab.status === 'running' && tab.activityDetail)
+  useEffect(() => {
+    if (!ticking) return undefined
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [ticking])
   const compactTabs = groupMode === 'workspace'
     ? profiles.flatMap((profile) => orderTabs(tabs.filter((tab) => tab.workspaceProfileId === profile.id)))
     : orderTabs(tabs)
   const sessionButton = (tab: DesktopSessionTab, workspaceName?: string, compactIndex?: number): JSX.Element => {
-    const statusLabel = tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle') : STATUS_LABEL[tab.status]
+    // Live detail (which tools run now) only while the process is running and no approval is pending.
+    const detail = tab.status === 'running' && tab.activityDetail ? tab.activityDetail : null
+    const statusLabel = detail
+      ? formatActivityLabel(detail)
+      : tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle') : STATUS_LABEL[tab.status]
+    const elapsed = detail ? formatElapsed(detail.since, now) : null
     const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${statusLabel}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -206,8 +220,9 @@ export function Sidebar({
       <span className={`sidebar-status-dot tab-status-${statusClass}`} aria-hidden="true" />
       <span className="sidebar-session-title">{compactIndex !== undefined ? compactIndex + 1 : tab.title}</span>
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
-        {outdatedCli ? 'Old CLI' : statusLabel}
+        {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
       </span>}
+      {compactIndex === undefined && detail && <span className="sidebar-session-activity">{statusLabel}</span>}
     </button>
     <button type="button" className="icon-button sidebar-session-actions-toggle"
       aria-label={`Actions for ${tab.title}`} title={`Actions for ${tab.title}`}

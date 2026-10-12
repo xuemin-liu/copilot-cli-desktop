@@ -229,6 +229,15 @@ does not mark a session idle, and background subagent completion does not mark
 the main task finished. Dropped oversized events clear activity evidence and
 report a diagnostic; later complete turns can establish activity again.
 
+While a session is working, its sidebar row shows what it is doing and for how long:
+**Thinking** during a model call, or the tools running right now (**Running command**,
+**Viewing** or **Editing** a file, **Searching**, **Fetching**, **Asking you**, or
+**Running tool** for anything else, including MCP tools) with an elapsed clock. File tools
+show only the file name; shell commands and tool descriptions are never shown, and tool
+titles come from a fixed list rather than from the event log. The line comes from the same
+saved CLI events, so it can lag by a few seconds and is empty where those events are not
+available (remote sessions, older CLIs). A pending approval always replaces it.
+
 Each tab tracks a resume mode (per workspace profile, overridable per tab):
 
 - **New** — starts a fresh session with a generated UUID and Copilot-visible
