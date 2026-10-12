@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { open, readdir } from 'node:fs/promises'
 import { join, win32 } from 'node:path'
 import { isValidSessionId } from './session-id.js'
@@ -10,6 +11,10 @@ import { isValidSessionId } from './session-id.js'
  *
  * Everything read here is data written by the CLI: only the directory name (which must be a UUID), the record type, its
  * start time and its cwd are looked at, from the first few kilobytes of the file.
+ *
+ * Ownership is established by the worktree's name: the desktop names the worktree it asks for (`--worktree=<name>`,
+ * unique per launch), and only a session whose cwd ends in that folder name is this launch's. Two launches at once, or a
+ * session someone starts elsewhere meanwhile, cannot be confused with it.
  */
 
 export interface StoreDiscoveryOptions {
@@ -19,6 +24,10 @@ export interface StoreDiscoveryOptions {
   since: number
   /** The folder the process was spawned in. A worktree session runs elsewhere, so a session there is not it. */
   launchCwd: string
+  /** The worktree folder name this launch asked for; the session's cwd must end in it. */
+  worktreeName: string
+  /** Tests replace the directory listing to control its timing. */
+  listSessions?(root: string): Promise<Set<string>>
   pollMs?: number
   timeoutMs?: number
   /** A small tolerance for clocks: the CLI stamps its own time. */
@@ -55,6 +64,21 @@ export async function readSessionStart(path: string): Promise<SessionStartRecord
   }
 }
 
+const MAX_SLUG_CHARS = 24
+
+/** A worktree (and branch) name for a launch: `desktop-<title slug>-<6 hex>`. Only characters git accepts in a branch
+ * name, bounded, and unique per launch, so a session's cwd identifies the launch that asked for it. */
+export function worktreeNameFor(title: string, random: () => string = () => randomBytes(3).toString('hex')): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, MAX_SLUG_CHARS).replace(/-+$/, '')
+  return `desktop-${slug || 'session'}-${random()}`
+}
+
+/** The last path segment, ignoring a trailing separator. */
+function folderName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  return trimmed.slice(Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/')) + 1)
+}
+
 function sameFolder(left: string, right: string): boolean {
   return win32.resolve(left).replace(/[\\/]+$/, '').toLowerCase() === win32.resolve(right).replace(/[\\/]+$/, '').toLowerCase()
 }
@@ -67,20 +91,27 @@ async function listSessionIds(root: string): Promise<Set<string>> {
   }
 }
 
-/** Takes the "already there" snapshot now; `find()` resolves with the new session's id, or null when none appeared in
- * time or `cancel()` was called. */
+/** Starts the "already there" snapshot now; await `ready()` before spawning, or the new session could be in it.
+ * `find()` resolves with the new session's id, or null when none appeared in time or `cancel()` was called. */
 export class SessionStoreDiscovery {
   private readonly baseline: Promise<Set<string>>
+  private readonly list: (root: string) => Promise<Set<string>>
   private cancelled = false
   private readonly pollMs: number
   private readonly timeoutMs: number
   private readonly slackMs: number
 
   constructor(private readonly options: StoreDiscoveryOptions) {
-    this.baseline = listSessionIds(options.root)
+    this.list = options.listSessions ?? listSessionIds
+    this.baseline = this.list(options.root)
     this.pollMs = options.pollMs ?? 500
     this.timeoutMs = options.timeoutMs ?? 90_000
     this.slackMs = options.slackMs ?? 5_000
+  }
+
+  /** Resolves once the pre-spawn snapshot is complete. */
+  async ready(): Promise<void> {
+    await this.baseline
   }
 
   cancel(): void {
@@ -91,14 +122,16 @@ export class SessionStoreDiscovery {
     const known = new Set(await this.baseline)
     const deadline = Date.now() + this.timeoutMs
     while (!this.cancelled && Date.now() < deadline) {
-      for (const id of await listSessionIds(this.options.root)) {
+      for (const id of await this.list(this.options.root)) {
         if (known.has(id)) continue
         const start = await readSessionStart(join(this.options.root, id, 'events.jsonl'))
         if (!start) continue // not written yet, or not a session; look again next poll
-        // Decided once per directory: a session that started before the spawn, or runs in the launch folder, is not ours.
+        // Decided once per directory: a session that started before the spawn, has no cwd, runs in the launch folder, or
+        // runs in any folder but the worktree this launch named, is not ours.
         known.add(id)
         if (start.startTime < this.options.since - this.slackMs) continue
-        if (start.cwd !== null && sameFolder(start.cwd, this.options.launchCwd)) continue
+        if (start.cwd === null || sameFolder(start.cwd, this.options.launchCwd)) continue
+        if (folderName(start.cwd).toLowerCase() !== this.options.worktreeName.toLowerCase()) continue
         if (this.cancelled) return null
         return id
       }

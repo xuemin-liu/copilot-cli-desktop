@@ -39,6 +39,7 @@ export async function runWorktreeCheck() {
     const workspace = initial.profiles.find(profile => profile.id === profileId).path
     assert.notEqual(cwd.toLowerCase(), workspace.toLowerCase(), 'a worktree session runs outside the project folder')
     assert.ok(cwd.toLowerCase().includes('.worktrees') || cwd.toLowerCase().includes('copilot-worktrees'), `worktree cwd: ${cwd}`)
+    assert.match(cwd.split(/[\\/]/).pop(), /^desktop-isolated-electron-test-[0-9a-f]{6}$/, 'the worktree carries the name the desktop chose')
     assert.equal(known.status, 'running')
     assert.equal(known.processId, running.processId, 'the same CLI process')
     // The monitor tails the discovered log: a prompt round-trip through the mock model ends in a recorded idle state.

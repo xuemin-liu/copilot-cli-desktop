@@ -1308,7 +1308,10 @@ test('a fresh worktree launch carries --name but no --session-id, and adopts the
       supportedOptions: ['--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
     const opened = await harness.createMain()
     const args = harness.spawns[0]!.args
-    assert.ok(args.includes('--worktree'), args.join(' '))
+    const worktreeArg = args.find((arg) => arg.startsWith('--worktree='))
+    assert.ok(worktreeArg, args.join(' '))
+    const worktreeName = worktreeArg.slice('--worktree='.length)
+    assert.match(worktreeName, /^desktop-[a-z0-9-]+-[0-9a-f]{6}$/, 'the desktop names the worktree')
     assert.ok(args.some((arg) => arg.startsWith('--name=')), 'the session is still named')
     assert.ok(!args.some((arg) => arg.startsWith('--session-id=')), 'Copilot refuses --session-id with --worktree')
     assert.ok(!args.some((arg) => arg.startsWith('--resume')), 'a fresh launch does not resume')
@@ -1319,7 +1322,7 @@ test('a fresh worktree launch carries --name but no --session-id, and adopts the
     const sessionDirectory = join(directory, 'session-state', sessionId)
     await mkdir(sessionDirectory, { recursive: true })
     await writeFile(join(sessionDirectory, 'events.jsonl'),
-      JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: join(directory, 'project.worktrees', 'copilot-x') } } }) + '\n'
+      JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: join(directory, 'project.worktrees', worktreeName) } } }) + '\n'
       + '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"auto","allowAllPermissions":false}}\n')
     let state = opened
     for (let attempt = 0; attempt < 60 && state.tabs[0]?.lastSessionId !== sessionId; attempt += 1) {

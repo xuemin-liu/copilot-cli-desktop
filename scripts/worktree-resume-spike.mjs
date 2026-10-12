@@ -1,9 +1,13 @@
 // Spike for the agent workbench plan, phase 3a: where does a session started with --worktree run, and where does it run
 // again when the desktop resumes it from the project folder? Real CLI, isolated COPILOT_HOME, a throwaway git repository,
 // and the loopback mock model (no paid requests). Prints the cwd of every session.start / session.resume record.
+//
+// The mock server lives in this process, so the CLI is spawned asynchronously and its exit awaited: a synchronous spawn
+// would block the event loop and starve the very server the CLI is waiting on. A launch that times out or exits
+// non-zero fails the spike.
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync, spawn } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCheckModelServer } from './check-model-server.mjs'
@@ -19,24 +23,34 @@ try {
   await Promise.all([repo, copilotHome].map((path) => mkdir(path)))
   await new Promise((resolveListen) => modelServer.listen(0, '127.0.0.1', resolveListen))
   const baseUrl = `http://127.0.0.1:${modelServer.address().port}/v1`
-  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') } })
+  const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') }
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: gitEnv })
   await writeFile(join(directory, 'gitconfig'), '[user]\n\tname = Spike\n\temail = spike@example.com\n[init]\n\tdefaultBranch = main\n')
   git('init', '-q')
   await writeFile(join(repo, 'a.txt'), 'one\n')
   git('add', '.')
   git('commit', '-q', '-m', 'init')
-  await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [repo, directory, join(process.env.USERPROFILE ?? '', 'source', 'repos', 'copilot-worktrees')] }))
-  const env = { ...process.env, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true' }
+  // Copilot asks to trust the worktree folder; it is created beside the repository, inside the disposable directory.
+  await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [repo, directory] }))
+  const env = { ...gitEnv, COPILOT_HOME: copilotHome, COPILOT_DISABLE_KEYTAR: '1', COPILOT_PROVIDER_TYPE: 'openai', COPILOT_PROVIDER_BASE_URL: baseUrl, COPILOT_MODEL: 'ui-check-model', OPENAI_API_KEY: 'local-ui-check-only', COPILOT_OFFLINE: 'true' }
   delete env.ELECTRON_RUN_AS_NODE
-  const run = (label, args) => {
-    const result = spawnSync(resolution.command, [...resolution.prefixArgs, ...args], { cwd: repo, env, encoding: 'utf8', timeout: 90_000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-    console.log(`[spike] ${label}: exit ${result.status}${result.error ? ' ' + result.error.code : ''}`)
-    if (result.status !== 0) console.log(((result.stdout ?? '') + '\n' + (result.stderr ?? '')).trim().split('\n').slice(-15).join('\n'))
-    return result
+  const run = async (label, args) => {
+    const child = spawn(resolution.command, [...resolution.prefixArgs, ...args], { cwd: repo, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    let output = ''
+    child.stdout.on('data', (chunk) => { output += chunk })
+    child.stderr.on('data', (chunk) => { output += chunk })
+    const timer = setTimeout(() => child.kill(), 90_000)
+    const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
+    clearTimeout(timer)
+    console.log(`[spike] ${label}: exit ${code}`)
+    if (code !== 0) console.log(output.trim().split('\n').slice(-15).join('\n'))
+    assert.equal(code, 0, `${label} did not exit cleanly`)
+    return output
   }
   // The CLI refuses --worktree together with --session-id, so the id is read back from the session store afterwards.
-  run('fresh --worktree', ['--worktree', '--name=worktree-spike', '--allow-all-tools', '-p', 'Reply with the saved marker.'])
-  const { readdir } = await import('node:fs/promises')
+  // The worktree name is chosen here, as the desktop does, so the session can be told apart from any other by its cwd.
+  const worktreeName = `desktop-spike-${Date.now().toString(16)}`
+  await run('fresh --worktree', [`--worktree=${worktreeName}`, '--name=worktree-spike', '--allow-all-tools', '-p', 'Reply with the saved marker.'])
   const [sessionId] = (await readdir(join(copilotHome, 'session-state'))).filter((name) => /^[0-9a-f-]{36}$/.test(name))
   assert.ok(sessionId, 'no session was recorded')
   console.log('[spike] session id from the store: ' + sessionId)
@@ -44,14 +58,17 @@ try {
   const cwds = async () => (await readFile(events, 'utf8')).split('\n').filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } })
     .filter((record) => record && (record.type === 'session.start' || record.type === 'session.resume'))
     .map((record) => `${record.type} ${record.data?.context?.cwd}`)
-  console.log('[spike] after fresh start:\n  ' + (await cwds()).join('\n  '))
-  run('resume from the project folder', [`--resume=${sessionId}`, '--allow-all-tools', '-p', 'Reply with the saved marker again.'])
-  console.log('[spike] after resume:\n  ' + (await cwds()).join('\n  '))
+  const afterStart = await cwds()
+  console.log('[spike] after fresh start:\n  ' + afterStart.join('\n  '))
+  assert.ok(afterStart[0]?.toLowerCase().endsWith(`\\${worktreeName}`), 'the session runs in the worktree named by the launcher')
+  await run('resume from the project folder', [`--resume=${sessionId}`, '--allow-all-tools', '-p', 'Reply with the saved marker again.'])
+  const afterResume = await cwds()
+  console.log('[spike] after resume:\n  ' + afterResume.join('\n  '))
+  assert.ok(afterResume.some((line) => line.startsWith('session.resume') && line.toLowerCase().endsWith(`\\${worktreeName}`)), 'a resumed session goes back to its worktree')
   console.log('[spike] worktrees now:\n' + git('worktree', 'list', '--porcelain'))
+  console.log('[spike] PASS')
 } finally {
   modelServer.closeAllConnections()
   await new Promise((resolveClose) => modelServer.close(() => resolveClose()))
-  // Copilot's worktree lives outside the temp folder; prune it so the spike leaves nothing behind.
-  try { execFileSync('git', ['worktree', 'prune'], { cwd: repo }) } catch { /* the repo is going away anyway */ }
   await rm(directory, { recursive: true, force: true }).catch(() => {})
 }

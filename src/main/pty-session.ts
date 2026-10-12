@@ -201,8 +201,11 @@ export class PtySession extends EventEmitter {
     if (this.pty) throw new Error('This session has already started')
     this.setStatus('starting')
     if (this.lastKnownSessionId) await this.attachPermissionMonitor(this.lastKnownSessionId)
-    // The snapshot of what is already in the store must predate the spawn, or the new session could be in it.
-    if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromStore) this.storeDiscovery = new SessionStoreDiscovery(this.options.discoverSessionIdFromStore)
+    // The snapshot of what is already in the store must be complete before the spawn, or the new session could be in it.
+    if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromStore) {
+      this.storeDiscovery = new SessionStoreDiscovery(this.options.discoverSessionIdFromStore)
+      await this.storeDiscovery.ready()
+    }
     const spawnCols = this.options.cols
     const spawnRows = this.options.rows
     let pty: PtyLike

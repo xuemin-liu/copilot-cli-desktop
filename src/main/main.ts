@@ -91,6 +91,7 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
+import { worktreeNameFor } from './session-store-discovery.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -1013,7 +1014,7 @@ function finalizeSessionArgs(
   plan: SessionSpawnPlan,
   resumeMode: ResumeMode,
   restoreLastSessionId: string | null,
-): { args: string[]; deterministicSessionId: string | null; discoverFromStore: boolean } {
+): { args: string[]; deterministicSessionId: string | null; worktreeName: string | null } {
   const resumeArgs = buildResumeArgs({ mode: resumeMode, lastSessionId: restoreLastSessionId })
   const freshSession = !plan.connectSessionId
     && (resumeMode === 'new' || (resumeMode === 'auto-resume' && resumeArgs.length === 0))
@@ -1025,6 +1026,8 @@ function finalizeSessionArgs(
   // Copilot refuses `--worktree` together with `--session-id`: a worktree session picks its own id, which the desktop
   // then reads back from the session store. `--name` is still accepted.
   const worktreeLaunch = freshSession && !plan.connectSessionId && plan.launch.worktree === true
+  // The desktop names the worktree, so the session it starts can be told apart from any other by its cwd.
+  const worktreeName = worktreeLaunch ? worktreeNameFor(plan.sessionTitle) : null
   const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity && !worktreeLaunch ? randomUUID() : restoreLastSessionId
   const identity = plan.connectSessionId
     ? [`--connect=${plan.connectSessionId}`]
@@ -1041,13 +1044,13 @@ function finalizeSessionArgs(
     '--mouse=on',
     ...identity,
     ...plan.attachmentPaths.map((path) => `--attachment=${path}`),
-    ...launchArgs,
+    ...launchArgs.map((argument) => argument === '--worktree' && worktreeName ? `--worktree=${worktreeName}` : argument),
     ...(plan.connectSessionId
       ? []
       : buildPermissionArgs(plan.permissionPreset, plan.cwd, plan.permissionCapabilities)),
     ...plan.secretArgs,
   ]
-  return { args, deterministicSessionId: worktreeLaunch ? null : deterministicSessionId, discoverFromStore: worktreeLaunch }
+  return { args, deterministicSessionId: worktreeLaunch ? null : deterministicSessionId, worktreeName }
 }
 
 /** Wires a session's lifecycle events to tab state for the given tab id.
@@ -1166,7 +1169,7 @@ async function createSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
-  const { args, deterministicSessionId, discoverFromStore } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
+  const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
 
   const session = new PtySession({
@@ -1177,7 +1180,7 @@ async function createSessionTab(
     spawnPty: spawnNodePty,
     sessionId: deterministicSessionId,
     discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
-    ...(discoverFromStore ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd } } : {}),
+    ...(worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName } } : {}),
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
@@ -1447,7 +1450,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         spawnPty: spawnNodePty,
         sessionId: deterministicSessionId,
         discoverSessionIdFromOutput: deterministicSessionId === null,
-        ...(finalized.discoverFromStore ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd } } : {}),
+        ...(finalized.worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName: finalized.worktreeName } } : {}),
         monitorSessionPermissions: true,
         ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
       })

@@ -229,13 +229,16 @@ supports it) so that it can tail the session's event log and resume it later. Th
 flag together with `--worktree`, so the worktree launch option has not worked with any CLI that
 supports session identity. The fix:
 
-- `finalizeSessionArgs` omits `--session-id` (keeps `--name` and `--worktree`) for a fresh worktree
-  launch, and reports that the id must be discovered.
+- `finalizeSessionArgs` omits `--session-id` for a fresh worktree launch, keeps `--name`, and names the
+  worktree itself: `--worktree=desktop-<title slug>-<6 hex>` (`worktreeNameFor`, git-safe, bounded,
+  unique per launch). The name is what ties the launch to its session.
 - `PtySession` gains store discovery: before spawning it snapshots the UUID directories under the
   session store (`copilotSessionRoot`), then polls (every 500 ms, for at most 90 s, cancelled on exit
   or stop) for a new directory whose `events.jsonl` starts with a `session.start` record whose
-  `startTime` is not before the spawn and whose `context.cwd` is not the launch folder (a worktree
-  session runs elsewhere). The first match becomes the session id: the same `session-id` event,
+  `startTime` is not before the spawn and whose `context.cwd` ends in the worktree name this launch
+  asked for (never the launch folder, never a record without a cwd). Two launches at once, or a session
+  started elsewhere meanwhile, cannot be confused with it. The snapshot is awaited before the spawn.
+  The first match becomes the session id: the same `session-id` event,
   monitor attachment, usage association and tab update as output discovery. No match leaves the tab
   as it is today for old CLIs (no monitor, `--continue` on restore).
 - The record is data: only `type`, `startTime` and `context.cwd` are read, from the first 4 KiB,
@@ -404,6 +407,11 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3a-0 review (independent): discovery by "any new session outside the launch folder" could adopt
+  another launch's or another project's session, the pre-spawn snapshot was started but not awaited, and
+  the spike's synchronous spawn starved its own mock server. Fixed by naming the worktree per launch and
+  matching the record's cwd to it, awaiting `ready()` before the spawn, and spawning the spike's CLI
+  asynchronously with exit codes asserted.
 - Phase 3a-0 result: shipped as designed, plus one more pre-existing defect found by the real-app check: a
   tab created right after launch was validated against empty capabilities while the startup probe was
   still running, and refused for an option the CLI supports. The spawn plan now waits for an in-flight
