@@ -1,3 +1,4 @@
+// The git service tests. Split across git-service.shard-*.test.ts so they run in parallel; see fixtures/sharded-test.ts.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
@@ -7,7 +8,8 @@ import type { AddressInfo } from 'node:net'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import test from 'node:test'
+import type test from 'node:test'
+import { shardedTest } from './fixtures/sharded-test.js'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, isIndexLockFailure } from './git-service.js'
@@ -88,7 +90,7 @@ async function waitFor<T>(read: () => T | undefined | false, timeoutMs = 8_000):
 
 const repoAt = (view: GitProjectView, relativePath: string) => view.repos.find(repo => repo.relativePath === relativePath)
 
-test('subscribing lists the project repository with its branch and no changes', { skip }, async (t) => {
+shardedTest('subscribing lists the project repository with its branch and no changes', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
   assert.equal(view.git.available, true)
@@ -101,7 +103,7 @@ test('subscribing lists the project repository with its branch and no changes', 
   assert.match(repo?.id ?? '', /^repo-\d+$/)
 })
 
-test('a requested refresh picks up edits and pushes one change event', { skip }, async (t) => {
+shardedTest('a requested refresh picks up edits and pushes one change event', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'one\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init') })
   await h.service.subscribe(SUBSCRIBER, PROFILE)
   const baseline = h.events.length
@@ -118,7 +120,7 @@ test('a requested refresh picks up edits and pushes one change event', { skip },
   assert.deepEqual(status.untracked.map(entry => entry.path), ['new.txt'])
 })
 
-test('nested repositories keep their ids across rescans and a removed id is never reused', { skip }, async (t) => {
+shardedTest('nested repositories keep their ids across rescans and a removed id is never reused', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { for (const name of ['a', 'b']) { mkdirSync(join(project, name)); f.plain(join(project, name), 'init', '-q') } })
   const first = await h.service.subscribe(SUBSCRIBER, PROFILE)
   const [a, b] = [repoAt(first, 'a')!, repoAt(first, 'b')!]
@@ -133,7 +135,7 @@ test('nested repositories keep their ids across rescans and a removed id is neve
   assert.notEqual(c.id, b.id)
 })
 
-test('a repository whose config runs a program waits for review and is never read until trusted', { skip }, async (t) => {
+shardedTest('a repository whose config runs a program waits for review and is never read until trusted', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-service-filter-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -162,7 +164,7 @@ test('a repository whose config runs a program waits for review and is never rea
   assert.equal(await h.trustStore.isTrusted(realpathSync.native(h.project), repo.configHash!), true)
 })
 
-test('trusting is undone by changing the config', { skip }, async (t) => {
+shardedTest('trusting is undone by changing the config', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); f.plain(project, 'config', 'core.sshCommand', 'ssh -i one') })
   const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(first.state, 'needs-review')
@@ -173,7 +175,7 @@ test('trusting is undone by changing the config', { skip }, async (t) => {
   assert.notEqual(again.configHash, first.configHash)
 })
 
-test('status groups staged, unstaged, untracked and conflicted files', { skip }, async (t) => {
+shardedTest('status groups staged, unstaged, untracked and conflicted files', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     f.plain(project, 'init', '-q')
     for (const name of ['both.txt', 'unstaged.txt', 'staged.txt']) writeFileSync(join(project, name), 'v1\n')
@@ -192,7 +194,7 @@ test('status groups staged, unstaged, untracked and conflicted files', { skip },
   assert.equal(status.summary.changeCount, 5)
 })
 
-test('diffs cover modified, staged, untracked, binary and directory entries', { skip }, async (t) => {
+shardedTest('diffs cover modified, staged, untracked, binary and directory entries', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     f.plain(project, 'init', '-q')
     writeFileSync(join(project, 'a.txt'), 'one\ntwo\n'); writeFileSync(join(project, 'img.bin'), Buffer.from([0, 1, 2, 3]))
@@ -224,7 +226,7 @@ test('diffs cover modified, staged, untracked, binary and directory entries', { 
   assert.equal((await h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, id('dir/'), false)).kind, 'directory')
 })
 
-test('staged diffs are separate from unstaged ones', { skip }, async (t) => {
+shardedTest('staged diffs are separate from unstaged ones', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'one\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init')
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', 'a.txt'); writeFileSync(join(project, 'a.txt'), 'three\n')
@@ -236,7 +238,7 @@ test('staged diffs are separate from unstaged ones', { skip }, async (t) => {
   assert.match((await h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, entryId, false)).text, /^\+three$/m)
 })
 
-test('an entry id from an older file list is rejected', { skip }, async (t) => {
+shardedTest('an entry id from an older file list is rejected', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'x\n') })
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   const old = (await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)).untracked[0]!.id
@@ -246,7 +248,7 @@ test('an entry id from an older file list is rejected', { skip }, async (t) => {
   await assert.rejects(h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, 'e999-0', false), GitStaleError)
 })
 
-test('log returns commits newest first and pages with skip', { skip }, async (t) => {
+shardedTest('log returns commits newest first and pages with skip', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   writeFileSync(join(h.project, 'a.txt'), 'x\n')
   h.fixture.plain(h.project, 'add', '.')
@@ -260,13 +262,13 @@ test('log returns commits newest first and pages with skip', { skip }, async (t)
   assert.deepEqual((await h.service.getLog(SUBSCRIBER, PROFILE, repo.id, 1, 1)).map(entry => entry.subject), ['first: a thing'])
 })
 
-test('an empty repository has no log and does not fail', { skip }, async (t) => {
+shardedTest('an empty repository has no log and does not fail', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.deepEqual(await h.service.getLog(SUBSCRIBER, PROFILE, repo.id, 10, 0), [])
 })
 
-test('unsubscribing stops every refresh and releases the project', { skip }, async (t) => {
+shardedTest('unsubscribing stops every refresh and releases the project', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   await h.service.subscribe(SUBSCRIBER, PROFILE)
   assert.equal(h.service.hasSubscribers(), true)
@@ -279,7 +281,7 @@ test('unsubscribing stops every refresh and releases the project', { skip }, asy
   await assert.rejects(h.service.getStatus(SUBSCRIBER, PROFILE, 'repo-1'), /Open the Git panel/)
 })
 
-test('two subscribers share one project and it stays until the last one leaves', { skip }, async (t) => {
+shardedTest('two subscribers share one project and it stays until the last one leaves', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   await h.service.subscribe(1, PROFILE)
   await h.service.subscribe(2, PROFILE)
@@ -289,7 +291,7 @@ test('two subscribers share one project and it stays until the last one leaves',
   assert.equal(h.service.hasSubscribers(), false)
 })
 
-test('pausing stops refreshes and resuming runs one', { skip }, async (t) => {
+shardedTest('pausing stops refreshes and resuming runs one', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   await h.service.subscribe(SUBSCRIBER, PROFILE)
   h.service.setPaused(true)
@@ -304,7 +306,7 @@ test('pausing stops refreshes and resuming runs one', { skip }, async (t) => {
   assert.equal(repoAt(event, '.')?.changeCount, 1)
 })
 
-test('shouldPause defers work without losing the subscription', { skip }, async (t) => {
+shardedTest('shouldPause defers work without losing the subscription', { skip }, async (t) => {
   let blocked = false
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'), { shouldPause: () => blocked })
   await h.service.subscribe(SUBSCRIBER, PROFILE)
@@ -319,7 +321,7 @@ test('shouldPause defers work without losing the subscription', { skip }, async 
   await waitFor(() => h.events.at(-1))
 })
 
-test('opening the panel works while background refreshing is paused, but background requests stay quiet', { skip }, async (t) => {
+shardedTest('opening the panel works while background refreshing is paused, but background requests stay quiet', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'), { shouldPause: () => true })
   const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
   assert.equal(view.git.available, true, 'a hidden window must not turn an explicit open into "git not found"')
@@ -332,7 +334,7 @@ test('opening the panel works while background refreshing is paused, but backgro
   assert.equal(status.summary.state, 'ready', 'an explicit read still refreshes')
 })
 
-test('dispose stops the service and refuses new subscriptions', { skip }, async (t) => {
+shardedTest('dispose stops the service and refuses new subscriptions', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   await h.service.subscribe(SUBSCRIBER, PROFILE)
   await h.service.dispose()
@@ -340,7 +342,7 @@ test('dispose stops the service and refuses new subscriptions', { skip }, async 
   await assert.rejects(h.service.subscribe(SUBSCRIBER, PROFILE), /stopped/)
 })
 
-test('a missing git reports itself instead of failing', async (t) => {
+shardedTest('a missing git reports itself instead of failing', async (t) => {
   const service = new GitService({
     getRuntime: async () => null,
     trustStore: new GitTrustStore(join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-none-${process.pid}.json`)),
@@ -354,7 +356,7 @@ test('a missing git reports itself instead of failing', async (t) => {
   assert.deepEqual(view.repos, [])
 })
 
-test('an unknown profile and an unsafe .git are reported without running git', { skip }, async (t) => {
+shardedTest('an unknown profile and an unsafe .git are reported without running git', { skip }, async (t) => {
   const h = await harness(t, (_f, project) => { mkdirSync(join(project, 'bad')); writeFileSync(join(project, 'bad', '.git'), 'gitdir: \\\\attacker\\share\\x\n') })
   await assert.rejects(h.service.subscribe(SUBSCRIBER, 'ffffffffffffffff'), /Unknown workspace/)
   const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
@@ -365,14 +367,14 @@ test('an unknown profile and an unsafe .git are reported without running git', {
   assert.equal(h.calls.includes('config'), false)
 })
 
-test('a corrupt repository is an error row, not an exception', { skip }, async (t) => {
+shardedTest('a corrupt repository is an error row, not an exception', { skip }, async (t) => {
   const h = await harness(t, (_f, project) => { mkdirSync(join(project, '.git')) })
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'error')
   assert.ok((repo.error ?? '').length > 0)
 })
 
-test('an explicit diff re-checks the settings and refuses a config that appeared after the last refresh', { skip }, async (t) => {
+shardedTest('an explicit diff re-checks the settings and refuses a config that appeared after the last refresh', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-service-diffgate-${process.pid}.marker`)
   const control = `${marker}.control`
   for (const file of [marker, control]) rmSync(file, { force: true })
@@ -408,7 +410,7 @@ test('an explicit diff re-checks the settings and refuses a config that appeared
   assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'needs-review', 'the panel is told at once')
 })
 
-test('a .git pointer that turns unsafe after discovery is caught before the next command', { skip }, async (t) => {
+shardedTest('a .git pointer that turns unsafe after discovery is caught before the next command', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'ready')
@@ -417,7 +419,7 @@ test('a .git pointer that turns unsafe after discovery is caught before the next
   assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'error')
 })
 
-test('closing the panel while an open is still resolving the folder leaves nothing running', { skip }, async (t) => {
+shardedTest('closing the panel while an open is still resolving the folder leaves nothing running', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const pending = h.service.subscribe(SUBSCRIBER, PROFILE)
   h.service.unsubscribeAll(SUBSCRIBER)
@@ -434,7 +436,7 @@ test('closing the panel while an open is still resolving the folder leaves nothi
   assert.equal(h.calls.length, 0, 'no git process may run after the panel was closed')
 })
 
-test('a later open of the same profile still works after a cancelled one', { skip }, async (t) => {
+shardedTest('a later open of the same profile still works after a cancelled one', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const first = h.service.subscribe(SUBSCRIBER, PROFILE)
   h.service.unsubscribeAll(SUBSCRIBER)
@@ -443,7 +445,7 @@ test('a later open of the same profile still works after a cancelled one', { ski
   assert.equal(repoAt(view, '.')?.state, 'ready')
 })
 
-test('the status summary follows a branch change even when the file list does not change', { skip }, async (t) => {
+shardedTest('the status summary follows a branch change even when the file list does not change', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'x\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init') })
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   const before = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
@@ -454,7 +456,7 @@ test('the status summary follows a branch change even when the file list does no
   assert.equal(after.generation, before.generation, 'entry ids stay valid when the file list is unchanged')
 })
 
-test('a setting too long to have been shown in full cannot be trusted, even if asked directly', { skip }, async (t) => {
+shardedTest('a setting too long to have been shown in full cannot be trusted, even if asked directly', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); f.plain(project, 'config', 'core.sshCommand', `ssh${' '.repeat(9_000)}-i key`) })
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'needs-review')
@@ -483,7 +485,7 @@ const committed = (f: GitFixture, project: string, files: Record<string, string>
   f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init')
 }
 
-test('staging moves files, a new folder and a deletion into the index and leaves the files alone', { skip }, async (t) => {
+shardedTest('staging moves files, a new folder and a deletion into the index and leaves the files alone', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n', 'b.txt': 'bee\n' })
     writeFileSync(join(project, 'a.txt'), 'one\ntwo\n')
@@ -503,7 +505,7 @@ test('staging moves files, a new folder and a deletion into the index and leaves
   assert.equal(existsSync(join(h.project, 'b.txt')), false, 'a staged deletion stays deleted')
 })
 
-test('unstaging puts files back where they were without touching their contents', { skip }, async (t) => {
+shardedTest('unstaging puts files back where they were without touching their contents', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'changed\n'); writeFileSync(join(project, 'new.txt'), 'n\n')
@@ -520,7 +522,7 @@ test('unstaging puts files back where they were without touching their contents'
   assert.equal(readFileSync(join(h.project, 'a.txt'), 'utf8'), 'changed\n')
 })
 
-test('a file named like a glob stages only itself, and a leading dash is just a name', { skip }, async (t) => {
+shardedTest('a file named like a glob stages only itself, and a leading dash is just a name', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'seed.txt': 's\n' })
     for (const name of ['a.ts', 'b.ts', '[a].ts', '-dash.ts']) writeFileSync(join(project, name), 'x\n')
@@ -533,7 +535,7 @@ test('a file named like a glob stages only itself, and a leading dash is just a 
   assert.deepEqual(result.status!.untracked.map(item => item.path).sort(), ['a.ts', 'b.ts'], 'a.ts and b.ts were not swept up by the glob')
 })
 
-test('unstaging a staged rename restores both the old and the new path', { skip }, async (t) => {
+shardedTest('unstaging a staged rename restores both the old and the new path', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'old.txt': 'content that is long enough to be detected as a rename\n' })
     f.plain(project, 'mv', 'old.txt', 'renamed.txt')
@@ -548,7 +550,7 @@ test('unstaging a staged rename restores both the old and the new path', { skip 
   assert.deepEqual(result.status!.untracked.map(item => item.path), ['renamed.txt'])
 })
 
-test('a repository with no commits can stage and unstage', { skip }, async (t) => {
+shardedTest('a repository with no commits can stage and unstage', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'first.txt'), 'hi\n') })
   const { repoId, status } = await open(h)
   let current = await status()
@@ -562,7 +564,7 @@ test('a repository with no commits can stage and unstage', { skip }, async (t) =
   assert.equal(readFileSync(join(h.project, 'first.txt'), 'utf8'), 'hi\n')
 })
 
-test('a request that quotes an old file list is refused, and so is one with nothing to do', { skip }, async (t) => {
+shardedTest('a request that quotes an old file list is refused, and so is one with nothing to do', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n') })
   const { repoId, status } = await open(h)
   const before = await status()
@@ -577,7 +579,7 @@ test('a request that quotes an old file list is refused, and so is one with noth
   await assert.rejects(h.service.unstage(SUBSCRIBER, PROFILE, repoId, [idOf(again, 'extra.txt')], again.generation), /nothing to unstage/)
 })
 
-test('two writes queued on one repository both happen, one after the other', { skip }, async (t) => {
+shardedTest('two writes queued on one repository both happen, one after the other', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'seed.txt': 's\n' }); writeFileSync(join(project, 'one.txt'), '1\n'); writeFileSync(join(project, 'two.txt'), '2\n') })
   const { repoId, status } = await open(h)
   const before = await status()
@@ -592,7 +594,7 @@ test('two writes queued on one repository both happen, one after the other', { s
   assert.deepEqual(again.status!.staged.map(item => item.path).sort(), ['one.txt', 'two.txt'])
 })
 
-test('another process holding index.lock is waited for, then reported, and the lock is never deleted', { skip }, async (t) => {
+shardedTest('another process holding index.lock is waited for, then reported, and the lock is never deleted', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'new.txt'), 'n\n') }, { lockWaitMs: 1_500, lockPollMs: 100 })
   const { repoId, status } = await open(h)
   const lock = join(h.project, '.git', 'index.lock')
@@ -614,7 +616,7 @@ test('another process holding index.lock is waited for, then reported, and the l
   assert.equal(existsSync(lock), true, 'a lock that is not ours is never removed')
 })
 
-test('a commit records exactly the message, whatever it contains, and clears the staged list', { skip }, async (t) => {
+shardedTest('a commit records exactly the message, whatever it contains, and clears the staged list', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.') })
   const { repoId, status } = await open(h)
   const before = await status()
@@ -628,7 +630,7 @@ test('a commit records exactly the message, whatever it contains, and clears the
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '2')
 })
 
-test('a commit with nothing staged, an empty message or unresolved conflicts does not happen', { skip }, async (t) => {
+shardedTest('a commit with nothing staged, an empty message or unresolved conflicts does not happen', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n') })
   const { repoId, status } = await open(h)
   const before = await status()
@@ -640,7 +642,7 @@ test('a commit with nothing staged, an empty message or unresolved conflicts doe
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 
-test('unresolved conflicts block a commit', { skip }, async (t) => {
+shardedTest('unresolved conflicts block a commit', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'base\n' })
     f.plain(project, 'checkout', '-q', '-b', 'side'); writeFileSync(join(project, 'a.txt'), 'side\n'); f.plain(project, 'commit', '-q', '-am', 'side')
@@ -654,7 +656,7 @@ test('unresolved conflicts block a commit', { skip }, async (t) => {
   assert.deepEqual([result.ok, result.reason], [false, 'conflicts'])
 })
 
-test('a commit asks to configure git when it does not know who the author is', { skip }, async (t) => {
+shardedTest('a commit asks to configure git when it does not know who the author is', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.') })
   writeFileSync(join(h.fixture.root, 'gitconfig'), '[init]\n\tdefaultBranch = main\n')
   const { repoId, status } = await open(h)
@@ -671,7 +673,7 @@ const hookFile = (project: string, name: string, body: string): void => {
   writeFileSync(join(project, '.git', 'hooks', name), `#!/bin/sh\n${body}\n`)
 }
 
-test('hooks a commit would run need approval of their exact contents, once per change', { skip }, async (t) => {
+shardedTest('hooks a commit would run need approval of their exact contents, once per change', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -715,7 +717,7 @@ test('hooks a commit would run need approval of their exact contents, once per c
   assert.equal(existsSync(marker), false)
 })
 
-test('a failing hook blocks the commit, its output is shown and streamed, and nothing is committed', { skip }, async (t) => {
+shardedTest('a failing hook blocks the commit, its output is shown and streamed, and nothing is committed', { skip }, async (t) => {
   const progress: string[] = []
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
@@ -733,7 +735,7 @@ test('a failing hook blocks the commit, its output is shown and streamed, and no
   assert.equal(result.status!.staged.length, 1, 'the file is still staged for another try')
 })
 
-test('Cancel stops a commit that is waiting on a slow hook, and says what to check', { skip }, async (t) => {
+shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what to check', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-cancel-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -759,7 +761,7 @@ test('Cancel stops a commit that is waiting on a slow hook, and says what to che
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 
-test('writes are refused for a repository that has not been trusted, and cannot start for an unknown one', { skip }, async (t) => {
+shardedTest('writes are refused for a repository that has not been trusted, and cannot start for an unknown one', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); f.plain(project, 'config', 'core.sshCommand', 'ssh -i k'); writeFileSync(join(project, 'a.txt'), 'x\n') })
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'needs-review')
@@ -768,7 +770,7 @@ test('writes are refused for a repository that has not been trusted, and cannot 
   await assert.rejects(h.service.stage(SUBSCRIBER, PROFILE, 'repo-999', ['e1-0'], 1), GitStaleError)
 })
 
-test('isIndexLockFailure recognises git\'s lock message and nothing else', () => {
+shardedTest('isIndexLockFailure recognises git\'s lock message and nothing else', () => {
   const run = (exitCode: number, stderr: string): GitRunResult => ({ exitCode, stdout: Buffer.alloc(0), stderr, stdoutTruncated: false, timedOut: false, cancelled: false, durationMs: 1 })
   assert.equal(isIndexLockFailure(run(128, "fatal: Unable to create 'C:/r/.git/index.lock': File exists.\n\nAnother git process seems to be running")), true)
   assert.equal(isIndexLockFailure(run(0, "warning: index.lock File exists (but it worked)")), false)
@@ -777,7 +779,7 @@ test('isIndexLockFailure recognises git\'s lock message and nothing else', () =>
 
 // ---- review fixes on phase 2 ------------------------------------------------------------------------------------
 
-test('replacing an approved oversized hook with different contents of the same size needs a new approval', { skip }, async (t) => {
+shardedTest('replacing an approved oversized hook with different contents of the same size needs a new approval', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-big-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -807,7 +809,7 @@ test('replacing an approved oversized hook with different contents of the same s
   assert.equal(readFileSync(marker, 'utf8').trim(), 'OLD', 'the replacement did not run')
 })
 
-test('a hook that cannot be fully checked can never be approved, and a commit refuses to run it', { skip }, async (t) => {
+shardedTest('a hook that cannot be fully checked can never be approved, and a commit refuses to run it', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-unverifiable-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -826,7 +828,7 @@ test('a hook that cannot be fully checked can never be approved, and a commit re
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
 })
 
-test('a commit refuses files that were staged after the panel last looked, and so does restaging different content', { skip }, async (t) => {
+shardedTest('a commit refuses files that were staged after the panel last looked, and so does restaging different content', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
@@ -851,7 +853,7 @@ test('a commit refuses files that were staged after the panel last looked, and s
   assert.equal(h.fixture.plain(h.project, 'show', '--name-only', '--format=', 'HEAD').trim().split(/\r?\n/).sort().join(','), 'a.txt,not-reviewed.txt')
 })
 
-test('staging after an unseen external change is refused for the same reason', { skip }, async (t) => {
+shardedTest('staging after an unseen external change is refused for the same reason', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n') })
   const { repoId, status } = await open(h)
   const seen = await status()
@@ -859,7 +861,7 @@ test('staging after an unseen external change is refused for the same reason', {
   await assert.rejects(h.service.stage(SUBSCRIBER, PROFILE, repoId, [idOf(seen, 'a.txt')], seen.generation), GitStaleError)
 })
 
-test('a commit also notices a change that lands while it waits for the index lock', { skip }, async (t) => {
+shardedTest('a commit also notices a change that lands while it waits for the index lock', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
@@ -881,7 +883,7 @@ test('a commit also notices a change that lands while it waits for the index loc
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
 })
 
-test('before the first commit, a file staged and then edited again can still be unstaged, and the edit is kept', { skip }, async (t) => {
+shardedTest('before the first commit, a file staged and then edited again can still be unstaged, and the edit is kept', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q'); writeFileSync(join(project, 'a.txt'), 'first\n') })
   const { repoId, status } = await open(h)
   let current = await status()
@@ -901,7 +903,7 @@ test('before the first commit, a file staged and then edited again can still be 
 const lockWaitHarness = (t: test.TestContext, setup: (f: GitFixture, project: string) => void) =>
   harness(t, setup, { lockWaitMs: 5_000, lockPollMs: 100 })
 
-test('a hook swapped while the commit waits for the index lock is not run on the old approval', { skip }, async (t) => {
+shardedTest('a hook swapped while the commit waits for the index lock is not run on the old approval', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-lockwait-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -927,7 +929,7 @@ test('a hook swapped while the commit waits for the index lock is not run on the
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1', 'nothing was committed')
 })
 
-test('a hook that appears while the commit waits for the lock needs approval too', { skip }, async (t) => {
+shardedTest('a hook that appears while the commit waits for the lock needs approval too', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-appeared-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -946,7 +948,7 @@ test('a hook that appears while the commit waits for the lock needs approval too
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 
-test('repository settings that start naming a program while the commit waits stop it', { skip }, async (t) => {
+shardedTest('repository settings that start naming a program while the commit waits stop it', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-settings-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -966,7 +968,7 @@ test('repository settings that start naming a program while the commit waits sto
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 
-test('a commit whose hooks stay approved still goes through after waiting for a lock', { skip }, async (t) => {
+shardedTest('a commit whose hooks stay approved still goes through after waiting for a lock', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-ok-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -989,7 +991,7 @@ test('a commit whose hooks stay approved still goes through after waiting for a 
 
 // ---- staged entries the panel does not list ------------------------------------------------------------------------------
 
-test('a commit is refused while a staged submodule update is in the index but not in the list', { skip }, async (t) => {
+shardedTest('a commit is refused while a staged submodule update is in the index but not in the list', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     f.plain(project, 'update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},sub`)
@@ -1013,7 +1015,7 @@ test('a commit is refused while a staged submodule update is in the index but no
   assert.equal(done.ok, true, `${done.reason}: ${done.message}`)
 })
 
-test('a staged rename is listed under both names, so a commit with it is not refused', { skip }, async (t) => {
+shardedTest('a staged rename is listed under both names, so a commit with it is not refused', { skip }, async (t) => {
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'old.txt': 'content that is long enough to be detected as a rename\n' })
     f.plain(project, 'mv', 'old.txt', 'renamed.txt')
@@ -1055,7 +1057,7 @@ const localHead = (h: Harness): string => h.fixture.plain(h.project, 'rev-parse'
 const withOrigin = (t: test.TestContext, extra?: (f: GitFixture, project: string) => void, options: Partial<GitServiceOptions> = {}) =>
   harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); withRemote(f, project); extra?.(f, project) }, options)
 
-test('fetch brings in what the remote has, tells how far behind the branch is, and leaves the files alone', { skip }, async (t) => {
+shardedTest('fetch brings in what the remote has, tells how far behind the branch is, and leaves the files alone', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId, status } = await open(h)
   assert.equal((await status()).summary.behind, 0)
@@ -1067,7 +1069,7 @@ test('fetch brings in what the remote has, tells how far behind the branch is, a
   assert.equal(existsSync(join(h.project, 'theirs.txt')), false, 'a fetch changes no file')
 })
 
-test('pull fast-forwards to the upstream and nothing else', { skip }, async (t) => {
+shardedTest('pull fast-forwards to the upstream and nothing else', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
@@ -1080,7 +1082,7 @@ test('pull fast-forwards to the upstream and nothing else', { skip }, async (t) 
   assert.deepEqual([again.ok, again.message], [true, 'Already up to date.'])
 })
 
-test('a pull that cannot fast-forward changes nothing and says so', { skip }, async (t) => {
+shardedTest('a pull that cannot fast-forward changes nothing and says so', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
   })
@@ -1094,7 +1096,7 @@ test('a pull that cannot fast-forward changes nothing and says so', { skip }, as
   assert.equal(existsSync(join(h.project, 'theirs.txt')), false)
 })
 
-test('pull does not run the repository\'s hooks', { skip }, async (t) => {
+shardedTest('pull does not run the repository\'s hooks', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-pull-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -1108,7 +1110,7 @@ test('pull does not run the repository\'s hooks', { skip }, async (t) => {
   assert.equal(existsSync(marker), false, 'no hook ran')
 })
 
-test('push sends the branch to its upstream', { skip }, async (t) => {
+shardedTest('push sends the branch to its upstream', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   writeFileSync(join(h.project, 'mine.txt'), 'm\n'); h.fixture.plain(h.project, 'add', '.'); h.fixture.plain(h.project, 'commit', '-q', '-m', 'mine')
@@ -1121,7 +1123,7 @@ test('push sends the branch to its upstream', { skip }, async (t) => {
   assert.deepEqual([again.ok, again.message], [true, 'Everything is already up to date.'])
 })
 
-test('a push the remote would have to overwrite is refused, even when the repository configures a forced push', { skip }, async (t) => {
+shardedTest('a push the remote would have to overwrite is refused, even when the repository configures a forced push', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
     f.plain(project, 'config', 'remote.origin.push', '+refs/heads/*:refs/heads/*')
@@ -1135,7 +1137,7 @@ test('a push the remote would have to overwrite is refused, even when the reposi
   assert.equal(remoteHead(h), theirs, 'the remote kept its own commit')
 })
 
-test('a branch with no upstream is only published after the remote is chosen', { skip }, async (t) => {
+shardedTest('a branch with no upstream is only published after the remote is chosen', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'feature')
     writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
@@ -1152,7 +1154,7 @@ test('a branch with no upstream is only published after the remote is chosen', {
   assert.equal(h.fixture.plain(h.project, 'rev-parse', '--abbrev-ref', '@{upstream}').trim(), 'origin/feature')
 })
 
-test('a branch that tracks a differently named branch is not pushed by the panel', { skip }, async (t) => {
+shardedTest('a branch that tracks a differently named branch is not pushed by the panel', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'feature', '--track', 'origin/main')
     writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
@@ -1165,7 +1167,7 @@ test('a branch that tracks a differently named branch is not pushed by the panel
   assert.equal(remoteHead(h), before)
 })
 
-test('pull and push need a branch, fetch does not', { skip }, async (t) => {
+shardedTest('pull and push need a branch, fetch does not', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => f.plain(project, 'checkout', '-q', '--detach'))
   const { repoId } = await open(h)
   for (const operation of ['pull', 'push'] as const) {
@@ -1175,7 +1177,7 @@ test('pull and push need a branch, fetch does not', { skip }, async (t) => {
   assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true)
 })
 
-test('a remote that points at a network share or runs a program is never contacted', { skip }, async (t) => {
+shardedTest('a remote that points at a network share or runs a program is never contacted', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-ext-remote-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -1192,7 +1194,7 @@ test('a remote that points at a network share or runs a program is never contact
   assert.equal(existsSync(marker), false)
 })
 
-test('a push is refused while the repository has a pre-push hook, which the panel does not run', { skip }, async (t) => {
+shardedTest('a push is refused while the repository has a pre-push hook, which the panel does not run', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-prepush-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -1218,7 +1220,7 @@ async function serve(t: test.TestContext, handler: (request: IncomingMessage, re
   return { port: (server.address() as AddressInfo).port, requests: () => count }
 }
 
-test('a remote that wants credentials fails fast with the terminal hint, and no secret reaches the result or the progress', { skip }, async (t) => {
+shardedTest('a remote that wants credentials fails fast with the terminal hint, and no secret reaches the result or the progress', { skip }, async (t) => {
   const server = await serve(t, (_request, response) => { response.writeHead(401, { 'WWW-Authenticate': 'Basic realm="x"' }); response.end() })
   const progress: string[] = []
   const h = await withOrigin(t, (f, project) => f.plain(project, 'config', 'remote.origin.url', `http://someone:hunter2secret@127.0.0.1:${server.port}/r.git`),
@@ -1235,7 +1237,7 @@ test('a remote that wants credentials fails fast with the terminal hint, and no 
   assert.ok(server.requests() > 0, 'the server really was contacted')
 })
 
-test('Cancel stops a fetch that is waiting for a slow remote', { skip }, async (t) => {
+shardedTest('Cancel stops a fetch that is waiting for a slow remote', { skip }, async (t) => {
   const server = await serve(t, () => { /* never answers */ })
   const h = await withOrigin(t, (f, project) => f.plain(project, 'config', 'remote.origin.url', `http://127.0.0.1:${server.port}/r.git`))
   const { repoId } = await open(h)
@@ -1248,7 +1250,7 @@ test('Cancel stops a fetch that is waiting for a slow remote', { skip }, async (
   assert.ok(Date.now() - started < 15_000)
 })
 
-test('network commands run with prompts off, only the supported transports, and SSH batch mode unless the user has their own SSH command', { skip }, async (t) => {
+shardedTest('network commands run with prompts off, only the supported transports, and SSH batch mode unless the user has their own SSH command', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true)
@@ -1264,7 +1266,7 @@ test('network commands run with prompts off, only the supported transports, and 
 
 // ---- what a fetch may write, and what a confirmation covers --------------------------------------------------------------------
 
-test('a fetch whose configured refspec would overwrite a local branch is refused, and the branch is untouched', { skip }, async (t) => {
+shardedTest('a fetch whose configured refspec would overwrite a local branch is refused, and the branch is untouched', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'branch', 'backup')
     writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'local work')
@@ -1283,7 +1285,7 @@ test('a fetch whose configured refspec would overwrite a local branch is refused
   assert.equal(h.calls.includes('fetch'), false, 'no fetch was started')
 })
 
-test('a fetch never prunes or writes tags, whatever the repository configures, and still follows a valid single-branch setup', { skip }, async (t) => {
+shardedTest('a fetch never prunes or writes tags, whatever the repository configures, and still follows a valid single-branch setup', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     // The remote has a branch that exists locally as a remote-tracking branch; the colleague deletes it after the first fetch.
     f.plain(join(f.root, 'other'), 'push', '-q', 'origin', 'HEAD:refs/heads/obsolete')
@@ -1304,7 +1306,7 @@ test('a fetch never prunes or writes tags, whatever the repository configures, a
   assert.equal(h.fixture.plain(h.project, 'tag', '--list').trim(), '', 'no tag was written')
 })
 
-test('fetch settings are held to the remote\'s own namespace, one value at a time', { skip }, async (t) => {
+shardedTest('fetch settings are held to the remote\'s own namespace, one value at a time', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   for (const spec of ['+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*', '+refs/heads/*:refs/remotes/fork/*']) {
@@ -1317,7 +1319,7 @@ test('fetch settings are held to the remote\'s own namespace, one value at a tim
   assert.equal((await h.service.fetch(SUBSCRIBER, PROFILE, repoId)).ok, true, 'the standard setting is fine')
 })
 
-test('a confirmation made for one branch does not publish another', { skip }, async (t) => {
+shardedTest('a confirmation made for one branch does not publish another', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'safe')
     writeFileSync(join(project, 's.txt'), 's\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'safe work')
@@ -1341,7 +1343,7 @@ test('a confirmation made for one branch does not publish another', { skip }, as
   assert.throws(() => remoteHead(h, 'private'))
 })
 
-test('a push or pull is for the commit that was shown: a new commit, or a missing confirmation, stops it', { skip }, async (t) => {
+shardedTest('a push or pull is for the commit that was shown: a new commit, or a missing confirmation, stops it', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'mine')
   })
@@ -1358,7 +1360,7 @@ test('a push or pull is for the commit that was shown: a new commit, or a missin
 
 // ---- the binding holds for the whole operation, not only at the start ------------------------------------------------------------
 
-test('a pull does not merge into another branch when the branch is switched while its fetch runs', { skip }, async (t) => {
+shardedTest('a pull does not merge into another branch when the branch is switched while its fetch runs', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'private')
     writeFileSync(join(project, 'p.txt'), 'p\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'private work')
@@ -1382,7 +1384,7 @@ test('a pull does not merge into another branch when the branch is switched whil
   assert.equal(existsSync(join(h.project, 'q.txt')), false)
 })
 
-test('a commit made while a pull fetches also stops the merge, and the merge names the confirmed upstream', { skip }, async (t) => {
+shardedTest('a commit made while a pull fetches also stops the merge, and the merge names the confirmed upstream', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   colleaguePushes(h.fixture, 'theirs.txt', 'x\n')
@@ -1400,7 +1402,7 @@ test('a commit made while a pull fetches also stops the merge, and the merge nam
   assert.equal(merge.args.includes('@{upstream}'), false)
 })
 
-test('a push sends the commit that was confirmed, not one added to the branch afterwards', { skip }, async (t) => {
+shardedTest('a push sends the commit that was confirmed, not one added to the branch afterwards', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     writeFileSync(join(project, 'mine.txt'), 'm\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'confirmed')
   })
@@ -1418,7 +1420,7 @@ test('a push sends the commit that was confirmed, not one added to the branch af
   assert.throws(() => h.fixture.plain(join(h.fixture.root, 'remote.git'), 'cat-file', '-e', localHead(h)), 'the unconfirmed commit never reached the remote')
 })
 
-test('publishing sends the confirmed commit and then makes the branch follow it', { skip }, async (t) => {
+shardedTest('publishing sends the confirmed commit and then makes the branch follow it', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'feature')
     writeFileSync(join(project, 'f.txt'), 'f\n'); f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'feature work')
@@ -1458,7 +1460,7 @@ const withFeature = (t: test.TestContext, extra: Partial<GitServiceOptions> = {}
     setup?.(f, project)
   }, { sessionActivity: () => ({ busy: false, detail: '' }), confirm: async () => true, ...extra })
 
-test('the branch list shows the current branch, upstream distance and last commit, newest first', { skip }, async (t) => {
+shardedTest('the branch list shows the current branch, upstream distance and last commit, newest first', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'topic'); commitFile(f, project, 't.txt', 't\n')
     f.plain(project, 'checkout', '-q', 'main'); commitFile(f, project, 'm.txt', 'm\n')   // main is now one ahead of origin/main and the newest
@@ -1473,7 +1475,7 @@ test('the branch list shows the current branch, upstream distance and last commi
   assert.ok(typeof main!.committedAt === 'number')
 })
 
-test('creating a branch makes it at the current commit, switches to it, and leaves the files alone', { skip }, async (t) => {
+shardedTest('creating a branch makes it at the current commit, switches to it, and leaves the files alone', { skip }, async (t) => {
   const h = await withFeature(t, {}, (f, project) => writeFileSync(join(project, 'a.txt'), 'edited\n'))
   const { repoId } = await open(h)
   const expected = headOf(h)
@@ -1487,7 +1489,7 @@ test('creating a branch makes it at the current commit, switches to it, and leav
   assert.equal(result.status!.summary.branch, 'work/new-idea')
 })
 
-test('a branch name that Git or the panel would not accept creates nothing', { skip }, async (t) => {
+shardedTest('a branch name that Git or the panel would not accept creates nothing', { skip }, async (t) => {
   const h = await withFeature(t)
   const { repoId } = await open(h)
   const before = h.fixture.plain(h.project, 'branch', '--list').trim()
@@ -1499,7 +1501,7 @@ test('a branch name that Git or the panel would not accept creates nothing', { s
   assert.equal(currentBranch(h), 'main')
 })
 
-test('a branch change is for the branch and commit that were on screen, and a stale one never opens a confirmation', { skip }, async (t) => {
+shardedTest('a branch change is for the branch and commit that were on screen, and a stale one never opens a confirmation', { skip }, async (t) => {
   let asked = 0
   const h = await withFeature(t, { confirm: async () => { asked++; return true } })
   const { repoId } = await open(h)
@@ -1513,7 +1515,7 @@ test('a branch change is for the branch and commit that were on screen, and a st
   assert.equal(asked, 0, 'the person was not asked to confirm something that could not happen')
 })
 
-test('switching asks first, then moves the files to the other branch', { skip }, async (t) => {
+shardedTest('switching asks first, then moves the files to the other branch', { skip }, async (t) => {
   const asked: Array<{ title: string; detail: string; confirmLabel: string }> = []
   const h = await withFeature(t, { confirm: async (_profile, request) => { asked.push(request); return true } }, (_f, project) => writeFileSync(join(project, 'notes.txt'), 'mine\n'))
   const { repoId } = await open(h)
@@ -1530,7 +1532,7 @@ test('switching asks first, then moves the files to the other branch', { skip },
   assert.equal(asked[0]!.confirmLabel, 'Switch branch')
 })
 
-test('declining the confirmation, or having no way to ask, switches nothing', { skip }, async (t) => {
+shardedTest('declining the confirmation, or having no way to ask, switches nothing', { skip }, async (t) => {
   let answer = false
   const h = await withFeature(t, { confirm: async () => answer })
   const { repoId } = await open(h)
@@ -1548,7 +1550,7 @@ test('declining the confirmation, or having no way to ask, switches nothing', { 
   assert.equal(currentBranch(unasked), 'main')
 })
 
-test('a switch is refused while a Copilot session is working in the project, and the person is not even asked', { skip }, async (t) => {
+shardedTest('a switch is refused while a Copilot session is working in the project, and the person is not even asked', { skip }, async (t) => {
   let asked = 0
   const h = await withFeature(t, { sessionActivity: () => ({ busy: true, detail: '"Main session" is working' }), confirm: async () => { asked++; return true } })
   const { repoId } = await open(h)
@@ -1561,7 +1563,7 @@ test('a switch is refused while a Copilot session is working in the project, and
   assert.equal((await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'idea', headOf(h))).ok, true)
 })
 
-test('a session that starts working while the confirmation is open stops the switch', { skip }, async (t) => {
+shardedTest('a session that starts working while the confirmation is open stops the switch', { skip }, async (t) => {
   let busy = false
   const h = await withFeature(t, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' }, confirm: async () => { busy = true; return true } })
   const { repoId } = await open(h)
@@ -1570,7 +1572,7 @@ test('a session that starts working while the confirmation is open stops the swi
   assert.equal(currentBranch(h), 'main')
 })
 
-test('a branch switched elsewhere while the confirmation is open is not switched again', { skip }, async (t) => {
+shardedTest('a branch switched elsewhere while the confirmation is open is not switched again', { skip }, async (t) => {
   let h!: Harness
   h = await withFeature(t, { confirm: async () => { h.fixture.plain(h.project, 'checkout', '-q', 'feature'); return true } }, (f, project) => f.plain(project, 'branch', 'third'))
   const { repoId } = await open(h)
@@ -1578,7 +1580,7 @@ test('a branch switched elsewhere while the confirmation is open is not switched
   assert.equal(currentBranch(h), 'feature', 'it stayed where the other tool put it')
 })
 
-test('uncommitted changes that would be overwritten stop the switch, and nothing is lost', { skip }, async (t) => {
+shardedTest('uncommitted changes that would be overwritten stop the switch, and nothing is lost', { skip }, async (t) => {
   const h = await withFeature(t, {}, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my unsaved work\n'))
   // `feature` changes a.txt too.
   h.fixture.plain(h.project, 'stash', '-q'); h.fixture.plain(h.project, 'checkout', '-q', 'feature')
@@ -1593,7 +1595,7 @@ test('uncommitted changes that would be overwritten stop the switch, and nothing
   assert.ok(h.runs.every(run => !run.args.some(arg => ['--force', '-f', '--merge', '-m', '--discard-changes'].includes(arg))), 'never forced')
 })
 
-test('the target must be a local branch that exists and is not the current one', { skip }, async (t) => {
+shardedTest('the target must be a local branch that exists and is not the current one', { skip }, async (t) => {
   const h = await withFeature(t)
   const { repoId } = await open(h)
   for (const [name, pattern] of [['nope', /no local branch "nope"/], ['main', /already on "main"/], ['origin/main', /no local branch/], ['refs/heads/feature', /no local branch/]] as const) {
@@ -1604,7 +1606,7 @@ test('the target must be a local branch that exists and is not the current one',
   assert.equal(h.runs.some(run => run.args[0] === 'switch'), false, 'no switch was started')
 })
 
-test('a switch runs no repository hook, and works from a detached HEAD', { skip }, async (t) => {
+shardedTest('a switch runs no repository hook, and works from a detached HEAD', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-switch-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -1619,7 +1621,7 @@ test('a switch runs no repository hook, and works from a detached HEAD', { skip 
   assert.equal(existsSync(marker), false, 'post-checkout did not run')
 })
 
-test('before the first commit there is no branch to create or leave', { skip }, async (t) => {
+shardedTest('before the first commit there is no branch to create or leave', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { f.plain(project, 'init', '-q') }, { sessionActivity: () => ({ busy: false, detail: '' }), confirm: async () => true })
   const { repoId } = await open(h)
   const result = await h.service.createBranch(SUBSCRIBER, PROFILE, repoId, 'x', { branch: 'main', headOid: 'a'.repeat(40) })
@@ -1627,7 +1629,7 @@ test('before the first commit there is no branch to create or leave', { skip }, 
   assert.match(result.message, /no commits yet/)
 })
 
-test('a branch that shares its name with a tag is listed by its real name and can be switched to', { skip }, async (t) => {
+shardedTest('a branch that shares its name with a tag is listed by its real name and can be switched to', { skip }, async (t) => {
   const h = await withFeature(t, {}, (f, project) => { f.plain(project, 'tag', 'feature', 'main'); f.plain(project, 'tag', 'main', 'feature') })
   const { repoId } = await open(h)
   const branches = await h.service.getBranches(SUBSCRIBER, PROFILE, repoId)
@@ -1674,7 +1676,7 @@ const withChanges = (t: test.TestContext, kit: DiscardKit, setup: (f: GitFixture
 const text = (path: string): string => readFileSync(path, 'utf8').replace(/\r/g, '')
 const savedCopies = (kit: DiscardKit): string[] => readdirSync(kit.snapshots)
 
-test('discarding a tracked file puts back its last version, after saving a copy of what was on disk', { skip }, async (t) => {
+shardedTest('discarding a tracked file puts back its last version, after saving a copy of what was on disk', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'b.txt'), 'other edit\n') })
   const { repoId, status } = await open(h)
@@ -1695,7 +1697,7 @@ test('discarding a tracked file puts back its last version, after saving a copy 
   assert.doesNotMatch(kit.asked[0]!.detail, /b\.txt/)
 })
 
-test('only the working-tree edit is discarded: what is staged stays staged', { skip }, async (t) => {
+shardedTest('only the working-tree edit is discarded: what is staged stays staged', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (f, project) => {
     writeFileSync(join(project, 'a.txt'), 'staged version\n'); f.plain(project, 'add', 'a.txt')
@@ -1711,7 +1713,7 @@ test('only the working-tree edit is discarded: what is staged stays staged', { s
   assert.deepEqual(result.status!.unstaged, [])
 })
 
-test('a file deleted in the working tree comes back, with nothing to copy', { skip }, async (t) => {
+shardedTest('a file deleted in the working tree comes back, with nothing to copy', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (_f, project) => rmSync(join(project, 'c.txt')))
   const { repoId, status } = await open(h)
@@ -1722,7 +1724,7 @@ test('a file deleted in the working tree comes back, with nothing to copy', { sk
   assert.doesNotMatch(result.message, /copy/i)
 })
 
-test('untracked files and folders go to the Recycle Bin, not away for good', { skip }, async (t) => {
+shardedTest('untracked files and folders go to the Recycle Bin, not away for good', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (_f, project) => {
     writeFileSync(join(project, 'scratch.txt'), 'x\n'); mkdirSync(join(project, 'build', 'deep'), { recursive: true }); writeFileSync(join(project, 'build', 'deep', 'out.js'), 'o\n')
@@ -1742,7 +1744,7 @@ test('untracked files and folders go to the Recycle Bin, not away for good', { s
   assert.match(kit.asked[0]!.detail, /moved to the Recycle Bin/)
 })
 
-test('a folder that holds a git repository is not offered for deletion, and nothing else in the request happens either', { skip }, async (t) => {
+shardedTest('a folder that holds a git repository is not offered for deletion, and nothing else in the request happens either', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (_f, project) => {
     writeFileSync(join(project, 'a.txt'), 'my edit\n')
@@ -1760,7 +1762,7 @@ test('a folder that holds a git repository is not offered for deletion, and noth
   assert.deepEqual(kit.trashed, [])
 })
 
-test('declining the confirmation discards nothing and saves nothing', { skip }, async (t) => {
+shardedTest('declining the confirmation discards nothing and saves nothing', { skip }, async (t) => {
   const kit = discardKit(t, () => false)
   const h = await withChanges(t, kit, (_f, project) => { writeFileSync(join(project, 'a.txt'), 'my edit\n'); writeFileSync(join(project, 'new.txt'), 'n\n') })
   const { repoId, status } = await open(h)
@@ -1772,7 +1774,7 @@ test('declining the confirmation discards nothing and saves nothing', { skip }, 
   assert.deepEqual(savedCopies(kit), [])
 })
 
-test('without a confirmation window, a place for copies or a Recycle Bin, nothing is discarded', { skip }, async (t) => {
+shardedTest('without a confirmation window, a place for copies or a Recycle Bin, nothing is discarded', { skip }, async (t) => {
   for (const [name, remove] of [['confirm', 'confirm'], ['snapshotDirectory', 'snapshotDirectory'], ['trash', 'trash']] as const) {
     const kit = discardKit(t)
     const options = { ...kit.options }
@@ -1788,7 +1790,7 @@ test('without a confirmation window, a place for copies or a Recycle Bin, nothin
   }
 })
 
-test('a discard is refused while a Copilot session is working, and the person is not even asked', { skip }, async (t) => {
+shardedTest('a discard is refused while a Copilot session is working, and the person is not even asked', { skip }, async (t) => {
   const kit = discardKit(t, () => true, { sessionActivity: () => ({ busy: true, detail: '"Main session" is working' }) })
   const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
   const { repoId, status } = await open(h)
@@ -1800,7 +1802,7 @@ test('a discard is refused while a Copilot session is working, and the person is
   assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
 })
 
-test('a session that starts working while the confirmation is open stops the discard', { skip }, async (t) => {
+shardedTest('a session that starts working while the confirmation is open stops the discard', { skip }, async (t) => {
   let busy = false
   const kit = discardKit(t, () => { busy = true; return true }, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' } })
   const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
@@ -1812,7 +1814,7 @@ test('a session that starts working while the confirmation is open stops the dis
   assert.deepEqual(savedCopies(kit), [])
 })
 
-test('a discard is for the file list that was on screen, and only for files that can be discarded', { skip }, async (t) => {
+shardedTest('a discard is for the file list that was on screen, and only for files that can be discarded', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await withChanges(t, kit, (f, project) => {
     writeFileSync(join(project, 'a.txt'), 'my edit\n')
@@ -1829,7 +1831,7 @@ test('a discard is for the file list that was on screen, and only for files that
   assert.equal(text(join(h.project, 'a.txt')), 'my edit\n')
 })
 
-test('the list changing while the confirmation is open stops the discard', { skip }, async (t) => {
+shardedTest('the list changing while the confirmation is open stops the discard', { skip }, async (t) => {
   let h!: Harness
   const kit = discardKit(t, () => { writeFileSync(join(h.project, 'late.txt'), 'late\n'); return true })
   h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
@@ -1840,7 +1842,7 @@ test('the list changing while the confirmation is open stops the discard', { ski
   assert.deepEqual(savedCopies(kit), [])
 })
 
-test('the saved copy is of what is on disk when the discard runs, so work added while the window was open is kept too', { skip }, async (t) => {
+shardedTest('the saved copy is of what is on disk when the discard runs, so work added while the window was open is kept too', { skip }, async (t) => {
   let h!: Harness
   const kit = discardKit(t, () => { appendFileSync(join(h.project, 'a.txt'), 'added while the window was open\n'); return true })
   h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'my edit\n'))
@@ -1853,7 +1855,7 @@ test('the saved copy is of what is on disk when the discard runs, so work added 
   assert.equal(text(join(h.project, 'a.txt')), 'one\n')
 })
 
-test('a file too big to copy stops the discard before anything is touched', { skip }, async (t) => {
+shardedTest('a file too big to copy stops the discard before anything is touched', { skip }, async (t) => {
   const kit = discardKit(t, () => true, { maxSnapshotFileBytes: 10 })
   const h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'much more than ten bytes of edit\n'))
   const { repoId, status } = await open(h)
@@ -1865,7 +1867,7 @@ test('a file too big to copy stops the discard before anything is touched', { sk
   assert.equal(text(join(h.project, 'a.txt')), 'much more than ten bytes of edit\n')
 })
 
-test('if one untracked item cannot be moved, the rest still are, the tracked restore stands, and the message says what failed', { skip }, async (t) => {
+shardedTest('if one untracked item cannot be moved, the rest still are, the tracked restore stands, and the message says what failed', { skip }, async (t) => {
   let count = 0
   const kit = discardKit(t, () => true, {})
   const trash = kit.options.trash!
@@ -1881,7 +1883,7 @@ test('if one untracked item cannot be moved, the rest still are, the tracked res
   assert.equal(readdirSync(kit.bin).length, 1, 'the other item is in the bin')
 })
 
-test('a long list is shown in part, and discarding many files at once works', { skip }, async (t) => {
+shardedTest('a long list is shown in part, and discarding many files at once works', { skip }, async (t) => {
   const kit = discardKit(t)
   const h = await harness(t, (f, project) => {
     committed(f, project, Object.fromEntries(Array.from({ length: 15 }, (_, index) => [`f${String(index).padStart(2, '0')}.txt`, 'orig\n'])))
@@ -1899,7 +1901,7 @@ test('a long list is shown in part, and discarding many files at once works', { 
 
 // ---- the discard holds across the whole operation (review of phase 4b) ------------------------------------------------------------
 
-test('a tracked path that runs through a junction out of the repository is refused, and the outside file is untouched', { skip }, async (t) => {
+shardedTest('a tracked path that runs through a junction out of the repository is refused, and the outside file is untouched', { skip }, async (t) => {
   const kit = discardKit(t)
   const outside = mkdtempSync(join(tmpdir(), 'git-discard-outside-'))
   t.after(() => rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
@@ -1922,7 +1924,7 @@ test('a tracked path that runs through a junction out of the repository is refus
   assert.deepEqual(savedCopies(kit), [])
 })
 
-test('work added while the restore waits for the index lock is saved too, not overwritten by an older copy', { skip }, async (t) => {
+shardedTest('work added while the restore waits for the index lock is saved too, not overwritten by an older copy', { skip }, async (t) => {
   const kit = discardKit(t)
   let h!: Harness
   h = await withChanges(t, kit, (_f, project) => writeFileSync(join(project, 'a.txt'), 'first edit\n'))
@@ -1940,7 +1942,7 @@ test('work added while the restore waits for the index lock is saved too, not ov
   assert.match(result.message, /saved in/)
 })
 
-test('a session that starts working while the restore waits for the index lock stops it', { skip }, async (t) => {
+shardedTest('a session that starts working while the restore waits for the index lock stops it', { skip }, async (t) => {
   let busy = false
   const kit = discardKit(t, () => true, { sessionActivity: () => busy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' } })
   let h!: Harness
@@ -1955,7 +1957,7 @@ test('a session that starts working while the restore waits for the index lock s
   assert.equal(text(join(h.project, 'a.txt')), 'my edit\n', 'the file was not restored while the session worked')
 })
 
-test('an untracked item that is swapped for a link after the checks is not moved', { skip }, async (t) => {
+shardedTest('an untracked item that is swapped for a link after the checks is not moved', { skip }, async (t) => {
   const kit = discardKit(t)
   const outside = mkdtempSync(join(tmpdir(), 'git-discard-outside-'))
   t.after(() => rmSync(outside, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
@@ -1975,7 +1977,7 @@ test('an untracked item that is swapped for a link after the checks is not moved
   assert.equal(existsSync(join(outside, 'precious.txt')), true, 'nothing outside was touched')
 })
 
-test('a file named __proto__ is tracked like any other while the restore waits for the index lock', { skip }, async (t) => {
+shardedTest('a file named __proto__ is tracked like any other while the restore waits for the index lock', { skip }, async (t) => {
   const kit = discardKit(t)
   let h!: Harness
   h = await harness(t, (f, project) => {
@@ -2013,7 +2015,7 @@ const withTwoCommits = (t: test.TestContext, setup?: (f: GitFixture, project: st
     setup?.(f, project)
   }, options)
 
-test('amending adds what is staged to the last commit and can change its message, keeping its parent and author', { skip }, async (t) => {
+shardedTest('amending adds what is staged to the last commit and can change its message, keeping its parent and author', { skip }, async (t) => {
   const h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
   const { repoId, status } = await open(h)
   const current = await status()
@@ -2031,7 +2033,7 @@ test('amending adds what is staged to the last commit and can change its message
   assert.equal(result.status!.staged.length, 0)
 })
 
-test('a message-only amend works with nothing staged, and nothing to change is refused', { skip }, async (t) => {
+shardedTest('a message-only amend works with nothing staged, and nothing to change is refused', { skip }, async (t) => {
   const h = await withTwoCommits(t)
   const { repoId, status } = await open(h)
   const current = await status()
@@ -2046,7 +2048,7 @@ test('a message-only amend works with nothing staged, and nothing to change is r
   assert.notEqual(localHead(h), before)
 })
 
-test('a commit that is already on a remote branch is never amended', { skip }, async (t) => {
+shardedTest('a commit that is already on a remote branch is never amended', { skip }, async (t) => {
   const h = await withOrigin(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
   const { repoId, status } = await open(h)
   const current = await status()
@@ -2064,7 +2066,7 @@ test('a commit that is already on a remote branch is never amended', { skip }, a
   assert.equal(h.fixture.plain(h.project, 'rev-parse', 'HEAD~1').trim(), before, 'it sits on the published commit, untouched')
 })
 
-test('an amend is for the commit that was on screen', { skip }, async (t) => {
+shardedTest('an amend is for the commit that was on screen', { skip }, async (t) => {
   const h = await withTwoCommits(t)
   const { repoId, status } = await open(h)
   const current = await status()
@@ -2079,7 +2081,7 @@ test('an amend is for the commit that was on screen', { skip }, async (t) => {
   assert.match(none.message, /no commit to amend/)
 })
 
-test('a commit that moves while the amend waits for the index lock is not amended', { skip }, async (t) => {
+shardedTest('a commit that moves while the amend waits for the index lock is not amended', { skip }, async (t) => {
   let h!: Harness
   h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
   const { repoId, status } = await open(h)
@@ -2096,7 +2098,7 @@ test('a commit that moves while the amend waits for the index lock is not amende
   assert.equal(headField(h, '%s'), 'someone else moved the branch', 'the other commit was not rewritten')
 })
 
-test('a commit that gets published while the amend waits for the index lock is not amended', { skip }, async (t) => {
+shardedTest('a commit that gets published while the amend waits for the index lock is not amended', { skip }, async (t) => {
   let h!: Harness
   h = await withTwoCommits(t, (f, project) => { writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') })
   const { repoId, status } = await open(h)
@@ -2111,7 +2113,7 @@ test('a commit that gets published while the amend waits for the index lock is n
   assert.equal(localHead(h), before)
 })
 
-test('a merge commit is not amended from the panel', { skip }, async (t) => {
+shardedTest('a merge commit is not amended from the panel', { skip }, async (t) => {
   const h = await withTwoCommits(t, (f, project) => {
     f.plain(project, 'checkout', '-q', '-b', 'side'); commitFile(f, project, 'side.txt', 's\n')
     f.plain(project, 'checkout', '-q', 'main'); commitFile(f, project, 'main2.txt', 'm\n')
@@ -2125,7 +2127,7 @@ test('a merge commit is not amended from the panel', { skip }, async (t) => {
   assert.equal(localHead(h), before)
 })
 
-test('an amend runs the repository\'s hooks, including post-rewrite, only after they are approved', { skip }, async (t) => {
+shardedTest('an amend runs the repository\'s hooks, including post-rewrite, only after they are approved', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-hooks-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -2146,7 +2148,7 @@ test('an amend runs the repository\'s hooks, including post-rewrite, only after 
   assert.deepEqual(readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean).sort(), ['post-rewrite', 'pre-commit'])
 })
 
-test('the last commit is described for the Amend control: its message, whether it is a merge, and where it is published', { skip }, async (t) => {
+shardedTest('the last commit is described for the Amend control: its message, whether it is a merge, and where it is published', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId } = await open(h)
   const info = await h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId)
@@ -2159,7 +2161,7 @@ test('the last commit is described for the Amend control: its message, whether i
   await assert.rejects(unborn.service.getHeadCommit(SUBSCRIBER, PROFILE, second.repoId), /no commit yet/)
 })
 
-test('an empty commit can be reworded, but an amend that would empty an ordinary commit is still refused by Git', { skip }, async (t) => {
+shardedTest('an empty commit can be reworded, but an amend that would empty an ordinary commit is still refused by Git', { skip }, async (t) => {
   const h = await withTwoCommits(t, (f, project) => f.plain(project, 'commit', '--allow-empty', '-q', '-m', 'empty one'))
   const { repoId, status } = await open(h)
   const current = await status()
@@ -2178,7 +2180,7 @@ test('an empty commit can be reworded, but an amend that would empty an ordinary
   assert.ok(other.runs.every(run => !run.args.includes('--allow-empty')), 'the guard was not switched off for an ordinary commit')
 })
 
-test('a refused amend never asks the person to approve hooks first', { skip }, async (t) => {
+shardedTest('a refused amend never asks the person to approve hooks first', { skip }, async (t) => {
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-refused-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
@@ -2218,7 +2220,7 @@ function failingRuntime(fixture: GitFixture, fails: (options: GitRunOptions) => 
   return async () => ({ runner, executable: fixture.git })
 }
 
-test('an amend is refused, and nothing is rewritten, when Git cannot say whether the commit is published', { skip }, async (t) => {
+shardedTest('an amend is refused, and nothing is rewritten, when Git cannot say whether the commit is published', { skip }, async (t) => {
   let broken = false
   let fixtureRef: GitFixture | null = null
   const h = await withOrigin(t, (f, project) => { fixtureRef = f; writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') },
@@ -2235,7 +2237,7 @@ test('an amend is refused, and nothing is rewritten, when Git cannot say whether
   await assert.rejects(h.service.getHeadCommit(SUBSCRIBER, PROFILE, repoId), /Could not tell where the last commit is published/)
 })
 
-test('a read that fails during the lock wait does not let an amend through either', { skip }, async (t) => {
+shardedTest('a read that fails during the lock wait does not let an amend through either', { skip }, async (t) => {
   let fixtureRef: GitFixture | null = null
   let lock = ''
   let commitAttempts = 0
@@ -2258,7 +2260,7 @@ test('a read that fails during the lock wait does not let an amend through eithe
   assert.equal(localHead(h), before)
 })
 
-test('a remote branch whose name ends in HEAD counts as published; only the remote\'s own HEAD pointer does not', { skip }, async (t) => {
+shardedTest('a remote branch whose name ends in HEAD counts as published; only the remote\'s own HEAD pointer does not', { skip }, async (t) => {
   const h = await withOrigin(t)
   const { repoId, status } = await open(h)
   commitFile(h.fixture, h.project, 'later.txt', 'l\n')
@@ -2271,7 +2273,7 @@ test('a remote branch whose name ends in HEAD counts as published; only the remo
   assert.match(result.message, /already on origin\/feature\/HEAD/)
 })
 
-test('the last message is loaded and amended in full, and one too long to edit is refused instead of shortened', { skip }, async (t) => {
+shardedTest('the last message is loaded and amended in full, and one too long to edit is refused instead of shortened', { skip }, async (t) => {
   const long = `subject line\n\n${Array.from({ length: 380 }, () => 'a long paragraph of explanation.').join(' ')}\n\nthe very last line\n`
   assert.ok(long.length > 12_000)
   const h = await withTwoCommits(t, (f, project) => {
@@ -2292,7 +2294,7 @@ test('the last message is loaded and amended in full, and one too long to edit i
   await assert.rejects(huge.service.getHeadCommit(SUBSCRIBER, PROFILE, second.repoId), /too long to edit here/)
 })
 
-test('an amend is refused when Git cannot read the last commit well enough to tell whether it is a merge', { skip }, async (t) => {
+shardedTest('an amend is refused when Git cannot read the last commit well enough to tell whether it is a merge', { skip }, async (t) => {
   let fixtureRef: GitFixture | null = null
   const h = await withTwoCommits(t, (f, project) => { fixtureRef = f; writeFileSync(join(project, 'extra.txt'), 'e\n'); f.plain(project, 'add', '.') },
     { getRuntime: async () => failingRuntime(fixtureRef!, options => options.args.includes('--parents'))() })
@@ -2304,7 +2306,7 @@ test('an amend is refused when Git cannot read the last commit well enough to te
   assert.equal(localHead(h), before)
 })
 
-test('a folder a session reports is listed as a worktree repository of the project while it is one, and the worktree list says who uses it', { skip }, async (t) => {
+shardedTest('a folder a session reports is listed as a worktree repository of the project while it is one, and the worktree list says who uses it', { skip }, async (t) => {
   let reported: string[] = []
   const h = await harness(t, (f, project) => {
     f.plain(project, 'init', '-q')
@@ -2373,7 +2375,7 @@ test('a folder a session reports is listed as a worktree repository of the proje
   assert.deepEqual(removed.repos.map(repo => repo.kind), ['project'])
 })
 
-test('a merged, unused worktree is removed after confirmation; everything else is refused with the reason and nothing is deleted', { skip }, async (t) => {
+shardedTest('a merged, unused worktree is removed after confirmation; everything else is refused with the reason and nothing is deleted', { skip }, async (t) => {
   let live: Array<string | null> = []
   let liveFn: () => Array<string | null> = () => live
   let answer = true
