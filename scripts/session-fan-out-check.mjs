@@ -39,7 +39,8 @@ export async function runFanOutCheck() {
     const firstThen = (await state()).tabs.find(tab => tab.id === first.id)
     assert.ok(firstThen.sessionCwd, 'the first had reported its folder before the second started')
     await until(() => ui('!document.querySelector(".input-dialog")'), 'dialog closed')
-    await until(() => ui('/Started 2 of 2 sessions/.test(document.querySelector(".fan-out-notice")?.innerText || "")'), 'fan-out notice', 150_000)
+    // The notice reports delivery as the panes acknowledged it: both took the paste, none was elsewhere or late.
+    await until(() => ui('/Started 2 of 2 sessions\\. The task is in each prompt box/.test(document.querySelector(".fan-out-notice")?.innerText || "")'), 'fan-out notice says the task reached each prompt box', 150_000)
     const done = await state()
     const started = done.tabs.filter(tab => [first.id, second.id].includes(tab.id))
     assert.equal(started.length, 2)

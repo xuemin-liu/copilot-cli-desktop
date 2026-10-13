@@ -415,6 +415,12 @@ Each is a small, independent PR, not part of the phases above:
   readiness signal the activity check uses), so a trust question or a slow start is never typed over; a
   session that shows no prompt within two minutes is left alone and named in the notice. The group label is
   runtime-only.
+- Phase 4 review (independent): the fan-out took "the first tab not seen before" as its member, which an ordinary
+  tab created at the same time could be; and a dispatch into this window was reported as delivery even for a
+  member popped out into its own window. Fixed: the creation path hands back the exact tab id it registered;
+  a prompt insert is acknowledged by the pane that took it (`dispatchPromptInsert` returns false when no pane
+  for that tab lives in this window), popped-out members are detected first, and the notice names any
+  session the task did not reach.
 - Phase 3b review (independent): a live session reaching the worktree through a junction slipped past the
   textual folder comparison, and liveness was filtered by the asking profile although another profile's
   session can run in the same folder. Fixed by comparing physical folders (`realpath`) and refusing when a

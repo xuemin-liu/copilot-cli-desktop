@@ -86,22 +86,38 @@ export function App(): JSX.Element {
     }
     setInputDialog(null)
     const notReady: string[] = []
+    const elsewhere: string[] = []
     await Promise.all(result.tabIds.map(async (tabId) => {
       const deadline = Date.now() + 120_000
       while (Date.now() < deadline) {
         let backlog = ''
-        try { backlog = await window.copilotDesktop.getTabBacklog(tabId) } catch { break }
-        if (backlog.includes('open sidebar')) { insertIntoPrompt(tabId, prompt); return }
+        let poppedOut = false
+        try {
+          poppedOut = ((await window.copilotDesktop.getState()).poppedOutTabIds ?? []).includes(tabId)
+          backlog = await window.copilotDesktop.getTabBacklog(tabId)
+        } catch { break }
+        // A session opened in its own window owns its terminal there; a paste from this window cannot reach it.
+        if (poppedOut) { elsewhere.push(tabId); return }
+        if (backlog.includes('open sidebar')) {
+          // Delivery is the pane's acknowledgement, not the dispatch.
+          if (!insertIntoPrompt(tabId, prompt)) elsewhere.push(tabId)
+          return
+        }
         await new Promise((resolve) => setTimeout(resolve, 500))
       }
       notReady.push(tabId)
     }))
+    const latest = await window.copilotDesktop.getState().catch(() => null)
+    const names = (ids: string[]): string => ids.map((id) => latest?.tabs.find((tab) => tab.id === id)?.title ?? id).join(', ')
+    const missed = notReady.length + elsewhere.length
     const notes = [
       `Started ${result.tabIds.length} of ${result.requested} sessions.`,
       result.stopped ? result.stopped : '',
-      notReady.length > 0 ? `${notReady.length} did not show a prompt in time, so the task was not pasted there.` : 'The task is in each prompt box; press Enter in each session to send it.',
+      notReady.length > 0 ? `${names(notReady)} did not show a prompt in time, so the task was not pasted there.` : '',
+      elsewhere.length > 0 ? `${names(elsewhere)} ${elsewhere.length === 1 ? 'is' : 'are'} open in a separate window, where this window cannot paste; paste the task there yourself.` : '',
+      missed === 0 ? 'The task is in each prompt box; press Enter in each session to send it.' : `The task is in the other ${result.tabIds.length - missed} prompt box${result.tabIds.length - missed === 1 ? '' : 'es'}; press Enter there to send it.`,
     ].filter(Boolean)
-    setOperationError(result.stopped || notReady.length > 0 ? notes.join(' ') : null)
+    setOperationError(result.stopped || missed > 0 ? notes.join(' ') : null)
     setFanOutNotice(notes.join(' '))
   }
 

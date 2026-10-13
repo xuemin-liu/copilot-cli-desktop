@@ -1112,10 +1112,11 @@ async function fanOutSessions(profile: WorkspaceProfile, label: string, count: n
   let stopped: string | null = null
   try {
     for (let index = 1; index <= count; index += 1) {
-      const before = new Set(tabsState.tabs.map((tab) => tab.id))
-      // A fresh session in its own worktree, whatever the profile's own launch setting says.
-      await createSessionTab({ ...profile, launch: { ...profile.launch, worktree: true } }, 'new', null, [], null, `${profile.name} ${index}/${count}`)
-      const created = tabsState.tabs.find((tab) => !before.has(tab.id))
+      // A fresh session in its own worktree, whatever the profile's own launch setting says. Another tab can be created
+      // while this one is being prepared, so the id comes from the creation itself, never from a before/after diff.
+      let createdId: string | null = null
+      await createSessionTab({ ...profile, launch: { ...profile.launch, worktree: true } }, 'new', null, [], null, `${profile.name} ${index}/${count}`, {}, null, null, null, (tabId) => { createdId = tabId })
+      const created = createdId === null ? undefined : tabsState.tabs.find((tab) => tab.id === createdId)
       if (!created) { stopped = 'The session tab could not be found after it started.'; break }
       tabIds.push(created.id)
       tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === created.id ? { ...tab, fanOutLabel: label } : tab) }
@@ -1249,6 +1250,8 @@ async function createSessionTab(
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
   restoredCandidate: RestoredTab | null = null,
+  /** Called with the new tab's id the moment it is registered, before anything else can create a tab. */
+  onCreated: ((tabId: string) => void) | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
@@ -1297,6 +1300,7 @@ async function createSessionTab(
   if (restoredCandidate) restoringTabIds.add(id)
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
   const previousProfileId = desktopConfig.activeProfileId
+  onCreated?.(id)
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,

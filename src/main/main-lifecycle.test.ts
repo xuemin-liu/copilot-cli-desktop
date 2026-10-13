@@ -27,6 +27,8 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  /** Like blockSpawnPlan, but only plans for a profile the predicate accepts wait; the others run at once. */
+  blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
   setNextSpawn(work: () => Promise<void>): void
   flushConfig(): Promise<void>
   checkMigrationIdle(): void
@@ -205,6 +207,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
+          blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
           setNextSpawn,
@@ -1416,6 +1419,58 @@ test('a fan-out stops, and says so, when a session does not report its folder in
       assert.match(result.stopped ?? '', /Session 1 of 2 did not report where it runs/)
       const state = await harness.request('desktop:get-state')
       assert.equal(state.tabs.find((tab) => tab.id === result.tabIds[0])?.fanOutLabel, 'fan-out · slow')
+    } finally {
+      if (previousWait === undefined) delete process.env.DESKTOP_FAN_OUT_WAIT_MS
+      else process.env.DESKTOP_FAN_OUT_WAIT_MS = previousWait
+    }
+  })
+})
+
+test('a fan-out labels and waits on exactly the tabs it created, even when an ordinary tab is created at the same time', async () => {
+  await fixture(async (harness, directory) => {
+    const previousWait = process.env.DESKTOP_FAN_OUT_WAIT_MS
+    process.env.DESKTOP_FAN_OUT_WAIT_MS = '3000'
+    try {
+      const { profile } = configure(harness, directory)
+      profile.defaultResumeMode = 'new'
+      harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true,
+        supportedOptions: ['--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+      await harness.createMain()
+      const before = harness.spawns.length
+      // Only the fan-out's worktree launch waits on its spawn plan; an ordinary New session, started while it waits,
+      // registers first. A member chosen as "the first tab not seen before" would be that ordinary tab.
+      const known = new Set((await harness.request('desktop:get-state')).tabs.map((tab) => tab.id))
+      let release!: () => void
+      harness.blockSpawnPlanWhen((candidate) => candidate.launch.worktree === true, new Promise<void>((resolve) => { release = resolve }))
+      const fanOut = harness.request('desktop:fan-out', profile.id, 'fan-out · exact', 2) as Promise<{ tabIds: string[]; stopped: string | null }>
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const ordinaryState = await (harness.request('desktop:create-tab', 'new', profile.id) as Promise<DesktopState>)
+      const ordinaryTab = ordinaryState.tabs.find((tab) => !known.has(tab.id))!
+      assert.ok(ordinaryTab && !ordinaryTab.title.includes('/'), 'the ordinary tab registered while the fan-out member was still being prepared')
+      release()
+      // The fan-out's spawns carry worktree names; report a folder for each as the CLI would.
+      const report = async (spawnIndex: number, digit: string): Promise<void> => {
+        for (let attempt = 0; attempt < 100 && harness.spawns.length <= spawnIndex; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+        const spawn = harness.spawns[spawnIndex]!
+        const name = spawn.args.find((arg) => arg.startsWith('--worktree='))!.slice('--worktree='.length)
+        const sessionId = `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`
+        await mkdir(join(directory, 'session-state', sessionId), { recursive: true })
+        await writeFile(join(directory, 'session-state', sessionId, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: join(directory, 'project.worktrees', name) } } }) + '\n')
+      }
+      const fanOutSpawns = () => harness.spawns.map((spawn, index) => [spawn, index] as const).filter(([spawn, index]) => index >= before && spawn.args.some((arg) => arg.startsWith('--worktree=')))
+      for (let attempt = 0; attempt < 100 && fanOutSpawns().length < 1; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      await report(fanOutSpawns()[0]![1], '5')
+      for (let attempt = 0; attempt < 100 && fanOutSpawns().length < 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      await report(fanOutSpawns()[1]![1], '6')
+      const result = await fanOut
+      assert.equal(result.stopped, null, result.stopped ?? '')
+      assert.equal(result.tabIds.length, 2)
+      assert.ok(!result.tabIds.includes(ordinaryTab.id), 'the ordinary tab is not a member')
+      const state = await harness.request('desktop:get-state')
+      assert.equal(state.tabs.find((tab) => tab.id === ordinaryTab.id)?.fanOutLabel ?? null, null, 'the ordinary tab carries no label')
+      const members = state.tabs.filter((tab) => result.tabIds.includes(tab.id))
+      assert.deepEqual(members.map((tab) => [tab.title, tab.fanOutLabel]), [[`${profile.name} 1/2`, 'fan-out · exact'], [`${profile.name} 2/2`, 'fan-out · exact']])
+      assert.ok(members.every((tab) => tab.sessionCwd), 'both members reported their folders')
     } finally {
       if (previousWait === undefined) delete process.env.DESKTOP_FAN_OUT_WAIT_MS
       else process.env.DESKTOP_FAN_OUT_WAIT_MS = previousWait
