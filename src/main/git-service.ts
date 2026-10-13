@@ -460,6 +460,14 @@ export class GitService {
     const entry = await inspectGitEntry(root)
     if (!entry) { this.markError(repo, 'The .git entry is gone'); return false }
     if (entry.issue ?? repo.discovered.issue) { this.markError(repo, entry.issue ?? repo.discovered.issue ?? 'Not safe to open'); return false }
+    // A worktree entry is only as safe as its ownership: its pointers can be redirected while it is listed, so they are
+    // checked again here, before every command, against the repository it was accepted for.
+    if (repo.discovered.kind === 'worktree') {
+      const main = repo.discovered.worktreeOf
+      const owned = main ? await inspectSessionWorktree(root, candidate => repoTrustKey(candidate) === repoTrustKey(main)) : null
+      if (!owned) { this.markError(repo, 'This folder is no longer a worktree of its repository'); return false }
+      if (owned.issue) { this.markError(repo, owned.issue); return false }
+    }
     if (!runtime.executable.supported) { this.markError(repo, `${runtime.executable.version.text} is older than the supported minimum (2.30)`); return false }
     try {
       const scan = await scanRepoConfig(runtime.runner, root, signal)

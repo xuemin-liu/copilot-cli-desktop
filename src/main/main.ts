@@ -1069,15 +1069,18 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
   const tab = tabsState.tabs.find((candidate) => candidate.id === id)
   const profile = tab ? desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId) : undefined
   let worktree: SessionWorktreeInfo | null = null
+  let gitDir: string | null = null
   if (cwd && profile) {
     const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
     const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
     const found = await inspectSessionWorktree(cwd, within)
-    if (found) { worktree = { path: found.root, name: found.name, branch: found.branch }; sessionWorktreeGitDirs.set(id, found.gitDir) }
+    if (found) { worktree = { path: found.root, name: found.name, branch: found.branch }; gitDir = found.gitDir }
   }
-  // A newer cwd event (or a log reset) for this tab has been applied meanwhile: this result is stale.
+  // A newer cwd event (or a log reset) for this tab has been applied meanwhile: this result is stale, and none of it,
+  // the polling directory included, may take effect.
   if (managedTabs.get(id)?.session !== session || sessionCwdGenerations.get(id) !== generation) return
-  if (!worktree) sessionWorktreeGitDirs.delete(id)
+  if (gitDir) sessionWorktreeGitDirs.set(id, gitDir)
+  else sessionWorktreeGitDirs.delete(id)
   tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: cwd, worktree } : candidate) }
   syncTabState()
   broadcastState()

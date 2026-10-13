@@ -412,7 +412,10 @@ Each is a small, independent PR, not part of the phases above:
   for the same tab; the chip never followed a branch switch or rename; and two new tests compared short and
   long forms of a temp path on CI. Fixed by requiring `commondir` to be the accepted repository's `.git` and
   the backpointer to name the worktree's `.git` file, a per-tab generation for cwd events, a five-second
-  HEAD poll for worktree tabs, and canonical fixture paths.
+  HEAD poll for worktree tabs, and canonical fixture paths. Second round: the ownership check now also
+  runs in the command gate (`passGate`) for worktree entries, so redirected pointers refuse the next read or
+  write instead of waiting for a refresh; and a stale inspection no longer touches the HEAD-polling map
+  before the generation check.
 - Phase 3a result: shipped as designed, with these decisions. The session folder is read from
   `session.start`/`session.resume` by the activity tracker and published by the monitor (after seeding,
   history being the truth about where a session runs). A worktree is recognised only by

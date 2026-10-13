@@ -2340,6 +2340,24 @@ test('a folder a session reports is listed as a worktree repository of the proje
   const fromLinked = await h.service.getWorktrees(SUBSCRIBER, PROFILE, linked.id)
   assert.deepEqual(fromLinked.map(entry => [entry.branch, entry.main, entry.current]), [['main', true, false], ['desktop-task-abc123', false, true]])
   assert.ok(h.runs.every(run => run.args[0] !== 'worktree' || run.args[1] === 'list'), 'the panel only ever lists worktrees')
+  // The worktree's administrative pointers are redirected to another repository while it is listed: the next command
+  // is refused at the gate, before git is pointed at it, and the entry is marked instead of read.
+  const other = h.fixture.repo('other')
+  writeFileSync(join(other, 'o.txt'), 'outside\n')
+  h.fixture.plain(other, 'add', '.')
+  h.fixture.plain(other, 'commit', '-q', '-m', 'SYNTHETIC OUTSIDE REPOSITORY HISTORY')
+  const adminDir = join(h.project, '.git', 'worktrees', 'desktop-task-abc123')
+  const originalCommon = readFileSync(join(adminDir, 'commondir'), 'utf8')
+  writeFileSync(join(adminDir, 'commondir'), join(other, '.git') + '\n')
+  await assert.rejects(h.service.getLog(SUBSCRIBER, PROFILE, linked.id, 10, 0), /no longer a worktree of its repository|This repository is not available/)
+  await assert.rejects(h.service.getWorktrees(SUBSCRIBER, PROFILE, linked.id), /no longer a worktree of its repository|This repository is not available/)
+  assert.ok(!h.runs.some(run => run.cwd.toLowerCase() === worktree.toLowerCase() && run.args[0] === 'log'), 'git log never ran in the redirected worktree')
+  const marked = (await h.service.rescan(SUBSCRIBER, PROFILE)).repos
+  assert.deepEqual(marked.map(repo => repo.kind), ['project'], 'and the next refresh drops it')
+  writeFileSync(join(adminDir, 'commondir'), originalCommon)
+  const restored = (await h.service.rescan(SUBSCRIBER, PROFILE)).repos.find(repo => repo.kind === 'worktree')
+  assert.ok(restored, 'restored pointers list it again')
+  assert.deepEqual((await h.service.getLog(SUBSCRIBER, PROFILE, restored.id, 10, 0)).map(entry => entry.subject), ['init'])
   // The session goes away: the worktree leaves the list. It comes back when reported again, with a new id.
   reported = []
   const gone = await h.service.rescan(SUBSCRIBER, PROFILE)
@@ -2347,6 +2365,7 @@ test('a folder a session reports is listed as a worktree repository of the proje
   reported = [worktree]
   const back = await h.service.rescan(SUBSCRIBER, PROFILE)
   assert.notEqual(back.repos.find(repo => repo.kind === 'worktree')?.id, linked.id, 'ids are never reused')
+  assert.notEqual(back.repos.find(repo => repo.kind === 'worktree')?.id, restored.id)
   // The folder is removed from disk while still reported: it drops out instead of being polled.
   reported = [worktree]
   h.fixture.plain(h.project, 'worktree', 'remove', '--force', worktree)
