@@ -51,6 +51,7 @@ export interface SidebarProps {
   onRestartTab: (tabId: string) => void
   onCreateTab: (profileId: string) => void
   onCreateTabWithAttachments: () => void
+  onFanOut: () => void
   onResumePicker: () => void
   onConnectRemote: () => void
   onOpenSettings: () => void
@@ -75,6 +76,7 @@ export function Sidebar({
   onRestartTab,
   onCreateTab,
   onCreateTabWithAttachments,
+  onFanOut,
   onResumePicker,
   onConnectRemote,
   onOpenSettings,
@@ -206,7 +208,8 @@ export function Sidebar({
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
     const worktreeLabel = tab.worktree ? (tab.worktree.branch ?? tab.worktree.name) : null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const fanOutLabel = tab.fanOutLabel ?? null
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -223,7 +226,8 @@ export function Sidebar({
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
         {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
       </span>}
-      {compactIndex === undefined && (detail || worktreeLabel) && <span className="sidebar-session-activity">
+      {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel) && <span className="sidebar-session-activity">
+        {fanOutLabel && <span className="session-fanout-chip" title={`Started together: ${fanOutLabel}`}>{fanOutLabel}</span>}
         {worktreeLabel && <span className="session-worktree-chip" title={`Worktree ${tab.worktree?.path ?? ''}`}>⎇ {worktreeLabel}</span>}
         {detail ? statusLabel : ''}
       </span>}
@@ -291,6 +295,16 @@ export function Sidebar({
             onClick={onCreateTabWithAttachments}
           >
             ＋⃞
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            title="Fan out: start the same task in several sessions, each in its own worktree"
+            aria-label="Fan out into several sessions"
+            disabled={activeProfileId === null || !canOpenTab}
+            onClick={onFanOut}
+          >
+            ⫶
           </button>
           <button
             type="button"

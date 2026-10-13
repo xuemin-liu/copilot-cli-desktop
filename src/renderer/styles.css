@@ -1138,6 +1138,8 @@ button:disabled {
 /* Worktree sessions (phase 3a of the agent workbench plan): a branch chip on the tab and sidebar, and the worktree list. */
 .session-worktree-chip { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; background: #2a3a2e; color: #9fe0b8; font-size: 10px; font-weight: 500; letter-spacing: .02em; vertical-align: middle; white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .session-pane-title .session-worktree-chip { margin-left: 8px; margin-right: 0; }
+.session-fanout-chip { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; background: #3a2f4d; color: #d9c6ff; font-size: 10px; font-weight: 500; white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.fan-out-notice { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 10px; max-width: 720px; padding: 8px 12px; border: 1px solid #2d3340; border-radius: 8px; background: #121724; color: #e3e7ee; font-size: 12px; box-shadow: 0 6px 24px rgb(0 0 0 / 40%); }
 .sidebar-session-activity .session-worktree-chip { max-width: 100%; }
 .git-worktrees { margin: 14px 8px 8px; }
 .git-section-title { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #929baa; }

@@ -291,6 +291,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       if (detail.image === true) terminal.input('\u001bv', true)
       else if (typeof detail.text === 'string') terminal.paste(promptInsertText(detail.text, terminal.modes.bracketedPasteMode))
       else return
+      // Acknowledge: the sender learns that a pane in this window took the insert.
+      event.preventDefault()
       terminal.focus()
     }
     window.addEventListener(INSERT_PROMPT_EVENT, handleInsertPrompt)

@@ -4,6 +4,7 @@ export const checkModes = [
   { flag: '--activity', env: 'DESKTOP_UI_ACTIVITY_CHECK', module: './session-activity-check.mjs', run: 'runActivityCheck', artifacts: 'session-activity', label: 'session activity' },
   { flag: '--permissions', env: 'DESKTOP_UI_PERMISSION_CHECK', module: './session-permission-check.mjs', run: 'runPermissionCheck', artifacts: 'permissions', label: 'session permission' },
   { flag: '--worktree', env: 'DESKTOP_UI_WORKTREE_CHECK', module: './session-worktree-check.mjs', run: 'runWorktreeCheck', artifacts: 'session-worktree', label: 'worktree session launch' },
+  { flag: '--fan-out', env: 'DESKTOP_UI_FAN_OUT_CHECK', module: './session-fan-out-check.mjs', run: 'runFanOutCheck', artifacts: 'session-fan-out', label: 'fan-out' },
   ...['switch', 'multi-click', 'status'].map(variant => ({ flag: `--clipboard-${variant}`, env: 'DESKTOP_UI_CLIPBOARD_CHECK', module: './clipboard-switch-check.mjs', run: 'runClipboardSwitchCheck', artifacts: `clipboard-${variant}`, label: `clipboard ${variant}` })),
 ]
 

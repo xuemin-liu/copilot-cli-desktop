@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   createTab: (resumeMode, profileId) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId),
   createTabWithAttachments: () => ipcRenderer.invoke('desktop:create-tab-with-attachments'),
+  fanOut: (profileId, label, count) => ipcRenderer.invoke('desktop:fan-out', profileId, label, count),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),

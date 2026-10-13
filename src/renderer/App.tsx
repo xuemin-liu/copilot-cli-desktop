@@ -1,6 +1,7 @@
+import { insertIntoPrompt } from './prompt-insert.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
-import type { DesktopState } from '../main/types.js'
+import type { DesktopState, FanOutResult } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
@@ -38,6 +39,7 @@ type InputDialog =
   | { kind: 'rename'; tabId: string; value: string; pending: boolean; error: string | null }
   | { kind: 'remote'; value: string; pending: boolean; error: string | null }
   | { kind: 'fork'; tabId: string; value: string; sourceSessionId: string; pending: boolean; error: string | null }
+  | { kind: 'fan-out'; value: string; count: number; pending: boolean; error: string | null }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
@@ -50,6 +52,7 @@ export function App(): JSX.Element {
   // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
   const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)
+  const [fanOutNotice, setFanOutNotice] = useState<string | null>(null)
   const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
@@ -70,12 +73,66 @@ export function App(): JSX.Element {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
   }
 
+  /** Start the sessions (main does that one by one), then paste the task into each prompt box once the CLI shows its prompt.
+   * Nothing is sent: the person presses Enter in each session. A session that never gets ready is left alone and named. */
+  const startFanOut = async (profileId: string, prompt: string, count: number): Promise<void> => {
+    const label = `fan-out · ${prompt.replace(/\s+/g, ' ').slice(0, 40)}`
+    let result: FanOutResult
+    try {
+      result = await window.copilotDesktop.fanOut(profileId, label, count)
+    } catch (error) {
+      setInputDialog((current) => current ? { ...current, pending: false, error: error instanceof Error ? error.message : String(error) } : current)
+      return
+    }
+    setInputDialog(null)
+    const notReady: string[] = []
+    const elsewhere: string[] = []
+    await Promise.all(result.tabIds.map(async (tabId) => {
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        let backlog = ''
+        let poppedOut = false
+        try {
+          poppedOut = ((await window.copilotDesktop.getState()).poppedOutTabIds ?? []).includes(tabId)
+          backlog = await window.copilotDesktop.getTabBacklog(tabId)
+        } catch { break }
+        // A session opened in its own window owns its terminal there; a paste from this window cannot reach it.
+        if (poppedOut) { elsewhere.push(tabId); return }
+        if (backlog.includes('open sidebar')) {
+          // Delivery is the pane's acknowledgement, not the dispatch.
+          if (!insertIntoPrompt(tabId, prompt)) elsewhere.push(tabId)
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      notReady.push(tabId)
+    }))
+    const latest = await window.copilotDesktop.getState().catch(() => null)
+    const names = (ids: string[]): string => ids.map((id) => latest?.tabs.find((tab) => tab.id === id)?.title ?? id).join(', ')
+    const missed = notReady.length + elsewhere.length
+    const notes = [
+      `Started ${result.tabIds.length} of ${result.requested} sessions.`,
+      result.stopped ? result.stopped : '',
+      notReady.length > 0 ? `${names(notReady)} did not show a prompt in time, so the task was not pasted there.` : '',
+      elsewhere.length > 0 ? `${names(elsewhere)} ${elsewhere.length === 1 ? 'is' : 'are'} open in a separate window, where this window cannot paste; paste the task there yourself.` : '',
+      missed === 0 ? 'The task is in each prompt box; press Enter in each session to send it.' : `The task is in the other ${result.tabIds.length - missed} prompt box${result.tabIds.length - missed === 1 ? '' : 'es'}; press Enter there to send it.`,
+    ].filter(Boolean)
+    setOperationError(result.stopped || missed > 0 ? notes.join(' ') : null)
+    setFanOutNotice(notes.join(' '))
+  }
+
   const submitInputDialog = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
     if (!inputDialog || inputDialog.pending) return
     const value = inputDialog.value.trim()
     if (!value) {
-      setInputDialog({ ...inputDialog, error: inputDialog.kind === 'remote' ? 'Enter a session or task ID.' : 'Enter a session title.' })
+      setInputDialog({ ...inputDialog, error: inputDialog.kind === 'remote' ? 'Enter a session or task ID.' : inputDialog.kind === 'fan-out' ? 'Enter the task to start in every session.' : 'Enter a session title.' })
+      return
+    }
+    if (inputDialog.kind === 'fan-out') {
+      if (!state.activeProfileId) return
+      setInputDialog({ ...inputDialog, pending: true, error: null })
+      void startFanOut(state.activeProfileId, value, inputDialog.count)
       return
     }
     setInputDialog({ ...inputDialog, pending: true, error: null })
@@ -211,6 +268,7 @@ export function App(): JSX.Element {
         onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
         onCreateTab={(profileId) => handleOperation(window.copilotDesktop.createTab(null, profileId))}
         onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
+        onFanOut={() => setInputDialog({ kind: 'fan-out', value: '', count: 3, pending: false, error: null })}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => handleOperation(window.copilotDesktop.createTab('picker'))}
         onConnectRemote={() => setInputDialog({ kind: 'remote', value: '', pending: false, error: null })}
@@ -261,11 +319,17 @@ export function App(): JSX.Element {
           </>
         )}
       </main>
+      {fanOutNotice && (
+        <div className="fan-out-notice" role="status">
+          <span>{fanOutNotice}</span>
+          <button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setFanOutNotice(null)}>×</button>
+        </div>
+      )}
       {inputDialog && (
         <div className="dialog-backdrop" role="presentation">
           <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}>
             <h2 id="input-dialog-title">
-              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : 'Rename session'}
+              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : 'Rename session'}
             </h2>
             {inputDialog.kind === 'fork' && (
               <>
@@ -277,14 +341,25 @@ export function App(): JSX.Element {
                 <p className="fork-hint">Read/search tools only. Both sessions share files; this is not an OS sandbox and does not isolate local hooks or manually entered commands. Unfinished output may not yet be saved.</p>
               </>
             )}
+            {inputDialog.kind === 'fan-out' && (
+              <>
+                <p>Starts the same task in several fresh sessions, each in its own Git worktree, one after another. The task is pasted into each prompt box; nothing is sent until you press Enter in each session.</p>
+                <p className="fork-hint">Each session is a separate Copilot conversation and uses premium requests on its own.</p>
+                <label htmlFor="fan-out-count">Sessions</label>
+                <select id="fan-out-count" value={inputDialog.count} disabled={inputDialog.pending}
+                  onChange={(event) => setInputDialog({ ...inputDialog, count: Number(event.target.value), error: null })}>
+                  {[2, 3, 4, 5].map((n) => <option key={n} value={n} disabled={n > state.maxSessionTabs - state.tabs.length}>{n}</option>)}
+                </select>
+              </>
+            )}
             <label htmlFor="input-dialog-value">
-              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : 'Session title'}
+              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : 'Session title'}
             </label>
             <input
               id="input-dialog-value"
               type="text"
               autoFocus
-              maxLength={inputDialog.kind === 'remote' ? 128 : 120}
+              maxLength={inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : 120}
               value={inputDialog.value}
               disabled={inputDialog.pending}
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
@@ -293,7 +368,7 @@ export function App(): JSX.Element {
             <div className="input-dialog-actions">
               <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
               <button type="submit" className="primary-button" disabled={inputDialog.pending}>
-                {inputDialog.pending ? 'Working…' : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : 'Rename'}
+                {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : 'Rename'}
               </button>
             </div>
           </form>

@@ -8,11 +8,18 @@ export function promptInsertText(text: string, bracketedPaste: boolean): string 
   return bracketedPaste ? bounded.replace(/\r\n?/g, '\n') : bounded.replace(/\s*\r?\n\s*/g, ' | ')
 }
 
-export function insertIntoPrompt(tabId: string, text: string): void {
-  window.dispatchEvent(new CustomEvent(INSERT_PROMPT_EVENT, { detail: { tabId, text } }))
+/** Dispatch an insert to whatever terminal pane owns the tab in this window. The pane that took it cancels the event, so
+ * the return value says whether anything did: false when no pane for that tab lives here (a popped-out session owns its
+ * terminal in another window). A dispatch is never taken as delivery by itself. */
+export function dispatchPromptInsert(target: EventTarget, detail: { tabId: string; text?: string; image?: true }): boolean {
+  return !target.dispatchEvent(new CustomEvent(INSERT_PROMPT_EVENT, { detail, cancelable: true }))
+}
+
+export function insertIntoPrompt(tabId: string, text: string): boolean {
+  return dispatchPromptInsert(window, { tabId, text })
 }
 
 /** Attach the image on the clipboard to the prompt with Copilot's own paste-image shortcut (Alt+V). Nothing is sent. */
-export function attachClipboardImage(tabId: string): void {
-  window.dispatchEvent(new CustomEvent(INSERT_PROMPT_EVENT, { detail: { tabId, image: true } }))
+export function attachClipboardImage(tabId: string): boolean {
+  return dispatchPromptInsert(window, { tabId, image: true })
 }

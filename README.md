@@ -28,6 +28,10 @@ handle, only input/output/resize events.
 - Resolves the `copilot` binary (PATH, legacy GitHub CLI-managed location,
   then a compatible `gh copilot --` installation), and shows a recovery dashboard with install/retry actions
   and a copyable diagnostic summary when it cannot be found.
+- **Fan out** (⫶ in the sidebar): start the same task in two to five fresh sessions, each in
+  its own Git worktree, one after another. The task is pasted into each prompt box and
+  nothing is sent until you press Enter in each session; the sessions share a label in the
+  sidebar, and the Git panel's worktree list lets you compare and keep one.
 - A standard collapsible AI-tool sidebar with workspace/session search,
   grouped or flat session views, manual/last-activity ordering, named recent
   workspace profiles, manual session naming, attachment-aware session
