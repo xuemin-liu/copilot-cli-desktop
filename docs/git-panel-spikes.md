@@ -84,7 +84,7 @@ Fixture: 20,000 tracked files in 200 folders, `core.autocrlf=true`, 20 modified 
   (`max(interval, 3 × lastDuration)`) and no polling while the panel is closed.
 - With `autocrlf=true`, git wrote an LF/CRLF warning **per file** on `add` (over 1 MB of stderr for 20,000 files).
   The runner caps stderr at 64 KB and decides success from the exit code, which the tests cover.
-- Building the fixture took 3.5 minutes because of those warnings; do not use a 20,000-file fixture in CI.
+- Building the fixture took 3.5 minutes because of those warnings; do not use a 20,000-file fixture in a test.
   The measured numbers are recorded here instead, and a smaller fixture can guard the cap logic.
 
 ## 6. Which flags change output — none that the parsers need

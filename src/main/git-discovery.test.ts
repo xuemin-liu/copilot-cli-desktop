@@ -83,7 +83,7 @@ test('the home folder is recognized through its 8.3 short name', async (t) => {
   makeRepo(root)
   const project = join(root, 'work', 'app')
   mkdirSync(project, { recursive: true })
-  // The same folder spelled with its short name, as os.homedir() or a CI runner profile can report it.
+  // The same folder spelled with its short name, as os.homedir() or a runner profile can report it.
   const short = execFileSync('powershell.exe', ['-NoProfile', '-Command', `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${root}').ShortPath`], { encoding: 'utf8' }).trim()
   if (short.toLowerCase() === root.toLowerCase()) t.diagnostic('short names are disabled for this folder; the case is covered only by the long form')
   const result = await discoverRepos(project, { homeDirectory: short })
@@ -357,7 +357,7 @@ test('a session folder is a worktree only when its .git file leads into an accep
   const fixture = await createGitFixture()
   if (!fixture) { t.skip('git is not installed'); return }
   t.after(() => fixture.cleanup())
-  // Canonical forms: a temp folder reached through a short name (RUNNER~1 on CI) is not equal to its long form by text.
+  // Canonical forms: a temp folder reached through a short name (RUNNER~1 on a hosted runner) is not equal to its long form by text.
   const repo = await realPathNative(fixture.repo('main'))
   const worktrees = join(fixture.root, 'main.worktrees')
   mkdirSync(worktrees)

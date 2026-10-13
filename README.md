@@ -113,8 +113,7 @@ handle, only input/output/resize events.
   first-class `run --prompt` command for official non-interactive Copilot
   execution, JSONL output, custom agents, models, and transcript export.
 - Windows packaging via `electron-builder` (NSIS), post-package runtime
-  auditing, Windows CI, scheduled compatibility checks against the latest
-  Copilot CLI, and signed tag-triggered releases with unsigned publication
+  auditing, and signed tag-triggered releases with unsigned publication
   blocked.
 
 ## Session windows
@@ -186,7 +185,7 @@ something new during the run, the check preserves it and prints a notice.
 Run `npm run links:check` for the isolated Electron/React/xterm click regression.
 It checks file and URL routing, IPC error messages, notice layout and dismissal,
 and tab-switch races without opening external applications. Results and screenshots
-are saved under `test-results/terminal-links/`; CI runs this check as well.
+are saved under `test-results/terminal-links/`.
 For paths containing spaces, use quotes or backticks with an explicit path prefix
 (for example, `./folder name/file.txt` or an absolute Windows path). Inline-code
 commands keep their embedded file links; a missing target shows a neutral notice.
@@ -321,7 +320,7 @@ corepack pnpm start
 ```
 
 `pnpm smoke` and `pnpm cli:smoke` are best-effort: without a real `copilot`
-binary on PATH they log that and exit successfully rather than failing CI.
+binary on PATH they log that and exit successfully.
 With `copilot` installed locally, `pnpm smoke` resolves it and spawns a real,
 short-lived pty session end to end.
 
@@ -378,7 +377,7 @@ supported per Windows user; set `COPILOT_DESKTOP_CLI_HOME` to isolate state
 for automation.
 
 The `run` command uses Copilot's official programmatic `--prompt` mode and
-inherits stdout/stderr so it can be composed with scripts and CI. It also
+inherits stdout/stderr so it can be composed with scripts. It also
 protects configured token variables with `--secret-env-vars`.
 
 **The long-running background controller spawns `copilot` as a plain piped child process, not a
@@ -406,18 +405,13 @@ the release workflow ends with a notice, builds nothing and publishes nothing, s
 unsigned publication stays impossible without failing the run. Packaging audits the archive, native
 `node-pty` addon, required executables, Electron fuses, and production-only files.
 
-## Continuous integration and releases
+## Releases
 
-The Windows CI workflow (`.github/workflows/ci.yml`) type-checks, runs unit
-tests, runs the best-effort smoke tests, and builds an unpacked application.
-Pushing a tag such as `v0.1.0` runs the same checks, builds the NSIS
-installer, and publishes it plus `latest.yml` (required by the in-app
-updater) to a GitHub release.
-
-The scheduled compatibility workflow (`.github/workflows/cli-compatibility.yml`)
-installs the latest Copilot CLI each week and reruns the type, unit, smoke, and
-CLI lifecycle checks. The detailed DeepSeek Harness comparison and every
-applicability decision are recorded in [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the NSIS
+installer and publishes it plus `latest.yml` (required by the in-app updater) to a GitHub
+release. It refuses to publish without Windows code signing. The detailed DeepSeek Harness
+comparison and every applicability decision are recorded in
+[`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
 
 ## Live-verification boundary
 

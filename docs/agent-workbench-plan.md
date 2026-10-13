@@ -437,7 +437,7 @@ Each is a small, independent PR, not part of the phases above:
 - Phase 3a review (independent): a forged `.git` file under the accepted repository's `worktrees` directory
   with a `commondir` naming another repository passed; an older cwd inspection could overwrite a newer one
   for the same tab; the chip never followed a branch switch or rename; and two new tests compared short and
-  long forms of a temp path on CI. Fixed by requiring `commondir` to be the accepted repository's `.git` and
+  long forms of a temp path on a hosted runner. Fixed by requiring `commondir` to be the accepted repository's `.git` and
   the backpointer to name the worktree's `.git` file, a per-tab generation for cwd events, a five-second
   HEAD poll for worktree tabs, and canonical fixture paths. Second round: the ownership check now also
   runs in the command gate (`passGate`) for worktree entries, so redirected pointers refuse the next read or
