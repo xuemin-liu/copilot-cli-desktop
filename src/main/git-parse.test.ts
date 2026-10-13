@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   boundText, groupStatusEntries, isSupportedGitVersion, parseGitVersion, parseLog, parseNumstat, parseStagedRaw, parseStatusV2, splitNul,
+  parseWorktrees,
 } from './git-parse.js'
 
 const rec = (...parts: string[]): string => parts.join('\0') + '\0'
@@ -162,4 +163,25 @@ test('parseStagedRaw reads modes and paths, including a submodule entry and a pa
     { path: 'dir/with space.txt', oldMode: '000000', newMode: '100644' },
   ])
   assert.deepEqual(parseStagedRaw(''), [])
+})
+
+test('worktree list blocks are parsed with their flags, paths with backslashes, and bounded', () => {
+  const output = [
+    'worktree C:/Users/me/repo', 'HEAD ' + 'a'.repeat(40), 'branch refs/heads/main', '',
+    'worktree C:/Users/me/repo.worktrees/desktop-x-abc123', 'HEAD ' + 'b'.repeat(40), 'branch refs/heads/desktop-x-abc123', 'locked', '',
+    'worktree C:/Users/me/elsewhere', 'HEAD ' + 'c'.repeat(40), 'detached', 'prunable gitdir file points to non-existent location', '',
+    'worktree C:/Users/me/bare', 'bare', '',
+    'garbage line', 'worktree C:/Users/me/odd', 'HEAD not-a-hash', 'branch refs/tags/v1', '',
+  ].join('\n')
+  const parsed = parseWorktrees(output)
+  assert.deepEqual(parsed, [
+    { path: 'C:\\Users\\me\\repo', head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null },
+    { path: 'C:\\Users\\me\\repo.worktrees\\desktop-x-abc123', head: 'b'.repeat(40), branch: 'desktop-x-abc123', detached: false, bare: false, locked: 'locked', prunable: null },
+    { path: 'C:\\Users\\me\\elsewhere', head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location' },
+    { path: 'C:\\Users\\me\\bare', head: null, branch: null, detached: false, bare: true, locked: null, prunable: null },
+    { path: 'C:\\Users\\me\\odd', head: null, branch: null, detached: false, bare: false, locked: null, prunable: null },
+  ])
+  assert.equal(parseWorktrees('worktree C:/a\r\nHEAD ' + 'd'.repeat(40) + '\r\n').length, 1, 'a final block without a blank line, with CRLF, still counts')
+  assert.equal(parseWorktrees(Array.from({ length: 10 }, (_item, index) => `worktree C:/w${index}\n\n`).join(''), 3).length, 3)
+  assert.deepEqual(parseWorktrees(''), [])
 })

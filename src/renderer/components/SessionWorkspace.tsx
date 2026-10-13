@@ -63,7 +63,9 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
             <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id)} obscured={obscured} renderHeader={browserToggle => <header className="session-pane-header">
-              <span className="session-pane-title" title={tab.title}>{tab.title}</span>
+              <span className="session-pane-title" title={tab.title}>{tab.title}
+                {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
+              </span>
               {onToggleGit && !tab.sideChat && (
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>

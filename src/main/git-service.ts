@@ -1,14 +1,14 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
 import type { ProjectActivity } from './git-branch.js'
 import { inspectCommitHooks, inspectHooks, PUSH_HOOKS } from './git-hooks.js'
 import type { HooksInventory } from './git-hooks.js'
-import { discoverRepos, inspectGitEntry } from './git-discovery.js'
+import { discoverRepos, inspectGitEntry, inspectSessionWorktree, sameFolder } from './git-discovery.js'
 import type { DiscoveredRepo } from './git-discovery.js'
-import { boundText, groupStatusEntries, parseBranches, parseLog, parseNumstat, parsePublishedRefs, parseStagedRaw, parseStatusV2 } from './git-parse.js'
+import { boundText, groupStatusEntries, parseBranches, parseLog, parseNumstat, parsePublishedRefs, parseStagedRaw, parseStatusV2, parseWorktrees } from './git-parse.js'
 import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
@@ -17,7 +17,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary,
+  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitWorktreeView,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -44,6 +44,9 @@ export interface GitServiceOptions {
   maxHookBytes?: number
   /** Whether a Copilot session is working in this project. A branch switch is refused while one is. */
   sessionActivity?(profileId: string): ProjectActivity
+  /** The folders the profile's Copilot sessions report as their cwd. Those that are linked worktrees of a listed
+   * repository are shown as repositories of their own, for as long as a session reports them. */
+  sessionWorktrees?(profileId: string): readonly string[]
   /** Ask the person in a native window. Without it, anything that needs a confirmation is refused. */
   confirm?(profileId: string, request: GitConfirmRequest): Promise<boolean>
   /** A folder the app owns, where a copy of each tracked file is saved before its changes are discarded. Without it none can be. */
@@ -101,12 +104,16 @@ interface RepoRuntime {
   writeQueue: Promise<unknown>
   /** Cancel handle of the write running now, if any. */
   writeAbort: AbortController | null
+  /** For a worktree: the id of the repository it belongs to. */
+  worktreeOfId: string | null
 }
 
 interface ProjectRuntime {
   key: string
   path: string
   repos: Map<string, RepoRuntime>
+  /** The last discovery result; session worktrees are added on top of it at every refresh. */
+  discoveredRepos: DiscoveredRepo[]
   notes: string[]
   truncated: boolean
   discovered: boolean
@@ -123,6 +130,8 @@ interface ProjectRuntime {
 }
 
 const MAX_DIFF_BYTES = 512 * 1024
+/** Session folders examined per refresh; the app allows 20 tabs. */
+const MAX_SESSION_WORKTREES = 24
 const STATUS_TIMEOUT_MS = 30_000
 const UNAVAILABLE_MESSAGE = 'Git was not found. Install Git for Windows to use the Git panel.'
 
@@ -213,7 +222,7 @@ export class GitService {
     let project = this.projects.get(key)
     if (!project) {
       project = {
-        key, path: canonical, repos: new Map(), notes: [], truncated: false, discovered: false, view: null, viewJson: '',
+        key, path: canonical, repos: new Map(), discoveredRepos: [], notes: [], truncated: false, discovered: false, view: null, viewJson: '',
         abort: new AbortController(), refreshing: null, again: false, rescanNext: false,
         debounce: undefined, fallback: undefined, lastDuration: 0, lastFinished: 0,
       }
@@ -368,11 +377,16 @@ export class GitService {
         project.rescanNext = false
         const found = await (this.options.discover ?? discoverRepos)(project.path)
         if (signal.aborted) return
-        this.reconcile(project, found.repos)
+        project.discoveredRepos = found.repos
         project.notes = found.notes
         project.truncated = found.truncated
         project.discovered = true
       }
+      // Worktrees that Copilot sessions run in are listed beside the discovered repositories, for as long as a session
+      // reports one and the folder still is a worktree of a listed repository; a removed worktree drops out here.
+      const worktrees = await this.sessionWorktreeRepos(project)
+      if (signal.aborted) return
+      this.reconcile(project, [...project.discoveredRepos, ...worktrees])
       await mapLimit([...project.repos.values()], this.options.concurrency ?? 3, repo => this.refreshRepo(project, repo, runtime, signal))
     } catch (error) {
       if (signal.aborted) return
@@ -393,12 +407,37 @@ export class GitService {
       const existing = project.repos.get(key)
       if (existing) { existing.discovered = found; continue }
       project.repos.set(key, {
-        id: `repo-${this.nextRepoNumber++}`, discovered: found, state: 'ready', error: null, scan: null,
+        id: `repo-${this.nextRepoNumber++}`, discovered: found, state: 'ready', error: null, scan: null, worktreeOfId: null,
         generation: 0, signature: '', status: null, entries: new Map(), statusView: null,
         writeQueue: Promise.resolve(), writeAbort: null,
       })
     }
     for (const key of [...project.repos.keys()]) if (!seen.has(key)) project.repos.delete(key)
+    for (const repo of project.repos.values()) {
+      const main = repo.discovered.worktreeOf
+      repo.worktreeOfId = main ? project.repos.get(repoTrustKey(main))?.id ?? null : null
+    }
+  }
+
+  private async sessionWorktreeRepos(project: ProjectRuntime): Promise<DiscoveredRepo[]> {
+    if (!this.options.sessionWorktrees) return []
+    const cwds = new Set<string>()
+    for (const mine of this.subscriptions.values()) {
+      for (const [profileId, candidate] of mine) if (candidate === project) for (const cwd of this.options.sessionWorktrees(profileId)) cwds.add(cwd)
+    }
+    // A worktree of the project's own repositories only; the parent repository above the project is not followed.
+    const mains = new Set(project.discoveredRepos.filter(repo => repo.kind !== 'parent').map(repo => repoTrustKey(repo.root)))
+    const result: DiscoveredRepo[] = []
+    const seen = new Set<string>()
+    for (const cwd of [...cwds].slice(0, MAX_SESSION_WORKTREES)) {
+      const found = await inspectSessionWorktree(cwd, mainRoot => mains.has(repoTrustKey(mainRoot)))
+      if (!found) continue
+      const key = repoTrustKey(found.root)
+      if (seen.has(key) || mains.has(key)) continue
+      seen.add(key)
+      result.push({ root: found.root, relativePath: found.root, kind: 'worktree', issue: found.issue, worktreeOf: found.mainRoot })
+    }
+    return result
   }
 
   private markError(repo: RepoRuntime, message: string): void {
@@ -421,6 +460,14 @@ export class GitService {
     const entry = await inspectGitEntry(root)
     if (!entry) { this.markError(repo, 'The .git entry is gone'); return false }
     if (entry.issue ?? repo.discovered.issue) { this.markError(repo, entry.issue ?? repo.discovered.issue ?? 'Not safe to open'); return false }
+    // A worktree entry is only as safe as its ownership: its pointers can be redirected while it is listed, so they are
+    // checked again here, before every command, against the repository it was accepted for.
+    if (repo.discovered.kind === 'worktree') {
+      const main = repo.discovered.worktreeOf
+      const owned = main ? await inspectSessionWorktree(root, candidate => repoTrustKey(candidate) === repoTrustKey(main)) : null
+      if (!owned) { this.markError(repo, 'This folder is no longer a worktree of its repository'); return false }
+      if (owned.issue) { this.markError(repo, owned.issue); return false }
+    }
     if (!runtime.executable.supported) { this.markError(repo, `${runtime.executable.version.text} is older than the supported minimum (2.30)`); return false }
     try {
       const scan = await scanRepoConfig(runtime.runner, root, signal)
@@ -500,6 +547,7 @@ export class GitService {
       name: repo.discovered.root.split('\\').filter(Boolean).at(-1) ?? repo.discovered.root,
       relativePath: relative,
       kind: repo.discovered.kind,
+      worktreeOf: repo.worktreeOfId,
       state: repo.state,
       branch: branch?.head ?? null,
       detached: branch?.detached ?? false,
@@ -876,6 +924,19 @@ export class GitService {
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     await this.requireGate(project, repo, runtime)
     return this.readBranches(runtime, repo.discovered.root, project.abort.signal)
+  }
+
+  /** Every worktree of the repository, read-only, with the one this repository entry is marked `current`. */
+  async getWorktrees(subscriberId: number, profileId: string, repoId: string): Promise<GitWorktreeView[]> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
+    const root = repo.discovered.root
+    const result = await runtime.runner.run({ cwd: root, args: worktreeListArgs(), signal: project.abort.signal, timeoutMs: 15_000 })
+    if (!gitSucceeded(result)) throw new Error(describeFailure(result, 'git worktree list', root))
+    return parseWorktrees(result.stdout.toString('utf8')).map((entry, index) => ({ ...entry, main: index === 0, current: sameFolder(entry.path, root) }))
   }
 
   private async readBranches(runtime: GitRuntime, root: string, signal: AbortSignal): Promise<GitBranchView[]> {

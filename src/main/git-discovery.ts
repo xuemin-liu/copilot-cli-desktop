@@ -17,6 +17,8 @@ export interface DiscoveredRepo {
   kind: GitRepoKind
   /** Set when the `.git` entry is unsafe to hand to git; the repo is listed but never opened. */
   issue: string | null
+  /** For a `worktree`: the canonical root of the repository it belongs to. */
+  worktreeOf?: string
 }
 
 export interface DiscoveryResult {
@@ -45,7 +47,7 @@ const GIT_POINTER_MAX_BYTES = 4_096
 /** `objects/info/alternates` lists one directory per line, so it may be longer; real ones are a few hundred bytes. */
 const GIT_ALTERNATES_MAX_BYTES = 64 * 1024
 
-const sameFolder = (left: string, right: string): boolean => win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase()
+export const sameFolder = (left: string, right: string): boolean => win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase()
 
 type PointerRead = { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unsafe' }
 
@@ -235,4 +237,76 @@ export async function discoverRepos(projectPath: string, options: DiscoveryOptio
   if (truncated) notes.push(`Showing the first ${repos.length} repositories; rescan to look again`)
   repos.sort((a, b) => (a.kind === 'nested' ? 1 : 0) - (b.kind === 'nested' ? 1 : 0) || a.relativePath.localeCompare(b.relativePath))
   return { project, repos, truncated, notes }
+}
+
+export interface SessionWorktree {
+  /** Canonical root of the worktree. */
+  root: string
+  /** Canonical root of the repository it belongs to. */
+  mainRoot: string
+  /** The worktree's folder name (`git worktree add` names it after the branch by default). */
+  name: string
+  /** The checked-out branch, or null when detached. Read from the worktree's HEAD file, without running git. */
+  branch: string | null
+  /** Set when the worktree's git directory is unsafe to hand to git; it is listed but never opened. */
+  issue: string | null
+  /** Canonical `<repo>\\.git\\worktrees\\<name>`, for reading the branch again later. */
+  gitDir: string
+}
+
+const WORKTREE_GIT_DIR = /^(.+)[\\/]\.git[\\/]worktrees[\\/]([^\\/]+)$/
+
+/**
+ * Whether a folder a Copilot session reports as its cwd is a linked worktree of a repository this app already knows, using
+ * only the filesystem. The cwd is data the CLI wrote: it must be a local path; its `.git` must be a file (not a link or a
+ * folder) naming a git directory under `<repo>\.git\worktrees\<name>`, after links are followed; and `accept` must agree
+ * that `<repo>` is one of ours. Anything else is not a worktree the app will show.
+ */
+export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: string) => boolean): Promise<SessionWorktree | null> {
+  if (typeof cwd !== 'string' || cwd.length === 0 || cwd.length > 4_096 || !isLocalFilesystemPath(cwd)) return null
+  let root: string
+  try { root = await realPathNative(cwd) } catch { return null }
+  if (!isLocalFilesystemPath(root)) return null
+  const entry = win32.join(root, '.git')
+  let info
+  try { info = await lstat(entry) } catch { return null }
+  if (!info.isFile()) return null
+  const pointer = await readPointerFile(entry, GIT_POINTER_MAX_BYTES)
+  const match = pointer.kind === 'text' ? /^gitdir:\s*(.+?)\s*$/m.exec(pointer.text) : null
+  if (!match?.[1]) return null
+  const named = localAbsolute(root, match[1])
+  if (!named) return null
+  let gitDir: string
+  try { gitDir = await realPathNative(named) } catch { return null }
+  if (!isLocalFilesystemPath(gitDir)) return null
+  const place = WORKTREE_GIT_DIR.exec(gitDir)
+  if (!place?.[1] || !place[2]) return null
+  let mainRoot: string
+  try { mainRoot = await realPathNative(place[1]) } catch { return null }
+  if (!isLocalFilesystemPath(mainRoot) || !accept(mainRoot)) return null
+  // Where the git directory sits says nothing about which repository git will read: `commondir` does. It must be the
+  // accepted repository's own .git, and the backpointer must name this folder's .git file, or the folder is not a
+  // worktree of that repository and is not shown at all.
+  const common = await readPointerFile(win32.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  if (common.kind !== 'text') return null
+  const commonNamed = localAbsolute(gitDir, common.text)
+  if (!commonNamed) return null
+  let commonDir: string
+  try { commonDir = await realPathNative(commonNamed) } catch { return null }
+  if (!sameFolder(commonDir, win32.join(mainRoot, '.git'))) return null
+  const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+  if (back.kind !== 'text') return null
+  const backNamed = localAbsolute(gitDir, back.text)
+  if (!backNamed) return null
+  let backTarget: string
+  try { backTarget = await realPathNative(backNamed) } catch { return null }
+  if (!sameFolder(backTarget, entry)) return null
+  return { root, mainRoot, name: place[2], branch: await readWorktreeBranch(gitDir), issue: await pointerIssue(gitDir), gitDir }
+}
+
+/** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
+export async function readWorktreeBranch(gitDir: string): Promise<string | null> {
+  const head = await readPointerFile(win32.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)
+  const ref = head.kind === 'text' ? /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(head.text) : null
+  return ref?.[1] ?? null
 }

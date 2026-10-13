@@ -50,6 +50,10 @@ export interface DesktopSessionTab {
   activity?: SessionActivity | null
   /** Running tools or thinking inside the current turn, for the sidebar's activity line. Runtime-only. */
   activityDetail?: ActivityDetail | null
+  /** The folder the CLI reports the session runs in, from its event log. Runtime-only; data the CLI wrote. */
+  sessionCwd?: string | null
+  /** Set when `sessionCwd` is a linked worktree of a repository in the workspace folder. Runtime-only. */
+  worktree?: SessionWorktreeInfo | null
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null
@@ -65,6 +69,16 @@ export interface DesktopSessionTab {
   canFork?: boolean
   /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */
   lastActivityAt: number
+}
+
+/** A session's worktree, as the tab and sidebar show it. */
+export interface SessionWorktreeInfo {
+  /** Canonical worktree folder. */
+  path: string
+  /** Its folder name. */
+  name: string
+  /** The checked-out branch, or null when detached. */
+  branch: string | null
 }
 
 export type CopilotResolutionKind = 'direct' | 'gh-wrapped'

@@ -11,7 +11,7 @@ import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
-import type { GitBranchView, GitDiffView, GitHeadCommitView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView } from '../main/git-types.js'
+import type { GitBranchView, GitDiffView, GitHeadCommitView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
@@ -54,6 +54,7 @@ export interface CopilotDesktopBridge {
   gitAmend(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>
   gitDiscard(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitBranches(profileId: string, repoId: string): Promise<GitBranchView[]>
+  gitWorktrees(profileId: string, repoId: string): Promise<GitWorktreeView[]>
   gitBranch(profileId: string, repoId: string, action: 'create' | 'switch', name: string, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>
   gitCancel(profileId: string, repoId: string): Promise<void>
   onGitProgress(listener: (payload: { profileId: string; event: GitProgressEvent }) => void): () => void

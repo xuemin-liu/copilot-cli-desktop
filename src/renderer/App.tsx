@@ -245,7 +245,8 @@ export function App(): JSX.Element {
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
             panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
-              promptTarget={promptTarget} />}>
+              promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}
+              worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             gitOpen={gitOpen} onToggleGit={toggleGit}
             obscured={inputDialog !== null || sidebarProjectsOpen}

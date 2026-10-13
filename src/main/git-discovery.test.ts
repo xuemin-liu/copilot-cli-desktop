@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture } from './fixtures/git-fixture.js'
-import { decodeGitQuoted, discoverRepos, inspectGitEntry } from './git-discovery.js'
+import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
+import { realPathNative } from './real-path.js'
 
 function workspace(t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), 'git-discovery-'))
@@ -350,4 +351,68 @@ test('the repository\'s own objects directory and a shared common directory are 
   mkdirSync(join(root, 'wt'))
   writeFileSync(join(root, 'wt', '.git'), `gitdir: ${gitDir}\n`)
   assert.match((await inspectGitEntry(join(root, 'wt')))?.issue ?? '', /borrows objects/)
+})
+
+test('a session folder is a worktree only when its .git file leads into an accepted repository, and its branch is read without git', async (t) => {
+  const fixture = await createGitFixture()
+  if (!fixture) { t.skip('git is not installed'); return }
+  t.after(() => fixture.cleanup())
+  // Canonical forms: a temp folder reached through a short name (RUNNER~1 on CI) is not equal to its long form by text.
+  const repo = await realPathNative(fixture.repo('main'))
+  const worktrees = join(fixture.root, 'main.worktrees')
+  mkdirSync(worktrees)
+  const mine = await realPathNative(worktrees).then(folder => join(folder, 'desktop-task-abc123'))
+  fixture.plain(repo, 'worktree', 'add', '-q', mine, '-b', 'desktop-task-abc123')
+  const accept = (mainRoot: string): boolean => mainRoot.toLowerCase() === repo.toLowerCase()
+  const found = await inspectSessionWorktree(mine, accept)
+  assert.ok(found)
+  assert.equal(found.root.toLowerCase(), mine.toLowerCase())
+  assert.equal(found.mainRoot.toLowerCase(), repo.toLowerCase())
+  assert.equal(found.name, 'desktop-task-abc123')
+  assert.equal(found.branch, 'desktop-task-abc123')
+  assert.equal(found.issue, null)
+  assert.equal(found.gitDir.toLowerCase(), join(repo, '.git', 'worktrees', 'desktop-task-abc123').toLowerCase())
+  assert.equal((await inspectSessionWorktree(mine + '\\', accept))?.root.toLowerCase(), mine.toLowerCase(), 'a trailing separator resolves to the same folder')
+  assert.equal(await inspectSessionWorktree(mine, () => false), null, 'a repository the caller does not accept is not followed')
+  assert.equal(await inspectSessionWorktree(repo, accept), null, 'the main repository is not a linked worktree')
+  assert.equal(await inspectSessionWorktree(join(fixture.root, 'nowhere'), accept), null)
+  assert.equal(await inspectSessionWorktree('\\\\server\\share\\x', accept), null, 'a share is never inspected')
+  assert.equal(await inspectSessionWorktree('', accept), null)
+  // The branch follows HEAD: a rename, then a detach, are read without git.
+  fixture.plain(mine, 'branch', '-m', 'renamed-later')
+  assert.equal(await readWorktreeBranch(found.gitDir), 'renamed-later')
+  fixture.plain(mine, 'checkout', '-q', '--detach')
+  const detached = await inspectSessionWorktree(mine, accept)
+  assert.equal(detached?.branch, null)
+  assert.equal(await readWorktreeBranch(found.gitDir), null)
+  assert.equal(await readWorktreeBranch(join(fixture.root, 'absent')), null)
+  // A forged worktree: its git directory sits under the accepted repository, but its commondir names another repository.
+  const other = await realPathNative(fixture.repo('other'))
+  const forgedDir = join(repo, '.git', 'worktrees', 'forged')
+  mkdirSync(forgedDir, { recursive: true })
+  const forged = join(fixture.root, 'forged')
+  mkdirSync(forged)
+  writeFileSync(join(forged, '.git'), `gitdir: ${forgedDir}\n`)
+  writeFileSync(join(forgedDir, 'gitdir'), `${join(forged, '.git')}\n`)
+  writeFileSync(join(forgedDir, 'HEAD'), 'ref: refs/heads/main\n')
+  writeFileSync(join(forgedDir, 'commondir'), `${join(other, '.git')}\n`)
+  assert.equal(await inspectSessionWorktree(forged, accept), null, 'a commondir outside the accepted repository is refused')
+  writeFileSync(join(forgedDir, 'commondir'), '../..\n')
+  // The backpointer names a real .git file, but another folder's: the pointers disagree about which worktree this is.
+  writeFileSync(join(forgedDir, 'gitdir'), `${join(mine, '.git')}\n`)
+  assert.equal(await inspectSessionWorktree(forged, accept), null, 'a backpointer that does not name this folder is refused')
+  writeFileSync(join(forgedDir, 'gitdir'), `${join(forged, '.git')}\n`)
+  assert.equal((await inspectSessionWorktree(forged, accept))?.name, 'forged', 'with both pointers consistent it is a worktree of the repository')
+  // A .git file that points elsewhere than <repo>\.git\worktrees\<name> is not a worktree.
+  const fake = join(fixture.root, 'fake')
+  mkdirSync(fake)
+  writeFileSync(join(fake, '.git'), `gitdir: ${join(repo, '.git')}\n`)
+  assert.equal(await inspectSessionWorktree(fake, accept), null)
+  // A .git folder (an ordinary repository) is not a worktree either.
+  assert.equal(await inspectSessionWorktree(other, () => true), null)
+  // A junction to the worktree resolves to the worktree itself.
+  const link = join(fixture.root, 'link')
+  junction(link, mine)
+  const viaLink = await inspectSessionWorktree(link, accept)
+  assert.equal(viaLink?.root.toLowerCase(), mine.toLowerCase())
 })

@@ -184,3 +184,27 @@ test('detail is published after seeding only, on every tool change, and cleared 
     assert.equal(details.at(-1), 'none', 'an oversized record invalidates the detail')
   } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
 })
+
+test('the session folder is published after seeding and when a later record changes it, and cleared by a rewritten log', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'copilot-cwd-monitor-'))
+  const path = join(directory, 'events.jsonl'), cwds: Array<string | null> = []
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, () => {}, () => {}, (cwd) => cwds.push(cwd))
+  try {
+    await writeFile(path, line('session.start', { context: { cwd: 'D:\\repo.worktrees\\desktop-a' } }) + line('assistant.turn_start', { turnId: '1' }))
+    await monitor.start()
+    assert.deepEqual(cwds, ['D:\\repo.worktrees\\desktop-a'], 'seeding publishes the folder once')
+    await appendFile(path, line('assistant.turn_end', { turnId: '1' }) + line('tool.execution_start', { toolCallId: 'x', toolName: 'view' }))
+    await monitor.poll()
+    assert.deepEqual(cwds, ['D:\\repo.worktrees\\desktop-a'], 'unrelated records publish nothing')
+    await appendFile(path, line('session.resume', { context: { cwd: 'D:\\repo.worktrees\\desktop-a' } }))
+    await monitor.poll()
+    assert.equal(cwds.length, 1, 'the same folder again is not republished')
+    await appendFile(path, line('session.resume', { context: { cwd: 'D:\\elsewhere' } }))
+    await monitor.poll()
+    assert.deepEqual(cwds, ['D:\\repo.worktrees\\desktop-a', 'D:\\elsewhere'])
+    await writeFile(path, line('assistant.turn_start', { turnId: '2' }))
+    await monitor.poll()
+    assert.equal(cwds.at(-1), null, 'a rewritten log has no folder until it says')
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})

@@ -154,6 +154,8 @@ export function registerGitIpc(deps: GitIpcDeps): void {
   })
   handle('desktop:git-branches', (service, event, profileId: unknown, repoId: unknown) =>
     service.getBranches(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
+  handle('desktop:git-worktrees', (service, event, profileId: unknown, repoId: unknown) =>
+    service.getWorktrees(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
   handle('desktop:git-branch', (service, event, profileId: unknown, repoId: unknown, action: unknown, name: unknown, expected: unknown) => {
     if (action !== 'create' && action !== 'switch') throw new Error('Invalid operation')
     const args = [event.sender.id, profileIdArg(profileId), repoIdArg(repoId), branchNameArg(name), expectedHeadArg(expected)] as const

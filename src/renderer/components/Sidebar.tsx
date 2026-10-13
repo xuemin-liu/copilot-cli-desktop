@@ -205,7 +205,8 @@ export function Sidebar({
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const worktreeLabel = tab.worktree ? (tab.worktree.branch ?? tab.worktree.name) : null
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -222,7 +223,10 @@ export function Sidebar({
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
         {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
       </span>}
-      {compactIndex === undefined && detail && <span className="sidebar-session-activity">{statusLabel}</span>}
+      {compactIndex === undefined && (detail || worktreeLabel) && <span className="sidebar-session-activity">
+        {worktreeLabel && <span className="session-worktree-chip" title={`Worktree ${tab.worktree?.path ?? ''}`}>⎇ {worktreeLabel}</span>}
+        {detail ? statusLabel : ''}
+      </span>}
     </button>
     <button type="button" className="icon-button sidebar-session-actions-toggle"
       aria-label={`Actions for ${tab.title}`} title={`Actions for ${tab.title}`}

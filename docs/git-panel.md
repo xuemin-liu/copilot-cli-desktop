@@ -169,6 +169,27 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
   This is a safeguard for the common shapes, not a guarantee.
 - If the active session is open in its own window, the buttons are disabled: the panel lives in the main window.
 
+## Worktree sessions
+
+A session started with the launch option **Start fresh sessions in an isolated Git worktree** runs in a
+linked worktree beside the repository (`<repo>.worktrees\<name>`; the desktop names it
+`desktop-<session title>-<6 hex>`, which is also its branch). The desktop learns where a session runs from
+the session's own event log and checks it on disk, without running git: the folder's `.git` must be a file
+naming a git directory under `<repo>\.git\worktrees\<name>`, and `<repo>` must lie inside the workspace
+folder. Then:
+
+- The session's tab and sidebar row show the branch as a chip (**⎇ name**); the tooltip has the folder.
+- The Git panel lists the worktree as a repository of its own, marked **(worktree)**, with its own changes,
+  diffs, commits and branches, and selects it when that session is active. The main repository stays in the
+  list; choose either. A worktree is listed for as long as a session reports it and the folder is still a
+  worktree of a listed repository; a removed worktree drops out at the next refresh.
+- The **Branches** tab ends with the repository's worktrees (`git worktree list`): branch, folder, and
+  whether one is the main worktree, detached, locked or prunable, and which session uses it. This list is
+  read-only; nothing in the panel creates or removes worktrees.
+
+A worktree shares the main repository's settings and hooks but is reviewed on its own: if the
+repository's config names programs, the worktree asks for the same review before it is read.
+
 ## Repositories that need review
 
 A repository's own settings (`.git/config`) can make Git run programs: clean filters, `core.sshCommand`, credential
