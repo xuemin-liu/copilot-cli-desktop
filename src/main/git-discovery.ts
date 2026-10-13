@@ -250,6 +250,8 @@ export interface SessionWorktree {
   branch: string | null
   /** Set when the worktree's git directory is unsafe to hand to git; it is listed but never opened. */
   issue: string | null
+  /** Canonical `<repo>\\.git\\worktrees\\<name>`, for reading the branch again later. */
+  gitDir: string
 }
 
 const WORKTREE_GIT_DIR = /^(.+)[\\/]\.git[\\/]worktrees[\\/]([^\\/]+)$/
@@ -282,7 +284,29 @@ export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: str
   let mainRoot: string
   try { mainRoot = await realPathNative(place[1]) } catch { return null }
   if (!isLocalFilesystemPath(mainRoot) || !accept(mainRoot)) return null
+  // Where the git directory sits says nothing about which repository git will read: `commondir` does. It must be the
+  // accepted repository's own .git, and the backpointer must name this folder's .git file, or the folder is not a
+  // worktree of that repository and is not shown at all.
+  const common = await readPointerFile(win32.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  if (common.kind !== 'text') return null
+  const commonNamed = localAbsolute(gitDir, common.text)
+  if (!commonNamed) return null
+  let commonDir: string
+  try { commonDir = await realPathNative(commonNamed) } catch { return null }
+  if (!sameFolder(commonDir, win32.join(mainRoot, '.git'))) return null
+  const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+  if (back.kind !== 'text') return null
+  const backNamed = localAbsolute(gitDir, back.text)
+  if (!backNamed) return null
+  let backTarget: string
+  try { backTarget = await realPathNative(backNamed) } catch { return null }
+  if (!sameFolder(backTarget, entry)) return null
+  return { root, mainRoot, name: place[2], branch: await readWorktreeBranch(gitDir), issue: await pointerIssue(gitDir), gitDir }
+}
+
+/** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
+export async function readWorktreeBranch(gitDir: string): Promise<string | null> {
   const head = await readPointerFile(win32.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)
   const ref = head.kind === 'text' ? /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(head.text) : null
-  return { root, mainRoot, name: place[2], branch: ref?.[1] ?? null, issue: await pointerIssue(gitDir) }
+  return ref?.[1] ?? null
 }

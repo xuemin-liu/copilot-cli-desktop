@@ -92,7 +92,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
-import { inspectSessionWorktree } from './git-discovery.js'
+import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
 import type { SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
@@ -236,6 +236,11 @@ const profilesWithSessionTabs = new Set<string>()
 const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
 const restoringTabIds = new Set<string>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+/** Per tab: the number of the latest cwd event, so an older inspection that finishes later cannot overwrite a newer one. */
+const sessionCwdGenerations = new Map<string, number>()
+/** Per tab: the git directory of the worktree it runs in, so its HEAD can be read again when the branch changes. */
+const sessionWorktreeGitDirs = new Map<string, string>()
+const WORKTREE_BRANCH_POLL_MS = 5_000
 
 // The Git panel's service. Created on first use, and never again once shutdown starts, so no git process can
 // start while the app is closing. It runs git only while a renderer has the panel open.
@@ -1060,7 +1065,7 @@ function finalizeSessionArgs(
 
 /** The folder a session reports is data the CLI wrote: it is shown as a worktree only after the filesystem checks in
  * `inspectSessionWorktree` pass and the repository it belongs to lies inside the workspace folder. */
-async function applySessionCwd(id: string, session: PtySession, cwd: string | null): Promise<void> {
+async function applySessionCwd(id: string, session: PtySession, cwd: string | null, generation: number): Promise<void> {
   const tab = tabsState.tabs.find((candidate) => candidate.id === id)
   const profile = tab ? desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId) : undefined
   let worktree: SessionWorktreeInfo | null = null
@@ -1068,13 +1073,31 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
     const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
     const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
     const found = await inspectSessionWorktree(cwd, within)
-    if (found) worktree = { path: found.root, name: found.name, branch: found.branch }
+    if (found) { worktree = { path: found.root, name: found.name, branch: found.branch }; sessionWorktreeGitDirs.set(id, found.gitDir) }
   }
-  if (managedTabs.get(id)?.session !== session) return
+  // A newer cwd event (or a log reset) for this tab has been applied meanwhile: this result is stale.
+  if (managedTabs.get(id)?.session !== session || sessionCwdGenerations.get(id) !== generation) return
+  if (!worktree) sessionWorktreeGitDirs.delete(id)
   tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: cwd, worktree } : candidate) }
   syncTabState()
   broadcastState()
   if (profile) gitService?.requestRefresh(profile.id)
+}
+
+/** The chip names the branch the worktree has checked out now, not the one it had when the session started: a switch or
+ * rename inside the worktree changes its HEAD file, which is read again here, without git, for every worktree tab. */
+async function refreshWorktreeBranches(): Promise<void> {
+  let changed = false
+  for (const [id, gitDir] of [...sessionWorktreeGitDirs]) {
+    const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+    if (!tab?.worktree || !managedTabs.has(id)) { sessionWorktreeGitDirs.delete(id); continue }
+    const branch = await readWorktreeBranch(gitDir)
+    const current = tabsState.tabs.find((candidate) => candidate.id === id)
+    if (!current?.worktree || current.worktree.branch === branch || sessionWorktreeGitDirs.get(id) !== gitDir) continue
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id && candidate.worktree ? { ...candidate, worktree: { ...candidate.worktree, branch } } : candidate) }
+    changed = true
+  }
+  if (changed) { syncTabState(); broadcastState() }
 }
 
 /** Wires a session's lifecycle events to tab state for the given tab id.
@@ -1098,7 +1121,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('session-cwd', (cwd: string | null) => {
     if (managedTabs.get(id)?.session !== session) return
-    observe(applySessionCwd(id, session, cwd), 'Could not inspect the session folder')
+    const generation = (sessionCwdGenerations.get(id) ?? 0) + 1
+    sessionCwdGenerations.set(id, generation)
+    observe(applySessionCwd(id, session, cwd, generation), 'Could not inspect the session folder')
   })
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
@@ -1495,6 +1520,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     }
     managedTabs.set(tabId, { session })
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null, activityDetail: null, sessionCwd: null, worktree: null } : candidate) }
+    sessionCwdGenerations.set(tabId, (sessionCwdGenerations.get(tabId) ?? 0) + 1)
+    sessionWorktreeGitDirs.delete(tabId)
     tabsState = setTabStatus(tabsState, tabId, 'starting')
     tabsState = setTabLaunchConfig(tabsState, tabId, {
       cliVersion: plan.cliVersion,
@@ -2858,6 +2885,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('activate', restoreMainWindow)
 
   app.whenReady().then(async () => {
+    setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')
     const recovery = await recoverMigrationReport(app.getPath('userData'))
     migrationService = new MigrationService({

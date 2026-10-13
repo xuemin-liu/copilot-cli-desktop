@@ -407,6 +407,12 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3a review (independent): a forged `.git` file under the accepted repository's `worktrees` directory
+  with a `commondir` naming another repository passed; an older cwd inspection could overwrite a newer one
+  for the same tab; the chip never followed a branch switch or rename; and two new tests compared short and
+  long forms of a temp path on CI. Fixed by requiring `commondir` to be the accepted repository's `.git` and
+  the backpointer to name the worktree's `.git` file, a per-tab generation for cwd events, a five-second
+  HEAD poll for worktree tabs, and canonical fixture paths.
 - Phase 3a result: shipped as designed, with these decisions. The session folder is read from
   `session.start`/`session.resume` by the activity tracker and published by the monitor (after seeding,
   history being the truth about where a session runs). A worktree is recognised only by

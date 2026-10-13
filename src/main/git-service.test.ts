@@ -2312,8 +2312,9 @@ test('a folder a session reports is listed as a worktree repository of the proje
     f.plain(project, 'add', '.')
     f.plain(project, 'commit', '-q', '-m', 'init')
   }, { sessionWorktrees: () => reported })
-  const worktree = join(h.fixture.root, 'project.worktrees', 'desktop-task-abc123')
   mkdirSync(join(h.fixture.root, 'project.worktrees'))
+  // Canonical, as the service reports it: the temp folder may be reached through a short name on CI.
+  const worktree = join(realpathSync.native(join(h.fixture.root, 'project.worktrees')), 'desktop-task-abc123')
   h.fixture.plain(h.project, 'worktree', 'add', '-q', worktree, '-b', 'desktop-task-abc123')
   const first = await h.service.subscribe(SUBSCRIBER, PROFILE)
   assert.deepEqual(first.repos.map(repo => repo.kind), ['project'], 'nothing reported yet')
