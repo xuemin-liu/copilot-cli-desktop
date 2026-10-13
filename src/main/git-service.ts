@@ -999,11 +999,23 @@ export class GitService {
         // Physical folders, not spellings: a session can reach the worktree through a junction, a link or a short name.
         let targetReal: string
         try { targetReal = await realPathNative(target.path) } catch { throw new WriteRefused(refused('failed', 'The worktree folder could not be resolved, so it is not removed.')) }
-        for (const folder of this.options.liveSessionFolders?.(profileId) ?? []) {
-          if (folder === null) throw new WriteRefused(refused('agent-working', 'A session has not reported where it runs yet; it might be this worktree. Wait for it, or close it, then try again.'))
-          let real: string
-          try { real = await realPathNative(folder) } catch { throw new WriteRefused(refused('agent-working', 'A session\'s folder cannot be checked, so the worktree is not removed. Close that session, then try again.')) }
-          if (sameFolder(real, targetReal)) throw new WriteRefused(refused('agent-working', 'A session is running in this worktree. Close it first.'))
+        // Resolving folders takes real time, during which a session can start or report where it runs. The set is read
+        // again after the reads and must be unchanged; otherwise the new set is checked, a bounded number of times.
+        const liveSet = (): Array<string | null> => [...(this.options.liveSessionFolders?.(profileId) ?? [])]
+        const sameSet = (left: Array<string | null>, right: Array<string | null>): boolean =>
+          left.length === right.length && left.every((entry, index) => entry === right[index])
+        let folders = liveSet()
+        for (let round = 0; ; round += 1) {
+          for (const folder of folders) {
+            if (folder === null) throw new WriteRefused(refused('agent-working', 'A session has not reported where it runs yet; it might be this worktree. Wait for it, or close it, then try again.'))
+            let real: string
+            try { real = await realPathNative(folder) } catch { throw new WriteRefused(refused('agent-working', 'A session\'s folder cannot be checked, so the worktree is not removed. Close that session, then try again.')) }
+            if (sameFolder(real, targetReal)) throw new WriteRefused(refused('agent-working', 'A session is running in this worktree. Close it first.'))
+          }
+          const again = liveSet()
+          if (sameSet(again, folders)) break
+          if (round >= 4) throw new WriteRefused(refused('agent-working', 'Sessions kept starting or moving while the worktree was being checked. Try again when they settle.'))
+          folders = again
         }
         return target
       }

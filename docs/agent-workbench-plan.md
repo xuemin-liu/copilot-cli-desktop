@@ -411,7 +411,9 @@ Each is a small, independent PR, not part of the phases above:
   textual folder comparison, and liveness was filtered by the asking profile although another profile's
   session can run in the same folder. Fixed by comparing physical folders (`realpath`) and refusing when a
   session's folder cannot be resolved, and by counting every live session of the app. The main-worktree
-  refusal test now uses the canonical repository path.
+  refusal test now uses the canonical repository path. Second round: the live-session set was captured once
+  before the awaited path reads, so a session starting during them was missed; the set is now read again
+  after the reads and a changed set is checked again (bounded), refusing if it keeps changing.
 - Phase 3b result: shipped as designed. `merged` is decided with `git merge-base --is-ancestor` against
   `origin/HEAD`, else local `main`/`master`, and is null (so never removable) without a default branch. The
   worktree shown in the panel is also refused, so the panel never removes the repository entry it is reading.

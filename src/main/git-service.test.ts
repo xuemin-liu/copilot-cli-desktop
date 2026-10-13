@@ -2375,6 +2375,7 @@ test('a folder a session reports is listed as a worktree repository of the proje
 
 test('a merged, unused worktree is removed after confirmation; everything else is refused with the reason and nothing is deleted', { skip }, async (t) => {
   let live: Array<string | null> = []
+  let liveFn: () => Array<string | null> = () => live
   let answer = true
   const asked: GitConfirmRequest[] = []
   const h = await harness(t, (f, project) => {
@@ -2382,7 +2383,7 @@ test('a merged, unused worktree is removed after confirmation; everything else i
     writeFileSync(join(project, 'a.txt'), 'one\n')
     f.plain(project, 'add', '.')
     f.plain(project, 'commit', '-q', '-m', 'init')
-  }, { liveSessionFolders: () => live, confirm: async (_profile, request) => { asked.push(request); return answer } })
+  }, { liveSessionFolders: () => liveFn(), confirm: async (_profile, request) => { asked.push(request); return answer } })
   const trees = join(realpathSync.native(h.fixture.root), 'project.worktrees')
   mkdirSync(trees)
   const add = (name: string): string => { const path = join(trees, name); h.fixture.plain(h.project, 'worktree', 'add', '-q', path, '-b', name); return path }
@@ -2454,6 +2455,18 @@ test('a merged, unused worktree is removed after confirmation; everything else i
   assert.equal(raced.ok, false)
   assert.equal(raced.reason, 'agent-working', raced.message)
   assert.ok(existsSync(done), 'the folder survived the race')
+  // A session appears while the final attempt is resolving folders: the first snapshot of that attempt is clean, the
+  // re-read after the awaited path reads is not. Calls: pre-confirm check (snapshot, re-read), attempt check (snapshot,
+  // re-read); only the fourth read sees the new, not-yet-located session.
+  let reads = 0
+  liveFn = () => { reads += 1; return reads >= 4 ? [join(trees, 'elsewhere'), null] : [join(trees, 'elsewhere')] }
+  const racedLate = await remove(done)
+  assert.equal(racedLate.ok, false)
+  assert.equal(racedLate.reason, 'agent-working', racedLate.message)
+  assert.match(racedLate.message, /has not reported where it runs/)
+  assert.ok(existsSync(done), 'the folder survived the late arrival')
+  assert.ok(reads >= 4, `the set was re-read after the path reads (${reads} reads)`)
+  liveFn = () => live
   // Finally: removed, folder gone, list shorter, branch kept.
   live = []
   const removed = await remove(done)
