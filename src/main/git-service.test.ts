@@ -2303,3 +2303,52 @@ test('an amend is refused when Git cannot read the last commit well enough to te
   assert.match(result.message, /could not read the last commit/)
   assert.equal(localHead(h), before)
 })
+
+test('a folder a session reports is listed as a worktree repository of the project while it is one, and the worktree list says who uses it', { skip }, async (t) => {
+  let reported: string[] = []
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'a.txt'), 'one\n')
+    f.plain(project, 'add', '.')
+    f.plain(project, 'commit', '-q', '-m', 'init')
+  }, { sessionWorktrees: () => reported })
+  const worktree = join(h.fixture.root, 'project.worktrees', 'desktop-task-abc123')
+  mkdirSync(join(h.fixture.root, 'project.worktrees'))
+  h.fixture.plain(h.project, 'worktree', 'add', '-q', worktree, '-b', 'desktop-task-abc123')
+  const first = await h.service.subscribe(SUBSCRIBER, PROFILE)
+  assert.deepEqual(first.repos.map(repo => repo.kind), ['project'], 'nothing reported yet')
+  // A session reports the worktree, and a cwd that is not one: only the worktree joins the list, tied to its repository.
+  reported = [worktree, join(h.fixture.root, 'nowhere'), h.project]
+  const withWorktree = await h.service.rescan(SUBSCRIBER, PROFILE)
+  const main = repoAt(withWorktree, '.')
+  const linked = withWorktree.repos.find(repo => repo.kind === 'worktree')
+  assert.ok(main && linked)
+  assert.equal(linked.worktreeOf, main.id)
+  assert.equal(linked.relativePath.toLowerCase(), worktree.toLowerCase())
+  assert.equal(linked.name, 'desktop-task-abc123')
+  assert.equal(linked.branch, 'desktop-task-abc123')
+  assert.equal(linked.state, 'ready')
+  // Its status is its own: a change in the worktree shows there, not in the main repository.
+  writeFileSync(join(worktree, 'b.txt'), 'two\n')
+  const status = await h.service.getStatus(SUBSCRIBER, PROFILE, linked.id)
+  assert.deepEqual(status.untracked.map(entry => entry.path), ['b.txt'])
+  assert.equal((await h.service.getStatus(SUBSCRIBER, PROFILE, main.id)).untracked.length, 0)
+  // The worktree list, read from either entry, names both and marks the one the list was read from.
+  const fromMain = await h.service.getWorktrees(SUBSCRIBER, PROFILE, main.id)
+  assert.deepEqual(fromMain.map(entry => [entry.branch, entry.main, entry.current]), [['main', true, true], ['desktop-task-abc123', false, false]])
+  const fromLinked = await h.service.getWorktrees(SUBSCRIBER, PROFILE, linked.id)
+  assert.deepEqual(fromLinked.map(entry => [entry.branch, entry.main, entry.current]), [['main', true, false], ['desktop-task-abc123', false, true]])
+  assert.ok(h.runs.every(run => run.args[0] !== 'worktree' || run.args[1] === 'list'), 'the panel only ever lists worktrees')
+  // The session goes away: the worktree leaves the list. It comes back when reported again, with a new id.
+  reported = []
+  const gone = await h.service.rescan(SUBSCRIBER, PROFILE)
+  assert.deepEqual(gone.repos.map(repo => repo.kind), ['project'])
+  reported = [worktree]
+  const back = await h.service.rescan(SUBSCRIBER, PROFILE)
+  assert.notEqual(back.repos.find(repo => repo.kind === 'worktree')?.id, linked.id, 'ids are never reused')
+  // The folder is removed from disk while still reported: it drops out instead of being polled.
+  reported = [worktree]
+  h.fixture.plain(h.project, 'worktree', 'remove', '--force', worktree)
+  const removed = await h.service.rescan(SUBSCRIBER, PROFILE)
+  assert.deepEqual(removed.repos.map(repo => repo.kind), ['project'])
+})

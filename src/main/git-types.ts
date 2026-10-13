@@ -2,7 +2,8 @@ import type { GitStatusCode, GitEntryKind, GitLogEntry } from './git-parse.js'
 
 /** Serializable shapes shared by the main process and the renderer. */
 
-export type GitRepoKind = 'project' | 'nested' | 'parent'
+/** `worktree`: a linked worktree of one of the project's repositories, in which a Copilot session runs. */
+export type GitRepoKind = 'project' | 'nested' | 'parent' | 'worktree'
 
 /**
  * - `ready`: status is available.
@@ -21,9 +22,11 @@ export interface GitRepoSummary {
   /** Opaque, monotonic, never reused: `repo-<n>`. */
   id: string
   name: string
-  /** Relative to the project folder; `.` for the project itself. */
+  /** Relative to the project folder; `.` for the project itself; the absolute folder for a worktree (which lives outside). */
   relativePath: string
   kind: GitRepoKind
+  /** For a worktree: the id of the repository it belongs to, when that repository is listed. */
+  worktreeOf: string | null
   state: GitRepoState
   branch: string | null
   detached: boolean
@@ -146,6 +149,23 @@ export interface GitBranchView {
   upstreamGone: boolean
   subject: string
   committedAt: number | null
+}
+
+/** One entry of `git worktree list`, as the Branches tab shows it. Paths use the platform's separators. */
+export interface GitWorktreeView {
+  path: string
+  head: string | null
+  branch: string | null
+  detached: boolean
+  bare: boolean
+  /** The lock reason, or `locked` when none was given; null when not locked. */
+  locked: string | null
+  /** Why git would prune it, or `prunable`; null when it is fine. */
+  prunable: string | null
+  /** The main worktree (the repository itself). */
+  main: boolean
+  /** The repository the list was read from. */
+  current: boolean
 }
 
 /** What the person is asked before something that rewrites files; shown by the main process in a native window. */

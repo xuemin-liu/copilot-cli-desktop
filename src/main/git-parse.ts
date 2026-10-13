@@ -323,3 +323,45 @@ export function parsePublishedRefs(output: string, max = 20): string[] {
   }
   return names
 }
+
+export interface GitWorktreeEntry {
+  path: string
+  head: string | null
+  branch: string | null
+  detached: boolean
+  bare: boolean
+  locked: string | null
+  prunable: string | null
+}
+
+/** Parse `worktreeListArgs()` output: blank-line separated blocks of `key [value]` lines, the first being `worktree <path>`.
+ * Git prints paths with forward slashes; they are returned with backslashes, as the rest of the app shows folders. */
+export function parseWorktrees(output: string, max = 200): GitWorktreeEntry[] {
+  const result: GitWorktreeEntry[] = []
+  let current: GitWorktreeEntry | null = null
+  const finish = (): void => { if (current && result.length < max) result.push(current); current = null }
+  for (const raw of output.split(String.fromCharCode(10))) {
+    const line = raw.replace(String.fromCharCode(13), '')
+    if (line === '') { finish(); continue }
+    const space = line.indexOf(' ')
+    const key = space === -1 ? line : line.slice(0, space)
+    const value = space === -1 ? '' : line.slice(space + 1)
+    if (key === 'worktree') {
+      finish()
+      if (value === '') continue
+      current = { path: value.replace(/\//g, '\\'), head: null, branch: null, detached: false, bare: false, locked: null, prunable: null }
+      continue
+    }
+    if (!current) continue
+    switch (key) {
+      case 'HEAD': current.head = /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(value) ? value : null; break
+      case 'branch': current.branch = value.startsWith('refs/heads/') ? value.slice('refs/heads/'.length) : null; break
+      case 'detached': current.detached = true; break
+      case 'bare': current.bare = true; break
+      case 'locked': current.locked = value === '' ? 'locked' : value; break
+      case 'prunable': current.prunable = value === '' ? 'prunable' : value; break
+    }
+  }
+  finish()
+  return result
+}

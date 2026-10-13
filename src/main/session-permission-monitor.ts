@@ -26,6 +26,7 @@ export class SessionPermissionMonitor {
   private seededMode: SessionPermissionMode | null = null
   private readonly activity = new SessionActivityTracker()
   private lastDetail: ActivityDetail | null = null
+  private lastCwd: string | null = null
 
   constructor(
     private readonly path: string,
@@ -34,6 +35,7 @@ export class SessionPermissionMonitor {
     private readonly onDiagnostic: (message: string) => void = () => {},
     private readonly onActivity: (activity: SessionActivity | null) => void = () => {},
     private readonly onDetail: (detail: ActivityDetail | null) => void = () => {},
+    private readonly onCwd: (cwd: string | null) => void = () => {},
   ) {}
 
   start(): Promise<void> {
@@ -48,6 +50,7 @@ export class SessionPermissionMonitor {
     const activity = this.activity.finishReplay()
     if (!this.stopped && activity) this.onActivity(activity)
     this.publishDetail()
+    this.publishCwd()
     if (this.stopped) return
     this.timer = setInterval(() => {
       void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
@@ -103,6 +106,15 @@ export class SessionPermissionMonitor {
     this.onDetail(detail)
   }
 
+  /** The session's folder is published after seeding (history is the truth here) and whenever a later record changes it. */
+  private publishCwd(): void {
+    if (this.seeding || this.stopped) return
+    const cwd = this.activity.sessionCwd
+    if (cwd === this.lastCwd) return
+    this.lastCwd = cwd
+    this.onCwd(cwd)
+  }
+
   private async readAppendedEvents(): Promise<void> {
     let size: number
     try {
@@ -118,6 +130,7 @@ export class SessionPermissionMonitor {
       this.activity.reset()
       if (!this.seeding) this.onActivity(null)
       this.publishDetail()
+      this.publishCwd()
     }
     if (size === this.offset) return
 
@@ -150,6 +163,7 @@ export class SessionPermissionMonitor {
       const activity = this.activity.consume(line)
       if (!this.seeding && activity !== undefined) this.onActivity(activity)
       this.publishDetail()
+      this.publishCwd()
       const mode = parsePermissionChangedEvent(
         line,
         (payload) => this.onDiagnostic(`Unknown session.permissions_changed payload: ${JSON.stringify(payload)}`),
@@ -167,6 +181,7 @@ export class SessionPermissionMonitor {
       this.activity.reset()
       if (!this.seeding) this.onActivity(null)
       this.publishDetail()
+      this.publishCwd()
       this.onDiagnostic(`Skipped session event exceeding ${MAX_PENDING_RECORD_BYTES} bytes; task activity is unknown`)
     }
   }

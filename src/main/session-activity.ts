@@ -18,8 +18,11 @@ interface ActivityEvent {
     toolCallId?: unknown
     toolName?: unknown
     arguments?: unknown
+    context?: { cwd?: unknown }
   }
 }
+
+const MAX_CWD_CHARS = 4_096
 
 /** A turn may end after tool calls and immediately start another model call.
  * Only a root turn with a final, tool-free response establishes idle.
@@ -33,6 +36,8 @@ export class SessionActivityTracker {
   private finalResponse = false
   private readonly runningTools = new Map<string, RunningTool>()
   private thinkingSince: number | null = null
+  /** The folder the session reports it runs in (`session.start` / `session.resume`); the latest record wins. */
+  sessionCwd: string | null = null
 
   constructor(private readonly clock: () => number = Date.now) {}
 
@@ -41,6 +46,7 @@ export class SessionActivityTracker {
     this.turnId = null
     this.finalResponse = false
     this.clearDetail()
+    this.sessionCwd = null
   }
 
   /** What the session is doing inside the current turn; null when idle or unknown. */
@@ -104,6 +110,12 @@ export class SessionActivityTracker {
         this.finalResponse = false
         this.clearDetail()
         break
+      case 'session.start':
+      case 'session.resume': {
+        const cwd = event.data?.context?.cwd
+        if (typeof cwd === 'string' && cwd.length > 0 && cwd.length <= MAX_CWD_CHARS) this.sessionCwd = cwd
+        break
+      }
     }
     return this.activity !== before ? this.activity : undefined
   }

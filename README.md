@@ -49,7 +49,8 @@ handle, only input/output/resize events.
   and is confirmed first), and discard changes (a copy of each tracked file is saved first,
   untracked files go to the Recycle Bin, and you confirm in a native window), and amend the last commit
   (only while it is not on any remote branch). Repositories whose own settings can run programs wait for
-  your review before anything is read. See [the Git panel](docs/git-panel.md).
+  your review before anything is read. A session that runs in a Git worktree shows its branch as a chip,
+  and the panel lists that worktree as a repository of its own and follows it. See [the Git panel](docs/git-panel.md).
 - Session identity and resume: each fresh tab gets a desktop-generated UUID
   through `--session-id` and a Copilot-visible `--name`, then auto-resumes with
   `--resume <id>` (or `--continue`) when reopened, plus a

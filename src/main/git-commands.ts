@@ -213,3 +213,8 @@ export function createBranchArgs(name: string): string[] {
 export function restoreArgs(): string[] {
   return ['restore', '--worktree', '--no-recurse-submodules', '--pathspec-from-file=-', '--pathspec-file-nul']
 }
+
+/** Every worktree of the repository, machine-readable. Read-only. */
+export function worktreeListArgs(): string[] {
+  return ['worktree', 'list', '--porcelain']
+}

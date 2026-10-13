@@ -314,3 +314,27 @@ test('running sessions show which tools run now with an elapsed clock; compact r
   assert.doesNotMatch(compact, /sidebar-session-activity/)
   assert.match(compact, /aria-label="1: Tools — Running command, Viewing x\.ts \+1 · 2m \d{1,2}s — one"/, 'the compact tooltip still carries the detail')
 })
+
+test('a session that runs in a worktree shows its branch as a chip, in the tooltip too, but not in compact rows', () => {
+  const profile: WorkspaceProfile = {
+    id: 'one', name: 'one', path: 'D:\\one', permissionPreset: 'default', defaultResumeMode: 'new',
+    launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
+  }
+  const tab: DesktopSessionTab = {
+    id: 'wt', title: 'Fix login', workspaceProfileId: 'one', lastSessionId: null,
+    status: 'running', activity: 'idle', processId: 42, cliVersion: '1.0.82', sessionPermissionPreset: 'default',
+    sessionPermissionMode: null, permissionWarning: null, remote: false, lastActivityAt: 1,
+    worktree: { path: 'D:\\one.worktrees\\desktop-fix-login-abc123', name: 'desktop-fix-login-abc123', branch: 'desktop-fix-login-abc123' },
+  }
+  const detached = { ...tab, id: 'detached', title: 'Detached', worktree: { ...tab.worktree!, branch: null } }
+  const plain = { ...tab, id: 'plain', title: 'Plain', worktree: null }
+  const markup = renderAccess([profile], tab, false, [tab, detached, plain])
+  assert.match(markup, /sidebar-session-activity"><span class="session-worktree-chip" title="Worktree D:\\one\.worktrees\\desktop-fix-login-abc123">⎇ desktop-fix-login-abc123<\/span><\/span>/, 'the chip is the second line of an idle worktree row')
+  assert.match(markup, /aria-label="Fix login \(worktree desktop-fix-login-abc123\) — Idle"/)
+  assert.match(markup, /aria-label="Detached \(worktree desktop-fix-login-abc123\) — Idle"/, 'a detached worktree is named by its folder')
+  assert.match(markup, /aria-label="Plain — Idle"/)
+  assert.equal((markup.match(/session-worktree-chip/g) ?? []).length, 2)
+  const compact = renderAccess([profile], tab, true, [tab])
+  assert.doesNotMatch(compact, /session-worktree-chip/)
+  assert.match(compact, /aria-label="1: Fix login \(worktree desktop-fix-login-abc123\) — Idle — one"/)
+})

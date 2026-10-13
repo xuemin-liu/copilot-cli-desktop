@@ -1135,6 +1135,18 @@ button:disabled {
 .git-branch-main { display: grid; gap: 2px; min-width: 0; }
 .git-branch-title { font-weight: 700; color: #eef2f8; overflow-wrap: anywhere; }
 .git-branch-badge { justify-self: start; padding: 0 6px; border-radius: 8px; background: #2c4d86; color: #dfe9ff; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+/* Worktree sessions (phase 3a of the agent workbench plan): a branch chip on the tab and sidebar, and the worktree list. */
+.session-worktree-chip { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; background: #2a3a2e; color: #9fe0b8; font-size: 10px; font-weight: 500; letter-spacing: .02em; vertical-align: middle; white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.session-pane-title .session-worktree-chip { margin-left: 8px; margin-right: 0; }
+.sidebar-session-activity .session-worktree-chip { max-width: 100%; }
+.git-worktrees { margin: 14px 8px 8px; }
+.git-section-title { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #929baa; }
+.git-worktree-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.git-worktree-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 8px; border: 1px solid #252a33; border-radius: 6px; background: #0f131b; font-size: 12px; }
+.git-worktree-current { border-color: #2c4d86; }
+.git-worktree-branch { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-worktree-path, .git-worktree-flags { grid-column: 1 / -1; color: #929baa; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-worktree-flags { color: #aab1bd; }
 .git-branch-track, .git-branch-subject { color: #929baa; font-size: 11px; overflow-wrap: anywhere; }
 
 .git-review { margin: 8px 10px 0; padding: 10px; border: 1px solid #5a3d1a; border-radius: 6px; background: #2a2418; }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
-import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary } from '../../main/git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
 import { errorMessage } from '../errors.js'
@@ -11,6 +11,8 @@ import { GitSyncBar } from './GitSyncBar.js'
 import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
 import { GitDiffView } from './GitDiffView.js'
+import { GitWorktreeList } from './GitWorktreeList.js'
+import type { WorktreeSession } from './GitWorktreeList.js'
 import type { DiffCommentAnchor } from './GitDiffView.js'
 import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
@@ -20,6 +22,10 @@ export interface GitPanelProps {
   profileId: string
   /** The session whose prompt box receives text, or null when there is none or it lives in another window. */
   promptTarget: { id: string; title: string } | null
+  /** The active session's worktree folder, when it runs in one: the panel shows that worktree's repository entry. */
+  sessionWorktreePath?: string | null
+  /** Every session that runs in a worktree, so the worktree list can say who uses which. */
+  worktreeSessions?: readonly WorktreeSession[]
   /** True when the panel is replacing the session area because the window is narrow. */
   takeover?: boolean
   onClose(): void
@@ -76,7 +82,7 @@ export function RepoRow({ repo, selected, onSelect, disabled = false }: { repo: 
     <button type="button" className={`git-repo git-repo-${tone}${selected ? ' git-repo-selected' : ''}`} aria-pressed={selected} onClick={onSelect} disabled={disabled}
       title={disabled ? 'Wait for the running Git operation to finish, or cancel it, before switching repositories' : repo.relativePath === '.' ? repo.name : repo.relativePath}>
       <span className="git-repo-dot" aria-hidden="true" />
-      <span className="git-repo-name">{repo.name}{repo.kind === 'parent' && <em> (parent)</em>}</span>
+      <span className="git-repo-name">{repo.name}{repo.kind === 'parent' && <em> (parent)</em>}{repo.kind === 'worktree' && <em> (worktree)</em>}</span>
       <span className="git-repo-meta">{[repo.branch ?? (repo.detached ? 'detached' : ''), stateLabel(repo), (repo.behind ?? 0) > 0 ? `↓${repo.behind}` : ''].filter(Boolean).join(' · ')}</span>
     </button>
   )
@@ -159,7 +165,7 @@ function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAc
   )
 }
 
-export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt }: GitPanelProps): JSX.Element {
+export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
@@ -194,6 +200,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [branchError, setBranchError] = useState<string | null>(null)
   const [newBranch, setNewBranch] = useState('')
   const [branchReload, setBranchReload] = useState(0)
+  // Worktrees of the selected repository (read-only), shown under the branches.
+  const [worktrees, setWorktrees] = useState<{ repoId: string; items: GitWorktreeView[] } | null>(null)
+  const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  // The session worktree the panel last followed, so a manual choice afterwards is kept until the session changes.
+  const followedWorktree = useRef<string | null>(null)
   // Amend: whether the box is amending the last commit, and what is known about that commit.
   const [amending, setAmending] = useState(false)
   const [headCommit, setHeadCommit] = useState<{ repoId: string; headOid: string; info: GitHeadCommitView } | null>(null)
@@ -201,6 +212,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
 
+  // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
+  useEffect(() => {
+    if (!view || !sessionWorktreePath || followedWorktree.current === sessionWorktreePath) return
+    const match = view.repos.find(candidate => candidate.kind === 'worktree' && candidate.relativePath.toLowerCase() === sessionWorktreePath.toLowerCase())
+    if (!match) return
+    followedWorktree.current = sessionWorktreePath
+    setStoredRepo(match.relativePath)
+    setSelection(null)
+  }, [view, sessionWorktreePath])
   const repo = view ? pickRepo(view, storedRepo) : null
   const ready = repo?.state === 'ready'
 
@@ -289,6 +309,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setBranchError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Worktrees: reloaded with the branches, and whenever the project view changes (a session's worktree may have appeared).
+  useEffect(() => {
+    if (tab !== 'branches' || !repo || repo.state !== 'ready') return
+    let stale = false
+    window.copilotDesktop.gitWorktrees(profileId, repo.id)
+      .then(items => { if (!stale) { setWorktrees({ repoId: repo.id, items }); setWorktreeError(null) } })
+      .catch((cause: unknown) => { if (!stale) setWorktreeError(errorMessage(cause)) })
+    return () => { stale = true }
+  }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload, view]) // eslint-disable-line react-hooks/exhaustive-deps
   const loadMore = (): void => {
     if (!repo || !log || moreRequest.current !== null) return
     const { repoId, headOid } = log
@@ -603,11 +632,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
               )}
 
               {tab === 'branches' && (
-                <GitBranchList branches={branches && branches.repoId === repo.id ? branches.items : null} error={branchError}
-                  locked={operation !== null || repo.headOid === null}
-                  lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
-                  newName={newBranch} onNewNameChange={setNewBranch}
-                  onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
+                <>
+                  <GitBranchList branches={branches && branches.repoId === repo.id ? branches.items : null} error={branchError}
+                    locked={operation !== null || repo.headOid === null}
+                    lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
+                    newName={newBranch} onNewNameChange={setNewBranch}
+                    onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
+                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions} />
+                </>
               )}
 
               {tab === 'history' && (

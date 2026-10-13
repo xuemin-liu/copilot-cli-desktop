@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture } from './fixtures/git-fixture.js'
-import { decodeGitQuoted, discoverRepos, inspectGitEntry } from './git-discovery.js'
+import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree } from './git-discovery.js'
 
 function workspace(t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), 'git-discovery-'))
@@ -350,4 +350,45 @@ test('the repository\'s own objects directory and a shared common directory are 
   mkdirSync(join(root, 'wt'))
   writeFileSync(join(root, 'wt', '.git'), `gitdir: ${gitDir}\n`)
   assert.match((await inspectGitEntry(join(root, 'wt')))?.issue ?? '', /borrows objects/)
+})
+
+test('a session folder is a worktree only when its .git file leads into an accepted repository, and its branch is read without git', async (t) => {
+  const fixture = await createGitFixture()
+  if (!fixture) { t.skip('git is not installed'); return }
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('main')
+  const worktrees = join(fixture.root, 'main.worktrees')
+  mkdirSync(worktrees)
+  const mine = join(worktrees, 'desktop-task-abc123')
+  fixture.plain(repo, 'worktree', 'add', '-q', mine, '-b', 'desktop-task-abc123')
+  const accept = (mainRoot: string): boolean => mainRoot.toLowerCase() === repo.toLowerCase()
+  const found = await inspectSessionWorktree(mine, accept)
+  assert.ok(found)
+  assert.equal(found.root.toLowerCase(), mine.toLowerCase())
+  assert.equal(found.mainRoot.toLowerCase(), repo.toLowerCase())
+  assert.equal(found.name, 'desktop-task-abc123')
+  assert.equal(found.branch, 'desktop-task-abc123')
+  assert.equal(found.issue, null)
+  assert.equal((await inspectSessionWorktree(mine + '\\', accept))?.root.toLowerCase(), mine.toLowerCase(), 'a trailing separator resolves to the same folder')
+  assert.equal(await inspectSessionWorktree(mine, () => false), null, 'a repository the caller does not accept is not followed')
+  assert.equal(await inspectSessionWorktree(repo, accept), null, 'the main repository is not a linked worktree')
+  assert.equal(await inspectSessionWorktree(join(fixture.root, 'nowhere'), accept), null)
+  assert.equal(await inspectSessionWorktree('\\\\server\\share\\x', accept), null, 'a share is never inspected')
+  assert.equal(await inspectSessionWorktree('', accept), null)
+  // Detached: the HEAD file no longer names a branch.
+  fixture.plain(mine, 'checkout', '-q', '--detach')
+  const detached = await inspectSessionWorktree(mine, accept)
+  assert.equal(detached?.branch, null)
+  // A .git file that points elsewhere than <repo>\.git\worktrees\<name> is not a worktree.
+  const fake = join(fixture.root, 'fake')
+  mkdirSync(fake)
+  writeFileSync(join(fake, '.git'), `gitdir: ${join(repo, '.git')}\n`)
+  assert.equal(await inspectSessionWorktree(fake, accept), null)
+  // A .git folder (an ordinary repository) is not a worktree either.
+  assert.equal(await inspectSessionWorktree(fixture.repo('other'), () => true), null)
+  // A junction to the worktree resolves to the worktree itself.
+  const link = join(fixture.root, 'link')
+  junction(link, mine)
+  const viaLink = await inspectSessionWorktree(link, accept)
+  assert.equal(viaLink?.root.toLowerCase(), mine.toLowerCase())
 })

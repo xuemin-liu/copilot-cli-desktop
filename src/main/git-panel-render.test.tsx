@@ -9,9 +9,10 @@ import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
 import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
 import { GitBranchList, upstreamLabel } from '../renderer/components/GitBranchList.js'
+import { GitWorktreeList, worktreeFlags } from '../renderer/components/GitWorktreeList.js'
 import type { GitBranchListProps } from '../renderer/components/GitBranchList.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
-import type { GitBranchView, GitDiffView as GitDiff, GitRepoSummary } from './git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitRepoSummary, GitWorktreeView } from './git-types.js'
 
 const diff = (text: string, extra: Partial<GitDiff> = {}): GitDiff => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 1, ...extra })
 
@@ -154,7 +155,7 @@ test('an unapproved hook is named in full and must be allowed before the commit 
 
 const summary = (overrides: Partial<GitRepoSummary> = {}): GitRepoSummary => ({
   id: 'repo-2', name: 'beta', relativePath: 'beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
-  changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], configHash: null, ...overrides,
+  changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], worktreeOf: null, configHash: null, ...overrides,
 })
 
 test('a repository row is disabled, with the reason, while a write runs elsewhere', () => {
@@ -360,4 +361,34 @@ test('inside a hunk, content starting with +++ or --- is an added or deleted lin
   assert.equal(html.match(/git-diff-gutter/g)?.length, 2, 'both content lines can be commented')
   assert.match(html, /git-diff-del[^>]*>.*aria-label="Comment on old line 1"/)
   assert.match(html, /git-diff-add[^>]*>.*aria-label="Comment on line 1"/)
+})
+
+test('a worktree repository row says so, and the worktree list names branch, folder, flags and the session using it', () => {
+  const summary: GitRepoSummary = {
+    id: 'repo-2', name: 'desktop-fix-login-abc123', relativePath: 'D:\\one.worktrees\\desktop-fix-login-abc123', kind: 'worktree', worktreeOf: 'repo-1', state: 'ready',
+    branch: 'desktop-fix-login-abc123', detached: false, upstream: null, ahead: null, behind: null, changeCount: 1, generation: 1, headOid: 'a'.repeat(40),
+    error: null, reviewItems: [], configHash: null,
+  }
+  const row = renderToStaticMarkup(<RepoRow repo={summary} selected onSelect={() => undefined} />)
+  assert.match(row, /git-repo-name">desktop-fix-login-abc123<em> \(worktree\)<\/em>/)
+  assert.match(row, /title="D:\\one\.worktrees\\desktop-fix-login-abc123"/)
+  const worktrees: GitWorktreeView[] = [
+    { path: 'D:\\one', head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null, main: true, current: false },
+    { path: 'D:\\one.worktrees\\desktop-fix-login-abc123', head: 'b'.repeat(40), branch: 'desktop-fix-login-abc123', detached: false, bare: false, locked: 'reason <b>here</b>', prunable: null, main: false, current: true },
+    { path: 'D:\\one.worktrees\\old', head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location', main: false, current: false },
+  ]
+  const sessions = [{ path: 'd:\\one.worktrees\\desktop-fix-login-abc123\\', title: 'Fix login' }]
+  assert.deepEqual(worktreeFlags(worktrees[0]!, sessions), ['main worktree'])
+  assert.deepEqual(worktreeFlags(worktrees[1]!, sessions), ['locked: reason <b>here</b>', 'used by Fix login'])
+  assert.deepEqual(worktreeFlags(worktrees[2]!, sessions), ['detached', 'prunable: gitdir file points to non-existent location'])
+  const html = renderToStaticMarkup(<GitWorktreeList worktrees={worktrees} error={null} sessions={sessions} />)
+  assert.match(html, /git-worktree-row git-worktree-current/)
+  assert.match(html, /git-branch-badge">shown</)
+  assert.match(html, /used by Fix login/)
+  assert.match(html, /detached at ccccccc/)
+  assert.doesNotMatch(html, /<b>here<\/b>/, 'a lock reason from git is text, never markup')
+  assert.match(html, /&lt;b&gt;here&lt;\/b&gt;/)
+  assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={[worktrees[0]!]} error={null} sessions={[]} />), /No linked worktrees/)
+  assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={null} error={null} sessions={[]} />), /Loading worktrees/)
+  assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={null} error="git failed" sessions={[]} />), /git failed/)
 })

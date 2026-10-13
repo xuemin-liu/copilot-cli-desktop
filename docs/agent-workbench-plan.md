@@ -1,8 +1,8 @@
 # Agent workbench plan
 
 Status: revision 3. Revision 1 was reworked after an independent review and revision 2 was approved with
-changes, both folded in (see [Review log](#review-log)). Phases 1 (#73) and 2 (#74) are merged. The phase 3a spike is done (see the review log); its first
-result is a prerequisite fix, phase 3a-0, on `feat/agent-workbench-phase3a0`.
+changes, both folded in (see [Review log](#review-log)). Phases 1 (#73), 2 (#74) and 3a-0 (#75) are merged. Phase 3a is implemented on
+`feat/agent-workbench-phase3a`.
 
 Four ideas borrowed from [Orca](https://www.onorca.dev/), an open-source "agent development
 environment" built around one git worktree per task, many agents in parallel, and a sidebar
@@ -407,6 +407,17 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3a result: shipped as designed, with these decisions. The session folder is read from
+  `session.start`/`session.resume` by the activity tracker and published by the monitor (after seeding,
+  history being the truth about where a session runs). A worktree is recognised only by
+  `inspectSessionWorktree` (filesystem only): `.git` must be a file whose `gitdir` resolves, after links,
+  to `<repo>\.git\worktrees\<name>`, and `<repo>` must be accepted by the caller (main process: inside
+  the workspace folder; Git service: one of the discovered non-parent repositories). The service lists
+  session worktrees on every refresh from a pull callback (`sessionWorktrees(profileId)`), on top of the
+  cached discovery, so they appear when a session reports one and drop out when it closes or the folder is
+  gone. Trust is not inherited: a worktree is reviewed on its own, like any repository (the plan's
+  inheritance idea was dropped as the riskier option). The parent repository above the workspace is not
+  followed. The Branches tab's worktree list is read-only; removal is phase 3b.
 - Phase 3a-0 review (independent): discovery by "any new session outside the launch folder" could adopt
   another launch's or another project's session, the pre-spawn snapshot was started but not awaited, and
   the spike's synchronous spawn starved its own mock server. Fixed by naming the worktree per launch and

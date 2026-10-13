@@ -57,6 +57,7 @@ export class PtySession extends EventEmitter {
   private statusValue: SessionLifecycleStatus = 'starting'
   private activityValue: SessionActivity | null = null
   private activityDetailValue: ActivityDetail | null = null
+  private sessionCwdValue: string | null = null
   private stopping = false
   private readonly outputLines: string[] = []
   private pendingLine = ''
@@ -87,6 +88,9 @@ export class PtySession extends EventEmitter {
 
   /** Running tools or thinking inside the current turn; null when idle or unknown. */
   get activityDetail(): ActivityDetail | null { return this.activityDetailValue }
+
+  /** The folder the CLI reports the session runs in (a worktree, for a worktree launch); null until its log says. */
+  get sessionCwd(): string | null { return this.sessionCwdValue }
 
   get processId(): number | null {
     return this.pty?.pid ?? null
@@ -176,6 +180,11 @@ export class PtySession extends EventEmitter {
         if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
         this.activityDetailValue = detail
         this.emit('activity-detail', detail)
+      },
+      (cwd) => {
+        if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
+        this.sessionCwdValue = cwd
+        this.emit('session-cwd', cwd)
       },
     )
     this.permissionMonitor = monitor
