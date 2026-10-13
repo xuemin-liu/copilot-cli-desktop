@@ -93,7 +93,7 @@ import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
 import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
-import type { SessionWorktreeInfo } from './types.js'
+import type { FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
@@ -1088,6 +1088,56 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
   syncTabState()
   broadcastState()
   if (profile) gitService?.requestRefresh(profile.id)
+}
+
+const FAN_OUT_MAX = 5
+/** How long one fan-out session gets to report where it runs before the fan-out stops (tests shorten it). */
+const FAN_OUT_WAIT_MS = Number(process.env.DESKTOP_FAN_OUT_WAIT_MS) > 0 ? Number(process.env.DESKTOP_FAN_OUT_WAIT_MS) : 90_000
+let fanOutRunning = false
+
+/**
+ * Start the same task in several fresh sessions, each in its own worktree, one after another: the next one starts only
+ * once the previous one has reported where it runs, because several `git worktree add` at once in one repository contend
+ * for the same locks. If a session does not report in time the fan-out stops and says how many it started; it never
+ * starts the next one blind. The prompt is not sent here: the renderer pastes it into each prompt box once the session is
+ * ready, and the person presses Enter in each.
+ */
+async function fanOutSessions(profile: WorkspaceProfile, label: string, count: number): Promise<FanOutResult> {
+  if (fanOutRunning) throw new Error('A fan-out is already starting sessions; wait for it to finish')
+  if (!Number.isInteger(count) || count < 2 || count > FAN_OUT_MAX) throw new Error(`Fan out into 2 to ${FAN_OUT_MAX} sessions`)
+  if (MAX_SESSION_TABS - tabsState.tabs.length < count) throw new Error(`Only ${Math.max(0, MAX_SESSION_TABS - tabsState.tabs.length)} more session tabs can be open`)
+  if (!copilotCapabilities.supportedOptions.includes('--worktree')) throw new Error('This Copilot CLI version does not support worktrees, which a fan-out needs; update it from Settings')
+  fanOutRunning = true
+  const tabIds: string[] = []
+  let stopped: string | null = null
+  try {
+    for (let index = 1; index <= count; index += 1) {
+      const before = new Set(tabsState.tabs.map((tab) => tab.id))
+      // A fresh session in its own worktree, whatever the profile's own launch setting says.
+      await createSessionTab({ ...profile, launch: { ...profile.launch, worktree: true } }, 'new', null, [], null, `${profile.name} ${index}/${count}`)
+      const created = tabsState.tabs.find((tab) => !before.has(tab.id))
+      if (!created) { stopped = 'The session tab could not be found after it started.'; break }
+      tabIds.push(created.id)
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === created.id ? { ...tab, fanOutLabel: label } : tab) }
+      syncTabState()
+      broadcastState()
+      const deadline = Date.now() + FAN_OUT_WAIT_MS
+      let reported = false
+      while (Date.now() < deadline) {
+        const current = tabsState.tabs.find((tab) => tab.id === created.id)
+        if (!current || current.status === 'crashed' || current.status === 'completed') { stopped = `Session ${index} of ${count} ended before it reported where it runs.`; break }
+        if (current.sessionCwd) { reported = true; break }
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+      if (stopped) break
+      if (!reported) { stopped = `Session ${index} of ${count} did not report where it runs within ${Math.round(FAN_OUT_WAIT_MS / 1000)} seconds, so no more were started.`; break }
+    }
+  } catch (error) {
+    stopped = `${error instanceof Error ? error.message : String(error)} (${tabIds.length} of ${count} started).`
+  } finally {
+    fanOutRunning = false
+  }
+  return { tabIds, requested: count, stopped, label }
 }
 
 /** The chip names the branch the worktree has checked out now, not the one it had when the session started: a switch or
@@ -2370,6 +2420,15 @@ ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unk
 ipcMain.handle('desktop:create-tab-with-attachments', (event) => {
   assertTrustedIpcSender(event)
   return createSessionWithAttachments()
+})
+ipcMain.handle('desktop:fan-out', (event, profileId: unknown, label: unknown, count: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
+  if (!profile) throw new Error('The selected workspace profile no longer exists')
+  if (typeof label !== 'string' || label.trim().length === 0 || label.length > 120) throw new Error('Invalid fan-out label')
+  if (typeof count !== 'number') throw new Error('Invalid session count')
+  return fanOutSessions(profile, label.trim(), count)
 })
 ipcMain.handle('desktop:activate-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

@@ -90,7 +90,7 @@ if (process.versions.electron) {
     const profile = createWorkspaceProfile(workspace, 'read-only')
     profile.name = 'Isolated Electron test'
     profile.tabs = [{ title: 'Main UI test', lastSessionId: sessionId }]
-    if (mode?.flag === '--worktree') {
+    if (mode?.flag === '--worktree' || mode?.flag === '--fan-out') {
       // A fresh worktree session needs a repository to branch from; the tab is created by the check itself.
       const { execFileSync } = await import('node:child_process')
       const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') }
@@ -122,7 +122,7 @@ if (process.versions.electron) {
     if (mode) {
       const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
       assert.equal(result.passed, true, result.error || `${mode.label} regression failed (see ${artifacts})`)
-      if (mode.flag !== '--worktree') assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
+      if (mode.flag !== '--worktree' && mode.flag !== '--fan-out') assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
     }
     const remainingHistory = await readFile(historyPath, 'utf8')
     for (const event of originalHistory.trim().split('\n').map(JSON.parse)) assert.ok(remainingHistory.includes(event.id), 'Original history was changed')

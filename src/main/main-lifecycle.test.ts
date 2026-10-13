@@ -1338,3 +1338,87 @@ test('a fresh worktree launch carries --name but no --session-id, and adopts the
     assert.equal(state.tabs[0]?.sessionPermissionMode, 'assisted', 'the permission monitor follows the discovered session')
   })
 })
+
+test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
+  await fixture(async (harness, directory) => {
+    const previousWait = process.env.DESKTOP_FAN_OUT_WAIT_MS
+    process.env.DESKTOP_FAN_OUT_WAIT_MS = '3000'
+    try {
+      const { profile } = configure(harness, directory)
+      profile.defaultResumeMode = 'new'
+      harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true,
+        supportedOptions: ['--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+      await harness.createMain()
+      const before = harness.spawns.length
+      // The CLI writes each session's log with its folder; the fan-out waits for that before the next spawn.
+      const report = async (index: number): Promise<string> => {
+        const spawn = harness.spawns[before + index]!
+        const name = spawn.args.find((arg) => arg.startsWith('--worktree='))!.slice('--worktree='.length)
+        const sessionId = `${String(index + 1).repeat(8)}-${String(index + 1).repeat(4)}-4${String(index + 1).repeat(3)}-8${String(index + 1).repeat(3)}-${String(index + 1).repeat(12)}`
+        const sessionDirectory = join(directory, 'session-state', sessionId)
+        await mkdir(sessionDirectory, { recursive: true })
+        await writeFile(join(sessionDirectory, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: join(directory, 'project.worktrees', name) } } }) + '\n')
+        return name
+      }
+      const fanOut = harness.request('desktop:fan-out', profile.id, 'fan-out · fix login', 3) as Promise<{ tabIds: string[]; requested: number; stopped: string | null; label: string }>
+      for (let attempt = 0; attempt < 50 && harness.spawns.length < before + 1; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      assert.equal(harness.spawns.length, before + 1, 'only the first session has started')
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      assert.equal(harness.spawns.length, before + 1, 'the second waits for the first to report its folder')
+      const first = await report(0)
+      for (let attempt = 0; attempt < 100 && harness.spawns.length < before + 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      assert.equal(harness.spawns.length, before + 2, 'the second started once the first reported')
+      const second = await report(1)
+      for (let attempt = 0; attempt < 100 && harness.spawns.length < before + 3; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+      assert.equal(harness.spawns.length, before + 3)
+      const third = await report(2)
+      const result = await fanOut
+      assert.equal(result.stopped, null, result.stopped ?? '')
+      assert.equal(result.tabIds.length, 3)
+      assert.equal(result.requested, 3)
+      assert.equal(new Set([first, second, third]).size, 3, 'three distinct worktree names')
+      for (const spawn of harness.spawns.slice(before)) {
+        assert.ok(spawn.args.some((arg) => arg.startsWith('--worktree=desktop-')), spawn.args.join(' '))
+        assert.ok(!spawn.args.some((arg) => arg.startsWith('--session-id=')))
+        assert.ok(!spawn.args.some((arg) => arg.includes('fix login')), 'the task is never passed on the command line')
+      }
+      const state = await harness.request('desktop:get-state')
+      const started = state.tabs.filter((tab) => result.tabIds.includes(tab.id))
+      assert.deepEqual(started.map((tab) => tab.fanOutLabel), ['fan-out · fix login', 'fan-out · fix login', 'fan-out · fix login'])
+      assert.deepEqual(started.map((tab) => tab.title), ['desktop-lifecycle-unit 1/3', 'desktop-lifecycle-unit 2/3', 'desktop-lifecycle-unit 3/3'].map((title) => title.replace('desktop-lifecycle-unit', profile.name)))
+      assert.ok(started.every((tab) => tab.sessionCwd), 'every session reported its folder')
+    } finally {
+      if (previousWait === undefined) delete process.env.DESKTOP_FAN_OUT_WAIT_MS
+      else process.env.DESKTOP_FAN_OUT_WAIT_MS = previousWait
+    }
+  })
+})
+
+test('a fan-out stops, and says so, when a session does not report its folder in time; bad requests start nothing', async () => {
+  await fixture(async (harness, directory) => {
+    const previousWait = process.env.DESKTOP_FAN_OUT_WAIT_MS
+    process.env.DESKTOP_FAN_OUT_WAIT_MS = '700'
+    try {
+      const { profile } = configure(harness, directory)
+      profile.defaultResumeMode = 'new'
+      harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true,
+        supportedOptions: ['--mode', '--agent', '--worktree', '--remote', '--remote-export', '--no-remote', '--no-remote-export'] })
+      await harness.createMain()
+      const before = harness.spawns.length
+      await assert.rejects(async () => harness.request('desktop:fan-out', profile.id, 'task', 1), /2 to 5 sessions/)
+      await assert.rejects(async () => harness.request('desktop:fan-out', profile.id, 'task', 6), /2 to 5 sessions/)
+      await assert.rejects(async () => harness.request('desktop:fan-out', profile.id, '', 2), /Invalid fan-out label/)
+      await assert.rejects(async () => harness.request('desktop:fan-out', profile.id, 'task', 20), /2 to 5 sessions/)
+      assert.equal(harness.spawns.length, before, 'nothing started')
+      const result = await (harness.request('desktop:fan-out', profile.id, 'fan-out · slow', 2) as Promise<{ tabIds: string[]; stopped: string | null }>)
+      assert.equal(harness.spawns.length, before + 1, 'the second was never started blind')
+      assert.equal(result.tabIds.length, 1)
+      assert.match(result.stopped ?? '', /Session 1 of 2 did not report where it runs/)
+      const state = await harness.request('desktop:get-state')
+      assert.equal(state.tabs.find((tab) => tab.id === result.tabIds[0])?.fanOutLabel, 'fan-out · slow')
+    } finally {
+      if (previousWait === undefined) delete process.env.DESKTOP_FAN_OUT_WAIT_MS
+      else process.env.DESKTOP_FAN_OUT_WAIT_MS = previousWait
+    }
+  })
+})

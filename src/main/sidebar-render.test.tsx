@@ -24,7 +24,7 @@ function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab, coll
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
       onCreateTab={() => undefined}
-      onCreateTabWithAttachments={() => undefined}
+      onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}
       onConnectRemote={() => undefined}
       onOpenSettings={() => undefined}
@@ -148,7 +148,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
       onCreateTab={() => undefined}
-      onCreateTabWithAttachments={() => undefined}
+      onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}
       onConnectRemote={() => undefined}
       onOpenSettings={() => undefined}
@@ -204,7 +204,7 @@ test('Sidebar shows current session access and marks changed access as applying 
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
       onCreateTab={() => undefined}
-      onCreateTabWithAttachments={() => undefined}
+      onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}
       onConnectRemote={() => undefined}
       onOpenSettings={() => undefined}
@@ -337,4 +337,25 @@ test('a session that runs in a worktree shows its branch as a chip, in the toolt
   const compact = renderAccess([profile], tab, true, [tab])
   assert.doesNotMatch(compact, /session-worktree-chip/)
   assert.match(compact, /aria-label="1: Fix login \(worktree desktop-fix-login-abc123\) — Idle — one"/)
+})
+
+test('the sidebar offers Fan out beside the attachment action, and rows started together share a label chip', () => {
+  const profile: WorkspaceProfile = {
+    id: 'one', name: 'one', path: 'D:\\one', permissionPreset: 'default', defaultResumeMode: 'new',
+    launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
+  }
+  const tab: DesktopSessionTab = {
+    id: 'a', title: 'one 1/2', workspaceProfileId: 'one', lastSessionId: null,
+    status: 'running', activity: 'idle', processId: 42, cliVersion: '1.0.82', sessionPermissionPreset: 'default',
+    sessionPermissionMode: null, permissionWarning: null, remote: false, lastActivityAt: 1, fanOutLabel: 'fan-out · fix <login>',
+    worktree: { path: 'D:\\one.worktrees\\desktop-one-1-2-abc123', name: 'desktop-one-1-2-abc123', branch: 'desktop-one-1-2-abc123' },
+  }
+  const other = { ...tab, id: 'b', title: 'one 2/2' }
+  const plain = { ...tab, id: 'c', title: 'Plain', fanOutLabel: null, worktree: null }
+  const markup = renderAccess([profile], tab, false, [tab, other, plain])
+  assert.match(markup, /aria-label="Fan out into several sessions"/)
+  assert.equal((markup.match(/session-fanout-chip/g) ?? []).length, 2)
+  assert.match(markup, /session-fanout-chip" title="Started together: fan-out · fix &lt;login&gt;">fan-out · fix &lt;login&gt;<\/span><span class="session-worktree-chip"/)
+  assert.match(markup, /aria-label="one 1\/2 \(worktree desktop-one-1-2-abc123\) \[fan-out · fix &lt;login&gt;\] — Idle"/)
+  assert.match(markup, /aria-label="Plain — Idle"/)
 })

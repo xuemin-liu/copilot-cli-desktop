@@ -54,6 +54,8 @@ export interface DesktopSessionTab {
   sessionCwd?: string | null
   /** Set when `sessionCwd` is a linked worktree of a repository in the workspace folder. Runtime-only. */
   worktree?: SessionWorktreeInfo | null
+  /** Sessions started together by one fan-out share this label. Runtime-only; not restored. */
+  fanOutLabel?: string | null
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null
@@ -79,6 +81,15 @@ export interface SessionWorktreeInfo {
   name: string
   /** The checked-out branch, or null when detached. */
   branch: string | null
+}
+
+/** What a fan-out did: how many sessions it started, and why it stopped early when it did. */
+export interface FanOutResult {
+  tabIds: string[]
+  requested: number
+  /** Why fewer sessions than requested were started, if so. */
+  stopped: string | null
+  label: string
 }
 
 export type CopilotResolutionKind = 'direct' | 'gh-wrapped'

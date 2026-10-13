@@ -1,4 +1,4 @@
-import type { DesktopState, RevealPathResult } from '../main/types.js'
+import type { DesktopState, RevealPathResult, FanOutResult } from '../main/types.js'
 import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserViewMode } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
@@ -69,6 +69,7 @@ export interface CopilotDesktopBridge {
   createTab(resumeMode?: ResumeMode | null, profileId?: string): Promise<DesktopState>
   forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState>
   createTabWithAttachments(): Promise<DesktopState>
+  fanOut(profileId: string, label: string, count: number): Promise<FanOutResult>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
   popOutTab(tabId: string): Promise<DesktopState>

@@ -1,8 +1,8 @@
 # Agent workbench plan
 
 Status: revision 3. Revision 1 was reworked after an independent review and revision 2 was approved with
-changes, both folded in (see [Review log](#review-log)). Phases 1 (#73), 2 (#74), 3a-0 (#75) and 3a (#76) are merged. Phase 3b is implemented on
-`feat/agent-workbench-phase3b`.
+changes, both folded in (see [Review log](#review-log)). Phases 1 (#73), 2 (#74), 3a-0 (#75), 3a (#76) and 3b (#77) are merged. Phase 4 is implemented on
+`feat/agent-workbench-phase4`.
 
 Four ideas borrowed from [Orca](https://www.onorca.dev/), an open-source "agent development
 environment" built around one git worktree per task, many agents in parallel, and a sidebar
@@ -407,6 +407,14 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 4 result: shipped as designed. The dialog is a new kind of the existing input dialog (task text and a
+  2–5 selector, options beyond the tab budget disabled). Main starts the sessions one by one with a launch
+  override (`worktree: true`) and a title `<profile> i/N`, waits for each to report its folder (90 s, or
+  `DESKTOP_FAN_OUT_WAIT_MS`), and stops with a message when one does not; only one fan-out runs at a time. The
+  renderer pastes the task into each session once its backlog shows the CLI's prompt footer (the same
+  readiness signal the activity check uses), so a trust question or a slow start is never typed over; a
+  session that shows no prompt within two minutes is left alone and named in the notice. The group label is
+  runtime-only.
 - Phase 3b review (independent): a live session reaching the worktree through a junction slipped past the
   textual folder comparison, and liveness was filtered by the asking profile although another profile's
   session can run in the same folder. Fixed by comparing physical folders (`realpath`) and refusing when a
