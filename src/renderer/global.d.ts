@@ -55,6 +55,7 @@ export interface CopilotDesktopBridge {
   gitDiscard(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitBranches(profileId: string, repoId: string): Promise<GitBranchView[]>
   gitWorktrees(profileId: string, repoId: string): Promise<GitWorktreeView[]>
+  gitWorktreeRemove(profileId: string, repoId: string, path: string): Promise<GitOperationResult>
   gitBranch(profileId: string, repoId: string, action: 'create' | 'switch', name: string, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>
   gitCancel(profileId: string, repoId: string): Promise<void>
   onGitProgress(listener: (payload: { profileId: string; event: GitProgressEvent }) => void): () => void

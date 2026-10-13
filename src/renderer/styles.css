@@ -1147,6 +1147,7 @@ button:disabled {
 .git-worktree-branch { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-worktree-path, .git-worktree-flags { grid-column: 1 / -1; color: #929baa; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-worktree-flags { color: #aab1bd; }
+.git-worktree-remove { grid-column: 2; grid-row: 1; justify-self: end; padding: 2px 8px; font-size: 11px; }
 .git-branch-track, .git-branch-subject { color: #929baa; font-size: 11px; overflow-wrap: anywhere; }
 
 .git-review { margin: 8px 10px 0; padding: 10px; border: 1px solid #5a3d1a; border-radius: 6px; background: #2a2418; }

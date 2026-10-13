@@ -14,6 +14,9 @@ export interface GitWorktreeListProps {
   error: string | null
   /** Desktop sessions that run in a worktree, so each entry can say who uses it. */
   sessions: readonly WorktreeSession[]
+  /** A write is running: nothing can be removed. */
+  locked?: boolean
+  onRemove?(path: string): void
 }
 
 const samePath = (left: string, right: string): boolean => left.replace(/[\\/]+$/, '').toLowerCase() === right.replace(/[\\/]+$/, '').toLowerCase()
@@ -31,8 +34,21 @@ export function worktreeFlags(worktree: GitWorktreeView, sessions: readonly Work
   return flags
 }
 
-/** The repository's worktrees, read-only: where each is, what it has checked out, and which session uses it. */
-export function GitWorktreeList({ worktrees, error, sessions }: GitWorktreeListProps): JSX.Element {
+/** Why a worktree cannot be removed from the panel, or null when it can be offered (the service checks again, and asks). */
+export function removeBlocker(worktree: GitWorktreeView, sessions: readonly WorktreeSession[]): string | null {
+  if (worktree.main) return 'The main worktree is the repository itself.'
+  if (worktree.current) return 'This is the worktree shown in the panel. Choose its repository first.'
+  if (worktree.locked !== null) return 'It is locked.'
+  if (worktree.prunable !== null) return 'Git already considers it prunable; run git worktree prune from a terminal.'
+  if (worktree.merged === null) return 'There is no default branch to check its branch against.'
+  if (!worktree.merged) return 'Its branch is not merged into the default branch.'
+  const using = sessions.filter(session => samePath(session.path, worktree.path)).map(session => session.title)
+  if (using.length > 0) return `It is used by ${using.join(', ')}.`
+  return null
+}
+
+/** The repository's worktrees: where each is, what it has checked out, which session uses it, and Remove for a merged, unused one. */
+export function GitWorktreeList({ worktrees, error, sessions, locked = false, onRemove }: GitWorktreeListProps): JSX.Element {
   return (
     <section className="git-worktrees" aria-label="Worktrees">
       <h3 className="git-section-title">Worktrees</h3>
@@ -49,6 +65,12 @@ export function GitWorktreeList({ worktrees, error, sessions }: GitWorktreeListP
               {worktree.current && <span className="git-branch-badge">shown</span>}
               <span className="git-worktree-path" title={worktree.path}>{formatReviewText(worktree.path)}</span>
               {worktreeFlags(worktree, sessions).length > 0 && <span className="git-worktree-flags">{worktreeFlags(worktree, sessions).map(formatReviewText).join(' · ')}</span>}
+              {onRemove && !worktree.main && (() => {
+                const blocker = removeBlocker(worktree, sessions)
+                return <button type="button" className="git-worktree-remove" disabled={locked || blocker !== null} aria-label={`Remove worktree ${worktree.branch ?? worktree.path}`}
+                  title={blocker ?? 'Delete this worktree\'s folder, including files Git ignores there. Its branch is kept. You will be asked to confirm, and Git refuses if it has uncommitted changes.'}
+                  onClick={() => onRemove(worktree.path)}>Remove</button>
+              })()}
             </li>
           ))}
         </ul>

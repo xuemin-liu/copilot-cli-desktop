@@ -184,8 +184,15 @@ folder. Then:
   list; choose either. A worktree is listed for as long as a session reports it and the folder is still a
   worktree of a listed repository; a removed worktree drops out at the next refresh.
 - The **Branches** tab ends with the repository's worktrees (`git worktree list`): branch, folder, and
-  whether one is the main worktree, detached, locked or prunable, and which session uses it. This list is
-  read-only; nothing in the panel creates or removes worktrees.
+  whether one is the main worktree, detached, locked or prunable, and which session uses it.
+- **Remove** on a worktree whose branch is merged into the default branch (`origin/HEAD`, else a local `main`
+  or `master`). It is refused, with the reason, for the main worktree, the worktree shown in the panel, a
+  locked or prunable one, an unmerged one, one a running session uses, and whenever any running session in
+  the project has not yet reported where it runs (it might be this one). A native window confirms first and
+  says plainly that **files Git ignores in that folder (build output, `node_modules`, local `.env` files) are
+  deleted too**; the branch is kept. Git is never forced: a worktree with uncommitted changes is refused by
+  Git itself and nothing is deleted. Every check runs again before each attempt, because the window can stay
+  open. Nothing in the panel creates worktrees.
 
 A worktree shares the main repository's settings and hooks but is reviewed on its own: if the
 repository's config names programs, the worktree asks for the same review before it is read.

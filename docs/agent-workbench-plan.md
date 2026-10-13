@@ -1,8 +1,8 @@
 # Agent workbench plan
 
 Status: revision 3. Revision 1 was reworked after an independent review and revision 2 was approved with
-changes, both folded in (see [Review log](#review-log)). Phases 1 (#73), 2 (#74) and 3a-0 (#75) are merged. Phase 3a is implemented on
-`feat/agent-workbench-phase3a`.
+changes, both folded in (see [Review log](#review-log)). Phases 1 (#73), 2 (#74), 3a-0 (#75) and 3a (#76) are merged. Phase 3b is implemented on
+`feat/agent-workbench-phase3b`.
 
 Four ideas borrowed from [Orca](https://www.onorca.dev/), an open-source "agent development
 environment" built around one git worktree per task, many agents in parallel, and a sidebar
@@ -407,6 +407,12 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3b result: shipped as designed. `merged` is decided with `git merge-base --is-ancestor` against
+  `origin/HEAD`, else local `main`/`master`, and is null (so never removable) without a default branch. The
+  worktree shown in the panel is also refused, so the panel never removes the repository entry it is reading.
+  Liveness comes from a new `liveSessionFolders(profileId)` callback (every tab not completed or crashed,
+  with its folder or null); the `--force` flag is never passed, so git's own refusal of a dirty worktree is
+  the last guard, reported as `local-changes`.
 - Phase 3a review (independent): a forged `.git` file under the accepted repository's `worktrees` directory
   with a `commondir` naming another repository passed; an older cwd inspection could overwrite a newer one
   for the same tab; the chip never followed a branch switch or rename; and two new tests compared short and

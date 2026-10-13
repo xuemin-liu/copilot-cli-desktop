@@ -273,6 +273,8 @@ function gitServiceInstance(): GitService | null {
     sessionActivity: (profileId) => projectActivity(tabsState.tabs, profileId, Date.now()),
     // Folders the profile's sessions report running in; the service lists those that are worktrees of its repositories.
     sessionWorktrees: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.sessionCwd ? [tab.sessionCwd] : []),
+    // Every live session of the profile, with its folder when known: a worktree removal is refused while one runs there or has not said.
+    liveSessionFolders: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.status !== 'completed' && tab.status !== 'crashed' ? [tab.sessionCwd ?? null] : []),
     // Discarding saves a copy of each tracked file here first, and sends untracked files to the Recycle Bin (never deletes them outright).
     snapshotDirectory: join(app.getPath('userData'), 'git-discarded'),
     trash: (absolutePath) => shell.trashItem(absolutePath),

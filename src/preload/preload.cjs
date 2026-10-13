@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   gitDiscard: (profileId, repoId, entryIds, generation) => ipcRenderer.invoke('desktop:git-discard', profileId, repoId, entryIds, generation),
   gitBranches: (profileId, repoId) => ipcRenderer.invoke('desktop:git-branches', profileId, repoId),
   gitWorktrees: (profileId, repoId) => ipcRenderer.invoke('desktop:git-worktrees', profileId, repoId),
+  gitWorktreeRemove: (profileId, repoId, path) => ipcRenderer.invoke('desktop:git-worktree-remove', profileId, repoId, path),
   gitBranch: (profileId, repoId, action, name, expected) => ipcRenderer.invoke('desktop:git-branch', profileId, repoId, action, name, expected),
   gitCancel: (profileId, repoId) => ipcRenderer.invoke('desktop:git-cancel', profileId, repoId),
   onGitProgress: (listener) => {

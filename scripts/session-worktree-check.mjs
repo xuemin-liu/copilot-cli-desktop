@@ -62,13 +62,17 @@ export async function runWorktreeCheck() {
     await until(() => ui(`document.querySelector('.git-repo-selected .git-repo-name')?.innerText.includes(${JSON.stringify(withWorktree.worktree.name)})`), 'the session worktree is the selected repository', 30_000)
     await ui('[...document.querySelectorAll(".git-panel button, .git-tabs button, button")].find(element => element.innerText.trim() === "Branches")?.click()')
     await until(() => ui('/used by Isolated Electron test/.test(document.querySelector(".git-worktrees")?.innerText || "")'), 'worktree list names the session', 30_000)
+    // Phase 3b: the worktree a running session uses cannot be removed from the panel; the button says why.
+    const removeTitle = await ui(`[...document.querySelectorAll('.git-worktree-remove')].find(element => element.closest('li')?.innerText.includes(${JSON.stringify(withWorktree.worktree.name)}))?.getAttribute('title') ?? ''`)
+    assert.match(removeTitle, /used by Isolated Electron test|shown in the panel/, `remove button reason: ${removeTitle}`)
+    assert.equal(await ui(`!![...document.querySelectorAll('.git-worktree-remove')].find(element => element.closest('li')?.innerText.includes(${JSON.stringify(withWorktree.worktree.name)}))?.disabled`), true, 'Remove is disabled for a worktree in use')
     // The chip follows the worktree's HEAD: rename the branch inside the worktree and the tab picks it up.
     const { execFileSync } = await import('node:child_process')
     execFileSync('git', ['-C', cwd, 'branch', '-m', 'renamed-by-check'], { env: process.env, stdio: 'ignore' })
     await until(async () => (await state()).tabs.find(tab => tab.id === running.id)?.worktree?.branch === 'renamed-by-check', 'chip follows a branch rename', 30_000)
     await until(() => ui(`[...document.querySelectorAll('.session-worktree-chip')].some(element => element.textContent.includes('renamed-by-check'))`), 'renamed branch chip shown')
     await screenshot('01-worktree-session')
-    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sessionId: known.lastSessionId, cwd, cli: (await state()).resolution.version, checks: ['fresh worktree launch without --session-id', 'id discovered from the store', 'session.start cwd is a worktree', 'monitor follows the discovered log through a prompt round-trip', 'tab shows the worktree branch chip', 'Git panel lists and selects the session worktree', 'worktree list names the session', 'chip follows a branch rename'] }, null, 2))
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sessionId: known.lastSessionId, cwd, cli: (await state()).resolution.version, checks: ['fresh worktree launch without --session-id', 'id discovered from the store', 'session.start cwd is a worktree', 'monitor follows the discovered log through a prompt round-trip', 'tab shows the worktree branch chip', 'Git panel lists and selects the session worktree', 'worktree list names the session', 'Remove is refused for a worktree in use', 'chip follows a branch rename'] }, null, 2))
     console.log('[worktree] PASS: fresh worktree session launched, id discovered from the store: ' + known.lastSessionId)
   } catch (error) {
     await screenshot('failure')

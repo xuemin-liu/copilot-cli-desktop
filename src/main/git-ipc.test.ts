@@ -15,7 +15,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
     trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
-    getBranches: record('getBranches'), getWorktrees: record('getWorktrees'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'), amend: record('amend'), getHeadCommit: record('getHeadCommit'),
+    getBranches: record('getBranches'), getWorktrees: record('getWorktrees'), removeWorktree: record('removeWorktree'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'), amend: record('amend'), getHeadCommit: record('getHeadCommit'),
   }
   let service: GitService | null = options.service === false ? null : fake as unknown as GitService
   registerGitIpc({
@@ -40,7 +40,7 @@ test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
     'desktop:git-amend', 'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-head-commit', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
-    'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage', 'desktop:git-worktrees',
+    'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage', 'desktop:git-worktree-remove', 'desktop:git-worktrees',
   ])
 })
 
@@ -196,9 +196,10 @@ test('branch changes carry the branch name and the head the person saw, and noth
   const seen = { branch: 'main', headOid: OID }
   call('desktop:git-branches', sender(), PROFILE, 'repo-1')
   call('desktop:git-worktrees', sender(), PROFILE, 'repo-1')
+  call('desktop:git-worktree-remove', sender(), PROFILE, 'repo-1', 'D:\\one.worktrees\\done')
   call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'create', 'feature/x', seen)
   call('desktop:git-branch', sender(), PROFILE, 'repo-1', 'switch', 'other', { branch: null, headOid: 'b'.repeat(64) })
-  assert.deepEqual(calls, [['getBranches', 1, PROFILE, 'repo-1'], ['getWorktrees', 1, PROFILE, 'repo-1'], ['createBranch', 1, PROFILE, 'repo-1', 'feature/x', seen], ['switchBranch', 1, PROFILE, 'repo-1', 'other', { branch: null, headOid: 'b'.repeat(64) }]])
+  assert.deepEqual(calls, [['getBranches', 1, PROFILE, 'repo-1'], ['getWorktrees', 1, PROFILE, 'repo-1'], ['removeWorktree', 1, PROFILE, 'repo-1', 'D:\\one.worktrees\\done'], ['createBranch', 1, PROFILE, 'repo-1', 'feature/x', seen], ['switchBranch', 1, PROFILE, 'repo-1', 'other', { branch: null, headOid: 'b'.repeat(64) }]])
   calls.length = 0
   for (const bad of ['delete', 'force', '', 5, null, undefined]) assert.throws(() => call('desktop:git-branch', sender(), PROFILE, 'repo-1', bad, 'x', seen), /Invalid operation/, String(bad))
   for (const bad of ['', '-f', '--force', 'a\0b', 'a\nb', 'x'.repeat(256), 5, null, undefined]) {
@@ -209,6 +210,7 @@ test('branch changes carry the branch name and the head the person saw, and noth
   }
   assert.throws(() => call('desktop:git-branches', sender(), PROFILE, 'repo-0'), /Invalid repository/)
   assert.throws(() => call('desktop:git-worktrees', sender(), PROFILE, 'repo-0'), /Invalid repository/)
+  for (const bad of ['', 'x'.repeat(5_000), 'D:\\a\u0000b', 'D:\\a\nb', 7, null]) assert.throws(() => call('desktop:git-worktree-remove', sender(), PROFILE, 'repo-1', bad), /Invalid worktree/)
   assert.equal(calls.length, 0, 'nothing reached the service')
 })
 

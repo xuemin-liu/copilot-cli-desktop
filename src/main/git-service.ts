@@ -1,5 +1,5 @@
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
@@ -47,6 +47,10 @@ export interface GitServiceOptions {
   /** The folders the profile's Copilot sessions report as their cwd. Those that are linked worktrees of a listed
    * repository are shown as repositories of their own, for as long as a session reports them. */
   sessionWorktrees?(profileId: string): readonly string[]
+  /** One entry per session of the profile whose process is alive (anything but completed or crashed): the folder it
+   * reports, or null when it has not said. A worktree removal is refused while any live session runs in it, and while
+   * any live session's folder is unknown, because it might be that one. */
+  liveSessionFolders?(profileId: string): ReadonlyArray<string | null>
   /** Ask the person in a native window. Without it, anything that needs a confirmation is refused. */
   confirm?(profileId: string, request: GitConfirmRequest): Promise<boolean>
   /** A folder the app owns, where a copy of each tracked file is saved before its changes are discarded. Without it none can be. */
@@ -933,10 +937,106 @@ export class GitService {
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     await this.requireGate(project, repo, runtime)
-    const root = repo.discovered.root
-    const result = await runtime.runner.run({ cwd: root, args: worktreeListArgs(), signal: project.abort.signal, timeoutMs: 15_000 })
+    return this.readWorktrees(runtime, repo.discovered.root, project.abort.signal)
+  }
+
+  private async readWorktrees(runtime: GitRuntime, root: string, signal: AbortSignal): Promise<GitWorktreeView[]> {
+    const result = await runtime.runner.run({ cwd: root, args: worktreeListArgs(), signal, timeoutMs: 15_000 })
     if (!gitSucceeded(result)) throw new Error(describeFailure(result, 'git worktree list', root))
-    return parseWorktrees(result.stdout.toString('utf8')).map((entry, index) => ({ ...entry, main: index === 0, current: sameFolder(entry.path, root) }))
+    const entries = parseWorktrees(result.stdout.toString('utf8'))
+    const base = await this.defaultBranchRef(runtime, root, signal)
+    const views: GitWorktreeView[] = []
+    for (const [index, entry] of entries.entries()) {
+      let merged: boolean | null = null
+      if (index > 0 && base && entry.head) {
+        const check = await runtime.runner.run({ cwd: root, args: isAncestorArgs(entry.head, base), signal, timeoutMs: 15_000 })
+        merged = check.exitCode === 0 ? true : check.exitCode === 1 ? false : null
+      }
+      views.push({ ...entry, main: index === 0, current: sameFolder(entry.path, root), merged })
+    }
+    return views
+  }
+
+  /** The ref a worktree's branch must be merged into before the worktree can be removed: `origin/HEAD` when known, else a
+   * local `main` or `master`. Null when none exists; then nothing is called merged. */
+  private async defaultBranchRef(runtime: GitRuntime, root: string, signal: AbortSignal): Promise<string | null> {
+    const origin = await runtime.runner.run({ cwd: root, args: defaultBranchRefArgs(), signal, timeoutMs: 15_000 })
+    const pointed = gitSucceeded(origin) ? origin.stdout.toString('utf8').trim() : ''
+    if (/^refs\/remotes\/[^\s]+$/.test(pointed)) return pointed
+    for (const candidate of ['refs/heads/main', 'refs/heads/master']) {
+      if (gitSucceeded(await runtime.runner.run({ cwd: root, args: verifyRefArgs(candidate), signal, timeoutMs: 15_000 }))) return candidate
+    }
+    return null
+  }
+
+  /**
+   * Remove a linked worktree of the repository. Fail closed: refused unless the worktree is listed, is not the main worktree
+   * or the one shown, is neither locked nor prunable, its commit is merged into the default branch, and no live session of the
+   * project runs in it or in an unknown folder. Confirmed in a native window that says ignored files go too; never `--force`,
+   * so git refuses a worktree with changes. Every check runs again before each attempt, because the window can stay open.
+   */
+  removeWorktree(subscriberId: number, profileId: string, repoId: string, path: string): Promise<GitOperationResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || path.includes('\0')) throw new Error('Invalid worktree')
+    return this.enqueueWrite(repo, async signal => {
+      const runtime = await this.getRuntime()
+      if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+      await this.requireGate(project, repo, runtime, signal)
+      await this.freshenBeforeWrite(project, repo)
+      const root = repo.discovered.root
+      const refused = (reason: GitOperationResult['reason'], text: string): GitOperationResult =>
+        this.outcome({ ok: false, reason, message: text, status: repo.statusView })
+      const check = async (): Promise<GitWorktreeView> => {
+        const target = (await this.readWorktrees(runtime, root, signal)).find(entry => sameFolder(entry.path, path))
+        if (!target) throw new WriteRefused(refused('failed', 'That worktree is no longer listed. Refresh and try again.'))
+        if (target.main) throw new WriteRefused(refused('failed', 'The main worktree is the repository itself and cannot be removed here.'))
+        if (target.current) throw new WriteRefused(refused('failed', 'This worktree is the one shown in the panel. Choose its repository first, then remove it.'))
+        if (target.locked !== null) throw new WriteRefused(refused('failed', `This worktree is locked${target.locked === 'locked' ? '' : `: ${target.locked}`}. Unlock it from a terminal if you mean to remove it.`))
+        if (target.prunable !== null) throw new WriteRefused(refused('failed', `Git already considers this worktree prunable (${target.prunable}). Run \`git worktree prune\` from a terminal.`))
+        if (target.merged !== true) throw new WriteRefused(refused('failed', target.merged === null ? 'There is no default branch to check this worktree\'s branch against, so it is not removed.' : `The branch "${target.branch ?? target.head?.slice(0, 7) ?? '?'}" is not merged into the default branch, so removing the worktree could lose work.`))
+        const live = this.options.liveSessionFolders?.(profileId) ?? []
+        if (live.some(folder => folder === null)) throw new WriteRefused(refused('agent-working', 'A session in this project has not reported where it runs yet; it might be this worktree. Wait for it, or close it, then try again.'))
+        if (live.some(folder => folder !== null && sameFolder(folder, target.path))) throw new WriteRefused(refused('agent-working', 'A session is running in this worktree. Close it first.'))
+        return target
+      }
+      let target: GitWorktreeView
+      try { target = await check() } catch (error) { if (error instanceof WriteRefused) return error.result; throw error }
+      if (!this.options.confirm) return refused('failed', 'Removing a worktree needs a confirmation window, which is not available.')
+      const label = target.branch ?? target.path.split('\\').filter(Boolean).at(-1) ?? target.path
+      const confirmed = await this.options.confirm(profileId, {
+        title: `Remove worktree "${label}"?`,
+        detail: `${target.path} will be deleted, including files Git ignores there (build output, node_modules, local .env files).\n\n`
+          + `Its branch${target.branch ? ` "${target.branch}"` : ''} is merged and is kept. If the worktree has uncommitted changes, Git refuses and nothing is deleted.`,
+        confirmLabel: 'Remove worktree', danger: true,
+      })
+      if (!confirmed) return this.outcome({ ok: false, reason: 'cancelled', message: 'Not removed.', status: repo.statusView })
+      const emit = this.emitter(subscriberId, profileId, repoId, 'worktree-remove')
+      let result: GitRunResult
+      try {
+        result = await this.runWithLockWait(runtime, {
+          cwd: root, kind: 'write', disableHooks: true, args: worktreeRemoveArgs(target.path), signal, timeoutMs: 120_000, onOutput: emit,
+        }, async () => {
+          // The window can stay open for a long time: before every attempt the worktree must still pass every check.
+          await this.requireGate(project, repo, runtime, signal)
+          await check()
+        })
+      } catch (error) {
+        if (error instanceof WriteRefused) return error.result
+        throw error
+      }
+      const status = await this.statusAfterWrite(project, repo)
+      if (!gitSucceeded(result)) {
+        if (result.cancelled) return this.outcome({ ok: false, reason: 'cancelled', message: 'Cancelled.', output: tailOutput(result), status })
+        if (isIndexLockFailure(result)) return { ...this.failure(result, root, 'git worktree remove'), status }
+        const text = String(result.stderr)
+        if (/modified or untracked|contains .*changes|use --force/i.test(text)) return this.outcome({ ok: false, reason: 'local-changes', message: 'The worktree has uncommitted changes, so Git refused and nothing was deleted. Commit or discard them in that worktree first.', output: tailOutput(result), status })
+        return { ...this.failure(result, root, 'git worktree remove'), status }
+      }
+      // The entry for this worktree (if it was listed as a repository) drops out at the next refresh.
+      this.schedule(project, 0)
+      return this.outcome({ ok: true, message: `Removed worktree ${label}.`, output: tailOutput(result), status })
+    })
   }
 
   private async readBranches(runtime: GitRuntime, root: string, signal: AbortSignal): Promise<GitBranchView[]> {
