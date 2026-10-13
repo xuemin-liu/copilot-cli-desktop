@@ -166,6 +166,9 @@ export interface GitWorktreeView {
   main: boolean
   /** The repository the list was read from. */
   current: boolean
+  /** Its commit is reachable from the repository's default branch; null when there is no default branch to compare with, or
+   * for the main worktree. */
+  merged: boolean | null
 }
 
 /** What the person is asked before something that rewrites files; shown by the main process in a native window. */
@@ -190,7 +193,7 @@ export interface GitConfirmRequest {
 
 export interface GitProgressEvent {
   repoId: string
-  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'switch' | 'discard'
+  operation: 'stage' | 'unstage' | 'commit' | 'fetch' | 'pull' | 'push' | 'switch' | 'discard' | 'worktree-remove'
   stream: 'stdout' | 'stderr'
   text: string
 }

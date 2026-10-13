@@ -24,6 +24,12 @@ const REPO_ID = /^repo-[1-9]\d{0,8}$/
 const ENTRY_ID = /^e\d{1,9}-\d{1,6}$/
 const CONFIG_HASH = /^[0-9a-f]{64}$/
 
+/** A worktree folder as the service listed it: printable, bounded. The service only acts on one it lists itself. */
+function worktreePathArg(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4_096 || [...value].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) throw new Error('Invalid worktree')
+  return value
+}
+
 /** A remote's name: printable, not an option, short. The service also requires it to be one of the repository's remotes. */
 function expectedBranchArg(value: unknown): { branch: string; headOid: string } {
   const entry = value as { branch?: unknown; headOid?: unknown } | null
@@ -156,6 +162,8 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     service.getBranches(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
   handle('desktop:git-worktrees', (service, event, profileId: unknown, repoId: unknown) =>
     service.getWorktrees(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
+  handle('desktop:git-worktree-remove', (service, event, profileId: unknown, repoId: unknown, path: unknown) =>
+    service.removeWorktree(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), worktreePathArg(path)))
   handle('desktop:git-branch', (service, event, profileId: unknown, repoId: unknown, action: unknown, name: unknown, expected: unknown) => {
     if (action !== 'create' && action !== 'switch') throw new Error('Invalid operation')
     const args = [event.sender.id, profileIdArg(profileId), repoIdArg(repoId), branchNameArg(name), expectedHeadArg(expected)] as const

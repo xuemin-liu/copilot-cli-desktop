@@ -218,3 +218,23 @@ export function restoreArgs(): string[] {
 export function worktreeListArgs(): string[] {
   return ['worktree', 'list', '--porcelain']
 }
+
+/** Where `origin/HEAD` points, as a full ref, when the remote's default branch is known. */
+export function defaultBranchRefArgs(): string[] {
+  return ['symbolic-ref', '-q', 'refs/remotes/origin/HEAD']
+}
+
+/** Exit 0 when the ref exists. */
+export function verifyRefArgs(ref: string): string[] {
+  return ['rev-parse', '--verify', '-q', '--end-of-options', ref]
+}
+
+/** Exit 0 when `commit` is an ancestor of `ref` (already merged), 1 when it is not. */
+export function isAncestorArgs(commit: string, ref: string): string[] {
+  return ['merge-base', '--is-ancestor', '--', commit, ref]
+}
+
+/** Remove a linked worktree. Never `--force`: git refuses a worktree with changes, and nothing here overrides it. */
+export function worktreeRemoveArgs(path: string): string[] {
+  return ['worktree', 'remove', '--', path]
+}

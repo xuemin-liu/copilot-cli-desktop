@@ -189,7 +189,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
   const [messages, setMessages] = useState<Record<string, string>>({})
-  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | GitSyncKind; repoId: string } | null>(null)
+  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind; repoId: string } | null>(null)
   // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
   const operationRepo = useRef<string | null>(null)
   const [progress, setProgress] = useState('')
@@ -397,7 +397,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
-  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
+  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
     operationRepo.current = owner.id
     setOperation({ kind, repoId: owner.id })
     setProgress('')
@@ -414,7 +414,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
         if (kind === 'commit') { setMessages(current => ({ ...current, [owner.key]: '' })); setAmending(false) }
         if (kind === 'branch') setNewBranch('')
-      } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch')) {
+        if (kind === 'worktree') setBranchReload(count => count + 1)
+      } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch' || kind === 'worktree')) {
         setNotice(result.message)
       } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
         setHooks({ names: result.hooks, hash: result.hooksHash })
@@ -451,6 +452,12 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (!repo || repo.headOid === null) return
     const expected = { branch: repo.detached ? null : repo.branch, headOid: repo.headOid }
     runWrite('branch', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitBranch(profileId, repo.id, action, name, expected))
+  }
+
+  // The service checks that the worktree is merged, unused and unlocked, then asks in a native window; nothing here decides.
+  const removeWorktree = (path: string): void => {
+    if (!repo) return
+    runWrite('worktree', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitWorktreeRemove(profileId, repo.id, path))
   }
 
   // The native window in main lists the files and asks; nothing here decides for the person.
@@ -638,7 +645,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                     lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
                     newName={newBranch} onNewNameChange={setNewBranch}
                     onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
-                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions} />
+                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions}
+                    locked={operation !== null} onRemove={removeWorktree} />
                 </>
               )}
 

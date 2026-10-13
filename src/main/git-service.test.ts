@@ -13,7 +13,7 @@ import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, isIndexLockFailure } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
 import { GitTrustStore } from './git-trust.js'
-import type { GitProjectView, GitRepoStatusView } from './git-types.js'
+import type { GitConfirmRequest, GitProjectView, GitRepoStatusView } from './git-types.js'
 import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 
 const git = await findGitForTests()
@@ -2371,4 +2371,107 @@ test('a folder a session reports is listed as a worktree repository of the proje
   h.fixture.plain(h.project, 'worktree', 'remove', '--force', worktree)
   const removed = await h.service.rescan(SUBSCRIBER, PROFILE)
   assert.deepEqual(removed.repos.map(repo => repo.kind), ['project'])
+})
+
+test('a merged, unused worktree is removed after confirmation; everything else is refused with the reason and nothing is deleted', { skip }, async (t) => {
+  let live: Array<string | null> = []
+  let liveFn: () => Array<string | null> = () => live
+  let answer = true
+  const asked: GitConfirmRequest[] = []
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'a.txt'), 'one\n')
+    f.plain(project, 'add', '.')
+    f.plain(project, 'commit', '-q', '-m', 'init')
+  }, { liveSessionFolders: () => liveFn(), confirm: async (_profile, request) => { asked.push(request); return answer } })
+  const trees = join(realpathSync.native(h.fixture.root), 'project.worktrees')
+  mkdirSync(trees)
+  const add = (name: string): string => { const path = join(trees, name); h.fixture.plain(h.project, 'worktree', 'add', '-q', path, '-b', name); return path }
+  const done = add('desktop-done-aaaaaa')
+  const wip = add('desktop-wip-bbbbbb')
+  writeFileSync(join(wip, 'w.txt'), 'work\n')
+  h.fixture.plain(wip, 'add', '.')
+  h.fixture.plain(wip, 'commit', '-q', '-m', 'unmerged work')
+  const locked = add('desktop-locked-cccccc')
+  h.fixture.plain(h.project, 'worktree', 'lock', locked)
+  const dirty = add('desktop-dirty-dddddd')
+  writeFileSync(join(dirty, 'untracked.txt'), 'not committed\n')
+  const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
+  const main = repoAt(view, '.')!
+  const list = await h.service.getWorktrees(SUBSCRIBER, PROFILE, main.id)
+  // Git lists the main worktree first, then the linked ones by path.
+  assert.deepEqual(list.map(entry => [entry.branch, entry.merged, entry.locked !== null]), [['main', null, false], ['desktop-dirty-dddddd', true, false], ['desktop-done-aaaaaa', true, false], ['desktop-locked-cccccc', true, true], ['desktop-wip-bbbbbb', false, false]])
+  const remove = (path: string) => h.service.removeWorktree(SUBSCRIBER, PROFILE, main.id, path)
+  // Refusals, each leaving the folder in place and asking nothing.
+  for (const [path, pattern] of [[realpathSync.native(h.project), /main worktree/], [wip, /not merged/], [locked, /locked/], [join(trees, 'never-existed'), /no longer listed/]] as const) {
+    const result = await remove(path)
+    assert.equal(result.ok, false, path)
+    assert.match(result.message, pattern)
+  }
+  assert.ok(existsSync(wip) && existsSync(locked))
+  live = [null]
+  assert.match((await remove(done)).message, /has not reported where it runs/)
+  live = [done + '\\']
+  assert.match((await remove(done)).message, /running in this worktree/)
+  // The session reaches the worktree through a junction: a different spelling of the same physical folder.
+  const alias = join(h.fixture.root, 'alias-to-done')
+  execFileSync('cmd.exe', ['/c', 'mklink', '/J', alias, done], { stdio: 'ignore' })
+  live = [alias]
+  assert.match((await remove(done)).message, /running in this worktree/, 'a junction alias is the same folder')
+  assert.ok(existsSync(done))
+  // A session's folder that cannot be resolved blocks removal too: it might be this one.
+  live = [join(h.fixture.root, 'vanished-session-folder')]
+  assert.match((await remove(done)).message, /cannot be checked/)
+  assert.ok(existsSync(done))
+  mkdirSync(join(trees, 'elsewhere'))
+  live = [join(trees, 'elsewhere')]
+  assert.equal(asked.length, 0, 'nothing asked so far')
+  // Declined: nothing happens.
+  answer = false
+  const declined = await remove(done)
+  assert.equal(declined.reason, 'cancelled')
+  assert.ok(existsSync(done))
+  assert.equal(asked.length, 1)
+  assert.equal(asked[0]!.danger, true)
+  assert.match(asked[0]!.title, /Remove worktree "desktop-done-aaaaaa"\?/)
+  assert.match(asked[0]!.detail, /files Git ignores there/)
+  assert.match(asked[0]!.detail, /branch "desktop-done-aaaaaa" is merged and is kept/)
+  // Dirty: git itself refuses, and the panel never forces.
+  answer = true
+  const refusedDirty = await remove(dirty)
+  assert.equal(refusedDirty.ok, false)
+  assert.equal(refusedDirty.reason, 'local-changes', refusedDirty.message)
+  assert.ok(existsSync(join(dirty, 'untracked.txt')), 'nothing was deleted')
+  assert.ok(h.runs.every(run => !(run.args[0] === 'worktree' && run.args[1] === 'remove' && run.args.includes('--force'))), 'never forced')
+  // A session starts in the worktree after the window was answered: the attempt is refused and nothing is deleted.
+  const racer = new GitService({
+    getRuntime: async () => ({ runner: h.fixture.runner, executable: h.fixture.git }), trustStore: h.trustStore,
+    resolveProject: (profileId) => profileId === PROFILE ? h.project : null, onChanged: () => {}, debounceMs: 20, fallbackMs: 60_000,
+    liveSessionFolders: () => live, confirm: async () => { live = [done]; return true },
+  })
+  t.after(() => racer.dispose())
+  const opened = await racer.subscribe(SUBSCRIBER, PROFILE)
+  const raced = await racer.removeWorktree(SUBSCRIBER, PROFILE, repoAt(opened, '.')!.id, done)
+  assert.equal(raced.ok, false)
+  assert.equal(raced.reason, 'agent-working', raced.message)
+  assert.ok(existsSync(done), 'the folder survived the race')
+  // A session appears while the final attempt is resolving folders: the first snapshot of that attempt is clean, the
+  // re-read after the awaited path reads is not. Calls: pre-confirm check (snapshot, re-read), attempt check (snapshot,
+  // re-read); only the fourth read sees the new, not-yet-located session.
+  let reads = 0
+  liveFn = () => { reads += 1; return reads >= 4 ? [join(trees, 'elsewhere'), null] : [join(trees, 'elsewhere')] }
+  const racedLate = await remove(done)
+  assert.equal(racedLate.ok, false)
+  assert.equal(racedLate.reason, 'agent-working', racedLate.message)
+  assert.match(racedLate.message, /has not reported where it runs/)
+  assert.ok(existsSync(done), 'the folder survived the late arrival')
+  assert.ok(reads >= 4, `the set was re-read after the path reads (${reads} reads)`)
+  liveFn = () => live
+  // Finally: removed, folder gone, list shorter, branch kept.
+  live = []
+  const removed = await remove(done)
+  assert.equal(removed.ok, true, removed.message)
+  assert.ok(!existsSync(done))
+  assert.deepEqual((await h.service.getWorktrees(SUBSCRIBER, PROFILE, main.id)).map(entry => entry.branch), ['main', 'desktop-dirty-dddddd', 'desktop-locked-cccccc', 'desktop-wip-bbbbbb'])
+  assert.ok((await h.service.getBranches(SUBSCRIBER, PROFILE, main.id)).some(branch => branch.name === 'desktop-done-aaaaaa'), 'the branch is kept')
 })

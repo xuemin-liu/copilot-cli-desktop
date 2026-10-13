@@ -9,7 +9,7 @@ import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
 import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
 import { GitBranchList, upstreamLabel } from '../renderer/components/GitBranchList.js'
-import { GitWorktreeList, worktreeFlags } from '../renderer/components/GitWorktreeList.js'
+import { GitWorktreeList, removeBlocker, worktreeFlags } from '../renderer/components/GitWorktreeList.js'
 import type { GitBranchListProps } from '../renderer/components/GitBranchList.js'
 import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from '../renderer/components/ProjectDock.js'
 import type { GitBranchView, GitDiffView as GitDiff, GitRepoSummary, GitWorktreeView } from './git-types.js'
@@ -373,9 +373,9 @@ test('a worktree repository row says so, and the worktree list names branch, fol
   assert.match(row, /git-repo-name">desktop-fix-login-abc123<em> \(worktree\)<\/em>/)
   assert.match(row, /title="D:\\one\.worktrees\\desktop-fix-login-abc123"/)
   const worktrees: GitWorktreeView[] = [
-    { path: 'D:\\one', head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null, main: true, current: false },
-    { path: 'D:\\one.worktrees\\desktop-fix-login-abc123', head: 'b'.repeat(40), branch: 'desktop-fix-login-abc123', detached: false, bare: false, locked: 'reason <b>here</b>', prunable: null, main: false, current: true },
-    { path: 'D:\\one.worktrees\\old', head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location', main: false, current: false },
+    { path: 'D:\\one', head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null, main: true, current: false, merged: null },
+    { path: 'D:\\one.worktrees\\desktop-fix-login-abc123', head: 'b'.repeat(40), branch: 'desktop-fix-login-abc123', detached: false, bare: false, locked: 'reason <b>here</b>', prunable: null, main: false, current: true, merged: true },
+    { path: 'D:\\one.worktrees\\old', head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location', main: false, current: false, merged: true },
   ]
   const sessions = [{ path: 'd:\\one.worktrees\\desktop-fix-login-abc123\\', title: 'Fix login' }]
   assert.deepEqual(worktreeFlags(worktrees[0]!, sessions), ['main worktree'])
@@ -391,4 +391,26 @@ test('a worktree repository row says so, and the worktree list names branch, fol
   assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={[worktrees[0]!]} error={null} sessions={[]} />), /No linked worktrees/)
   assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={null} error={null} sessions={[]} />), /Loading worktrees/)
   assert.match(renderToStaticMarkup(<GitWorktreeList worktrees={null} error="git failed" sessions={[]} />), /git failed/)
+})
+
+test('Remove is offered only for a merged, unlocked, unused worktree that is not the main one or the one shown, with the reason otherwise', () => {
+  const base: GitWorktreeView = { path: 'D:\\one.worktrees\\done', head: 'b'.repeat(40), branch: 'desktop-done-abc123', detached: false, bare: false, locked: null, prunable: null, main: false, current: false, merged: true }
+  const sessions = [{ path: 'D:\\one.worktrees\\busy', title: 'Busy one' }]
+  assert.equal(removeBlocker(base, sessions), null)
+  assert.match(removeBlocker({ ...base, main: true }, sessions) ?? '', /main worktree/)
+  assert.match(removeBlocker({ ...base, current: true }, sessions) ?? '', /shown in the panel/)
+  assert.match(removeBlocker({ ...base, locked: 'locked' }, sessions) ?? '', /locked/)
+  assert.match(removeBlocker({ ...base, prunable: 'gone' }, sessions) ?? '', /prunable/)
+  assert.match(removeBlocker({ ...base, merged: null }, sessions) ?? '', /no default branch/)
+  assert.match(removeBlocker({ ...base, merged: false }, sessions) ?? '', /not merged/)
+  assert.match(removeBlocker({ ...base, path: 'd:\\one.worktrees\\busy\\' }, sessions) ?? '', /used by Busy one/)
+  const main: GitWorktreeView = { ...base, path: 'D:\\one', branch: 'main', main: true, merged: null }
+  const html = renderToStaticMarkup(<GitWorktreeList worktrees={[main, base, { ...base, path: 'D:\\one.worktrees\\wip', branch: 'wip', merged: false }]} error={null} sessions={sessions} onRemove={() => undefined} />)
+  assert.equal(html.match(/git-worktree-remove/g)?.length, 2, 'the main worktree has no button at all')
+  assert.match(html, /aria-label="Remove worktree desktop-done-abc123" title="Delete this worktree/)
+  assert.doesNotMatch(html, /aria-label="Remove worktree desktop-done-abc123" disabled/)
+  assert.match(html, /disabled="" aria-label="Remove worktree wip" title="Its branch is not merged/)
+  const busy = renderToStaticMarkup(<GitWorktreeList worktrees={[main, base]} error={null} sessions={sessions} onRemove={() => undefined} locked />)
+  assert.match(busy, /disabled="" aria-label="Remove worktree desktop-done-abc123"/, 'everything is locked while a write runs')
+  assert.doesNotMatch(renderToStaticMarkup(<GitWorktreeList worktrees={[main, base]} error={null} sessions={sessions} />), /git-worktree-remove/, 'without a handler nothing is offered')
 })
