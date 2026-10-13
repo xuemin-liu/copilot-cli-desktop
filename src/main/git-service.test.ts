@@ -2402,7 +2402,7 @@ test('a merged, unused worktree is removed after confirmation; everything else i
   assert.deepEqual(list.map(entry => [entry.branch, entry.merged, entry.locked !== null]), [['main', null, false], ['desktop-dirty-dddddd', true, false], ['desktop-done-aaaaaa', true, false], ['desktop-locked-cccccc', true, true], ['desktop-wip-bbbbbb', false, false]])
   const remove = (path: string) => h.service.removeWorktree(SUBSCRIBER, PROFILE, main.id, path)
   // Refusals, each leaving the folder in place and asking nothing.
-  for (const [path, pattern] of [[h.project, /main worktree/], [wip, /not merged/], [locked, /locked/], [join(trees, 'never-existed'), /no longer listed/]] as const) {
+  for (const [path, pattern] of [[realpathSync.native(h.project), /main worktree/], [wip, /not merged/], [locked, /locked/], [join(trees, 'never-existed'), /no longer listed/]] as const) {
     const result = await remove(path)
     assert.equal(result.ok, false, path)
     assert.match(result.message, pattern)
@@ -2412,6 +2412,17 @@ test('a merged, unused worktree is removed after confirmation; everything else i
   assert.match((await remove(done)).message, /has not reported where it runs/)
   live = [done + '\\']
   assert.match((await remove(done)).message, /running in this worktree/)
+  // The session reaches the worktree through a junction: a different spelling of the same physical folder.
+  const alias = join(h.fixture.root, 'alias-to-done')
+  execFileSync('cmd.exe', ['/c', 'mklink', '/J', alias, done], { stdio: 'ignore' })
+  live = [alias]
+  assert.match((await remove(done)).message, /running in this worktree/, 'a junction alias is the same folder')
+  assert.ok(existsSync(done))
+  // A session's folder that cannot be resolved blocks removal too: it might be this one.
+  live = [join(h.fixture.root, 'vanished-session-folder')]
+  assert.match((await remove(done)).message, /cannot be checked/)
+  assert.ok(existsSync(done))
+  mkdirSync(join(trees, 'elsewhere'))
   live = [join(trees, 'elsewhere')]
   assert.equal(asked.length, 0, 'nothing asked so far')
   // Declined: nothing happens.

@@ -407,6 +407,11 @@ Each is a small, independent PR, not part of the phases above:
   CLI on every run. The CLI offers `view`, `ask_user`, `grep` and `glob` to a BYOK model in
   the read-only preset; tool execution itself is too brief to observe through the one-second
   broadcast debounce, which is by design.
+- Phase 3b review (independent): a live session reaching the worktree through a junction slipped past the
+  textual folder comparison, and liveness was filtered by the asking profile although another profile's
+  session can run in the same folder. Fixed by comparing physical folders (`realpath`) and refusing when a
+  session's folder cannot be resolved, and by counting every live session of the app. The main-worktree
+  refusal test now uses the canonical repository path.
 - Phase 3b result: shipped as designed. `merged` is decided with `git merge-base --is-ancestor` against
   `origin/HEAD`, else local `main`/`master`, and is null (so never removable) without a default branch. The
   worktree shown in the panel is also refused, so the panel never removes the repository entry it is reading.

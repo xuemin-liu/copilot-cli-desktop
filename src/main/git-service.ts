@@ -47,9 +47,10 @@ export interface GitServiceOptions {
   /** The folders the profile's Copilot sessions report as their cwd. Those that are linked worktrees of a listed
    * repository are shown as repositories of their own, for as long as a session reports them. */
   sessionWorktrees?(profileId: string): readonly string[]
-  /** One entry per session of the profile whose process is alive (anything but completed or crashed): the folder it
-   * reports, or null when it has not said. A worktree removal is refused while any live session runs in it, and while
-   * any live session's folder is unknown, because it might be that one. */
+  /** One entry per live session of the whole app (anything but completed or crashed), whichever profile it belongs to:
+   * the folder it reports, or null when it has not said. A worktree removal is refused while any live session runs in
+   * it, and while any live session's folder is unknown or cannot be resolved, because it might be that one. The
+   * profile id is the one asking; a session in another profile can run in the same folder, so it is not a filter. */
   liveSessionFolders?(profileId: string): ReadonlyArray<string | null>
   /** Ask the person in a native window. Without it, anything that needs a confirmation is refused. */
   confirm?(profileId: string, request: GitConfirmRequest): Promise<boolean>
@@ -995,9 +996,15 @@ export class GitService {
         if (target.locked !== null) throw new WriteRefused(refused('failed', `This worktree is locked${target.locked === 'locked' ? '' : `: ${target.locked}`}. Unlock it from a terminal if you mean to remove it.`))
         if (target.prunable !== null) throw new WriteRefused(refused('failed', `Git already considers this worktree prunable (${target.prunable}). Run \`git worktree prune\` from a terminal.`))
         if (target.merged !== true) throw new WriteRefused(refused('failed', target.merged === null ? 'There is no default branch to check this worktree\'s branch against, so it is not removed.' : `The branch "${target.branch ?? target.head?.slice(0, 7) ?? '?'}" is not merged into the default branch, so removing the worktree could lose work.`))
-        const live = this.options.liveSessionFolders?.(profileId) ?? []
-        if (live.some(folder => folder === null)) throw new WriteRefused(refused('agent-working', 'A session in this project has not reported where it runs yet; it might be this worktree. Wait for it, or close it, then try again.'))
-        if (live.some(folder => folder !== null && sameFolder(folder, target.path))) throw new WriteRefused(refused('agent-working', 'A session is running in this worktree. Close it first.'))
+        // Physical folders, not spellings: a session can reach the worktree through a junction, a link or a short name.
+        let targetReal: string
+        try { targetReal = await realPathNative(target.path) } catch { throw new WriteRefused(refused('failed', 'The worktree folder could not be resolved, so it is not removed.')) }
+        for (const folder of this.options.liveSessionFolders?.(profileId) ?? []) {
+          if (folder === null) throw new WriteRefused(refused('agent-working', 'A session has not reported where it runs yet; it might be this worktree. Wait for it, or close it, then try again.'))
+          let real: string
+          try { real = await realPathNative(folder) } catch { throw new WriteRefused(refused('agent-working', 'A session\'s folder cannot be checked, so the worktree is not removed. Close that session, then try again.')) }
+          if (sameFolder(real, targetReal)) throw new WriteRefused(refused('agent-working', 'A session is running in this worktree. Close it first.'))
+        }
         return target
       }
       let target: GitWorktreeView
