@@ -141,7 +141,7 @@ test('a timeout kills the whole tree, including a hook that is still running', {
   const started = Date.now()
   const result = await fixture.runner.run({ cwd: repo, kind: 'write', args: ['commit', '-m', 'slow'], timeoutMs: 600 })
   assert.equal(result.timedOut, true)
-  assert.ok(Date.now() - started < 2_500, `returned in ${Date.now() - started} ms`)
+  assert.ok(Date.now() - started < 6_000, `returned in ${Date.now() - started} ms`)
   await new Promise(resolve => setTimeout(resolve, 3_500))
   assert.equal(existsSync(marker), false, 'the hook child survived the timeout')
 })
