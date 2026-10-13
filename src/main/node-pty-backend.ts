@@ -4,7 +4,7 @@ import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 /**
  * Describe the renderer that actually consumes this PTY's output instead of
  * inheriting terminal flags from whichever shell happened to launch Electron.
- * In particular, Codex and some CI launchers export TERM=dumb; Copilot treats
+ * In particular, Codex and some automation launchers export TERM=dumb; Copilot treats
  * that as a hard "no OSC" signal and disables its OSC 52 clipboard fallback.
  */
 export function embeddedTerminalEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

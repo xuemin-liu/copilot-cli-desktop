@@ -2,7 +2,7 @@
 // project (which pins and installs its runtime as an npm dependency, so its
 // smoke test always has a real binary to launch), the `copilot` CLI is an
 // external tool this project does not/cannot vendor. When it is not
-// installed, this script logs that and exits 0 rather than failing CI;
+// installed, this script logs that and exits 0 rather than failing;
 // when it IS installed (e.g. on a developer machine with `copilot` on PATH),
 // it resolves the binary and spawns a real, very short-lived pty session to
 // confirm the resolution + pty-spawn path actually works end to end.

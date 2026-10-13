@@ -234,6 +234,5 @@ error and is never opened. This is checked again before every command, not only 
   `test-results/git-panel/`.
 - `pnpm git-panel-app:check` starts the whole app with a real Copilot CLI session and checks the header button,
   `Ctrl+Shift+G` with the terminal focused, persistence across a reload, the narrow-window takeover, and that the terminal is
-  never remounted. It starts a real session, so like the other real-session checks it is run by hand, not in CI.
+  never remounted. It starts a real session, so like the other real-session checks it is run by hand.
 
-The first two run in CI.

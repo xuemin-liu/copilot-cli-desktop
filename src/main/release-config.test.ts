@@ -47,10 +47,4 @@ test('release workflow refuses to publish an unsigned Windows installer', async 
   assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d/)
 })
 
-test('latest Copilot CLI compatibility is exercised on a schedule', async () => {
-  const workflow = await readFile('.github/workflows/cli-compatibility.yml', 'utf8')
-  assert.match(workflow, /schedule:/)
-  assert.match(workflow, /npm install --global @github\/copilot@latest/)
-  assert.match(workflow, /pnpm smoke/)
-  assert.match(workflow, /pnpm cli:smoke/)
-})
+

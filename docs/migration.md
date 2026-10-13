@@ -169,4 +169,4 @@ file aside and retry; do not terminate an unrelated process based on its PID alo
 Close external CLI sessions before importing.
 Export checks each file while reading it; import destination fingerprints detect
 changes after preview. Inventory, preview, and export do not block terminal input.
-Both migration smoke and Settings integration checks run in Windows CI.
+Both migration smoke and Settings integration checks run on Windows as part of the release checks.

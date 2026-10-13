@@ -573,8 +573,7 @@ Modified:
 - `src/renderer/App.tsx`, `SessionWorkspace.tsx`, `BrowserWorkspace.tsx` (use `Splitter`
   and `ObscureContext`), `styles.css` (existing palette: `#10151e` panel, `#4f88ff`
   accent, `#ffb84d` changed, `#20c9a6` added).
-- `package.json` (`git:check` script), `.github/workflows/ci.yml` (run it and upload
-  `test-results/git-panel/`), `README.md`.
+- `package.json` (`git:check` script), `README.md`.
 - Not `docs/FEATURE_PARITY.md`: that file compares against another product, and a Git
   panel is not a parity item.
 
@@ -623,10 +622,6 @@ the pinned minimum version also gets one run.
   final browser bounds, open the Commit menu with the browser panel open and assert the view
   is hidden, reload the renderer and assert no git process remains. Evidence goes to
   `test-results/git-panel/`.
-- CI: add the script after the earlier build/test steps (like `sidebar:check`, which has no
-  build step of its own), and add `test-results/git-panel/` to the explicit upload list in
-  `ci.yml`. Not every Electron check runs in CI today (`activity:check`, `popout:check`,
-  `paste:check` do not), so do not assume pop-out is covered.
 - Performance fixture of about 50,000 files to measure `status` and the adaptive refresh.
 
 ## Spikes
@@ -677,12 +672,12 @@ Open from the spikes: SSH batch-mode behavior, git versions other than 2.55, and
 - A malicious-repo fixture cannot run a program by being opened and read.
 - Diff and **Add to prompt** work for modified, added, deleted, renamed, untracked and
   binary files, with truncation and masking.
-- Typecheck, unit tests and `git:check` pass in CI on Windows.
+- Typecheck, unit tests and `git:check` pass on Windows.
 - `docs/git-panel.md` and the README feature list are updated.
 
 ## Phase 1a result
 
-The backend runs end to end through the real preload bridge (`pnpm git:check`, added to CI): discovery of three
+The backend runs end to end through the real preload bridge (`pnpm git:check`): discovery of three
 repositories, a repository that must be reviewed before it is read, status, diff (tracked, staged, untracked, binary,
 directory), log, a pushed change event, argument validation, main-window-only access, and release of the
 subscription when the renderer reloads. 20 service tests, 10 discovery, 8 trust, 7 untracked-file and 7 IPC tests run
@@ -738,7 +733,7 @@ Accepted and applied in this revision:
 - Re-phased into a spike plus four phases; split view, syntax highlighting and
   `FEATURE_PARITY.md` removed.
 - Test plan: renderer tests under `src/main`, malicious-repo and planted-binary fixtures,
-  fixture isolation, CI artifact list, performance fixture.
+  fixture isolation, performance fixture.
 
 Not verified and carried into [Spikes](#spikes): shortcut delivery, ceiling directories on
 Windows, Git Credential Manager behavior, `trashItem` on junctions, large-repo timing.
