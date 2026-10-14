@@ -739,24 +739,29 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-cancel-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
-  const lines: string[] = []
+  // The hook sleeps far longer than a cancel can take under full-suite load, so "returned before the hook finished"
+  // and "the hook never wrote its marker" stay meaningful without racing process start-up.
+  const hookSleepMs = 15_000
+  let hookStarted = 0
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
-    hookFile(project, 'pre-commit', `echo started\nsleep 4\necho finished > "${shellPath(marker)}"`)
-  }, { onProgress: (_subscriber, _profile, event) => { lines.push(event.text) } })
+    hookFile(project, 'pre-commit', `echo started\nsleep ${hookSleepMs / 1_000}\necho finished > "${shellPath(marker)}"`)
+  }, { onProgress: (_subscriber, _profile, event) => { if (!hookStarted && event.text.includes('started')) hookStarted = Date.now() } })
   const { repoId, status } = await open(h)
   const current = await status()
   const hooks = await h.service.commit(SUBSCRIBER, PROFILE, repoId, 'slow', current.generation, null)
   const pending = h.service.commit(SUBSCRIBER, PROFILE, repoId, 'slow', current.generation, hooks.hooksHash)
-  await waitFor(() => lines.some(line => line.includes('started')))
-  const began = Date.now()
+  // Starting git and then the hook's shell can take several seconds under load; nothing is timed until the hook runs.
+  await waitFor(() => hookStarted > 0, 30_000)
   h.service.cancel(SUBSCRIBER, PROFILE, repoId)
   const result = await pending
   assert.deepEqual([result.ok, result.reason], [false, 'cancelled'])
   assert.match(result.message, /index\.lock/)
-  assert.ok(Date.now() - began < 3_500, 'it returned well before the hook would have finished')
-  await new Promise(resolve => setTimeout(resolve, 4_500))
+  const returnedAfter = Date.now() - hookStarted
+  assert.ok(returnedAfter < 10_000, `it returned well before the hook would have finished (${returnedAfter} ms after the hook started)`)
+  // Wait past the moment the hook would have written its marker had it been left running.
+  await new Promise(resolve => setTimeout(resolve, hookStarted + hookSleepMs + 2_500 - Date.now()))
   assert.equal(existsSync(marker), false, 'the hook was stopped, not left running')
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
