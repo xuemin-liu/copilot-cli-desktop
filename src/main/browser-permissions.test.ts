@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { SitePermissions, sitePermissionTarget } from './browser-permissions.js'
 
@@ -94,4 +97,41 @@ test('a burst of simultaneous unknown sites cannot get past the cap', async () =
   assert.equal(results.slice(50).some(Boolean), false)
   assert.equal(calls, 50)
   assert.equal(permissions.list().length, 50)
+})
+
+test('answers are kept across launches, asked with the requesting browser prompt, and only sane entries are restored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'site-permissions-'))
+  try {
+    const file = join(root, 'browser-permissions.json')
+    const shared = new SitePermissions(undefined, { file })
+    const asked: string[] = []
+    const fromSession = (name: string, answer: boolean) => async () => { asked.push(name); return answer }
+    assert.equal(await shared.request('http://a.test', 'notifications', never, fromSession('first', true)), true)
+    // Another session's browser reuses the answer without asking again.
+    assert.equal(await shared.request('http://a.test', 'notifications', never, fromSession('second', false)), true)
+    assert.equal(await shared.request('https://b.test', 'clipboard-read', never, fromSession('second', false)), false)
+    assert.deepEqual(asked, ['first', 'second'])
+    await shared.flush()
+    const restored = new SitePermissions(undefined, { file })
+    assert.equal(restored.allowed('http://a.test', 'notifications'), true)
+    assert.deepEqual(restored.list().map(entry => [entry.origin, entry.permission, entry.decision]),
+      [['http://a.test', 'notifications', 'allow'], ['https://b.test', 'clipboard-read', 'block']])
+    restored.forget(restored.list()[0]!.id)
+    await restored.flush()
+    assert.deepEqual(new SitePermissions(undefined, { file }).list().map(entry => entry.origin), ['https://b.test'])
+
+    await writeFile(file, JSON.stringify([
+      { origin: 'http://ok.test', permission: 'notifications', decision: 'allow' },
+      { origin: 'http://ok.test/path', permission: 'notifications', decision: 'allow' },
+      { origin: 'file://', permission: 'notifications', decision: 'allow' },
+      { origin: 'http://cam.test', permission: 'media', decision: 'allow' },
+      { origin: 'http://odd.test', permission: 'notifications', decision: 'maybe' },
+      'junk',
+    ]))
+    assert.deepEqual(new SitePermissions(undefined, { file }).list().map(entry => entry.origin), ['http://ok.test'])
+    const errors: string[] = []
+    await writeFile(file, '{not json')
+    assert.deepEqual(new SitePermissions(undefined, { file, reportError: message => errors.push(message) }).list(), [])
+    assert.equal(errors.length, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

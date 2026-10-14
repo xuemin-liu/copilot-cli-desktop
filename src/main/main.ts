@@ -32,6 +32,7 @@ import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
+  isBrowserProfileMode,
   isCloseBehavior,
   readDesktopConfig,
   recordDesktopVersion,
@@ -131,8 +132,12 @@ import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 import { BrowserDebug } from './browser-debug.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
-import { browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
+import { SHARED_BROWSER_PROFILE_ID, browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
 import { browserProfileHasPartition, clearBrowserStorage, pruneBrowserProfiles, pruneBrowserLaunches, removeBrowserProfileSettings, removeBrowserLaunch } from './browser-cleanup.js'
+import { shareDevtoolsSettings } from './browser-devtools-settings.js'
+import { BrowserHistory } from './browser-history.js'
+import { SitePermissions } from './browser-permissions.js'
+import { BrowserZoom } from './browser-zoom.js'
 import type { BrowserBounds } from './browser-debug-types.js'
 import { MigrationService } from './migration-service.js'
 import { recoverMigrationReport } from './migration-import.js'
@@ -189,6 +194,16 @@ const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as con
 
 let mainWindow: BrowserWindow | null = null
 const sessionBrowsers = new Map<string, BrowserDebug>()
+const logBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
+// Shared by every session's browser and kept across launches, like one Chrome profile.
+let browserHistory: BrowserHistory | null = null
+const sharedBrowserHistory = (): BrowserHistory => browserHistory ??= new BrowserHistory(
+  join(app.getPath('userData'), 'browser-history.json'), logBrowserError)
+let sitePermissions: SitePermissions | null = null
+const sharedSitePermissions = (): SitePermissions => sitePermissions ??= new SitePermissions(undefined,
+  { file: join(app.getPath('userData'), 'browser-permissions.json'), reportError: logBrowserError })
+let browserZoom: BrowserZoom | null = null
+const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
 const closingBrowserTabs = new Set<string>()
 const sessionWindows = new Map<string, BrowserWindow>()
 const sessionOutputSequences = new Map<string, number>()
@@ -1453,7 +1468,8 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       const profileId = tabsState.tabs.find(tab => tab.id === tabId)?.browserProfileId
       if (profileId) {
         const paths = browserProfilePaths(app.getPath('userData'), profileId)
-        if (browser || await browserProfileHasPartition(app.getPath('userData'), profileId)) {
+        // A browser on the shared profile leaves its cookies and storage to the other sessions.
+        if (browser?.partition === paths.partition || await browserProfileHasPartition(app.getPath('userData'), profileId)) {
           await clearBrowserStorage(electronSession.fromPartition(paths.partition), reportBrowserError)
         }
         await removeBrowserProfileSettings(app.getPath('userData'), profileId)
@@ -2203,6 +2219,7 @@ function settingsPreferences(): DesktopPreferences {
     notifications: desktopConfig.notifications,
     automaticUpdateChecks: desktopConfig.automaticUpdateChecks,
     globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
+    browserProfile: desktopConfig.browserProfile,
   }
 }
 
@@ -2313,10 +2330,17 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     if (closingBrowserTabs.has(tabId)) throw new Error('Browser session is closing')
     const paths = browserSessionPaths(browserSessionRoot(), tabId)
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
+    // The tab's own settings keep its last page; the browser profile setting decides whose cookies and storage it uses.
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
-    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition: profile.partition, tabId,
-      onAppShortcut: () => toggleGitPanel(),
-      reportError: message => { void writeAppLog(message).catch(() => {}) } })
+    const partitionProfileId = desktopConfig.browserProfile === 'shared' ? SHARED_BROWSER_PROFILE_ID : tab.browserProfileId!
+    const partition = browserProfilePaths(app.getPath('userData'), partitionProfileId).partition
+    // Before BrowserDebug creates the partition's session, which reads Preferences only once; an open session keeps its own.
+    const partitionOpen = [...sessionBrowsers.values()].some(other => other.partition === partition)
+    try { shareDevtoolsSettings(app.getPath('userData'), partitionOpen ? undefined : partitionProfileId) }
+    catch (error) { logBrowserError(`Could not share DevTools settings: ${String(error)}`) }
+    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition, tabId,
+      history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(),
+      onAppShortcut: () => toggleGitPanel(), reportError: logBrowserError })
     sessionBrowsers.set(tabId, browser)
   }
   browser.setOwner(owner)
@@ -2593,6 +2617,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'notifications',
     'automaticUpdateChecks',
     'globalShortcutEnabled',
+    'browserProfile',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -2604,6 +2629,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('notifications' in values && typeof values.notifications !== 'boolean')
     || ('automaticUpdateChecks' in values && typeof values.automaticUpdateChecks !== 'boolean')
     || ('globalShortcutEnabled' in values && typeof values.globalShortcutEnabled !== 'boolean')
+    || ('browserProfile' in values && !isBrowserProfileMode(values.browserProfile))
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -2621,6 +2647,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   if (typeof values.globalShortcutEnabled === 'boolean') {
     desktopConfig.globalShortcutEnabled = values.globalShortcutEnabled
   }
+  // Browsers already open keep their profile until their session closes or the app restarts.
+  if (isBrowserProfileMode(values.browserProfile)) desktopConfig.browserProfile = values.browserProfile
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -2632,6 +2660,22 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   broadcastSettingsPreferences()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:clear-shared-browser-data', async (event) => {
+  assertTrustedSettingsSender(event)
+  const userData = app.getPath('userData')
+  const { partition } = browserProfilePaths(userData, SHARED_BROWSER_PROFILE_ID)
+  // Signs every session out of the shared profile; open pages stay where they are.
+  if (![...sessionBrowsers.values()].some(browser => browser.partition === partition) && !await browserProfileHasPartition(userData, SHARED_BROWSER_PROFILE_ID)) return
+  let failed = false
+  await clearBrowserStorage(electronSession.fromPartition(partition), message => { failed = true; logBrowserError(message) })
+  if (failed) throw new Error('Some shared browser data could not be cleared. See the app log.')
+})
+ipcMain.handle('desktop-settings:clear-browser-history', async (event) => {
+  assertTrustedSettingsSender(event)
+  const history = sharedBrowserHistory()
+  history.clear()
+  await history.flush()
 })
 ipcMain.handle('desktop-settings:set-launch-at-login', (event, enabled: unknown) => {
   assertTrustedSettingsSender(event)
@@ -3021,6 +3065,9 @@ if (!app.requestSingleInstanceLock()) {
       )
     }
     if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
+    // Keep DevTools settings from sessions closed last launch before their partitions are pruned.
+    try { shareDevtoolsSettings(app.getPath('userData')) }
+    catch (error) { void writeAppLog(`Could not share DevTools settings: ${String(error)}`).catch(() => {}) }
     // Browser profiles referenced only by an unreadable or recovered config must survive until the hold is released.
     if (!recoveryHold && !configWritesBlocked) {
       await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))

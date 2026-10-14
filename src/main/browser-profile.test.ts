@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
-import { browserProfilePaths, normalizeBrowserProfileId, selectBrowserProfileId } from './browser-profile.js'
+import { SHARED_BROWSER_PROFILE_ID, browserProfilePaths, normalizeBrowserProfileId, selectBrowserProfileId } from './browser-profile.js'
 
 const FIRST = '11111111-1111-4111-8111-111111111111'
 test('restored browser profiles remain stable and never share an active terminal profile', () => {
@@ -20,4 +20,11 @@ test('restored browser profiles remain stable and never share an active terminal
     assert.equal(normalizeBrowserProfileId(invalid), undefined)
     assert.throws(() => browserProfilePaths('user-data', invalid as string), /Invalid browser profile/)
   }
+})
+
+test('the shared browser profile is never kept or handed out as a terminal tab profile', () => {
+  assert.equal(normalizeBrowserProfileId(SHARED_BROWSER_PROFILE_ID), SHARED_BROWSER_PROFILE_ID)
+  const assigned = selectBrowserProfileId(SHARED_BROWSER_PROFILE_ID, [])
+  assert.notEqual(assigned, SHARED_BROWSER_PROFILE_ID)
+  assert.equal(normalizeBrowserProfileId(assigned), assigned)
 })

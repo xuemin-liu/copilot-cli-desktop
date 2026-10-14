@@ -168,6 +168,18 @@ test('readDesktopConfig migrates legacy close-to-tray preferences safely', async
   })
 })
 
+test('the session browser profile defaults to separate and accepts only known modes', async () => {
+  await withTempFile(async (filename) => {
+    assert.equal((await readDesktopConfig(filename)).browserProfile, 'separate')
+    for (const browserProfile of ['separate', 'shared'] as const) {
+      await writeFile(filename, JSON.stringify({ browserProfile }), 'utf8')
+      assert.equal((await readDesktopConfig(filename)).browserProfile, browserProfile)
+    }
+    await writeFile(filename, JSON.stringify({ browserProfile: 'chrome' }), 'utf8')
+    assert.equal((await readDesktopConfig(filename)).browserProfile, 'separate')
+  })
+})
+
 test('readDesktopConfig accepts persisted close behavior values', async () => {
   await withTempFile(async (filename) => {
     for (const closeBehavior of ['ask', 'tray', 'quit'] as const) {

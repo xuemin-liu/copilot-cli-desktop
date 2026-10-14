@@ -148,6 +148,8 @@ export interface CopilotDesktopSettingsBridge {
   get(): Promise<DesktopSettingsSnapshot>
   updatePreferences(preferences: Partial<DesktopPreferences>): Promise<DesktopSettingsSnapshot>
   setLaunchAtLogin(enabled: boolean): Promise<DesktopSettingsSnapshot>
+  clearSharedBrowserData(): Promise<void>
+  clearBrowserHistory(): Promise<void>
   updateWorkspaceProfile(
     profileId: string,
     name: string,

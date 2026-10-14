@@ -6,9 +6,12 @@ export function normalizeBrowserProfileId(value: unknown): string | undefined {
     ? value.toLowerCase() : undefined
 }
 
+/** The browser profile every session's browser uses when the shared browser profile is selected. It is never a tab's own. */
+export const SHARED_BROWSER_PROFILE_ID = '00000000-0000-4000-8000-000000000000'
+
 /** Saved terminal tabs retain their browser profile; new or duplicated tabs get their own. */
 export function selectBrowserProfileId(saved: unknown, used: Iterable<string | undefined>): string {
-  const reserved = new Set(used)
+  const reserved = new Set([...used, SHARED_BROWSER_PROFILE_ID])
   const id = normalizeBrowserProfileId(saved)
   if (id && !reserved.has(id)) return id
   let fresh: string

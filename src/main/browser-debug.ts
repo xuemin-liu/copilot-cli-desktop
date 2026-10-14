@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog } from 'electron'
-import type { BrowserWindowConstructorOptions, Session, WebContents, WebRequest } from 'electron'
+import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -13,13 +13,14 @@ import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './
 import { BrowserReader } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
-import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget } from './browser-permissions.js'
-import { nextZoomFactor } from './browser-zoom.js'
+import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePermission } from './browser-permissions.js'
+import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
+import { BrowserHistory } from './browser-history.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
-const MAX_HISTORY = 200
+const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
 interface BrowserPage {
   contents: WebContents
@@ -50,11 +51,16 @@ export class BrowserDebug {
   private settingsWrite = Promise.resolve()
   private readonly reader: BrowserReader
   private readonly sitePermissions: SitePermissions
+  private readonly askPermission: AskSitePermission
+  private readonly zoom: BrowserZoom
+  private readonly unsubscribeZoom: () => void
+  /** The Chromium partition this browser's pages use; with the shared browser profile, other browsers use it too. */
+  readonly partition: string
   private readonly tabId: string
   private readonly notifyShortcut: (name: 'find' | 'find-close') => void
   private readonly appShortcut: ((name: 'git-toggle') => void) | undefined
   private readonly showMenu: (menu: Menu) => void
-  private readonly history: string[] = []
+  private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
   private state: BrowserDebugState = {
@@ -65,15 +71,19 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle') => void; showMenu?: (menu: Menu) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle') => void; showMenu?: (menu: Menu) => void } = {}) {
     this.appShortcut = options.onAppShortcut
+    this.history = options.history ?? new BrowserHistory()
+    this.zoom = options.zoom ?? new BrowserZoom()
+    this.partition = options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`
     this.showMenu = options.showMenu ?? (menu => { if (!this.owner.isDestroyed()) menu.popup({ window: this.owner }) })
     this.tabId = options.tabId ?? ''
     this.notifyShortcut = options.notify ?? (name => { if (!this.owner.isDestroyed() && this.tabId) this.owner.webContents.send('desktop:browser-shortcut', this.tabId, name) })
     this.endpointPath = options.endpointPath ?? browserControlPath()
     this.reportError = options.reportError ?? (message => console.warn(message))
-    this.sitePermissions = new SitePermissions(async (origin, permission, signal) => {
-      const description = `${origin} wants to ${SITE_PERMISSIONS[permission]}.\n\nBlock keeps it off. Either answer is remembered for this session's browser until you remove it under Site permissions or quit the app. Camera, microphone, location, screen capture and other permissions are always blocked.`
+    this.sitePermissions = options.sitePermissions ?? new SitePermissions()
+    this.askPermission = async (origin, permission, signal) => {
+      const description = `${origin} wants to ${SITE_PERMISSIONS[permission]}.\n\nBlock keeps it off. Either answer is remembered for every session's browser until you remove it under Site permissions. Camera, microphone, location, screen capture and other permissions are always blocked.`
       if (this.disposed || signal.aborted) return null
       if (options.approvePermission) return options.approvePermission(description)
       const owner = this.owner
@@ -84,33 +94,63 @@ export class BrowserDebug {
       const { response } = await dialog.showMessageBox(owner, { type: 'question', title: 'Allow site permission?', message: 'A page in the session browser is asking for permission.',
         detail: description, buttons: ['Block', 'Allow'], defaultId: 0, cancelId: 0, noLink: true, signal })
       return signal.aborted ? null : response === 1
-    })
+    }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
       active: () => this.activePageId, select: id => { this.action(`select-page:${id}`) }, owner: () => this.owner,
       recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
       ...(options.approveInteraction ? { approve: options.approveInteraction } : {}) })
     const view = new WebContentsView({ webPreferences: {
-      partition: options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`, sandbox: true, contextIsolation: true,
+      partition: this.partition, sandbox: true, contextIsolation: true,
       nodeIntegration: false, devTools: true,
     } })
     this.addPage(view, true)
-    const session = view.webContents.session
-    // Only a few permissions can be granted, only to http(s) main frames of this session's pages, and only after the user answered a native prompt.
+    BrowserDebug.browsersOn(view.webContents.session).add(this)
+    // Another browser changing a site's zoom changes it here too, as in one Chrome profile.
+    this.unsubscribeZoom = this.zoom.subscribe((site, factor) => {
+      for (const page of this.pages.values()) {
+        if (!page.contents.isDestroyed() && zoomSite(page.contents.getURL()) === site && page.contents.getZoomFactor() !== factor) page.contents.setZoomFactor(factor)
+      }
+    })
+  }
+
+  /**
+   * The browsers using a Chromium session, installing that session's hooks the first time. With the shared browser
+   * profile several browsers use one session, and Electron keeps one permission handler and one listener per
+   * webRequest event per session, so each hook is offered to every browser and each acts only on its own pages.
+   */
+  private static browsersOn(session: Session): Set<BrowserDebug> {
+    const known = browsersBySession.get(session)
+    if (known) return known
+    const browsers = new Set<BrowserDebug>()
+    browsersBySession.set(session, browsers)
+    const owning = (contents: WebContents | null): BrowserDebug | undefined => contents ? [...browsers].find(browser => browser.pages.has(contents.id)) : undefined
+    // Only a few permissions can be granted, only to http(s) main frames of these browsers' pages, and only after the user answered a native prompt.
     session.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
       const target = sitePermissionTarget(permission, details.requestingUrl ?? requestingOrigin, details.isMainFrame)
-      return Boolean(target && contents && this.pages.has(contents.id) && this.sitePermissions.allowed(target.origin, target.permission))
+      const browser = owning(contents)
+      return Boolean(target && browser && browser.sitePermissions.allowed(target.origin, target.permission))
     })
     session.setPermissionRequestHandler((contents, permission, callback, details) => {
       const target = sitePermissionTarget(permission, details.requestingUrl, details.isMainFrame)
-      if (!target || !contents || !this.pages.has(contents.id) || this.disposed) { callback(false); return }
+      const browser = owning(contents)
+      if (!target || !browser || browser.disposed) { callback(false); return }
       const closed = new AbortController()
       const abort = (): void => closed.abort()
       contents.once('destroyed', abort)
-      void this.sitePermissions.request(target.origin, target.permission, closed.signal)
+      void browser.sitePermissions.request(target.origin, target.permission, closed.signal, browser.askPermission)
         .finally(() => { contents.off('destroyed', abort) }).then(callback, () => callback(false))
     })
     session.on('will-download', event => event.preventDefault())
-    this.captureNetwork(session.webRequest)
+    // Request ids are unique within a session, so each browser records only requests from its own pages.
+    const request = session.webRequest
+    const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }
+    request.onBeforeRequest(filter, (details, callback) => { for (const browser of browsers) browser.requestStarted(details); callback({}) })
+    request.onSendHeaders(filter, details => { for (const browser of browsers) browser.requestHeadersSent(details) })
+    request.onHeadersReceived(filter, (details, callback) => { for (const browser of browsers) browser.responseHeadersReceived(details); callback({}) })
+    request.onBeforeRedirect(filter, details => { for (const browser of browsers) browser.networkEntry(details.id)?.redirects.push(sanitizedUrl(details.redirectURL)) })
+    request.onCompleted(filter, details => { for (const browser of browsers) browser.requestFinished(details.id, details.statusCode, null) })
+    request.onErrorOccurred(filter, details => { for (const browser of browsers) browser.requestFinished(details.id, null, details.error) })
+    return browsers
   }
 
   /** The toolbar and DevTools act on the selected page; every page belongs to this terminal. */
@@ -217,7 +257,12 @@ export class BrowserDebug {
     contents.on('did-fail-load', (_event, code, description, _url, main) => {
       if (main && code !== -3) page.error = sanitizedText(description)
     })
-    contents.on('did-navigate', (_event, url) => { this.rememberUrl(page, url); this.recordHistory(url) })
+    contents.on('did-navigate', (_event, url) => {
+      this.rememberUrl(page, url)
+      this.history.record(url)
+      const zoom = this.zoom.get(url)
+      if (contents.getZoomFactor() !== zoom) contents.setZoomFactor(zoom)
+    })
     contents.on('found-in-page', (_event, result) => {
       if (this.activePageId === contents.id && this.findQuery && result.finalUpdate) this.findResult = { matches: result.matches, active: result.activeMatchOrdinal }
     })
@@ -238,49 +283,40 @@ export class BrowserDebug {
     return page
   }
 
-  private captureNetwork(request: WebRequest): void {
-    const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }
-    request.onBeforeRequest(filter, (details, callback) => {
-      if (this.state.recordingNetwork && details.webContentsId !== undefined && this.pages.has(details.webContentsId)) {
-        const id = String(details.id)
-        const previous = this.state.network.find(entry => entry.id === id)
-        if (previous) previous.url = sanitizedUrl(details.url)
-        else {
-          this.started.set(id, Date.now())
-          this.state.network.push({ id, pageId: details.webContentsId, timestamp: new Date().toISOString(), method: details.method,
-            url: sanitizedUrl(details.url), resourceType: details.resourceType, status: null, durationMs: null, error: null,
-            requestHeaders: {}, responseHeaders: {}, redirects: [] })
-          if (this.state.network.length > MAX_ENTRIES) {
-            const removed = this.state.network.shift()
-            if (removed) this.started.delete(removed.id)
-          }
-        }
-      }
-      callback({})
-    })
-    request.onSendHeaders(filter, details => {
-      const entry = this.networkEntry(details.id)
-      if (entry) entry.requestHeaders = sanitizedHeaders(details.requestHeaders)
-    })
-    request.onHeadersReceived(filter, (details, callback) => {
-      const entry = this.networkEntry(details.id)
-      if (entry) {
-        entry.status = details.statusCode
-        entry.responseHeaders = sanitizedHeaders(details.responseHeaders ?? {})
-      }
-      callback({})
-    })
-    request.onBeforeRedirect(filter, details => {
-      this.networkEntry(details.id)?.redirects.push(sanitizedUrl(details.redirectURL))
-    })
-    request.onCompleted(filter, details => {
-      const entry = this.networkEntry(details.id)
-      if (entry) { entry.status = details.statusCode; this.finishRequest(entry) }
-    })
-    request.onErrorOccurred(filter, details => {
-      const entry = this.networkEntry(details.id)
-      if (entry) { entry.error = details.error; this.finishRequest(entry) }
-    })
+  private requestStarted(details: OnBeforeRequestListenerDetails): void {
+    if (!this.state.recordingNetwork || details.webContentsId === undefined || !this.pages.has(details.webContentsId)) return
+    const id = String(details.id)
+    const previous = this.state.network.find(entry => entry.id === id)
+    if (previous) { previous.url = sanitizedUrl(details.url); return }
+    this.started.set(id, Date.now())
+    this.state.network.push({ id, pageId: details.webContentsId, timestamp: new Date().toISOString(), method: details.method,
+      url: sanitizedUrl(details.url), resourceType: details.resourceType, status: null, durationMs: null, error: null,
+      requestHeaders: {}, responseHeaders: {}, redirects: [] })
+    if (this.state.network.length > MAX_ENTRIES) {
+      const removed = this.state.network.shift()
+      if (removed) this.started.delete(removed.id)
+    }
+  }
+
+  private requestHeadersSent(details: OnSendHeadersListenerDetails): void {
+    const entry = this.networkEntry(details.id)
+    if (entry) entry.requestHeaders = sanitizedHeaders(details.requestHeaders)
+  }
+
+  private responseHeadersReceived(details: OnHeadersReceivedListenerDetails): void {
+    const entry = this.networkEntry(details.id)
+    if (!entry) return
+    entry.status = details.statusCode
+    entry.responseHeaders = sanitizedHeaders(details.responseHeaders ?? {})
+  }
+
+  /** A completed request carries its status; a failed one, its error. */
+  private requestFinished(id: number, status: number | null, error: string | null): void {
+    const entry = this.networkEntry(id)
+    if (!entry) return
+    if (status !== null) entry.status = status
+    if (error !== null) entry.error = error
+    this.finishRequest(entry)
   }
 
   private networkEntry(id: number): BrowserNetworkEntry | undefined {
@@ -324,7 +360,7 @@ export class BrowserDebug {
       const dialog = this.reader.pendingDialog
       if (dialog) this.state.dialog = dialog
       else delete this.state.dialog
-      this.state.history = [...this.history]
+      this.state.history = this.history.list()
       if (this.findQuery) this.state.find = { query: this.findQuery, ...(this.findResult ?? { matches: 0, active: 0 }) }
       else delete this.state.find
       this.state.canGoBack = contents.navigationHistory.canGoBack()
@@ -436,16 +472,6 @@ export class BrowserDebug {
     if (notify) this.notifyShortcut('find-close')
   }
 
-  private recordHistory(url: string): void {
-    let saved: string | null
-    try { saved = restorableUrl(url) } catch { return }
-    if (!saved) return
-    const existing = this.history.indexOf(saved)
-    if (existing >= 0) this.history.splice(existing, 1)
-    this.history.unshift(saved)
-    if (this.history.length > MAX_HISTORY) this.history.length = MAX_HISTORY
-  }
-
   private showContextMenu(page: BrowserPage, params: ContextMenuInput & { x: number; y: number }): void {
     const contents = page.contents
     const items = contextMenuItems(params, { canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward() })
@@ -546,7 +572,12 @@ export class BrowserDebug {
       case 'reload': this.activePage.error = null; contents.reload(); break
       // Re-fetch every resource instead of trusting the HTTP cache, like Ctrl+Shift+R in Chrome.
       case 'hard-reload': this.activePage.error = null; contents.reloadIgnoringCache(); break
-      case 'zoom-in': case 'zoom-out': case 'zoom-reset': contents.setZoomFactor(nextZoomFactor(contents.getZoomFactor(), action.slice(5) as 'in' | 'out' | 'reset')); break
+      case 'zoom-in': case 'zoom-out': case 'zoom-reset': {
+        const factor = nextZoomFactor(contents.getZoomFactor(), action.slice(5) as 'in' | 'out' | 'reset')
+        contents.setZoomFactor(factor)
+        this.zoom.set(contents.getURL(), factor)
+        break
+      }
       case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'clear-console': this.state.console = []; break
       case 'clear-network': this.state.network = []; this.started.clear(); this.reader.clear(); break
@@ -748,7 +779,9 @@ export class BrowserDebug {
       }
     }
     this.disposed = true
-    this.sitePermissions.clear()
+    // Site permissions and zoom belong to every session's browser; closing this one only stops following them.
+    browsersBySession.get(storage)?.delete(this)
+    this.unsubscribeZoom()
     this.reader.dispose()
     await this.serverStart?.catch(() => {})
     if (this.server) { this.server.closeAllConnections(); this.server.close(); this.server = null }

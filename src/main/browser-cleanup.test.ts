@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { SHARED_BROWSER_PROFILE_ID } from './browser-profile.js'
 import { browserProfileHasPartition, clearBrowserStorage, pruneBrowserLaunches, pruneBrowserProfiles, removeBrowserLaunch, removeBrowserProfileSettings } from './browser-cleanup.js'
 
 const KEEP = '11111111-1111-4111-8111-111111111111'
@@ -21,6 +22,8 @@ test('startup cleanup removes orphan browser profiles and partitions while retai
     await writeFile(join(root, 'Partitions', `browser-debug%3A${id}`, 'Cookies'), 'cookie-fixture')
   }
   await mkdir(join(root, 'Partitions', 'unrelated'), { recursive: true })
+  // The shared browser profile outlives every tab so switching back to it keeps its logins.
+  await mkdir(join(root, 'Partitions', `browser-debug%3A${SHARED_BROWSER_PROFILE_ID}`), { recursive: true })
   assert.equal(await browserProfileHasPartition(root, KEEP), true)
   assert.equal(await browserProfileHasPartition(root, CURRENT), false)
   await pruneBrowserProfiles(root, [KEEP, undefined, '../outside'])
@@ -30,6 +33,7 @@ test('startup cleanup removes orphan browser profiles and partitions while retai
   await assert.rejects(access(join(root, 'Partitions', `browser-debug%3A${ORPHAN}`)))
   assert.equal(await browserProfileHasPartition(root, ORPHAN), false)
   await access(join(root, 'Partitions', 'unrelated'))
+  await access(join(root, 'Partitions', `browser-debug%3A${SHARED_BROWSER_PROFILE_ID}`))
   await removeBrowserProfileSettings(root, KEEP)
   await assert.rejects(access(join(root, 'browser-profiles', KEEP)))
 }))

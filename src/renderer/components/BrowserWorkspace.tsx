@@ -218,7 +218,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
       <div className="browser-footer-details">
         <details className="browser-permissions"><summary>Site permissions ({state.sitePermissions.length})</summary>
           {state.sitePermissions.length === 0
-            ? <p>Pages are asked before they can copy to or read from your clipboard or show notifications. Your answers appear here for this session; camera, microphone, location and other permissions are always blocked.</p>
+            ? <p>Pages are asked before they can copy to or read from your clipboard or show notifications. Your answers appear here and apply to every session's browser until you forget them; camera, microphone, location and other permissions are always blocked.</p>
             : <><ul>{state.sitePermissions.map(entry => <li key={entry.id}>
                 <span><strong>{entry.decision === 'allow' ? 'Allowed' : 'Blocked'}</strong> {entry.origin}: {entry.label}</span>
                 <button type="button" aria-label={`Forget ${entry.decision === 'allow' ? 'allowed' : 'blocked'} permission for ${entry.origin}: ${entry.label}`}
