@@ -1,6 +1,6 @@
 import { lstat, readdir, rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { normalizeBrowserProfileId } from './browser-profile.js'
+import { SHARED_BROWSER_PROFILE_ID, normalizeBrowserProfileId } from './browser-profile.js'
 import { isSessionTabId } from './external-targets.js'
 import type { Session } from 'electron'
 
@@ -55,9 +55,10 @@ export async function browserProfileHasPartition(userData: string, profileId: st
   return false
 }
 
-/** Run before creating any native browser sessions: Chromium owns open partition files until exit. */
+/** Run before creating any native browser sessions: Chromium owns open partition files until exit. The shared browser
+ * profile is kept even while no session uses it, so switching back finds its logins; Settings can clear it. */
 export async function pruneBrowserProfiles(userData: string, referenced: Iterable<string | undefined>): Promise<void> {
-  const retained = new Set([...referenced].map(normalizeBrowserProfileId).filter(Boolean))
+  const retained = new Set([...referenced, SHARED_BROWSER_PROFILE_ID].map(normalizeBrowserProfileId).filter(Boolean))
   for (const [name, partition] of [['browser-profiles', false], ['Partitions', true]] as const) {
     const root = resolve(userData, name)
     if (!await directoryExists(root)) continue

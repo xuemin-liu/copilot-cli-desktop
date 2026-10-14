@@ -21,12 +21,13 @@ export interface DesktopConfig {
   automaticUpdateChecks: boolean
   globalShortcutEnabled: boolean
   launchAtLogin: boolean
+  browserProfile: BrowserProfileMode
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile'
 >
 
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
@@ -34,6 +35,14 @@ export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
 
 export function isCloseBehavior(value: unknown): value is CloseBehavior {
   return CLOSE_BEHAVIORS.includes(value as CloseBehavior)
+}
+
+/** Whether each session's browser has its own cookies and storage, or every session shares one profile like Chrome. */
+export const BROWSER_PROFILE_MODES = ['separate', 'shared'] as const
+export type BrowserProfileMode = (typeof BROWSER_PROFILE_MODES)[number]
+
+export function isBrowserProfileMode(value: unknown): value is BrowserProfileMode {
+  return BROWSER_PROFILE_MODES.includes(value as BrowserProfileMode)
 }
 
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
@@ -47,6 +56,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   automaticUpdateChecks: true,
   globalShortcutEnabled: false,
   launchAtLogin: false,
+  browserProfile: 'separate',
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -221,6 +231,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     automaticUpdateChecks: typeof value.automaticUpdateChecks === 'boolean' ? value.automaticUpdateChecks : true,
     globalShortcutEnabled: typeof value.globalShortcutEnabled === 'boolean' ? value.globalShortcutEnabled : false,
     launchAtLogin: typeof value.launchAtLogin === 'boolean' ? value.launchAtLogin : false,
+    browserProfile: isBrowserProfileMode(value.browserProfile) ? value.browserProfile : 'separate',
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

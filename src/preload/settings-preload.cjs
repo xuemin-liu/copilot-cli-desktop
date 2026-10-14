@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
   get: () => ipcRenderer.invoke('desktop-settings:get'),
   updatePreferences: (preferences) => ipcRenderer.invoke('desktop-settings:update-preferences', preferences),
   setLaunchAtLogin: (enabled) => ipcRenderer.invoke('desktop-settings:set-launch-at-login', enabled),
+  clearSharedBrowserData: () => ipcRenderer.invoke('desktop-settings:clear-shared-browser-data'),
+  clearBrowserHistory: () => ipcRenderer.invoke('desktop-settings:clear-browser-history'),
   updateWorkspaceProfile: (profileId, name, permissionPreset, defaultResumeMode, launch) =>
     ipcRenderer.invoke('desktop-settings:update-workspace-profile', profileId, name, permissionPreset, defaultResumeMode, launch),
   updateProvider: (provider) => ipcRenderer.invoke('desktop-settings:update-provider', provider),

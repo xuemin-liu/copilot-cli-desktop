@@ -489,7 +489,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -556,6 +556,49 @@ export function SettingsApp(): JSX.Element | null {
           />
           Launch at sign-in{!snapshot.launchAtLoginAvailable ? ' (installed builds only)' : ''}
         </label>
+      </section>
+
+      <section>
+        <h2>Session browser</h2>
+        <label className="settings-row settings-row-select">
+          Cookies, logins and site storage
+          <select
+            value={snapshot.browserProfile}
+            onChange={(event) => updatePreference({
+              browserProfile: event.target.value as DesktopSettingsSnapshot['browserProfile'],
+            })}
+          >
+            <option value="separate">Separate for each session</option>
+            <option value="shared">Shared by all sessions, like Chrome</option>
+          </select>
+        </label>
+        <p className="settings-disclaimer">
+          Separate keeps each session signed in on its own and clears its data when the session closes. Shared lets
+          every session use the same logins, including the Copilot agent in each session, and keeps them when a session
+          closes. Browsers already open keep their current profile until their session closes or the app restarts.
+          History, site permissions, zoom and DevTools settings are shared either way.
+        </p>
+        <div className="settings-actions">
+          <button
+            type="button"
+            onClick={() => {
+              if (!window.confirm('Sign every session out of the shared browser profile and remove its cookies, site storage and cache?')) return
+              void window.copilotDesktopSettings.clearSharedBrowserData()
+                .then(() => showMessage('Cleared shared browser data.'), (error: unknown) => showMessage(String(error)))
+            }}
+          >
+            Clear shared browser data
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void window.copilotDesktopSettings.clearBrowserHistory()
+                .then(() => showMessage('Cleared browsing history.'), (error: unknown) => showMessage(String(error)))
+            }
+          >
+            Clear browsing history
+          </button>
+        </div>
       </section>
 
       <section>

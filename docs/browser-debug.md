@@ -5,8 +5,9 @@ or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
 addresses and development hosts (single-label names, `.localhost`, `.local`,
 `.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
 HTTP/HTTPS always takes precedence. Each terminal session has its own browser pages,
-DevTools, console/network capture, and cookie/storage partition, separate from
-other terminal sessions, the desktop shell, and your installed Chrome. Drag the divider
+DevTools and console/network capture and, by default, its own cookie/storage partition,
+separate from other terminal sessions, the desktop shell, and your installed Chrome
+(see [Sharing between sessions](#sharing-between-sessions)). Drag the divider
 to resize it. The **Reload** button does a normal reload, which can keep serving cached
 scripts and styles; **Shift+click** it (or press **Ctrl+Shift+R** or **Ctrl+F5** while the
 page has focus) for a hard reload that bypasses the cache and applies your latest changes. Use **+ (New page)** in the page strip to open another page in the
@@ -17,16 +18,22 @@ targeting a new page open browser page tabs inside the same terminal. They share
 that terminal's login/storage and console/network capture. Select or close pages
 using the page strip; navigation controls and DevTools apply to the selected page.
 The address toolbar shows the selected page's actual browser zoom percentage.
+Zoom is remembered per site (host name, as in Chrome) for every session's browser and
+kept across restarts; returning a site to 100% forgets it.
 Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
 Restored terminal sessions retain their browser cookies, local storage,
 and last successful top-level page's origin and path across app restarts;
 query strings, fragments, and SPA route changes are not saved. Authentication
-callback URLs do not replace the saved page. The pane starts hidden in a new
+callback URLs do not replace the saved page. Address-bar suggestions come from one
+browsing history shared by every session's browser and kept across restarts and
+session closes; like the saved page, it stores only the origin and path of pages
+without sensitive query parameters or fragments. The pane starts hidden in a new
 session. Switching terminal tabs preserves each session's browser. Pop-out and
 docking move the same browser page with its terminal.
 Explicitly closing a terminal session clears its browser credentials, storage and
-cache and removes its saved page and diagnostic helper files. App quit preserves
+cache and removes its saved page and diagnostic helper files. With the shared browser
+profile, closing a session keeps the shared cookies and storage for the other sessions. App quit preserves
 restorable profiles. Startup removes orphaned profiles/partitions and old helper
 directories; Chromium's open partition files are removed after the previous
 process exits.
@@ -35,7 +42,11 @@ Select **DevTools / Overrides**, then **Sources → Overrides** in the embedded
 DevTools. Select the folder you already use for Chrome Local Overrides and enable
 Local Overrides. Chrome's saved override files are ordinary local files and can
 be reused. The folder selection must be configured once in this app; Chrome's
-profile settings are not imported automatically. DevTools remembers the selection.
+profile settings are not imported automatically. The overrides folder and other
+DevTools settings, including whether Local Overrides is enabled, are shared by every
+session's browser: a session opened later starts with the settings other sessions
+saved (Chromium saves them a few seconds after a change), and settings from a closed
+session are kept. Console history is shared too.
 
 Use Network's **Override content** or **Override headers** actions, or edit the
 existing files in your overrides folder. Save and reload to test the changes.
@@ -218,13 +229,39 @@ sent: review the prompt, then press Enter.
   none) and failed requests (HTTP 400 and above, or a network error) as text. Entries are the
   filtered ones the browser already captured, limited to 25 console lines and 10 requests.
 
+## Sharing between sessions
+
+Like tabs in one Chrome profile, every session's browser shares:
+
+- address-bar history (Settings → **Session browser** → **Clear browsing history** empties it),
+- [site permissions](#site-permissions),
+- page zoom per site,
+- DevTools settings, the Local Overrides folder and console history.
+
+All of these are kept across app restarts. Each session keeps its own pages, DevTools window,
+console/network capture, find, and last page to restore.
+
+Cookies, logins, local storage, IndexedDB and cache depend on Settings → **Session browser** →
+**Cookies, logins and site storage**:
+
+- **Separate for each session** (default): each session is signed in on its own, a page in one
+  session cannot use another session's logins, and closing a session erases its data.
+- **Shared by all sessions, like Chrome**: every session uses one profile, so signing in once
+  signs in everywhere, including for the Copilot agent in each session. Closing a session keeps
+  the shared data; **Clear shared browser data** signs every session out and removes its cookies,
+  site storage and cache. The shared data is kept while you use separate profiles, so switching
+  back finds your logins.
+
+Changing the setting applies to session browsers opened afterwards; a browser that is already
+open keeps its profile until its session closes or the app restarts.
+
 ## Site permissions
 
 A page can ask to copy text to your clipboard (`navigator.clipboard.writeText`), read text from
 your clipboard, or show notifications. A native dialog names the site and the request; **Allow**
-or **Block** is remembered for that site and permission in this session's browser. Open
-**Site permissions** at the bottom of the browser pane to see the answers and **Forget** one (or
-all), after which the page is asked again. Answers are not saved across app restarts.
+or **Block** is remembered for that site and permission in every session's browser and kept
+across app restarts. Open **Site permissions** at the bottom of the browser pane to see the
+answers and **Forget** one (or all), after which the page is asked again.
 
 Everything else (camera, microphone, location, screen capture, USB and other devices, fullscreen
 and so on) is always blocked without a prompt. Only the page's top frame can ask: requests from
@@ -378,7 +415,7 @@ Testing mode there. A manual navigation to another origin disables Testing mode.
 Popup activation changes the selected page and stops the old run.
 A run stops at its first failed step. Test actions may change the app's data; a
 failed or cancelled run does not undo completed steps. Keep the Page view visible
-for input and screenshots. Browser sessions remain isolated from each other.
+for input and screenshots. A run acts only on its own session's pages.
 
 The runner supports navigation, click, double-click, hover, coordinate dragging, text entry and replacement,
 single-choice select elements, keyboard keys, document/container scrolling, waits,
