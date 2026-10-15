@@ -4,6 +4,7 @@ import {
   EMPTY_TABS_STATE,
   MAX_SESSION_TABS,
   activateTab,
+  activeWorkspaceFor,
   canOpenAnotherTab,
   closeTab,
   createTab as createTabState,
@@ -94,6 +95,17 @@ test('closeTab leaves no active tab once the last one closes', () => {
 test('closeTab on an unknown id is a no-op', () => {
   const state = createTab(EMPTY_TABS_STATE, { id: 'a', title: 'A', workspaceProfileId: 'ws-1' })
   assert.equal(closeTab(state, 'missing'), state)
+})
+
+test('the active project follows the active session, and stays when no session is active', () => {
+  let state: TabsState = EMPTY_TABS_STATE
+  state = createTab(state, { id: 'a', title: 'A', workspaceProfileId: 'ws-1' })
+  state = createTab(state, { id: 'b', title: 'B', workspaceProfileId: 'ws-2' })
+  assert.equal(activeWorkspaceFor(activateTab(state, 'a'), 'ws-2'), 'ws-1')
+  assert.equal(activeWorkspaceFor(activateTab(state, 'b'), 'ws-1'), 'ws-2')
+  // Closing the last session of ws-2 moves to the session left on screen.
+  assert.equal(activeWorkspaceFor(closeTab(activateTab(state, 'b'), 'b'), 'ws-2'), 'ws-1')
+  assert.equal(activeWorkspaceFor(EMPTY_TABS_STATE, 'ws-2'), 'ws-2')
 })
 
 test('activateTab rejects an unknown id', () => {

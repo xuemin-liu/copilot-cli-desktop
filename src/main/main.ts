@@ -114,6 +114,7 @@ import {
 import {
   EMPTY_TABS_STATE,
   activateTab,
+  activeWorkspaceFor,
   closeTab,
   createTab,
   renameTab,
@@ -1424,11 +1425,21 @@ function activateSessionTab(tabId: string): DesktopState {
   const popout = sessionWindows.get(tabId)
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
+  followActiveTabWorkspace()
   if (popout) focusSessionWindow(popout)
   else restoreMainWindow()
   broadcastState()
   refreshMenus()
   return snapshot()
+}
+
+/** Switches the active project to the active session's project, as selecting that project would. */
+function followActiveTabWorkspace(): void {
+  const next = activeWorkspaceFor(tabsState, desktopConfig.activeProfileId)
+  if (next === desktopConfig.activeProfileId) return
+  desktopConfig.activeProfileId = next
+  syncWorkspaceState()
+  void persistConfig().catch((error) => void writeAppLog(`Failed to save the active workspace: ${String(error)}`))
 }
 
 function renameSessionTab(tabId: string, title: string): DesktopState {
@@ -1480,6 +1491,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     finally { sessionBrowsers.delete(tabId); closingBrowserTabs.delete(tabId) }
     tabsState = closeTab(tabsState, tabId)
     syncTabState()
+    followActiveTabWorkspace()
     const popout = sessionWindows.get(tabId)
     sessionWindows.delete(tabId)
     popout?.destroy()

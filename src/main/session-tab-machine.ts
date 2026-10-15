@@ -158,6 +158,14 @@ export function tabsForWorkspace(state: TabsState, workspaceProfileId: string): 
   return state.tabs.filter((tab) => tab.workspaceProfileId === workspaceProfileId)
 }
 
+/**
+ * The project the window shows: the active session's own project, so the Git panel, worktree following and new sessions
+ * match the session on screen. With no active session the current project stays.
+ */
+export function activeWorkspaceFor(state: TabsState, current: string | null): string | null {
+  return state.tabs.find((tab) => tab.id === state.activeTabId)?.workspaceProfileId ?? current
+}
+
 export function canOpenAnotherTab(state: TabsState): boolean {
   return state.tabs.length < MAX_SESSION_TABS
 }
