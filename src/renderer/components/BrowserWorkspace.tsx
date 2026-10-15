@@ -7,6 +7,7 @@ import { BrowserIcon, ConsoleErrorsIcon, PickElementIcon, ScreenshotIcon } from 
 import { attachClipboardImage, insertIntoPrompt } from '../prompt-insert.js'
 import { formatBrowserContext } from '../../main/browser-context-format.js'
 import { MAX_PICKED_ELEMENTS, composeElementSelection, pickedElementLabel } from '../../main/browser-pick-compose.js'
+import { overridesStatus } from '../../main/browser-overrides-status.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -131,6 +132,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     run(window.copilotDesktop.browserFind(tabId, text, forward, next))
   }
   const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
+  const overrides = overridesStatus(state.overrides)
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
@@ -225,7 +227,10 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
                   onClick={() => run(window.copilotDesktop.browserAction(tabId, `forget-permission:${entry.id}`))}>Forget</button></li>)}</ul>
                 <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forget-permissions'))}>Forget all</button></>}
         </details>
-        <details><summary>Local Overrides setup</summary><p>Open DevTools / Overrides → Sources → Overrides, select your existing Chrome overrides folder, and enable Local Overrides. Save local edits and reload the page to test them.</p></details>
+        <details className="browser-overrides"><summary><span className={`browser-overrides-${overrides.tone}`}>{overrides.text}</span></summary>
+          <p>Open DevTools / Overrides → Sources → Overrides, select your existing Chrome overrides folder, and enable Local Overrides. Overrides apply to a page while its DevTools runs, shown or hidden. Save local edits and reload the page to test them.</p>
+          {overrides.tone !== 'on' && <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'view:devtools'))}>Open DevTools / Overrides</button>}
+        </details>
       </div>
     </footer>
   </aside>

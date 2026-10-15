@@ -53,6 +53,17 @@ export interface BrowserDebugState {
   find?: { query: string; matches: number; active: number }
   /** Recently visited pages (address only, no query or fragment), newest first, for the address bar suggestions. */
   history: string[]
+  /** Local Overrides for the selected page; absent until it has been read. */
+  overrides?: BrowserOverridesState
+}
+
+export interface BrowserOverridesState {
+  /** Whether Local Overrides is enabled in DevTools. */
+  enabled: boolean
+  /** The overrides folder DevTools uses, as a local path. */
+  folder: string | null
+  /** Whether the selected page's DevTools is running, shown or hidden. Overrides apply to a page only while it is. */
+  devtools: boolean
 }
 
 export interface BrowserBounds { x: number; y: number; width: number; height: number }
