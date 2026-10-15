@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog } from 'electron'
+import { join } from 'node:path'
+import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath } from '../cli/browser-control.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
@@ -17,6 +18,7 @@ import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePe
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
+import { OVERRIDES_SCRIPT, overridesFromDevtools, overridesFromPreferences, type OverridesSetting } from './browser-overrides.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -32,6 +34,8 @@ interface BrowserPage {
   lastUrl: string
   devtools: boolean
   panel: 'console' | 'network' | 'sources' | null
+  /** Local Overrides as this page's running DevTools last reported it. */
+  overrides: OverridesSetting | null
 }
 
 /** Own browser session, with native Chromium DevTools, scoped reading and CLI telemetry.
@@ -63,6 +67,10 @@ export class BrowserDebug {
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
+  private overridesRead: Promise<void> | null = null
+  private overridesReadAt = 0
+  private savedOverrides: OverridesSetting | null = null
+  private savedOverridesAt = 0
   private state: BrowserDebugState = {
     activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
     recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
@@ -161,7 +169,7 @@ export class BrowserDebug {
   private addPage(view: WebContentsView, activate: boolean): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
@@ -276,6 +284,7 @@ export class BrowserDebug {
     const id = contents.id
     contents.on('devtools-closed', () => {
       page.devtools = false
+      page.overrides = null
       if (id === this.activePageId && ['console', 'network', 'devtools'].includes(this.state.view)) this.state.view = 'page'
       if (this.pages.has(id)) this.layout()
     })
@@ -365,7 +374,39 @@ export class BrowserDebug {
       else delete this.state.find
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
+      const setting = page.overrides ?? this.savedOverrides
+      if (setting) this.state.overrides = { ...setting, devtools: page.overrides !== null }
+      else delete this.state.overrides
+      this.refreshOverrides()
     }
+  }
+
+  /**
+   * Keeps the Local Overrides status current without blocking a snapshot: the selected page's DevTools answers while it
+   * runs, since only then do overrides apply to the page; before that, the saved preferences say what it will use.
+   */
+  private refreshOverrides(): void {
+    if (this.overridesRead || Date.now() - this.overridesReadAt < 1000) return
+    this.overridesRead = this.readOverrides(this.activePage).catch(() => {})
+      .finally(() => { this.overridesRead = null; this.overridesReadAt = Date.now() })
+  }
+
+  private async readOverrides(page: BrowserPage): Promise<void> {
+    const tools = page.tools?.webContents
+    if (tools && !tools.isDestroyed() && !tools.isLoading() && tools.getURL().startsWith('devtools://devtools/')) {
+      // A fixed, read-only query in the native DevTools frontend, never in the inspected page.
+      page.overrides = overridesFromDevtools(await tools.executeJavaScript(OVERRIDES_SCRIPT).catch(() => null))
+      if (page.overrides) return
+    } else page.overrides = null
+    if (Date.now() - this.savedOverridesAt < 3000) return
+    // Chromium saves Preferences a few seconds after a change, which is soon enough for a page whose DevTools is not running.
+    const preferences = async (directory: string | null): Promise<unknown> => {
+      if (!directory) return undefined
+      try { return JSON.parse(await readFile(join(directory, 'Preferences'), 'utf8')) as unknown } catch { return undefined }
+    }
+    const [partition, defaults] = await Promise.all([preferences(page.contents.session.storagePath), preferences(electronSession.defaultSession.storagePath)])
+    this.savedOverrides = overridesFromPreferences(partition, defaults)
+    this.savedOverridesAt = Date.now()
   }
 
   get snapshot(): BrowserDebugState {
@@ -743,7 +784,7 @@ export class BrowserDebug {
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, ...state } = this.state
+        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, ...state } = this.state
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.

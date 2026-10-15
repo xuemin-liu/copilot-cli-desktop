@@ -602,6 +602,10 @@ button:disabled {
 .browser-footer-details details[open] { flex-basis: 100%; }
 .browser-footer summary { cursor: pointer; }
 .browser-footer p { line-height: 1.5; }
+.browser-overrides summary { overflow-wrap: anywhere; }
+.browser-overrides-on { color: #20c9a6; }
+.browser-overrides-on::before, .browser-overrides-warning::before { content: '●'; margin-right: 5px; }
+.browser-overrides-warning { color: #ffb84d; }
 .browser-testing { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 5px 8px; font-size: 11px; color: #929baa; }
 .browser-testing button { flex-shrink: 0; }
 .browser-testing span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

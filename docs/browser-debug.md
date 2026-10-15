@@ -48,6 +48,13 @@ session's browser: a session opened later starts with the settings other session
 saved (Chromium saves them a few seconds after a change), and settings from a closed
 session are kept. Console history is shared too.
 
+The browser footer shows whether Local Overrides applies to the selected page: **on** with the overrides
+folder (green), **off**, or a warning when it is enabled but no folder is selected, or when the page's
+DevTools has not run yet. Overrides apply to a page only while its DevTools runs, shown or hidden, so
+open **DevTools / Overrides** once for each page; the warning has a button for it. Once DevTools runs the
+status comes from DevTools itself and follows changes within about a second; before that it comes from
+the saved settings.
+
 Use Network's **Override content** or **Override headers** actions, or edit the
 existing files in your overrides folder. Save and reload to test the changes.
 This uses native Chromium Local Overrides, including its URL-to-file mapping and
