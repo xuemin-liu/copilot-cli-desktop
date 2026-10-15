@@ -28,6 +28,7 @@
     "git:check": "node scripts/git-ipc-check.mjs",
     "git-panel:check": "node scripts/git-panel-check.mjs",
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
+    "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
