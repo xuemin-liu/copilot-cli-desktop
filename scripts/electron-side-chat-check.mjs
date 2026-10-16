@@ -69,9 +69,14 @@ if (process.versions.electron) {
       env.DESKTOP_UI_CHECK_ARTIFACTS = artifacts
     }
     // Trust only this newly-created disposable fixture, never a user folder.
-    await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace],
-      ...(env.DESKTOP_UI_PERMISSION_CHECK === '1' ? { enabledFeatureFlags: { AUTO_APPROVAL: true } } : {}),
-    }))
+    await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace] }))
+    // Assisted approval sits behind the AUTO_APPROVAL feature flag. Copilot CLI reads user settings such as feature flags
+    // from settings.json (1.0.98 ignores them in config.json, which it now manages itself); older CLIs read config.json.
+    if (env.DESKTOP_UI_PERMISSION_CHECK === '1') {
+      const flags = { enabledFeatureFlags: { AUTO_APPROVAL: true } }
+      await writeFile(join(copilotHome, 'settings.json'), JSON.stringify(flags))
+      await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace], ...flags }))
+    }
     rpc = new CopilotRpc(resolution, workspace, env)
     const sessionId = randomUUID()
     const provider = { type: 'openai', baseUrl, apiKey: 'local-ui-check-only', wireApi: 'completions' }
