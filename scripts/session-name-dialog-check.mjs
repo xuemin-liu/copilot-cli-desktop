@@ -119,7 +119,7 @@ if (!process.versions.electron) {
     let shown = await dialog()
     assert.deepEqual({ title: shown.title, value: shown.value, placeholder: shown.placeholder, focused: shown.focused, submit: shown.submit },
       { title: 'New session', value: '', placeholder: 'project', focused: true, submit: 'Start session' })
-    assert.match(shown.hint, /Leave it empty to use “project”/)
+    assert.match(shown.hint, /Leave it empty and Copilot names the session from your first prompt; until then the tab shows “project”/)
     assert.doesNotMatch(shown.hint, /worktree/, 'no worktree preview for a project without worktrees')
     assert.equal(await ui(`getComputedStyle(document.querySelector('#input-dialog-value'), '::placeholder').color !== getComputedStyle(document.querySelector('#input-dialog-value')).color`), true, 'the default is shown greyed out')
     await writeFile(join(out, 'default-name.png'), (await main.webContents.capturePage()).toPNG())

@@ -8,6 +8,7 @@ import {
   MAX_PROFILES,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
+  normalizeDesktopConfig,
   readDesktopConfig,
   recordDesktopVersion,
   workspaceProfileId,
@@ -220,4 +221,19 @@ test('readDesktopConfig tolerates a UTF-8 BOM and reports unparseable files', as
     await readDesktopConfig(filename, undefined, () => { unparseable = true })
     assert.equal(unparseable, false)
   })
+})
+
+test('a saved tab keeps whether its title follows Copilot and whether a rename still has to reach Copilot', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
+    { title: 'Say hello please', lastSessionId: 'a', autoTitle: true },
+    { title: 'Fix login', lastSessionId: 'b', autoTitle: false, renamePending: true },
+    { title: 'Old tab', lastSessionId: 'c' },
+    { title: 'Bad flags', lastSessionId: 'd', autoTitle: 'yes', renamePending: 1 },
+  ] }] })
+  assert.deepEqual(config.profiles[0]!.tabs, [
+    { title: 'Say hello please', lastSessionId: 'a', autoTitle: true },
+    { title: 'Fix login', lastSessionId: 'b', autoTitle: false, renamePending: true },
+    { title: 'Old tab', lastSessionId: 'c' },
+    { title: 'Bad flags', lastSessionId: 'd' },
+  ])
 })

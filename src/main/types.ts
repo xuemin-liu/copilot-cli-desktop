@@ -27,6 +27,10 @@ export interface RestoredTab {
   sessionPermissionMode?: SessionPermissionMode
   sideChat?: true
   sideParentSessionId?: string
+  /** The title follows Copilot's name for the session. Absent in config files written by older releases. */
+  autoTitle?: boolean
+  /** A rename made in the desktop that had not reached Copilot when the tab was saved. */
+  renamePending?: true
 }
 
 export interface WorkspaceProfile {
@@ -71,6 +75,12 @@ export interface DesktopSessionTab {
   canFork?: boolean
   /** Last local lifecycle, output, or user-activation activity for sidebar ordering. */
   lastActivityAt: number
+  /** Nobody named the session, so the title follows the name Copilot gives it; a rename in the desktop clears this and
+   * renames the Copilot session instead. Saved. */
+  autoTitle?: boolean
+  /** Renamed in the desktop; `/rename` is typed into the session at the next safe moment, until Copilot reports the
+   * name. Saved, so a rename made just before quitting reaches Copilot after the next start. */
+  renamePending?: true
 }
 
 /** A session's worktree, as the tab and sidebar show it. */

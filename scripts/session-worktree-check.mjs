@@ -29,6 +29,13 @@ export async function runWorktreeCheck() {
     assert.ok(createdId, 'a tab was created')
     const running = await until(async () => (await state()).tabs.find(tab => tab.id === createdId && tab.status === 'running'), 'worktree session running')
     assert.equal(running.lastSessionId, null, 'the desktop could not choose the id')
+    // Nobody named this session, so Copilot stores it only with its first prompt (and names it from that prompt).
+    await delay(4_000)
+    assert.equal((await state()).tabs.find(tab => tab.id === running.id)?.lastSessionId, null, 'not stored before its first prompt')
+    await until(async () => (await ui(`window.copilotDesktop.getTabBacklog(${JSON.stringify(running.id)})`)).includes('open sidebar'), 'CLI prompt ready')
+    await ui(`window.copilotDesktop.writeTab(${JSON.stringify(running.id)}, 'Hello from the worktree')`)
+    await delay(200)
+    await ui(`window.copilotDesktop.writeTab(${JSON.stringify(running.id)}, "\\r")`)
     // The real CLI creates the worktree and writes its own session id; the desktop reads it back from the store.
     const known = await until(async () => { const tab = (await state()).tabs.find(tab => tab.id === running.id); return tab?.lastSessionId ? tab : null }, 'session id discovered from the store', 90_000)
     assert.match(known.lastSessionId, /^[0-9a-f-]{36}$/)

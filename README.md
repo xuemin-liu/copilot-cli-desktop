@@ -64,9 +64,15 @@ handle, only input/output/resize events.
   private per-session log capture under the app's user-data directory. Logs
   rotate at 5 MiB; launch directories are limited to 7 days and the latest 20.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
-  each. A new session is named first: the dialog shows the project's name
-  greyed out, OK keeps it and typing replaces it; in a project that starts
-  sessions in a Git worktree, it also previews the worktree name. Sessions
+  each. A new session can be named first; left empty, Copilot names it from
+  the first prompt and the tab follows that name (until then it shows the
+  project's name, greyed out in the dialog). In a project that starts
+  sessions in a Git worktree, the dialog also previews the worktree name.
+  Renaming a tab renames the Copilot session too, so `copilot --resume
+  "<name>"` and Copilot's session list find it by that name after it
+  closes; the rename is typed as `/rename` only while the session is idle
+  with an empty prompt box (or as the tab closes). Tabs renamed before this
+  release are left as they are; rename one again to send its name. Sessions
   have lifecycle badges (starting / running / needs-approval / stopping
   / completed / crashed) and are restored per workspace profile.
 - **Paste screenshots with Ctrl+V** while Copilot's prompt is ready. Text uses

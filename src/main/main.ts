@@ -94,8 +94,9 @@ import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
 import { newSessionTitle } from './session-name.js'
+import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
-import type { FanOutResult, SessionWorktreeInfo } from './types.js'
+import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
@@ -116,6 +117,8 @@ import {
   EMPTY_TABS_STATE,
   activateTab,
   activeWorkspaceFor,
+  adoptCopilotTitle,
+  confirmTabRename,
   closeTab,
   createTab,
   renameTab,
@@ -258,6 +261,8 @@ const sessionCwdGenerations = new Map<string, number>()
 /** Per tab: the git directory of the worktree it runs in, so its HEAD can be read again when the branch changes. */
 const sessionWorktreeGitDirs = new Map<string, string>()
 const WORKTREE_BRANCH_POLL_MS = 5_000
+/** How often tab titles and Copilot session names are compared; Copilot has no event for a name. */
+const SESSION_NAME_POLL_MS = 3_000
 
 // The Git panel's service. Created on first use, and never again once shutdown starts, so no git process can
 // start while the app is closing. It runs git only while a renderer has the panel open.
@@ -625,6 +630,8 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
+          ...(tab.renamePending ? { renamePending: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
           ...(tab.lastSessionId && tab.sessionPermissionMode && !tab.sideChat
@@ -947,6 +954,19 @@ interface SessionSpawnPlan {
   secretArgs: string[]
   connectSessionId: string | null
   sessionTitle: string
+  /** False when nobody named the session: no `--name`, so Copilot names it from the first prompt. */
+  nameSession?: boolean
+  /** A fresh launch takes this id instead of a new one: a session that was never stored keeps its id. */
+  sessionId?: string
+}
+
+/**
+ * Copilot stores a session started without `--name` only once it gets its first prompt, so a tab that was opened and
+ * never used has an id Copilot does not know, and resuming it would fail. Such a tab starts fresh under the same id.
+ */
+async function copilotSessionStored(sessionId: string): Promise<boolean> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) return true
+  try { await access(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl')); return true } catch { return false }
 }
 
 /** Throws if the launch options a *fresh-vs-resume* choice would produce
@@ -1065,13 +1085,14 @@ function finalizeSessionArgs(
   const worktreeLaunch = freshSession && !plan.connectSessionId && plan.launch.worktree === true
   // The desktop names the worktree, so the session it starts can be told apart from any other by its cwd.
   const worktreeName = worktreeLaunch ? worktreeNameFor(plan.sessionTitle) : null
-  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity && !worktreeLaunch ? randomUUID() : restoreLastSessionId
+  const deterministicSessionId = freshSession && copilotCapabilities.sessionIdentity && !worktreeLaunch ? plan.sessionId ?? randomUUID() : restoreLastSessionId
+  const name = plan.nameSession === false ? [] : [`--name=${plan.sessionTitle}`]
   const identity = plan.connectSessionId
     ? [`--connect=${plan.connectSessionId}`]
     : worktreeLaunch
-      ? [`--name=${plan.sessionTitle}`]
+      ? name
       : freshSession && deterministicSessionId
-        ? [`--session-id=${deterministicSessionId}`, `--name=${plan.sessionTitle}`]
+        ? [`--session-id=${deterministicSessionId}`, ...name]
         : resumeArgs
   const args = [
     ...plan.prefixArgs,
@@ -1193,6 +1214,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     // A session doing something probably changed files; the Git panel (if open) refreshes shortly.
     const profileId = tabsState.tabs.find((tab) => tab.id === id)?.workspaceProfileId
     if (profileId) gitService?.requestRefresh(profileId)
+    if (session.activity === 'idle') observe(refreshSessionNames(), 'Could not read session names')
   })
   session.on('activity-detail', () => {
     if (managedTabs.get(id)?.session !== session) return
@@ -1283,8 +1305,20 @@ async function createSessionTab(
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
 
   const id = `tab-${nextTabSequence++}`
-  const resumeMode = resumeModeOverride ?? profile.defaultResumeMode
+  let resumeMode = resumeModeOverride ?? profile.defaultResumeMode
+  let resumeSessionId = restoreLastSessionId
+  let reusedSessionId: string | null = null
+  if (restoreLastSessionId && !connectSessionId && !await copilotSessionStored(restoreLastSessionId)) {
+    reusedSessionId = restoreLastSessionId
+    resumeSessionId = null
+    resumeMode = 'new'
+  }
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
+  // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt. A saved tab
+  // from an older release has no flag; one still titled with the project's name was never renamed.
+  const autoTitle = !connectSessionId && (restoredCandidate
+    ? restoredCandidate.autoTitle ?? restoredCandidate.title === profile.name
+    : !titleOverride?.trim())
   const sessionPermissionPreset = connectSessionId
     ? null
     : sideOptions.sideChat
@@ -1297,7 +1331,9 @@ async function createSessionTab(
   pendingSessionCreations++
   let plan: Awaited<ReturnType<typeof buildSessionSpawnPlan>>
   try {
-    plan = await buildSessionSpawnPlan(launchProfile, resumeMode, restoreLastSessionId, attachmentPaths, connectSessionId, sessionTitle)
+    plan = await buildSessionSpawnPlan(launchProfile, resumeMode, resumeSessionId, attachmentPaths, connectSessionId, sessionTitle)
+    plan.nameSession = !autoTitle
+    if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
   }
   finally { pendingSessionCreations-- }
@@ -1305,7 +1341,7 @@ async function createSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
-  const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, restoreLastSessionId)
+  const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
 
   const session = new PtySession({
@@ -1316,10 +1352,13 @@ async function createSessionTab(
     spawnPty: spawnNodePty,
     sessionId: deterministicSessionId,
     discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
-    ...(worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName } } : {}),
+    // An unnamed session reaches the store only with its first prompt, which can come any time.
+    ...(worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName,
+      ...(plan.nameSession === false ? { timeoutMs: Number.POSITIVE_INFINITY } : {}) } } : {}),
     monitorSessionPermissions: connectSessionId === null,
   })
   managedTabs.set(id, { session })
+  trackSessionName(id, { ...process.env, ...plan.env }, resumeMode === 'picker')
   profilesWithSessionTabs.add(profile.id)
   if (restoredCandidate) restoringTabIds.add(id)
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
@@ -1338,6 +1377,8 @@ async function createSessionTab(
     lastSessionId: deterministicSessionId,
     ...sideOptions,
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
+    autoTitle,
+    renamePending: restoredCandidate?.renamePending === true,
   })
   desktopConfig.activeProfileId = profile.id
   syncWorkspaceState()
@@ -1456,7 +1497,120 @@ function renameSessionTab(tabId: string, title: string): DesktopState {
   persistProfileTabs()
   broadcastState()
   refreshMenus()
+  observe(syncSessionName(tabId), 'Could not rename the Copilot session')
   return snapshot()
+}
+
+/** Where each tab's session keeps its name, the prompt-draft state of its terminal, and the name last read from it. */
+const sessionNameRoots = new Map<string, string>()
+const promptDrafts = new Map<string, PromptDraft>()
+const copilotNames = new Map<string, { sessionId: string; mtimeMs: number; value: CopilotSessionName | null }>()
+const renamesSent = new Map<string, { title: string; at: number }>()
+
+/** A new process for the tab: its prompt starts empty, or on the resume picker. */
+function trackSessionName(tabId: string, env: NodeJS.ProcessEnv, picker: boolean): void {
+  sessionNameRoots.set(tabId, copilotSessionRoot(env))
+  promptDrafts.set(tabId, new PromptDraft({ awaitingFirstEnter: picker }))
+  renamesSent.delete(tabId)
+}
+
+function forgetSessionName(tabId: string): void {
+  sessionNameRoots.delete(tabId)
+  promptDrafts.delete(tabId)
+  copilotNames.delete(tabId)
+  renamesSent.delete(tabId)
+}
+
+/** Copilot's name for the tab's current session: undefined until it has been read. */
+function knownSessionName(tab: DesktopSessionTab): CopilotSessionName | null | undefined {
+  const known = copilotNames.get(tab.id)
+  return known && known.sessionId === tab.lastSessionId ? known.value : undefined
+}
+
+async function readSessionName(tabId: string): Promise<void> {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  const root = sessionNameRoots.get(tabId)
+  if (!tab || tab.remote || !tab.lastSessionId || !root) return
+  const sessionId = tab.lastSessionId
+  const known = copilotNames.get(tabId)
+  const read = await readCopilotSessionName(root, sessionId, known?.sessionId === sessionId ? known : undefined)
+  if (tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId === sessionId) copilotNames.set(tabId, { sessionId, ...read })
+}
+
+/**
+ * Types `/rename` into the session when that cannot disturb anything: it is running and not mid-turn, its prompt box
+ * holds nothing the person typed (a draft would be sent to the model with the command appended), and no key was pressed
+ * just now. `closing` allows clearing a draft with Ctrl+C first, since closing discards it anyway.
+ */
+function sendSessionRename(tabId: string, closing = false): boolean {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  const managed = managedTabs.get(tabId)
+  const draft = promptDrafts.get(tabId)
+  if (!tab || !managed || !draft || tab.status !== 'running') return false
+  const action = nameSyncAction(tab, knownSessionName(tab))
+  const command = action.kind === 'rename' ? renameCommand(action.title) : null
+  if (!command || action.kind !== 'rename') return false
+  const session = managed.session
+  // Idle by its event log, or (before any turn) showing the prompt's footer.
+  const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
+  if (!ready || (!closing && (!draft.empty || !draft.quiet()))) return false
+  // Ctrl+C on the resume picker would leave it, not clear a prompt.
+  if (closing && draft.beforeFirstEnter) return false
+  const sent = renamesSent.get(tabId)
+  if (!closing && sent?.title === action.title && Date.now() - sent.at < 15_000) return false
+  renamesSent.set(tabId, { title: action.title, at: Date.now() })
+  if (!draft.empty) { session.write('\x03'); draft.note('\x03') }
+  setTimeout(() => {
+    if (managedTabs.get(tabId)?.session !== session) return
+    session.write(command)
+    setTimeout(() => { if (managedTabs.get(tabId)?.session === session) session.write('\r') }, 200)
+  }, closing ? 300 : 0)
+  return true
+}
+
+/** Reads the session's name and acts on it: an unnamed tab takes Copilot's name, and a named one renames the session. */
+async function syncSessionName(tabId: string): Promise<boolean> {
+  await readSessionName(tabId)
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab) return false
+  const action = nameSyncAction(tab, knownSessionName(tab))
+  if (action.kind === 'adopt') {
+    tabsState = adoptCopilotTitle(tabsState, tabId, action.title)
+    return true
+  }
+  if (action.kind === 'confirmed') {
+    tabsState = confirmTabRename(tabsState, tabId)
+    return true
+  }
+  if (action.kind === 'rename') sendSessionRename(tabId)
+  return false
+}
+
+async function refreshSessionNames(): Promise<void> {
+  let changed = false
+  for (const tab of [...tabsState.tabs]) {
+    if (!tab.remote && tab.lastSessionId) changed = await syncSessionName(tab.id) || changed
+  }
+  if (!changed) return
+  syncTabState()
+  persistProfileTabs()
+  broadcastState()
+  refreshMenus()
+}
+
+/** Before a tab closes: a rename that is still waiting goes to Copilot now, so the session keeps the tab's name. Skipped
+ * while Copilot is mid-turn, since only Ctrl+C would make room and that would cancel the turn. */
+async function flushSessionName(tabId: string): Promise<void> {
+  await readSessionName(tabId)
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab || nameSyncAction(tab, knownSessionName(tab)).kind !== 'rename' || !sendSessionRename(tabId, true)) return
+  const end = Date.now() + 4_000
+  while (Date.now() < end) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await readSessionName(tabId)
+    if (knownSessionName(tab)?.name === tab.title) return
+  }
+  void writeAppLog(`Copilot did not confirm the new name for ${tabId} before it closed`).catch(() => {})
 }
 
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
@@ -1475,10 +1629,12 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     activityBroadcastTimers.delete(tabId)
     const managed = managedTabs.get(tabId)
     if (managed) {
+      await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before closing: ${String(error)}`))
       await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
       managed.session.removeAllListeners()
       managedTabs.delete(tabId)
     }
+    forgetSessionName(tabId)
     const browser = sessionBrowsers.get(tabId)
     const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
     try { await browser?.dispose() }
@@ -1563,6 +1719,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // refreshing it never reintroduces a second point where this can fail
     // after the healthy process is already gone.
     const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
+    plan.nameSession = tab.autoTitle !== true
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
 
     if (managed) await managed.session.stop()
@@ -1571,7 +1728,11 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // soon as a force-kill timeout fires, ahead of the later 'exit' event
     // that would otherwise copy this into tabsState — relying on tabsState
     // alone here could still be reflecting an earlier cycle's id.
-    const resumeSessionId = managed?.session.lastSessionId ?? bestKnownSessionId
+    let resumeSessionId = managed?.session.lastSessionId ?? bestKnownSessionId
+    if (resumeSessionId && !await copilotSessionStored(resumeSessionId)) {
+      plan.sessionId = resumeSessionId
+      resumeSessionId = null
+    }
     tab = tabsState.tabs.find((candidate) => candidate.id === tabId) ?? tab
     managed?.session.removeAllListeners()
     // Capture the terminal size as the very last step before constructing
@@ -1599,7 +1760,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         spawnPty: spawnNodePty,
         sessionId: deterministicSessionId,
         discoverSessionIdFromOutput: deterministicSessionId === null,
-        ...(finalized.worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName: finalized.worktreeName } } : {}),
+        ...(finalized.worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName: finalized.worktreeName,
+          ...(plan.nameSession === false ? { timeoutMs: Number.POSITIVE_INFINITY } : {}) } } : {}),
         monitorSessionPermissions: true,
         ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
       })
@@ -1615,6 +1777,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       throw error
     }
     managedTabs.set(tabId, { session })
+    trackSessionName(tabId, { ...process.env, ...plan.env }, false)
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null, activityDetail: null, sessionCwd: null, worktree: null } : candidate) }
     sessionCwdGenerations.set(tabId, (sessionCwdGenerations.get(tabId) ?? 0) + 1)
     sessionWorktreeGitDirs.delete(tabId)
@@ -2510,6 +2673,7 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof data !== 'string') throw new Error('Invalid pty input')
   if (!ownsSessionTerminal(event, tabId)) return
+  promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {
@@ -3020,6 +3184,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
+    setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')
     const recovery = await recoverMigrationReport(app.getPath('userData'))
     migrationService = new MigrationService({

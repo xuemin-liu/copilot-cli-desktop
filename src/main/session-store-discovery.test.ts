@@ -108,3 +108,23 @@ test('discovery gives up at the timeout and stops when cancelled', async () => {
     assert.equal(await missing.find(), null, 'a missing store is not an error')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('an unnamed launch keeps looking past the usual timeout, less often, until its first prompt stores the session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'store-discovery-'))
+  try {
+    const since = Date.now()
+    const lists: number[] = []
+    const discovery = new SessionStoreDiscovery({ root, since, launchCwd: join(root, 'project'), worktreeName: 'desktop-unnamed-abc123',
+      pollMs: 10, slowAfterMs: 100, slowPollMs: 150, timeoutMs: Number.POSITIVE_INFINITY,
+      listSessions: async (path) => { lists.push(Date.now()); const { readdir } = await import('node:fs/promises'); return new Set(await readdir(path)) } })
+    await discovery.ready()
+    const found = discovery.find()
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const quick = lists.filter((at, index) => index > 1 && at - lists[index - 1]! < 60).length
+    const slow = lists.filter((at, index) => index > 1 && at - lists[index - 1]! >= 120).length
+    assert.ok(quick > 3 && slow >= 1, `polls quickly at first, then slowly: ${JSON.stringify(lists.map((at, index) => index ? at - lists[index - 1]! : 0))}`)
+    // The first prompt stores the session, long after a 90 s default would have given up.
+    await session(root, '77777777-7777-4777-8777-777777777777', start(since + 500, join(root, 'project.worktrees', 'desktop-unnamed-abc123')))
+    assert.equal(await found, '77777777-7777-4777-8777-777777777777')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

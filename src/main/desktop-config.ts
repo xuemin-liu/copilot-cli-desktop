@@ -145,6 +145,8 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
       ...(lastSessionId && tab.sideChat !== true && isSessionPermissionMode(tab.sessionPermissionMode)
         ? { sessionPermissionMode: tab.sessionPermissionMode }
         : {}),
+      ...(typeof tab.autoTitle === 'boolean' ? { autoTitle: tab.autoTitle } : {}),
+      ...(tab.renamePending === true ? { renamePending: true as const } : {}),
       ...(tab.sideChat === true ? {
         sideChat: true as const,
         ...(typeof tab.sideParentSessionId === 'string' && tab.sideParentSessionId.length <= 128
