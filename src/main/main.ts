@@ -1506,6 +1506,8 @@ const sessionNameRoots = new Map<string, string>()
 const promptDrafts = new Map<string, PromptDraft>()
 const copilotNames = new Map<string, { sessionId: string; mtimeMs: number; value: CopilotSessionName | null }>()
 const renamesSent = new Map<string, { title: string; at: number }>()
+/** Terminal input that arrived while the desktop was typing `/rename` into that tab's session, waiting for its Enter. */
+const heldInput = new Map<string, string[]>()
 
 /** A new process for the tab: its prompt starts empty, or on the resume picker. */
 function trackSessionName(tabId: string, env: NodeJS.ProcessEnv, picker: boolean): void {
@@ -1515,6 +1517,7 @@ function trackSessionName(tabId: string, env: NodeJS.ProcessEnv, picker: boolean
 }
 
 function forgetSessionName(tabId: string): void {
+  heldInput.delete(tabId)
   sessionNameRoots.delete(tabId)
   promptDrafts.delete(tabId)
   copilotNames.delete(tabId)
@@ -1556,14 +1559,27 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   if (!ready || (!closing && (!draft.empty || !draft.quiet()))) return false
   // Ctrl+C on the resume picker would leave it, not clear a prompt.
   if (closing && draft.beforeFirstEnter) return false
+  if (heldInput.has(tabId)) return false
   const sent = renamesSent.get(tabId)
   if (!closing && sent?.title === action.title && Date.now() - sent.at < 15_000) return false
   renamesSent.set(tabId, { title: action.title, at: Date.now() })
+  // From here until its Enter, keys the person presses are held back, then passed on in order: typed into the command
+  // they would become part of the name (or of a prompt sent with it).
+  heldInput.set(tabId, [])
+  const release = (): void => {
+    const held = heldInput.get(tabId) ?? []
+    heldInput.delete(tabId)
+    const current = managedTabs.get(tabId)?.session
+    for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
+  }
   if (!draft.empty) { session.write('\x03'); draft.note('\x03') }
   setTimeout(() => {
-    if (managedTabs.get(tabId)?.session !== session) return
+    if (managedTabs.get(tabId)?.session !== session) { release(); return }
     session.write(command)
-    setTimeout(() => { if (managedTabs.get(tabId)?.session === session) session.write('\r') }, 200)
+    setTimeout(() => {
+      if (managedTabs.get(tabId)?.session === session) session.write('\r')
+      release()
+    }, 200)
   }, closing ? 300 : 0)
   return true
 }
@@ -2673,6 +2689,8 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof data !== 'string') throw new Error('Invalid pty input')
   if (!ownsSessionTerminal(event, tabId)) return
+  const held = heldInput.get(tabId)
+  if (held) { held.push(data); return }
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
 })

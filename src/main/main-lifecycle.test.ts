@@ -1432,6 +1432,33 @@ test('renaming a tab types /rename into an idle session at an empty prompt, and 
   })
 })
 
+test('keys pressed while the desktop is typing /rename wait for its Enter, so they never become part of the name', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    const id = opened.tabs[0]!.id
+    await writeSessionName(directory, opened.tabs[0]!.lastSessionId!, 'Say hello please')
+    await harness.refreshNames()
+    const spawn = harness.spawns[0]!
+    spawn.emitData(' <- open sidebar | / commands\r\n')
+    await pause(2_200)
+    await harness.request('desktop:rename-tab', id, 'Race rename')
+    await waitFor(() => spawn.written, (written) => written.includes('/rename Race rename'), '/rename typed')
+    // The command is on screen and its Enter has not been pressed yet: someone starts typing.
+    await harness.request('desktop:write-tab', id, ' UNSENT_DRAFT')
+    assert.deepEqual(spawn.written, ['/rename Race rename'], 'held back while the command is being typed')
+    await waitFor(() => spawn.written, (written) => written.length === 3, 'held keys passed on')
+    assert.deepEqual(spawn.written, ['/rename Race rename', '\r', ' UNSENT_DRAFT'], 'the rename is sent alone, the keys land in the next prompt')
+    // Those keys are now a draft in the prompt box: nothing more is typed over them.
+    await harness.request('desktop:rename-tab', id, 'Second rename')
+    await pause(2_200)
+    await harness.refreshNames()
+    await pause(400)
+    assert.deepEqual(spawn.written, ['/rename Race rename', '\r', ' UNSENT_DRAFT'])
+  })
+})
+
 test('closing a tab whose rename is still waiting clears the draft and renames the session before it stops', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)

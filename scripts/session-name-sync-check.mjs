@@ -79,13 +79,24 @@ export async function runSessionNameCheck() {
     assert.equal((await tab(fresh.id)).autoTitle, false)
     results.renameReachesCopilot = true
 
+    // 3b. Keys pressed while the desktop is typing /rename wait for its Enter instead of becoming part of the name.
+    await delay(2_500)
+    await ui(`window.copilotDesktop.renameTab(${JSON.stringify(fresh.id)}, 'Race rename')`)
+    await until(async () => (await ui(`window.copilotDesktop.getTabBacklog(${JSON.stringify(fresh.id)})`)).includes('/rename Race rename'), 'command echoed', 10_000)
+    await write(fresh.id, ' UNSENT_DRAFT')
+    await until(async () => (await copilotName(fresh.lastSessionId)).name === 'Race rename', 'rename reached Copilot')
+    await delay(2_000)
+    assert.equal((await copilotName(fresh.lastSessionId)).name, 'Race rename', 'the keys did not join the name')
+    await write(fresh.id, '\x03')
+    results.keysDuringRename = true
+
     // 4. A rename while a draft sits in the prompt waits; closing the tab clears the draft and renames before stopping.
     // The draft never reaches the model.
     const before = await modelRequests()
     await write(fresh.id, 'unsent draft words')
     await ui(`window.copilotDesktop.renameTab(${JSON.stringify(fresh.id)}, 'Closed with this name')`)
     await delay(4_000)
-    assert.equal((await copilotName(fresh.lastSessionId)).name, 'Login race fix', 'a draft holds the rename back')
+    assert.equal((await copilotName(fresh.lastSessionId)).name, 'Race rename', 'a draft holds the rename back')
     await screenshot('02-draft-waiting')
     await ui(`window.copilotDesktop.closeTab(${JSON.stringify(fresh.id)})`)
     await until(async () => !(await tab(fresh.id)), 'tab closed')
