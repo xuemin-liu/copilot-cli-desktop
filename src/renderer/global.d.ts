@@ -66,9 +66,12 @@ export interface CopilotDesktopBridge {
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
-  createTab(resumeMode?: ResumeMode | null, profileId?: string): Promise<DesktopState>
+  /** `title` names the session; empty or absent uses the project's name. */
+  createTab(resumeMode?: ResumeMode | null, profileId?: string, title?: string | null): Promise<DesktopState>
   forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState>
-  createTabWithAttachments(): Promise<DesktopState>
+  createTabWithAttachments(title?: string | null): Promise<DesktopState>
+  /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
+  onNewSessionRequest(listener: (attachments: boolean) => void): () => void
   fanOut(profileId: string, label: string, count: number): Promise<FanOutResult>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>

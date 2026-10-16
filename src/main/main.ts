@@ -93,6 +93,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
+import { newSessionTitle } from './session-name.js'
 import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
 import type { FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
@@ -266,6 +267,13 @@ let gitServiceStopped = false
 function toggleGitPanel(): void {
   const window = mainWindow
   if (window && !window.isDestroyed()) window.webContents.send('desktop:git-toggle')
+}
+/** Ask the main window for its new-session dialog, where the session is named before it starts (menu and tray). */
+function requestNewSession(attachments: boolean): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  restoreMainWindow()
+  window.webContents.send('desktop:new-session-request', attachments)
 }
 
 function gitServiceInstance(): GitService | null {
@@ -836,7 +844,7 @@ function rebuildTrayMenu(): void {
     {
       label: 'New Session Tab',
       enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-      click: () => observe(createSessionTab(), 'Could not create session tab'),
+      click: () => requestNewSession(false),
     },
     {
       label: 'Restart Active Session',
@@ -1410,7 +1418,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
   return operation
 }
 
-async function createSessionWithAttachments(): Promise<DesktopState> {
+async function createSessionWithAttachments(title: string | null = null): Promise<DesktopState> {
   if (!mainWindow) return snapshot()
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: 'Attach files to a new Copilot session',
@@ -1418,7 +1426,7 @@ async function createSessionWithAttachments(): Promise<DesktopState> {
     defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
   })
   if (selection.canceled || selection.filePaths.length === 0) return snapshot()
-  return createSessionTab(undefined, 'new', null, selection.filePaths.slice(0, 20))
+  return createSessionTab(undefined, 'new', null, selection.filePaths.slice(0, 20), null, title)
 }
 
 function activateSessionTab(tabId: string): DesktopState {
@@ -2018,7 +2026,7 @@ function installApplicationMenu(): void {
           label: 'New Session Tab',
           accelerator: 'CmdOrCtrl+T',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => observe(createSessionTab(), 'Could not create session tab'),
+          click: () => requestNewSession(false),
         },
         {
           label: 'Close Session Tab',
@@ -2039,7 +2047,7 @@ function installApplicationMenu(): void {
         {
           label: 'New Session with Attachments…',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => observe(createSessionWithAttachments(), 'Could not create attached session'),
+          click: () => requestNewSession(true),
         },
         {
           label: 'Restart Active Session',
@@ -2448,18 +2456,19 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
-ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown) => {
+ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
-  if (profileId === undefined) return createSessionTab(undefined, override)
+  const sessionTitle = newSessionTitle(title)
+  if (profileId === undefined) return createSessionTab(undefined, override, null, [], null, sessionTitle)
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  return createSessionTab(profile, override)
+  return createSessionTab(profile, override, null, [], null, sessionTitle)
 })
-ipcMain.handle('desktop:create-tab-with-attachments', (event) => {
+ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown) => {
   assertTrustedIpcSender(event)
-  return createSessionWithAttachments()
+  return createSessionWithAttachments(newSessionTitle(title))
 })
 ipcMain.handle('desktop:fan-out', (event, profileId: unknown, label: unknown, count: unknown) => {
   assertTrustedIpcSender(event)

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { open, readdir } from 'node:fs/promises'
 import { join, win32 } from 'node:path'
 import { isValidSessionId } from './session-id.js'
+import { worktreeNamePrefix } from './session-name.js'
 
 /**
  * Finds the id of a session the desktop could not name itself. Copilot CLI refuses `--worktree` together with
@@ -64,13 +65,10 @@ export async function readSessionStart(path: string): Promise<SessionStartRecord
   }
 }
 
-const MAX_SLUG_CHARS = 24
-
 /** A worktree (and branch) name for a launch: `desktop-<title slug>-<6 hex>`. Only characters git accepts in a branch
  * name, bounded, and unique per launch, so a session's cwd identifies the launch that asked for it. */
 export function worktreeNameFor(title: string, random: () => string = () => randomBytes(3).toString('hex')): string {
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, MAX_SLUG_CHARS).replace(/-+$/, '')
-  return `desktop-${slug || 'session'}-${random()}`
+  return `${worktreeNamePrefix(title)}-${random()}`
 }
 
 /** The last path segment, ignoring a trailing separator. */

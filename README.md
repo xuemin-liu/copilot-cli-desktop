@@ -64,8 +64,11 @@ handle, only input/output/resize events.
   private per-session log capture under the app's user-data directory. Logs
   rotate at 5 MiB; launch directories are limited to 7 days and the latest 20.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
-  each, with lifecycle badges (starting / running / needs-approval / stopping
-  / completed / crashed) restored per workspace profile.
+  each. A new session is named first: the dialog shows the project's name
+  greyed out, OK keeps it and typing replaces it; in a project that starts
+  sessions in a Git worktree, it also previews the worktree name. Sessions
+  have lifecycle badges (starting / running / needs-approval / stopping
+  / completed / crashed) and are restored per workspace profile.
 - **Paste screenshots with Ctrl+V** while Copilot's prompt is ready. Text uses
   xterm's normal paste handling; image-only paste invokes Copilot's native Alt+V
   attachment shortcut. Alt+V also reaches Copilot directly. A clipboard containing
