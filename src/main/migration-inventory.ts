@@ -108,6 +108,7 @@ export async function portableDesktop(path: string): Promise<Buffer> {
   const config = await readDesktopConfig(path)
   return jsonBytes({ closeBehavior: config.closeBehavior, trayEnabled: config.trayEnabled, notifications: config.notifications,
     automaticUpdateChecks: config.automaticUpdateChecks, globalShortcutEnabled: config.globalShortcutEnabled,
+    worktreeTimeoutMinutes: config.worktreeTimeoutMinutes,
     provider: { type: config.provider.type, model: config.provider.model, offline: config.provider.offline },
     profiles: config.profiles.map(({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs }) =>
       ({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs })) })

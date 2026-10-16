@@ -51,6 +51,20 @@ test('readDesktopConfig returns defaults when the file does not exist', async ()
   })
 })
 
+test('worktree timeout defaults to ten minutes, validates saved values and persists changes', async () => {
+  assert.equal(normalizeDesktopConfig({}).worktreeTimeoutMinutes, 10)
+  for (const value of [null, '20', 0, -1, 1.5, 1441, NaN, Infinity]) {
+    assert.equal(normalizeDesktopConfig({ worktreeTimeoutMinutes: value }).worktreeTimeoutMinutes, 10)
+  }
+  for (const value of [1, 25, 1440]) {
+    assert.equal(normalizeDesktopConfig({ worktreeTimeoutMinutes: value }).worktreeTimeoutMinutes, value)
+  }
+  await withTempFile(async filename => {
+    await writeDesktopConfig(filename, { ...DEFAULT_DESKTOP_CONFIG, worktreeTimeoutMinutes: 25 })
+    assert.equal((await readDesktopConfig(filename)).worktreeTimeoutMinutes, 25)
+  })
+})
+
 test('activateWorkspaceProfile creates a profile on first use and reuses it afterward', () => {
   const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
   const first = activateWorkspaceProfile(config, 'C:\\work\\project-a')

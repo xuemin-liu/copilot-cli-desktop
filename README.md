@@ -104,9 +104,10 @@ handle, only input/output/resize events.
 - Per-workspace Copilot launch profiles for model, reasoning effort, context
   tier, custom agent, interactive/plan/autopilot/plan-then-autopilot mode,
   AI-credit and continuation limits, worktrees, screen readers, remote control,
-  and session-export privacy. A fresh session with the worktree option lets the
-  CLI choose its session id (the CLI refuses `--worktree` together with
-  `--session-id`). The desktop names the worktree and its branch
+  and session-export privacy. The desktop creates a new worktree before launching
+  Copilot in it. **Settings → General → Worktree timeout (minutes)** controls the
+  checkout time limit (default: 10 minutes). A fresh worktree
+  session lets the CLI choose its session id. The desktop names the worktree and its branch
   (`desktop-<session title>-<6 hex>`), finds the session that runs in that
   worktree in the session store within about a minute, then monitors and
   resumes it as usual.
