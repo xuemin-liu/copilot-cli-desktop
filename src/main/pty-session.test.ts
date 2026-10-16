@@ -43,6 +43,25 @@ function fakeSpawnPty(pty: FakePty): SpawnPtyFn {
   return () => pty
 }
 
+test('closing a session aborts a pending worktree preparation before a PTY starts', async () => {
+  let preparing!: () => void
+  const begun = new Promise<void>(resolve => { preparing = resolve })
+  const session = new PtySession({ file: 'copilot', args: [], cwd: 'C:\\work',
+    spawnPty: async (_file, _args, options) => {
+      preparing()
+      await new Promise<never>((_resolve, reject) => {
+        options.signal!.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+      })
+      throw new Error('Unexpected spawn')
+    } })
+  const started = assert.rejects(session.start(), /cancelled/)
+  await begun
+  await session.stop()
+  await started
+  assert.equal(session.processId, null)
+  assert.equal(session.status, 'completed')
+})
+
 test('stop waits for permission drain after the PTY has already exited', async (context) => {
   let release!: () => void
   const drained = new Promise<void>((resolve) => { release = resolve })

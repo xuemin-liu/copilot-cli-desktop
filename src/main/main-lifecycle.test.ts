@@ -64,7 +64,7 @@ interface Harness {
   blockBrowserDispose(work: Promise<void>, started: () => void): void
   request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
   cleanup(): Promise<void>
-  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
+  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; worktreeTimeoutMinutes?: number; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -98,7 +98,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `,
       electron: `
         import { EventEmitter } from 'node:events';
-        export const app = Object.assign(new EventEmitter(), { quitCalls: 0, requestSingleInstanceLock: () => false, quit() { this.quitCalls++; }, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)} });
+        export const app = Object.assign(new EventEmitter(), { quitCalls: 0, requestSingleInstanceLock: () => false, quit() { this.quitCalls++; }, getPath: () => ${JSON.stringify(directory)}, getAppPath: () => ${JSON.stringify(directory)}, getVersion: () => '0.1.44' });
         const handlers = new Map();
         export const ipcMain = { handle: (name, handler) => handlers.set(name, handler), invoke: (name, ...args) => handlers.get(name)(...args) };
         const allWindows = []; let applicationMenu = null;
@@ -130,7 +130,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = {}, Notification = {}, safeStorage = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, Notification = {}, safeStorage = {}, Tray = {};
         export const browserStorageClears = [];
         export const session = { fromPartition(partition) {
           return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>
@@ -165,7 +165,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           const work = nextSpawn; nextSpawn = null; if (work) await work();
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, cwd: options.cwd, env: options.env, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, cwd: options.cwd, env: options.env, worktreeTimeoutMinutes: options.worktreeTimeoutMinutes, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
           return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
@@ -273,6 +273,27 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('worktree timeout settings validate and persist, and new sessions and restarts use the latest value', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id },
+    { ...EMPTY_COPILOT_CAPABILITIES, sessionIdentity: true, toolAllowlist: true })
+  const first = await harness.createMain()
+  assert.equal(harness.spawns[0]!.worktreeTimeoutMinutes, 10)
+  for (const value of [0, -1, 1.5, 1441, '25', null]) {
+    await assert.rejects(harness.requestSettings('desktop-settings:update-preferences', { worktreeTimeoutMinutes: value }), /Invalid desktop preferences/)
+  }
+  const saved = await harness.requestSettings('desktop-settings:update-preferences', { worktreeTimeoutMinutes: 25 }) as { worktreeTimeoutMinutes: number }
+  assert.equal(saved.worktreeTimeoutMinutes, 25)
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).worktreeTimeoutMinutes, 25)
+  await harness.request('desktop:create-tab', 'new', profile.id)
+  assert.equal(harness.spawns.at(-1)!.worktreeTimeoutMinutes, 25)
+  assert.equal(harness.spawns[0]!.worktreeTimeoutMinutes, 10, 'an in-flight launch keeps its captured timeout')
+  await harness.request('desktop:restart-tab', first.activeTabId)
+  assert.equal(harness.spawns.at(-1)!.worktreeTimeoutMinutes, 25)
+}))
 
 test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {
   configure(harness, directory)
