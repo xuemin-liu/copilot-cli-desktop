@@ -93,7 +93,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
-import { newSessionTitle } from './session-name.js'
+import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
@@ -1459,7 +1459,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
   return operation
 }
 
-async function createSessionWithAttachments(title: string | null = null): Promise<DesktopState> {
+async function createSessionWithAttachments(title: string | null = null, options: NewSessionOptions = {}): Promise<DesktopState> {
   if (!mainWindow) return snapshot()
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: 'Attach files to a new Copilot session',
@@ -1467,7 +1467,13 @@ async function createSessionWithAttachments(title: string | null = null): Promis
     defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
   })
   if (selection.canceled || selection.filePaths.length === 0) return snapshot()
-  return createSessionTab(undefined, 'new', null, selection.filePaths.slice(0, 20), null, title)
+  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title)
+}
+
+/** The project with the choices made for one new session in the new-session dialog; the saved project is unchanged. */
+function withSessionChoices(profile: WorkspaceProfile | null, options: NewSessionOptions): WorkspaceProfile | null {
+  if (!profile || options.worktree === undefined) return profile
+  return { ...profile, launch: { ...profile.launch, worktree: options.worktree } }
 }
 
 function activateSessionTab(tabId: string): DesktopState {
@@ -2635,19 +2641,20 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
-ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown) => {
+ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
   const sessionTitle = newSessionTitle(title)
-  if (profileId === undefined) return createSessionTab(undefined, override, null, [], null, sessionTitle)
+  const choices = newSessionOptions(options)
+  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle)
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  return createSessionTab(profile, override, null, [], null, sessionTitle)
+  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle)
 })
-ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown) => {
+ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
-  return createSessionWithAttachments(newSessionTitle(title))
+  return createSessionWithAttachments(newSessionTitle(title), newSessionOptions(options))
 })
 ipcMain.handle('desktop:fan-out', (event, profileId: unknown, label: unknown, count: unknown) => {
   assertTrustedIpcSender(event)

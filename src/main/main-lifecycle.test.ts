@@ -1500,6 +1500,28 @@ test('a saved tab whose session Copilot never stored starts fresh under the same
   assert.ok(harness.spawns[1]!.args.includes(`--resume=${SOURCE}`), harness.spawns[1]!.args.join(' '))
 }))
 
+test('a new session can choose its own worktree over the project setting, either way, without changing the project', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    await harness.createMain()
+    assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--worktree')), 'the project does not use worktrees')
+    await harness.request('desktop:create-tab', null, profile.id, 'In a worktree', { worktree: true })
+    const worktreeArg = harness.spawns[1]!.args.find((arg) => arg.startsWith('--worktree='))
+    assert.match(worktreeArg ?? '', /^--worktree=desktop-in-a-worktree-[0-9a-f]{6}$/, harness.spawns[1]!.args.join(' '))
+    assert.ok(!harness.spawns[1]!.args.some((arg) => arg.startsWith('--session-id=')), 'Copilot refuses --session-id with --worktree')
+    assert.equal(profile.launch.worktree, false, 'the project setting is unchanged')
+    // The other way round: a worktree project, one session in the project folder.
+    profile.launch = { ...profile.launch, worktree: true }
+    await harness.request('desktop:create-tab', null, profile.id, 'In the folder', { worktree: false })
+    assert.ok(!harness.spawns[2]!.args.some((arg) => arg.startsWith('--worktree')), harness.spawns[2]!.args.join(' '))
+    assert.ok(harness.spawns[2]!.args.some((arg) => arg.startsWith('--session-id=')))
+    await harness.request('desktop:create-tab', null, profile.id, 'Project default')
+    assert.ok(harness.spawns[3]!.args.some((arg) => arg.startsWith('--worktree=')), 'no choice: the project setting applies')
+    await assert.rejects(async () => harness.request('desktop:create-tab', null, profile.id, 'Bad', { worktree: 'yes' }), /Invalid session options/)
+  })
+})
+
 test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
   await fixture(async (harness, directory) => {
     const previousWait = process.env.DESKTOP_FAN_OUT_WAIT_MS

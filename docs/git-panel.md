@@ -171,7 +171,9 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
 
 ## Worktree sessions
 
-A session started with the launch option **Start fresh sessions in an isolated Git worktree** runs in a
+A session started with **Work in a new Git worktree** ticked in the new-session dialog runs in a separate
+worktree. The box starts from the project setting **New sessions work in an isolated Git worktree by default**,
+and each new session can choose either way. Such a session runs in a
 linked worktree beside the repository (`<repo>.worktrees\<name>`; the desktop names it
 `desktop-<session title>-<6 hex>`, which is also its branch). The desktop learns where a session runs from
 the session's own event log and checks it on disk, without running git: the folder's `.git` must be a file

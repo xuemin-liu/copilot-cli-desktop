@@ -42,7 +42,9 @@ type InputDialog =
   | { kind: 'fork'; tabId: string; value: string; sourceSessionId: string; pending: boolean; error: string | null }
   | { kind: 'fan-out'; value: string; count: number; pending: boolean; error: string | null }
   /** Names a session before it starts; `profileId` null means the active project. */
-  | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null }
+  | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null
+      /** Whether this session starts in its own worktree; null until changed, which means the project's setting. */
+      worktree: boolean | null }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
@@ -61,9 +63,11 @@ export function App(): JSX.Element {
     ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
     : null
   const newSessionDefault = newSessionProfile?.name ?? null
-  // Only a fresh session gets one; 'continue' and the picker resume an earlier session where it ran.
-  const newSessionWorktree = Boolean(newSessionProfile?.launch?.worktree)
-    && (inputDialog?.kind === 'new-session' && inputDialog.attachments || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume')
+  // Only a fresh session can get one; 'continue' and the picker resume an earlier session where it ran.
+  const newSessionFresh = inputDialog?.kind === 'new-session' && inputDialog.attachments
+    || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume'
+  const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh
+    && (inputDialog.worktree ?? Boolean(newSessionProfile?.launch?.worktree))
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
@@ -81,7 +85,7 @@ export function App(): JSX.Element {
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
-    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', pending: false, error: null })
+    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, pending: false, error: null })
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -153,9 +157,11 @@ export function App(): JSX.Element {
     if (inputDialog.kind === 'new-session') {
       // An empty name keeps the default shown in the box: the project's name.
       setInputDialog({ ...inputDialog, pending: true, error: null })
+      // Only a choice made here is sent; otherwise the project's setting applies.
+      const options = inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }
       finish(inputDialog.attachments
-        ? window.copilotDesktop.createTabWithAttachments(value || null)
-        : window.copilotDesktop.createTab(null, inputDialog.profileId ?? undefined, value || null))
+        ? window.copilotDesktop.createTabWithAttachments(value || null, options)
+        : window.copilotDesktop.createTab(null, inputDialog.profileId ?? undefined, value || null, options))
       return
     }
     if (!value) {
@@ -393,6 +399,13 @@ export function App(): JSX.Element {
               disabled={inputDialog.pending}
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
             />
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
+              <label className="input-dialog-check" title={newSessionFresh ? undefined : 'This project resumes an earlier session, which keeps the folder it ran in.'}>
+                <input type="checkbox" checked={newSessionWorktree} disabled={inputDialog.pending || !newSessionFresh}
+                  onChange={(event) => setInputDialog({ ...inputDialog, worktree: event.target.checked, error: null })} />
+                Work in a new Git worktree
+              </label>
+            )}
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
               <p className="fork-hint">
                 Leave it empty and Copilot names the session from your first prompt; until then the tab shows “{newSessionDefault}”.
