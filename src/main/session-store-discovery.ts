@@ -30,6 +30,9 @@ export interface StoreDiscoveryOptions {
   /** Tests replace the directory listing to control its timing. */
   listSessions?(root: string): Promise<Set<string>>
   pollMs?: number
+  /** After this long without a match, look less often: an unnamed session may not be stored for a long time. */
+  slowAfterMs?: number
+  slowPollMs?: number
   timeoutMs?: number
   /** A small tolerance for clocks: the CLI stamps its own time. */
   slackMs?: number
@@ -96,6 +99,8 @@ export class SessionStoreDiscovery {
   private readonly list: (root: string) => Promise<Set<string>>
   private cancelled = false
   private readonly pollMs: number
+  private readonly slowAfterMs: number
+  private readonly slowPollMs: number
   private readonly timeoutMs: number
   private readonly slackMs: number
 
@@ -103,6 +108,8 @@ export class SessionStoreDiscovery {
     this.list = options.listSessions ?? listSessionIds
     this.baseline = this.list(options.root)
     this.pollMs = options.pollMs ?? 500
+    this.slowAfterMs = options.slowAfterMs ?? 90_000
+    this.slowPollMs = options.slowPollMs ?? 3_000
     this.timeoutMs = options.timeoutMs ?? 90_000
     this.slackMs = options.slackMs ?? 5_000
   }
@@ -118,7 +125,8 @@ export class SessionStoreDiscovery {
 
   async find(): Promise<string | null> {
     const known = new Set(await this.baseline)
-    const deadline = Date.now() + this.timeoutMs
+    const begun = Date.now()
+    const deadline = begun + this.timeoutMs
     while (!this.cancelled && Date.now() < deadline) {
       for (const id of await this.list(this.options.root)) {
         if (known.has(id)) continue
@@ -133,7 +141,7 @@ export class SessionStoreDiscovery {
         if (this.cancelled) return null
         return id
       }
-      await new Promise((resolve) => setTimeout(resolve, this.pollMs))
+      await new Promise((resolve) => setTimeout(resolve, Date.now() - begun >= this.slowAfterMs ? this.slowPollMs : this.pollMs))
     }
     return null
   }

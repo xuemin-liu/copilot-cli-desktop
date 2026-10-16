@@ -26,6 +26,10 @@ export interface NewTabInput {
   sideChat?: true
   sideParentTabId?: string
   canFork?: boolean
+  /** Nobody named the session: the title follows the name Copilot gives it. */
+  autoTitle?: boolean
+  /** A rename made in the desktop that Copilot has not confirmed yet. */
+  renamePending?: boolean
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
@@ -52,6 +56,8 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     ...(input.sideChat ? { sideChat: true as const } : {}),
     ...(input.sideParentTabId ? { sideParentTabId: input.sideParentTabId } : {}),
     ...(input.canFork !== undefined ? { canFork: input.canFork } : {}),
+    ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
+    ...(input.renamePending ? { renamePending: true as const } : {}),
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
@@ -139,12 +145,30 @@ export function setTabPermissionMode(
   }
 }
 
+/** Someone named the tab: from now on the session's Copilot name follows the tab, not the other way round. */
 export function renameTab(state: TabsState, tabId: string, title: string): TabsState {
   const normalized = title.trim().slice(0, 120) || 'Copilot'
   return {
     ...state,
-    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, title: normalized, lastActivityAt: Date.now() } : tab)),
+    tabs: state.tabs.map((tab) => (tab.id === tabId ? { ...tab, title: normalized, autoTitle: false, renamePending: true, lastActivityAt: Date.now() } : tab)),
   }
+}
+
+/** Copilot reports the name the tab was given: nothing more to send. */
+export function confirmTabRename(state: TabsState, tabId: string): TabsState {
+  return { ...state, tabs: state.tabs.map((tab) => {
+    if (tab.id !== tabId || !tab.renamePending) return tab
+    const { renamePending: _done, ...rest } = tab
+    return rest
+  }) }
+}
+
+/** Copilot named an unnamed session: the tab shows that name and keeps following it. Nobody did anything, so the tab's
+ * place in the activity order stays. */
+export function adoptCopilotTitle(state: TabsState, tabId: string, title: string): TabsState {
+  const normalized = title.trim().slice(0, 120)
+  if (!normalized) return state
+  return { ...state, tabs: state.tabs.map((tab) => (tab.id === tabId && tab.autoTitle ? { ...tab, title: normalized } : tab)) }
 }
 
 export function touchTab(state: TabsState, tabId: string, at = Date.now()): TabsState {

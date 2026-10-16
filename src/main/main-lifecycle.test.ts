@@ -34,6 +34,8 @@ interface Harness {
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
+  /** One pass of the session-name poll, which the app runs every few seconds once ready. */
+  refreshNames(): Promise<void>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
   restore(): Promise<void>
   restoreSaved(): Promise<void>
@@ -216,6 +218,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
+          refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForProfile,
           restoreSaved: restoreSavedWorkspaceTabs,
@@ -1009,6 +1012,8 @@ test('startup restores all saved workspaces and retains the selected workspace',
   const unused = createWorkspaceProfile(join(directory, 'unused'))
   profile.tabs = [{ title: 'First workspace', lastSessionId: SOURCE }]
   second.tabs = [{ title: 'Second workspace', lastSessionId: FORK }]
+  // Both sessions are in Copilot's store, so both resume.
+  for (const id of [SOURCE, FORK]) { await mkdir(join(directory, 'session-state', id), { recursive: true }); await writeFile(join(directory, 'session-state', id, 'events.jsonl'), '{"type":"session.start"}\n') }
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, second, unused], activeProfileId: profile.id }, capabilities)
   await harness.restoreSaved()
   const state = await harness.request('desktop:get-state')
@@ -1302,7 +1307,7 @@ test('remote tabs are never persisted as restorable local sessions', async () =>
   })
 })
 
-test('a fresh worktree launch carries --name but no --session-id, and adopts the id the CLI writes to the store', async () => {
+test('a fresh worktree launch carries no --session-id, a --name only when named, and adopts the id the CLI writes to the store', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)
     profile.launch = { ...profile.launch, worktree: true }
@@ -1315,7 +1320,8 @@ test('a fresh worktree launch carries --name but no --session-id, and adopts the
     assert.ok(worktreeArg, args.join(' '))
     const worktreeName = worktreeArg.slice('--worktree='.length)
     assert.match(worktreeName, /^desktop-[a-z0-9-]+-[0-9a-f]{6}$/, 'the desktop names the worktree')
-    assert.ok(args.some((arg) => arg.startsWith('--name=')), 'the session is still named')
+    assert.ok(!args.some((arg) => arg.startsWith('--name=')), 'nobody named the startup session, so Copilot names it')
+    assert.equal(opened.tabs[0]?.autoTitle, true)
     assert.ok(!args.some((arg) => arg.startsWith('--session-id=')), 'Copilot refuses --session-id with --worktree')
     assert.ok(!args.some((arg) => arg.startsWith('--resume')), 'a fresh launch does not resume')
     assert.equal(opened.tabs[0]?.lastSessionId, null)
@@ -1341,6 +1347,158 @@ test('a fresh worktree launch carries --name but no --session-id, and adopts the
     assert.equal(state.tabs[0]?.sessionPermissionMode, 'assisted', 'the permission monitor follows the discovered session')
   })
 })
+
+/** Copilot keeps a session's name in `<COPILOT_HOME>/session-state/<id>/workspace.yaml`; the fixture's COPILOT_HOME is `directory`. */
+async function writeSessionName(directory: string, sessionId: string, name: string): Promise<void> {
+  await mkdir(join(directory, 'session-state', sessionId), { recursive: true })
+  await writeFile(join(directory, 'session-state', sessionId, 'workspace.yaml'), `id: ${sessionId}\nname: ${name}\nuser_named: false\n`)
+}
+
+async function waitFor<T>(read: () => Promise<T> | T, done: (value: T) => boolean, label: string, timeoutMs = 8_000): Promise<T> {
+  const end = Date.now() + timeoutMs
+  let value = await read()
+  while (!done(value)) {
+    if (Date.now() > end) throw new Error(`Timed out: ${label} (last: ${JSON.stringify(value)})`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    value = await read()
+  }
+  return value
+}
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('an unnamed session starts without --name and its tab takes the name Copilot gives it', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    const tab = opened.tabs[0]!
+    assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--name=')), harness.spawns[0]!.args.join(' '))
+    assert.ok(harness.spawns[0]!.args.some((arg) => arg.startsWith('--session-id=')))
+    assert.equal(tab.title, profile.name, 'the project name shows until Copilot names it')
+    assert.equal(tab.autoTitle, true)
+    await harness.refreshNames()
+    assert.equal((await harness.request('desktop:get-state')).tabs[0]?.title, profile.name, 'no name yet: the tab keeps the project name')
+    await writeSessionName(directory, tab.lastSessionId!, 'Say hello please')
+    await harness.refreshNames()
+    const named = await harness.request('desktop:get-state')
+    assert.equal(named.tabs[0]?.title, 'Say hello please', 'the tab took the name Copilot gave the session')
+    assert.equal(named.tabs[0]?.autoTitle, true, 'it keeps following that name')
+    assert.deepEqual(harness.spawns[0]!.written, [], 'nothing is typed for an unnamed session')
+    // A session named in the dialog carries its name.
+    await harness.request('desktop:create-tab', null, profile.id, 'Fix login')
+    assert.ok(harness.spawns[1]!.args.includes('--name=Fix login'), harness.spawns[1]!.args.join(' '))
+    assert.equal((await harness.request('desktop:get-state')).tabs[1]?.autoTitle, false)
+  })
+})
+
+test('renaming a tab types /rename into an idle session at an empty prompt, and waits while the prompt holds a draft', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    const id = opened.tabs[0]!.id
+    const sessionId = opened.tabs[0]!.lastSessionId!
+    await writeSessionName(directory, sessionId, 'Say hello please')
+    await harness.refreshNames()
+    const spawn = harness.spawns[0]!
+    spawn.emitData('> \r\n <- open sidebar | / commands\r\n')
+
+    // A draft in the prompt box: nothing is typed, since the draft would be sent with the command.
+    await harness.request('desktop:write-tab', id, 'half a thought')
+    await harness.request('desktop:rename-tab', id, 'Fix login race')
+    await pause(2_200)
+    await harness.refreshNames()
+    await pause(400)
+    assert.deepEqual(spawn.written, ['half a thought'], 'a draft holds the rename back')
+    const renamed = await harness.request('desktop:get-state')
+    assert.equal(renamed.tabs[0]?.title, 'Fix login race')
+    assert.equal(renamed.tabs[0]?.autoTitle, false, 'the tab no longer follows the Copilot name')
+
+    // Right after Enter the prompt may be starting a turn; once things are quiet the rename goes through.
+    await harness.request('desktop:write-tab', id, '\r')
+    await harness.refreshNames()
+    await pause(400)
+    assert.ok(!spawn.written.includes('/rename Fix login race'), 'not right after Enter')
+    await pause(2_000)
+    await harness.refreshNames()
+    await waitFor(() => spawn.written, (written) => written.at(-1) === '\r' && written.includes('/rename Fix login race'), '/rename typed')
+    assert.deepEqual(spawn.written.slice(-3), ['\r', '/rename Fix login race', '\r'])
+    // Copilot confirms the name; nothing is typed again.
+    await writeSessionName(directory, sessionId, 'Fix login race')
+    await harness.refreshNames()
+    await pause(400)
+    assert.equal(spawn.written.filter((data) => data.startsWith('/rename')).length, 1)
+  })
+})
+
+test('keys pressed while the desktop is typing /rename wait for its Enter, so they never become part of the name', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    const id = opened.tabs[0]!.id
+    await writeSessionName(directory, opened.tabs[0]!.lastSessionId!, 'Say hello please')
+    await harness.refreshNames()
+    const spawn = harness.spawns[0]!
+    spawn.emitData(' <- open sidebar | / commands\r\n')
+    await pause(2_200)
+    await harness.request('desktop:rename-tab', id, 'Race rename')
+    await waitFor(() => spawn.written, (written) => written.includes('/rename Race rename'), '/rename typed')
+    // The command is on screen and its Enter has not been pressed yet: someone starts typing.
+    await harness.request('desktop:write-tab', id, ' UNSENT_DRAFT')
+    assert.deepEqual(spawn.written, ['/rename Race rename'], 'held back while the command is being typed')
+    await waitFor(() => spawn.written, (written) => written.length === 3, 'held keys passed on')
+    assert.deepEqual(spawn.written, ['/rename Race rename', '\r', ' UNSENT_DRAFT'], 'the rename is sent alone, the keys land in the next prompt')
+    // Those keys are now a draft in the prompt box: nothing more is typed over them.
+    await harness.request('desktop:rename-tab', id, 'Second rename')
+    await pause(2_200)
+    await harness.refreshNames()
+    await pause(400)
+    assert.deepEqual(spawn.written, ['/rename Race rename', '\r', ' UNSENT_DRAFT'])
+  })
+})
+
+test('closing a tab whose rename is still waiting clears the draft and renames the session before it stops', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    const id = opened.tabs[0]!.id
+    const sessionId = opened.tabs[0]!.lastSessionId!
+    await writeSessionName(directory, sessionId, 'Say hello please')
+    await harness.refreshNames()
+    const spawn = harness.spawns[0]!
+    spawn.emitData(' <- open sidebar | / commands\r\n')
+    await harness.request('desktop:write-tab', id, 'unsent draft')
+    await harness.request('desktop:rename-tab', id, 'Keep this name')
+    const closing = harness.request('desktop:close-tab', id)
+    await waitFor(() => spawn.written, (written) => written.includes('/rename Keep this name'), '/rename typed on close')
+    assert.deepEqual(spawn.written.slice(0, 3), ['unsent draft', '\x03', '/rename Keep this name'], 'Ctrl+C clears the draft first')
+    assert.equal(spawn.stopped, false, 'the session is still running while it renames')
+    await writeSessionName(directory, sessionId, 'Keep this name')
+    await closing
+    assert.equal(spawn.stopped, true)
+  })
+})
+
+test('a saved tab whose session Copilot never stored starts fresh under the same id instead of failing to resume', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  // Opened without a name and closed before its first prompt: Copilot never stored it.
+  profile.tabs = [{ title: profile.name, lastSessionId: SOURCE, autoTitle: true }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const args = harness.spawns[0]!.args
+  assert.ok(!args.some((arg) => arg.startsWith('--resume')), args.join(' '))
+  assert.ok(args.includes(`--session-id=${SOURCE}`), 'the tab keeps its id')
+  assert.ok(!args.some((arg) => arg.startsWith('--name=')), 'still unnamed')
+  assert.equal((await harness.request('desktop:get-state')).tabs[0]?.lastSessionId, SOURCE)
+  // Once stored, a restart resumes it.
+  await mkdir(join(directory, 'session-state', SOURCE), { recursive: true })
+  await writeFile(join(directory, 'session-state', SOURCE, 'events.jsonl'), '{"type":"session.start"}\n')
+  await harness.request('desktop:restart-tab', (await harness.request('desktop:get-state')).tabs[0]!.id)
+  assert.ok(harness.spawns[1]!.args.includes(`--resume=${SOURCE}`), harness.spawns[1]!.args.join(' '))
+}))
 
 test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
   await fixture(async (harness, directory) => {

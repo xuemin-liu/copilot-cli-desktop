@@ -395,7 +395,7 @@ export function App(): JSX.Element {
             />
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
               <p className="fork-hint">
-                Leave it empty to use “{newSessionDefault}”.
+                Leave it empty and Copilot names the session from your first prompt; until then the tab shows “{newSessionDefault}”.
                 {newSessionWorktree && <> It starts in its own Git worktree and branch, <code>{worktreeNamePrefix(inputDialog.value.trim() || newSessionDefault)}-…</code>, named from this.</>}
               </p>
             )}

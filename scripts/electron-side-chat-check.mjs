@@ -43,7 +43,7 @@ if (process.versions.electron) {
     await mkdir(artifacts, { recursive: true })
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
   }
-  const recordingPath = mode?.flag === '--native-paste' || mode?.flag === '--activity' ? join(artifacts, 'model-requests.jsonl') : undefined
+  const recordingPath = mode?.flag === '--native-paste' || mode?.flag === '--activity' || mode?.flag === '--session-name' ? join(artifacts, 'model-requests.jsonl') : undefined
   if (recordingPath) await writeFile(recordingPath, '')
   const activityMode = mode?.flag === '--activity'
   // The activity check makes the model read one workspace file so the real CLI writes a tool record to its event log.
