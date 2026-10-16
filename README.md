@@ -66,8 +66,9 @@ handle, only input/output/resize events.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
   each. A new session can be named first; left empty, Copilot names it from
   the first prompt and the tab follows that name (until then it shows the
-  project's name, greyed out in the dialog). In a project that starts
-  sessions in a Git worktree, the dialog also previews the worktree name.
+  project's name, greyed out in the dialog). **Work in a new Git worktree**
+  starts that one session in its own worktree and branch (the box starts from
+  the project setting), and the dialog previews the worktree name.
   Renaming a tab renames the Copilot session too, so `copilot --resume
   "<name>"` and Copilot's session list find it by that name after it
   closes; the rename is typed as `/rename` only while the session is idle

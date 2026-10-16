@@ -197,7 +197,7 @@ function WorkspaceProfileEditor({
           checked={launch.worktree}
           onChange={(event) => setLaunch((current) => ({ ...current, worktree: event.target.checked }))}
         />
-        Start fresh sessions in an isolated Git worktree
+        New sessions work in an isolated Git worktree by default (each new session can choose)
       </label>
       <label className="settings-row">
         <input

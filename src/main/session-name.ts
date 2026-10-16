@@ -15,3 +15,17 @@ export function worktreeNamePrefix(title: string): string {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, MAX_SLUG_CHARS).replace(/-+$/, '')
   return `desktop-${slug || 'session'}`
 }
+
+/** Choices made for one new session in the new-session dialog, over the project's defaults. */
+export interface NewSessionOptions {
+  /** Start in its own Git worktree; absent means the project's setting. */
+  worktree?: boolean
+}
+
+export function newSessionOptions(value: unknown): NewSessionOptions {
+  if (value === undefined || value === null) return {}
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session options')
+  const { worktree } = value as Record<string, unknown>
+  if (worktree !== undefined && typeof worktree !== 'boolean') throw new Error('Invalid session options')
+  return worktree === undefined ? {} : { worktree }
+}

@@ -23,7 +23,7 @@ if (!process.versions.electron) {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Session name dialog check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log('New sessions are named in a dialog: the default is greyed out and kept on OK, a typed name replaces it, the menu and Ctrl+T use the same dialog, and a worktree project previews its worktree name.')
+    console.log('New sessions are named in a dialog: the default is greyed out and kept on OK, a typed name replaces it, the menu and Ctrl+T use the same dialog, and a worktree project previews its worktree name, and each session can choose its own worktree.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -48,6 +48,7 @@ if (!process.versions.electron) {
     process.env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
     process.env.COPILOT_HOME = join(directory, 'copilot-home')
     process.env.COPILOT_DISABLE_KEYTAR = '1'
+    await writeFile(join(directory, 'copilot-home', 'config.json'), JSON.stringify({ trustedFolders: [directory] }))
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: process.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     const projects = {}
     for (const name of ['project', 'trees']) {
@@ -62,7 +63,7 @@ if (!process.versions.electron) {
 
     const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const project = createWorkspaceProfile(projects.project)
-    // A project whose fresh sessions start in a worktree. The check never starts one, so no worktree is created.
+    // A project whose fresh sessions start in a worktree. The check never starts one there, so no worktree is created in it.
     const trees = createWorkspaceProfile(projects.trees)
     trees.launch = { ...trees.launch, worktree: true }
     trees.defaultResumeMode = 'new'
@@ -105,7 +106,8 @@ if (!process.versions.electron) {
       if (!form) return null;
       const input = form.querySelector('#input-dialog-value');
       return { title: form.querySelector('h2').innerText, value: input.value, placeholder: input.placeholder, focused: document.activeElement === input,
-        hint: form.querySelector('.fork-hint')?.innerText ?? '', submit: form.querySelector('button[type="submit"]').innerText };
+        hint: form.querySelector('.fork-hint')?.innerText ?? '', submit: form.querySelector('button[type="submit"]').innerText,
+        worktree: form.querySelector('.input-dialog-check input')?.checked ?? null };
     })()`)
     const titles = async () => (await ui('window.copilotDesktop.getState()')).tabs.map(tab => tab.title)
     const results = {}
@@ -121,6 +123,7 @@ if (!process.versions.electron) {
       { title: 'New session', value: '', placeholder: 'project', focused: true, submit: 'Start session' })
     assert.match(shown.hint, /Leave it empty and Copilot names the session from your first prompt; until then the tab shows “project”/)
     assert.doesNotMatch(shown.hint, /worktree/, 'no worktree preview for a project without worktrees')
+    assert.equal(shown.worktree, false, 'the worktree box follows the project setting: off')
     assert.equal(await ui(`getComputedStyle(document.querySelector('#input-dialog-value'), '::placeholder').color !== getComputedStyle(document.querySelector('#input-dialog-value')).color`), true, 'the default is shown greyed out')
     await writeFile(join(out, 'default-name.png'), (await main.webContents.capturePage()).toPNG())
     press('Return')
@@ -159,14 +162,34 @@ if (!process.versions.electron) {
     await until('!!document.querySelector(".input-dialog")', 'dialog for the worktree project')
     shown = await dialog()
     assert.equal(shown.placeholder, 'trees')
+    assert.equal(shown.worktree, true, 'the worktree box follows the project setting: on')
     assert.match(shown.hint, /own Git worktree and branch, desktop-trees-…/)
     type('Fix login race')
     await until(`/desktop-fix-login-race-…/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'preview follows the typed name')
     await writeFile(join(out, 'worktree-preview.png'), (await main.webContents.capturePage()).toPNG())
+    // This one session can work in the project folder instead.
+    await click('.input-dialog-check input')
+    await until(`!document.querySelector('.input-dialog-check input').checked && !/worktree and branch/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'worktree turned off for this session')
+    await click('.input-dialog-check input')
+    await until(`document.querySelector('.input-dialog-check input').checked`, 'worktree turned back on')
     await click('.input-dialog-actions button[type="button"]')
     await until('!document.querySelector(".input-dialog")', 'Cancel closes the dialog')
     assert.equal((await titles()).length, 3)
     results.worktreePreview = true
+
+    // A project without worktrees, one session in a new worktree: tick the box, and the real CLI runs it in one.
+    await click(`[aria-label="New session in ${project.name}"]`)
+    await until('!!document.querySelector(".input-dialog")', 'dialog for one worktree session')
+    type('In a worktree')
+    await click('.input-dialog-check input')
+    await until(`/desktop-in-a-worktree-…/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'preview for the chosen worktree')
+    await writeFile(join(out, 'worktree-chosen.png'), (await main.webContents.capturePage()).toPNG())
+    press('Return')
+    await until(`(async () => (await window.copilotDesktop.getState()).tabs.find(tab => tab.title === 'In a worktree' && tab.worktree))()`, 'the session runs in its own worktree')
+    const worktree = (await ui('window.copilotDesktop.getState()')).tabs.find(tab => tab.title === 'In a worktree').worktree
+    assert.match(worktree.branch ?? '', /^desktop-in-a-worktree-[0-9a-f]{6}$/, JSON.stringify(worktree))
+    assert.equal(JSON.parse(await readFile(join(userData, 'desktop.json'), 'utf8')).profiles.find(entry => entry.id === project.id).launch.worktree, false, 'the project setting is unchanged')
+    results.worktreeChosen = worktree.branch
 
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, ...results }, null, 2))
     app.quit()

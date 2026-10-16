@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { newSessionTitle, worktreeNamePrefix } from './session-name.js'
+import { newSessionOptions, newSessionTitle, worktreeNamePrefix } from './session-name.js'
 import { worktreeNameFor } from './session-store-discovery.js'
 
 test('an empty or missing new-session name means the default, and a typed one is trimmed and bounded', () => {
@@ -21,4 +21,15 @@ test('the dialog previews the same worktree name a launch uses, minus its random
   for (const title of ['project', 'Fix login race', '  --Weird__Title!! (v2) ', 'a'.repeat(100)]) {
     assert.equal(worktreeNameFor(title, () => 'abc123'), `${worktreeNamePrefix(title)}-abc123`)
   }
+})
+
+test('a new session\'s choices are optional booleans; anything else is refused', () => {
+  assert.deepEqual(newSessionOptions(undefined), {})
+  assert.deepEqual(newSessionOptions(null), {})
+  assert.deepEqual(newSessionOptions({}), {})
+  assert.deepEqual(newSessionOptions({ worktree: true }), { worktree: true })
+  assert.deepEqual(newSessionOptions({ worktree: false, extra: 1 }), { worktree: false })
+  assert.throws(() => newSessionOptions({ worktree: 'yes' }), /Invalid session options/)
+  assert.throws(() => newSessionOptions([]), /Invalid session options/)
+  assert.throws(() => newSessionOptions('worktree'), /Invalid session options/)
 })

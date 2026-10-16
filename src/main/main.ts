@@ -93,7 +93,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
-import { newSessionTitle } from './session-name.js'
+import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
@@ -630,6 +630,7 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
@@ -1301,6 +1302,8 @@ async function createSessionTab(
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
+  // A restored tab starts the way it first started.
+  else if (restoredCandidate?.launchWorktree !== undefined) profile = withSessionChoices(profile, { worktree: restoredCandidate.launchWorktree })!
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
 
@@ -1377,6 +1380,7 @@ async function createSessionTab(
     lastSessionId: deterministicSessionId,
     ...sideOptions,
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
+    ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
     autoTitle,
     renamePending: restoredCandidate?.renamePending === true,
   })
@@ -1459,7 +1463,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
   return operation
 }
 
-async function createSessionWithAttachments(title: string | null = null): Promise<DesktopState> {
+async function createSessionWithAttachments(title: string | null = null, options: NewSessionOptions = {}): Promise<DesktopState> {
   if (!mainWindow) return snapshot()
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: 'Attach files to a new Copilot session',
@@ -1467,7 +1471,13 @@ async function createSessionWithAttachments(title: string | null = null): Promis
     defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
   })
   if (selection.canceled || selection.filePaths.length === 0) return snapshot()
-  return createSessionTab(undefined, 'new', null, selection.filePaths.slice(0, 20), null, title)
+  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title)
+}
+
+/** The project with the choices made for one new session in the new-session dialog; the saved project is unchanged. */
+function withSessionChoices(profile: WorkspaceProfile | null, options: NewSessionOptions): WorkspaceProfile | null {
+  if (!profile || options.worktree === undefined) return profile
+  return { ...profile, launch: { ...profile.launch, worktree: options.worktree } }
 }
 
 function activateSessionTab(tabId: string): DesktopState {
@@ -1717,9 +1727,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const sessionPermissionPreset = tab.sideChat
       ? 'read-only'
       : tab.sessionPermissionPreset ?? savedProfile.permissionPreset
+    // The launch is rebuilt from the saved project, but the session keeps the worktree choice it started with.
     const profile = tab.sideChat
       ? sideChatProfile(savedProfile, copilotCapabilities)
-      : { ...savedProfile, permissionPreset: sessionPermissionPreset }
+      : { ...withSessionChoices(savedProfile, tab.launchWorktree === undefined ? {} : { worktree: tab.launchWorktree })!, permissionPreset: sessionPermissionPreset }
 
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
 
@@ -2635,19 +2646,20 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
-ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown) => {
+ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
   const sessionTitle = newSessionTitle(title)
-  if (profileId === undefined) return createSessionTab(undefined, override, null, [], null, sessionTitle)
+  const choices = newSessionOptions(options)
+  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle)
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  return createSessionTab(profile, override, null, [], null, sessionTitle)
+  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle)
 })
-ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown) => {
+ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
-  return createSessionWithAttachments(newSessionTitle(title))
+  return createSessionWithAttachments(newSessionTitle(title), newSessionOptions(options))
 })
 ipcMain.handle('desktop:fan-out', (event, profileId: unknown, label: unknown, count: unknown) => {
   assertTrustedIpcSender(event)

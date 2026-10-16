@@ -61,8 +61,8 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   },
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
-  createTab: (resumeMode, profileId, title) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId, title ?? null),
-  createTabWithAttachments: (title) => ipcRenderer.invoke('desktop:create-tab-with-attachments', title ?? null),
+  createTab: (resumeMode, profileId, title, options) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId, title ?? null, options ?? null),
+  createTabWithAttachments: (title, options) => ipcRenderer.invoke('desktop:create-tab-with-attachments', title ?? null, options ?? null),
   onNewSessionRequest: (listener) => {
     const handler = (_event, attachments) => listener(attachments === true)
     ipcRenderer.on('desktop:new-session-request', handler)
