@@ -6,7 +6,8 @@ import { normalizeBrowserProfileId } from './browser-profile.js'
 
 /** DevTools settings by name, with the JSON-encoded values DevTools saves. */
 type Snapshot = Record<string, string>
-interface Store { values: Snapshot; seen: Record<string, Snapshot> }
+/** `private`: browser profiles whose sessions keep DevTools settings, Local Overrides included, to themselves. */
+interface Store { values: Snapshot; seen: Record<string, Snapshot>; private: string[] }
 
 const STORE_FILE = 'browser-devtools.json'
 
@@ -53,12 +54,13 @@ function applySnapshot(prefs: Json, values: Snapshot): void {
 function loadStore(file: string): Store {
   let saved: unknown
   try { saved = readJson(file) } catch { saved = undefined }
-  const store: Store = { values: {}, seen: {} }
+  const store: Store = { values: {}, seen: {}, private: [] }
   if (!isRecord(saved)) return store
   const strings = (value: unknown): Snapshot => isRecord(value)
     ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) : {}
   store.values = strings(saved.values)
   if (isRecord(saved.seen)) for (const [id, snapshot] of Object.entries(saved.seen)) if (normalizeBrowserProfileId(id) === id) store.seen[id] = strings(snapshot)
+  if (Array.isArray(saved.private)) store.private = saved.private.filter((id): id is string => typeof id === 'string' && normalizeBrowserProfileId(id) === id)
   return store
 }
 
@@ -81,6 +83,7 @@ function partitions(userData: string): Map<string, string> {
 function collect(store: Store, found: Map<string, string>): void {
   const changes: { time: number; key: string; value: string | undefined }[] = []
   for (const [id, directory] of found) {
+    if (store.private.includes(id)) continue
     const file = join(directory, 'Preferences')
     let prefs: unknown, time: number
     try { prefs = readJson(file); time = statSync(file).mtimeMs } catch { continue }
@@ -106,14 +109,23 @@ function collect(store: Store, found: Map<string, string>): void {
  * partition on disk and, with `profileId`, writes the shared settings into that partition. Call it before that
  * partition's session is created: Chromium reads Preferences once and later overwrites the file.
  */
-export function shareDevtoolsSettings(userData: string, profileId?: string): void {
+export function shareDevtoolsSettings(userData: string, profileId?: string, options: { private?: boolean } = {}): void {
   const storeFile = join(userData, STORE_FILE)
   const store = loadStore(storeFile)
   const found = partitions(userData)
   collect(store, found)
-  if (profileId !== undefined) {
-    const id = normalizeBrowserProfileId(profileId)
-    if (!id) throw new Error('Invalid browser profile')
+  // At startup, before unused partitions are removed: a private profile whose partition is already gone is forgotten.
+  // Not later, since a session just marked private may not have created its partition yet.
+  if (profileId === undefined) store.private = store.private.filter(id => found.has(id))
+  const id = profileId === undefined ? undefined : normalizeBrowserProfileId(profileId)
+  if (profileId !== undefined && !id) throw new Error('Invalid browser profile')
+  if (id && options.private) {
+    // A session that keeps DevTools settings to itself starts with DevTools defaults, and its changes stay out of the
+    // shared settings, now and after it closes.
+    if (!store.private.includes(id)) store.private.push(id)
+    delete store.seen[id]
+  } else if (id) {
+    if (store.private.includes(id)) throw new Error('This browser profile keeps its DevTools settings to itself')
     const file = join(found.get(id) ?? join(userData, 'Partitions', encodeURIComponent(`browser-debug:${id}`)), 'Preferences')
     // An unreadable Preferences file belongs to Chromium; leave it alone rather than replace it.
     const prefs = readJson(file) ?? {}

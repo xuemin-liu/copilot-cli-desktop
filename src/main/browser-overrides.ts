@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url'
 import type { BrowserOverridesState } from './browser-debug-types.js'
 
 /** What the selected page's DevTools, or failing that the saved preferences, say about Local Overrides. */
-export type OverridesSetting = Omit<BrowserOverridesState, 'devtools'>
+export type OverridesSetting = Omit<BrowserOverridesState, 'devtools' | 'scope'>
 
 const ENABLED_SETTING = 'persistence-network-overrides-enabled'
 

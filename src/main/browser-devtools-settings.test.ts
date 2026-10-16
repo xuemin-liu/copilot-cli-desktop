@@ -75,3 +75,32 @@ test('an unreadable Chromium preferences file is left untouched', () => fixture(
   assert.equal(await readFile(prefsFile(root, A), 'utf8'), '{not json')
   assert.throws(() => shareDevtoolsSettings(root, '../x'), /Invalid browser profile/)
 }))
+
+test('a session with its own DevTools settings starts with defaults and its changes never reach the shared ones', () => fixture(async root => {
+  const overridesOn = { electron: { devtools: { preferences: { 'persistence-network-overrides-enabled': 'true' } } } }
+  await writePrefs(root, A, overridesOn, 1000)
+  shareDevtoolsSettings(root, B, { private: true })
+  await assert.rejects(readPrefs(root, B), 'nothing is seeded into a private partition')
+  // It turns Local Overrides off and changes the theme; a session opened later still gets the shared settings.
+  await writePrefs(root, B, { electron: { devtools: { preferences: { theme: '"light"' } } } }, 2000)
+  shareDevtoolsSettings(root, C)
+  assert.deepEqual((await readPrefs(root, C)).electron.devtools.preferences, overridesOn.electron.devtools.preferences)
+  // Also after it closes: startup still finds its partition, and it stays out until the partition is gone.
+  shareDevtoolsSettings(root)
+  const store = JSON.parse(await readFile(join(root, 'browser-devtools.json'), 'utf8'))
+  assert.deepEqual(store.private, [B])
+  assert.deepEqual(store.values, overridesOn.electron.devtools.preferences)
+  assert.throws(() => shareDevtoolsSettings(root, B), /keeps its DevTools settings to itself/)
+  await rm(join(root, 'Partitions', `browser-debug%3A${B}`), { recursive: true })
+  shareDevtoolsSettings(root)
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'browser-devtools.json'), 'utf8')).private, [], 'forgotten once its partition is gone')
+}))
+
+test('a profile marked private before its partition exists stays private while sessions open', () => fixture(async root => {
+  shareDevtoolsSettings(root, B, { private: true })
+  // Another session opens before B's browser has created its partition.
+  shareDevtoolsSettings(root, C)
+  await writePrefs(root, B, { electron: { devtools: { preferences: { theme: '"light"' } } } }, 2000)
+  shareDevtoolsSettings(root, A)
+  assert.deepEqual((await readPrefs(root, A)).electron.devtools.preferences, {}, 'B\'s theme did not leak')
+}))

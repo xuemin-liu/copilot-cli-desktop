@@ -67,8 +67,9 @@ export async function pruneBrowserProfiles(userData: string, referenced: Iterabl
       let candidate = entry.name
       if (partition) {
         try { candidate = decodeURIComponent(candidate) } catch { continue }
-        if (!candidate.startsWith('browser-debug:')) continue
-        candidate = candidate.slice('browser-debug:'.length)
+        const prefix = ['browser-debug:', 'browser-devtools:'].find(name => candidate.startsWith(name))
+        if (!prefix) continue
+        candidate = candidate.slice(prefix.length)
       }
       const id = normalizeBrowserProfileId(candidate)
       if (id && !retained.has(id)) await removeChild(root, entry.name)

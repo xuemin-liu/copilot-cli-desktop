@@ -29,12 +29,18 @@ test('saved preferences give the partition toggle and only the folder added for 
 })
 
 test('the footer says whether overrides apply to this page, and why not', () => {
-  assert.deepEqual(overridesStatus({ enabled: true, folder, devtools: true }), { tone: 'on', text: `Local Overrides: on · ${folder}` })
-  const closed = overridesStatus({ enabled: true, folder, devtools: false })
+  const shared = { scope: 'shared' } as const
+  assert.deepEqual(overridesStatus({ enabled: true, folder, devtools: true, ...shared }), { tone: 'on', text: `Local Overrides: on · ${folder}` })
+  const closed = overridesStatus({ enabled: true, folder, devtools: false, ...shared })
   assert.equal(closed.tone, 'warning')
   assert.match(closed.text, /not applied to this page until its DevTools opens/)
   assert.ok(closed.text.endsWith(folder))
-  assert.deepEqual(overridesStatus({ enabled: true, folder: null, devtools: true }), { tone: 'warning', text: 'Local Overrides: on, but no overrides folder is selected' })
-  assert.deepEqual(overridesStatus({ enabled: false, folder, devtools: true }), { tone: 'off', text: 'Local Overrides: off' })
+  assert.deepEqual(overridesStatus({ enabled: true, folder: null, devtools: true, ...shared }), { tone: 'warning', text: 'Local Overrides: on, but no overrides folder is selected' })
+  assert.deepEqual(overridesStatus({ enabled: false, folder, devtools: true, ...shared }), { tone: 'off', text: 'Local Overrides: off' })
   assert.equal(overridesStatus(undefined).tone, 'off')
+})
+
+test('a session with Local Overrides of its own says so in the footer', () => {
+  assert.deepEqual(overridesStatus({ enabled: true, folder, devtools: true, scope: 'session' }), { tone: 'on', text: `Local Overrides (this session only): on · ${folder}` })
+  assert.deepEqual(overridesStatus({ enabled: false, folder: null, devtools: true, scope: 'session' }), { tone: 'off', text: 'Local Overrides (this session only): off' })
 })

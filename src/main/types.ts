@@ -29,6 +29,8 @@ export interface RestoredTab {
   sideParentSessionId?: string
   /** Whether the session was started in its own Git worktree. Absent in config files written by older releases. */
   launchWorktree?: boolean
+  /** The session's browser keeps DevTools settings and Local Overrides to itself. */
+  privateOverrides?: true
   /** The title follows Copilot's name for the session. Absent in config files written by older releases. */
   autoTitle?: boolean
   /** A rename made in the desktop that had not reached Copilot when the tab was saved. */
@@ -80,6 +82,9 @@ export interface DesktopSessionTab {
   /** Whether the session was started in its own Git worktree: the choice made in the new-session dialog, or the project
    * setting at the time. A fresh restart (a session Copilot has not stored yet) and a restore keep it. Saved. */
   launchWorktree?: boolean
+  /** The session's browser keeps DevTools settings and Local Overrides (its folder and its on/off switch) to itself instead
+   * of using the ones every session shares. Chosen when the session starts; saved. */
+  privateOverrides?: true
   /** Nobody named the session, so the title follows the name Copilot gives it; a rename in the desktop clears this and
    * renames the Copilot session instead. Saved. */
   autoTitle?: boolean
@@ -133,6 +138,8 @@ export interface DesktopState {
   maxSessionTabs: number
   recentLogs: string[]
   error: string | null
+  /** The new-session dialog's default: new sessions keep their own Local Overrides (Settings → Session browser). */
+  newSessionPrivateOverrides?: boolean
 }
 
 /** Desktop event surfaced to the renderer/tray/notifications layer. */

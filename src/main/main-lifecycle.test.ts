@@ -59,7 +59,7 @@ interface Harness {
   requestSettings(name: string, ...args: unknown[]): Promise<unknown>
   requestWithFrame(name: string, frameUrl: string): Promise<unknown>
   browserBounds(): unknown
-  browserConfigs: { settings: string; options: { partition: string; endpointPath: string } }[]
+  browserConfigs: { settings: string; options: { partition: string; endpointPath: string; devtoolsPartition?: string } }[]
   browserStorageClears: { partition: string; operation: string }[]
   blockBrowserDispose(work: Promise<void>, started: () => void): void
   request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
@@ -1560,6 +1560,41 @@ test('a restored tab Copilot never stored starts the way it first started, workt
   assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--worktree')), `restore stays in the folder: ${harness.spawns[0]!.args.join(' ')}`)
   assert.equal((await harness.request('desktop:get-state')).tabs[0]?.launchWorktree, false)
 }))
+
+test('a session can keep Local Overrides to itself: its browser runs DevTools in its own partition, out of the shared settings', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const opened = await harness.createMain()
+    harness.createTestWindow()
+    assert.equal(opened.newSessionPrivateOverrides, false, 'shared by default')
+    assert.equal(opened.tabs[0]!.privateOverrides, undefined)
+    // Chosen in the new-session dialog.
+    await harness.request('desktop:create-tab', null, profile.id, 'Own overrides', { sharedOverrides: false })
+    const own = (await harness.request('desktop:get-state')).tabs.at(-1)!
+    assert.equal(own.privateOverrides, true)
+    await harness.request('desktop:browser-open', opened.tabs[0]!.id)
+    await harness.request('desktop:browser-open', own.id)
+    assert.equal(harness.browserConfigs[0]!.options.devtoolsPartition, undefined, 'the shared one uses the default session')
+    assert.equal(harness.browserConfigs[1]!.options.devtoolsPartition, `persist:browser-devtools:${own.browserProfileId}`)
+    const store = JSON.parse(await readFile(join(directory, 'browser-devtools.json'), 'utf8'))
+    assert.deepEqual(store.private, [own.browserProfileId], 'its page partition stays out of the shared DevTools settings')
+    // The Settings default applies to sessions started without a choice, and only to new ones.
+    harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id, browserOverrides: 'private' }, capabilities)
+    const after = await harness.request('desktop:get-state')
+    assert.equal(after.newSessionPrivateOverrides, true)
+    assert.equal(after.tabs[0]!.privateOverrides, undefined, 'an open session keeps what it started with')
+    await harness.request('desktop:create-tab', null, profile.id, 'Default now private')
+    assert.equal((await harness.request('desktop:get-state')).tabs.at(-1)!.privateOverrides, true)
+    await harness.request('desktop:create-tab', null, profile.id, 'Shared anyway', { sharedOverrides: true })
+    assert.equal((await harness.request('desktop:get-state')).tabs.at(-1)!.privateOverrides, undefined)
+    // Saved with the tab.
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.equal(saved.browserOverrides, 'private')
+    assert.deepEqual(saved.profiles[0]!.tabs.map((tab) => tab.privateOverrides === true), [false, true, true, false])
+  })
+})
 
 test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
   await fixture(async (harness, directory) => {

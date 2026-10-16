@@ -15,6 +15,8 @@ test('restored browser profiles remain stable and never share an active terminal
   assert.deepEqual(browserProfilePaths('user-data', FIRST), {
     settings: join('user-data', 'browser-profiles', FIRST, 'settings.json'),
     partition: `persist:browser-debug:${FIRST}`,
+    // A session with Local Overrides of its own runs DevTools in this one.
+    devtoolsPartition: `persist:browser-devtools:${FIRST}`,
   })
   for (const invalid of ['../tab-1', '', 'tab-1', null]) {
     assert.equal(normalizeBrowserProfileId(invalid), undefined)

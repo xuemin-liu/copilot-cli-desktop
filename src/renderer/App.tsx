@@ -44,7 +44,9 @@ type InputDialog =
   /** Names a session before it starts; `profileId` null means the active project. */
   | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null
       /** Whether this session starts in its own worktree; null until changed, which means the project's setting. */
-      worktree: boolean | null }
+      worktree: boolean | null
+      /** Whether its browser uses the shared Local Overrides; null until changed, which means the Settings default. */
+      sharedOverrides: boolean | null }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
@@ -68,6 +70,8 @@ export function App(): JSX.Element {
     || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume'
   const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh
     && (inputDialog.worktree ?? Boolean(newSessionProfile?.launch?.worktree))
+  const newSessionSharedOverrides = inputDialog?.kind === 'new-session'
+    && (inputDialog.sharedOverrides ?? !state.newSessionPrivateOverrides)
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
@@ -85,7 +89,7 @@ export function App(): JSX.Element {
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
-    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, pending: false, error: null })
+    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, sharedOverrides: null, pending: false, error: null })
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -158,7 +162,10 @@ export function App(): JSX.Element {
       // An empty name keeps the default shown in the box: the project's name.
       setInputDialog({ ...inputDialog, pending: true, error: null })
       // Only a choice made here is sent; otherwise the project's setting applies.
-      const options = inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }
+      const options = {
+        ...(inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }),
+        ...(inputDialog.sharedOverrides === null ? {} : { sharedOverrides: inputDialog.sharedOverrides }),
+      }
       finish(inputDialog.attachments
         ? window.copilotDesktop.createTabWithAttachments(value || null, options)
         : window.copilotDesktop.createTab(null, inputDialog.profileId ?? undefined, value || null, options))
@@ -401,9 +408,16 @@ export function App(): JSX.Element {
             />
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
               <label className="input-dialog-check" title={newSessionFresh ? undefined : 'This project resumes an earlier session, which keeps the folder it ran in.'}>
-                <input type="checkbox" checked={newSessionWorktree} disabled={inputDialog.pending || !newSessionFresh}
+                <input type="checkbox" name="worktree" checked={newSessionWorktree} disabled={inputDialog.pending || !newSessionFresh}
                   onChange={(event) => setInputDialog({ ...inputDialog, worktree: event.target.checked, error: null })} />
                 Work in a new Git worktree
+              </label>
+            )}
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
+              <label className="input-dialog-check" title="Unticked, this session's browser starts DevTools with defaults and keeps its Local Overrides folder and settings to itself.">
+                <input type="checkbox" name="shared-overrides" checked={newSessionSharedOverrides} disabled={inputDialog.pending}
+                  onChange={(event) => setInputDialog({ ...inputDialog, sharedOverrides: event.target.checked, error: null })} />
+                Use the shared Local Overrides and DevTools settings
               </label>
             )}
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
