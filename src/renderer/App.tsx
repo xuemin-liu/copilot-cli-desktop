@@ -11,6 +11,7 @@ import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.j
 import { OperationError } from './components/OperationError.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
+import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -40,6 +41,8 @@ type InputDialog =
   | { kind: 'remote'; value: string; pending: boolean; error: string | null }
   | { kind: 'fork'; tabId: string; value: string; sourceSessionId: string; pending: boolean; error: string | null }
   | { kind: 'fan-out'; value: string; count: number; pending: boolean; error: string | null }
+  /** Names a session before it starts; `profileId` null means the active project. */
+  | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
@@ -54,6 +57,13 @@ export function App(): JSX.Element {
   const [operationError, setOperationError] = useState<string | null>(null)
   const [fanOutNotice, setFanOutNotice] = useState<string | null>(null)
   const canOpenTab = canOpenSessionTab(state.resolution, state.tabs.length, state.maxSessionTabs)
+  const newSessionProfile = inputDialog?.kind === 'new-session'
+    ? state.profiles.find((profile) => profile.id === (inputDialog.profileId ?? state.activeProfileId)) ?? null
+    : null
+  const newSessionDefault = newSessionProfile?.name ?? null
+  // Only a fresh session gets one; 'continue' and the picker resume an earlier session where it ran.
+  const newSessionWorktree = Boolean(newSessionProfile?.launch?.worktree)
+    && (inputDialog?.kind === 'new-session' && inputDialog.attachments || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume')
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
@@ -68,6 +78,10 @@ export function App(): JSX.Element {
   const changeGitWidth = (width: number): void => {
     setGitWidth(width)
     try { localStorage.setItem('git-panel-width', String(Math.round(width))) } catch { /* Keep the in-memory width. */ }
+  }
+  /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
+  const openNewSession = (profileId: string | null = null, attachments = false): void => {
+    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', pending: false, error: null })
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -125,6 +139,25 @@ export function App(): JSX.Element {
     event.preventDefault()
     if (!inputDialog || inputDialog.pending) return
     const value = inputDialog.value.trim()
+    const finish = (request: Promise<unknown>): void => {
+      void request
+        .then(() => setInputDialog(null))
+        .catch((error: unknown) => {
+          setInputDialog((current) => current ? {
+            ...current,
+            pending: false,
+            error: error instanceof Error ? error.message : String(error),
+          } : current)
+        })
+    }
+    if (inputDialog.kind === 'new-session') {
+      // An empty name keeps the default shown in the box: the project's name.
+      setInputDialog({ ...inputDialog, pending: true, error: null })
+      finish(inputDialog.attachments
+        ? window.copilotDesktop.createTabWithAttachments(value || null)
+        : window.copilotDesktop.createTab(null, inputDialog.profileId ?? undefined, value || null))
+      return
+    }
     if (!value) {
       setInputDialog({ ...inputDialog, error: inputDialog.kind === 'remote' ? 'Enter a session or task ID.' : inputDialog.kind === 'fan-out' ? 'Enter the task to start in every session.' : 'Enter a session title.' })
       return
@@ -141,15 +174,7 @@ export function App(): JSX.Element {
       : inputDialog.kind === 'fork'
         ? window.copilotDesktop.forkSideChat(inputDialog.tabId, inputDialog.sourceSessionId.trim(), value)
       : window.copilotDesktop.renameTab(inputDialog.tabId, value)
-    void request
-      .then(() => setInputDialog(null))
-      .catch((error: unknown) => {
-        setInputDialog((current) => current ? {
-          ...current,
-          pending: false,
-          error: error instanceof Error ? error.message : String(error),
-        } : current)
-      })
+    finish(request)
   }
 
   useEffect(() => {
@@ -169,6 +194,8 @@ export function App(): JSX.Element {
 
   // Ctrl+Shift+G is handled in the main process, before the terminal sees it, and arrives here.
   useEffect(() => window.copilotDesktop.onGitToggle(() => { if (gitPanelAvailable.current) toggleGit() }), [toggleGit])
+  // The File menu and the tray ask here, so their sessions are named in the same dialog.
+  useEffect(() => window.copilotDesktop.onNewSessionRequest((attachments) => openNewSession(null, attachments)), [])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -184,7 +211,7 @@ export function App(): JSX.Element {
       }
       if (event.key.toLowerCase() === 't') {
         event.preventDefault()
-        if (canOpenTab) handleOperation(window.copilotDesktop.createTab())
+        if (canOpenTab) openNewSession()
       } else if (event.key.toLowerCase() === 'w' && state.activeTabId) {
         event.preventDefault()
         window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
@@ -266,8 +293,8 @@ export function App(): JSX.Element {
         onRenameTab={requestTabRename}
         onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
         onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
-        onCreateTab={(profileId) => handleOperation(window.copilotDesktop.createTab(null, profileId))}
-        onCreateTabWithAttachments={() => handleOperation(window.copilotDesktop.createTabWithAttachments())}
+        onCreateTab={(profileId) => openNewSession(profileId)}
+        onCreateTabWithAttachments={() => openNewSession(null, true)}
         onFanOut={() => setInputDialog({ kind: 'fan-out', value: '', count: 3, pending: false, error: null })}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => handleOperation(window.copilotDesktop.createTab('picker'))}
@@ -313,7 +340,7 @@ export function App(): JSX.Element {
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
-            onCreate={() => handleOperation(window.copilotDesktop.createTab())}
+            onCreate={() => openNewSession()}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
           </ProjectDock>
           </>
@@ -327,9 +354,10 @@ export function App(): JSX.Element {
       )}
       {inputDialog && (
         <div className="dialog-backdrop" role="presentation">
-          <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}>
+          <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}
+            onKeyDown={(event) => { if (event.key === 'Escape' && !inputDialog.pending) { event.preventDefault(); setInputDialog(null) } }}>
             <h2 id="input-dialog-title">
-              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : 'Rename session'}
+              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'New session with attachments' : 'New session') : 'Rename session'}
             </h2>
             {inputDialog.kind === 'fork' && (
               <>
@@ -353,22 +381,29 @@ export function App(): JSX.Element {
               </>
             )}
             <label htmlFor="input-dialog-value">
-              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : 'Session title'}
+              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : inputDialog.kind === 'new-session' ? 'Session name' : 'Session title'}
             </label>
             <input
               id="input-dialog-value"
               type="text"
               autoFocus
-              maxLength={inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : 120}
+              maxLength={inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : MAX_SESSION_TITLE_CHARS}
               value={inputDialog.value}
+              placeholder={newSessionDefault ?? undefined}
               disabled={inputDialog.pending}
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
             />
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
+              <p className="fork-hint">
+                Leave it empty to use “{newSessionDefault}”.
+                {newSessionWorktree && <> It starts in its own Git worktree and branch, <code>{worktreeNamePrefix(inputDialog.value.trim() || newSessionDefault)}-…</code>, named from this.</>}
+              </p>
+            )}
             {inputDialog.error && <p className="input-dialog-error" role="alert">{inputDialog.error}</p>}
             <div className="input-dialog-actions">
               <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
               <button type="submit" className="primary-button" disabled={inputDialog.pending}>
-                {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : 'Rename'}
+                {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'Choose files…' : 'Start session') : 'Rename'}
               </button>
             </div>
           </form>

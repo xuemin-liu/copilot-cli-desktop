@@ -101,6 +101,9 @@ if (!process.versions.electron) {
     // A session starts in project one; a second one starts in project two from the sidebar, which makes two active.
     await until('!!document.querySelector(".session-git-toggle") && !!document.querySelector(".xterm")', 'first session')
     await click(`[aria-label="New session in ${two.name}"]`)
+    // The new-session dialog: OK with the name left empty keeps the default.
+    await until('!!document.querySelector(".input-dialog")', 'new-session dialog')
+    await click('.input-dialog button[type="submit"]')
     await until(`document.querySelectorAll(".sidebar-session").length === 2`, 'second session listed')
     assert.equal((await state()).activeProfileId, two.id, 'a new session in project two makes it active')
     await click('.session-git-toggle')
