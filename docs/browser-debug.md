@@ -48,6 +48,17 @@ session's browser: a session opened later starts with the settings other session
 saved (Chromium saves them a few seconds after a change), and settings from a closed
 session are kept. Console history is shared too.
 
+A session can instead keep DevTools settings and Local Overrides to itself: untick **Use the shared Local
+Overrides and DevTools settings** in the new-session dialog. The box starts from **Settings → Session browser →
+DevTools settings and Local Overrides for new sessions** (shared by default). Such a session's DevTools starts with
+defaults and runs in a partition of its own (`browser-devtools:<id>`), so the overrides folder it selects stays its
+own. Its Local Overrides switch and other DevTools settings stay out of the shared ones, while it runs and after it
+closes. Shared sessions never see its folder or switch, and it never sees theirs. Its DevTools data is cleared when
+it closes and its partition is removed at the next start. The footer then reads **Local Overrides (this session
+only)**. With **Cookies, logins and site storage** shared by all sessions, every session's pages use one partition,
+so the switch is shared too and only the folder stays per session. Sessions keep the choice they started with,
+including after a restart.
+
 The browser footer shows whether Local Overrides applies to the selected page: **on** with the overrides
 folder (green), **off**, or a warning when it is enabled but no folder is selected, or when the page's
 DevTools has not run yet. Overrides apply to a page only while its DevTools runs, shown or hidden, so

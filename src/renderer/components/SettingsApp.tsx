@@ -489,7 +489,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -576,7 +576,26 @@ export function SettingsApp(): JSX.Element | null {
           Separate keeps each session signed in on its own and clears its data when the session closes. Shared lets
           every session use the same logins, including the Copilot agent in each session, and keeps them when a session
           closes. Browsers already open keep their current profile until their session closes or the app restarts.
-          History, site permissions, zoom and DevTools settings are shared either way.
+          History, site permissions and zoom are shared either way.
+        </p>
+        <label className="settings-row settings-row-select">
+          DevTools settings and Local Overrides for new sessions
+          <select
+            value={snapshot.browserOverrides}
+            onChange={(event) => updatePreference({
+              browserOverrides: event.target.value as DesktopSettingsSnapshot['browserOverrides'],
+            })}
+          >
+            <option value="shared">Shared by all sessions</option>
+            <option value="private">Separate for each session</option>
+          </select>
+        </label>
+        <p className="settings-disclaimer">
+          Shared gives every session's DevTools the same Local Overrides folder, on/off switch and other DevTools settings, like
+          one Chrome profile. Separate starts a session's DevTools with defaults and keeps its overrides folder and settings to
+          that session; they are removed after it closes. This is the default in the new-session dialog, where each session can
+          choose. Sessions already open keep what they started with. With shared cookies and logins, the Local Overrides
+          on/off switch is shared too; the folder stays per session.
         </p>
         <div className="settings-actions">
           <button

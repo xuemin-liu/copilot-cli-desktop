@@ -60,6 +60,8 @@ export class BrowserDebug {
   private readonly unsubscribeZoom: () => void
   /** The Chromium partition this browser's pages use; with the shared browser profile, other browsers use it too. */
   readonly partition: string
+  /** The partition its DevTools runs in when this session keeps Local Overrides to itself; null for the shared ones. */
+  readonly devtoolsPartition: string | null
   private readonly tabId: string
   private readonly notifyShortcut: (name: 'find' | 'find-close') => void
   private readonly appShortcut: ((name: 'git-toggle') => void) | undefined
@@ -79,11 +81,12 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle') => void; showMenu?: (menu: Menu) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle') => void; showMenu?: (menu: Menu) => void } = {}) {
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
     this.zoom = options.zoom ?? new BrowserZoom()
     this.partition = options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`
+    this.devtoolsPartition = options.devtoolsPartition ?? null
     this.showMenu = options.showMenu ?? (menu => { if (!this.owner.isDestroyed()) menu.popup({ window: this.owner }) })
     this.tabId = options.tabId ?? ''
     this.notifyShortcut = options.notify ?? (name => { if (!this.owner.isDestroyed() && this.tabId) this.owner.webContents.send('desktop:browser-shortcut', this.tabId, name) })
@@ -375,7 +378,7 @@ export class BrowserDebug {
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
       const setting = page.overrides ?? this.savedOverrides
-      if (setting) this.state.overrides = { ...setting, devtools: page.overrides !== null }
+      if (setting) this.state.overrides = { ...setting, devtools: page.overrides !== null, scope: this.devtoolsPartition ? 'session' : 'shared' }
       else delete this.state.overrides
       this.refreshOverrides()
     }
@@ -404,7 +407,8 @@ export class BrowserDebug {
       if (!directory) return undefined
       try { return JSON.parse(await readFile(join(directory, 'Preferences'), 'utf8')) as unknown } catch { return undefined }
     }
-    const [partition, defaults] = await Promise.all([preferences(page.contents.session.storagePath), preferences(electronSession.defaultSession.storagePath)])
+    const folders = this.devtoolsPartition ? electronSession.fromPartition(this.devtoolsPartition) : electronSession.defaultSession
+    const [partition, defaults] = await Promise.all([preferences(page.contents.session.storagePath), preferences(folders.storagePath)])
     this.savedOverrides = overridesFromPreferences(partition, defaults)
     this.savedOverridesAt = Date.now()
   }
@@ -636,7 +640,10 @@ export class BrowserDebug {
     if (!page.devtools) { this.layout(); return }
     page.panel = view === 'devtools' ? 'sources' : view as 'console' | 'network'
     if (!page.tools) {
-      page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true } })
+      // DevTools keeps its added folders (the Local Overrides folder) in its own view's session: the default one, shared by
+      // every session, or this session's own partition.
+      page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true,
+        ...(this.devtoolsPartition ? { partition: this.devtoolsPartition } : {}) } })
       if (page.attached) this.owner.contentView.addChildView(page.tools)
       page.tools.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       page.tools.webContents.on('did-finish-load', () => this.selectDevtoolsPanel(page))

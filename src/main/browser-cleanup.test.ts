@@ -82,3 +82,13 @@ test('clearing stored authentication continues after one cleanup operation fails
   assert.equal(errors.length, 1)
   assert.match(errors[0]!, /storage unavailable/)
 })
+
+test('startup cleanup removes a closed session\'s private DevTools partition with its browser profile', async () => fixture(async root => {
+  for (const id of [KEEP, ORPHAN]) {
+    await mkdir(join(root, 'Partitions', `browser-devtools%3A${id}`), { recursive: true })
+    await writeFile(join(root, 'Partitions', `browser-devtools%3A${id}`, 'Preferences'), '{"devtools":{"file_system_paths":{}}}')
+  }
+  await pruneBrowserProfiles(root, [KEEP])
+  await access(join(root, 'Partitions', `browser-devtools%3A${KEEP}`, 'Preferences'))
+  await assert.rejects(access(join(root, 'Partitions', `browser-devtools%3A${ORPHAN}`)))
+}))

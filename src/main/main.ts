@@ -32,6 +32,7 @@ import {
   DEFAULT_DESKTOP_CONFIG,
   activateWorkspaceProfile,
   activeWorkspaceProfile,
+  isBrowserOverridesMode,
   isBrowserProfileMode,
   isCloseBehavior,
   readDesktopConfig,
@@ -507,6 +508,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     profiles: state.profiles.map((profile) => ({ ...profile, tabs: profile.tabs.map((tab) => ({ ...tab })) })),
     tabs: state.tabs.map((tab) => ({ ...tab })),
     recentLogs: [...state.recentLogs],
+    newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
   }
 }
 
@@ -631,6 +633,7 @@ function persistProfileTabs(): void {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
           ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
+          ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
@@ -1293,7 +1296,8 @@ async function createSessionTab(
   attachmentPaths: string[] = [],
   connectSessionId: string | null = null,
   titleOverride: string | null = null,
-  sideOptions: { sideChat?: true; sideParentTabId?: string } = {},
+  /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved). */
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
   restoredCandidate: RestoredTab | null = null,
@@ -1378,7 +1382,10 @@ async function createSessionTab(
     remote: connectSessionId !== null,
     cliVersion: plan.cliVersion,
     lastSessionId: deterministicSessionId,
-    ...sideOptions,
+    ...(sideOptions.sideChat ? { sideChat: true as const } : {}),
+    ...(sideOptions.sideParentTabId ? { sideParentTabId: sideOptions.sideParentTabId } : {}),
+    privateOverrides: !connectSessionId && (sideOptions.privateOverrides
+      ?? (restoredCandidate ? restoredCandidate.privateOverrides === true : desktopConfig.browserOverrides === 'private')),
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
     ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
     autoTitle,
@@ -1471,7 +1478,12 @@ async function createSessionWithAttachments(title: string | null = null, options
     defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
   })
   if (selection.canceled || selection.filePaths.length === 0) return snapshot()
-  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title)
+  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title, overridesChoice(options))
+}
+
+/** The new-session dialog's Local Overrides choice, as createSessionTab takes it. */
+function overridesChoice(options: NewSessionOptions): { privateOverrides?: boolean } {
+  return options.sharedOverrides === undefined ? {} : { privateOverrides: !options.sharedOverrides }
 }
 
 /** The project with the choices made for one new session in the new-session dialog; the saved project is unchanged. */
@@ -1673,6 +1685,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
         if (browser?.partition === paths.partition || await browserProfileHasPartition(app.getPath('userData'), profileId)) {
           await clearBrowserStorage(electronSession.fromPartition(paths.partition), reportBrowserError)
         }
+        if (browser?.devtoolsPartition) await clearBrowserStorage(electronSession.fromPartition(browser.devtoolsPartition), reportBrowserError)
         await removeBrowserProfileSettings(app.getPath('userData'), profileId)
       }
     } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
@@ -2430,6 +2443,7 @@ function settingsPreferences(): DesktopPreferences {
     automaticUpdateChecks: desktopConfig.automaticUpdateChecks,
     globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
     browserProfile: desktopConfig.browserProfile,
+    browserOverrides: desktopConfig.browserOverrides,
   }
 }
 
@@ -2546,11 +2560,16 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     const partition = browserProfilePaths(app.getPath('userData'), partitionProfileId).partition
     // Before BrowserDebug creates the partition's session, which reads Preferences only once; an open session keeps its own.
     const partitionOpen = [...sessionBrowsers.values()].some(other => other.partition === partition)
-    try { shareDevtoolsSettings(app.getPath('userData'), partitionOpen ? undefined : partitionProfileId) }
+    // A session with Local Overrides of its own runs DevTools in its own partition (its folders) and keeps its page
+    // partition's DevTools settings (the on/off switch) out of the shared ones. On the shared browser profile every session's
+    // pages use one partition, so the switch is shared; the folder is still its own.
+    const privateOverrides = tab.privateOverrides === true
+    const privateSettings = privateOverrides && partitionProfileId !== SHARED_BROWSER_PROFILE_ID
+    try { shareDevtoolsSettings(app.getPath('userData'), partitionOpen ? undefined : partitionProfileId, { private: privateSettings }) }
     catch (error) { logBrowserError(`Could not share DevTools settings: ${String(error)}`) }
     browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition, tabId,
       history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(),
-      onAppShortcut: () => toggleGitPanel(), reportError: logBrowserError })
+      onAppShortcut: () => toggleGitPanel(), reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
     sessionBrowsers.set(tabId, browser)
   }
   browser.setOwner(owner)
@@ -2651,11 +2670,11 @@ ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unk
   const override = isResumeMode(resumeMode) ? resumeMode : null
   const sessionTitle = newSessionTitle(title)
   const choices = newSessionOptions(options)
-  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle)
+  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle, overridesChoice(choices))
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle)
+  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle, overridesChoice(choices))
 })
 ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
@@ -2833,6 +2852,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'automaticUpdateChecks',
     'globalShortcutEnabled',
     'browserProfile',
+    'browserOverrides',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -2845,6 +2865,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('automaticUpdateChecks' in values && typeof values.automaticUpdateChecks !== 'boolean')
     || ('globalShortcutEnabled' in values && typeof values.globalShortcutEnabled !== 'boolean')
     || ('browserProfile' in values && !isBrowserProfileMode(values.browserProfile))
+    || ('browserOverrides' in values && !isBrowserOverridesMode(values.browserOverrides))
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -2864,6 +2885,9 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   }
   // Browsers already open keep their profile until their session closes or the app restarts.
   if (isBrowserProfileMode(values.browserProfile)) desktopConfig.browserProfile = values.browserProfile
+  // Only new sessions follow it; the new-session dialog shows it as its default.
+  const overridesChanged = isBrowserOverridesMode(values.browserOverrides) && desktopConfig.browserOverrides !== values.browserOverrides
+  if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -2873,6 +2897,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   updateTrayVisibility()
   await persistConfig()
   broadcastSettingsPreferences()
+  if (overridesChanged) broadcastState()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })

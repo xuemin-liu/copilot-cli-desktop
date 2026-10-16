@@ -20,12 +20,15 @@ export function worktreeNamePrefix(title: string): string {
 export interface NewSessionOptions {
   /** Start in its own Git worktree; absent means the project's setting. */
   worktree?: boolean
+  /** Use the DevTools settings and Local Overrides every session shares; absent means the Settings default. */
+  sharedOverrides?: boolean
 }
 
 export function newSessionOptions(value: unknown): NewSessionOptions {
   if (value === undefined || value === null) return {}
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session options')
-  const { worktree } = value as Record<string, unknown>
+  const { worktree, sharedOverrides } = value as Record<string, unknown>
   if (worktree !== undefined && typeof worktree !== 'boolean') throw new Error('Invalid session options')
-  return worktree === undefined ? {} : { worktree }
+  if (sharedOverrides !== undefined && typeof sharedOverrides !== 'boolean') throw new Error('Invalid session options')
+  return { ...(worktree === undefined ? {} : { worktree }), ...(sharedOverrides === undefined ? {} : { sharedOverrides }) }
 }

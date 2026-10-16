@@ -31,6 +31,7 @@ export interface NewTabInput {
   /** A rename made in the desktop that Copilot has not confirmed yet. */
   renamePending?: boolean
   launchWorktree?: boolean
+  privateOverrides?: boolean
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
@@ -58,6 +59,7 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     ...(input.sideParentTabId ? { sideParentTabId: input.sideParentTabId } : {}),
     ...(input.canFork !== undefined ? { canFork: input.canFork } : {}),
     ...(input.launchWorktree !== undefined ? { launchWorktree: input.launchWorktree } : {}),
+    ...(input.privateOverrides ? { privateOverrides: true as const } : {}),
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
   }

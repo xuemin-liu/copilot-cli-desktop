@@ -22,12 +22,14 @@ export interface DesktopConfig {
   globalShortcutEnabled: boolean
   launchAtLogin: boolean
   browserProfile: BrowserProfileMode
+  /** Whether a new session's browser uses the DevTools settings and Local Overrides every session shares, or its own. */
+  browserOverrides: BrowserOverridesMode
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides'
 >
 
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
@@ -45,6 +47,13 @@ export function isBrowserProfileMode(value: unknown): value is BrowserProfileMod
   return BROWSER_PROFILE_MODES.includes(value as BrowserProfileMode)
 }
 
+export const BROWSER_OVERRIDES_MODES = ['shared', 'private'] as const
+export type BrowserOverridesMode = (typeof BROWSER_OVERRIDES_MODES)[number]
+
+export function isBrowserOverridesMode(value: unknown): value is BrowserOverridesMode {
+  return BROWSER_OVERRIDES_MODES.includes(value as BrowserOverridesMode)
+}
+
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   profiles: [],
   activeProfileId: null,
@@ -57,6 +66,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   globalShortcutEnabled: false,
   launchAtLogin: false,
   browserProfile: 'separate',
+  browserOverrides: 'shared',
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -148,6 +158,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
       ...(typeof tab.autoTitle === 'boolean' ? { autoTitle: tab.autoTitle } : {}),
       ...(tab.renamePending === true ? { renamePending: true as const } : {}),
       ...(typeof tab.launchWorktree === 'boolean' ? { launchWorktree: tab.launchWorktree } : {}),
+      ...(tab.privateOverrides === true ? { privateOverrides: true as const } : {}),
       ...(tab.sideChat === true ? {
         sideChat: true as const,
         ...(typeof tab.sideParentSessionId === 'string' && tab.sideParentSessionId.length <= 128
@@ -235,6 +246,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     globalShortcutEnabled: typeof value.globalShortcutEnabled === 'boolean' ? value.globalShortcutEnabled : false,
     launchAtLogin: typeof value.launchAtLogin === 'boolean' ? value.launchAtLogin : false,
     browserProfile: isBrowserProfileMode(value.browserProfile) ? value.browserProfile : 'separate',
+    browserOverrides: isBrowserOverridesMode(value.browserOverrides) ? value.browserOverrides : 'shared',
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

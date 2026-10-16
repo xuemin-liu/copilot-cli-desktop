@@ -19,8 +19,10 @@ export function selectBrowserProfileId(saved: unknown, used: Iterable<string | u
   return fresh
 }
 
-export function browserProfilePaths(userData: string, profileId: string): { settings: string; partition: string } {
+export function browserProfilePaths(userData: string, profileId: string): { settings: string; partition: string; devtoolsPartition: string } {
   const id = normalizeBrowserProfileId(profileId)
   if (!id) throw new Error('Invalid browser profile')
-  return { settings: join(userData, 'browser-profiles', id, 'settings.json'), partition: `persist:browser-debug:${id}` }
+  return { settings: join(userData, 'browser-profiles', id, 'settings.json'), partition: `persist:browser-debug:${id}`,
+    // A session with Local Overrides of its own runs DevTools here, so the folders it adds stay its own.
+    devtoolsPartition: `persist:browser-devtools:${id}` }
 }

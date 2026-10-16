@@ -64,6 +64,8 @@ export interface BrowserOverridesState {
   folder: string | null
   /** Whether the selected page's DevTools is running, shown or hidden. Overrides apply to a page only while it is. */
   devtools: boolean
+  /** Shared by every session's browser, or this session's own. */
+  scope: 'shared' | 'session'
 }
 
 export interface BrowserBounds { x: number; y: number; width: number; height: number }

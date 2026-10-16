@@ -68,7 +68,10 @@ handle, only input/output/resize events.
   the first prompt and the tab follows that name (until then it shows the
   project's name, greyed out in the dialog). **Work in a new Git worktree**
   starts that one session in its own worktree and branch (the box starts from
-  the project setting), and the dialog previews the worktree name.
+  the project setting), and the dialog previews the worktree name. Unticking
+  **Use the shared Local Overrides and DevTools settings** gives that session's
+  browser its own Local Overrides folder and switch (the default is in
+  Settings → Session browser).
   Renaming a tab renames the Copilot session too, so `copilot --resume
   "<name>"` and Copilot's session list find it by that name after it
   closes; the rename is typed as `/rename` only while the session is idle
