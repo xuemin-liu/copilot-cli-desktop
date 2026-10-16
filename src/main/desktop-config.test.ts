@@ -237,3 +237,13 @@ test('a saved tab keeps whether its title follows Copilot and whether a rename s
     { title: 'Bad flags', lastSessionId: 'd' },
   ])
 })
+
+test('a saved tab keeps whether it was started in its own worktree', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
+    { title: 'In a worktree', lastSessionId: null, launchWorktree: true },
+    { title: 'In the folder', lastSessionId: null, launchWorktree: false },
+    { title: 'Older', lastSessionId: null },
+    { title: 'Bad', lastSessionId: null, launchWorktree: 'yes' },
+  ] }] })
+  assert.deepEqual(config.profiles[0]!.tabs.map((tab) => tab.launchWorktree), [true, false, undefined, undefined])
+})

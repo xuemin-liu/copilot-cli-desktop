@@ -630,6 +630,7 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
@@ -1301,6 +1302,8 @@ async function createSessionTab(
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
+  // A restored tab starts the way it first started.
+  else if (restoredCandidate?.launchWorktree !== undefined) profile = withSessionChoices(profile, { worktree: restoredCandidate.launchWorktree })!
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
 
@@ -1377,6 +1380,7 @@ async function createSessionTab(
     lastSessionId: deterministicSessionId,
     ...sideOptions,
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
+    ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
     autoTitle,
     renamePending: restoredCandidate?.renamePending === true,
   })
@@ -1723,9 +1727,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const sessionPermissionPreset = tab.sideChat
       ? 'read-only'
       : tab.sessionPermissionPreset ?? savedProfile.permissionPreset
+    // The launch is rebuilt from the saved project, but the session keeps the worktree choice it started with.
     const profile = tab.sideChat
       ? sideChatProfile(savedProfile, copilotCapabilities)
-      : { ...savedProfile, permissionPreset: sessionPermissionPreset }
+      : { ...withSessionChoices(savedProfile, tab.launchWorktree === undefined ? {} : { worktree: tab.launchWorktree })!, permissionPreset: sessionPermissionPreset }
 
     const bestKnownSessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
 

@@ -1522,6 +1522,45 @@ test('a new session can choose its own worktree over the project setting, either
   })
 })
 
+test('a session keeps its own worktree choice when it restarts before Copilot stored it', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    await harness.createMain()
+    const latest = async () => (await harness.request('desktop:get-state')).tabs.at(-1)!
+    // A normal project, one session in a worktree: Copilot has not stored it yet, so a restart starts it fresh.
+    await harness.request('desktop:create-tab', null, profile.id, 'In a worktree', { worktree: true })
+    const chosen = await latest()
+    assert.equal(chosen.launchWorktree, true)
+    await harness.request('desktop:restart-tab', chosen.id)
+    assert.ok(harness.spawns.at(-1)!.args.some((arg) => arg.startsWith('--worktree=')), `restart keeps the worktree: ${harness.spawns.at(-1)!.args.join(' ')}`)
+    // A worktree project, one session in the project folder.
+    profile.launch = { ...profile.launch, worktree: true }
+    await harness.request('desktop:create-tab', null, profile.id, 'In the folder', { worktree: false })
+    const folder = await latest()
+    assert.equal(folder.launchWorktree, false)
+    await harness.request('desktop:restart-tab', folder.id)
+    assert.ok(!harness.spawns.at(-1)!.args.some((arg) => arg.startsWith('--worktree')), `restart stays in the folder: ${harness.spawns.at(-1)!.args.join(' ')}`)
+    assert.equal(profile.launch.worktree, true, 'the project setting is unchanged')
+    // Saved and restored: the tab starts as it first did.
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    const savedTabs = saved.profiles[0]!.tabs
+    assert.deepEqual(savedTabs.filter((tab) => tab.title === 'In the folder').map((tab) => tab.launchWorktree), [false])
+  })
+})
+
+test('a restored tab Copilot never stored starts the way it first started, worktree or not', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  profile.launch = { ...profile.launch, worktree: true }
+  profile.tabs = [{ title: 'In the folder', lastSessionId: null, launchWorktree: false }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--worktree')), `restore stays in the folder: ${harness.spawns[0]!.args.join(' ')}`)
+  assert.equal((await harness.request('desktop:get-state')).tabs[0]?.launchWorktree, false)
+}))
+
 test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
   await fixture(async (harness, directory) => {
     const previousWait = process.env.DESKTOP_FAN_OUT_WAIT_MS
