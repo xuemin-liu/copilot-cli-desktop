@@ -365,8 +365,10 @@ before activating or scrolling it.
 Response capture retains at most 100 responses and 4 MiB of filtered output in memory,
 with a 256 KiB per-body limit. It exports valid JSON only, redacts credential fields,
 recognizable authorization values, common API-token prefixes, JWTs, private keys
-and sensitive URLs, and withholds HTML, scripts, plain text, binaries, invalid JSON
-and oversized bodies. Partial JSON is
+and sensitive URLs, and withholds HTML, page scripts, binaries, invalid JSON
+and oversized bodies. XHR/fetch replies sent as JavaScript or plain text are
+exported when they are JSON or JSONP (the callback is unwrapped); any other
+script or text is withheld. Partial JSON is
 never returned. Clearing Activity's network log also clears these bodies; paused
 network recording and Preserve log apply to this capture. Native DevTools may detach
 the reader transport; inspection reconnects when possible and reports unavailable
