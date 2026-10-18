@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MAX_RESPONSE_BYTES, readableResponse, redactBrowserValue } from './browser-read-privacy.js'
+import { MAX_RESPONSE_BYTES, capturableBody, readableResponse, redactBrowserValue } from './browser-read-privacy.js'
 
 test('ticket JSON preserves fields, ADF and comments while credentials are withheld at every depth', () => {
   const body = JSON.stringify({ key: 'APP-123', fields: { summary: 'Broken layout', description: { type: 'doc', content: [{ text: 'Steps to reproduce' }] },
@@ -51,4 +51,44 @@ test('pasted provider tokens and arbitrary authorization schemes are withheld in
   for (const secret of [...secrets, 'opaque-private-token', 'opaque-private-proxy', 'opaque-private-digest']) assert.ok(!output.includes(secret), secret)
   assert.ok(output.includes('Ticket description remains readable')); assert.ok(output.includes('Skip the next step'))
   assert.equal(result.redacted, true)
+})
+
+test('XHR/fetch API replies sent as script or text are exported when they are JSON or JSONP, with the same redaction', () => {
+  const info = { Rows: 512, Columns: 512, Modality: 'CT', accessToken: 'private-access', note: 'Authorization: Bearer private-bearer' }
+  for (const [body, mime, type] of <[string, string, string][]>[[`jQuery1123_456(${JSON.stringify(info)});`, 'application/javascript', 'XHR'],
+    [`/**/ angular.callbacks._0(${JSON.stringify(info)})`, 'text/javascript; charset=utf-8', 'Fetch'],
+    [`\n${JSON.stringify(info)}\n`, 'text/plain', 'XHR'], [JSON.stringify(info), 'application/x-javascript', 'Fetch']]) {
+    const result = readableResponse(body, mime, type)
+    const output = JSON.stringify(result)
+    assert.equal(result.state, 'available', `${mime} ${type}`)
+    assert.deepEqual({ ...result.data as object }, { Rows: 512, Columns: 512, Modality: 'CT', accessToken: '[redacted]', note: '[redacted]' })
+    for (const text of ['private-access', 'private-bearer']) assert.ok(!output.includes(text), text)
+    assert.equal(result.redacted, true)
+  }
+})
+
+test('page scripts, raw text, HTML and oversized script replies stay withheld', () => {
+  const json = JSON.stringify({ token: 'never-export', value: 1 })
+  // Page scripts and other resource types never qualify, even when they look like JSONP.
+  for (const type of ['Script', 'Document', 'Other', '']) assert.equal(readableResponse(`cb(${json})`, 'application/javascript', type).data, undefined)
+  assert.equal(readableResponse('<html>secret</html>', 'text/html', 'XHR').state, 'unavailable')
+  assert.equal(readableResponse('AAAA', 'application/octet-stream', 'Fetch').state, 'unavailable')
+  for (const body of ['var token = "never-export";', 'plain secret-without-label', `cb(${json}); stealCookies()`, `cb(${json}, 200)`, 'cb("never-export")', `alert(1);cb(${json})`]) {
+    const result = readableResponse(body, 'application/javascript', 'XHR')
+    assert.equal(result.state, 'unavailable', body); assert.equal(result.data, undefined)
+    assert.ok(!JSON.stringify(result).includes('never-export'), body)
+  }
+  const big = readableResponse(`cb(${JSON.stringify({ description: 'x'.repeat(MAX_RESPONSE_BYTES), token: 'never-export' })})`, 'text/javascript', 'XHR')
+  assert.equal(big.state, 'unavailable'); assert.equal(big.truncated, true)
+  assert.ok(!JSON.stringify(big).includes('never-export'))
+})
+
+test('only JSON, or script and text replies to XHR/fetch, are worth retrieving', () => {
+  assert.equal(capturableBody('application/json'), true)
+  assert.equal(capturableBody('application/vnd.api+json', 'Script'), true)
+  for (const mime of ['application/javascript', 'text/javascript', 'application/x-javascript', 'text/plain; charset=utf-8']) {
+    assert.equal(capturableBody(mime, 'XHR'), true, mime); assert.equal(capturableBody(mime, 'Fetch'), true, mime)
+    assert.equal(capturableBody(mime, 'Script'), false, mime); assert.equal(capturableBody(mime), false, mime)
+  }
+  for (const mime of ['text/html', 'application/octet-stream', 'image/png', 'text/css']) assert.equal(capturableBody(mime, 'XHR'), false, mime)
 })

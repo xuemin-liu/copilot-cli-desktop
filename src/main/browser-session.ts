@@ -172,7 +172,9 @@ content. OutputPath must be a local absolute .png path; network and device paths
 are rejected. Use a new output filename if the screenshot file already exists. View the
 saved PNG with the available image-view tool; do not print base64. Response output
 contains only captured, filtered JSON and records its page/frame, time and limits.
-HTML, scripts, non-JSON and oversized bodies are withheld. Native DevTools may
+XHR/fetch replies sent as JavaScript or plain text are exported when they are JSON
+or JSONP (the callback is unwrapped). HTML, page scripts, other non-JSON and
+oversized bodies are withheld. Native DevTools may
 temporarily interrupt capture; report unavailable bodies and retry page reading.
 
 ## General web-app automation tests
