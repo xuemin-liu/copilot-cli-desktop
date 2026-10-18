@@ -5,7 +5,7 @@ import { browserReadScript } from './browser-read-script.js'
 import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
 import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot-mask.js'
 import type { ScreenshotMaskGeometry, ScreenshotLayout } from './browser-screenshot-mask.js'
-import { MAX_RESPONSE_BYTES, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
+import { MAX_RESPONSE_BYTES, capturableBody, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
 import { browserTestScript } from './browser-test-script.js'
 import { browserPickScript } from './browser-pick-script.js'
 import { formatPickedElement } from './browser-pick-format.js'
@@ -44,7 +44,7 @@ interface PageReader {
   dialog: PendingDialog | null; dialogRule: DialogRule | null
   contents: WebContents; sessions: Map<string, string>; contexts: Map<string, number>; ready: Promise<void> | null
   capture: 'starting' | 'ready' | 'unavailable'
-  requests: Map<string, { requestId: string; sessionId?: string; response: ResponseRecord }>
+  requests: Map<string, { requestId: string; sessionId?: string; resourceType: string; response: ResponseRecord }>
 }
 export interface BrowserReaderOptions {
   pages: () => WebContents[]
@@ -213,9 +213,10 @@ export class BrowserReader {
         frameId: String(params.frameId ?? ''), url: readableUrl(String(response.url)), status: Number(response.status),
         mimeType: String(response.mimeType), timestamp: new Date().toISOString(), state: 'loading', redacted: false, truncated: false }
       this.responses.set(record.id, record)
-      if (/^(application\/(?:[\w.-]+\+)?json|text\/json)(?:;|$)/i.test(record.mimeType)) {
-        page.requests.set(key, { requestId: String(params.requestId), ...(sessionId ? { sessionId } : {}), response: record })
-      } else Object.assign(record, readableResponse('', record.mimeType))
+      const resourceType = String(params.type ?? '')
+      if (capturableBody(record.mimeType, resourceType)) {
+        page.requests.set(key, { requestId: String(params.requestId), ...(sessionId ? { sessionId } : {}), resourceType, response: record })
+      } else Object.assign(record, readableResponse('', record.mimeType, resourceType))
       this.trim()
     } else if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
       const pending = page.requests.get(key)
@@ -225,16 +226,16 @@ export class BrowserReader {
       if (method === 'Network.loadingFailed') { record.state = 'unavailable'; record.reason = 'Request failed or was cancelled.'; return }
       if (!this.options.recording()) { record.state = 'unavailable'; record.reason = 'Capture was paused before the response completed.'; return }
       if (Number(params.encodedDataLength) > MAX_RESPONSE_BYTES) { record.state = 'unavailable'; record.reason = 'Response exceeds capture limit.'; record.truncated = true; return }
-      // Avoid even retrieving non-JSON bodies (login HTML, scripts, binary attachments).
-      if (!/^(application\/(?:[\w.-]+\+)?json|text\/json)(?:;|$)/i.test(record.mimeType)) {
-        Object.assign(record, readableResponse('', record.mimeType)); return
+      // Avoid even retrieving other bodies (login HTML, page scripts, binary attachments).
+      if (!capturableBody(record.mimeType, pending.resourceType)) {
+        Object.assign(record, readableResponse('', record.mimeType, pending.resourceType)); return
       }
       try {
         const body = await this.command(page, 'Network.getResponseBody', { requestId: pending.requestId }, pending.sessionId)
         if (this.disposed || !this.responses.has(record.id)) return
         if (!this.options.recording()) { record.state = 'unavailable'; record.reason = 'Capture was paused before the body was retained.'; return }
         const raw = body.base64Encoded ? Buffer.from(String(body.body), 'base64').toString('utf8') : String(body.body)
-        Object.assign(record, readableResponse(raw, record.mimeType))
+        Object.assign(record, readableResponse(raw, record.mimeType, pending.resourceType))
         this.trim()
       } catch { record.state = 'unavailable'; record.reason = 'Body was not retained by Chromium, was too large, or the debugger disconnected. No request was replayed.' }
     }
@@ -679,7 +680,7 @@ export class BrowserReader {
       return { recording: this.options.recording(), limit: MAX_RESPONSES, timestamp: new Date().toISOString(),
         capture: [...this.readers].filter(([id]) => id === pageId).map(([id, page]) => ({ pageId: id, state: page.capture })),
         responses: [...this.responses.values()].filter(record => record.pageId === pageId).map(({ data: _data, ...metadata }) => metadata),
-        limitations: ['Only captured JSON is exported. Earlier, cleared, oversized, non-JSON and unretained responses are unavailable; requests are never replayed.'] }
+        limitations: ['Only captured JSON is exported; XHR/fetch replies sent as script or text count when they are JSON or JSONP. Earlier, cleared, oversized, non-JSON and unretained responses are unavailable; requests are never replayed.'] }
     }
     if (command === 'response') {
       const record = this.responses.get(args[0]!)
