@@ -23,7 +23,12 @@ if (!process.versions.electron) {
       permissionPreset: 'default', defaultResumeMode: 'new', launch: {}, tabs: []
     }));
     const noop = () => {};
-    window.fixture = { calls: [], openChanges: [], errors: [] };
+    window.fixture = { calls: [], openChanges: [], errors: [], views: [] };
+    // Stands in for the preload bridge: the View menu's sidebar choices arrive and are reported here.
+    window.copilotDesktop = {
+      reportSidebarView: view => { window.fixture.views.push(view); return Promise.resolve(); },
+      onSidebarViewRequest: listener => { window.fixture.requestView = listener; return () => { window.fixture.requestView = null; }; },
+    };
     const describe = node => node instanceof Element ? node.getAttribute('aria-label') || node.getAttribute('class') || node.tagName : null;
     window.fixture.events = [];
     window.fixture.lastResizeAt = performance.now();
@@ -213,6 +218,33 @@ if (!process.versions.electron) {
       await closed()
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 0)
       checks.push('Expanding sidebar dismisses flyout and reports unobscured')
+
+      // At the app's 280px sidebar width no header action may be clipped off the edge.
+      const heading = await ui(`(() => {
+        const sidebar = document.querySelector('.sidebar');
+        sidebar.style.width = '280px';
+        const box = sidebar.getBoundingClientRect();
+        const contentRight = box.right - parseFloat(getComputedStyle(sidebar).paddingRight);
+        const actions = [...document.querySelectorAll('.sidebar-heading-actions button')].map(button => {
+          const rect = button.getBoundingClientRect();
+          return {label: button.getAttribute('aria-label'), left: rect.left, right: rect.right};
+        });
+        return {contentRight, left: box.left, actions};
+      })()`)
+      assert.ok(heading.actions.some(action => action.label === 'Add workspace'), 'Add workspace is in the header')
+      assert.ok(!heading.actions.some(action => action.label === 'View options'), 'View options moved to the View menu')
+      for (const action of heading.actions) {
+        assert.ok(action.left >= heading.left && action.right <= heading.contentRight + 0.5, `${action.label} fits in the sidebar`)
+      }
+      await ui(`document.querySelector('.sidebar').style.width = ''`)
+      checks.push('Header actions, including Add workspace, fit a 280px sidebar')
+
+      await until(`JSON.stringify(window.fixture.views.at(-1)) === '{"group":"workspace","order":"manual"}'`, 'initial view reported to the menu')
+      await ui(`window.fixture.requestView({ group: 'list' })`)
+      await until(`!!document.querySelector('.workspace-sessions-flat') && localStorage.getItem('sidebar-group-mode') === 'list' && JSON.stringify(window.fixture.views.at(-1)) === '{"group":"list","order":"manual"}'`, 'menu groups sessions in one list')
+      await ui(`window.fixture.requestView({ order: 'last-updated' })`)
+      await until(`localStorage.getItem('sidebar-order-mode') === 'last-updated' && JSON.stringify(window.fixture.views.at(-1)) === '{"group":"list","order":"last-updated"}'`, 'menu orders sessions by last update')
+      checks.push('View menu requests regroup, reorder, save and report the sidebar view')
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)
