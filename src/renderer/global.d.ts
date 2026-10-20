@@ -1,4 +1,4 @@
-import type { DesktopState, RevealPathResult, FanOutResult } from '../main/types.js'
+import type { DesktopState, RevealPathResult, FanOutResult, SidebarView } from '../main/types.js'
 import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserViewMode } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
@@ -73,6 +73,10 @@ export interface CopilotDesktopBridge {
   createTabWithAttachments(title?: string | null, options?: NewSessionOptions | null): Promise<DesktopState>
   /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
   onNewSessionRequest(listener: (attachments: boolean) => void): () => void
+  /** The View menu picked a sidebar grouping or order. */
+  onSidebarViewRequest(listener: (change: Partial<SidebarView>) => void): () => void
+  /** Tells the main process the sidebar's current view so the View menu shows it checked. */
+  reportSidebarView(view: SidebarView): Promise<void>
   fanOut(profileId: string, label: string, count: number): Promise<FanOutResult>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>

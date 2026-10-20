@@ -136,8 +136,17 @@ button:disabled {
   font-weight: 650;
 }
 
+/* The label gives way first so no action button is ever clipped off the edge. */
+.sidebar-section-heading > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-heading-actions {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 2px;
 }
@@ -180,46 +189,6 @@ button:disabled {
 .sidebar-search:focus {
   border-color: #537de8;
   box-shadow: 0 0 0 2px rgb(83 125 232 / 15%);
-}
-
-.sidebar-view-menu {
-  display: grid;
-  gap: 3px;
-  margin: 5px 3px 3px;
-  padding: 8px;
-  border: 1px solid #373b45;
-  border-radius: 8px;
-  background: #20232a;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 32%);
-}
-
-.sidebar-view-menu > span {
-  padding: 5px 7px 2px;
-  color: #7f8898;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-}
-
-.sidebar-view-menu button {
-  min-height: 29px;
-  padding: 0 8px;
-  border: 0;
-  background: transparent;
-  text-align: left;
-}
-
-.sidebar-view-menu button::after {
-  content: '';
-  float: right;
-}
-
-.sidebar-view-menu button.selected {
-  background: #30343d;
-}
-
-.sidebar-view-menu button.selected::after {
-  content: '✓';
 }
 
 .sidebar-collapsed {

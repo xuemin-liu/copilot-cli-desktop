@@ -132,7 +132,7 @@ import {
   visibleSessionTabs,
   type TabsState,
 } from './session-tab-machine.js'
-import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, WorkspaceProfile } from './types.js'
+import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, SidebarView, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
@@ -275,6 +275,15 @@ function toggleGitPanel(): void {
   if (window && !window.isDestroyed()) window.webContents.send('desktop:git-toggle')
 }
 /** Ask the main window for its new-session dialog, where the session is named before it starts (menu and tray). */
+// Mirrors the renderer's saved choice so the View menu can check the right items.
+let sidebarView: SidebarView = { group: 'workspace', order: 'manual' }
+
+function requestSidebarView(change: Partial<SidebarView>): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  window.webContents.send('desktop:sidebar-view-request', change)
+}
+
 function requestNewSession(attachments: boolean): void {
   const window = mainWindow
   if (!window || window.isDestroyed()) return
@@ -2266,6 +2275,21 @@ function installApplicationMenu(): void {
     {
       label: 'View',
       submenu: [
+        {
+          label: 'Group Sessions',
+          submenu: [
+            { label: 'By Workspace', type: 'radio', checked: sidebarView.group === 'workspace', click: () => requestSidebarView({ group: 'workspace' }) },
+            { label: 'In One List', type: 'radio', checked: sidebarView.group === 'list', click: () => requestSidebarView({ group: 'list' }) },
+          ],
+        },
+        {
+          label: 'Order Sessions',
+          submenu: [
+            { label: 'Manually', type: 'radio', checked: sidebarView.order === 'manual', click: () => requestSidebarView({ order: 'manual' }) },
+            { label: 'By Last Updated', type: 'radio', checked: sidebarView.order === 'last-updated', click: () => requestSidebarView({ order: 'last-updated' }) },
+          ],
+        },
+        { type: 'separator' },
         ...(!app.isPackaged ? [
           { role: 'reload' as const },
           { role: 'toggleDevTools' as const },
@@ -2655,6 +2679,13 @@ ipcMain.handle('desktop:dock-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
   return dockSessionTab(tabId)
+})
+ipcMain.handle('desktop:sidebar-view-changed', (event, view: unknown) => {
+  assertTrustedIpcSender(event)
+  const { group, order } = (view ?? {}) as Partial<Record<keyof SidebarView, unknown>>
+  if ((group !== 'workspace' && group !== 'list') || (order !== 'manual' && order !== 'last-updated')) throw new Error('Invalid sidebar view')
+  sidebarView = { group, order }
+  refreshMenus()
 })
 ipcMain.handle('desktop:select-workspace', (event) => {
   assertTrustedIpcSender(event)
