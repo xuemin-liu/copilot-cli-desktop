@@ -43,6 +43,7 @@ import {
   type DesktopPreferences,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
+import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import { appendBoundedLog, pruneSessionLogDirectories } from './log-retention.js'
 import {
   EMPTY_COPILOT_CAPABILITIES,
@@ -1366,6 +1367,7 @@ async function createSessionTab(
     cwd: plan.cwd,
     env: plan.env,
     spawnPty: spawnNodePty,
+    worktreeTimeoutMinutes: desktopConfig.worktreeTimeoutMinutes,
     sessionId: deterministicSessionId,
     discoverSessionIdFromOutput: deterministicSessionId === null && connectSessionId === null,
     // An unnamed session reaches the store only with its first prompt, which can come any time.
@@ -1807,6 +1809,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
         cwd: plan.cwd,
         env: plan.env,
         spawnPty: spawnNodePty,
+        worktreeTimeoutMinutes: desktopConfig.worktreeTimeoutMinutes,
         sessionId: deterministicSessionId,
         discoverSessionIdFromOutput: deterministicSessionId === null,
         ...(finalized.worktreeName ? { discoverSessionIdFromStore: { root: copilotSessionRoot({ ...process.env, ...plan.env }), since: Date.now(), launchCwd: plan.cwd, worktreeName: finalized.worktreeName,
@@ -2468,6 +2471,7 @@ function settingsPreferences(): DesktopPreferences {
     globalShortcutEnabled: desktopConfig.globalShortcutEnabled,
     browserProfile: desktopConfig.browserProfile,
     browserOverrides: desktopConfig.browserOverrides,
+    worktreeTimeoutMinutes: desktopConfig.worktreeTimeoutMinutes,
   }
 }
 
@@ -2884,6 +2888,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'globalShortcutEnabled',
     'browserProfile',
     'browserOverrides',
+    'worktreeTimeoutMinutes',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -2897,6 +2902,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('globalShortcutEnabled' in values && typeof values.globalShortcutEnabled !== 'boolean')
     || ('browserProfile' in values && !isBrowserProfileMode(values.browserProfile))
     || ('browserOverrides' in values && !isBrowserOverridesMode(values.browserOverrides))
+    || ('worktreeTimeoutMinutes' in values && !isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes))
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -2919,6 +2925,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   // Only new sessions follow it; the new-session dialog shows it as its default.
   const overridesChanged = isBrowserOverridesMode(values.browserOverrides) && desktopConfig.browserOverrides !== values.browserOverrides
   if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
+  if (isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes)) desktopConfig.worktreeTimeoutMinutes = values.worktreeTimeoutMinutes
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

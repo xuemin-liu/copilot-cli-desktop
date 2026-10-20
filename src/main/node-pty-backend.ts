@@ -1,5 +1,6 @@
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
 import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
+import { prepareSessionWorktree } from './session-worktree-launch.js'
 
 /**
  * Describe the renderer that actually consumes this PTY's output instead of
@@ -34,6 +35,10 @@ export function embeddedTerminalEnvironment(environment: NodeJS.ProcessEnv): Nod
  */
 export async function spawnNodePty(file: string, args: string[], options: SpawnOptions): Promise<PtyLike> {
   const pty = await import('node-pty')
+  const prepared = await prepareSessionWorktree(args, options)
+  args = prepared.args
+  options = prepared.options
+  options.signal?.throwIfAborted()
   const child = pty.spawn(file, args, {
     cwd: options.cwd,
     env: embeddedTerminalEnvironment(options.env) as { [key: string]: string },

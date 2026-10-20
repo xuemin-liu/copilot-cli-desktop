@@ -30,6 +30,7 @@ export interface PtySessionOptions {
   cols?: number
   rows?: number
   spawnPty: SpawnPtyFn
+  worktreeTimeoutMinutes?: number
   forceKillTimeoutMs?: number
   sessionId?: string | null
   discoverSessionIdFromOutput?: boolean
@@ -59,6 +60,7 @@ export class PtySession extends EventEmitter {
   private activityDetailValue: ActivityDetail | null = null
   private sessionCwdValue: string | null = null
   private stopping = false
+  private readonly startupAbort = new AbortController()
   private readonly outputLines: string[] = []
   private pendingLine = ''
   private heuristicBuffer = ''
@@ -208,6 +210,7 @@ export class PtySession extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.pty) throw new Error('This session has already started')
+    this.startupAbort.signal.throwIfAborted()
     this.setStatus('starting')
     if (this.lastKnownSessionId) await this.attachPermissionMonitor(this.lastKnownSessionId)
     // The snapshot of what is already in the store must be complete before the spawn, or the new session could be in it.
@@ -224,7 +227,14 @@ export class PtySession extends EventEmitter {
         env: { ...process.env, ...this.options.env },
         cols: spawnCols,
         rows: spawnRows,
+        signal: this.startupAbort.signal,
+        worktreeTimeoutMinutes: this.options.worktreeTimeoutMinutes,
       })
+      if (this.stopping) {
+        pty.kill()
+        pty.dispose?.()
+        throw new Error('Session startup cancelled')
+      }
     } catch (error) {
       this.storeDiscovery?.cancel()
       await this.drainPermissionMonitor()
@@ -324,6 +334,9 @@ export class PtySession extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true
+    this.startupAbort.abort()
+    this.storeDiscovery?.cancel()
     const pty = this.pty
     if (!pty) {
       await this.exitCompletion
@@ -331,8 +344,6 @@ export class PtySession extends EventEmitter {
       this.setStatus('completed')
       return
     }
-    this.stopping = true
-    this.storeDiscovery?.cancel()
     this.setStatus('stopping')
     const exited = new Promise<void>((resolve) => this.once('exit', resolve))
 

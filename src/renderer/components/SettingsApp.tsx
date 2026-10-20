@@ -11,6 +11,7 @@ import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copi
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
 import { MigrationSettings } from './MigrationSettings.js'
+import { MAX_WORKTREE_TIMEOUT_MINUTES } from '../../main/worktree-timeout.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
   value,
@@ -489,7 +490,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -508,6 +509,27 @@ export function SettingsApp(): JSX.Element | null {
 
       <section>
         <h2>General</h2>
+        <label className="settings-row settings-row-number">
+          Worktree timeout (minutes)
+          <input
+            key={snapshot.worktreeTimeoutMinutes}
+            type="number"
+            min={1}
+            max={MAX_WORKTREE_TIMEOUT_MINUTES}
+            step={1}
+            required
+            defaultValue={snapshot.worktreeTimeoutMinutes}
+            onBlur={(event) => {
+              const input = event.currentTarget
+              if (!input.reportValidity()) return
+              const minutes = input.valueAsNumber
+              if (minutes !== snapshot.worktreeTimeoutMinutes) updatePreference({ worktreeTimeoutMinutes: minutes })
+            }}
+          />
+        </label>
+        <p className="settings-disclaimer">
+          Maximum time to create a new Git worktree. Default: 10 minutes. Changes apply to worktree creation started after saving.
+        </p>
         <label className="settings-row settings-row-select">
           When the main window closes
           <select

@@ -979,6 +979,11 @@ button:disabled {
   margin-left: auto;
 }
 
+.settings-row-number input {
+  width: 100px;
+  margin-left: auto;
+}
+
 .profile-row {
   display: flex;
   align-items: center;

@@ -15,6 +15,8 @@ export interface PtyLike {
 }
 
 export interface SpawnOptions {
+  worktreeTimeoutMinutes?: number | undefined
+  signal?: AbortSignal | undefined
   cwd: string
   env: NodeJS.ProcessEnv
   cols: number

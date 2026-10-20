@@ -921,7 +921,7 @@ test('recovery refuses to overwrite changes made after interruption', async (t) 
 test('workspace mapping normalizes IDs, skips unmapped profiles, and does not restore sessions or OS integration', async (t) => {
   const { root, target } = await fixture(t)
   const workspace = join(root, 'destination-repo'); await mkdir(workspace)
-  const data = archive(fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ ...DEFAULT_DESKTOP_CONFIG, launchAtLogin: true, globalShortcutEnabled: true, provider: { type: 'openai', model: 'test', baseUrl: 'SECRET' }, profiles: [{ name: 'Work', path: 'D:\\old\\work', permissionPreset: 'full-access', launch: { mode: 'autopilot' }, tabs: [{ title: 'old', lastSessionId: 'old' }] }] })))
+  const data = archive(fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ ...DEFAULT_DESKTOP_CONFIG, worktreeTimeoutMinutes: 25, launchAtLogin: true, globalShortcutEnabled: true, provider: { type: 'openai', model: 'test', baseUrl: 'SECRET' }, profiles: [{ name: 'Work', path: 'D:\\old\\work', permissionPreset: 'full-access', launch: { mode: 'autopilot' }, tabs: [{ title: 'old', lastSessionId: 'old' }] }] })))
   const id = 'aaaaaaaaaaaaaaaa'
   data.manifest.projects = [{ id, name: 'Work', sourcePath: 'D:\\old\\work' }]
   await applyMigrationImport(await planMigrationImport(data, target, { [id]: workspace }, choices), target)
@@ -931,6 +931,7 @@ test('workspace mapping normalizes IDs, skips unmapped profiles, and does not re
   assert.equal(config.profiles[0]?.launch.mode, 'interactive')
   assert.deepEqual(config.profiles[0]?.tabs, [])
   assert.equal(config.launchAtLogin, false)
+  assert.equal(config.worktreeTimeoutMinutes, 25)
   assert.equal(config.globalShortcutEnabled, false)
   assert.equal(config.provider.baseUrl, '')
 })
