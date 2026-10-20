@@ -68,6 +68,12 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     ipcRenderer.on('desktop:new-session-request', handler)
     return () => ipcRenderer.removeListener('desktop:new-session-request', handler)
   },
+  onSidebarViewRequest: (listener) => {
+    const handler = (_event, change) => listener(change)
+    ipcRenderer.on('desktop:sidebar-view-request', handler)
+    return () => ipcRenderer.removeListener('desktop:sidebar-view-request', handler)
+  },
+  reportSidebarView: (view) => ipcRenderer.invoke('desktop:sidebar-view-changed', view),
   fanOut: (profileId, label, count) => ipcRenderer.invoke('desktop:fan-out', profileId, label, count),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),

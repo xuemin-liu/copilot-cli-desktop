@@ -112,6 +112,12 @@ export interface FanOutResult {
   label: string
 }
 
+/** How the sidebar lists sessions; the renderer owns it, the View menu mirrors it. */
+export interface SidebarView {
+  group: 'workspace' | 'list'
+  order: 'manual' | 'last-updated'
+}
+
 export type CopilotResolutionKind = 'direct' | 'gh-wrapped'
 
 export interface CopilotResolution {

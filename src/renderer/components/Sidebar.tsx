@@ -83,7 +83,6 @@ export function Sidebar({
 }: SidebarProps): JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [viewOpen, setViewOpen] = useState(false)
   const [projectsOpen, setProjectsOpen] = useState(false)
   const projectsId = useId()
   const projectsPopover = useRef<HTMLDivElement>(null)
@@ -92,6 +91,20 @@ export function Sidebar({
   const [groupMode, setGroupMode] = useState<'workspace' | 'list'>(() => readSidebarPreference('sidebar-group-mode') === 'list' ? 'list' : 'workspace')
   const [orderMode, setOrderMode] = useState<'manual' | 'last-updated'>(() => readSidebarPreference('sidebar-order-mode') === 'last-updated' ? 'last-updated' : 'manual')
   const normalizedQuery = query.trim().toLowerCase()
+  // The View menu owns these choices now; keep it checked and apply what it picks.
+  useEffect(() => {
+    void window.copilotDesktop.reportSidebarView({ group: groupMode, order: orderMode }).catch(() => {})
+  }, [groupMode, orderMode])
+  useEffect(() => window.copilotDesktop.onSidebarViewRequest((change) => {
+    if (change.group) {
+      setGroupMode(change.group)
+      writeSidebarPreference('sidebar-group-mode', change.group)
+    }
+    if (change.order) {
+      setOrderMode(change.order)
+      writeSidebarPreference('sidebar-order-mode', change.order)
+    }
+  }), [])
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
   useEffect(() => {
     if (!collapsed) setProjectsOpen(false)
@@ -329,16 +342,6 @@ export function Sidebar({
           <button
             type="button"
             className="icon-button"
-            title="View options"
-            aria-label="View options"
-            aria-expanded={viewOpen}
-            onClick={() => setViewOpen((open) => !open)}
-          >
-            ☷
-          </button>
-          <button
-            type="button"
-            className="icon-button"
             title="Add workspace"
             aria-label="Add workspace"
             onClick={onSelectWorkspace}
@@ -360,28 +363,6 @@ export function Sidebar({
         />
       )}
 
-      {viewOpen && !collapsed && (
-        <div className="sidebar-view-menu" role="menu" aria-label="Session view options">
-          <span>Group by</span>
-          <button type="button" className={groupMode === 'workspace' ? 'selected' : ''} onClick={() => {
-            setGroupMode('workspace')
-            writeSidebarPreference('sidebar-group-mode', 'workspace')
-          }}>Workspace</button>
-          <button type="button" className={groupMode === 'list' ? 'selected' : ''} onClick={() => {
-            setGroupMode('list')
-            writeSidebarPreference('sidebar-group-mode', 'list')
-          }}>In one list</button>
-          <span>Order by</span>
-          <button type="button" className={orderMode === 'manual' ? 'selected' : ''} onClick={() => {
-            setOrderMode('manual')
-            writeSidebarPreference('sidebar-order-mode', 'manual')
-          }}>Manual</button>
-          <button type="button" className={orderMode === 'last-updated' ? 'selected' : ''} onClick={() => {
-            setOrderMode('last-updated')
-            writeSidebarPreference('sidebar-order-mode', 'last-updated')
-          }}>Last updated</button>
-        </div>
-      )}
 
       {collapsed && <>
         <button type="button" className="sidebar-projects-button" ref={projectsButton}
