@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
@@ -10,7 +10,7 @@ import type { AmendState } from './GitCommitBox.js'
 import { GitSyncBar } from './GitSyncBar.js'
 import { GitBranchList } from './GitBranchList.js'
 import type { GitSyncKind } from './GitSyncBar.js'
-import { GitDiffView } from './GitDiffView.js'
+import { GitDiffView, diffChangeSignature } from './GitDiffView.js'
 import { GitWorktreeList } from './GitWorktreeList.js'
 import type { WorktreeSession } from './GitWorktreeList.js'
 import type { DiffCommentAnchor } from './GitDiffView.js'
@@ -42,6 +42,12 @@ const HISTORY_PAGE = 50
 
 function readStoredRepo(profileId: string): string | null {
   try { return localStorage.getItem(repoStorageKey(profileId)) } catch { return null }
+}
+
+/** Whether the diff shows the whole file rather than the changes with a few lines around them: one choice for every repository. */
+const WHOLE_FILE_KEY = 'git-diff-whole-file'
+function readWholeFile(): boolean {
+  try { return localStorage.getItem(WHOLE_FILE_KEY) === '1' } catch { return false }
 }
 
 /** Opens the project in the main process, follows its pushed changes, and closes it again on unmount. */
@@ -174,6 +180,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [statusError, setStatusError] = useState<string | null>(null)
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
+  const [wholeFile, setWholeFile] = useState(readWholeFile)
   // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
   // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
   const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
@@ -242,11 +249,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   })()
 
   // The diff of the selected file: reload on selection, on a changed list, and when the window regains focus.
-  const diffKey = repo && selectedEntry && selection ? `${repo.id}:${selectedEntry.id}:${selection.staged}` : null
+  const diffKey = repo && selectedEntry && selection ? `${repo.id}:${selectedEntry.id}:${selection.staged}:${wholeFile ? 'whole' : 'hunks'}` : null
   useEffect(() => {
     if (!repo || !selectedEntry || !selection || !diffKey) { setDiff(null); setDiffError(null); return }
     let stale = false
-    window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged)
+    window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged, wholeFile)
       .then(value => { if (!stale) { setDiff({ key: diffKey, value }); setDiffError(null) } })
       .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
     return () => { stale = true }
@@ -262,7 +269,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     const working = new Set([...currentStatus.unstaged, ...currentStatus.untracked, ...currentStatus.conflicted].map(entry => entry.path))
     setComments(current => pruneCommentBuckets(current, currentStatus.repoId, (path, isStaged) => (isStaged ? staged : working).has(path)))
   }, [currentStatus])
-  const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diff.value.text !== activeComments.diffText
+  // Compared by the changed lines alone, so comments written in the other view (more or less context) are not stale.
+  const diffSignature = useMemo(() => diff ? diffChangeSignature(diff.value.text) : null, [diff])
+  const baselineSignature = useMemo(() => activeComments ? diffChangeSignature(activeComments.diffText) : null, [activeComments?.diffText]) // eslint-disable-line react-hooks/exhaustive-deps
+  const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diffSignature !== baselineSignature
+  const toggleWholeFile = (): void => {
+    const next = !wholeFile
+    setWholeFile(next)
+    try { localStorage.setItem(WHOLE_FILE_KEY, next ? '1' : '0') } catch { /* Keep the in-memory choice. */ }
+  }
   const changeComment = (key: string, anchor: DiffCommentAnchor, text: string | null): void => {
     if (!commentKey || !diff || diff.key !== diffKey) return
     const diffText = diff.value.text
@@ -357,9 +372,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   }
 
   const addToPrompt = (): void => {
-    if (!repo || !selection || !diff || diff.key !== diffKey || !promptTarget) return
-    insert(promptTarget.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: diff.value }))
-    setNotice(`Added to the prompt box of “${promptTarget.title}”. Review it and press Enter to send.`)
+    if (!repo || !selection || !selectedEntry || !diff || diff.key !== diffKey || !promptTarget) return
+    const target = promptTarget
+    const send = (value: GitDiff): void => {
+      insert(target.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: value }))
+      setNotice(`Added to the prompt box of “${target.title}”. Review it and press Enter to send.`)
+    }
+    if (!wholeFile) { send(diff.value); return }
+    // The whole file would crowd the change out of the prompt: send the change with its usual context instead.
+    setActionError(null)
+    window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged)
+      .then(send).catch((cause: unknown) => setActionError(errorMessage(cause)))
   }
 
   const addCommentsToPrompt = (): void => {
@@ -610,6 +633,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       <div className="git-diff-head">
                         <span className="git-diff-path" title={selection.path}>{selection.path}</span>
                         <span className="git-diff-side">{selection.staged ? 'staged' : 'working tree'}</span>
+                        <button type="button" className="git-diff-whole-file" aria-pressed={wholeFile} onClick={toggleWholeFile}
+                          title={wholeFile ? 'Show only the changes and the lines around them' : 'Show the whole file with the changes in place'}>
+                          Whole file
+                        </button>
                         <button type="button" disabled={!canInsert || !diff || diff.key !== diffKey} onClick={addToPrompt}
                           title={canInsert ? `Put this diff in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
                           Add to prompt

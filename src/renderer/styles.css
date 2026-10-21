@@ -1179,6 +1179,7 @@ button:disabled {
 .git-diff-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #252a33; }
 .git-diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; direction: rtl; text-align: left; }
 .git-diff-side { color: #929baa; font-size: 11px; }
+.git-diff-head .git-diff-whole-file[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }
 .git-diff-stats { display: flex; gap: 8px; padding: 4px 8px 0; font-size: 11px; }
 .git-diff-added { color: #20c9a6; } .git-diff-deleted { color: #ff6b7a; }
 .git-diff-lines { margin: 0; padding: 4px 0 6px; overflow-x: auto; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11.5px; line-height: 1.5; max-height: 55vh; overflow-y: auto; }

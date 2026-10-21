@@ -612,7 +612,8 @@ export class GitService {
     }
   }
 
-  async getDiff(subscriberId: number, profileId: string, repoId: string, entryId: string, staged: boolean): Promise<GitDiffView> {
+  /** With `wholeFile`, the diff carries every unchanged line as context (an untracked file is always shown whole). */
+  async getDiff(subscriberId: number, profileId: string, repoId: string, entryId: string, staged: boolean, wholeFile = false): Promise<GitDiffView> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
@@ -644,7 +645,7 @@ export class GitService {
     if (binary) return { ...base, kind: 'binary', text: '', truncated: false, added: null, deleted: null }
     const added = counts.reduce((sum, count) => sum + (count.added ?? 0), 0)
     const deleted = counts.reduce((sum, count) => sum + (count.deleted ?? 0), 0)
-    const diff = await runtime.runner.run({ cwd: root, args: diffArgs(paths), signal, maxStdoutBytes: MAX_DIFF_BYTES + 64 * 1024 })
+    const diff = await runtime.runner.run({ cwd: root, args: diffArgs({ ...paths, wholeFile }), signal, maxStdoutBytes: MAX_DIFF_BYTES + 64 * 1024 })
     if (diff.cancelled) throw new Error('Cancelled')
     if (!gitSucceeded(diff) && !diff.stdoutTruncated) throw new Error(describeFailure(diff, 'git diff', root))
     const bounded = boundText(diff.stdout, MAX_DIFF_BYTES)

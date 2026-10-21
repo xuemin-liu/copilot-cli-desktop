@@ -22,6 +22,9 @@ export interface NumberedDiffLine {
   oldLine: number | null
   /** Line number in the new file (added and context lines), or null. */
   newLine: number | null
+  /** Where the line sits in the new file, the same however much context the diff carries: its new line number, or for a
+   * deleted line, half a line before the new line that follows it. Null for lines without a number. */
+  position: number | null
 }
 
 /** Give each diff line its file line numbers from the hunk headers. Inside a hunk, a line is content classified by its
@@ -43,15 +46,24 @@ export function numberDiffLines(lines: readonly string[]): NumberedDiffLine[] {
           newNext = Number(header[3]); newLeft = header[4] === undefined ? 1 : Number(header[4])
         }
       }
-      return { text, kind, oldLine: null, newLine: null }
+      return { text, kind, oldLine: null, newLine: null, position: null }
     }
-    if (text.startsWith('\\')) return { text, kind: 'context', oldLine: null, newLine: null }
-    if (text.startsWith('+') && newLeft > 0) { newLeft -= 1; return { text, kind: 'add', oldLine: null, newLine: newNext++ } }
-    if (text.startsWith('-') && oldLeft > 0) { oldLeft -= 1; return { text, kind: 'del', oldLine: oldNext++, newLine: null } }
+    if (text.startsWith('\\')) return { text, kind: 'context', oldLine: null, newLine: null, position: null }
+    if (text.startsWith('+') && newLeft > 0) { newLeft -= 1; return { text, kind: 'add', oldLine: null, newLine: newNext, position: newNext++ } }
+    if (text.startsWith('-') && oldLeft > 0) { oldLeft -= 1; return { text, kind: 'del', oldLine: oldNext++, newLine: null, position: newNext - 0.5 } }
     oldLeft = Math.max(0, oldLeft - 1)
     newLeft = Math.max(0, newLeft - 1)
-    return { text, kind: 'context', oldLine: oldNext++, newLine: newNext++ }
+    return { text, kind: 'context', oldLine: oldNext++, newLine: newNext, position: newNext++ }
   })
+}
+
+/** The added and deleted lines of a diff with their line numbers, as one string: equal for two diffs of the same change
+ * whatever context they carry, so switching to the whole file does not look like the change moved. */
+export function diffChangeSignature(text: string): string {
+  return numberDiffLines(text.replace(/\r\n/g, '\n').split('\n'))
+    .filter(line => line.kind === 'add' || line.kind === 'del')
+    .map(line => `${line.oldLine ?? ''}:${line.newLine ?? ''}:${line.text}`)
+    .join('\n')
 }
 
 export interface DiffCommentAnchor {
@@ -59,8 +71,10 @@ export interface DiffCommentAnchor {
   line: number
   /** The diff line as shown. */
   quote: string
-  /** Position in the diff, so comments can be sent in reading order. */
+  /** Index of the line in the diff as shown, to place it relative to private-key blocks. */
   order: number
+  /** `NumberedDiffLine.position`, so comments can be sent in reading order whichever view they were written in. */
+  position: number
 }
 
 /** The key a comment is stored under: the side and line it belongs to. Null for lines that cannot take a comment. */
@@ -125,7 +139,7 @@ export function GitDiffView({ diff, comments }: { diff: GitDiff; comments?: Diff
           const key = comments ? diffCommentKey(line) : null
           const existing = key !== null ? comments?.items.get(key) : undefined
           const where = line.newLine !== null ? `line ${line.newLine}` : `old line ${line.oldLine}`
-          const anchor = (): DiffCommentAnchor => ({ side: line.newLine !== null ? 'new' : 'old', line: line.newLine ?? line.oldLine ?? 0, quote: line.text, order: index })
+          const anchor = (): DiffCommentAnchor => ({ side: line.newLine !== null ? 'new' : 'old', line: line.newLine ?? line.oldLine ?? 0, quote: line.text, order: index, position: line.position ?? 0 })
           return (
             <span key={index} className={`git-diff-row${existing !== undefined ? ' git-diff-row-commented' : ''}`}>
               <span className={`git-diff-line git-diff-${line.kind}`}>

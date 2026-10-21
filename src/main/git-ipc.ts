@@ -111,10 +111,11 @@ export function registerGitIpc(deps: GitIpcDeps): void {
   })
   handle('desktop:git-status', (service, event, profileId: unknown, repoId: unknown) =>
     service.getStatus(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)))
-  handle('desktop:git-diff', (service, event, profileId: unknown, repoId: unknown, entryId: unknown, staged: unknown) => {
+  handle('desktop:git-diff', (service, event, profileId: unknown, repoId: unknown, entryId: unknown, staged: unknown, wholeFile: unknown) => {
     if (typeof entryId !== 'string' || !ENTRY_ID.test(entryId)) throw new Error('Invalid file')
     if (typeof staged !== 'boolean') throw new Error('Invalid diff side')
-    return service.getDiff(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), entryId, staged)
+    if (wholeFile !== undefined && wholeFile !== null && typeof wholeFile !== 'boolean') throw new Error('Invalid diff view')
+    return service.getDiff(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), entryId, staged, wholeFile === true)
   })
   const entryIdsArg = (value: unknown): string[] => {
     if (!Array.isArray(value) || value.length < 1 || value.length > 5_000) throw new Error('Invalid file selection')

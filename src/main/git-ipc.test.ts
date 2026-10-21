@@ -55,7 +55,9 @@ test('valid calls reach the service with the sender id', () => {
   call('desktop:git-trust', sender(), PROFILE, 'repo-3', 'a'.repeat(64))
   assert.deepEqual(calls.map(entry => entry[0]), ['subscribe', 'unsubscribe', 'rescan', 'getStatus', 'getDiff', 'getLog', 'trust'])
   assert.deepEqual(calls[0], ['subscribe', 1, PROFILE])
-  assert.deepEqual(calls[4], ['getDiff', 1, PROFILE, 'repo-3', 'e12-4', true])
+  assert.deepEqual(calls[4], ['getDiff', 1, PROFILE, 'repo-3', 'e12-4', true, false])
+  call('desktop:git-diff', sender(), PROFILE, 'repo-3', 'e12-4', false, true)
+  assert.deepEqual(calls.at(-1), ['getDiff', 1, PROFILE, 'repo-3', 'e12-4', false, true])
 })
 
 test('arguments are validated before the service sees them', () => {
@@ -70,6 +72,7 @@ test('arguments are validated before the service sees them', () => {
     assert.throws(() => call('desktop:git-diff', sender(), PROFILE, 'repo-1', bad, false), /Invalid file/, JSON.stringify(bad))
   }
   assert.throws(() => call('desktop:git-diff', sender(), PROFILE, 'repo-1', 'e1-1', 'yes'), /Invalid diff side/)
+  assert.throws(() => call('desktop:git-diff', sender(), PROFILE, 'repo-1', 'e1-1', true, 'yes'), /Invalid diff view/)
   for (const bad of [0, 201, 1.5, -1, '10', NaN, Infinity]) {
     assert.throws(() => call('desktop:git-log', sender(), PROFILE, 'repo-1', bad, 0), /Invalid limit/, String(bad))
   }

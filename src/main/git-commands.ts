@@ -82,9 +82,15 @@ export function statusArgs(untracked: 'normal' | 'no' = 'normal'): string[] {
   return ['status', '--porcelain=v2', '-z', '--branch', `--untracked-files=${untracked}`, '--ignore-submodules=all']
 }
 
-export function diffArgs(options: { staged: boolean; path?: string; alsoPath?: string | null; numstat?: boolean }): string[] {
+/** Context lines for a whole-file diff: more than any diff the panel reads can hold, small enough not to overflow Git's
+ * arithmetic where `long` is 32 bits. */
+export const WHOLE_FILE_CONTEXT = 1_000_000
+
+export function diffArgs(options: { staged: boolean; path?: string; alsoPath?: string | null; numstat?: boolean; wholeFile?: boolean }): string[] {
   const args = ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--submodule=short']
   if (options.numstat) args.push('--numstat', '-z')
+  // Every unchanged line as context: one hunk that shows the whole file with its changes in place.
+  else if (options.wholeFile) args.push(`--unified=${WHOLE_FILE_CONTEXT}`)
   if (options.staged) args.push('--cached')
   if (options.path !== undefined) {
     assertGitArgument(options.path, 'path')

@@ -141,7 +141,8 @@ export interface DiffComment {
   quote: string
   /** Captured from inside a private-key block of the diff it came from: never quoted, whatever diff is current later. */
   redacted: boolean
-  /** Index of the line in the diff as shown: orders the comments and places them relative to private-key blocks. */
+  /** Where the line sits in the new file (`NumberedDiffLine.position`): orders the comments whatever context the diff
+   * they came from carried. */
   index: number
   text: string
 }

@@ -198,7 +198,9 @@ shardedTest('diffs cover modified, staged, untracked, binary and directory entri
   const h = await harness(t, (f, project) => {
     f.plain(project, 'init', '-q')
     writeFileSync(join(project, 'a.txt'), 'one\ntwo\n'); writeFileSync(join(project, 'img.bin'), Buffer.from([0, 1, 2, 3]))
+    writeFileSync(join(project, 'long.txt'), Array.from({ length: 20 }, (_, n) => `line ${n + 1}\n`).join(''))
     f.plain(project, 'add', '.'); f.plain(project, 'commit', '-q', '-m', 'init')
+    writeFileSync(join(project, 'long.txt'), Array.from({ length: 20 }, (_, n) => n === 9 ? 'changed\n' : `line ${n + 1}\n`).join(''))
     writeFileSync(join(project, 'a.txt'), 'one\nTWO\nthree\n')
     writeFileSync(join(project, 'img.bin'), Buffer.from([0, 9, 9, 9, 9]))
     writeFileSync(join(project, 'new.txt'), 'hello\nworld\n')
@@ -214,6 +216,16 @@ shardedTest('diffs cover modified, staged, untracked, binary and directory entri
   assert.match(modified.text, /^-two$/m)
   assert.match(modified.text, /^\+TWO$/m)
   assert.deepEqual([modified.added, modified.deleted], [2, 1])
+
+  // The usual diff shows a few lines around the change; the whole-file diff shows every line, numbered from the first.
+  const hunk = await h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, id('long.txt'), false)
+  assert.doesNotMatch(hunk.text, /^ line 1$/m)
+  const whole = await h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, id('long.txt'), false, true)
+  assert.match(whole.text, /^@@ -1,20 \+1,20 @@$/m)
+  assert.match(whole.text, /^ line 1$/m)
+  assert.match(whole.text, /^ line 20$/m)
+  assert.match(whole.text, /^-line 10$/m)
+  assert.deepEqual([whole.added, whole.deleted], [1, 1])
 
   assert.equal((await h.service.getDiff(SUBSCRIBER, PROFILE, repo.id, id('img.bin'), false)).kind, 'binary')
 
