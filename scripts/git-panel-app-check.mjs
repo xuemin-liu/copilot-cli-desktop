@@ -118,7 +118,7 @@ if (!process.versions.electron) {
     await ui('[...document.querySelectorAll(".git-entry")].find(element => element.innerText.includes("a.txt")).setAttribute("data-pick", "")')
     await click('[data-pick]')
     await until('/\\+two/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'diff shown')
-    await click('.git-diff-head button')
+    await click('.git-diff-head .git-diff-add-prompt')
     await until('window.__inserted.length === 1', 'prompt text inserted')
     const inserted = await ui('window.__inserted[0]')
     assert.match(inserted.text, /unstaged change to `a\.txt` in `alpha`/)

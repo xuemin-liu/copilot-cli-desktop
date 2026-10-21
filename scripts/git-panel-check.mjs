@@ -69,13 +69,14 @@ if (!process.versions.electron) {
       await mkdir(repo)
       git(repo, 'init', '-q')
       await writeFile(join(repo, 'a.txt'), 'one\n')
-      await writeFile(join(repo, 'b.txt'), 'bee\n')
+      // Enough lines that a change at the end leaves the first line out of the usual diff's context.
+      await writeFile(join(repo, 'b.txt'), `bee\n${Array.from({ length: 8 }, (_, index) => `filler ${index + 1}\n`).join('')}`)
       git(repo, 'add', '.')
       git(repo, 'commit', '-q', '-m', `init ${name}`)
     }
     const alpha = join(workspace, 'alpha')
     await writeFile(join(alpha, 'a.txt'), 'one\ntwo\n')              // unstaged change
-    await writeFile(join(alpha, 'b.txt'), 'bee\nbuzz\n'); git(alpha, 'add', 'b.txt') // staged change
+    await writeFile(join(alpha, 'b.txt'), `${await readFile(join(alpha, 'b.txt'), 'utf8')}buzz\n`); git(alpha, 'add', 'b.txt') // staged change
     await writeFile(join(alpha, 'new.txt'), 'hello\n')               // untracked
     git(join(workspace, 'gamma'), 'config', 'core.sshCommand', 'ssh -i check') // needs review
     // A second setting hides a command behind 220 spaces: the review card must show all of it.
@@ -196,7 +197,7 @@ ${point.missing}`)
     results.diff = true
 
     // 4. Add to prompt puts a bounded, fenced diff in the target session's prompt.
-    await click('.git-diff-head button')
+    await click('.git-diff-head .git-diff-add-prompt')
     await until('window.__inserted.length === 1', 'prompt text inserted')
     const first = await ui('window.__inserted[0]')
     assert.equal(first.tabId, 'tab-1')
@@ -210,14 +211,34 @@ ${point.missing}`)
     await clickByText('.git-entry', 'b.txt')
     await until('/buzz/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'staged diff')
     assert.match(await text('.git-diff-side'), /staged/)
+    // A line's text follows its comment gutter button, so match the end of the line.
+    const showsFirstLine = '[...document.querySelectorAll(".git-diff-context")].some(line => line.textContent.endsWith(" bee\\n"))'
+    assert.equal(await ui(showsFirstLine), false, 'the usual diff leaves out lines far from the change')
+
+    // 5a. Whole file shows every line with the change in place, is remembered, and Add to prompt still sends the change.
+    await click('.git-diff-head .git-diff-whole-file')
+    await until(showsFirstLine, 'whole file shown')
+    assert.match(await text('.git-diff-lines'), /\+buzz/)
+    assert.equal(await ui('document.querySelector(".git-diff-whole-file").getAttribute("aria-pressed")'), 'true')
+    assert.equal(await ui('localStorage.getItem("git-diff-whole-file")'), '1')
+    await click('.git-diff-head .git-diff-add-prompt')
+    await until('window.__inserted.length === 2', 'prompt text inserted from the whole-file view')
+    const compact = (await ui('window.__inserted[1]')).text
+    assert.match(compact, /staged change to `b\.txt`[\s\S]*\+buzz/)
+    assert.doesNotMatch(compact, /^ bee$/m, 'the prompt gets the change with its usual context, not the whole file')
+    await click('.git-diff-head .git-diff-whole-file')
+    await until(`!(${showsFirstLine})`, 'back to the usual diff')
+    assert.equal(await ui('localStorage.getItem("git-diff-whole-file")'), '0')
+    results.wholeFile = true
+
     await clickByText('.git-entry', 'new.txt')
     await until('/\\+hello/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'untracked diff')
     results.stagedAndUntracked = true
 
     // 6. Draft commit message builds a prompt from the staged files only.
     await clickByText('.git-commit-row button', 'Draft with Copilot')
-    await until('window.__inserted.length === 2', 'draft prompt inserted')
-    const draft = await ui('window.__inserted[1]')
+    await until('window.__inserted.length === 3', 'draft prompt inserted')
+    const draft = await ui('window.__inserted[2]')
     assert.match(draft.text, /conventional-commit message/)
     assert.match(draft.text, /### b\.txt/)
     assert.doesNotMatch(draft.text, /### a\.txt/)

@@ -37,7 +37,7 @@ export function updateCommentBucket(buckets: DiffCommentBuckets, target: BucketT
   if (text === null) items.delete(commentKey)
   else {
     const redacted = privateKeyLineRanges(diffText).some(([first, last]) => anchor.order >= first && anchor.order <= last)
-    items.set(commentKey, { side: anchor.side, line: anchor.line, quote: redacted ? '' : anchor.quote, redacted, index: anchor.order, text })
+    items.set(commentKey, { side: anchor.side, line: anchor.line, quote: redacted ? '' : anchor.quote, redacted, index: anchor.position, text })
   }
   if (items.size === 0) next.delete(key)
   else next.set(key, { ...target, diffText: current?.diffText ?? diffText, items })
@@ -64,7 +64,7 @@ export function pruneCommentBuckets(buckets: DiffCommentBuckets, repoId: string,
   return next ?? buckets
 }
 
-/** Comments in the order they appear in the diff. */
+/** Comments in the order they appear in the diff: by position, then a run of deleted lines by old line number. */
 export function orderedComments(bucket: DiffCommentBucket): DiffComment[] {
-  return [...bucket.items.values()].sort((left, right) => left.index - right.index)
+  return [...bucket.items.values()].sort((left, right) => left.index - right.index || left.line - right.line)
 }

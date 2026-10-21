@@ -60,7 +60,7 @@ export interface CopilotDesktopBridge {
   gitBranch(profileId: string, repoId: string, action: 'create' | 'switch', name: string, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>
   gitCancel(profileId: string, repoId: string): Promise<void>
   onGitProgress(listener: (payload: { profileId: string; event: GitProgressEvent }) => void): () => void
-  gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean): Promise<GitDiffView>
+  gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean, wholeFile?: boolean): Promise<GitDiffView>
   gitLog(profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]>
   onGitToggle(listener: () => void): () => void
   onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void

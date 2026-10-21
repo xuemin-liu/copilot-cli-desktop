@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { GitDiffView, diffCommentKey, diffLineKind, numberDiffLines } from '../renderer/components/GitDiffView.js'
+import { GitDiffView, diffChangeSignature, diffCommentKey, diffLineKind, numberDiffLines } from '../renderer/components/GitDiffView.js'
 import { GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import type { AmendState } from '../renderer/components/GitCommitBox.js'
@@ -326,6 +326,18 @@ test('diff lines get their file line numbers from the hunk headers; headers, met
   ])
   assert.deepEqual(numberDiffLines(['+before any hunk header']).map(line => [line.oldLine, line.newLine]), [[null, null]])
   assert.deepEqual(numbered.map(diffCommentKey), [null, null, null, null, 'new:10', 'old:11', 'new:11', 'new:12', 'new:13', null, null, 'new:1'])
+})
+
+test('a line position and the change signature do not depend on how much context the diff carries', () => {
+  const hunks = ['--- a/a.ts', '+++ b/a.ts', '@@ -3,3 +3,3 @@', ' c', '-d', '+D', ' e']
+  const whole = ['--- a/a.ts', '+++ b/a.ts', '@@ -1,6 +1,6 @@', ' a', ' b', ' c', '-d', '+D', ' e', ' f']
+  const at = (lines: string[], kind: string) => numberDiffLines(lines).find(line => line.kind === kind)?.position
+  assert.equal(at(hunks, 'del'), 3.5, 'a deleted line sits just before the new line that follows it')
+  assert.equal(at(hunks, 'add'), 4)
+  assert.equal(at(whole, 'del'), at(hunks, 'del'))
+  assert.equal(at(whole, 'add'), at(hunks, 'add'))
+  assert.equal(diffChangeSignature(whole.join('\n')), diffChangeSignature(hunks.join('\n')))
+  assert.notEqual(diffChangeSignature(whole.join('\n').replace('+D', '+X')), diffChangeSignature(hunks.join('\n')))
 })
 
 test('with comments enabled, numbered lines get a gutter button and existing comments are shown as text under their line', () => {

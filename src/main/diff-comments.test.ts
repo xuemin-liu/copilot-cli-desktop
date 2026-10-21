@@ -3,7 +3,7 @@ import test from 'node:test'
 import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../renderer/diff-comments.js'
 import type { DiffCommentBuckets } from '../renderer/diff-comments.js'
 
-const anchor = (line: number, order = line, quote = `+line ${line}`) => ({ side: 'new' as const, line, quote, order })
+const anchor = (line: number, order = line, quote = `+line ${line}`) => ({ side: 'new' as const, line, quote, order, position: line })
 const A = { repoId: 'r1', path: 'a.txt', staged: false }
 const B = { repoId: 'r1', path: 'b.txt', staged: false }
 const A_STAGED = { repoId: 'r1', path: 'a.txt', staged: true }

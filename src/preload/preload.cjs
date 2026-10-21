@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     return () => ipcRenderer.removeListener('desktop:git-progress', handler)
   },
   gitStatus: (profileId, repoId) => ipcRenderer.invoke('desktop:git-status', profileId, repoId),
-  gitDiff: (profileId, repoId, entryId, staged) => ipcRenderer.invoke('desktop:git-diff', profileId, repoId, entryId, staged),
+  gitDiff: (profileId, repoId, entryId, staged, wholeFile) => ipcRenderer.invoke('desktop:git-diff', profileId, repoId, entryId, staged, wholeFile),
   gitLog: (profileId, repoId, limit, skip) => ipcRenderer.invoke('desktop:git-log', profileId, repoId, limit, skip),
   onGitToggle: (listener) => {
     const handler = () => listener()

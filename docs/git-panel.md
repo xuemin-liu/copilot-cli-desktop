@@ -17,7 +17,9 @@ debug browser sees it). Close it the same way. Its width and open state are reme
   upstream and ahead/behind counts. The list updates a moment after a session's activity changes (for example when Copilot
   starts or finishes working), when the window regains focus, and every 20 seconds as a fallback. **↻** rescans the folder.
 - **Diff.** Select a file to see its diff, coloured by line. Untracked files are shown as all-added. Binary files, folders
-  and very large files show a notice instead of content.
+  and very large files show a notice instead of content. **Whole file** in the diff header switches between the changes
+  with a few lines around them and the whole file with its changes in place; the choice is remembered. The panel still
+  shows at most 4,000 lines.
 - **History.** The latest commits, 50 at a time. **Load more** waits for the page in flight, so a double click never lists a
   commit twice or skips one.
 
@@ -149,7 +151,8 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
 ## Giving context to Copilot
 
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
-  Enter. The text is kept under 11,000 characters and says how many lines were left out.
+  Enter. The text is kept under 11,000 characters and says how many lines were left out. With **Whole file** on, it still
+  adds the changes with their usual context, not the whole file.
 - **Comments on diff lines.** Hover a line of the diff and select the **+** in its gutter to write a comment under it
   (Ctrl+Enter saves, Esc cancels; an existing comment shows **✎** and can be edited or removed). Comments collect under
   the diff with a count, **Add comments to prompt** and **Clear**. **Add comments to prompt** puts a numbered list in the
