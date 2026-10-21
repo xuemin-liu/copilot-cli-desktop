@@ -304,6 +304,76 @@ export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: str
   return { root, mainRoot, name: place[2], branch: await readWorktreeBranch(gitDir), issue: await pointerIssue(gitDir), gitDir }
 }
 
+/** More linked worktrees than the start-in list shows; the rest are not offered there (a saved choice is still honored). */
+const MAX_LISTED_WORKTREES = 50
+
+/**
+ * The canonical project folder and the main checkout of the repository it is (or sits in), found the way `discoverRepos`
+ * finds a project or parent repository; when the project is itself a linked worktree, its main repository. Null when there
+ * is none, it is unsafe to open, or the only one encloses the home folder or a drive root.
+ */
+async function projectRepository(projectPath: string, homeDirectory?: string): Promise<{ project: string; mainRoot: string } | null> {
+  if (!isLocalFilesystemPath(projectPath)) return null
+  let project: string
+  try { project = await realPathNative(projectPath) } catch { return null }
+  const rawHome = homeDirectory ?? homedir()
+  const home = await realPathNative(rawHome).catch(() => rawHome)
+  for (let folder = project, previous = ''; folder !== previous; previous = folder, folder = win32.dirname(folder)) {
+    let info
+    try { info = await lstat(win32.join(folder, '.git')) } catch { continue }
+    if (folder !== project && isAncestorTooBroad(folder, home)) return null
+    if (info.isDirectory()) return (await inspectGitEntry(folder))?.issue === null ? { project, mainRoot: folder } : null
+    const mainRoot = (await inspectSessionWorktree(folder, () => true))?.mainRoot
+    return mainRoot ? { project, mainRoot } : null
+  }
+  return null
+}
+
+/** A folder is offered as a linked worktree of `mainRoot` when `inspectSessionWorktree` accepts it for that repository, it
+ * is safe to open, and it is not the project folder itself. */
+async function linkedWorktreeOf(folder: string, mainRoot: string, project: string): Promise<SessionWorktree | null> {
+  const worktree = await inspectSessionWorktree(folder, (candidate) => sameFolder(candidate, mainRoot))
+  return worktree && worktree.issue === null && !sameFolder(worktree.root, project) ? worktree : null
+}
+
+/**
+ * The linked worktrees of the repository a project folder is (or sits in), using only the filesystem, so a session can be
+ * started in one: each entry under `<repo>\.git\worktrees` whose folder passes `linkedWorktreeOf`. At most `max` are
+ * listed. Sorted by folder.
+ */
+export async function listLinkedWorktrees(projectPath: string, options: { homeDirectory?: string; max?: number } = {}): Promise<SessionWorktree[]> {
+  const repository = await projectRepository(projectPath, options.homeDirectory)
+  if (!repository) return []
+  const { project, mainRoot } = repository
+  const max = options.max ?? MAX_LISTED_WORKTREES
+  let entries
+  try { entries = await readdir(win32.join(mainRoot, '.git', 'worktrees'), { withFileTypes: true }) } catch { return [] }
+  const found: SessionWorktree[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (found.length >= max) break
+    const gitDir = win32.join(mainRoot, '.git', 'worktrees', entry.name)
+    const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+    const dotGit = back.kind === 'text' ? localAbsolute(gitDir, back.text) : null
+    if (!dotGit) continue
+    const worktree = await linkedWorktreeOf(win32.dirname(dotGit), mainRoot, project)
+    // The folder must lead back to this very entry; one whose backpointer names another entry's worktree is not listed twice.
+    if (worktree && sameFolder(worktree.gitDir, gitDir)) found.push(worktree)
+  }
+  return found.sort((a, b) => a.root.localeCompare(b.root))
+}
+
+/**
+ * `path` as a linked worktree of the project's repository, else null. The path comes from the renderer or a saved tab, so
+ * the folder itself is checked against the repository (its `.git` file, commondir and backpointer), the same check the
+ * list makes for each entry, but without the list's cap: a choice stays valid however many worktrees are added later.
+ */
+export async function resolveLinkedWorktree(projectPath: string, path: string): Promise<SessionWorktree | null> {
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || !isLocalFilesystemPath(path)) return null
+  const repository = await projectRepository(projectPath)
+  return repository ? linkedWorktreeOf(path, repository.mainRoot, repository.project) : null
+}
+
 /** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
 export async function readWorktreeBranch(gitDir: string): Promise<string | null> {
   const head = await readPointerFile(win32.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)

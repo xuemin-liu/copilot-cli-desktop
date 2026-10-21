@@ -1,4 +1,4 @@
-import type { DesktopState, RevealPathResult, FanOutResult, SidebarView } from '../main/types.js'
+import type { DesktopState, RevealPathResult, FanOutResult, SessionWorktreeInfo, SidebarView } from '../main/types.js'
 import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserViewMode } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
@@ -71,6 +71,8 @@ export interface CopilotDesktopBridge {
   createTab(resumeMode?: ResumeMode | null, profileId?: string, title?: string | null, options?: NewSessionOptions | null): Promise<DesktopState>
   forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState>
   createTabWithAttachments(title?: string | null, options?: NewSessionOptions | null): Promise<DesktopState>
+  /** The project's existing linked worktrees a new session can start in, read from the filesystem. */
+  listSessionWorktrees(profileId: string): Promise<SessionWorktreeInfo[]>
   /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
   onNewSessionRequest(listener: (attachments: boolean) => void): () => void
   /** The View menu picked a sidebar grouping or order. */

@@ -20,6 +20,8 @@ export function worktreeNamePrefix(title: string): string {
 export interface NewSessionOptions {
   /** Start in its own Git worktree; absent means the project's setting. */
   worktree?: boolean
+  /** Start in this existing linked worktree of the project's repository instead; main checks it is one. */
+  worktreePath?: string
   /** Use the DevTools settings and Local Overrides every session shares; absent means the Settings default. */
   sharedOverrides?: boolean
 }
@@ -27,8 +29,16 @@ export interface NewSessionOptions {
 export function newSessionOptions(value: unknown): NewSessionOptions {
   if (value === undefined || value === null) return {}
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session options')
-  const { worktree, sharedOverrides } = value as Record<string, unknown>
+  const { worktree, worktreePath, sharedOverrides } = value as Record<string, unknown>
   if (worktree !== undefined && typeof worktree !== 'boolean') throw new Error('Invalid session options')
+  if (worktreePath !== undefined && (typeof worktreePath !== 'string' || worktreePath.length < 1 || worktreePath.length > 4_096
+    || [...worktreePath].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))) throw new Error('Invalid session options')
+  // A session starts in a new worktree or an existing one, not both.
+  if (worktreePath !== undefined && worktree === true) throw new Error('Invalid session options')
   if (sharedOverrides !== undefined && typeof sharedOverrides !== 'boolean') throw new Error('Invalid session options')
-  return { ...(worktree === undefined ? {} : { worktree }), ...(sharedOverrides === undefined ? {} : { sharedOverrides }) }
+  return {
+    ...(worktree === undefined ? {} : { worktree }),
+    ...(worktreePath === undefined ? {} : { worktreePath }),
+    ...(sharedOverrides === undefined ? {} : { sharedOverrides }),
+  }
 }

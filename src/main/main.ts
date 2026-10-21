@@ -97,7 +97,7 @@ import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { worktreeNameFor } from './session-store-discovery.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
-import { inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
+import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
@@ -643,6 +643,7 @@ function persistProfileTabs(): void {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
           ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
+          ...(tab.launchWorktreePath ? { launchWorktreePath: tab.launchWorktreePath } : {}),
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
@@ -1306,8 +1307,9 @@ async function createSessionTab(
   attachmentPaths: string[] = [],
   connectSessionId: string | null = null,
   titleOverride: string | null = null,
-  /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved). */
-  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean } = {},
+  /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved).
+   * `worktreePath`: the existing worktree chosen there, checked against the project's worktrees before anything starts. */
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
   restoredCandidate: RestoredTab | null = null,
@@ -1318,6 +1320,15 @@ async function createSessionTab(
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
   // A restored tab starts the way it first started.
   else if (restoredCandidate?.launchWorktree !== undefined) profile = withSessionChoices(profile, { worktree: restoredCandidate.launchWorktree })!
+  // An existing worktree: chosen now, it must still be one of the project's, or nothing starts; a restored tab whose
+  // worktree has gone starts in the project folder instead, so the session can still be reached.
+  const requestedWorktree = connectSessionId || sideOptions.sideChat ? undefined : sideOptions.worktreePath ?? restoredCandidate?.launchWorktreePath
+  const existingWorktree = requestedWorktree === undefined ? null : await resolveLinkedWorktree(profile.path, requestedWorktree)
+  if (requestedWorktree !== undefined && !existingWorktree) {
+    if (sideOptions.worktreePath !== undefined) throw new Error('That folder is no longer a worktree of this project\'s repository')
+    void writeAppLog(`A restored session's worktree is no longer one of the project's; it starts in the project folder: ${requestedWorktree}`).catch(() => {})
+  }
+  if (existingWorktree) profile = withSessionChoices(profile, { worktree: false })!
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
 
@@ -1350,6 +1361,7 @@ async function createSessionTab(
   try {
     plan = await buildSessionSpawnPlan(launchProfile, resumeMode, resumeSessionId, attachmentPaths, connectSessionId, sessionTitle)
     plan.nameSession = !autoTitle
+    if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
   }
@@ -1399,6 +1411,7 @@ async function createSessionTab(
       ?? (restoredCandidate ? restoredCandidate.privateOverrides === true : desktopConfig.browserOverrides === 'private')),
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
     ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
+    ...(existingWorktree ? { launchWorktreePath: existingWorktree.root } : {}),
     autoTitle,
     renamePending: restoredCandidate?.renamePending === true,
   })
@@ -1489,18 +1502,23 @@ async function createSessionWithAttachments(title: string | null = null, options
     defaultPath: activeWorkspaceProfile(desktopConfig)?.path ?? app.getPath('home'),
   })
   if (selection.canceled || selection.filePaths.length === 0) return snapshot()
-  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title, overridesChoice(options))
+  return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), options), 'new', null, selection.filePaths.slice(0, 20), null, title, dialogChoices(options))
 }
 
-/** The new-session dialog's Local Overrides choice, as createSessionTab takes it. */
-function overridesChoice(options: NewSessionOptions): { privateOverrides?: boolean } {
-  return options.sharedOverrides === undefined ? {} : { privateOverrides: !options.sharedOverrides }
+/** The new-session dialog's Local Overrides and existing-worktree choices, as createSessionTab takes them. */
+function dialogChoices(options: NewSessionOptions): { privateOverrides?: boolean; worktreePath?: string } {
+  return {
+    ...(options.sharedOverrides === undefined ? {} : { privateOverrides: !options.sharedOverrides }),
+    ...(options.worktreePath === undefined ? {} : { worktreePath: options.worktreePath }),
+  }
 }
 
 /** The project with the choices made for one new session in the new-session dialog; the saved project is unchanged. */
 function withSessionChoices(profile: WorkspaceProfile | null, options: NewSessionOptions): WorkspaceProfile | null {
-  if (!profile || options.worktree === undefined) return profile
-  return { ...profile, launch: { ...profile.launch, worktree: options.worktree } }
+  // An existing worktree is never combined with a new one.
+  const worktree = options.worktreePath !== undefined ? false : options.worktree
+  if (!profile || worktree === undefined) return profile
+  return { ...profile, launch: { ...profile.launch, worktree } }
 }
 
 function activateSessionTab(tabId: string): DesktopState {
@@ -1771,6 +1789,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // after the healthy process is already gone.
     const plan = await buildSessionSpawnPlan(profile, bestKnownSessionId ? 'auto-resume' : 'new', bestKnownSessionId, [], null, tab.title)
     plan.nameSession = tab.autoTitle !== true
+    // A session started in an existing worktree runs there again while it is still one of the project's worktrees.
+    const existingWorktree = tab.launchWorktreePath && !tab.sideChat ? await resolveLinkedWorktree(savedProfile.path, tab.launchWorktreePath) : null
+    if (existingWorktree) plan.cwd = existingWorktree.root
+    else if (tab.launchWorktreePath && !tab.sideChat) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
 
     if (managed) await managed.session.stop()
@@ -2705,11 +2727,18 @@ ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unk
   const override = isResumeMode(resumeMode) ? resumeMode : null
   const sessionTitle = newSessionTitle(title)
   const choices = newSessionOptions(options)
-  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle, overridesChoice(choices))
+  if (profileId === undefined) return createSessionTab(withSessionChoices(activeWorkspaceProfile(desktopConfig), choices), override, null, [], null, sessionTitle, dialogChoices(choices))
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
-  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle, overridesChoice(choices))
+  return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle, dialogChoices(choices))
+})
+ipcMain.handle('desktop:list-session-worktrees', async (event, profileId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
+  if (!profile) throw new Error('The selected workspace profile no longer exists')
+  return (await listLinkedWorktrees(profile.path)).map(({ root, name, branch }): SessionWorktreeInfo => ({ path: root, name, branch }))
 })
 ipcMain.handle('desktop:create-tab-with-attachments', (event, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)

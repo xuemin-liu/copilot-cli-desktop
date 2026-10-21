@@ -23,7 +23,7 @@ if (!process.versions.electron) {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Session name dialog check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log('New sessions are named in a dialog: the default is greyed out and kept on OK, a typed name replaces it, the menu and Ctrl+T use the same dialog, and a worktree project previews its worktree name, and each session can choose its own worktree.')
+    console.log('New sessions are named in a dialog: the default is greyed out and kept on OK, a typed name replaces it, the menu and Ctrl+T use the same dialog, and a worktree project previews its worktree name, and each session can choose its own worktree or start in an existing one.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -101,13 +101,20 @@ if (!process.versions.electron) {
       main.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
     }
     const type = text => { for (const keyCode of text) main.webContents.sendInputEvent({ type: 'char', keyCode }) }
+    // Picks where the session starts, the way choosing in the list does (a native list cannot be driven by mouse events).
+    const choose = value => ui(`(() => {
+      const select = document.querySelector('select[name="start-in"]');
+      select.value = ${JSON.stringify(value)};
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`)
     const dialog = () => ui(`(() => {
       const form = document.querySelector('.input-dialog');
       if (!form) return null;
       const input = form.querySelector('#input-dialog-value');
       return { title: form.querySelector('h2').innerText, value: input.value, placeholder: input.placeholder, focused: document.activeElement === input,
         hint: form.querySelector('.fork-hint')?.innerText ?? '', submit: form.querySelector('button[type="submit"]').innerText,
-        worktree: form.querySelector('input[name="worktree"]')?.checked ?? null,
+        worktree: form.querySelector('select[name="start-in"]') ? form.querySelector('select[name="start-in"]').value === 'new' : null,
+        startIn: [...(form.querySelector('select[name="start-in"]')?.options ?? [])].map(option => option.value),
         sharedOverrides: form.querySelector('input[name="shared-overrides"]')?.checked ?? null };
     })()`)
     const titles = async () => (await ui('window.copilotDesktop.getState()')).tabs.map(tab => tab.title)
@@ -124,7 +131,8 @@ if (!process.versions.electron) {
       { title: 'New session', value: '', placeholder: 'project', focused: true, submit: 'Start session' })
     assert.match(shown.hint, /Leave it empty and Copilot names the session from your first prompt; until then the tab shows “project”/)
     assert.doesNotMatch(shown.hint, /worktree/, 'no worktree preview for a project without worktrees')
-    assert.equal(shown.worktree, false, 'the worktree box follows the project setting: off')
+    assert.equal(shown.worktree, false, 'the start-in choice follows the project setting: the project folder')
+    assert.deepEqual(shown.startIn, ['folder', 'new'], 'no existing worktrees to offer yet')
     assert.equal(shown.sharedOverrides, true, 'the Local Overrides box follows the Settings default: shared')
     assert.equal(await ui(`getComputedStyle(document.querySelector('#input-dialog-value'), '::placeholder').color !== getComputedStyle(document.querySelector('#input-dialog-value')).color`), true, 'the default is shown greyed out')
     await writeFile(join(out, 'default-name.png'), (await main.webContents.capturePage()).toPNG())
@@ -164,26 +172,26 @@ if (!process.versions.electron) {
     await until('!!document.querySelector(".input-dialog")', 'dialog for the worktree project')
     shown = await dialog()
     assert.equal(shown.placeholder, 'trees')
-    assert.equal(shown.worktree, true, 'the worktree box follows the project setting: on')
+    assert.equal(shown.worktree, true, 'the start-in choice follows the project setting: a new worktree')
     assert.match(shown.hint, /own Git worktree and branch, desktop-trees-…/)
     type('Fix login race')
     await until(`/desktop-fix-login-race-…/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'preview follows the typed name')
     await writeFile(join(out, 'worktree-preview.png'), (await main.webContents.capturePage()).toPNG())
     // This one session can work in the project folder instead.
-    await click('input[name="worktree"]')
-    await until(`!document.querySelector('input[name="worktree"]').checked && !/worktree and branch/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'worktree turned off for this session')
-    await click('input[name="worktree"]')
-    await until(`document.querySelector('input[name="worktree"]').checked`, 'worktree turned back on')
+    await choose('folder')
+    await until(`document.querySelector('select[name="start-in"]').value === 'folder' && !/worktree and branch/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'worktree turned off for this session')
+    await choose('new')
+    await until(`document.querySelector('select[name="start-in"]').value === 'new'`, 'worktree turned back on')
     await click('.input-dialog-actions button[type="button"]')
     await until('!document.querySelector(".input-dialog")', 'Cancel closes the dialog')
     assert.equal((await titles()).length, 3)
     results.worktreePreview = true
 
-    // A project without worktrees, one session in a new worktree: tick the box, and the real CLI runs it in one.
+    // A project without worktrees, one session in a new worktree: choose it, and the real CLI runs it in one.
     await click(`[aria-label="New session in ${project.name}"]`)
     await until('!!document.querySelector(".input-dialog")', 'dialog for one worktree session')
     type('In a worktree')
-    await click('input[name="worktree"]')
+    await choose('new')
     await until(`/desktop-in-a-worktree-…/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'preview for the chosen worktree')
     await click('input[name="shared-overrides"]')
     await until(`!document.querySelector('input[name="shared-overrides"]').checked`, 'own Local Overrides for this session')
@@ -199,6 +207,26 @@ if (!process.versions.electron) {
     assert.equal(chosenTab.privateOverrides, true, 'its browser keeps Local Overrides to itself')
     assert.equal((await ui('window.copilotDesktop.getState()')).tabs.filter(tab => tab.privateOverrides).length, 1, 'only that session')
     results.privateOverridesChosen = true
+
+    // The worktree that session made is now offered to the next one: it starts there, with no new worktree, and says so.
+    await click(`[aria-label="New session in ${project.name}"]`)
+    await until('!!document.querySelector(".input-dialog")', 'dialog for a session in an existing worktree')
+    const existing = `existing:${worktree.path}`
+    await until(`[...document.querySelectorAll('select[name="start-in"] option')].some(option => option.value === ${JSON.stringify(existing)})`, 'the existing worktree is offered')
+    assert.match(await ui(`[...document.querySelectorAll('select[name="start-in"] option')].find(option => option.value === ${JSON.stringify(existing)}).innerText`),
+      /used by In a worktree/, 'the option names the session already there')
+    type('Same worktree')
+    await choose(existing)
+    await until(`/existing worktree/.test(document.querySelector('.input-dialog .fork-hint')?.innerText ?? '')`, 'preview for the existing worktree')
+    await delay(300)
+    await writeFile(join(out, 'existing-worktree-chosen.png'), (await main.webContents.capturePage()).toPNG())
+    press('Return')
+    await until(`(async () => (await window.copilotDesktop.getState()).tabs.find(tab => tab.title === 'Same worktree' && tab.worktree))()`, 'the session runs in the existing worktree')
+    const same = (await ui('window.copilotDesktop.getState()')).tabs.find(tab => tab.title === 'Same worktree')
+    assert.equal(same.worktree.path.toLowerCase(), worktree.path.toLowerCase(), JSON.stringify(same.worktree))
+    assert.equal(same.launchWorktreePath.toLowerCase(), worktree.path.toLowerCase())
+    assert.equal(git(projects.project, 'worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).length, 2, 'no further worktree was made')
+    results.existingWorktreeChosen = same.worktree.path
 
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, ...results }, null, 2))
     app.quit()

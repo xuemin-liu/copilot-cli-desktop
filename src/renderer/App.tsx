@@ -1,7 +1,7 @@
 import { insertIntoPrompt } from './prompt-insert.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
-import type { DesktopState, FanOutResult } from '../main/types.js'
+import type { DesktopState, FanOutResult, SessionWorktreeInfo } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
@@ -45,6 +45,8 @@ type InputDialog =
   | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null
       /** Whether this session starts in its own worktree; null until changed, which means the project's setting. */
       worktree: boolean | null
+      /** An existing worktree of the project to start in instead; null for the project folder or a new worktree. */
+      worktreePath: string | null
       /** Whether its browser uses the shared Local Overrides; null until changed, which means the Settings default. */
       sharedOverrides: boolean | null }
 
@@ -68,8 +70,21 @@ export function App(): JSX.Element {
   // Only a fresh session can get one; 'continue' and the picker resume an earlier session where it ran.
   const newSessionFresh = inputDialog?.kind === 'new-session' && inputDialog.attachments
     || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume'
-  const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh
+  const newSessionExisting = inputDialog?.kind === 'new-session' && newSessionFresh ? inputDialog.worktreePath : null
+  const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh && newSessionExisting === null
     && (inputDialog.worktree ?? Boolean(newSessionProfile?.launch?.worktree))
+  // The project's existing worktrees, read when the dialog opens for it; empty when there are none or they cannot be read.
+  const [projectWorktrees, setProjectWorktrees] = useState<{ profileId: string; items: SessionWorktreeInfo[] } | null>(null)
+  const newSessionProfileId = newSessionFresh ? newSessionProfile?.id ?? null : null
+  useEffect(() => {
+    if (!newSessionProfileId) return
+    let stale = false
+    window.copilotDesktop.listSessionWorktrees(newSessionProfileId)
+      .then((items) => { if (!stale) setProjectWorktrees({ profileId: newSessionProfileId, items }) })
+      .catch(() => { if (!stale) setProjectWorktrees({ profileId: newSessionProfileId, items: [] }) })
+    return () => { stale = true }
+  }, [newSessionProfileId])
+  const newSessionWorktrees = newSessionProfileId && projectWorktrees?.profileId === newSessionProfileId ? projectWorktrees.items : []
   const newSessionSharedOverrides = inputDialog?.kind === 'new-session'
     && (inputDialog.sharedOverrides ?? !state.newSessionPrivateOverrides)
   const handleOperation = (operation: Promise<DesktopState>): void => {
@@ -89,7 +104,7 @@ export function App(): JSX.Element {
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
-    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, sharedOverrides: null, pending: false, error: null })
+    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, worktreePath: null, sharedOverrides: null, pending: false, error: null })
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -163,7 +178,8 @@ export function App(): JSX.Element {
       setInputDialog({ ...inputDialog, pending: true, error: null })
       // Only a choice made here is sent; otherwise the project's setting applies.
       const options = {
-        ...(inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }),
+        ...(newSessionExisting !== null ? { worktreePath: newSessionExisting }
+          : inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }),
         ...(inputDialog.sharedOverrides === null ? {} : { sharedOverrides: inputDialog.sharedOverrides }),
       }
       finish(inputDialog.attachments
@@ -407,11 +423,27 @@ export function App(): JSX.Element {
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
             />
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
-              <label className="input-dialog-check" title={newSessionFresh ? undefined : 'This project resumes an earlier session, which keeps the folder it ran in.'}>
-                <input type="checkbox" name="worktree" checked={newSessionWorktree} disabled={inputDialog.pending || !newSessionFresh}
-                  onChange={(event) => setInputDialog({ ...inputDialog, worktree: event.target.checked, error: null })} />
-                Work in a new Git worktree
-              </label>
+              <>
+                <label htmlFor="new-session-start-in">Start in</label>
+                <select id="new-session-start-in" name="start-in" disabled={inputDialog.pending || !newSessionFresh}
+                  title={newSessionFresh ? undefined : 'This project resumes an earlier session, which keeps the folder it ran in.'}
+                  value={newSessionExisting !== null ? `existing:${newSessionExisting}` : newSessionWorktree ? 'new' : 'folder'}
+                  onChange={(event) => {
+                    const choice = event.target.value
+                    setInputDialog(choice.startsWith('existing:')
+                      ? { ...inputDialog, worktree: false, worktreePath: choice.slice('existing:'.length), error: null }
+                      : { ...inputDialog, worktree: choice === 'new', worktreePath: null, error: null })
+                  }}>
+                  <option value="folder">The project folder</option>
+                  <option value="new">A new Git worktree</option>
+                  {newSessionWorktrees.map((worktree) => {
+                    const users = state.tabs.filter((tab) => tab.worktree && tab.worktree.path.toLowerCase() === worktree.path.toLowerCase()).map((tab) => tab.title)
+                    return <option key={worktree.path} value={`existing:${worktree.path}`} title={worktree.path}>
+                      Worktree {worktree.branch ?? `${worktree.name} (detached)`}{users.length > 0 ? ` · used by ${users.join(', ')}` : ''}
+                    </option>
+                  })}
+                </select>
+              </>
             )}
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
               <label className="input-dialog-check" title="Unticked, this session's browser starts DevTools with defaults and keeps its Local Overrides folder and settings to itself.">
@@ -424,6 +456,7 @@ export function App(): JSX.Element {
               <p className="fork-hint">
                 Leave it empty and Copilot names the session from your first prompt; until then the tab shows “{newSessionDefault}”.
                 {newSessionWorktree && <> It starts in its own Git worktree and branch, <code>{worktreeNamePrefix(inputDialog.value.trim() || newSessionDefault)}-…</code>, named from this.</>}
+                {newSessionExisting !== null && <> It starts in the existing worktree <code>{newSessionExisting}</code>, on whatever it has checked out.</>}
               </p>
             )}
             {inputDialog.error && <p className="input-dialog-error" role="alert">{inputDialog.error}</p>}

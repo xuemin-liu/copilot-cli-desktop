@@ -29,6 +29,8 @@ export interface RestoredTab {
   sideParentSessionId?: string
   /** Whether the session was started in its own Git worktree. Absent in config files written by older releases. */
   launchWorktree?: boolean
+  /** The existing linked worktree the session was started in, when it was. Checked again before every launch. */
+  launchWorktreePath?: string
   /** The session's browser keeps DevTools settings and Local Overrides to itself. */
   privateOverrides?: true
   /** The title follows Copilot's name for the session. Absent in config files written by older releases. */
@@ -82,6 +84,9 @@ export interface DesktopSessionTab {
   /** Whether the session was started in its own Git worktree: the choice made in the new-session dialog, or the project
    * setting at the time. A fresh restart (a session Copilot has not stored yet) and a restore keep it. Saved. */
   launchWorktree?: boolean
+  /** The existing linked worktree of the project's repository the session was started in, chosen in the new-session
+   * dialog. Restarts and restores launch there again while it is still one of the project's worktrees. Saved. */
+  launchWorktreePath?: string
   /** The session's browser keeps DevTools settings and Local Overrides (its folder and its on/off switch) to itself instead
    * of using the ones every session shares. Chosen when the session starts; saved. */
   privateOverrides?: true
