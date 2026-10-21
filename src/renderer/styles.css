@@ -713,7 +713,24 @@ button:disabled {
   font: inherit;
 }
 
-.input-dialog input:focus {
+/* Without a width a select grows to its longest option (a worktree's branch and who uses it) and spills out of the dialog. */
+.input-dialog select {
+  width: 100%;
+  min-height: 38px;
+  margin-bottom: 12px;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid #414957;
+  border-radius: 7px;
+  outline: none;
+  background: #0d1118;
+  color: #f2f5fa;
+  font: inherit;
+}
+
+.input-dialog input:focus, .input-dialog select:focus {
   border-color: #537de8;
   box-shadow: 0 0 0 2px rgb(83 125 232 / 18%);
 }
