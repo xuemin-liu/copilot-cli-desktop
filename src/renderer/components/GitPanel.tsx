@@ -637,7 +637,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                           title={wholeFile ? 'Show only the changes and the lines around them' : 'Show the whole file with the changes in place'}>
                           Whole file
                         </button>
-                        <button type="button" disabled={!canInsert || !diff || diff.key !== diffKey} onClick={addToPrompt}
+                        <button type="button" className="git-diff-add-prompt" disabled={!canInsert || !diff || diff.key !== diffKey} onClick={addToPrompt}
                           title={canInsert ? `Put this diff in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
                           Add to prompt
                         </button>
