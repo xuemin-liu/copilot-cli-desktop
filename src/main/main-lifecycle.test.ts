@@ -1630,6 +1630,33 @@ test('a new session can start in an existing worktree of the project, and restar
   })
 })
 
+test('a chosen worktree stays valid when more worktrees than the start-in list shows are added later', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const chosen = await linkedWorktree(directory, 'zz-chosen', 'chosen')
+    await harness.createMain()
+    await harness.request('desktop:create-tab', null, profile.id, 'Chosen', { worktreePath: chosen })
+    for (let index = 0; index < 50; index++) await linkedWorktree(directory, `aa-${String(index).padStart(2, '0')}`, `branch-${index}`)
+    const listed = await harness.request('desktop:list-session-worktrees', profile.id) as { path: string }[]
+    assert.equal(listed.length, 50)
+    assert.ok(!listed.some((entry) => sameFolderText(entry.path, chosen)), 'the chosen worktree is past the list cap now')
+    const tab = (await harness.request('desktop:get-state')).tabs.at(-1)!
+    await harness.request('desktop:restart-tab', tab.id)
+    assert.ok(sameFolderText(harness.spawns.at(-1)!.cwd, chosen), `a restart still runs there: ${harness.spawns.at(-1)!.cwd}`)
+  })
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const chosen = await linkedWorktree(directory, 'zz-chosen', 'chosen')
+    for (let index = 0; index < 50; index++) await linkedWorktree(directory, `aa-${String(index).padStart(2, '0')}`, `branch-${index}`)
+    profile.tabs = [{ title: 'Chosen', lastSessionId: null, launchWorktree: false, launchWorktreePath: chosen }]
+    harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
+    await harness.restoreSaved()
+    assert.ok(sameFolderText(harness.spawns[0]!.cwd, chosen), `a restore still runs there: ${harness.spawns[0]!.cwd}`)
+  })
+})
+
 test('a restored tab starts in its existing worktree, or in the project folder once that worktree is gone', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   profile.defaultResumeMode = 'new'

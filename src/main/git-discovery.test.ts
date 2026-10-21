@@ -15,6 +15,7 @@ function workspace(t: test.TestContext): string {
 }
 
 const makeRepo = (folder: string): void => { mkdirSync(join(folder, '.git'), { recursive: true }) }
+const sameFolderText = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase()
 const junction = (link: string, target: string): void => { execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, target], { stdio: 'ignore' }) }
 
 test('a project that is itself a repository is returned alone and its children are not scanned', async (t) => {
@@ -436,7 +437,12 @@ test('a project\'s linked worktrees are listed from the filesystem, from the mai
   assert.deepEqual(roots(await listLinkedWorktrees(join(repo, 'sub'))), roots(fromMain), 'a project inside the repository')
   assert.deepEqual(roots(await listLinkedWorktrees(one)), [two.toLowerCase()], 'from a worktree: the others, not itself')
   assert.equal((await resolveLinkedWorktree(repo, one.toUpperCase() + '\\'))?.root.toLowerCase(), one.toLowerCase(), 'matched as a folder')
+  const capped = await listLinkedWorktrees(repo, { max: 1 })
+  assert.equal(capped.length, 1, 'the list is capped')
+  const beyond = [one, two].find(folder => !sameFolderText(folder, capped[0]!.root))!
+  assert.equal((await resolveLinkedWorktree(repo, beyond))?.root.toLowerCase(), beyond.toLowerCase(), 'a worktree past the cap is still resolved')
   assert.equal(await resolveLinkedWorktree(repo, repo), null, 'the main checkout is not a linked worktree')
+  assert.equal(await resolveLinkedWorktree(one, one), null, 'nor the project folder itself')
   assert.equal(await resolveLinkedWorktree(repo, join(fixture.root, 'nowhere')), null)
   assert.equal(await resolveLinkedWorktree(repo, '\\\\server\\share\\one'), null, 'a share is never inspected')
   // A worktree whose folder is gone, and an entry whose backpointer names another folder, are not offered.
