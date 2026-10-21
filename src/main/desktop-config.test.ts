@@ -262,6 +262,16 @@ test('a saved tab keeps whether it was started in its own worktree', () => {
   assert.deepEqual(config.profiles[0]!.tabs.map((tab) => tab.launchWorktree), [true, false, undefined, undefined])
 })
 
+test('a saved tab keeps the existing worktree it was started in', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project', tabs: [
+    { title: 'Existing', lastSessionId: null, launchWorktree: false, launchWorktreePath: 'D:\\project.worktrees\\feature' },
+    { title: 'Older', lastSessionId: null },
+    { title: 'Empty', lastSessionId: null, launchWorktreePath: '' },
+    { title: 'Bad', lastSessionId: null, launchWorktreePath: 7 },
+  ] }] })
+  assert.deepEqual(config.profiles[0]!.tabs.map((tab) => tab.launchWorktreePath), ['D:\\project.worktrees\\feature', undefined, undefined, undefined])
+})
+
 test('the Local Overrides default for new sessions is shared unless set, and a saved tab keeps its own choice', () => {
   assert.equal(normalizeDesktopConfig({}).browserOverrides, 'shared')
   assert.equal(normalizeDesktopConfig({ browserOverrides: 'private' }).browserOverrides, 'private')

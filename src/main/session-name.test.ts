@@ -35,4 +35,8 @@ test('a new session\'s choices are optional booleans; anything else is refused',
   assert.throws(() => newSessionOptions({ worktree: 'yes' }), /Invalid session options/)
   assert.throws(() => newSessionOptions([]), /Invalid session options/)
   assert.throws(() => newSessionOptions('worktree'), /Invalid session options/)
+  assert.deepEqual(newSessionOptions({ worktreePath: 'D:\\repo.worktrees\\feature' }), { worktreePath: 'D:\\repo.worktrees\\feature' })
+  assert.deepEqual(newSessionOptions({ worktree: false, worktreePath: 'D:\\wt' }), { worktree: false, worktreePath: 'D:\\wt' })
+  assert.throws(() => newSessionOptions({ worktree: true, worktreePath: 'D:\\wt' }), /Invalid session options/, 'a new worktree and an existing one')
+  for (const bad of ['', 42, 'D:\\a\nb', 'x'.repeat(4_097)]) assert.throws(() => newSessionOptions({ worktreePath: bad }), /Invalid session options/)
 })

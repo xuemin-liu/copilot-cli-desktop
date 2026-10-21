@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createGitFixture } from './fixtures/git-fixture.js'
-import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, readWorktreeBranch } from './git-discovery.js'
+import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import { realPathNative } from './real-path.js'
 
 function workspace(t: test.TestContext): string {
@@ -415,4 +415,38 @@ test('a session folder is a worktree only when its .git file leads into an accep
   junction(link, mine)
   const viaLink = await inspectSessionWorktree(link, accept)
   assert.equal(viaLink?.root.toLowerCase(), mine.toLowerCase())
+})
+
+test('a project\'s linked worktrees are listed from the filesystem, from the main checkout, a subfolder or another worktree', async (t) => {
+  const fixture = await createGitFixture()
+  if (!fixture) { t.skip('git is not installed'); return }
+  t.after(() => fixture.cleanup())
+  const repo = await realPathNative(fixture.repo('main'))
+  mkdirSync(join(repo, 'sub'))
+  const beside = await realPathNative(fixture.root).then(folder => join(folder, 'main.worktrees'))
+  mkdirSync(beside)
+  const one = join(beside, 'one')
+  const two = join(beside, 'two')
+  fixture.plain(repo, 'worktree', 'add', '-q', one, '-b', 'one')
+  fixture.plain(repo, 'worktree', 'add', '-q', '--detach', two)
+  const roots = (list: { root: string }[]): string[] => list.map(entry => entry.root.toLowerCase())
+  const fromMain = await listLinkedWorktrees(repo)
+  assert.deepEqual(roots(fromMain), [one.toLowerCase(), two.toLowerCase()], 'the main checkout itself is not listed')
+  assert.deepEqual(fromMain.map(entry => entry.branch), ['one', null])
+  assert.deepEqual(roots(await listLinkedWorktrees(join(repo, 'sub'))), roots(fromMain), 'a project inside the repository')
+  assert.deepEqual(roots(await listLinkedWorktrees(one)), [two.toLowerCase()], 'from a worktree: the others, not itself')
+  assert.equal((await resolveLinkedWorktree(repo, one.toUpperCase() + '\\'))?.root.toLowerCase(), one.toLowerCase(), 'matched as a folder')
+  assert.equal(await resolveLinkedWorktree(repo, repo), null, 'the main checkout is not a linked worktree')
+  assert.equal(await resolveLinkedWorktree(repo, join(fixture.root, 'nowhere')), null)
+  assert.equal(await resolveLinkedWorktree(repo, '\\\\server\\share\\one'), null, 'a share is never inspected')
+  // A worktree whose folder is gone, and an entry whose backpointer names another folder, are not offered.
+  rmSync(two, { recursive: true, force: true })
+  const stray = join(repo, '.git', 'worktrees', 'stray')
+  mkdirSync(stray)
+  writeFileSync(join(stray, 'gitdir'), `${join(one, '.git')}\n`)
+  assert.deepEqual(roots(await listLinkedWorktrees(repo)), [one.toLowerCase()])
+  // Not a repository at all.
+  const plain = join(fixture.root, 'plain')
+  mkdirSync(plain)
+  assert.deepEqual(await listLinkedWorktrees(plain), [])
 })

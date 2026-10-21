@@ -13,6 +13,7 @@ import { MigrationService } from './migration-service.js'
 import { readMigrationArchive, writeMigrationArchive } from './migration-archive.js'
 import { fileEntry } from './migration-inventory.js'
 import { MigrationImportFailure } from './migration-import.js'
+import { realPathNative } from './real-path.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
@@ -1580,6 +1581,71 @@ test('a restored tab Copilot never stored starts the way it first started, workt
   await harness.restoreSaved()
   assert.ok(!harness.spawns[0]!.args.some((arg) => arg.startsWith('--worktree')), `restore stays in the folder: ${harness.spawns[0]!.args.join(' ')}`)
   assert.equal((await harness.request('desktop:get-state')).tabs[0]?.launchWorktree, false)
+}))
+
+/** A linked worktree of the repository at `directory`, made of the files git would write (no git needed). Canonical path. */
+async function linkedWorktree(directory: string, name: string, branch: string): Promise<string> {
+  const gitDir = join(directory, '.git', 'worktrees', name)
+  const root = join(directory, name)
+  await mkdir(gitDir, { recursive: true })
+  await mkdir(root, { recursive: true })
+  await writeFile(join(root, '.git'), `gitdir: ${gitDir}\n`)
+  await writeFile(join(gitDir, 'gitdir'), `${join(root, '.git')}\n`)
+  await writeFile(join(gitDir, 'commondir'), '../..\n')
+  await writeFile(join(gitDir, 'HEAD'), `ref: refs/heads/${branch}\n`)
+  return realPathNative(root)
+}
+
+const sameFolderText = (left: string, right: string): boolean => left.replace(/[\\/]+$/, '').toLowerCase() === right.replace(/[\\/]+$/, '').toLowerCase()
+
+test('a new session can start in an existing worktree of the project, and restarts and restores there', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    // Even in a project whose sessions get a new worktree, an existing one is never combined with --worktree.
+    profile.launch = { ...profile.launch, worktree: true }
+    const feature = await linkedWorktree(directory, 'feature', 'feature/login')
+    await harness.createMain()
+    const listed = await harness.request('desktop:list-session-worktrees', profile.id) as { path: string; name: string; branch: string | null }[]
+    assert.deepEqual(listed.map((entry) => [entry.path.toLowerCase(), entry.name, entry.branch]), [[feature.toLowerCase(), 'feature', 'feature/login']])
+    await harness.request('desktop:create-tab', null, profile.id, 'On the feature', { worktreePath: feature })
+    const started = harness.spawns.at(-1)!
+    assert.ok(sameFolderText(started.cwd, feature), `runs in the worktree: ${started.cwd}`)
+    assert.ok(!started.args.some((arg) => arg.startsWith('--worktree')), started.args.join(' '))
+    assert.ok(started.args.some((arg) => arg.startsWith('--session-id=')), 'an ordinary fresh session, with its own id')
+    const tab = (await harness.request('desktop:get-state')).tabs.at(-1)!
+    assert.ok(sameFolderText(tab.launchWorktreePath ?? '', feature))
+    assert.equal(tab.launchWorktree, false)
+    assert.equal(profile.launch.worktree, true, 'the project setting is unchanged')
+    await harness.request('desktop:restart-tab', tab.id)
+    assert.ok(sameFolderText(harness.spawns.at(-1)!.cwd, feature), 'a restart runs there again')
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.ok(sameFolderText(saved.profiles[0]!.tabs.find((entry) => entry.title === 'On the feature')?.launchWorktreePath ?? '', feature))
+    // Only a listed linked worktree is accepted: not the main checkout, not some other folder, not with a new worktree too.
+    await assert.rejects(async () => harness.request('desktop:create-tab', null, profile.id, 'Main', { worktreePath: directory }), /no longer a worktree/)
+    await mkdir(join(directory, 'plain'))
+    await assert.rejects(async () => harness.request('desktop:create-tab', null, profile.id, 'Plain', { worktreePath: join(directory, 'plain') }), /no longer a worktree/)
+    await assert.rejects(async () => harness.request('desktop:create-tab', null, profile.id, 'Both', { worktree: true, worktreePath: feature }), /Invalid session options/)
+  })
+})
+
+test('a restored tab starts in its existing worktree, or in the project folder once that worktree is gone', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const feature = await linkedWorktree(directory, 'feature', 'feature')
+  const gone = await linkedWorktree(directory, 'gone', 'gone')
+  await rm(join(directory, '.git', 'worktrees', 'gone'), { recursive: true })
+  profile.tabs = [
+    { title: 'Feature', lastSessionId: null, launchWorktree: false, launchWorktreePath: feature },
+    { title: 'Gone', lastSessionId: null, launchWorktree: false, launchWorktreePath: gone },
+  ]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  assert.ok(sameFolderText(harness.spawns[0]!.cwd, feature), harness.spawns[0]!.cwd)
+  assert.ok(sameFolderText(harness.spawns[1]!.cwd, directory), `a worktree that is gone falls back to the project: ${harness.spawns[1]!.cwd}`)
+  const tabs = (await harness.request('desktop:get-state')).tabs
+  assert.equal(tabs.find((tab) => tab.title === 'Gone')?.launchWorktreePath, undefined)
 }))
 
 test('a session can keep Local Overrides to itself: its browser runs DevTools in its own partition, out of the shared settings', async () => {

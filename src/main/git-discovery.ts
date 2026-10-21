@@ -304,6 +304,65 @@ export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: str
   return { root, mainRoot, name: place[2], branch: await readWorktreeBranch(gitDir), issue: await pointerIssue(gitDir), gitDir }
 }
 
+/** More linked worktrees than any real repository has; the rest are not offered. */
+const MAX_LINKED_WORKTREES = 50
+
+/**
+ * The linked worktrees of the repository a project folder is (or sits in), using only the filesystem, so a session can be
+ * started in one. The project's repository is found the way `discoverRepos` finds a project or parent repository; when the
+ * project is itself a linked worktree, its main repository's other worktrees are listed. Each entry under
+ * `<repo>\.git\worktrees` must pass `inspectSessionWorktree` for that repository and be safe to open; the project folder
+ * itself is left out. Sorted by folder.
+ */
+export async function listLinkedWorktrees(projectPath: string, options: { homeDirectory?: string } = {}): Promise<SessionWorktree[]> {
+  if (!isLocalFilesystemPath(projectPath)) return []
+  let project: string
+  try { project = await realPathNative(projectPath) } catch { return [] }
+  const rawHome = options.homeDirectory ?? homedir()
+  const home = await realPathNative(rawHome).catch(() => rawHome)
+  let mainRoot: string | null = null
+  for (let folder = project, previous = ''; folder !== previous; previous = folder, folder = win32.dirname(folder)) {
+    let info
+    try { info = await lstat(win32.join(folder, '.git')) } catch { continue }
+    if (folder !== project && isAncestorTooBroad(folder, home)) return []
+    if (info.isDirectory()) {
+      if ((await inspectGitEntry(folder))?.issue !== null) return []
+      mainRoot = folder
+    } else {
+      mainRoot = (await inspectSessionWorktree(folder, () => true))?.mainRoot ?? null
+    }
+    break
+  }
+  if (!mainRoot) return []
+  const root = mainRoot
+  let entries
+  try { entries = await readdir(win32.join(root, '.git', 'worktrees'), { withFileTypes: true }) } catch { return [] }
+  const found: SessionWorktree[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (found.length >= MAX_LINKED_WORKTREES) break
+    const gitDir = win32.join(root, '.git', 'worktrees', entry.name)
+    const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+    const dotGit = back.kind === 'text' ? localAbsolute(gitDir, back.text) : null
+    if (!dotGit) continue
+    const worktree = await inspectSessionWorktree(win32.dirname(dotGit), (candidate) => sameFolder(candidate, root))
+    // The folder must lead back to this very entry; one whose backpointer names another entry's worktree is not listed twice.
+    if (worktree && worktree.issue === null && sameFolder(worktree.gitDir, gitDir) && !sameFolder(worktree.root, project)) found.push(worktree)
+  }
+  return found.sort((a, b) => a.root.localeCompare(b.root))
+}
+
+/**
+ * The canonical folder of `path` when it is one of the project's linked worktrees (`listLinkedWorktrees`), else null. The
+ * path comes from the renderer or a saved tab, so it is only ever matched against what the filesystem lists, never used as is.
+ */
+export async function resolveLinkedWorktree(projectPath: string, path: string): Promise<SessionWorktree | null> {
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || !isLocalFilesystemPath(path)) return null
+  const target = await realPathNative(path).catch(() => null)
+  if (!target) return null
+  return (await listLinkedWorktrees(projectPath)).find((worktree) => sameFolder(worktree.root, target)) ?? null
+}
+
 /** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
 export async function readWorktreeBranch(gitDir: string): Promise<string | null> {
   const head = await readPointerFile(win32.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)

@@ -66,9 +66,11 @@ handle, only input/output/resize events.
 - Native session tabs (Ctrl+T new, Ctrl+W close) bound to one pty session
   each. A new session can be named first; left empty, Copilot names it from
   the first prompt and the tab follows that name (until then it shows the
-  project's name, greyed out in the dialog). **Work in a new Git worktree**
-  starts that one session in its own worktree and branch (the box starts from
-  the project setting), and the dialog previews the worktree name. Unticking
+  project's name, greyed out in the dialog). **Start in** picks where that one
+  session runs: the project folder, **A new Git worktree** (its own worktree
+  and branch; the dialog previews the name, and the choice starts from the
+  project setting), or one of the repository's existing linked worktrees,
+  which restarts and restores keep using while it exists. Unticking
   **Use the shared Local Overrides and DevTools settings** gives that session's
   browser its own Local Overrides folder and switch (the default is in
   Settings → Session browser).
