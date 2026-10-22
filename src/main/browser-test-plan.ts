@@ -6,6 +6,8 @@ export interface BrowserTestStep {
   action: 'navigate' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'fill' | 'select' | 'press' | 'scroll' | 'waitFor' | 'assert' | 'screenshot'
   label: string
   selector?: string
+  /** Explicit native input surface, with path coordinates still relative to selector. */
+  inputSelector?: string
   text?: string
   frame?: string
   url?: string
@@ -56,7 +58,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     const step = object(raw)
     const extra: Record<string, string[]> = {
       navigate: ['url', 'dialog'], click: ['selector', 'text', 'frame', 'dialog'], doubleClick: ['selector', 'text', 'frame', 'dialog'], hover: ['selector', 'text', 'frame'],
-      drag: ['selector', 'text', 'frame', 'path', 'durationMs'],
+      drag: ['selector', 'inputSelector', 'text', 'frame', 'path', 'durationMs'],
       fill: ['selector', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'text', 'frame', 'value', 'dialog'],
       press: ['selector', 'text', 'frame', 'key', 'dialog'], scroll: ['selector', 'text', 'frame', 'pixels'],
       waitFor: ['selector', 'text', 'frame', 'condition', 'expected', 'timeoutMs'],
@@ -68,6 +70,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     string(step.label, 200)
     if (step.frame !== undefined && (typeof step.frame !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.frame))) fail('invalid frame ID.')
     if (step.selector !== undefined) string(step.selector, 512)
+    if (step.inputSelector !== undefined) string(step.inputSelector, 512)
     if (step.text !== undefined) string(step.text, 2000)
     if (step.dialog !== undefined) {
       const dialog = object(step.dialog); fields(dialog, ['accept', 'message'])

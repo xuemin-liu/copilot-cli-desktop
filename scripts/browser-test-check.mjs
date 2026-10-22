@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const artifacts = resolve('test-results/browser-testing')
+// Focused acceptance check; the default still exercises the complete workflow.
+const viewerOnly = process.argv.includes('--viewer-only')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const until = async (read, name) => {
   const end = Date.now() + 15000
@@ -19,7 +21,7 @@ if (!process.versions.electron) {
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
   const scale = process.argv.slice(2).find(arg => arg.startsWith('--force-device-scale-factor='))
   if (scale) assert.ok(/^--force-device-scale-factor=\d+(\.\d+)?$/.test(scale) && Number(scale.split('=')[1]) >= 0.5 && Number(scale.split('=')[1]) <= 3, 'Display scale must be within 0.5–3')
-  const child = spawn((await import('electron')).default, [...(scale ? [scale] : []), fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [...(scale ? [scale] : []), fileURLToPath(import.meta.url), ...(viewerOnly ? ['--viewer-only'] : [])], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 150000)
   try {
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) })
@@ -124,6 +126,132 @@ if (!process.versions.electron) {
       // fractional display scaling can shift the delivered CSS point by a pixel.
       assert.ok(Math.abs(Number(point[1]) - 240) <= 1 && Math.abs(Number(point[2]) - 90) <= 1, `Drag endpoint is outside one CSS pixel of (240,90): ${status}`)
     }
+    const checkViewerDrag = async () => {
+      // A viewer renders an oversized image under a sibling SVG that receives
+      // native input. Only the requested points need to be in the viewport.
+      const viewerSetup = `(${function () {
+        document.querySelector('#viewer-fixture')?.remove()
+        const fixture = document.createElement('div'); fixture.id = 'viewer-fixture'
+        fixture.innerHTML = '<button id="measurement-tool" style="position:fixed;top:0;right:0;z-index:1002">Measure</button><canvas id="coronal-image" width="1600" height="1000" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1000"></canvas><svg id="viewer-input" xmlns="http://www.w3.org/2000/svg" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1001;touch-action:none"></svg>'
+        document.body.append(fixture); window.scrollTo(0, 0)
+        const canvas = fixture.querySelector('canvas'); const surface = fixture.querySelector('svg')
+        const context = canvas.getContext('2d'); context.fillStyle = '#333'; context.fillRect(0, 0, 1600, 1000)
+        window.viewerFixture = { selected: false, pressed: false, events: [], obstruct: false }
+        fixture.querySelector('button').onclick = () => { window.viewerFixture.selected = true }
+        for (const type of ['pointerdown', 'pointermove', 'pointerup']) surface.addEventListener(type, event => {
+          const state = window.viewerFixture
+          if (!state.selected || type === 'pointermove' && !state.pressed) return
+          state.events.push({ type, trusted: event.isTrusted, buttons: event.buttons })
+          const rect = surface.getBoundingClientRect(); const x = event.clientX - rect.left; const y = event.clientY - rect.top
+          if (type === 'pointerdown') {
+            state.pressed = true; surface.setPointerCapture(event.pointerId)
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line'); line.id = 'measurement'
+            for (const [key, value] of Object.entries({ x1: x, y1: y, x2: x, y2: y, stroke: '#ffff00', 'stroke-width': 4, 'pointer-events': 'none' })) line.setAttribute(key, String(value))
+            surface.append(line)
+            if (state.obstruct) {
+              const cover = document.createElement('input'); cover.id = 'viewer-obstruction'; cover.className = 'dialog-cover'; cover.type = 'password'; cover.value = 'never-report-this-field-value'
+              cover.setAttribute('aria-label', 'never-report-this-label'); cover.style.cssText = 'position:fixed;inset:0;z-index:1003'
+              fixture.append(cover)
+            }
+          }
+          if (type === 'pointermove') { const line = surface.querySelector('line'); line.setAttribute('x2', String(x)); line.setAttribute('y2', String(y)) }
+          if (type === 'pointerup') state.pressed = false
+        })
+        return true
+      }.toString()})()`
+      const viewerDrag = (extra = {}) => drag({ selector: '#coronal-image', inputSelector: '#viewer-input', ...extra })
+      const measurementVisible = visible('#measurement')
+      const setupViewer = async () => {
+        await browser.view.webContents.executeJavaScript(viewerSetup)
+        assert.equal((await execute([step('click', 'Select measurement tool', { selector: '#measurement-tool' }), visible('#coronal-image')])).status, 'passed')
+      }
+      await setupViewer()
+      const noSurface = await execute([viewerDrag({ inputSelector: undefined }), measurementVisible])
+      assert.equal(noSurface.status, 'failed')
+      const noSurfacePoint = await browser.view.webContents.executeJavaScript('(() => { const rect = document.querySelector("#coronal-image").getBoundingClientRect(); return { x: rect.left + 20, y: rect.top + 20 } })()')
+      assert.ok(noSurface.steps[0].reason.includes('path point 1/3 at viewport (' + noSurfacePoint.x + ', ' + noSurfacePoint.y + ')'))
+      assert.match(noSurface.steps[0].reason, /covered.*"tag":"svg".*"id":"viewer-input"/)
+      assert.equal((await browser.view.webContents.executeJavaScript('window.viewerFixture')).events.length, 0)
+      for (const direct of [false, true]) {
+        await setupViewer()
+        const measured = await execute([viewerDrag(direct ? { selector: '#viewer-input', inputSelector: undefined } : {}), measurementVisible,
+          step('screenshot', 'Visible measurement on cropped image', {})])
+        assert.equal(measured.status, 'passed', JSON.stringify(measured))
+        const state = await browser.view.webContents.executeJavaScript('window.viewerFixture')
+        assert.ok(state.events.every(event => event.trusted)); assert.equal(state.pressed, false)
+        const endpoint = await browser.view.webContents.executeJavaScript('({x:Number(document.querySelector("#measurement").getAttribute("x2")),y:Number(document.querySelector("#measurement").getAttribute("y2"))})')
+        assert.ok(Math.abs(endpoint.x - 240) <= 1 && Math.abs(endpoint.y - 90) <= 1)
+        await writeFile(join(artifacts, `viewer-measurement-${direct ? 'direct' : 'overlay'}.png`), await readFile(measured.screenshots[0].path))
+      }
+      await setupViewer()
+      const outsideViewport = await execute([viewerDrag({ path: [{ x: 20, y: 20 }, { x: 1500, y: 90 }] }), measurementVisible])
+      assert.equal(outsideViewport.status, 'failed'); assert.match(outsideViewport.steps[0].reason, /path point 2\/2 at viewport \(1530, 150\).*outside the viewport.*Hit element: null/)
+      assert.equal((await browser.view.webContents.executeJavaScript('window.viewerFixture')).events.length, 0)
+      await setupViewer()
+      await browser.view.webContents.executeJavaScript('window.viewerFixture.obstruct=true')
+      const obstructedViewer = await execute([viewerDrag(), step('click', 'Do not write after obstruction', { selector: '#write' }), measurementVisible])
+      assert.equal(obstructedViewer.status, 'failed'); assert.equal(obstructedViewer.steps[1].status, 'skipped')
+      assert.match(obstructedViewer.steps[0].reason, /segment 1\/2, sample 1\/\d+ toward path point 2\/3 at viewport \([\d.]+, [\d.]+\).*covered.*"tag":"input".*"id":"viewer-obstruction".*dialog-cover/)
+      assert.ok(!JSON.stringify(obstructedViewer).includes('never-report-this'))
+      const obstructedState = await browser.view.webContents.executeJavaScript('window.viewerFixture')
+      assert.equal(obstructedState.pressed, false); assert.equal(writes, 0)
+      assert.ok(obstructedState.events.some(event => event.type === 'pointerup' && event.buttons === 0 && event.trusted))
+      const ancestorResults = []
+      for (const inputSelector of ['html', 'body', '#viewer-fixture', '#viewer-shadow-host']) {
+        await setupViewer()
+        await browser.view.webContents.executeJavaScript(`(() => {
+          window.viewerFixture.obstruct = true
+          if (${JSON.stringify(inputSelector)} === '#viewer-shadow-host') {
+            const host = document.createElement('div'); host.id = 'viewer-shadow-host'
+            document.querySelector('#viewer-fixture').append(host)
+            host.attachShadow({ mode: 'open' }).append(document.querySelector('#coronal-image'), document.querySelector('#viewer-input'))
+          }
+        })()`)
+        const report = await execute([viewerDrag({ inputSelector }), measurementVisible])
+        const state = await browser.view.webContents.executeJavaScript('window.viewerFixture')
+        ancestorResults.push({ inputSelector, status: report.status, reason: report.steps[0].reason, events: state.events.length })
+      }
+      await setupViewer()
+      await browser.view.webContents.executeJavaScript(`(() => {
+        const panel = document.createElement('div'); panel.id = 'viewer-scroll-panel'
+        panel.style.cssText = 'position:fixed;left:10px;top:60px;width:400px;height:200px;overflow:auto;z-index:1000'
+        const content = document.createElement('div'); content.style.cssText = 'position:relative;width:400px;height:650px'
+        for (const surface of [document.querySelector('#coronal-image'), document.querySelector('#viewer-input')]) {
+          surface.style.cssText = 'position:absolute;left:0;top:440px;width:300px;height:150px;touch-action:none'
+          content.append(surface)
+        }
+        panel.append(content); document.querySelector('#viewer-fixture').append(panel)
+      })()`)
+      const clippedBefore = await browser.view.webContents.executeJavaScript('({top:document.querySelector("#coronal-image").getBoundingClientRect().top,height:innerHeight})')
+      assert.ok(clippedBefore.top > 260 && clippedBefore.top + 20 < clippedBefore.height, 'start is in the window but clipped below the panel')
+      const scrolled = await execute([viewerDrag({ path: [{ x: 20, y: 20 }, { x: 60, y: 40 }] }), measurementVisible])
+      const panelScrollTop = await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-scroll-panel").scrollTop')
+      await setupViewer()
+      await browser.view.webContents.executeJavaScript(`(() => {
+        const icons = document.createElement('div'); icons.id = 'viewer-icons'
+        for (let index = 0; index < 150; index++) {
+          const button = document.createElement('button'); button.id = 'icon-' + index
+          button.innerHTML = '<svg width="12" height="12"><svg width="6" height="6"></svg></svg>'
+          icons.append(button)
+        }
+        const shadowButton = document.createElement('div'); shadowButton.id = 'shadow-icon-button'; shadowButton.setAttribute('role', 'button')
+        shadowButton.attachShadow({ mode: 'open' }).innerHTML = '<svg width="12" height="12"></svg>'
+        icons.append(shadowButton); document.body.prepend(icons)
+      })()`)
+      const discovery = await browserCommand(['test-targets'])
+      const icons = { svgCount: discovery.targets.filter(target => target.tag === 'svg').length,
+        hasWrite: discovery.targets.some(target => target.selector === '#write'),
+        hasViewerInput: discovery.targets.some(target => target.selector === '#viewer-input'), truncated: discovery.truncated }
+      await writeFile(join(artifacts, `viewer-regressions-${runId}.json`), JSON.stringify({ ancestorResults, scrolled, panelScrollTop, icons }, null, 2))
+      await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-icons").remove()')
+      for (const ancestor of ancestorResults) {
+        assert.equal(ancestor.status, 'failed', `ancestor input surface must be rejected: ${ancestor.inputSelector}`)
+        assert.match(ancestor.reason, /ancestor/); assert.equal(ancestor.events, 0)
+      }
+      assert.equal(scrolled.status, 'passed', JSON.stringify(scrolled)); assert.ok(panelScrollTop > 0)
+      assert.deepEqual(icons, { svgCount: 1, hasWrite: true, hasViewerInput: true, truncated: false })
+      await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-fixture").remove()')
+    }
     let sequence = 0
     const runId = Date.now()
     const execute = async (steps, shell = false) => {
@@ -139,6 +267,16 @@ if (!process.versions.electron) {
       await browser.open(); await second.open(); await browser.navigate(url)
       await assert.rejects(execute([visible('#login')]), /Testing mode/)
       browser.action('testing:on')
+      if (viewerOnly) {
+        await checkViewerDrag()
+        await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, viewerOverlayMeasurement: true, directSvgInputSurface: true,
+          partiallyVisibleDragSurface: true, dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
+          testingModeRequired: true, installedPowerShell: false }, null, 2))
+        console.log('Viewer drag acceptance check passed: native measurement, cropped viewport, obstruction diagnostics and pointer release.')
+        return
+      }
+      const controller = JSON.parse(await readFile(endpoint, 'utf8'))
+      const request = (value, signal) => fetch(`http://127.0.0.1:${controller.port}/test`, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: JSON.stringify(value), ...(signal ? { signal } : {}) })
       const generatedWithoutLabels = await execute([
         { action: 'fill', selector: '#simple-search', value: 'amazon fire tv bub' },
         { action: 'press', selector: '#simple-search', key: 'Enter' },
@@ -226,8 +364,6 @@ if (!process.versions.electron) {
       const covered = await execute([step('click', 'Covered', { selector: '#write' }), visible('#title')])
       assert.equal(covered.status, 'failed'); assert.equal(writes, 0)
       await browser.view.webContents.executeJavaScript('document.querySelector("#cover").remove()')
-      const controller = JSON.parse(await readFile(endpoint, 'utf8'))
-      const request = (value, signal) => fetch(`http://127.0.0.1:${controller.port}/test`, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: JSON.stringify(value), ...(signal ? { signal } : {}) })
       for (const shell of [false, true]) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         const target = (await browserCommand(['test-targets'])).targets.find(target => target.selector === '#drag-canvas')
@@ -249,6 +385,7 @@ if (!process.versions.electron) {
       assert.equal(zoomedDrag.status, 'passed', JSON.stringify(zoomedDrag))
       await assertDragEndpoint(browser.view.webContents)
       browser.view.webContents.setZoomFactor(1)
+      await checkViewerDrag()
       for (const mode of ['bounds', 'move', 'cover', 'replace']) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         await browser.view.webContents.executeJavaScript(`window.dragFixture.mode=${JSON.stringify(mode)}`)
@@ -376,8 +513,14 @@ if (!process.versions.electron) {
         nativeCoordinateDrag: true, dragInterpolation: true, dragBounds: true, dragGeometryGuard: true, dragOverlayGuard: true,
         dragReplacementGuard: true, zoomedCoordinateDrag: true, dragCancellationReleasesButton: true, dragPageSwitchReleasesButton: true,
         sameOriginFrameDrag: true, crossOriginDragBlocked: true, dragEndpointTolerance: 1,
+        viewerOverlayMeasurement: true, directSvgInputSurface: true, partiallyVisibleDragSurface: true,
+        dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
-    } finally { await browser.dispose(); await second.dispose(); window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close(); app.quit() }
+    } finally {
+      await browser.dispose(); await second.dispose()
+      window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close()
+      app.quit()
+    }
   }
 }

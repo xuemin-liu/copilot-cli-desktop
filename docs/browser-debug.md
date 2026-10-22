@@ -454,7 +454,8 @@ unique `selector` and a `path` of 2–100 `{ "x": number, "y": number }` points.
 point uses CSS pixels relative to the target's bounding-box top-left, rather than
 screen coordinates or the canvas backing-store resolution. `test-targets` exposes
 CSS-pixel bounds to help choose points. Points must remain within the target and
-visible viewport. The runner scrolls the target into view before pressing, then
+visible viewport; the entire canvas or input surface need not fit onscreen.
+The runner preserves an already visible starting point, scrolls if needed before pressing, then
 holds the native left mouse button while interpolating the path. `durationMs`
 defaults to 500 and accepts 100–5000 milliseconds; event processing can extend the
 elapsed time. Covered, moved, replaced, or navigated targets stop the drag. The
@@ -469,6 +470,22 @@ Display scaling and browser page zoom are separate settings.
 ```json
 { "action": "drag", "selector": "#canvas", "path": [{ "x": 20, "y": 20 }, { "x": 80, "y": 40 }, { "x": 240, "y": 90 }], "durationMs": 500 }
 ```
+
+Viewers often receive pointer input on an HTML or SVG overlay above the image.
+Use that actual input surface as `selector`, or add `"inputSelector": "#viewer-input"`
+to keep path offsets relative to the image selected by `selector`. The input surface
+must match exactly one visible element in the same frame. Native hit-testing must
+reach that surface or its descendants at every point. Neither hit-testing nor page
+styles are changed; unrelated covers still block the drag. Both elements are checked
+for replacement and changing geometry while the pointer is held.
+An input surface cannot be an ancestor of the image target (including across shadow
+roots); select the surface itself instead of a broad page or viewer wrapper.
+
+An obstructed drag reports the path point (or segment and interpolated sample),
+viewport coordinates, and the hit element's tag, ID, classes and role. Field values,
+element text and accessible labels are excluded. Embedded-frame obstructions report
+coordinates in the embedding viewport. A failure releases the pointer and skips
+remaining actions.
 
 Include an assertion of the app's resulting state after the drag. Painting a
 canvas alone does not prove the intended selection, drawing, or pan succeeded.
