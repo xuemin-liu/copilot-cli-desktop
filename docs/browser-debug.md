@@ -478,6 +478,8 @@ must match exactly one visible element in the same frame. Native hit-testing mus
 reach that surface or its descendants at every point. Neither hit-testing nor page
 styles are changed; unrelated covers still block the drag. Both elements are checked
 for replacement and changing geometry while the pointer is held.
+An input surface cannot be an ancestor of the image target (including across shadow
+roots); select the surface itself instead of a broad page or viewer wrapper.
 
 An obstructed drag reports the path point (or segment and interpolated sample),
 viewport coordinates, and the hit element's tag, ID, classes and role. Field values,

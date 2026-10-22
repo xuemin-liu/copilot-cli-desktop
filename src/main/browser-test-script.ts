@@ -2,6 +2,12 @@
 export function browserTestScript(operation: string, args: Record<string, any>): Record<string, any> | Promise<Record<string, any>> {
   if (Date.now() > args.deadline) return { error: 'Test operation expired.' }
   if (args.allowedOrigin && location.origin !== args.allowedOrigin) return { error: 'Test input frame is outside the enabled origin.' }
+  const parent = (element: Element): Element | null => element.parentElement
+    ?? (element.getRootNode() instanceof ShadowRoot ? (element.getRootNode() as ShadowRoot).host : null)
+  const contains = (ancestor: Element, element: Element | null): boolean => {
+    for (let node = element; node; node = parent(node)) if (node === ancestor) return true
+    return false
+  }
   const visible = (element: Element): boolean => {
     for (let node: Element | null = element; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
       const style = getComputedStyle(node)
@@ -47,8 +53,15 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     })
     if (operation === 'viewport') return { width: innerWidth, height: innerHeight }
     if (operation === 'inspect') {
-      const matches = find('input,textarea,select,button,a,summary,[role="button"],[role="tab"],[contenteditable="true"],tr,img,canvas,svg,[data-testid]')
-      const targets = matches.filter(visible).slice(0, 200).map(element => ({
+      const matches = find('input,textarea,select,button,a,summary,[role="button"],[role="tab"],[contenteditable="true"],tr,img,canvas,svg,[data-testid]').filter(visible).filter(element => {
+        if (element.localName !== 'svg') return true
+        // Decorative icons should not consume slots already used by their control.
+        for (let node = parent(element); node; node = parent(node)) {
+          if (node.matches('button,a,summary,[role="button"],[role="tab"],svg')) return false
+        }
+        return true
+      })
+      const targets = matches.slice(0, 200).map(element => ({
         selector: element.id ? `#${CSS.escape(element.id)}` : element.hasAttribute('data-testid') ? `[data-testid=${JSON.stringify(element.getAttribute('data-testid'))}]`
           : element.hasAttribute('name') ? `${element.tagName.toLowerCase()}[name=${JSON.stringify(element.getAttribute('name'))}]` : element.tagName.toLowerCase(),
         tag: element.tagName.toLowerCase(), type: element.getAttribute('type'),
@@ -89,6 +102,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     const inputs = dragging && args.inputSelector ? find(String(args.inputSelector), false).filter(visible) : [target]
     if (inputs.length !== 1) return { error: 'Drag inputSelector needs exactly one visible element; refine the selector.' }
     const input = inputs[0]!
+    if (dragging && input !== target && contains(input, target)) return { error: 'Drag input surface must not be an ancestor of the target. Select the actual input surface.' }
     if (args.reference) {
       const scope = globalThis as typeof globalThis & { __desktopTestTarget?: { token: string; element: Element; input: Element } }
       const previous = scope.__desktopTestTarget
@@ -100,17 +114,26 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if ([target, input].some(element => element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true')) return { error: 'Target is disabled.' }
     if (operation === 'focused') return (target.getRootNode() as Document | ShadowRoot).activeElement === target
       ? { passed: true } : { error: 'Input focus changed during the action.' }
-    const before = target.getBoundingClientRect()
-    const pointVisible = dragging && args.offset && before.left + args.offset.x >= 0 && before.left + args.offset.x < innerWidth
-      && before.top + args.offset.y >= 0 && before.top + args.offset.y < innerHeight
-    // Centering a large canvas can move an already visible starting point offscreen.
-    if (args.scroll !== false && !pointVisible) target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
-    const rect = target.getBoundingClientRect()
-    const x = args.offset ? rect.left + args.offset.x : Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
-    const y = args.offset ? rect.top + args.offset.y : Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2
-    // Start at the document so an overlay outside a shadow root cannot be missed.
-    let hit = document.elementFromPoint(x, y)
-    while (hit?.shadowRoot) { const deep = hit.shadowRoot.elementFromPoint(x, y); if (!deep || deep === hit) break; hit = deep }
+    const pointAt = (rect: DOMRect): { x: number; y: number } => ({
+      x: args.offset ? rect.left + args.offset.x : Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2,
+      y: args.offset ? rect.top + args.offset.y : Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2,
+    })
+    const hitAt = (x: number, y: number): Element | null => {
+      // Start at the document so an overlay outside a shadow root cannot be missed.
+      let hit = document.elementFromPoint(x, y)
+      while (hit?.shadowRoot) { const deep = hit.shadowRoot.elementFromPoint(x, y); if (!deep || deep === hit) break; hit = deep }
+      return hit
+    }
+    let rect = target.getBoundingClientRect()
+    let { x, y } = pointAt(rect)
+    let hit = hitAt(x, y)
+    const pointVisible = dragging && args.offset && x >= 0 && x < innerWidth && y >= 0 && y < innerHeight && contains(input, hit)
+    // A viewport point may still be clipped by a scroll panel. Nearest scrolling
+    // exposes it without centering an oversized canvas that is already onscreen.
+    if (args.scroll !== false && !pointVisible) {
+      target.scrollIntoView({ block: dragging ? 'nearest' : 'center', inline: dragging ? 'nearest' : 'center', behavior: 'instant' })
+      rect = target.getBoundingClientRect(); ({ x, y } = pointAt(rect)); hit = hitAt(x, y)
+    }
     const metadata = (element: Element | null): string => element ? JSON.stringify({
       tag: element.localName,
       id: element.id.slice(0, 120),
@@ -122,13 +145,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if (args.offset && (![args.offset.x, args.offset.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
       || args.offset.x >= rect.width || args.offset.y >= rect.height)) return failPoint('Drag point is outside the target bounds.')
     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return failPoint('Target is outside the viewport.')
-    const containsHit = (element: Element): boolean => {
-      for (let node = hit; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
-        if (node === element) return true
-      }
-      return false
-    }
-    if (!hit || !containsHit(input)) return failPoint('Target is covered or outside the viewport.')
+    if (!contains(input, hit)) return failPoint('Target is covered or outside the viewport.')
     const inputRect = input.getBoundingClientRect()
     if (operation === 'target') return { x, y, width: innerWidth, height: innerHeight,
       targetLeft: rect.left, targetTop: rect.top, targetWidth: rect.width, targetHeight: rect.height,

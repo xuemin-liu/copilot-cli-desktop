@@ -32,7 +32,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow } = await import('electron')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
-  void run().then(() => { if (viewerOnly) app.exit(0) }).catch(error => { console.error(error); app.exit(1) })
+  void run().catch(error => { console.error(error); app.exit(1) })
   async function run() {
     await app.whenReady()
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
@@ -132,7 +132,7 @@ if (!process.versions.electron) {
       const viewerSetup = `(${function () {
         document.querySelector('#viewer-fixture')?.remove()
         const fixture = document.createElement('div'); fixture.id = 'viewer-fixture'
-        fixture.innerHTML = '<button id="measurement-tool" style="position:fixed;top:0;left:0;z-index:1002">Measure</button><canvas id="coronal-image" width="1600" height="1000" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1000"></canvas><svg id="viewer-input" xmlns="http://www.w3.org/2000/svg" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1001;touch-action:none"></svg>'
+        fixture.innerHTML = '<button id="measurement-tool" style="position:fixed;top:0;right:0;z-index:1002">Measure</button><canvas id="coronal-image" width="1600" height="1000" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1000"></canvas><svg id="viewer-input" xmlns="http://www.w3.org/2000/svg" style="position:absolute;left:30px;top:60px;width:1600px;height:1000px;z-index:1001;touch-action:none"></svg>'
         document.body.append(fixture); window.scrollTo(0, 0)
         const canvas = fixture.querySelector('canvas'); const surface = fixture.querySelector('svg')
         const context = canvas.getContext('2d'); context.fillStyle = '#333'; context.fillRect(0, 0, 1600, 1000)
@@ -167,7 +167,10 @@ if (!process.versions.electron) {
       }
       await setupViewer()
       const noSurface = await execute([viewerDrag({ inputSelector: undefined }), measurementVisible])
-      assert.equal(noSurface.status, 'failed'); assert.match(noSurface.steps[0].reason, /path point 1\/3 at viewport \(50, 80\).*covered.*"tag":"svg".*"id":"viewer-input"/)
+      assert.equal(noSurface.status, 'failed')
+      const noSurfacePoint = await browser.view.webContents.executeJavaScript('(() => { const rect = document.querySelector("#coronal-image").getBoundingClientRect(); return { x: rect.left + 20, y: rect.top + 20 } })()')
+      assert.ok(noSurface.steps[0].reason.includes('path point 1/3 at viewport (' + noSurfacePoint.x + ', ' + noSurfacePoint.y + ')'))
+      assert.match(noSurface.steps[0].reason, /covered.*"tag":"svg".*"id":"viewer-input"/)
       assert.equal((await browser.view.webContents.executeJavaScript('window.viewerFixture')).events.length, 0)
       for (const direct of [false, true]) {
         await setupViewer()
@@ -193,6 +196,60 @@ if (!process.versions.electron) {
       const obstructedState = await browser.view.webContents.executeJavaScript('window.viewerFixture')
       assert.equal(obstructedState.pressed, false); assert.equal(writes, 0)
       assert.ok(obstructedState.events.some(event => event.type === 'pointerup' && event.buttons === 0 && event.trusted))
+      const ancestorResults = []
+      for (const inputSelector of ['html', 'body', '#viewer-fixture', '#viewer-shadow-host']) {
+        await setupViewer()
+        await browser.view.webContents.executeJavaScript(`(() => {
+          window.viewerFixture.obstruct = true
+          if (${JSON.stringify(inputSelector)} === '#viewer-shadow-host') {
+            const host = document.createElement('div'); host.id = 'viewer-shadow-host'
+            document.querySelector('#viewer-fixture').append(host)
+            host.attachShadow({ mode: 'open' }).append(document.querySelector('#coronal-image'), document.querySelector('#viewer-input'))
+          }
+        })()`)
+        const report = await execute([viewerDrag({ inputSelector }), measurementVisible])
+        const state = await browser.view.webContents.executeJavaScript('window.viewerFixture')
+        ancestorResults.push({ inputSelector, status: report.status, reason: report.steps[0].reason, events: state.events.length })
+      }
+      await setupViewer()
+      await browser.view.webContents.executeJavaScript(`(() => {
+        const panel = document.createElement('div'); panel.id = 'viewer-scroll-panel'
+        panel.style.cssText = 'position:fixed;left:10px;top:60px;width:400px;height:200px;overflow:auto;z-index:1000'
+        const content = document.createElement('div'); content.style.cssText = 'position:relative;width:400px;height:650px'
+        for (const surface of [document.querySelector('#coronal-image'), document.querySelector('#viewer-input')]) {
+          surface.style.cssText = 'position:absolute;left:0;top:440px;width:300px;height:150px;touch-action:none'
+          content.append(surface)
+        }
+        panel.append(content); document.querySelector('#viewer-fixture').append(panel)
+      })()`)
+      const clippedBefore = await browser.view.webContents.executeJavaScript('({top:document.querySelector("#coronal-image").getBoundingClientRect().top,height:innerHeight})')
+      assert.ok(clippedBefore.top > 260 && clippedBefore.top + 20 < clippedBefore.height, 'start is in the window but clipped below the panel')
+      const scrolled = await execute([viewerDrag({ path: [{ x: 20, y: 20 }, { x: 60, y: 40 }] }), measurementVisible])
+      const panelScrollTop = await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-scroll-panel").scrollTop')
+      await setupViewer()
+      await browser.view.webContents.executeJavaScript(`(() => {
+        const icons = document.createElement('div'); icons.id = 'viewer-icons'
+        for (let index = 0; index < 150; index++) {
+          const button = document.createElement('button'); button.id = 'icon-' + index
+          button.innerHTML = '<svg width="12" height="12"><svg width="6" height="6"></svg></svg>'
+          icons.append(button)
+        }
+        const shadowButton = document.createElement('div'); shadowButton.id = 'shadow-icon-button'; shadowButton.setAttribute('role', 'button')
+        shadowButton.attachShadow({ mode: 'open' }).innerHTML = '<svg width="12" height="12"></svg>'
+        icons.append(shadowButton); document.body.prepend(icons)
+      })()`)
+      const discovery = await browserCommand(['test-targets'])
+      const icons = { svgCount: discovery.targets.filter(target => target.tag === 'svg').length,
+        hasWrite: discovery.targets.some(target => target.selector === '#write'),
+        hasViewerInput: discovery.targets.some(target => target.selector === '#viewer-input'), truncated: discovery.truncated }
+      await writeFile(join(artifacts, `viewer-regressions-${runId}.json`), JSON.stringify({ ancestorResults, scrolled, panelScrollTop, icons }, null, 2))
+      await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-icons").remove()')
+      for (const ancestor of ancestorResults) {
+        assert.equal(ancestor.status, 'failed', `ancestor input surface must be rejected: ${ancestor.inputSelector}`)
+        assert.match(ancestor.reason, /ancestor/); assert.equal(ancestor.events, 0)
+      }
+      assert.equal(scrolled.status, 'passed', JSON.stringify(scrolled)); assert.ok(panelScrollTop > 0)
+      assert.deepEqual(icons, { svgCount: 1, hasWrite: true, hasViewerInput: true, truncated: false })
       await browser.view.webContents.executeJavaScript('document.querySelector("#viewer-fixture").remove()')
     }
     let sequence = 0
@@ -461,11 +518,9 @@ if (!process.versions.electron) {
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally {
-      // The focused fixture uses a temporary profile and need not wait for cookie
-      // persistence. Exit after cleanup; assertion errors still reach the catch.
-      if (!viewerOnly) { await browser.dispose(); await second.dispose() }
+      await browser.dispose(); await second.dispose()
       window.destroy(); site.closeAllConnections(); site.close(); foreign.closeAllConnections(); foreign.close()
-      if (!viewerOnly) app.quit()
+      app.quit()
     }
   }
 }

@@ -219,6 +219,7 @@ the drag and release the button. File/DataTransfer drag-and-drop is unsupported.
 For viewers that receive input on an overlay, explicitly set inputSelector to that
 visible interaction surface (including SVG). Coordinates remain relative to selector.
 Alternatively, use the input surface itself as selector and measure offsets from it.
+inputSelector cannot name an ancestor of the target, such as body or a viewer wrapper.
 Only hits on that surface or its descendants are accepted; unrelated covers still
 fail. Inspect the reported path point, viewport coordinates and hit element metadata
 to identify obstructions. Do not disable hit-testing or modify the page to bypass them.
