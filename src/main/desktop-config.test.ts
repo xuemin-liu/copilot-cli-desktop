@@ -283,3 +283,13 @@ test('the Local Overrides default for new sessions is shared unless set, and a s
   ] }] })
   assert.deepEqual(config.profiles[0]!.tabs.map((tab) => tab.privateOverrides), [true, undefined, undefined])
 })
+
+test('worktree cleanup defaults to removing safe worktrees and keeps a valid saved choice', async () => {
+  assert.equal(normalizeDesktopConfig({}).worktreeCleanup, 'safe')
+  for (const value of [null, 'always', 1, true]) assert.equal(normalizeDesktopConfig({ worktreeCleanup: value }).worktreeCleanup, 'safe')
+  for (const value of ['safe', 'ask', 'keep'] as const) assert.equal(normalizeDesktopConfig({ worktreeCleanup: value }).worktreeCleanup, value)
+  await withTempFile(async filename => {
+    await writeDesktopConfig(filename, { ...DEFAULT_DESKTOP_CONFIG, worktreeCleanup: 'keep' })
+    assert.equal((await readDesktopConfig(filename)).worktreeCleanup, 'keep')
+  })
+})

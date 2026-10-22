@@ -4,6 +4,7 @@ import { GitRunner, gitSucceeded, resolveGitExecutable } from './git-runner.js'
 import type { GitRunOptions, GitRunResult } from './git-runner.js'
 import type { SpawnOptions } from './pty-backend.js'
 import { normalizeWorktreeTimeoutMinutes } from './worktree-timeout.js'
+import { DESKTOP_WORKTREE_NAME } from './session-worktree-cleanup.js'
 
 type RunGit = (options: GitRunOptions) => Promise<GitRunResult>
 
@@ -15,7 +16,7 @@ export async function prepareSessionWorktree(
   if (!flag) return { args, options }
   const name = flag.slice('--worktree='.length)
   // Only intercept worktrees named by the desktop, never arbitrary paths or CLI options.
-  if (!/^desktop-[a-z0-9-]+-[0-9a-f]{6}$/.test(name)) throw new Error('Invalid session worktree name')
+  if (!DESKTOP_WORKTREE_NAME.test(name)) throw new Error('Invalid session worktree name')
   if (!runGit) {
     const executable = await resolveGitExecutable({ env: options.env })
     if (!executable) throw new Error('Git is required to create a session worktree')

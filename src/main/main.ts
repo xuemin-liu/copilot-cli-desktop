@@ -44,6 +44,15 @@ import {
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
+import {
+  inspectDesktopWorktree,
+  isWorktreeCleanupMode,
+  removalIsSafe,
+  removeDesktopWorktree,
+  worktreeCleanupDecision,
+  worktreeCleanupPrompt,
+  type DesktopWorktreeState,
+} from './session-worktree-cleanup.js'
 import { appendBoundedLog, pruneSessionLogDirectories } from './log-retention.js'
 import {
   EMPTY_COPILOT_CAPABILITIES,
@@ -1702,6 +1711,8 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       managedTabs.delete(tabId)
     }
     forgetSessionName(tabId)
+    // Read before the tab is dropped: its worktree is cleaned up once it is gone.
+    const closing = tabsState.tabs.find((tab) => tab.id === tabId)
     const browser = sessionBrowsers.get(tabId)
     const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
     try { await browser?.dispose() }
@@ -1733,7 +1744,76 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     sessionOutputSequences.delete(tabId)
     broadcastState()
     refreshMenus()
+    if (closing) cleanUpSessionWorktree(closing)
     return snapshot()
+  })
+}
+
+/** Worktree cleanups run one at a time: two in one repository contend for its worktree records, and prompts would stack. */
+let worktreeCleanupQueue: Promise<void> = Promise.resolve()
+
+/** Whether a tab still open (running or not, since it can be restarted) runs in the folder or below it, or was started there. */
+async function openTabUsesFolder(folder: string): Promise<boolean> {
+  const canonical = (path: string): Promise<string> => realPathNative(path).then((real) => real.replace(/[\\/]+$/, '').toLowerCase())
+  let target: string
+  try { target = await canonical(folder) } catch { return false }
+  for (const tab of tabsState.tabs) {
+    for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
+      if (!where) continue
+      let real: string
+      try { real = await canonical(where) } catch { continue }
+      if (real === target || real.startsWith(`${target}\\`)) return true
+    }
+  }
+  return false
+}
+
+async function askToRemoveWorktree(state: DesktopWorktreeState): Promise<boolean> {
+  const window = mainWindow
+  if (!window || window.isDestroyed() || !window.isVisible()) return false
+  const { title, detail } = worktreeCleanupPrompt(state)
+  const safe = removalIsSafe(state)
+  const answer = await dialog.showMessageBox(window, {
+    type: safe ? 'question' : 'warning', title, message: title, detail,
+    buttons: ['Remove worktree', 'Keep worktree'], defaultId: safe ? 0 : 1, cancelId: 1, noLink: true,
+  })
+  return answer.response === 0
+}
+
+/**
+ * After a session tab closes, remove the worktree the desktop made for it, as Settings → General says: without asking
+ * when nothing can be lost, otherwise after a prompt (or never). Only the desktop's own `desktop-*` worktrees qualify; an
+ * existing worktree the session was started in, a side chat's folder and one another open tab uses are left alone.
+ */
+function cleanUpSessionWorktree(tab: DesktopSessionTab): void {
+  const folder = tab.worktree?.path
+  if (!folder || tab.launchWorktree !== true || tab.launchWorktreePath || tab.sideChat || tab.remote) return
+  if (desktopConfig.worktreeCleanup === 'keep') return
+  const log = (message: string): void => { void writeAppLog(message).catch(() => {}) }
+  worktreeCleanupQueue = worktreeCleanupQueue.then(async () => {
+    if (shuttingDown() || await openTabUsesFolder(folder)) return
+    const executable = await resolveGitExecutable()
+    if (!executable) return
+    const runner = new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') })
+    const runGit = (request: Parameters<GitRunner['run']>[0]): ReturnType<GitRunner['run']> => runner.run(request)
+    const state = await inspectDesktopWorktree(folder, runGit)
+    if (!state) { log(`Kept the worktree of a closed session; it could not be checked: ${folder}`); return }
+    const decision = worktreeCleanupDecision(desktopConfig.worktreeCleanup, state)
+    const asked = decision === 'ask'
+    if (decision === 'keep' || (asked && !await askToRemoveWorktree(state))) return
+    // The prompt can stay open a long time: a tab may have started there, or the worktree changed, since it was read.
+    if (shuttingDown() || await openTabUsesFolder(folder)) return
+    const current = await inspectDesktopWorktree(folder, runGit)
+    if (!current || current.head !== state.head || current.branch !== state.branch || current.changes !== state.changes
+      || (!asked && !removalIsSafe(current))) {
+      log(`Kept the worktree of a closed session; it changed while it was being checked: ${folder}`)
+      return
+    }
+    const { branchDeleted } = await removeDesktopWorktree(current, runGit, { trash: (path) => shell.trashItem(path) })
+    log(`Removed the worktree of a closed session${branchDeleted ? ' and its branch' : ''}: ${current.path}`)
+  }).catch((error: unknown) => {
+    log(`Could not remove the worktree of a closed session (${folder}): ${String(error)}`)
+    showNotification('Worktree not removed', `${folder} was kept. ${error instanceof Error ? error.message : ''}`.trim())
   })
 }
 
@@ -2494,6 +2574,7 @@ function settingsPreferences(): DesktopPreferences {
     browserProfile: desktopConfig.browserProfile,
     browserOverrides: desktopConfig.browserOverrides,
     worktreeTimeoutMinutes: desktopConfig.worktreeTimeoutMinutes,
+    worktreeCleanup: desktopConfig.worktreeCleanup,
   }
 }
 
@@ -2918,6 +2999,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'browserProfile',
     'browserOverrides',
     'worktreeTimeoutMinutes',
+    'worktreeCleanup',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -2932,6 +3014,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('browserProfile' in values && !isBrowserProfileMode(values.browserProfile))
     || ('browserOverrides' in values && !isBrowserOverridesMode(values.browserOverrides))
     || ('worktreeTimeoutMinutes' in values && !isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes))
+    || ('worktreeCleanup' in values && !isWorktreeCleanupMode(values.worktreeCleanup))
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -2955,6 +3038,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   const overridesChanged = isBrowserOverridesMode(values.browserOverrides) && desktopConfig.browserOverrides !== values.browserOverrides
   if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
   if (isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes)) desktopConfig.worktreeTimeoutMinutes = values.worktreeTimeoutMinutes
+  if (isWorktreeCleanupMode(values.worktreeCleanup)) desktopConfig.worktreeCleanup = values.worktreeCleanup
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

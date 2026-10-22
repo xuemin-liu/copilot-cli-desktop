@@ -10,6 +10,7 @@ import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderC
 import { DEFAULT_SESSION_LAUNCH_CONFIG, normalizeSessionLaunchConfig } from './session-launch.js'
 import type { RestoredTab, WorkspaceProfile } from './types.js'
 import { DEFAULT_WORKTREE_TIMEOUT_MINUTES, normalizeWorktreeTimeoutMinutes } from './worktree-timeout.js'
+import { DEFAULT_WORKTREE_CLEANUP, isWorktreeCleanupMode, type WorktreeCleanupMode } from './session-worktree-cleanup.js'
 
 export interface DesktopConfig {
   profiles: WorkspaceProfile[]
@@ -26,12 +27,14 @@ export interface DesktopConfig {
   /** Whether a new session's browser uses the DevTools settings and Local Overrides every session shares, or its own. */
   browserOverrides: BrowserOverridesMode
   worktreeTimeoutMinutes: number
+  /** What happens to the worktree the desktop made for a session when its tab is closed. */
+  worktreeCleanup: WorktreeCleanupMode
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup'
 >
 
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
@@ -70,6 +73,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   browserProfile: 'separate',
   browserOverrides: 'shared',
   worktreeTimeoutMinutes: DEFAULT_WORKTREE_TIMEOUT_MINUTES,
+  worktreeCleanup: DEFAULT_WORKTREE_CLEANUP,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -253,6 +257,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     browserProfile: isBrowserProfileMode(value.browserProfile) ? value.browserProfile : 'separate',
     browserOverrides: isBrowserOverridesMode(value.browserOverrides) ? value.browserOverrides : 'shared',
     worktreeTimeoutMinutes: normalizeWorktreeTimeoutMinutes(value.worktreeTimeoutMinutes),
+    worktreeCleanup: isWorktreeCleanupMode(value.worktreeCleanup) ? value.worktreeCleanup : DEFAULT_WORKTREE_CLEANUP,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

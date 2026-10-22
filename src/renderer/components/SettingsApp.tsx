@@ -490,7 +490,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -529,6 +529,25 @@ export function SettingsApp(): JSX.Element | null {
         </label>
         <p className="settings-disclaimer">
           Maximum time to create a new Git worktree. Default: 10 minutes. Changes apply to worktree creation started after saving.
+        </p>
+        <label className="settings-row settings-row-select">
+          When a worktree session closes
+          <select
+            value={snapshot.worktreeCleanup}
+            onChange={(event) => updatePreference({
+              worktreeCleanup: event.target.value as DesktopSettingsSnapshot['worktreeCleanup'],
+            })}
+          >
+            <option value="safe">Remove the worktree when nothing is lost</option>
+            <option value="ask">Ask every time</option>
+            <option value="keep">Keep the worktree</option>
+          </select>
+        </label>
+        <p className="settings-disclaimer">
+          Applies to the worktree the desktop created for a session, not to an existing worktree a session was started in.
+          Nothing is lost when the worktree has no uncommitted changes: its branch is deleted too when every commit on it is
+          also on another branch, and kept otherwise. A worktree with changes is removed only after you confirm, and goes to the Recycle
+          Bin. Files Git ignores there (build output, node_modules) are deleted with it.
         </p>
         <label className="settings-row settings-row-select">
           When the main window closes
