@@ -202,6 +202,12 @@ folder. Then:
   deleted too**; the branch is kept. Git is never forced: a worktree with uncommitted changes is refused by
   Git itself and nothing is deleted. Every check runs again before each attempt, because the window can stay
   open. Nothing in the panel creates worktrees.
+- Closing the tab of a session the desktop started in a new worktree removes that worktree as
+  **Settings → General → When a worktree session closes** says. By default: without asking when it has no
+  uncommitted changes (files Git ignores do not count, and are deleted with it), deleting its `desktop-*` branch
+  too when every commit on it is also on another local or remote-tracking branch and keeping it otherwise; after a
+  confirmation when it has changes, moving the folder to the Recycle Bin. A locked worktree, an existing worktree
+  the session was started in, and one another open tab runs in or was started in are left alone.
 
 A worktree shares the main repository's settings and hooks but is reviewed on its own: if the
 repository's config names programs, the worktree asks for the same review before it is read.

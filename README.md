@@ -113,6 +113,13 @@ handle, only input/output/resize events.
   (`desktop-<session title>-<6 hex>`), finds the session that runs in that
   worktree in the session store within about a minute, then monitors and
   resumes it as usual.
+  **Settings → General → When a worktree session closes** decides what happens to
+  that worktree when its tab is closed: by default it is removed when nothing is
+  lost (no uncommitted changes; its `desktop-*` branch is deleted too when every
+  commit on it is also on another branch, and kept otherwise), and a worktree with
+  changes is removed only after you confirm, to the Recycle Bin. **Ask every time**
+  and **Keep the worktree** are the other choices. An existing worktree a session
+  was started in, and one another open tab still uses, are never removed.
 - A Copilot management center that can install, repair, and update the official
   CLI; exposes Copilot's native session-start automatic updates with stable and
   prerelease channels; labels sessions still running an older CLI after an

@@ -135,7 +135,7 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
       const incoming = normalizeDesktopConfig(rawIncoming)
       const current = normalizeDesktopConfig(before ? jsonObject(before) : null)
       const merged = { ...current }
-      for (const key of ['closeBehavior', 'trayEnabled', 'notifications', 'automaticUpdateChecks', 'worktreeTimeoutMinutes'] as const) {
+      for (const key of ['closeBehavior', 'trayEnabled', 'notifications', 'automaticUpdateChecks', 'worktreeTimeoutMinutes', 'worktreeCleanup'] as const) {
         if (!(key in rawIncoming)) continue
         const value = incoming[key]
         if (addChange(`${file.path}#${key}`, `${target} → ${key}`, 'desktop', before ? jsonBytes(current[key]) : null, jsonBytes(value), `Incoming: ${JSON.stringify(value)}`, true)) Object.assign(merged, { [key]: value })

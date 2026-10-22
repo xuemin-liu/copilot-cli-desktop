@@ -14,12 +14,17 @@ import { readMigrationArchive, writeMigrationArchive } from './migration-archive
 import { fileEntry } from './migration-inventory.js'
 import { MigrationImportFailure } from './migration-import.js'
 import { realPathNative } from './real-path.js'
+import { findGitForTests } from './fixtures/git-fixture.js'
 
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   shellCalls: { action: string; target: string }[]
   createTestWindow(): void
+  /** Answer every native message box with this button, and collect what each one asked. */
+  answerMessageBoxes(response: number, beforeAnswer?: () => void): { title: string; detail: string; buttons: string[] }[]
+  /** Settles once every worktree cleanup started by a tab close has finished. */
+  worktreeCleanups(): Promise<void>
   refreshAppMenu(): void
   quitCalls(): number
   windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
@@ -120,7 +125,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             session: { setPermissionCheckHandler() {}, setPermissionRequestHandler() {} },
           });
           setMenu(menu) { this.menu = menu; } setTitle(title) { this.title = title; }
-          isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; }
+          isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; } isVisible() { return true; }
           show() {} focus() { this.focused++; this.emit('focus'); } restore() {}
           async loadFile(path) {
             this.url = (await import('node:url')).pathToFileURL(path).href;
@@ -144,6 +149,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           calls: [],
           showItemInFolder(target) { this.calls.push({ action: 'reveal', target }); },
           async openExternal(target) { this.calls.push({ action: 'open', target }); },
+          async trashItem(target) { this.calls.push({ action: 'trash', target }); (await import('node:fs')).rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); },
         };
       `,
       'electron-updater': 'export default { autoUpdater: null };',
@@ -236,6 +242,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; closePromptAbort = new AbortController(); },
           closePromptDismissed: () => closePromptWindow === null,
           promptClose(window, result) { dialog.showMessageBox = () => result; return promptForWindowClose(window); },
+          answerMessageBoxes(response, beforeAnswer) { const asked = []; dialog.showMessageBox = async (_window, options) => { asked.push(options); beforeAnswer?.(); return { response }; }; return asked; },
+          worktreeCleanups: () => worktreeCleanupQueue,
           dismissClosePrompt: dismissClosePromptForUpdate,
           quitPendingOnPrompt: () => quitAfterClosePrompt,
           updateError: recoverUpdateAttempt,
@@ -1843,5 +1851,125 @@ test('a fan-out labels and waits on exactly the tabs it created, even when an or
       if (previousWait === undefined) delete process.env.DESKTOP_FAN_OUT_WAIT_MS
       else process.env.DESKTOP_FAN_OUT_WAIT_MS = previousWait
     }
+  })
+})
+
+/**
+ * A worktree session as the desktop starts one, with real git: the project folder holds a repository, the CLI is told
+ * `--worktree=<name>`, and the worktree it would make is made here, at `<repo>.worktrees\<name>`, before the session
+ * reports running there.
+ */
+async function startWorktreeSession(harness: Harness, directory: string, git: string): Promise<{ tabId: string; repo: string; worktree: string; name: string }> {
+  const { execFileSync } = await import('node:child_process')
+  const globalConfig = join(directory, 'gitconfig')
+  writeFileSync(globalConfig, '[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n')
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }
+  const plain = (cwd: string, ...args: string[]): string => execFileSync(git, args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  const repo = join(directory, 'project')
+  await mkdir(repo, { recursive: true })
+  if (!(await access(join(repo, '.git')).then(() => true, () => false))) {
+    plain(repo, 'init', '-q')
+    writeFileSync(join(repo, 'a.txt'), 'one\n')
+    plain(repo, 'add', '.')
+    plain(repo, 'commit', '-q', '-m', 'init')
+  }
+  const before = harness.spawns.length
+  const opened = await harness.request('desktop:create-tab', 'new', (await harness.request('desktop:get-state')).activeProfileId, 'Fix it', { worktree: true }) as DesktopState
+  const tabId = opened.activeTabId!
+  const name = harness.spawns[before]!.args.find((arg) => arg.startsWith('--worktree='))!.slice('--worktree='.length)
+  const worktree = join(`${repo}.worktrees`, name)
+  plain(repo, 'worktree', 'add', '-q', '-b', name, worktree, 'HEAD')
+  const sessionId = randomSessionId()
+  await mkdir(join(directory, 'session-state', sessionId), { recursive: true })
+  await writeFile(join(directory, 'session-state', sessionId, 'events.jsonl'),
+    JSON.stringify({ type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } }) + '\n')
+  await waitFor(async () => (await harness.request('desktop:get-state')).tabs.find((tab) => tab.id === tabId)?.worktree?.name, (value) => value === name, 'the tab shows its worktree')
+  return { tabId, repo, worktree, name }
+}
+
+function randomSessionId(): string {
+  const hex = [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+test('closing a worktree session removes its worktree and branch when nothing is lost, and asks before discarding changes', async (t) => {
+  const git = await findGitForTests()
+  if (!git) return t.skip('Git unavailable')
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    harness.createTestWindow()
+    await harness.createMain()
+    const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false)
+    const { execFileSync } = await import('node:child_process')
+    const branches = (repo: string): string[] => execFileSync(git.path, ['branch', '--format=%(refname:short)'], { cwd: repo, encoding: 'utf8' }).split('\n').filter(Boolean)
+
+    // Clean: removed without a prompt, branch and all.
+    const asked = harness.answerMessageBoxes(1)
+    const clean = await startWorktreeSession(harness, directory, git.path)
+    await harness.request('desktop:close-tab', clean.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(asked.length, 0, 'nothing to lose, nothing asked')
+    assert.equal(await exists(clean.worktree), false)
+    assert.ok(!branches(clean.repo).includes(clean.name))
+
+    // Changes: asked; keeping leaves everything as it was.
+    const dirty = await startWorktreeSession(harness, directory, git.path)
+    writeFileSync(join(dirty.worktree, 'notes.txt'), 'unsaved\n')
+    await harness.request('desktop:close-tab', dirty.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(asked.length, 1)
+    assert.match(asked[0]!.detail, /1 uncommitted change/)
+    assert.equal(await exists(join(dirty.worktree, 'notes.txt')), true)
+    assert.ok(branches(dirty.repo).includes(dirty.name))
+
+    // Changes, confirmed: the folder goes to the Recycle Bin and git forgets it.
+    const confirmed = await startWorktreeSession(harness, directory, git.path)
+    writeFileSync(join(confirmed.worktree, 'notes.txt'), 'unsaved\n')
+    let accepted = harness.answerMessageBoxes(0)
+    await harness.request('desktop:close-tab', confirmed.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(accepted.length, 1)
+    assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmed.worktree.toLowerCase()))
+    assert.equal(await exists(confirmed.worktree), false)
+    assert.ok(!execFileSync(git.path, ['worktree', 'list', '--porcelain'], { cwd: confirmed.repo, encoding: 'utf8' }).includes(confirmed.name))
+
+    // Locked while the confirmation was open: kept, folder, registration and branch.
+    const lockedLate = await startWorktreeSession(harness, directory, git.path)
+    writeFileSync(join(lockedLate.worktree, 'notes.txt'), 'unsaved\n')
+    const trashesBefore = harness.shellCalls.filter((call) => call.action === 'trash').length
+    const lockedAsked = harness.answerMessageBoxes(0, () => {
+      execFileSync(git.path, ['worktree', 'lock', lockedLate.worktree], { cwd: lockedLate.repo })
+    })
+    await harness.request('desktop:close-tab', lockedLate.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(lockedAsked.length, 1)
+    assert.equal(harness.shellCalls.filter((call) => call.action === 'trash').length, trashesBefore, 'a locked worktree is never trashed')
+    assert.equal(await exists(join(lockedLate.worktree, 'notes.txt')), true)
+    assert.ok(branches(lockedLate.repo).includes(lockedLate.name))
+    accepted = harness.answerMessageBoxes(0)
+
+    // Another open tab runs there: kept, without asking.
+    const shared = await startWorktreeSession(harness, directory, git.path)
+    const other = (await harness.request('desktop:create-tab', 'new', profile.id, 'Also there')) as DesktopState
+    const otherId = harness.spawns.at(-1)!.args.find((arg) => arg.startsWith('--session-id='))!.slice('--session-id='.length)
+    await mkdir(join(directory, 'session-state', otherId), { recursive: true })
+    await writeFile(join(directory, 'session-state', otherId, 'events.jsonl'),
+      JSON.stringify({ type: 'session.start', data: { sessionId: otherId, startTime: new Date().toISOString(), context: { cwd: shared.worktree } } }) + '\n')
+    await waitFor(async () => (await harness.request('desktop:get-state')).tabs.find((tab) => tab.id === other.activeTabId)?.sessionCwd, Boolean, 'the other tab reports its folder')
+    const before = accepted.length
+    await harness.request('desktop:close-tab', shared.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(accepted.length, before)
+    assert.equal(await exists(shared.worktree), true, 'still in use by another tab')
+
+    // Keep: never touched.
+    await harness.requestSettings('desktop-settings:update-preferences', { worktreeCleanup: 'keep' })
+    await assert.rejects(harness.requestSettings('desktop-settings:update-preferences', { worktreeCleanup: 'always' }), /Invalid desktop preferences/)
+    const kept = await startWorktreeSession(harness, directory, git.path)
+    await harness.request('desktop:close-tab', kept.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(await exists(kept.worktree), true)
   })
 })
