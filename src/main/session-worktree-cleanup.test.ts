@@ -167,3 +167,8 @@ test('locked worktrees, the main checkout and other folders are not inspected as
     assert.equal(await inspectDesktopWorktree(other, run), null)
   })
 })
+
+test('a locked worktree is refused even when removal was confirmed', async () => {
+  await assert.rejects(removeDesktopWorktree(state({ locked: true, changes: 1 }), async () => { throw new Error('No git command may run') },
+    { trash: async () => { throw new Error('A locked worktree is not trashed') } }), /is locked/)
+})

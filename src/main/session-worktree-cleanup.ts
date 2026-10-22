@@ -131,6 +131,8 @@ export interface RemoveWorktreeResult {
  * `removalDeletesBranch` says so, and only if it still points at the commit that was checked.
  */
 export async function removeDesktopWorktree(state: DesktopWorktreeState, runGit: RunGit, options: RemoveWorktreeOptions): Promise<RemoveWorktreeResult> {
+  // Trashing a folder bypasses git's own refusal to remove a locked worktree, so a lock is refused here for both paths.
+  if (state.locked) throw new Error(`Worktree ${state.name} is locked`)
   const run = async (args: string[]): Promise<GitRunResult> => {
     const result = await runGit({ cwd: state.mainPath, args, kind: 'write', disableHooks: true, signal: options.signal, timeoutMs: 120_000 })
     if (!gitSucceeded(result)) {

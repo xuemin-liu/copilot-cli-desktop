@@ -22,7 +22,7 @@ interface Harness {
   shellCalls: { action: string; target: string }[]
   createTestWindow(): void
   /** Answer every native message box with this button, and collect what each one asked. */
-  answerMessageBoxes(response: number): { title: string; detail: string; buttons: string[] }[]
+  answerMessageBoxes(response: number, beforeAnswer?: () => void): { title: string; detail: string; buttons: string[] }[]
   /** Settles once every worktree cleanup started by a tab close has finished. */
   worktreeCleanups(): Promise<void>
   refreshAppMenu(): void
@@ -242,7 +242,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureClosePrompt() { closePromptWindow = { isDestroyed: () => false }; closePromptAbort = new AbortController(); },
           closePromptDismissed: () => closePromptWindow === null,
           promptClose(window, result) { dialog.showMessageBox = () => result; return promptForWindowClose(window); },
-          answerMessageBoxes(response) { const asked = []; dialog.showMessageBox = async (_window, options) => { asked.push(options); return { response }; }; return asked; },
+          answerMessageBoxes(response, beforeAnswer) { const asked = []; dialog.showMessageBox = async (_window, options) => { asked.push(options); beforeAnswer?.(); return { response }; }; return asked; },
           worktreeCleanups: () => worktreeCleanupQueue,
           dismissClosePrompt: dismissClosePromptForUpdate,
           quitPendingOnPrompt: () => quitAfterClosePrompt,
@@ -1927,13 +1927,28 @@ test('closing a worktree session removes its worktree and branch when nothing is
     // Changes, confirmed: the folder goes to the Recycle Bin and git forgets it.
     const confirmed = await startWorktreeSession(harness, directory, git.path)
     writeFileSync(join(confirmed.worktree, 'notes.txt'), 'unsaved\n')
-    const accepted = harness.answerMessageBoxes(0)
+    let accepted = harness.answerMessageBoxes(0)
     await harness.request('desktop:close-tab', confirmed.tabId)
     await harness.worktreeCleanups()
     assert.equal(accepted.length, 1)
     assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmed.worktree.toLowerCase()))
     assert.equal(await exists(confirmed.worktree), false)
     assert.ok(!execFileSync(git.path, ['worktree', 'list', '--porcelain'], { cwd: confirmed.repo, encoding: 'utf8' }).includes(confirmed.name))
+
+    // Locked while the confirmation was open: kept, folder, registration and branch.
+    const lockedLate = await startWorktreeSession(harness, directory, git.path)
+    writeFileSync(join(lockedLate.worktree, 'notes.txt'), 'unsaved\n')
+    const trashesBefore = harness.shellCalls.filter((call) => call.action === 'trash').length
+    const lockedAsked = harness.answerMessageBoxes(0, () => {
+      execFileSync(git.path, ['worktree', 'lock', lockedLate.worktree], { cwd: lockedLate.repo })
+    })
+    await harness.request('desktop:close-tab', lockedLate.tabId)
+    await harness.worktreeCleanups()
+    assert.equal(lockedAsked.length, 1)
+    assert.equal(harness.shellCalls.filter((call) => call.action === 'trash').length, trashesBefore, 'a locked worktree is never trashed')
+    assert.equal(await exists(join(lockedLate.worktree, 'notes.txt')), true)
+    assert.ok(branches(lockedLate.repo).includes(lockedLate.name))
+    accepted = harness.answerMessageBoxes(0)
 
     // Another open tab runs there: kept, without asking.
     const shared = await startWorktreeSession(harness, directory, git.path)

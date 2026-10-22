@@ -1804,7 +1804,7 @@ function cleanUpSessionWorktree(tab: DesktopSessionTab): void {
     // The prompt can stay open a long time: a tab may have started there, or the worktree changed, since it was read.
     if (shuttingDown() || await openTabUsesFolder(folder)) return
     const current = await inspectDesktopWorktree(folder, runGit)
-    if (!current || current.head !== state.head || current.branch !== state.branch || current.changes !== state.changes
+    if (!current || current.locked || current.head !== state.head || current.branch !== state.branch || current.changes !== state.changes
       || (!asked && !removalIsSafe(current))) {
       log(`Kept the worktree of a closed session; it changed while it was being checked: ${folder}`)
       return
@@ -1813,7 +1813,9 @@ function cleanUpSessionWorktree(tab: DesktopSessionTab): void {
     log(`Removed the worktree of a closed session${branchDeleted ? ' and its branch' : ''}: ${current.path}`)
   }).catch((error: unknown) => {
     log(`Could not remove the worktree of a closed session (${folder}): ${String(error)}`)
-    showNotification('Worktree not removed', `${folder} was kept. ${error instanceof Error ? error.message : ''}`.trim())
+    // A rejected queue would skip every later cleanup, so a failing notification must not reject it.
+    try { showNotification('Worktree not removed', `${folder} was kept. ${error instanceof Error ? error.message : ''}`.trim()) }
+    catch (notifyError) { log(`Could not show a notification: ${String(notifyError)}`) }
   })
 }
 
