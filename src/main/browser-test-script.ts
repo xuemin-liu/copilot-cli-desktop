@@ -25,7 +25,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     }
     return text.trim().slice(0, 200)
   }
-  const find = (selector: string): Element[] => {
+  const find = (selector: string, filterText = true): Element[] => {
     const matches: Element[] = []; let visited = 0
     const walk = (root: Document | ShadowRoot): void => {
       matches.push(...root.querySelectorAll(selector))
@@ -36,7 +36,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       }
     }
     walk(document)
-    return matches.filter(element => !args.text || (element as HTMLElement).innerText?.includes(args.text))
+    return matches.filter(element => !filterText || !args.text || (element as HTMLElement).innerText?.includes(args.text))
   }
   try {
     if (operation === 'settle') return new Promise(resolve => {
@@ -47,7 +47,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     })
     if (operation === 'viewport') return { width: innerWidth, height: innerHeight }
     if (operation === 'inspect') {
-      const matches = find('input,textarea,select,button,a,summary,[role="button"],[role="tab"],[contenteditable="true"],tr,img,canvas,[data-testid]')
+      const matches = find('input,textarea,select,button,a,summary,[role="button"],[role="tab"],[contenteditable="true"],tr,img,canvas,svg,[data-testid]')
       const targets = matches.filter(visible).slice(0, 200).map(element => ({
         selector: element.id ? `#${CSS.escape(element.id)}` : element.hasAttribute('data-testid') ? `[data-testid=${JSON.stringify(element.getAttribute('data-testid'))}]`
           : element.hasAttribute('name') ? `${element.tagName.toLowerCase()}[name=${JSON.stringify(element.getAttribute('name'))}]` : element.tagName.toLowerCase(),
@@ -83,30 +83,56 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       }
       return { passed: false }
     }
-    if (matches.length !== 1 || !(matches[0] instanceof HTMLElement)) return { error: 'Action needs exactly one visible element; refine the selector or text.' }
-    const target = matches[0]
+    const dragging = args.action === 'drag'
+    if (matches.length !== 1 || (!dragging && !(matches[0] instanceof HTMLElement))) return { error: 'Action needs exactly one visible element; refine the selector or text.' }
+    const target = matches[0]!
+    const inputs = dragging && args.inputSelector ? find(String(args.inputSelector), false).filter(visible) : [target]
+    if (inputs.length !== 1) return { error: 'Drag inputSelector needs exactly one visible element; refine the selector.' }
+    const input = inputs[0]!
     if (args.reference) {
-      const scope = globalThis as typeof globalThis & { __desktopTestTarget?: { token: string; element: Element } }
+      const scope = globalThis as typeof globalThis & { __desktopTestTarget?: { token: string; element: Element; input: Element } }
       const previous = scope.__desktopTestTarget
       if (args.requireReference && (!previous || previous.token !== args.reference)) return { error: 'Target document changed during the action. Inspect the page again.' }
       if (previous && previous.token === args.reference && previous.element !== target) return { error: 'Target was replaced during the action. Inspect the page again.' }
-      scope.__desktopTestTarget = { token: args.reference, element: target }
+      if (previous && previous.token === args.reference && previous.input !== input) return { error: 'Drag input surface was replaced during the action. Inspect the page again.' }
+      scope.__desktopTestTarget = { token: args.reference, element: target, input }
     }
-    if (target.matches(':disabled') || target.getAttribute('aria-disabled') === 'true') return { error: 'Target is disabled.' }
+    if ([target, input].some(element => element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true')) return { error: 'Target is disabled.' }
     if (operation === 'focused') return (target.getRootNode() as Document | ShadowRoot).activeElement === target
       ? { passed: true } : { error: 'Input focus changed during the action.' }
-    if (args.scroll !== false) target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
+    const before = target.getBoundingClientRect()
+    const pointVisible = dragging && args.offset && before.left + args.offset.x >= 0 && before.left + args.offset.x < innerWidth
+      && before.top + args.offset.y >= 0 && before.top + args.offset.y < innerHeight
+    // Centering a large canvas can move an already visible starting point offscreen.
+    if (args.scroll !== false && !pointVisible) target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
     const rect = target.getBoundingClientRect()
-    if (args.offset && (![args.offset.x, args.offset.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
-      || args.offset.x >= rect.width || args.offset.y >= rect.height)) return { error: 'Drag point is outside the target bounds.' }
     const x = args.offset ? rect.left + args.offset.x : Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
     const y = args.offset ? rect.top + args.offset.y : Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2
-    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return { error: 'Target is outside the viewport.' }
-    const root = target.getRootNode() as Document | ShadowRoot
-    const hit = root.elementFromPoint(x, y)
-    if (!hit || !(target === hit || target.contains(hit))) return { error: 'Target is covered or outside the viewport.' }
+    // Start at the document so an overlay outside a shadow root cannot be missed.
+    let hit = document.elementFromPoint(x, y)
+    while (hit?.shadowRoot) { const deep = hit.shadowRoot.elementFromPoint(x, y); if (!deep || deep === hit) break; hit = deep }
+    const metadata = (element: Element | null): string => element ? JSON.stringify({
+      tag: element.localName,
+      id: element.id.slice(0, 120),
+      classes: [...element.classList].slice(0, 8).map(value => value.slice(0, 80)),
+      role: element.getAttribute('role')?.slice(0, 80) ?? null,
+    }) : 'null'
+    const failPoint = (error: string): Record<string, any> => ({ error: dragging
+      ? `Drag ${args.dragPoint ?? 'point'} at viewport (${x}, ${y}): ${error} Hit element: ${metadata(hit)}.` : error })
+    if (args.offset && (![args.offset.x, args.offset.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+      || args.offset.x >= rect.width || args.offset.y >= rect.height)) return failPoint('Drag point is outside the target bounds.')
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return failPoint('Target is outside the viewport.')
+    const containsHit = (element: Element): boolean => {
+      for (let node = hit; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
+        if (node === element) return true
+      }
+      return false
+    }
+    if (!hit || !containsHit(input)) return failPoint('Target is covered or outside the viewport.')
+    const inputRect = input.getBoundingClientRect()
     if (operation === 'target') return { x, y, width: innerWidth, height: innerHeight,
-      targetLeft: rect.left, targetTop: rect.top, targetWidth: rect.width, targetHeight: rect.height }
+      targetLeft: rect.left, targetTop: rect.top, targetWidth: rect.width, targetHeight: rect.height,
+      inputLeft: inputRect.left, inputTop: inputRect.top, inputWidth: inputRect.width, inputHeight: inputRect.height }
     if (operation === 'scroll') { target.scrollBy({ top: args.pixels, behavior: 'instant' }); return { passed: true } }
     if (operation === 'select') {
       if (!(target instanceof HTMLSelectElement) || target.multiple || ![...target.options].some(option => option.value === args.value && !option.disabled && !(option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled))) return { error: 'Select option is unavailable.' }
@@ -117,8 +143,9 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if (operation === 'fill') {
       if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement && /^(text|search|email|url|tel|password|number)$/.test(target.type)) {
         if (target.readOnly) return { error: 'Field is read-only.' }
-      } else if (!target.isContentEditable) return { error: 'Target is not an editable text field.' }
+      } else if (!(target instanceof HTMLElement) || !target.isContentEditable) return { error: 'Target is not an editable text field.' }
     }
+    if (!(target instanceof HTMLElement)) return { error: 'Target is not an HTML control.' }
     target.focus()
     if (operation === 'fill' && target.isContentEditable) { const range = document.createRange(); range.selectNodeContents(target); const selection = getSelection(); selection?.removeAllRanges(); selection?.addRange(range) }
     return { passed: true }

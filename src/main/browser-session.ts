@@ -197,7 +197,7 @@ inspect frames separately and use a frame ID belonging to this page when needed.
 Write a local UTF-8 JSON plan with description, expected and steps. Each step has
 an action. label is optional and defaults to <action> step <n> in reports; provide
 a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
-drag(selector,path,optional durationMs), fill(selector,value), select(selector,value), press(selector,key),
+drag(selector,path,optional durationMs,inputSelector), fill(selector,value), select(selector,value), press(selector,key),
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
 assert(condition,selector,optional expected), screenshot(). Optional text filters
 match visible element text; optional frame selects a current-page frame.
@@ -211,10 +211,17 @@ is not supported by this browser. Outside a test, a dialog waits for the user to
 it in the browser pane, and reads fail with a message saying so; ask the user to answer it.
 Drag path has 2–100 {x,y} points in CSS pixels relative to the target's bounding
 box top-left (not canvas backing-store pixels or screen coordinates). Points must
-stay inside that target and the visible viewport. durationMs is 100–5000, default
+stay inside that target and the visible viewport; the whole target need not fit
+onscreen. durationMs is 100–5000, default
 500. Example: {action:"drag",selector:"#canvas",path:[{x:20,y:20},{x:100,y:80}]}.
 Native left-button input follows the path; covered, moved or replaced targets stop
 the drag and release the button. File/DataTransfer drag-and-drop is unsupported.
+For viewers that receive input on an overlay, explicitly set inputSelector to that
+visible interaction surface (including SVG). Coordinates remain relative to selector.
+Alternatively, use the input surface itself as selector and measure offsets from it.
+Only hits on that surface or its descendants are accepted; unrelated covers still
+fail. Inspect the reported path point, viewport coordinates and hit element metadata
+to identify obstructions. Do not disable hit-testing or modify the page to bypass them.
 Fractional display scaling can shift delivered pointer coordinates by about one
 CSS pixel. Prefer assertions of the resulting app state over exact coordinates.
 Conditions: visible, hidden, text (contains expected), count (visible elements),

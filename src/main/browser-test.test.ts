@@ -9,6 +9,9 @@ const plan = (steps: unknown[] = [assertion], extra = {}) => validateBrowserTest
 test('drag plans accept bounded CSS-pixel paths and reject malformed input', () => {
   const drag = { action: 'drag', selector: '#canvas', path: [{ x: 1.5, y: 20 }, { x: 240, y: 90 }], durationMs: 500 }
   assert.deepEqual(plan([drag, assertion]).steps[0]?.path, drag.path)
+  assert.equal(plan([{ ...drag, inputSelector: '#viewer svg' }, assertion]).steps[0]?.inputSelector, '#viewer svg')
+  for (const inputSelector of ['', 1, 'x'.repeat(513)]) assert.throws(() => plan([{ ...drag, inputSelector }, assertion]))
+  assert.throws(() => plan([{ action: 'click', selector: '#canvas', inputSelector: '#viewer' }, assertion]))
   for (const path of [undefined, [], [{ x: 1, y: 1 }], Array.from({ length: 101 }, () => ({ x: 1, y: 1 })),
     [{ x: -1, y: 0 }, { x: 1, y: 1 }], [{ x: NaN, y: 0 }, { x: 1, y: 1 }], [{ x: Infinity, y: 0 }, { x: 1, y: 1 }],
     [{ x: '1', y: 0 }, { x: 1, y: 1 }], [{ x: 20000, y: 0 }, { x: 1, y: 1 }],

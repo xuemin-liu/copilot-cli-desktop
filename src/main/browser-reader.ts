@@ -416,8 +416,8 @@ export class BrowserReader {
     if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
-    const targetPoint = async (requireFocus = false, offset?: { x: number; y: number }, scroll = true): Promise<Params> => {
-      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared, offset, scroll })
+    const targetPoint = async (requireFocus = false, offset?: { x: number; y: number }, scroll = true, dragPoint?: string): Promise<Params> => {
+      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared, offset, scroll, dragPoint })
       prepared = true
       let current = frame
       // Check every embedding frame for overlays. Coordinates from each frame's
@@ -434,7 +434,7 @@ export class BrowserReader {
         if (!objectId) throw new Error('Frame position is unavailable.')
         try {
           const mapped = await this.command(page, 'Runtime.callFunctionOn', { objectId, returnByValue: true,
-            functionDeclaration: `function(rx,ry,focused) {
+            functionDeclaration: `function(rx,ry,focused,dragPoint) {
               const win = this.ownerDocument.defaultView;
               if(focused&&this.getRootNode().activeElement!==this) return {error:'Input focus changed during the action.'};
               for (let el=this; el; el=el.parentElement) {
@@ -445,10 +445,14 @@ export class BrowserReader {
               const r=this.getBoundingClientRect();
               const x=r.left+(this.clientLeft+rx*this.clientWidth)*r.width/this.offsetWidth;
               const y=r.top+(this.clientTop+ry*this.clientHeight)*r.height/this.offsetHeight;
-              const hit=this.getRootNode().elementFromPoint(x,y);
-              if(hit!==this&&!this.contains(hit)) return {error:'Embedding frame is covered or outside the viewport.'};
+              let hit=this.ownerDocument.elementFromPoint(x,y);
+              while(hit?.shadowRoot) { const deep=hit.shadowRoot.elementFromPoint(x,y); if(!deep||deep===hit) break; hit=deep; }
+              if(x<0||y<0||x>=win.innerWidth||y>=win.innerHeight||hit!==this) {
+                const metadata=hit?JSON.stringify({tag:hit.localName,id:hit.id.slice(0,120),classes:[...hit.classList].slice(0,8).map(value=>value.slice(0,80)),role:hit.getAttribute('role')?.slice(0,80)??null}):'null';
+                return {error:(dragPoint?'Drag '+dragPoint+' at embedding viewport ('+x+', '+y+'): ':'')+'Embedding frame is covered or outside the viewport.'+(dragPoint?' Hit element: '+metadata+'.':'')};
+              }
               return {x,y,width:win.innerWidth,height:win.innerHeight};
-            }`, arguments: [{ value: Number(point.x) / Number(point.width) }, { value: Number(point.y) / Number(point.height) }, { value: requireFocus }],
+            }`, arguments: [{ value: Number(point.x) / Number(point.width) }, { value: Number(point.y) / Number(point.height) }, { value: requireFocus }, { value: dragPoint ?? null }],
           }, session, 10000, signal)
           if (mapped.exceptionDetails || !mapped.result?.value) throw new Error('Frame position is unavailable.')
           if (mapped.result.value.error) throw new Error(String(mapped.result.value.error))
@@ -463,27 +467,28 @@ export class BrowserReader {
       const path = step.path!
       // Scroll once, then freeze geometry: moving/replaced/covered surfaces must
       // never redirect a held pointer into a different control or document.
-      let start = await targetPoint(false, path[0])
+      const waypoint = (index: number): string => `path point ${index + 1}/${path.length}`
+      let start = await targetPoint(false, path[0], true, waypoint(0))
       const stableUntil = Date.now() + 2000
       while (true) {
         check()
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y }, undefined, 10000, signal)
         if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
-        const fresh = await targetPoint(false, path[0], false)
+        const fresh = await targetPoint(false, path[0], false, waypoint(0))
         if (Math.abs(fresh.x - start.x) < 0.5 && Math.abs(fresh.y - start.y) < 0.5) { start = fresh; break }
         if (Date.now() >= stableUntil) throw new Error('Target did not stabilize before the drag.')
         start = fresh
       }
-      const geometry = ['width', 'height', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight']
+      const geometry = ['width', 'height', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight', 'inputLeft', 'inputTop', 'inputWidth', 'inputHeight']
       const mapped: Params[] = []
       const stable = (point: Params): void => {
         if (geometry.some(key => Math.abs(Number(point[key]) - Number(start[key])) >= 0.5)) throw new Error('Target geometry changed during the drag.')
       }
-      for (const offset of path) { const point = await targetPoint(false, offset, false); stable(point); mapped.push(point) }
+      for (const [index, offset] of path.entries()) { const point = await targetPoint(false, offset, false, waypoint(index)); stable(point); mapped.push(point) }
       let last = start; let completed = false; let pressed = false
       try {
         check()
-        const freshStart = await targetPoint(false, path[0], false); stable(freshStart)
+        const freshStart = await targetPoint(false, path[0], false, waypoint(0)); stable(freshStart)
         if (Math.abs(freshStart.x - start.x) >= 0.5 || Math.abs(freshStart.y - start.y) >= 0.5) throw new Error('Frame position changed before the drag.')
         pressed = true
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x: start.x, y: start.y }, undefined, 10000, signal)
@@ -495,7 +500,7 @@ export class BrowserReader {
           const fraction = sample / samples
           const offset = { x: path[segment - 1]!.x + (path[segment]!.x - path[segment - 1]!.x) * fraction,
             y: path[segment - 1]!.y + (path[segment]!.y - path[segment - 1]!.y) * fraction }
-          const point = await targetPoint(false, offset, false); stable(point)
+          const point = await targetPoint(false, offset, false, `segment ${segment}/${path.length - 1}, sample ${sample}/${samples} toward ${waypoint(segment)}`); stable(point)
           if (Math.abs(point.x - (mapped[segment - 1]!.x + (mapped[segment]!.x - mapped[segment - 1]!.x) * fraction)) >= 0.5
             || Math.abs(point.y - (mapped[segment - 1]!.y + (mapped[segment]!.y - mapped[segment - 1]!.y) * fraction)) >= 0.5) throw new Error('Frame position changed during the drag.')
           check()
