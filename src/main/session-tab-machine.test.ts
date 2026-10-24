@@ -5,6 +5,7 @@ import {
   MAX_SESSION_TABS,
   activateTab,
   activeWorkspaceFor,
+  addDormantTab,
   canOpenAnotherTab,
   closeTab,
   createTab as createTabState,
@@ -50,6 +51,29 @@ test('createTab adds a starting tab and makes it active', () => {
     remote: false,
     lastActivityAt: 123,
   })
+})
+
+test('addDormantTab lists a saved tab without starting it, and takes focus only when nothing has it', () => {
+  const saved = { cliVersion: null, sessionPermissionPreset: 'default' as const, permissionWarning: null, remote: false }
+  let state = addDormantTab(EMPTY_TABS_STATE, { ...saved, id: 'tab-1', title: 'First', workspaceProfileId: 'ws-1', lastSessionId: 'session-1' })
+  assert.equal(state.activeTabId, 'tab-1')
+  state = addDormantTab(state, { ...saved, id: 'tab-2', title: 'Second', workspaceProfileId: 'ws-2' })
+  assert.equal(state.activeTabId, 'tab-1')
+  assert.deepEqual(state.tabs.map((tab) => [tab.id, tab.status, tab.processId, tab.lastSessionId]), [
+    ['tab-1', 'dormant', null, 'session-1'],
+    ['tab-2', 'dormant', null, null],
+  ])
+  // A started session still takes focus from a dormant one.
+  state = createTab(state, { id: 'tab-3', title: 'New', workspaceProfileId: 'ws-1' })
+  assert.equal(state.activeTabId, 'tab-3')
+})
+
+test('addDormantTab counts toward MAX_SESSION_TABS', () => {
+  let state = EMPTY_TABS_STATE
+  for (let index = 0; index < MAX_SESSION_TABS; index++) {
+    state = addDormantTab(state, { id: `tab-${index}`, title: 'Saved', workspaceProfileId: 'ws-1', cliVersion: null, sessionPermissionPreset: 'default', permissionWarning: null, remote: false })
+  }
+  assert.throws(() => createTab(state, { id: 'tab-extra', title: 'New', workspaceProfileId: 'ws-1' }), /No more than/)
 })
 
 test('createTab rejects a duplicate id', () => {

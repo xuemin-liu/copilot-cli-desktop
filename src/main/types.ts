@@ -11,6 +11,8 @@ export type RevealPathResult =
 
 /** Lifecycle status of one spawned `copilot` pty session. */
 export type SessionLifecycleStatus =
+  /** Restored from the saved tabs but not started: no process until the tab is first shown. */
+  | 'dormant'
   | 'starting'
   | 'running'
   | 'approval-needed'

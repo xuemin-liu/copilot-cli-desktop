@@ -103,7 +103,8 @@ import {
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
-import { worktreeNameFor } from './session-store-discovery.js'
+import { readSessionStart, worktreeNameFor } from './session-store-discovery.js'
+import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
@@ -128,6 +129,7 @@ import {
   EMPTY_TABS_STATE,
   activateTab,
   activeWorkspaceFor,
+  addDormantTab,
   adoptCopilotTitle,
   confirmTabRename,
   closeTab,
@@ -265,8 +267,10 @@ const managedTabs = new Map<string, ManagedTab>()
 // replacement process starts successfully, including across failed attempts.
 const profilesWithSessionTabs = new Set<string>()
 const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
-const restoringTabIds = new Set<string>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+/** Per dormant tab: the read of the folder its saved session started in, until it settles. Until then the tab may still
+ * resume in any worktree, so nothing may treat that worktree as unused. */
+const dormantFolderReads = new Map<string, Promise<void>>()
 /** Per tab: the number of the latest cwd event, so an older inspection that finishes later cannot overwrite a newer one. */
 const sessionCwdGenerations = new Map<string, number>()
 /** Per tab: the git directory of the worktree it runs in, so its HEAD can be read again when the branch changes. */
@@ -323,8 +327,12 @@ function gitServiceInstance(): GitService | null {
     // Folders the profile's sessions report running in; the service lists those that are worktrees of its repositories.
     sessionWorktrees: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.sessionCwd ? [tab.sessionCwd] : []),
     // Every live session of the app, whichever profile it belongs to (a worktree can be another profile's workspace), with its
-    // folder when known: a worktree removal is refused while one runs there or has not said.
-    liveSessionFolders: () => tabsState.tabs.flatMap((tab) => tab.status !== 'completed' && tab.status !== 'crashed' ? [tab.sessionCwd ?? null] : []),
+    // folder when known: a worktree removal is refused while one runs there or has not said. A dormant tab counts only
+    // where its saved session started, since that is where it resumes; one with no stored session runs nowhere yet, and
+    // one whose saved folder is still being read has not said.
+    liveSessionFolders: () => tabsState.tabs.flatMap((tab) => tab.status === 'dormant'
+      ? (tab.sessionCwd ? [tab.sessionCwd] : dormantFolderReads.has(tab.id) ? [null] : [])
+      : tab.status !== 'completed' && tab.status !== 'crashed' ? [tab.sessionCwd ?? null] : []),
     // Discarding saves a copy of each tracked file here first, and sends untracked files to the Recycle Bin (never deletes them outright).
     snapshotDirectory: join(app.getPath('userData'), 'git-discarded'),
     trash: (absolutePath) => shell.trashItem(absolutePath),
@@ -546,6 +554,8 @@ function broadcastState(): void {
   for (const [tabId, browser] of sessionBrowsers) {
     if (!sessionWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
   }
+  // A restored tab starts the first time it is on screen.
+  for (const tabId of [visible.main?.id, visible.side?.id, ...sessionWindows.keys()]) if (tabId) void wakeDormantTab(tabId)
   const window = mainWindow
   if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), shellUrl())) {
     window.webContents.send('desktop:state-changed', snapshot())
@@ -645,7 +655,7 @@ function persistProfileTabs(): void {
   for (const profile of desktopConfig.profiles) {
     if (!profilesWithSessionTabs.has(profile.id)) continue
     profile.tabs = tabsState.tabs
-      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote && !restoringTabIds.has(tab.id))
+      .filter((tab) => tab.workspaceProfileId === profile.id && !tab.remote)
       .map((tab) => {
         const parentSessionId = tabsState.tabs.find((parent) => parent.id === tab.sideParentTabId)?.lastSessionId
         return {
@@ -1140,14 +1150,7 @@ function finalizeSessionArgs(
 async function applySessionCwd(id: string, session: PtySession, cwd: string | null, generation: number): Promise<void> {
   const tab = tabsState.tabs.find((candidate) => candidate.id === id)
   const profile = tab ? desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId) : undefined
-  let worktree: SessionWorktreeInfo | null = null
-  let gitDir: string | null = null
-  if (cwd && profile) {
-    const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
-    const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
-    const found = await inspectSessionWorktree(cwd, within)
-    if (found) { worktree = { path: found.root, name: found.name, branch: found.branch }; gitDir = found.gitDir }
-  }
+  const { worktree, gitDir } = await sessionWorktreeIn(profile, cwd)
   // A newer cwd event (or a log reset) for this tab has been applied meanwhile: this result is stale, and none of it,
   // the polling directory included, may take effect.
   if (managedTabs.get(id)?.session !== session || sessionCwdGenerations.get(id) !== generation) return
@@ -1157,6 +1160,31 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
   syncTabState()
   broadcastState()
   if (profile) gitService?.requestRefresh(profile.id)
+}
+
+async function sessionWorktreeIn(profile: WorkspaceProfile | undefined, cwd: string | null): Promise<{ worktree: SessionWorktreeInfo | null; gitDir: string | null }> {
+  if (!cwd || !profile) return { worktree: null, gitDir: null }
+  const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
+  const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
+  const found = await inspectSessionWorktree(cwd, within)
+  return found ? { worktree: { path: found.root, name: found.name, branch: found.branch }, gitDir: found.gitDir } : { worktree: null, gitDir: null }
+}
+
+/** A dormant tab runs nowhere yet, but its session will resume in the folder it started in: read from the stored
+ * `session.start` record so the sidebar, Git panel and worktree cleanup know it before the tab is first shown. */
+async function applyDormantSessionCwd(id: string, sessionId: string): Promise<void> {
+  if (!isValidSessionId(sessionId)) return
+  const start = await readSessionStart(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl'))
+  const tab = tabsState.tabs.find((candidate) => candidate.id === id)
+  if (!start?.cwd || tab?.status !== 'dormant') return
+  // The folder alone is enough to keep a worktree it resumes in; the worktree chip is extra.
+  const { worktree } = await sessionWorktreeIn(desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId), start.cwd)
+    .catch(() => ({ worktree: null }))
+  // Woken meanwhile: the running session reports its own folder.
+  if (tabsState.tabs.find((candidate) => candidate.id === id)?.status !== 'dormant') return
+  tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: start.cwd, worktree } : candidate) }
+  syncTabState()
+  broadcastState()
 }
 
 const FAN_OUT_MAX = 5
@@ -1184,7 +1212,7 @@ async function fanOutSessions(profile: WorkspaceProfile, label: string, count: n
       // A fresh session in its own worktree, whatever the profile's own launch setting says. Another tab can be created
       // while this one is being prepared, so the id comes from the creation itself, never from a before/after diff.
       let createdId: string | null = null
-      await createSessionTab({ ...profile, launch: { ...profile.launch, worktree: true } }, 'new', null, [], null, `${profile.name} ${index}/${count}`, {}, null, null, null, (tabId) => { createdId = tabId })
+      await createSessionTab({ ...profile, launch: { ...profile.launch, worktree: true } }, 'new', null, [], null, `${profile.name} ${index}/${count}`, {}, null, null, (tabId) => { createdId = tabId })
       const created = createdId === null ? undefined : tabsState.tabs.find((tab) => tab.id === createdId)
       if (!created) { stopped = 'The session tab could not be found after it started.'; break }
       tabIds.push(created.id)
@@ -1321,22 +1349,15 @@ async function createSessionTab(
   sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
-  restoredCandidate: RestoredTab | null = null,
   /** Called with the new tab's id the moment it is registered, before anything else can create a tab. */
   onCreated: ((tabId: string) => void) | null = null,
 ): Promise<DesktopState> {
   if (!profile) throw new Error('Select a workspace before starting a session')
   if (sideOptions.sideChat) profile = sideChatProfile(profile, copilotCapabilities)
-  // A restored tab starts the way it first started.
-  else if (restoredCandidate?.launchWorktree !== undefined) profile = withSessionChoices(profile, { worktree: restoredCandidate.launchWorktree })!
-  // An existing worktree: chosen now, it must still be one of the project's, or nothing starts; a restored tab whose
-  // worktree has gone starts in the project folder instead, so the session can still be reached.
-  const requestedWorktree = connectSessionId || sideOptions.sideChat ? undefined : sideOptions.worktreePath ?? restoredCandidate?.launchWorktreePath
+  // An existing worktree: chosen now, it must still be one of the project's, or nothing starts.
+  const requestedWorktree = connectSessionId || sideOptions.sideChat ? undefined : sideOptions.worktreePath
   const existingWorktree = requestedWorktree === undefined ? null : await resolveLinkedWorktree(profile.path, requestedWorktree)
-  if (requestedWorktree !== undefined && !existingWorktree) {
-    if (sideOptions.worktreePath !== undefined) throw new Error('That folder is no longer a worktree of this project\'s repository')
-    void writeAppLog(`A restored session's worktree is no longer one of the project's; it starts in the project folder: ${requestedWorktree}`).catch(() => {})
-  }
+  if (requestedWorktree !== undefined && !existingWorktree) throw new Error('That folder is no longer a worktree of this project\'s repository')
   if (existingWorktree) profile = withSessionChoices(profile, { worktree: false })!
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
@@ -1351,11 +1372,8 @@ async function createSessionTab(
     resumeMode = 'new'
   }
   const sessionTitle = titleOverride?.trim().slice(0, 120) || profile.name
-  // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt. A saved tab
-  // from an older release has no flag; one still titled with the project's name was never renamed.
-  const autoTitle = !connectSessionId && (restoredCandidate
-    ? restoredCandidate.autoTitle ?? restoredCandidate.title === profile.name
-    : !titleOverride?.trim())
+  // Nobody named it: the tab shows the project's name until Copilot names the session from its first prompt.
+  const autoTitle = !connectSessionId && !titleOverride?.trim()
   const sessionPermissionPreset = connectSessionId
     ? null
     : sideOptions.sideChat
@@ -1399,14 +1417,13 @@ async function createSessionTab(
   managedTabs.set(id, { session })
   trackSessionName(id, { ...process.env, ...plan.env }, resumeMode === 'picker')
   profilesWithSessionTabs.add(profile.id)
-  if (restoredCandidate) restoringTabIds.add(id)
   if (deterministicSessionId && !connectSessionId) usageService?.associate(deterministicSessionId, sideOptions.sideChat === true)
   const previousProfileId = desktopConfig.activeProfileId
   onCreated?.(id)
   tabsState = createTab(tabsState, {
     id,
     title: connectSessionId ? `Remote ${connectSessionId.slice(0, 12)}` : sessionTitle,
-    browserProfileId: selectBrowserProfileId(restoredCandidate?.browserProfileId, tabsState.tabs.map(tab => tab.browserProfileId)),
+    browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map(tab => tab.browserProfileId)),
     workspaceProfileId: profile.id,
     sessionPermissionPreset,
     sessionPermissionMode,
@@ -1417,12 +1434,11 @@ async function createSessionTab(
     ...(sideOptions.sideChat ? { sideChat: true as const } : {}),
     ...(sideOptions.sideParentTabId ? { sideParentTabId: sideOptions.sideParentTabId } : {}),
     privateOverrides: !connectSessionId && (sideOptions.privateOverrides
-      ?? (restoredCandidate ? restoredCandidate.privateOverrides === true : desktopConfig.browserOverrides === 'private')),
+      ?? desktopConfig.browserOverrides === 'private'),
     canFork: !connectSessionId && !sideOptions.sideChat && supportsSessionFork(state.resolution?.version ?? null),
     ...(connectSessionId ? {} : { launchWorktree: profile.launch.worktree === true }),
     ...(existingWorktree ? { launchWorktreePath: existingWorktree.root } : {}),
     autoTitle,
-    renamePending: restoredCandidate?.renamePending === true,
   })
   desktopConfig.activeProfileId = profile.id
   syncWorkspaceState()
@@ -1443,7 +1459,6 @@ async function createSessionTab(
     scheduleCopilotResolutionRefresh()
   } catch (error) {
     if (managedTabs.get(id)?.session === session) {
-      restoringTabIds.delete(id)
       session.removeAllListeners()
       const wasActive = tabsState.activeTabId === id
       tabsState = closeTab(tabsState, id)
@@ -1459,12 +1474,6 @@ async function createSessionTab(
     refreshMenus()
     persistProfileTabs()
     throw error
-  }
-  restoringTabIds.delete(id)
-  if (restoredCandidate) {
-    const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(candidate => candidate !== restoredCandidate)
-    if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
-    else unrestoredProfileTabs.delete(profile.id)
   }
   persistProfileTabs()
   return snapshot()
@@ -1757,6 +1766,8 @@ async function openTabUsesFolder(folder: string): Promise<boolean> {
   const canonical = (path: string): Promise<string> => realPathNative(path).then((real) => real.replace(/[\\/]+$/, '').toLowerCase())
   let target: string
   try { target = await canonical(folder) } catch { return false }
+  // A dormant tab whose saved folder is still being read may resume in this one.
+  await Promise.all(dormantFolderReads.values())
   for (const tab of tabsState.tabs) {
     for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
       if (!where) continue
@@ -1874,7 +1885,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // A session started in an existing worktree runs there again while it is still one of the project's worktrees.
     const existingWorktree = tab.launchWorktreePath && !tab.sideChat ? await resolveLinkedWorktree(savedProfile.path, tab.launchWorktreePath) : null
     if (existingWorktree) plan.cwd = existingWorktree.root
-    else if (tab.launchWorktreePath && !tab.sideChat) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
+    const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
+    if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
 
     if (managed) await managed.session.stop()
@@ -1934,7 +1946,12 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     }
     managedTabs.set(tabId, { session })
     trackSessionName(tabId, { ...process.env, ...plan.env }, false)
-    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId ? { ...candidate, activity: null, activityDetail: null, sessionCwd: null, worktree: null } : candidate) }
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+      if (candidate.id !== tabId) return candidate
+      const { launchWorktreePath: _gone, ...rest } = candidate
+      // It runs in the project folder now, so it is no longer a session of that worktree.
+      return { ...(worktreeGone ? rest : candidate), activity: null, activityDetail: null, sessionCwd: null, worktree: null }
+    }) }
     sessionCwdGenerations.set(tabId, (sessionCwdGenerations.get(tabId) ?? 0) + 1)
     sessionWorktreeGitDirs.delete(tabId)
     tabsState = setTabStatus(tabsState, tabId, 'starting')
@@ -1982,7 +1999,66 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   return restartPromise
 }
 
-async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopConfig)): Promise<void> {
+/** Lists a saved tab without starting it: its process starts the first time it is shown (`wakeDormantTab`), so a launch
+ * with many saved tabs starts one Copilot process instead of all of them. */
+function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
+  const id = `tab-${nextTabSequence++}`
+  const parent = candidate.sideParentSessionId
+    ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
+    : undefined
+  const sessionPermissionPreset = candidate.sideChat ? 'read-only' : candidate.sessionPermissionPreset ?? profile.permissionPreset
+  tabsState = addDormantTab(tabsState, {
+    id,
+    title: candidate.title.trim().slice(0, 120) || profile.name,
+    browserProfileId: selectBrowserProfileId(candidate.browserProfileId, tabsState.tabs.map(tab => tab.browserProfileId)),
+    workspaceProfileId: profile.id,
+    lastSessionId: candidate.lastSessionId,
+    sessionPermissionPreset,
+    sessionPermissionMode: candidate.sideChat ? null : candidate.sessionPermissionMode ?? null,
+    permissionWarning: candidate.sideChat ? SIDE_CHAT_PERMISSION_WARNING : permissionCompatibilityWarning(sessionPermissionPreset, copilotCapabilities),
+    remote: false,
+    cliVersion: null,
+    ...(candidate.sideChat ? { sideChat: true as const } : {}),
+    ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
+    privateOverrides: candidate.privateOverrides === true,
+    launchWorktree: !candidate.sideChat && (candidate.launchWorktree ?? profile.launch.worktree === true),
+    ...(candidate.launchWorktreePath && !candidate.sideChat ? { launchWorktreePath: candidate.launchWorktreePath } : {}),
+    // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
+    autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
+    renamePending: candidate.renamePending === true,
+  })
+  profilesWithSessionTabs.add(profile.id)
+  if (candidate.lastSessionId) {
+    const reading = applyDormantSessionCwd(id, candidate.lastSessionId)
+      .catch((error) => void writeAppLog(`Could not read a saved session's folder: ${String(error)}`).catch(() => {}))
+      .finally(() => dormantFolderReads.delete(id))
+    dormantFolderReads.set(id, reading)
+  }
+  return id
+}
+
+const wakingTabs = new Map<string, Promise<void>>()
+
+/** Starts a dormant tab's process, resuming its saved conversation the way Restart does. A failure leaves the tab
+ * crashed, with its Restart button, rather than retrying each time it is shown. Settles once the start is over. */
+function wakeDormantTab(tabId: string): Promise<void> {
+  const pending = wakingTabs.get(tabId)
+  if (pending) return pending
+  if (shuttingDown() || tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return Promise.resolve()
+  const waking = restartSessionTab(tabId).then(() => {}, (error) => {
+    void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
+    if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
+    tabsState = setTabStatus(tabsState, tabId, 'crashed')
+    syncTabState()
+    broadcastState()
+    refreshMenus()
+  }).finally(() => wakingTabs.delete(tabId))
+  wakingTabs.set(tabId, waking)
+  return waking
+}
+
+/** `activate`: show this project's last saved tab; restoring other projects' tabs in the background leaves focus alone. */
+async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopConfig), activate = true): Promise<void> {
   if (!profile || !state.resolution || state.resolution.version === null) return
   const pending = pendingProfileRestores.get(profile.id)
   if (pending) return pending
@@ -2001,25 +2077,32 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
       if (parentIndex > index) restored.splice(index, 0, ...restored.splice(parentIndex, 1))
     }
     // A fresh tab for an empty workspace is not a saved session to retain.
-    const candidates: (RestoredTab | null)[] = restored.length ? restored : [null]
-    for (const savedCandidate of candidates.slice(0, MAX_SESSION_TABS)) {
-      if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
-      const candidate = savedCandidate ?? { title: profile.name, lastSessionId: null }
-      const mode: ResumeMode = candidate.lastSessionId ? 'auto-resume' : 'new'
-      try {
-        const parent = candidate.sideParentSessionId
-          ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
-          : undefined
-        await createSessionTab(profile, mode, candidate.lastSessionId, [], null, candidate.title, {
-          ...(candidate.sideChat ? { sideChat: true as const } : {}),
-          ...(parent && !tabsState.tabs.some((tab) => tab.sideParentTabId === parent.id) ? { sideParentTabId: parent.id } : {}),
-        }, candidate.sessionPermissionPreset ?? profile.permissionPreset, candidate.sideChat ? null : candidate.sessionPermissionMode ?? null, savedCandidate)
-      } catch (error) {
-        await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`)
-      }
+    if (!restored.length) {
+      try { await createSessionTab(profile, 'new', null, [], null, profile.name) }
+      catch (error) { await writeAppLog(`Failed to start a session for ${profile.path}: ${String(error)}`) }
+      return
     }
+    let last: string | null = null
+    for (const candidate of restored) {
+      if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
+      try { last = addDormantSessionTab(profile, candidate) }
+      catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
+      const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(saved => saved !== candidate)
+      if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
+      else unrestoredProfileTabs.delete(profile.id)
+    }
+    if (activate && last) {
+      tabsState = activateTab(tabsState, last)
+      desktopConfig.activeProfileId = profile.id
+      syncWorkspaceState()
+    }
+    // Showing the active tab wakes it; the restore is over once the tabs on screen have started.
     syncTabState()
+    persistProfileTabs()
     broadcastState()
+    refreshMenus()
+    const visible = visibleSessionTabs(tabsState)
+    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [wakingTabs.get(id)] : []))
   })()
   pendingProfileRestores.set(profile.id, operation)
   try {
@@ -2037,11 +2120,7 @@ async function restoreSavedWorkspaceTabs(): Promise<void> {
   // Do not spend a saved session's slot on a fresh tab in an empty workspace.
   if (!profiles.length) profiles.push(activeProfile)
   await restoreTabsForProfile(profiles[0])
-  const activeTabId = tabsState.activeTabId
-  for (const profile of profiles.slice(1)) await restoreTabsForProfile(profile)
-  if (activeTabId && tabsState.tabs.some(tab => tab.id === activeTabId)) {
-    tabsState = activateTab(tabsState, activeTabId)
-  }
+  for (const profile of profiles.slice(1)) await restoreTabsForProfile(profile, false)
   desktopConfig.activeProfileId = tabsState.tabs.find(tab => tab.id === tabsState.activeTabId)?.workspaceProfileId ?? activeProfile.id
   syncWorkspaceState()
   syncTabState()

@@ -490,6 +490,7 @@ button:disabled {
   background: #0b0e14;
 }
 
+.tab-status-dormant { background: transparent; box-shadow: inset 0 0 0 1.5px #8b949e; }
 .tab-status-starting { background: #929baa; }
 .tab-status-running, .tab-status-idle { background: #8b949e; }
 .tab-status-working { background: #4f88ff; box-shadow: 0 0 0 3px rgb(79 136 255 / 12%); }

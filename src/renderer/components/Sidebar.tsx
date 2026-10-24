@@ -8,6 +8,7 @@ import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
+  dormant: 'Not started',
   starting: 'Starting',
   running: 'Open',
   'approval-needed': 'Needs approval',
