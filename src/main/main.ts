@@ -268,6 +268,9 @@ const managedTabs = new Map<string, ManagedTab>()
 const profilesWithSessionTabs = new Set<string>()
 const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
 const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+/** Per dormant tab: the read of the folder its saved session started in, until it settles. Until then the tab may still
+ * resume in any worktree, so nothing may treat that worktree as unused. */
+const dormantFolderReads = new Map<string, Promise<void>>()
 /** Per tab: the number of the latest cwd event, so an older inspection that finishes later cannot overwrite a newer one. */
 const sessionCwdGenerations = new Map<string, number>()
 /** Per tab: the git directory of the worktree it runs in, so its HEAD can be read again when the branch changes. */
@@ -325,8 +328,10 @@ function gitServiceInstance(): GitService | null {
     sessionWorktrees: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.sessionCwd ? [tab.sessionCwd] : []),
     // Every live session of the app, whichever profile it belongs to (a worktree can be another profile's workspace), with its
     // folder when known: a worktree removal is refused while one runs there or has not said. A dormant tab counts only
-    // where its saved session started, since that is where it resumes; one with no stored session runs nowhere yet.
-    liveSessionFolders: () => tabsState.tabs.flatMap((tab) => tab.status === 'dormant' ? (tab.sessionCwd ? [tab.sessionCwd] : [])
+    // where its saved session started, since that is where it resumes; one with no stored session runs nowhere yet, and
+    // one whose saved folder is still being read has not said.
+    liveSessionFolders: () => tabsState.tabs.flatMap((tab) => tab.status === 'dormant'
+      ? (tab.sessionCwd ? [tab.sessionCwd] : dormantFolderReads.has(tab.id) ? [null] : [])
       : tab.status !== 'completed' && tab.status !== 'crashed' ? [tab.sessionCwd ?? null] : []),
     // Discarding saves a copy of each tracked file here first, and sends untracked files to the Recycle Bin (never deletes them outright).
     snapshotDirectory: join(app.getPath('userData'), 'git-discarded'),
@@ -1172,7 +1177,9 @@ async function applyDormantSessionCwd(id: string, sessionId: string): Promise<vo
   const start = await readSessionStart(join(copilotSessionRoot(process.env), sessionId, 'events.jsonl'))
   const tab = tabsState.tabs.find((candidate) => candidate.id === id)
   if (!start?.cwd || tab?.status !== 'dormant') return
+  // The folder alone is enough to keep a worktree it resumes in; the worktree chip is extra.
   const { worktree } = await sessionWorktreeIn(desktopConfig.profiles.find((candidate) => candidate.id === tab.workspaceProfileId), start.cwd)
+    .catch(() => ({ worktree: null }))
   // Woken meanwhile: the running session reports its own folder.
   if (tabsState.tabs.find((candidate) => candidate.id === id)?.status !== 'dormant') return
   tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: start.cwd, worktree } : candidate) }
@@ -1759,6 +1766,8 @@ async function openTabUsesFolder(folder: string): Promise<boolean> {
   const canonical = (path: string): Promise<string> => realPathNative(path).then((real) => real.replace(/[\\/]+$/, '').toLowerCase())
   let target: string
   try { target = await canonical(folder) } catch { return false }
+  // A dormant tab whose saved folder is still being read may resume in this one.
+  await Promise.all(dormantFolderReads.values())
   for (const tab of tabsState.tabs) {
     for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
       if (!where) continue
@@ -2019,7 +2028,12 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     renamePending: candidate.renamePending === true,
   })
   profilesWithSessionTabs.add(profile.id)
-  if (candidate.lastSessionId) observe(applyDormantSessionCwd(id, candidate.lastSessionId), 'Could not read a saved session\'s folder')
+  if (candidate.lastSessionId) {
+    const reading = applyDormantSessionCwd(id, candidate.lastSessionId)
+      .catch((error) => void writeAppLog(`Could not read a saved session's folder: ${String(error)}`).catch(() => {}))
+      .finally(() => dormantFolderReads.delete(id))
+    dormantFolderReads.set(id, reading)
+  }
   return id
 }
 

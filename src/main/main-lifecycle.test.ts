@@ -35,6 +35,8 @@ interface Harness {
   blockSpawnPlan(work: Promise<void>): void
   /** Like blockSpawnPlan, but only plans for a profile the predicate accepts wait; the others run at once. */
   blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
+  /** Dormant tabs' reads of their saved session's folder wait for `work`. */
+  blockDormantFolderReads(work: Promise<void>): void
   setNextSpawn(work: () => Promise<void>): void
   flushConfig(): Promise<void>
   checkMigrationIdle(): void
@@ -217,6 +219,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
+          blockDormantFolderReads(work) { const original = applyDormantSessionCwd; applyDormantSessionCwd = async (...args) => { await work; return original(...args); }; },
           checkMigrationIdle,
           spawns,
           setNextSpawn,
@@ -1914,6 +1917,38 @@ function randomSessionId(): string {
   const hex = [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, '0')).join('')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
 }
+
+test('a worktree a dormant tab resumes in is kept even while its saved folder is still being read', async (t) => {
+  const git = await findGitForTests()
+  if (!git) return t.skip('Git unavailable')
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.defaultResumeMode = 'new'
+    const savedId = randomSessionId()
+    profile.tabs = [{ title: 'Saved there', lastSessionId: savedId }, { title: 'Shown', lastSessionId: null }]
+    harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, capabilities)
+    harness.createTestWindow()
+    let releaseReads!: () => void
+    harness.blockDormantFolderReads(new Promise<void>((resolve) => { releaseReads = resolve }))
+    await harness.restore()
+    const shared = await startWorktreeSession(harness, directory, git.path)
+    // The saved session started in that worktree; the dormant tab has not read so yet.
+    await mkdir(join(directory, 'session-state', savedId), { recursive: true })
+    await writeFile(join(directory, 'session-state', savedId, 'events.jsonl'),
+      JSON.stringify({ type: 'session.start', data: { sessionId: savedId, startTime: new Date().toISOString(), context: { cwd: shared.worktree } } }) + '\n')
+    const asked = harness.answerMessageBoxes(0)
+    await harness.request('desktop:close-tab', shared.tabId)
+    // Without waiting for the read, the cleanup would finish here and remove the worktree.
+    await Promise.race([harness.worktreeCleanups(), new Promise((resolve) => setTimeout(resolve, 1_000))])
+    releaseReads()
+    await harness.worktreeCleanups()
+    assert.equal(asked.length, 0)
+    assert.equal(await access(shared.worktree).then(() => true, () => false), true, 'the dormant tab resumes there')
+    const dormant = (await harness.request('desktop:get-state')).tabs.find((tab) => tab.title === 'Saved there')!
+    assert.equal(dormant.status, 'dormant')
+    assert.equal(dormant.worktree?.name, shared.name)
+  })
+})
 
 test('closing a worktree session removes its worktree and branch when nothing is lost, and asks before discarding changes', async (t) => {
   const git = await findGitForTests()
