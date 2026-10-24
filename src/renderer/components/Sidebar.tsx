@@ -55,6 +55,7 @@ export interface SidebarProps {
   onCreateTabWithAttachments: () => void
   onFanOut: () => void
   onResumePicker: () => void
+  onOpenHistory: () => void
   onConnectRemote: () => void
   onOpenSettings: () => void
 }
@@ -81,6 +82,7 @@ export function Sidebar({
   onCreateTabWithAttachments,
   onFanOut,
   onResumePicker,
+  onOpenHistory,
   onConnectRemote,
   onOpenSettings,
 }: SidebarProps): JSX.Element {
@@ -335,6 +337,15 @@ export function Sidebar({
             onClick={onResumePicker}
           >
             ☰
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            title="Session history: find a closed session by its prompts and reopen it (Ctrl+Shift+H)"
+            aria-label="Session history"
+            onClick={onOpenHistory}
+          >
+            ◷
           </button>
           <button
             type="button"

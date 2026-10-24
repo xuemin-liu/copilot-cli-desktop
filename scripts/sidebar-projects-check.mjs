@@ -55,7 +55,7 @@ if (!process.versions.electron) {
           onActivateProfile={id => window.fixture.calls.push('activate:' + id)}
           onCreateTab={id => window.fixture.calls.push('create:' + id)}
           onActivateTab={noop} onPopOutTab={noop} onRenameTab={noop} onCloseTab={noop}
-          onRestartTab={noop} onUnloadTab={noop} onCreateTabWithAttachments={noop} onResumePicker={noop}
+          onRestartTab={noop} onUnloadTab={noop} onOpenHistory={noop} onCreateTabWithAttachments={noop} onResumePicker={noop}
           onConnectRemote={noop} onOpenSettings={noop} />
         <button id="outside" style={{position:'fixed',left:500,top:20}}>Outside</button>
       </>;

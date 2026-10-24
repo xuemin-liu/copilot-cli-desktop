@@ -60,6 +60,12 @@ handle, only input/output/resize events.
   `--resume <id>` (or `--continue`) when reopened, plus a
   manual "Resume session…" action that opens `copilot --resume`'s own
   interactive picker directly inside the terminal pane.
+- Saved tabs start lazily: at launch only the tab on screen starts, and every other saved tab is listed as
+  **Not started** and starts the first time it is shown. **Unload** (☾ in a session's actions, or File → Unload Active
+  Session) stops a session to free its memory but keeps its tab; **Resume this session** picks the conversation up again.
+- **Session history** (◷ in the sidebar, or Ctrl+Shift+H) lists the sessions Copilot has stored, newest first, by their
+  first and latest prompt, project, branch and last use, with a search box. Opening one shows its tab when it is open, or
+  resumes it in a new tab in its project (or that project's worktree), adding the project when it is not open yet.
 - Per-session pty process supervision: crash detection, a restart action, and
   private per-session log capture under the app's user-data directory. Logs
   rotate at 5 MiB; launch directories are limited to 7 days and the latest 20.

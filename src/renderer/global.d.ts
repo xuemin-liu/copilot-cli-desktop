@@ -1,4 +1,4 @@
-import type { DesktopState, RevealPathResult, FanOutResult, SessionWorktreeInfo, SidebarView } from '../main/types.js'
+import type { DesktopState, RevealPathResult, FanOutResult, SessionHistoryEntry, SessionWorktreeInfo, SidebarView } from '../main/types.js'
 import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserViewMode } from '../main/browser-debug-types.js'
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
@@ -75,6 +75,9 @@ export interface CopilotDesktopBridge {
   listSessionWorktrees(profileId: string): Promise<SessionWorktreeInfo[]>
   /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
   onNewSessionRequest(listener: (attachments: boolean) => void): () => void
+  listSessionHistory(): Promise<SessionHistoryEntry[]>
+  openSessionHistory(sessionId: string): Promise<DesktopState>
+  onSessionHistoryRequest(listener: () => void): () => void
   /** The View menu picked a sidebar grouping or order. */
   onSidebarViewRequest(listener: (change: Partial<SidebarView>) => void): () => void
   /** Tells the main process the sidebar's current view so the View menu shows it checked. */

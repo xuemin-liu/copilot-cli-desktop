@@ -102,6 +102,26 @@ export interface DesktopSessionTab {
   renamePending?: true
 }
 
+/** A session Copilot stored, as the History list shows it. Everything but the last two fields is data the CLI wrote. */
+export interface SessionHistoryEntry {
+  sessionId: string
+  name: string | null
+  userNamed: boolean
+  cwd: string | null
+  gitRoot: string | null
+  repository: string | null
+  branch: string | null
+  createdAt: number | null
+  /** Last write to the session's files: when it was last used. */
+  updatedAt: number
+  firstPrompt: string | null
+  lastPrompt: string | null
+  /** The tab it is open in, if any. */
+  openTabId: string | null
+  /** The open project it belongs to (its folder, or a worktree of its repository); null when opening it adds one. */
+  projectName: string | null
+}
+
 /** A session's worktree, as the tab and sidebar show it. */
 export interface SessionWorktreeInfo {
   /** Canonical worktree folder. */

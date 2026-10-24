@@ -1,11 +1,12 @@
 import { insertIntoPrompt } from './prompt-insert.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
-import type { DesktopState, FanOutResult, SessionWorktreeInfo } from '../main/types.js'
+import type { DesktopState, FanOutResult, SessionHistoryEntry, SessionWorktreeInfo } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
+import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { GitPanel } from './components/GitPanel.js'
 import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.js'
 import { OperationError } from './components/OperationError.js'
@@ -56,6 +57,7 @@ export function App(): JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebar-collapsed') === 'true')
   const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(false)
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
+  const [history, setHistory] = useState<{ entries: SessionHistoryEntry[] | null; loadError: string | null; pendingSessionId: string | null; openError: string | null } | null>(null)
   const [gitOpen, setGitOpen] = useState(readStoredGitOpen)
   const [gitWidth, setGitWidth] = useState(readStoredGitWidth)
   // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
@@ -226,6 +228,20 @@ export function App(): JSX.Element {
   // The File menu and the tray ask here, so their sessions are named in the same dialog.
   useEffect(() => window.copilotDesktop.onNewSessionRequest((attachments) => openNewSession(null, attachments)), [])
 
+  const openHistory = useCallback((): void => {
+    setHistory({ entries: null, loadError: null, pendingSessionId: null, openError: null })
+    window.copilotDesktop.listSessionHistory().then(
+      (entries) => setHistory((current) => current && { ...current, entries }),
+      (error: unknown) => setHistory((current) => current && { ...current, entries: [], loadError: errorMessage(error) }))
+  }, [])
+  const openFromHistory = (sessionId: string): void => {
+    setHistory((current) => current && { ...current, pendingSessionId: sessionId, openError: null })
+    window.copilotDesktop.openSessionHistory(sessionId).then(
+      () => setHistory(null),
+      (error: unknown) => setHistory((current) => current && { ...current, pendingSessionId: null, openError: errorMessage(error) }))
+  }
+  useEffect(() => window.copilotDesktop.onSessionHistoryRequest(openHistory), [openHistory])
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = event.ctrlKey || event.metaKey
@@ -328,6 +344,7 @@ export function App(): JSX.Element {
         onFanOut={() => setInputDialog({ kind: 'fan-out', value: '', count: 3, pending: false, error: null })}
         onOpenSettings={() => void window.copilotDesktop.openSettings()}
         onResumePicker={() => handleOperation(window.copilotDesktop.createTab('picker'))}
+        onOpenHistory={openHistory}
         onConnectRemote={() => setInputDialog({ kind: 'remote', value: '', pending: false, error: null })}
       />
       <main className="main-content">
@@ -364,7 +381,7 @@ export function App(): JSX.Element {
               worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             gitOpen={gitOpen} onToggleGit={toggleGit}
-            obscured={inputDialog !== null || sidebarProjectsOpen}
+            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
@@ -381,6 +398,10 @@ export function App(): JSX.Element {
           <span>{fanOutNotice}</span>
           <button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setFanOutNotice(null)}>×</button>
         </div>
+      )}
+      {history && (
+        <SessionHistoryDialog entries={history.entries} loadError={history.loadError} pendingSessionId={history.pendingSessionId}
+          openError={history.openError} onOpen={openFromHistory} onClose={() => setHistory(null)} />
       )}
       {inputDialog && (
         <div className="dialog-backdrop" role="presentation">
