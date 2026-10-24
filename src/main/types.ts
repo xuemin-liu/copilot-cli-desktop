@@ -66,6 +66,8 @@ export interface DesktopSessionTab {
   sessionCwd?: string | null
   /** Set when `sessionCwd` is a linked worktree of a repository in the workspace folder. Runtime-only. */
   worktree?: SessionWorktreeInfo | null
+  /** Dormant because it was unloaded: it waits for Resume instead of starting when shown. Runtime-only; not restored. */
+  unloaded?: true
   /** Sessions started together by one fan-out share this label. Runtime-only; not restored. */
   fanOutLabel?: string | null
   processId: number | null
