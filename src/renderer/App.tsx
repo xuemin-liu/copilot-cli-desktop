@@ -322,6 +322,7 @@ export function App(): JSX.Element {
         onRenameTab={requestTabRename}
         onCloseTab={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
         onRestartTab={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
+        onUnloadTab={(tabId) => handleOperation(window.copilotDesktop.unloadTab(tabId))}
         onCreateTab={(profileId) => openNewSession(profileId)}
         onCreateTabWithAttachments={() => openNewSession(null, true)}
         onFanOut={() => setInputDialog({ kind: 'fan-out', value: '', count: 3, pending: false, error: null })}

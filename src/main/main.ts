@@ -1698,6 +1698,43 @@ async function flushSessionName(tabId: string): Promise<void> {
   void writeAppLog(`Copilot did not confirm the new name for ${tabId} before it closed`).catch(() => {})
 }
 
+/** Stops a session's process and its browser to free their memory, but keeps the tab: it becomes Not started, keeping
+ * its conversation, folder and browser data, and resumes when Resume (Restart) is chosen. */
+async function unloadSessionTab(tabId: string): Promise<DesktopState> {
+  return queueTabTransition(tabId, async () => {
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    if (!tab) throw new Error('This session tab no longer exists')
+    if (tab.remote) throw new Error('A remote session cannot be unloaded')
+    if (tab.status === 'dormant') return snapshot()
+    const activityTimer = activityBroadcastTimers.get(tabId)
+    if (activityTimer) clearTimeout(activityTimer)
+    activityBroadcastTimers.delete(tabId)
+    const managed = managedTabs.get(tabId)
+    if (managed) {
+      await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before unloading: ${String(error)}`))
+      await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+      managed.session.removeAllListeners()
+      managedTabs.delete(tabId)
+      if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
+    }
+    forgetSessionName(tabId)
+    const browser = sessionBrowsers.get(tabId)
+    sessionBrowsers.delete(tabId)
+    try { await browser?.dispose() }
+    catch (error) { void writeAppLog(`Failed to dispose browser for ${tabId}: ${String(error)}`).catch(() => {}) }
+    // The session resumes where it ran, so its folder and worktree stay known and protected.
+    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId
+      ? { ...candidate, status: 'dormant' as const, unloaded: true as const, processId: null, activity: null, activityDetail: null }
+      : candidate) }
+    sessionWindows.get(tabId)?.close()
+    syncTabState()
+    persistProfileTabs()
+    broadcastState()
+    refreshMenus()
+    return snapshot()
+  })
+}
+
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
   // Share the queue with restartSessionTab: closing a tab while its restart
   // is still in flight could otherwise stop the very session the restart is
@@ -1948,9 +1985,10 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     trackSessionName(tabId, { ...process.env, ...plan.env }, false)
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
       if (candidate.id !== tabId) return candidate
-      const { launchWorktreePath: _gone, ...rest } = candidate
+      const { launchWorktreePath: _gone, unloaded: _resumed, ...rest } = candidate
       // It runs in the project folder now, so it is no longer a session of that worktree.
-      return { ...(worktreeGone ? rest : candidate), activity: null, activityDetail: null, sessionCwd: null, worktree: null }
+      return { ...rest, ...(worktreeGone || !candidate.launchWorktreePath ? {} : { launchWorktreePath: candidate.launchWorktreePath }),
+        activity: null, activityDetail: null, sessionCwd: null, worktree: null }
     }) }
     sessionCwdGenerations.set(tabId, (sessionCwdGenerations.get(tabId) ?? 0) + 1)
     sessionWorktreeGitDirs.delete(tabId)
@@ -2044,7 +2082,9 @@ const wakingTabs = new Map<string, Promise<void>>()
 function wakeDormantTab(tabId: string): Promise<void> {
   const pending = wakingTabs.get(tabId)
   if (pending) return pending
-  if (shuttingDown() || tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return Promise.resolve()
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  // An unloaded tab was stopped on purpose: it waits for Resume.
+  if (shuttingDown() || tab?.status !== 'dormant' || tab.unloaded) return Promise.resolve()
   const waking = restartSessionTab(tabId).then(() => {}, (error) => {
     void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
     if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
@@ -2452,6 +2492,11 @@ function installApplicationMenu(): void {
           accelerator: 'CmdOrCtrl+Shift+R',
           enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote),
           click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
+        },
+        {
+          label: 'Unload Active Session',
+          enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && tab.status !== 'dormant'),
+          click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
         { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
         { type: 'separator' },
@@ -2929,6 +2974,11 @@ ipcMain.handle('desktop:close-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return closeSessionTab(tabId)
+})
+ipcMain.handle('desktop:unload-tab', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string') throw new Error('Invalid session tab')
+  return unloadSessionTab(tabId)
 })
 ipcMain.handle('desktop:restart-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

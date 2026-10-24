@@ -23,6 +23,7 @@ function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab, coll
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
+      onUnloadTab={() => undefined}
       onCreateTab={() => undefined}
       onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}
@@ -147,6 +148,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
+      onUnloadTab={() => undefined}
       onCreateTab={() => undefined}
       onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}
@@ -203,6 +205,7 @@ test('Sidebar shows current session access and marks changed access as applying 
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}
       onRestartTab={() => undefined}
+      onUnloadTab={() => undefined}
       onCreateTab={() => undefined}
       onCreateTabWithAttachments={() => undefined} onFanOut={() => undefined}
       onResumePicker={() => undefined}

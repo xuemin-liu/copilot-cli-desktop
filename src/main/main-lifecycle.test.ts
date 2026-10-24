@@ -1104,6 +1104,41 @@ test('saved tabs that are never shown never start, and closing one starts nothin
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.title, tab.lastSessionId === FORK]), [['Second', true], ['Shown', false]])
 }))
 
+test('unloading a session stops its process and keeps its tab until Resume, which resumes the same conversation', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const opened = await harness.createMain()
+  const tabId = opened.activeTabId!
+  const sessionId = opened.tabs[0]!.lastSessionId!
+  await mkdir(join(directory, 'session-state', sessionId), { recursive: true })
+  await writeFile(join(directory, 'session-state', sessionId, 'events.jsonl'), '{"type":"session.start"}\n')
+  const unloaded = await harness.request('desktop:unload-tab', tabId)
+  const tab = unloaded.tabs.find((candidate) => candidate.id === tabId)!
+  assert.equal(tab.status, 'dormant')
+  assert.equal(tab.unloaded, true)
+  assert.equal(tab.processId, null)
+  assert.equal(tab.lastSessionId, sessionId)
+  assert.equal(harness.spawns[0]!.stopped, true)
+  // Shown again, it waits for Resume instead of starting by itself.
+  await harness.request('desktop:create-tab', 'new', profile.id)
+  await harness.request('desktop:activate-tab', tabId)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.equal(harness.spawns.length, 2, 'only the new tab started')
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.ok(saved.profiles[0]!.tabs.some((entry) => entry.lastSessionId === sessionId), 'an unloaded tab stays saved')
+  const resumed = await harness.request('desktop:restart-tab', tabId)
+  const after = resumed.tabs.find((candidate) => candidate.id === tabId)!
+  assert.equal(after.status, 'running')
+  assert.equal(after.unloaded, undefined)
+  assert.ok(harness.spawns[2]!.args.includes(`--resume=${sessionId}`), harness.spawns[2]!.args.join(' '))
+  // Unloaded twice in a row: the second one has nothing left to stop.
+  await harness.request('desktop:unload-tab', tabId)
+  await harness.request('desktop:unload-tab', tabId)
+  assert.equal(harness.spawns[2]!.stopped, true)
+  assert.equal(harness.spawns.length, 3)
+}))
+
 test('restoration links a saved side chat even when its parent follows it in the saved list', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.tabs = [{ title: 'Side', lastSessionId: FORK, sideChat: true, sideParentSessionId: SOURCE }, { title: 'Parent', lastSessionId: SOURCE }]

@@ -97,6 +97,9 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               {tab.status === 'crashed' && !tab.remote && (
                 <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Restart this session</button>
               )}
+              {tab.status === 'dormant' && tab.unloaded && (
+                <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Resume this session</button>
+              )}
             </div>
             </BrowserWorkspace>
           </section>
