@@ -266,7 +266,7 @@ export function App(): JSX.Element {
 
   // "Add to prompt" fills the active session's prompt box, unless that session lives in another window.
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
-  const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
+  const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'dormant' && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
     ? { id: activeTab.id, title: activeTab.title } : null
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)

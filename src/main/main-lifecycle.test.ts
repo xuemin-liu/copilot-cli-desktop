@@ -1035,7 +1035,7 @@ test('restoring one workspace preserves saved sessions in other workspaces on di
   assert.ok(state.tabs.some(tab => tab.lastSessionId === FORK))
 }))
 
-test('startup restores all saved workspaces and retains the selected workspace', async () => fixture(async (harness, directory) => {
+test('startup lists all saved workspaces, starts only the shown tab, and retains the selected workspace', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   const secondPath = join(directory, 'second'); await mkdir(secondPath)
   const second = createWorkspaceProfile(secondPath)
@@ -1048,15 +1048,20 @@ test('startup restores all saved workspaces and retains the selected workspace',
   await harness.restoreSaved()
   const state = await harness.request('desktop:get-state')
   assert.deepEqual(state.tabs.map(tab => tab.lastSessionId), [SOURCE, FORK])
-  assert.deepEqual(harness.spawns.map(spawn => spawn.cwd), [directory, secondPath])
+  assert.deepEqual(harness.spawns.map(spawn => spawn.cwd), [directory], 'the other workspace tab waits until it is shown')
   assert.ok(harness.spawns[0]!.args.includes(`--resume=${SOURCE}`))
-  assert.ok(harness.spawns[1]!.args.includes(`--resume=${FORK}`))
+  assert.deepEqual(state.tabs.map(tab => tab.status), ['running', 'dormant'])
   assert.equal(state.activeProfileId, profile.id)
   assert.equal(state.tabs.find(tab => tab.id === state.activeTabId)?.workspaceProfileId, profile.id)
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
   assert.equal(saved.activeProfileId, profile.id)
   assert.deepEqual(saved.profiles.map(entry => entry.tabs.length), [1, 1, 0])
+  // Showing it starts it.
+  await harness.request('desktop:activate-tab', state.tabs[1]!.id)
+  await waitFor(() => harness.spawns.length, (count) => count === 2, 'the shown tab starts')
+  assert.equal(harness.spawns[1]!.cwd, secondPath)
+  assert.ok(harness.spawns[1]!.args.includes(`--resume=${FORK}`))
   // Explicitly closing a restored tab must still remove it from the next restart.
   await harness.request('desktop:close-tab', state.tabs[1]!.id)
   await harness.flushConfig()
@@ -1066,18 +1071,34 @@ test('startup restores all saved workspaces and retains the selected workspace',
   assert.equal(harness.spawns.length, 3, 'an explicitly emptied workspace can start a fresh tab')
 }))
 
-test('a failed restore preserves the saved session alongside successful tabs for the next restart', async () => fixture(async (harness, directory) => {
+test('a restored tab that fails to start stays saved, shows as crashed, and starts on restart', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
-  profile.tabs = [{ title: 'Temporarily unavailable', lastSessionId: SOURCE }, { title: 'Available', lastSessionId: FORK }]
+  profile.tabs = [{ title: 'Not shown', lastSessionId: SOURCE }, { title: 'Temporarily unavailable', lastSessionId: FORK }]
   harness.setNextSpawn(async () => { throw new Error('temporary PTY failure') })
   await harness.restore()
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
-  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.lastSessionId).sort(), [SOURCE, FORK].sort())
+  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.lastSessionId), [SOURCE, FORK])
+  const failed = await harness.request('desktop:get-state')
+  assert.deepEqual(failed.tabs.map(tab => tab.status), ['dormant', 'crashed'], 'a failure is not retried each time the tab is shown')
+  assert.equal(harness.spawns.length, 0)
+  const restarted = await harness.request('desktop:restart-tab', failed.activeTabId)
+  assert.deepEqual(restarted.tabs.map(tab => tab.status), ['dormant', 'running'])
+  assert.ok(harness.spawns[0]!.args.some(arg => arg.endsWith(FORK)), harness.spawns[0]!.args.join(' '))
+}))
+
+test('saved tabs that are never shown never start, and closing one starts nothing', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.tabs = [{ title: 'First', lastSessionId: SOURCE }, { title: 'Second', lastSessionId: FORK }, { title: 'Shown', lastSessionId: null }]
   await harness.restore()
   const state = await harness.request('desktop:get-state')
-  assert.deepEqual(state.tabs.map(tab => tab.lastSessionId).sort(), [SOURCE, FORK].sort())
-  assert.equal(harness.spawns.length, 2, 'retry starts only the failed session')
+  assert.deepEqual(state.tabs.map(tab => [tab.title, tab.status]), [['First', 'dormant'], ['Second', 'dormant'], ['Shown', 'running']])
+  assert.equal(harness.spawns.length, 1)
+  await harness.request('desktop:close-tab', state.tabs[0]!.id)
+  assert.equal(harness.spawns.length, 1)
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.title, tab.lastSessionId === FORK]), [['Second', true], ['Shown', false]])
 }))
 
 test('restoration links a saved side chat even when its parent follows it in the saved list', async () => fixture(async (harness, directory) => {
@@ -1163,9 +1184,7 @@ test('saved tabs survive an interruption partway through restoring a workspace',
   profile.tabs = [{ title: 'First', lastSessionId: SOURCE }, { title: 'Second', lastSessionId: FORK }]
   let release!: () => void, entered!: () => void
   const started = new Promise<void>(resolve => { entered = resolve })
-  harness.setNextSpawn(async () => {
-    harness.setNextSpawn(() => { entered(); return new Promise<void>(resolve => { release = resolve }) })
-  })
+  harness.setNextSpawn(() => { entered(); return new Promise<void>(resolve => { release = resolve }) })
   const restoring = harness.restore()
   await started
   try {
@@ -1677,8 +1696,12 @@ test('a restored tab starts in its existing worktree, or in the project folder o
   ]
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
   await harness.restoreSaved()
-  assert.ok(sameFolderText(harness.spawns[0]!.cwd, feature), harness.spawns[0]!.cwd)
-  assert.ok(sameFolderText(harness.spawns[1]!.cwd, directory), `a worktree that is gone falls back to the project: ${harness.spawns[1]!.cwd}`)
+  // The last saved tab is shown, so it starts first; the other starts when it is shown.
+  assert.ok(sameFolderText(harness.spawns[0]!.cwd, directory), `a worktree that is gone falls back to the project: ${harness.spawns[0]!.cwd}`)
+  const featureTab = (await harness.request('desktop:get-state')).tabs.find((tab) => tab.title === 'Feature')!
+  await harness.request('desktop:activate-tab', featureTab.id)
+  await waitFor(() => harness.spawns.length, (count) => count === 2, 'the shown tab starts')
+  assert.ok(sameFolderText(harness.spawns[1]!.cwd, feature), harness.spawns[1]!.cwd)
   const tabs = (await harness.request('desktop:get-state')).tabs
   assert.equal(tabs.find((tab) => tab.title === 'Gone')?.launchWorktreePath, undefined)
 }))

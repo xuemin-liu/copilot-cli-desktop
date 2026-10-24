@@ -36,19 +36,28 @@ export interface NewTabInput {
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
+  return { tabs: [...state.tabs, newTab(state, input, 'starting')], activeTabId: input.id }
+}
+
+/** A saved tab listed without starting its process; it takes focus only when nothing else has it. */
+export function addDormantTab(state: TabsState, input: NewTabInput): TabsState {
+  return { tabs: [...state.tabs, newTab(state, input, 'dormant')], activeTabId: state.activeTabId ?? input.id }
+}
+
+function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleStatus): DesktopSessionTab {
   if (state.tabs.length >= MAX_SESSION_TABS) {
     throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   }
   if (state.tabs.some((tab) => tab.id === input.id)) {
     throw new Error(`A session tab with id ${input.id} already exists`)
   }
-  const tab: DesktopSessionTab = {
+  return {
     id: input.id,
     title: input.title,
     ...(input.browserProfileId ? { browserProfileId: input.browserProfileId } : {}),
     workspaceProfileId: input.workspaceProfileId,
     lastSessionId: input.lastSessionId ?? null,
-    status: 'starting',
+    status,
     processId: null,
     cliVersion: input.cliVersion,
     sessionPermissionPreset: input.sessionPermissionPreset,
@@ -65,7 +74,6 @@ export function createTab(state: TabsState, input: NewTabInput): TabsState {
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
   }
-  return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
 
 export function closeTab(state: TabsState, tabId: string): TabsState {
