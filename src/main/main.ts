@@ -2156,7 +2156,10 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
     syncWorkspaceState()
     await persistConfig()
   }
-  // Opened while the folder was checked: show that tab instead of a second one.
+  // Its project's saved tabs come first. Startup may not have listed them yet, and adding a tab before they are listed
+  // would save the project with only this one; listing them starts none of them.
+  if (target.profile.tabs.length > 0) await restoreTabsForProfile(target.profile, false)
+  // Opened meanwhile, or one of those saved tabs: show that tab instead of a second one.
   const opened = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
   if (opened) return activateSessionTab(opened.id)
   const tabId = addDormantSessionTab(target.profile, {
@@ -2212,11 +2215,13 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
       desktopConfig.activeProfileId = profile.id
       syncWorkspaceState()
     }
-    // Showing the active tab wakes it; the restore is over once the tabs on screen have started.
+    // Showing the active tab wakes it; a restore that showed its tab is over once that tab has started. One that only
+    // listed its tabs does not wait for another project's tab on screen.
     syncTabState()
     persistProfileTabs()
     broadcastState()
     refreshMenus()
+    if (!activate) return
     const visible = visibleSessionTabs(tabsState)
     await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [wakingTabs.get(id)] : []))
   })()

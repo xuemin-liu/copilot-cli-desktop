@@ -63,6 +63,17 @@ test('the list is bounded and a cache skips sessions whose files did not change'
   assert.equal((await listStoredSessions(root, { cache }))[0]!.lastPrompt, 'changed')
 }))
 
+test('the limit counts only sessions with a prompt, so newer empty sessions cannot hide older conversations', async () => store(async (root) => {
+  await session(root, ids[0]!, [start('D:\\w'), prompt('the real conversation')], undefined, new Date(Date.UTC(2026, 0, 1)))
+  for (let index = 0; index < 40; index++) {
+    const id = `55555555-5555-4555-8555-${String(index).padStart(12, '0')}`
+    await session(root, id, [start('D:\\w')], undefined, new Date(Date.UTC(2026, 5, 1, 0, index)))
+  }
+  await session(root, ids[1]!, [start('D:\\w'), prompt('a newer conversation')], undefined, new Date(Date.UTC(2026, 9, 1)))
+  assert.deepEqual((await listStoredSessions(root, { limit: 2 })).map((entry) => entry.firstPrompt), ['a newer conversation', 'the real conversation'])
+  assert.deepEqual((await listStoredSessions(root, { limit: 1 })).map((entry) => entry.firstPrompt), ['a newer conversation'])
+}))
+
 test('a missing store lists nothing', async () => {
   assert.deepEqual(await listStoredSessions(join(tmpdir(), 'no-such-session-store-for-tests')), [])
 })

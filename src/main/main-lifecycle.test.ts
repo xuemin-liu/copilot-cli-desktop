@@ -1184,6 +1184,36 @@ test('a stored session is listed in History by its prompts and reopens in its pr
   await assert.rejects(async () => harness.request('desktop:open-session-history', 'not-a-session'), /Invalid session id/)
 }))
 
+test('opening a History session in a project startup has not listed yet keeps that project\'s saved tabs', async (t) => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const secondPath = `${directory}-second`; await mkdir(secondPath)
+  t.after(() => rm(secondPath, { recursive: true, force: true }))
+  const second = createWorkspaceProfile(secondPath)
+  const savedThere = '55555555-5555-4555-8555-555555555555'
+  profile.tabs = [{ title: 'Shown', lastSessionId: SOURCE }]
+  second.tabs = [{ title: 'Saved there', lastSessionId: savedThere }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, second], activeProfileId: profile.id }, capabilities)
+  await mkdir(join(directory, 'session-state', FORK), { recursive: true })
+  await writeFile(join(directory, 'session-state', FORK, 'workspace.yaml'), `cwd: ${secondPath}\nname: second\n`)
+  await writeFile(join(directory, 'session-state', FORK, 'events.jsonl'), `${JSON.stringify({ type: 'user.message', data: { content: 'from history' } })}\n`)
+  // Startup waits on the shown tab's process, so the second project is not listed yet.
+  let release!: () => void, entered!: () => void
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  harness.setNextSpawn(() => { entered(); return new Promise<void>((resolve) => { release = resolve }) })
+  const startup = harness.restoreSaved()
+  await started
+  try {
+    const opened = await harness.request('desktop:open-session-history', FORK)
+    assert.deepEqual(opened.tabs.filter((tab) => tab.workspaceProfileId === second.id).map((tab) => [tab.lastSessionId, tab.status]),
+      [[savedThere, 'dormant'], [FORK, 'running']])
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(saved.profiles.find((entry) => entry.id === second.id)!.tabs.map((tab) => tab.lastSessionId), [savedThere, FORK])
+  } finally { release(); await startup }
+  const after = await harness.request('desktop:get-state')
+  assert.equal(after.tabs.filter((tab) => tab.lastSessionId === savedThere).length, 1, 'startup does not list it twice')
+}))
+
 test('restoration links a saved side chat even when its parent follows it in the saved list', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.tabs = [{ title: 'Side', lastSessionId: FORK, sideChat: true, sideParentSessionId: SOURCE }, { title: 'Parent', lastSessionId: SOURCE }]

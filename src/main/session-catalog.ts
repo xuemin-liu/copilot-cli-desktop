@@ -16,6 +16,8 @@ const WORKSPACE_BYTES = 64 * 1024
 const PROMPT_SLICE_BYTES = 256 * 1024
 export const MAX_PROMPT_CHARS = 280
 const MAX_FIELD_CHARS = 1_024
+/** Sessions read at once: bounds open files while the list is built. */
+const READ_BATCH = 16
 
 /** Read results by session, kept while the session's files are unchanged. */
 export type SessionCatalogCache = Map<string, { stamp: string; value: StoredSession }>
@@ -95,8 +97,8 @@ async function readSession(root: string, sessionId: string, events: { mtimeMs: n
   }
 }
 
-/** The most recently used stored sessions, newest first. Sessions that never received a prompt are left out: there is
- * nothing in them to go back to. */
+/** The `limit` most recently used stored sessions that received a prompt, newest first. Sessions that never did are left
+ * out: there is nothing in them to go back to. */
 export async function listStoredSessions(root: string, options: { limit?: number; cache?: SessionCatalogCache } = {}): Promise<StoredSession[]> {
   const limit = options.limit ?? 200
   let names: string[]
@@ -106,14 +108,21 @@ export async function listStoredSessions(root: string, options: { limit?: number
     const [events, workspace] = await Promise.all([modified(join(root, sessionId, 'events.jsonl')), modified(join(root, sessionId, 'workspace.yaml'))])
     return { sessionId, events, workspace, updatedAt: Math.max(events?.mtimeMs ?? 0, workspace?.mtimeMs ?? 0) }
   }))
-  const recent = stamped.filter((entry) => entry.events).sort((left, right) => right.updatedAt - left.updatedAt).slice(0, limit)
-  const sessions = await Promise.all(recent.map(async ({ sessionId, events, workspace }) => {
+  const candidates = stamped.filter((entry) => entry.events).sort((left, right) => right.updatedAt - left.updatedAt)
+  const read = async ({ sessionId, events, workspace }: typeof candidates[number]): Promise<StoredSession> => {
     const stamp = `${events?.mtimeMs}:${events?.size}:${workspace?.mtimeMs}:${workspace?.size}`
     const known = options.cache?.get(sessionId)
     if (known?.stamp === stamp) return known.value
     const value = await readSession(root, sessionId, events, workspace)
     options.cache?.set(sessionId, { stamp, value })
     return value
-  }))
-  return sessions.filter((session) => session.firstPrompt !== null || session.lastPrompt !== null)
+  }
+  // Empty sessions are common and often the newest, so the limit counts only sessions with a prompt: read newest first, a
+  // batch at a time, until enough are found.
+  const sessions: StoredSession[] = []
+  for (let index = 0; index < candidates.length && sessions.length < limit; index += READ_BATCH) {
+    const batch = await Promise.all(candidates.slice(index, index + READ_BATCH).map(read))
+    sessions.push(...batch.filter((session) => session.firstPrompt !== null || session.lastPrompt !== null))
+  }
+  return sessions.slice(0, limit)
 }
