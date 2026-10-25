@@ -1718,6 +1718,8 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
       if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
     }
     forgetSessionName(tabId)
+    // Until the tab is marked unloaded, a browser request finds it closing rather than creating a new browser.
+    closingBrowserTabs.add(tabId)
     const browser = sessionBrowsers.get(tabId)
     sessionBrowsers.delete(tabId)
     try { await browser?.dispose() }
@@ -1726,6 +1728,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId
       ? { ...candidate, status: 'dormant' as const, unloaded: true as const, processId: null, activity: null, activityDetail: null }
       : candidate) }
+    closingBrowserTabs.delete(tabId)
     sessionWindows.get(tabId)?.close()
     syncTabState()
     persistProfileTabs()
@@ -2809,8 +2812,10 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
   let browser = sessionBrowsers.get(tabId)
   if (!browser) {
     if (closingBrowserTabs.has(tabId)) throw new Error('Browser session is closing')
-    const paths = browserSessionPaths(browserSessionRoot(), tabId)
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
+    // Unloading freed this browser; a poll from a panel still on screen must not bring it back before Resume.
+    if (tab.unloaded) throw new Error('This session is unloaded; resume it to use its browser')
+    const paths = browserSessionPaths(browserSessionRoot(), tabId)
     // The tab's own settings keep its last page; the browser profile setting decides whose cookies and storage it uses.
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
     const partitionProfileId = desktopConfig.browserProfile === 'shared' ? SHARED_BROWSER_PROFILE_ID : tab.browserProfileId!

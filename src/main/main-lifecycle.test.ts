@@ -1141,6 +1141,29 @@ test('unloading a session stops its process and keeps its tab until Resume, whic
   assert.equal(harness.spawns.length, 3)
 }))
 
+test('an unloaded session\'s browser stays closed, also while it unloads, until Resume', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const tabId = (await harness.createMain()).activeTabId!
+  harness.createTestWindow()
+  await harness.request('desktop:browser-open', tabId)
+  assert.equal(harness.browserConfigs.length, 1)
+  let release!: () => void, disposing!: () => void
+  const disposeStarted = new Promise<void>((resolve) => { disposing = resolve })
+  harness.blockBrowserDispose(new Promise<void>((resolve) => { release = resolve }), disposing)
+  const unloading = harness.request('desktop:unload-tab', tabId)
+  await disposeStarted
+  // The panel on screen keeps polling its browser's state.
+  await assert.rejects(async () => harness.request('desktop:browser-state', tabId), /closing/)
+  release()
+  await unloading
+  await assert.rejects(async () => harness.request('desktop:browser-state', tabId), /unloaded/)
+  assert.equal(harness.browserConfigs.length, 1, 'no browser is created while unloading or unloaded')
+  await harness.request('desktop:restart-tab', tabId)
+  await harness.request('desktop:browser-state', tabId)
+  assert.equal(harness.browserConfigs.length, 2, 'Resume makes the browser available again')
+}))
+
 test('restoration links a saved side chat even when its parent follows it in the saved list', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.tabs = [{ title: 'Side', lastSessionId: FORK, sideChat: true, sideParentSessionId: SOURCE }, { title: 'Parent', lastSessionId: SOURCE }]
