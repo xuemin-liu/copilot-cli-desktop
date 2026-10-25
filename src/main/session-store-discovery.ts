@@ -29,6 +29,9 @@ export interface StoreDiscoveryOptions {
   worktreeName: string
   /** Tests replace the directory listing to control its timing. */
   listSessions?(root: string): Promise<Set<string>>
+  /** Tests replace the clock and the wait between polls, so the polling schedule does not depend on real time. */
+  now?(): number
+  sleep?(ms: number): Promise<void>
   pollMs?: number
   /** After this long without a match, look less often: an unnamed session may not be stored for a long time. */
   slowAfterMs?: number
@@ -97,6 +100,8 @@ async function listSessionIds(root: string): Promise<Set<string>> {
 export class SessionStoreDiscovery {
   private readonly baseline: Promise<Set<string>>
   private readonly list: (root: string) => Promise<Set<string>>
+  private readonly now: () => number
+  private readonly sleep: (ms: number) => Promise<void>
   private cancelled = false
   private readonly pollMs: number
   private readonly slowAfterMs: number
@@ -106,6 +111,8 @@ export class SessionStoreDiscovery {
 
   constructor(private readonly options: StoreDiscoveryOptions) {
     this.list = options.listSessions ?? listSessionIds
+    this.now = options.now ?? Date.now
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
     this.baseline = this.list(options.root)
     this.pollMs = options.pollMs ?? 500
     this.slowAfterMs = options.slowAfterMs ?? 90_000
@@ -125,9 +132,9 @@ export class SessionStoreDiscovery {
 
   async find(): Promise<string | null> {
     const known = new Set(await this.baseline)
-    const begun = Date.now()
+    const begun = this.now()
     const deadline = begun + this.timeoutMs
-    while (!this.cancelled && Date.now() < deadline) {
+    while (!this.cancelled && this.now() < deadline) {
       for (const id of await this.list(this.options.root)) {
         if (known.has(id)) continue
         const start = await readSessionStart(join(this.options.root, id, 'events.jsonl'))
@@ -141,7 +148,7 @@ export class SessionStoreDiscovery {
         if (this.cancelled) return null
         return id
       }
-      await new Promise((resolve) => setTimeout(resolve, Date.now() - begun >= this.slowAfterMs ? this.slowPollMs : this.pollMs))
+      await this.sleep(this.now() - begun >= this.slowAfterMs ? this.slowPollMs : this.pollMs)
     }
     return null
   }
