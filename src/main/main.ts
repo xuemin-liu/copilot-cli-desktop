@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir } from 'node:fs/promises'
-import { basename, dirname, join, resolve } from 'node:path'
+import { access, appendFile, mkdir, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -104,6 +104,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { readSessionStart, worktreeNameFor } from './session-store-discovery.js'
+import { listStoredSessions, type SessionCatalogCache, type StoredSession } from './session-catalog.js'
 import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
@@ -144,7 +145,7 @@ import {
   visibleSessionTabs,
   type TabsState,
 } from './session-tab-machine.js'
-import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, SidebarView, WorkspaceProfile } from './types.js'
+import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, SessionHistoryEntry, SidebarView, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
@@ -296,6 +297,13 @@ function requestSidebarView(change: Partial<SidebarView>): void {
   const window = mainWindow
   if (!window || window.isDestroyed()) return
   window.webContents.send('desktop:sidebar-view-request', change)
+}
+
+function requestSessionHistory(): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  restoreMainWindow()
+  window.webContents.send('desktop:session-history-request')
 }
 
 function requestNewSession(attachments: boolean): void {
@@ -2100,6 +2108,77 @@ function wakeDormantTab(tabId: string): Promise<void> {
   return waking
 }
 
+const sessionCatalogCache: SessionCatalogCache = new Map()
+
+function sameOrInside(path: string, folder: string): boolean {
+  const target = win32.resolve(path).replace(/[\\/]+$/, '').toLowerCase()
+  const base = win32.resolve(folder).replace(/[\\/]+$/, '').toLowerCase()
+  return target === base || target.startsWith(`${base}\\`)
+}
+
+/** The open project a stored session belongs to: one whose folder holds where it ran, or whose repository it ran in a
+ * linked worktree of (then it resumes in that worktree). */
+async function projectForSession(session: StoredSession): Promise<{ profile: WorkspaceProfile; worktreePath?: string } | null> {
+  if (!session.cwd) return null
+  const holding = desktopConfig.profiles.filter((profile) => sameOrInside(session.cwd!, profile.path))
+  // The innermost project wins when projects are nested.
+  const inside = holding.sort((left, right) => right.path.length - left.path.length)[0]
+  if (inside) return { profile: inside }
+  for (const profile of desktopConfig.profiles) {
+    const worktree = await resolveLinkedWorktree(profile.path, session.cwd).catch(() => null)
+    if (worktree) return { profile, worktreePath: worktree.root }
+  }
+  return null
+}
+
+async function listSessionHistory(): Promise<SessionHistoryEntry[]> {
+  const sessions = await listStoredSessions(copilotSessionRoot(process.env), { cache: sessionCatalogCache })
+  return Promise.all(sessions.map(async (session) => ({
+    ...session,
+    openTabId: tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === session.sessionId)?.id ?? null,
+    projectName: (await projectForSession(session))?.profile.name ?? null,
+  })))
+}
+
+/** Shows a stored session: its tab when it is open, else a new tab that resumes it in its project, adding that project
+ * (its repository's folder, or where it ran) when it is not open yet. */
+async function openSessionFromHistory(sessionId: string): Promise<DesktopState> {
+  if (!isForkSessionId(sessionId)) throw new Error('Invalid session id')
+  const open = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
+  if (open) return activateSessionTab(open.id)
+  if (!isCopilotResolved()) throw new Error('Copilot CLI is not available yet')
+  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`Close or unload a session tab first: no more than ${MAX_SESSION_TABS} can be open`)
+  const session = (await listStoredSessions(copilotSessionRoot(process.env), { cache: sessionCatalogCache, limit: Number.POSITIVE_INFINITY }))
+    .find((candidate) => candidate.sessionId === sessionId)
+  if (!session?.cwd) throw new Error('That session is no longer stored')
+  let target = await projectForSession(session)
+  if (!target) {
+    const folder = session.gitRoot && sameOrInside(session.cwd, session.gitRoot) ? session.gitRoot : session.cwd
+    if (!await stat(folder).then((info) => info.isDirectory(), () => false)) throw new Error(`The folder that session ran in no longer exists: ${folder}`)
+    target = { profile: activateWorkspaceProfile(desktopConfig, folder, new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId))) }
+    syncWorkspaceState()
+    await persistConfig()
+  }
+  // Its project's saved tabs come first. Startup may not have listed them yet, and adding a tab before they are listed
+  // would save the project with only this one; listing them starts none of them.
+  if (target.profile.tabs.length > 0) await restoreTabsForProfile(target.profile, false)
+  // Opened meanwhile, or one of those saved tabs: show that tab instead of a second one.
+  const opened = tabsState.tabs.find((tab) => !tab.remote && tab.lastSessionId === sessionId)
+  if (opened) return activateSessionTab(opened.id)
+  const tabId = addDormantSessionTab(target.profile, {
+    title: session.name ?? session.firstPrompt ?? target.profile.name,
+    lastSessionId: sessionId,
+    autoTitle: !session.userNamed,
+    // It resumes in the folder it ran in, never in a new worktree.
+    launchWorktree: false,
+    ...(target.worktreePath ? { launchWorktreePath: target.worktreePath } : {}),
+  })
+  persistProfileTabs()
+  activateSessionTab(tabId)
+  await wakingTabs.get(tabId)
+  return snapshot()
+}
+
 /** `activate`: show this project's last saved tab; restoring other projects' tabs in the background leaves focus alone. */
 async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopConfig), activate = true): Promise<void> {
   if (!profile || !state.resolution || state.resolution.version === null) return
@@ -2139,11 +2218,13 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
       desktopConfig.activeProfileId = profile.id
       syncWorkspaceState()
     }
-    // Showing the active tab wakes it; the restore is over once the tabs on screen have started.
+    // Showing the active tab wakes it; a restore that showed its tab is over once that tab has started. One that only
+    // listed its tabs does not wait for another project's tab on screen.
     syncTabState()
     persistProfileTabs()
     broadcastState()
     refreshMenus()
+    if (!activate) return
     const visible = visibleSessionTabs(tabsState)
     await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [wakingTabs.get(id)] : []))
   })()
@@ -2495,6 +2576,12 @@ function installApplicationMenu(): void {
           accelerator: 'CmdOrCtrl+Shift+R',
           enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote),
           click: () => menuTabId && observe(restartSessionTab(menuTabId), 'Could not restart session tab'),
+        },
+        {
+          label: 'Session History…',
+          accelerator: 'CmdOrCtrl+Shift+H',
+          enabled: !installInProgress,
+          click: () => requestSessionHistory(),
         },
         {
           label: 'Unload Active Session',
@@ -2979,6 +3066,15 @@ ipcMain.handle('desktop:close-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return closeSessionTab(tabId)
+})
+ipcMain.handle('desktop:list-session-history', (event) => {
+  assertTrustedIpcSender(event)
+  return listSessionHistory()
+})
+ipcMain.handle('desktop:open-session-history', (event, sessionId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isForkSessionId(sessionId)) throw new Error('Invalid session id')
+  return openSessionFromHistory(sessionId)
 })
 ipcMain.handle('desktop:unload-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

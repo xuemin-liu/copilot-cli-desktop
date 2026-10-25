@@ -69,6 +69,13 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     ipcRenderer.on('desktop:new-session-request', handler)
     return () => ipcRenderer.removeListener('desktop:new-session-request', handler)
   },
+  listSessionHistory: () => ipcRenderer.invoke('desktop:list-session-history'),
+  openSessionHistory: (sessionId) => ipcRenderer.invoke('desktop:open-session-history', sessionId),
+  onSessionHistoryRequest: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on('desktop:session-history-request', handler)
+    return () => ipcRenderer.removeListener('desktop:session-history-request', handler)
+  },
   onSidebarViewRequest: (listener) => {
     const handler = (_event, change) => listener(change)
     ipcRenderer.on('desktop:sidebar-view-request', handler)

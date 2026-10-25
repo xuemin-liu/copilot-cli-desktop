@@ -28,14 +28,17 @@ function yamlScalar(raw: string): string | null {
   return value.replace(/\s+#.*$/, '').trim() || null
 }
 
+/** One top-level scalar field of Copilot's workspace.yaml, or null when it is missing or not a plain scalar. */
+export function workspaceField(text: string, key: string): string | null {
+  const raw = text.split(/\r?\n/).find(line => line.startsWith(`${key}:`))?.slice(key.length + 1)
+  return raw === undefined ? null : yamlScalar(raw)
+}
+
 /** The session name in Copilot's workspace.yaml, or null when it has none yet. */
 export function parseWorkspaceName(text: string): CopilotSessionName | null {
-  const lines = text.split(/\r?\n/)
-  const field = (key: string): string | undefined => lines.find(line => line.startsWith(`${key}:`))?.slice(key.length + 1)
-  const raw = field('name')
-  const name = raw === undefined ? null : yamlScalar(raw)
+  const name = workspaceField(text, 'name')
   if (!name) return null
-  return { name, userNamed: field('user_named')?.trim() === 'true' }
+  return { name, userNamed: workspaceField(text, 'user_named') === 'true' }
 }
 
 /** Reads a session's name; null when the file or the name is missing. `known` skips the read when the file is unchanged. */

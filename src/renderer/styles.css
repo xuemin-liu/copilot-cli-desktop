@@ -756,6 +756,78 @@ button:disabled {
   accent-color: #537de8;
 }
 
+.session-history {
+  width: min(680px, 100%);
+}
+
+.session-history-list {
+  max-height: min(60vh, 520px);
+  margin: 12px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid #2c323d;
+  border-radius: 8px;
+}
+
+.session-history-list li + li {
+  border-top: 1px solid #262b35;
+}
+
+.session-history-empty {
+  padding: 14px 12px;
+  color: #8e97a6;
+}
+
+.session-history-entry {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+}
+
+.session-history-entry:hover:not(:disabled), .session-history-entry:focus-visible {
+  background: #1f2531;
+  outline: none;
+}
+
+.session-history-title {
+  overflow: hidden;
+  color: #f2f5fa;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-prompt {
+  overflow: hidden;
+  color: #b8c0cc;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: #8e97a6;
+  font-size: 12px;
+}
+
+.session-history-badge {
+  padding: 0 6px;
+  border: 1px solid #3a404c;
+  border-radius: 999px;
+  color: #c9d1dd;
+}
+
 .input-dialog-actions {
   display: flex;
   justify-content: flex-end;

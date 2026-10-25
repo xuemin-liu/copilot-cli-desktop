@@ -8,7 +8,7 @@ import test from 'node:test'
 import { build } from 'esbuild'
 import { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, type DesktopConfig } from './desktop-config.js'
 import { EMPTY_COPILOT_CAPABILITIES, type CopilotCapabilities } from './copilot-command.js'
-import type { DesktopState, WorkspaceProfile } from './types.js'
+import type { DesktopState, SessionHistoryEntry, WorkspaceProfile } from './types.js'
 import { MigrationService } from './migration-service.js'
 import { readMigrationArchive, writeMigrationArchive } from './migration-archive.js'
 import { fileEntry } from './migration-inventory.js'
@@ -1139,6 +1139,79 @@ test('unloading a session stops its process and keeps its tab until Resume, whic
   await harness.request('desktop:unload-tab', tabId)
   assert.equal(harness.spawns[2]!.stopped, true)
   assert.equal(harness.spawns.length, 3)
+}))
+
+test('a stored session is listed in History by its prompts and reopens in its project, once', async (t) => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  // Outside the project folder: a folder inside it would belong to the project.
+  const elsewhere = `${directory}-elsewhere`; await mkdir(elsewhere)
+  t.after(() => rm(elsewhere, { recursive: true, force: true }))
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, capabilities)
+  const store = async (id: string, cwd: string, prompt: string): Promise<void> => {
+    await mkdir(join(directory, 'session-state', id), { recursive: true })
+    await writeFile(join(directory, 'session-state', id, 'workspace.yaml'), `cwd: ${cwd}\nname: ${profile.name}\nuser_named: true\nbranch: main\n`)
+    await writeFile(join(directory, 'session-state', id, 'events.jsonl'), [
+      { type: 'session.start', data: { startTime: new Date().toISOString(), context: { cwd } } },
+      { type: 'user.message', data: { content: prompt } },
+    ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+  }
+  await store(SOURCE, directory, 'fix the login bug')
+  await store(FORK, elsewhere, 'explain the parser')
+  const listed = await harness.request('desktop:list-session-history') as SessionHistoryEntry[]
+  const login = listed.find((entry) => entry.sessionId === SOURCE)!
+  assert.deepEqual([login.firstPrompt, login.projectName, login.openTabId], ['fix the login bug', profile.name, null])
+  assert.equal(listed.find((entry) => entry.sessionId === FORK)!.projectName, null, 'its folder is not an open project')
+
+  const opened = await harness.request('desktop:open-session-history', SOURCE)
+  const tab = opened.tabs.find((candidate) => candidate.lastSessionId === SOURCE)!
+  assert.equal(opened.activeTabId, tab.id)
+  assert.equal(tab.status, 'running')
+  assert.equal(tab.workspaceProfileId, profile.id)
+  assert.ok(harness.spawns.at(-1)!.args.includes(`--resume=${SOURCE}`), harness.spawns.at(-1)!.args.join(' '))
+  const spawned = harness.spawns.length
+  // Already open: shown, not opened twice.
+  const again = await harness.request('desktop:open-session-history', SOURCE)
+  assert.equal(again.tabs.filter((candidate) => candidate.lastSessionId === SOURCE).length, 1)
+  assert.equal(harness.spawns.length, spawned)
+  assert.equal((await harness.request('desktop:list-session-history') as SessionHistoryEntry[]).find((entry) => entry.sessionId === SOURCE)!.openTabId, tab.id)
+
+  // A session from a folder that is not open adds that folder as a project.
+  const added = await harness.request('desktop:open-session-history', FORK)
+  const other = added.tabs.find((candidate) => candidate.lastSessionId === FORK)!
+  const otherProfile = added.profiles.find((candidate) => candidate.id === other.workspaceProfileId)!
+  assert.ok(sameFolderText(otherProfile.path, elsewhere), otherProfile.path)
+  assert.ok(sameFolderText(harness.spawns.at(-1)!.cwd, elsewhere), harness.spawns.at(-1)!.cwd)
+  await assert.rejects(async () => harness.request('desktop:open-session-history', 'not-a-session'), /Invalid session id/)
+}))
+
+test('opening a History session in a project startup has not listed yet keeps that project\'s saved tabs', async (t) => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const secondPath = `${directory}-second`; await mkdir(secondPath)
+  t.after(() => rm(secondPath, { recursive: true, force: true }))
+  const second = createWorkspaceProfile(secondPath)
+  const savedThere = '55555555-5555-4555-8555-555555555555'
+  profile.tabs = [{ title: 'Shown', lastSessionId: SOURCE }]
+  second.tabs = [{ title: 'Saved there', lastSessionId: savedThere }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, second], activeProfileId: profile.id }, capabilities)
+  await mkdir(join(directory, 'session-state', FORK), { recursive: true })
+  await writeFile(join(directory, 'session-state', FORK, 'workspace.yaml'), `cwd: ${secondPath}\nname: second\n`)
+  await writeFile(join(directory, 'session-state', FORK, 'events.jsonl'), `${JSON.stringify({ type: 'user.message', data: { content: 'from history' } })}\n`)
+  // Startup waits on the shown tab's process, so the second project is not listed yet.
+  let release!: () => void, entered!: () => void
+  const started = new Promise<void>((resolve) => { entered = resolve })
+  harness.setNextSpawn(() => { entered(); return new Promise<void>((resolve) => { release = resolve }) })
+  const startup = harness.restoreSaved()
+  await started
+  try {
+    const opened = await harness.request('desktop:open-session-history', FORK)
+    assert.deepEqual(opened.tabs.filter((tab) => tab.workspaceProfileId === second.id).map((tab) => [tab.lastSessionId, tab.status]),
+      [[savedThere, 'dormant'], [FORK, 'running']])
+    await harness.flushConfig()
+    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+    assert.deepEqual(saved.profiles.find((entry) => entry.id === second.id)!.tabs.map((tab) => tab.lastSessionId), [savedThere, FORK])
+  } finally { release(); await startup }
+  const after = await harness.request('desktop:get-state')
+  assert.equal(after.tabs.filter((tab) => tab.lastSessionId === savedThere).length, 1, 'startup does not list it twice')
 }))
 
 test('an unloaded session\'s browser stays closed, also while it unloads, until Resume', async () => fixture(async (harness, directory) => {
