@@ -87,6 +87,7 @@ export interface CopilotDesktopBridge {
   renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
+  unloadTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>

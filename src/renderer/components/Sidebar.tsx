@@ -50,6 +50,7 @@ export interface SidebarProps {
   onRenameTab: (tabId: string, currentTitle: string) => void
   onCloseTab: (tabId: string) => void
   onRestartTab: (tabId: string) => void
+  onUnloadTab: (tabId: string) => void
   onCreateTab: (profileId: string) => void
   onCreateTabWithAttachments: () => void
   onFanOut: () => void
@@ -75,6 +76,7 @@ export function Sidebar({
   onRenameTab,
   onCloseTab,
   onRestartTab,
+  onUnloadTab,
   onCreateTab,
   onCreateTabWithAttachments,
   onFanOut,
@@ -214,7 +216,8 @@ export function Sidebar({
     const detail = tab.status === 'running' && tab.activityDetail ? tab.activityDetail : null
     const statusLabel = detail
       ? formatActivityLabel(detail)
-      : tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle') : STATUS_LABEL[tab.status]
+      : tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle')
+        : tab.unloaded ? 'Unloaded' : STATUS_LABEL[tab.status]
     const elapsed = detail ? formatElapsed(detail.since, now) : null
     const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
@@ -255,6 +258,9 @@ export function Sidebar({
           onClick={() => { setOpenActionsTabId(null); onPopOutTab(tab.id) }}>↗</button>
         {!tab.remote && <button type="button" className="icon-button session-restart" disabled={busy}
           aria-label={`Restart ${tab.title}`} title="Restart session" onClick={() => { setOpenActionsTabId(null); onRestartTab(tab.id) }}>↻</button>}
+        {!tab.remote && tab.status !== 'dormant' && <button type="button" className="icon-button session-unload" disabled={busy}
+          aria-label={`Unload ${tab.title}`} title="Unload session: stop it to free its memory and keep the tab to resume later"
+          onClick={() => { setOpenActionsTabId(null); onUnloadTab(tab.id) }}>☾</button>}
         <button type="button" className="icon-button session-close" aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
           title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}
           onClick={() => { setOpenActionsTabId(null); onCloseTab(tab.id) }}>×</button>
