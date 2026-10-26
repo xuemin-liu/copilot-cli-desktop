@@ -58,7 +58,7 @@ try {
     $meetingPatch = New-Object System.Text.StringBuilder
     Invoke-MeetingGit rev-parse --verify --quiet HEAD | Out-Null
     if ($LASTEXITCODE -eq 0) {
-      $meetingDiff = Invoke-MeetingGit -c core.quotepath=false diff HEAD --no-ext-diff --no-textconv --no-color
+      $meetingDiff = Invoke-MeetingGit -c core.quotepath=false diff HEAD --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/
       if ($meetingDiff) { [void]$meetingPatch.AppendLine(($meetingDiff -join [char]10)) }
     }
     $meetingUntracked = @((Invoke-MeetingGit -c core.quotepath=false ls-files --others --exclude-standard) | Where-Object { $_ })
@@ -69,7 +69,7 @@ try {
         [void]$meetingPatch.AppendLine('# New file not included: ' + $meetingPath)
         continue
       }
-      $meetingNew = Invoke-MeetingGit -c core.quotepath=false diff --no-index --no-ext-diff --no-textconv --no-color -- /dev/null $meetingPath
+      $meetingNew = Invoke-MeetingGit -c core.quotepath=false diff --no-index --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ -- /dev/null $meetingPath
       if ($meetingNew) { [void]$meetingPatch.AppendLine(($meetingNew -join [char]10)); $meetingIncluded++ }
     }
     $meetingBody.changes = $meetingPatch.ToString()

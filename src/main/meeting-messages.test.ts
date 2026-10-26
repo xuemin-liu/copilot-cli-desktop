@@ -42,6 +42,17 @@ test('the shared patch withholds files that hold secrets and masks credential-lo
   assert.equal(shareablePatch('diff --git a/a.ts b/a.ts\n+x\n'), 'diff --git a/a.ts b/a.ts\n+x\n', 'nothing to hide, nothing added')
 })
 
+test('a secret file is withheld whatever prefixes Git was configured to print', () => {
+  const noPrefix = 'diff --git .env .env\nnew file mode 100644\n--- /dev/null\n+++ .env\n@@ -0,0 +1 @@\n+DATABASE_CONNECTION_STRING=Server=db;Password=opaque-value-91\n'
+  const mnemonic = 'diff --git i/config/.env.local w/config/.env.local\n--- i/config/.env.local\n+++ w/config/.env.local\n@@ -1 +1 @@\n-A=1\n+A=opaque-value-92\n'
+  const spaced = 'diff --git a/my keys/server.pem b/my keys/server.pem\nBinary files /dev/null and b/my keys/server.pem differ\n'
+  for (const [patch, name] of [[noPrefix, '.env'], [mnemonic, 'w/config/.env.local'], [spaced, 'my keys/server.pem']] as const) {
+    const shared = shareablePatch(patch)
+    assert.doesNotMatch(shared, /opaque-value/)
+    assert.match(shared, new RegExp(`# Changes to ${name.replace(/\./g, '\\.')} withheld`))
+  }
+})
+
 test('a vote is read from the first line only, and anything but AGREE objects', () => {
   assert.equal(parseVote('AGREE'), 'agree')
   assert.equal(parseVote('\n  agree, nothing left'), 'agree')

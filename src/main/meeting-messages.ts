@@ -178,15 +178,30 @@ export function parseVote(text: string): MeetingVote {
   return /^AGREE\b/i.test(first.replace(VOTE_DECORATION, '')) ? 'agree' : 'object'
 }
 
-/** Every path a file's section of a patch names: the `diff --git` line, `---` / `+++`, renames and binary notes. */
+/**
+ * Every path a file's section of a patch may name: the `diff --git` line, `---` / `+++`, renames and binary notes. The
+ * helper asks Git for `a/` and `b/` prefixes, but nothing here relies on them: Git's configuration can drop them
+ * (`diff.noprefix`) or change them (`diff.mnemonicPrefix`), so each line is taken whole and also split at spaces, and a
+ * secret-looking name matches with or without a prefix in front of it.
+ */
 function sectionPaths(section: string): string[] {
-  const paths: string[] = []
+  const candidates: string[] = []
   const first = section.slice(0, section.indexOf('\n') === -1 ? undefined : section.indexOf('\n'))
-  const header = /^diff --git a\/(.*) b\/(.*)$/.exec(first)
-  if (header) paths.push(header[1]!, header[2]!)
-  for (const match of section.matchAll(/^(?:--- a\/|\+\+\+ b\/|rename from |rename to |copy from |copy to )(.+?)\t?$/gm)) paths.push(match[1]!)
-  for (const match of section.matchAll(/^Binary files (?:a\/)?(.+?) and (?:b\/)?(.+?) differ$/gm)) paths.push(match[1]!, match[2]!)
-  return paths.map((path) => path.trim()).filter((path) => path && path !== '/dev/null')
+  if (first.startsWith('diff --git ')) candidates.push(first.slice('diff --git '.length))
+  for (const match of section.matchAll(/^(?:--- |\+\+\+ |rename from |rename to |copy from |copy to )(.+?)\t?$/gm)) candidates.push(match[1]!)
+  for (const match of section.matchAll(/^Binary files (.+?) and (.+?) differ$/gm)) candidates.push(match[1]!, match[2]!)
+  return candidates.flatMap((line) => [line, ...line.split(/\s+/)])
+    .map((path) => path.trim()).filter((path) => path && path !== '/dev/null')
+}
+
+/** The file a section is about, for the note that withholds it: the new name when the patch gives one. */
+function sectionName(section: string): string {
+  const name = /^(?:\+\+\+ |rename to |copy to )(.+?)\t?$/m.exec(section)?.[1]?.trim()
+  if (name && name !== '/dev/null') return name.replace(/^b\//, '')
+  const binary = /^Binary files .+? and (.+?) differ$/m.exec(section)?.[1]?.trim()
+  if (binary && binary !== '/dev/null') return binary.replace(/^b\//, '')
+  const first = section.slice(0, section.indexOf('\n') === -1 ? undefined : section.indexOf('\n'))
+  return first.replace(/^diff --git /, '').split(/\s+/).at(-1)?.replace(/^b\//, '') || 'a file'
 }
 
 /**
@@ -199,9 +214,8 @@ export function shareablePatch(patch: string): string {
   const withheld: string[] = []
   let masked = false
   const kept = sections.map((section) => {
-    const paths = sectionPaths(section)
-    if (paths.some(looksSensitivePath)) {
-      const name = paths.at(-1) ?? 'a file'
+    if (sectionPaths(section).some(looksSensitivePath)) {
+      const name = sectionName(section)
       withheld.push(name)
       return `# Changes to ${name} withheld: the file looks like it holds secrets.\n`
     }
