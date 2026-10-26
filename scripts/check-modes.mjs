@@ -6,6 +6,7 @@ export const checkModes = [
   { flag: '--worktree', env: 'DESKTOP_UI_WORKTREE_CHECK', module: './session-worktree-check.mjs', run: 'runWorktreeCheck', artifacts: 'session-worktree', label: 'worktree session launch' },
   { flag: '--session-name', env: 'DESKTOP_UI_SESSION_NAME_CHECK', module: './session-name-sync-check.mjs', run: 'runSessionNameCheck', artifacts: 'session-name', label: 'session name sync' },
   { flag: '--fan-out', env: 'DESKTOP_UI_FAN_OUT_CHECK', module: './session-fan-out-check.mjs', run: 'runFanOutCheck', artifacts: 'session-fan-out', label: 'fan-out' },
+  { flag: '--meeting', env: 'DESKTOP_UI_MEETING_CHECK', module: './session-meeting-check.mjs', run: 'runMeetingCheck', artifacts: 'session-meeting', label: 'review meeting' },
   ...['switch', 'multi-click', 'status'].map(variant => ({ flag: `--clipboard-${variant}`, env: 'DESKTOP_UI_CLIPBOARD_CHECK', module: './clipboard-switch-check.mjs', run: 'runClipboardSwitchCheck', artifacts: `clipboard-${variant}`, label: `clipboard ${variant}` })),
 ]
 

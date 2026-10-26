@@ -39,6 +39,9 @@ handle, only input/output/resize events.
 - The **Fork into side chat** button (branch icon in the session header) keeps a main conversation on the left and an independent,
   resizable conversation on the right. Side chats use read/search-only model tools,
   including after restart, and can be closed without stopping the main session.
+- **Review meetings** let other sessions, in any project and with any model, review one session's plan or uncommitted
+  changes. Say "start a meeting to review your plan" in one session and "join meeting <id>" in the others; the desktop
+  passes the rounds between them until every reviewer agrees. See [Review meetings](#review-meetings).
 - **Debug browser** opens your web app beside the terminal, with native Chromium
   DevTools and Local Overrides. Console and network activity are also available
   through `copilot-desktop browser` commands, without an MCP server. Testing mode
@@ -224,6 +227,41 @@ sequence. Its screenshots and results are saved under `test-results/clipboard-mu
 Use `node scripts/electron-side-chat-check.mjs --clipboard-status` to compare the
 first and second copy confirmations' color and terminal-row alignment. Screenshots
 and measurements are saved under `test-results/clipboard-status/`.
+
+## Review meetings
+
+A meeting lets several sessions review one session's plan or local changes without copying anything or pushing a branch.
+
+1. In the session that wrote the plan or made the changes, ask: **"start a meeting to review your plan"** (or "…your local
+   changes"). Copilot writes the material to a file and runs the meeting helper; it tells you the meeting id, for example
+   **K7QF**.
+2. In each session that should review it (any project, any model, read-only sessions too), type **"join meeting K7QF"**.
+   **Add session…** on the meeting bar does the same.
+3. The desktop does the rest, in rounds. It types the host's post (and its uncommitted changes, as a patch) into every
+   reviewer, collects their replies, and gives them all to the host in one message. The host answers or revises, and the
+   next round goes out, with what the other reviewers said. When the open items are settled the host proposes to close;
+   each reviewer answers AGREE or OBJECT. When everyone agrees the meeting closes, and the host goes on with whatever you
+   asked it to do after the meeting.
+
+- The desktop types a meeting message only when that session is idle and its prompt box is empty, the same moment it uses
+  for `/rename`. Type into any session at any time; the meeting waits for it.
+- The meeting bar above a session in a meeting shows the round and whom it waits for, with **Transcript** and **Stop**.
+  A meeting pauses at its round limit (Settings, default 6) and asks whether to allow 3 more rounds. A round stops waiting
+  for a reviewer after the round timeout (Settings, default 10 minutes).
+- Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
+  answers your own message. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
+  on what it reads, so prefer Restricted reviewers.
+- The shared patch gets the same protection as the Git panel's prompts: files that hold secrets by convention (`.env`,
+  keys, credentials) are named but their changes are withheld, and values that look like credentials are masked. This
+  catches the common shapes, not every secret: review what you share.
+- Only running sessions can join; resume an unloaded session first. Unloading or closing a session takes it out of its
+  meeting (closing the meeting, for the host). A reply that arrives after its round timed out is passed on as a late reply,
+  never counted for a later round or vote.
+- The material and transcript live in `%APPDATA%\Copilot CLI Desktop\meetings\<id>`; the desktop adds that folder to each
+  session with `/add-dir`. Folders are removed a week after their last change. Meetings do not survive an app restart, and
+  remote sessions cannot take part.
+- The host needs a session started (or resumed once) by this version, so that it has the meeting helper. The helper runs in
+  the host's own shell, so it asks for approval like any other command unless the session allows it.
 
 ## Permission presets
 

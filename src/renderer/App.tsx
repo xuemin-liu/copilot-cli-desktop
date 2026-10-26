@@ -10,6 +10,7 @@ import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { GitPanel } from './components/GitPanel.js'
 import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.js'
 import { OperationError } from './components/OperationError.js'
+import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
@@ -324,6 +325,7 @@ export function App(): JSX.Element {
       <Sidebar
         profiles={state.profiles}
         tabs={state.tabs}
+        meetings={state.meetings ?? []}
         installedCliVersion={state.resolution?.version ?? null}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
@@ -381,6 +383,7 @@ export function App(): JSX.Element {
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
+          <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} />
           <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
             panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
               promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}

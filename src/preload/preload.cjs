@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   forkSideChat: (tabId, sourceSessionId, title) => ipcRenderer.invoke('desktop:fork-side-chat', tabId, sourceSessionId, title),
   writeTab: (tabId, data) => ipcRenderer.invoke('desktop:write-tab', tabId, data),
   gitResolve: (profileId, repoId, tabId, text) => ipcRenderer.invoke('desktop:git-resolve', profileId, repoId, tabId, text),
+  meetingAction: (meetingId, action, tabId) => ipcRenderer.invoke('desktop:meeting-action', meetingId, action, tabId),
   resizeTab: (tabId, cols, rows) => ipcRenderer.invoke('desktop:resize-tab', tabId, cols, rows),
   getTabBacklog: (tabId) => ipcRenderer.invoke('desktop:get-tab-backlog', tabId),
   getTabSnapshot: (tabId) => ipcRenderer.invoke('desktop:get-tab-snapshot', tabId),

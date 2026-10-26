@@ -109,6 +109,12 @@ import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
+import { MeetingError, MeetingHub, joinRequestId, MEETING_ID_PATTERN } from './meeting.js'
+import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
+import { MeetingOutbox } from './meeting-delivery.js'
+import { MeetingTurnReader } from './meeting-turns.js'
+import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
+import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
@@ -558,6 +564,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     tabs: state.tabs.map((tab) => ({ ...tab })),
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
+    meetings: meetingHub.views(),
   }
 }
 
@@ -1290,6 +1297,11 @@ function wireSessionEvents(id: string, session: PtySession): void {
     const profileId = tabsState.tabs.find((tab) => tab.id === id)?.workspaceProfileId
     if (profileId) gitService?.requestRefresh(profileId)
     if (session.activity === 'idle') observe(refreshSessionNames(), 'Could not read session names')
+    if (session.activity === 'idle') onMeetingIdle(id)
+  })
+  session.on('session-record', (line: string) => {
+    if (managedTabs.get(id)?.session !== session) return
+    onMeetingRecord(id, line)
   })
   session.on('activity-detail', () => {
     if (managedTabs.get(id)?.session !== session) return
@@ -1306,6 +1318,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
+    // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host).
+    if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) forgetMeetingSession(id)
+    else scheduleMeetingPump(0)
     syncTabState()
     refreshMenus()
     broadcastState()
@@ -1414,6 +1429,7 @@ async function createSessionTab(
     if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env)
   }
   finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
@@ -1681,7 +1697,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
  * typed in the prompt box and no key pressed just now. Keys pressed meanwhile are held back, then passed on in order. When
  * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
  */
-function sendSessionTask(tabId: string, text: string): SessionTaskSend {
+function sendSessionTask(tabId: string, text: string, needsWrite = true): SessionTaskSend {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -1699,7 +1715,7 @@ function sendSessionTask(tabId: string, text: string): SessionTaskSend {
     picker: draft.beforeFirstEnter,
     typing: heldInput.has(tabId),
     bracketedPaste: session.bracketedPaste,
-  })
+  }, needsWrite)
   if (decision.result !== 'sent') return decision
   heldInput.set(tabId, [])
   const release = (): void => {
@@ -1717,6 +1733,146 @@ function sendSessionTask(tabId: string, text: string): SessionTaskSend {
     release()
   }, 300)
   return decision
+}
+
+/** Types a one-line slash command (a meeting's `/add-dir`) at the same safe moment, holding back keys pressed meanwhile. */
+function sendSessionCommand(tabId: string, command: string): boolean {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  const managed = managedTabs.get(tabId)
+  const draft = promptDrafts.get(tabId)
+  if (!tab || !managed || !draft || tab.status !== 'running' || tab.remote) return false
+  const session = managed.session
+  const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
+  if (!ready || !draft.empty || !draft.quiet() || draft.beforeFirstEnter || heldInput.has(tabId)) return false
+  heldInput.set(tabId, [])
+  const text = command.replace(/[\u0000-\u001f\u007f]/g, '')
+  draft.note(text)
+  session.write(text)
+  setTimeout(() => {
+    if (managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
+    const held = heldInput.get(tabId) ?? []
+    heldInput.delete(tabId)
+    for (const data of held) { promptDrafts.get(tabId)?.note(data); managedTabs.get(tabId)?.session.write(data) }
+  }, 200)
+  return true
+}
+
+// Review meetings between sessions (docs/session-meeting-plan.md): the hub decides, the outbox types, the readers tell what
+// each session was asked and what it answered.
+function meetingRoot(): string { return join(app.getPath('userData'), 'meetings') }
+const meetingReaders = new Map<string, MeetingTurnReader>()
+const meetingWrites = new Map<string, Promise<void>>()
+let meetingPumpTimer: NodeJS.Timeout | null = null
+
+function meetingReader(tabId: string): MeetingTurnReader {
+  let reader = meetingReaders.get(tabId)
+  if (!reader) { reader = new MeetingTurnReader(); meetingReaders.set(tabId, reader) }
+  return reader
+}
+
+function meetingParty(tabId: string): { tabId: string; title: string; folder: string | null } {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  return { tabId, title: tab?.title ?? 'A session', folder: tab?.sessionCwd ?? managedTabs.get(tabId)?.session.sessionCwd ?? null }
+}
+
+const meetingOutbox = new MeetingOutbox({
+  sendTask: (tabId, text) => sendSessionTask(tabId, text, false),
+  sendCommand: sendSessionCommand,
+  sent: (tabId) => meetingReader(tabId).expectDesktopPrompt(),
+  refused: (tabId, delivery, message) => {
+    void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
+  },
+  now: () => Date.now(),
+})
+
+const meetingHub = new MeetingHub(meetingRoot, {
+  deliver: (tabId, delivery) => { meetingOutbox.enqueue(tabId, delivery); scheduleMeetingPump(0) },
+  cancel: (meetingId, tabId) => meetingOutbox.cancel(meetingId, tabId),
+  write: (meetingId, path, text) => {
+    // One meeting's files are written in order, so the transcript on disk is always the latest one.
+    const previous = meetingWrites.get(meetingId) ?? Promise.resolve()
+    const next = previous.then(() => writeMeetingFile(meetingRoot(), meetingId, path, text))
+      .catch((error) => writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {}))
+    meetingWrites.set(meetingId, next)
+  },
+  changed: () => broadcastState(),
+  notify: (_meetingId, message) => {
+    void writeAppLog(message).catch(() => {})
+    showNotification('Copilot CLI Desktop', message)
+  },
+}, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes }))
+
+const meetingControl = new MeetingControlServer(handleMeetingCommand)
+
+function scheduleMeetingPump(delayMs = 1_000): void {
+  if (meetingPumpTimer) {
+    if (delayMs > 0) return
+    clearTimeout(meetingPumpTimer)
+  }
+  meetingPumpTimer = setTimeout(() => {
+    meetingPumpTimer = null
+    if (meetingOutbox.pump()) scheduleMeetingPump()
+  }, delayMs)
+  meetingPumpTimer.unref()
+}
+
+function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): MeetingResponse {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab || tab.remote) return { ok: false, message: 'This session is not open in the desktop.' }
+  try {
+    switch (command) {
+      case 'start': {
+        // Only the person starts a meeting: the prompt this session is answering must be theirs, not a meeting message.
+        if (!meetingReader(tabId).answeringPerson) return { ok: false, message: 'Start a meeting only when the person asks for one in their own message.' }
+        const meeting = meetingHub.start(meetingParty(tabId), { topic: request.topic, post: request.text, changes: request.changes })
+        return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.` }
+      }
+      case 'round':
+      case 'propose-close':
+        return { ok: true, message: meetingHub.post(tabId, command, request.text, request.changes) }
+      case 'end':
+        meetingHub.end(tabId)
+        return { ok: true, message: 'The meeting is closed.' }
+      case 'status': {
+        const current = meetingHub.meetingOf(tabId)
+        const view = current ? meetingHub.views().find((meeting) => meeting.id === current.id) : undefined
+        if (!view) return { ok: true, message: 'This session is not in an open meeting.' }
+        const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title ?? id)
+        return { ok: true, message: `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s)${waiting.length ? `; waiting for ${waiting.join(', ')}` : ''}.` }
+      }
+    }
+  } catch (error) {
+    if (error instanceof MeetingError) return { ok: false, message: error.message }
+    throw error
+  }
+}
+
+/** A record appended to a session's event log: a prompt the person typed may ask to join a meeting. */
+function onMeetingRecord(tabId: string, line: string): void {
+  const prompt = meetingReader(tabId).consume(line)
+  if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
+  const id = joinRequestId(prompt.content)
+  if (!id) return
+  if (!meetingHub.isOpen(id)) { showNotification('Copilot CLI Desktop', `There is no open meeting ${id}.`); return }
+  try { meetingHub.join(meetingParty(tabId), id) }
+  catch (error) {
+    if (!(error instanceof MeetingError)) throw error
+    showNotification('Copilot CLI Desktop', error.message)
+  }
+}
+
+/** The session went idle: a prompt the desktop typed (if that is what it answered) is done. */
+function onMeetingIdle(tabId: string): void {
+  const turn = meetingReaders.get(tabId)?.finish() ?? null
+  const delivery = meetingOutbox.turnEnded(tabId)
+  if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
+  scheduleMeetingPump(0)
+}
+
+function forgetMeetingSession(tabId: string): void {
+  meetingHub.leave(tabId)
+  meetingOutbox.forget(tabId)
+  meetingReaders.delete(tabId)
 }
 
 /** Reads the session's name and acts on it: an unnamed tab takes Copilot's name, and a named one renames the session. */
@@ -1784,6 +1940,8 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
       if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
     }
     forgetSessionName(tabId)
+    // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
+    forgetMeetingSession(tabId)
     // Until the tab is marked unloaded, a browser request finds it closing rather than creating a new browser.
     closingBrowserTabs.add(tabId)
     const browser = sessionBrowsers.get(tabId)
@@ -1826,6 +1984,8 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       managedTabs.delete(tabId)
     }
     forgetSessionName(tabId)
+    forgetMeetingSession(tabId)
+    meetingControl.forget(tabId)
     // Read before the tab is dropped: its worktree is cleaned up once it is gone.
     const closing = tabsState.tabs.find((tab) => tab.id === tabId)
     const browser = sessionBrowsers.get(tabId)
@@ -1994,6 +2154,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env)
 
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
@@ -2849,6 +3010,8 @@ function settingsPreferences(): DesktopPreferences {
     browserOverrides: desktopConfig.browserOverrides,
     worktreeTimeoutMinutes: desktopConfig.worktreeTimeoutMinutes,
     worktreeCleanup: desktopConfig.worktreeCleanup,
+    meetingMaxRounds: desktopConfig.meetingMaxRounds,
+    meetingRoundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes,
   }
 }
 
@@ -3160,6 +3323,30 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
 })
+/** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
+ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown): Promise<void> => {
+  assertTrustedIpcSender(event)
+  if (typeof meetingId !== 'string' || !MEETING_ID_PATTERN.test(meetingId)) throw new Error('Invalid meeting')
+  if (action === 'stop') meetingHub.stop(meetingId)
+  else if (action === 'resume') meetingHub.resume(meetingId)
+  else if (action === 'join') {
+    if (!isSessionTabId(tabId)) throw new Error('Invalid session')
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    if (!tab || tab.remote) throw new Error('Only a local session can join a meeting')
+    // Nothing can be typed into a session without a running CLI: it would sit in the round as a reviewer that never answers.
+    if (tab.unloaded || !managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
+      throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
+    }
+    try { meetingHub.join(meetingParty(tabId), meetingId) }
+    catch (error) { throw error instanceof MeetingError ? new Error(error.message) : error }
+  } else if (action === 'transcript') {
+    const folder = meetingHub.folderOf(meetingId)
+    if (!folder) throw new Error('That meeting is no longer listed')
+    const failure = await shell.openPath(join(folder, 'transcript.md'))
+    if (failure) throw new Error(failure)
+  } else throw new Error('Invalid meeting action')
+})
+
 // Resolve with Copilot: the task goes to the session, and the repository is claimed for it in main, so the panel's writes
 // there are refused while it works, however often the panel is closed and reopened.
 ipcMain.handle('desktop:git-resolve', (event, profileId: unknown, repoId: unknown, tabId: unknown, text: unknown): SessionTaskSend => {
@@ -3306,6 +3493,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'browserOverrides',
     'worktreeTimeoutMinutes',
     'worktreeCleanup',
+    'meetingMaxRounds',
+    'meetingRoundTimeoutMinutes',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -3321,6 +3510,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('browserOverrides' in values && !isBrowserOverridesMode(values.browserOverrides))
     || ('worktreeTimeoutMinutes' in values && !isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes))
     || ('worktreeCleanup' in values && !isWorktreeCleanupMode(values.worktreeCleanup))
+    || ('meetingMaxRounds' in values && !isMeetingMaxRounds(values.meetingMaxRounds))
+    || ('meetingRoundTimeoutMinutes' in values && !isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes))
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -3345,6 +3536,9 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
   if (isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes)) desktopConfig.worktreeTimeoutMinutes = values.worktreeTimeoutMinutes
   if (isWorktreeCleanupMode(values.worktreeCleanup)) desktopConfig.worktreeCleanup = values.worktreeCleanup
+  // Open meetings keep their round limit; the round timeout applies from the next round.
+  if (isMeetingMaxRounds(values.meetingMaxRounds)) desktopConfig.meetingMaxRounds = values.meetingMaxRounds
+  if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -3773,6 +3967,7 @@ if (!app.requestSingleInstanceLock()) {
     }
     await pruneBrowserLaunches(app.getPath('userData'), launchId)
       .catch(error => writeAppLog(`Could not prune old browser helpers: ${String(error)}`))
+    await pruneMeetingFolders(meetingRoot(), Date.now())
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(
@@ -3859,7 +4054,8 @@ app.on('before-quit', (event) => {
     .then(() => configWriteQueue)
     .finally(async () => {
       usageService = null
-      await Promise.allSettled([service?.stop(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      meetingHub.dispose()
+      await Promise.allSettled([service?.stop(), meetingControl.close(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)
         .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))

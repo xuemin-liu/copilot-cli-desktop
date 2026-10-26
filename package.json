@@ -30,6 +30,7 @@
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",
+    "meeting:check": "npm run build && node scripts/electron-side-chat-check.mjs --meeting",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",

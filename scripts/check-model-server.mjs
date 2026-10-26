@@ -2,8 +2,9 @@ import { appendFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 
 /** `toolCall` ({ name, arguments }) makes the model request that tool once, when the CLI offers it and no
- * tool result is in the conversation yet; every later request gets the plain final answer. */
-export function createCheckModelServer({ recordingPath, delayMs = 0, toolCall } = {}) {
+ * tool result is in the conversation yet; every later request gets the plain final answer. `reply(request)` may
+ * script the answer instead: it returns an assistant message, or nothing for the default. */
+export function createCheckModelServer({ recordingPath, delayMs = 0, toolCall, reply } = {}) {
   let recording = Promise.resolve()
   return createServer((request, response) => {
     const chunks = []
@@ -19,7 +20,8 @@ export function createCheckModelServer({ recordingPath, delayMs = 0, toolCall } 
       }
       const offersTool = Array.isArray(parsed?.tools) && parsed.tools.some(tool => tool?.function?.name === toolCall?.name)
       const answeredTool = Array.isArray(parsed?.messages) && parsed.messages.some(message => message?.role === 'tool')
-      const message = toolCall && offersTool && !answeredTool
+      const scripted = parsed && reply ? reply(parsed) : undefined
+      const message = scripted ? scripted : toolCall && offersTool && !answeredTool
         ? { role: 'assistant', content: null, tool_calls: [{ id: 'call_ui_check_1', type: 'function', function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) } }] }
         : { role: 'assistant', content: 'The saved marker is desktop-side-chat-42.' }
       const respond = () => {

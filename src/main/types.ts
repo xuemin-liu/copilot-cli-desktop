@@ -4,6 +4,7 @@ import type { ResumeMode } from './resume-args.js'
 import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
+import type { MeetingView } from './meeting.js'
 
 export type RevealPathResult =
   | { ok: true }
@@ -175,6 +176,8 @@ export interface DesktopState {
   error: string | null
   /** The new-session dialog's default: new sessions keep their own Local Overrides (Settings → Session browser). */
   newSessionPrivateOverrides?: boolean
+  /** Review meetings between sessions, open ones and recently closed ones. Runtime-only. */
+  meetings?: MeetingView[]
 }
 
 /** Desktop event surfaced to the renderer/tray/notifications layer. */

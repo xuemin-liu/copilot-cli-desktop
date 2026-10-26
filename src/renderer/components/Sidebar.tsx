@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { JSX } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
+import type { MeetingView } from '../../main/meeting.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
 import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
@@ -36,6 +37,8 @@ function writeSidebarPreference(key: string, value: string): void {
 export interface SidebarProps {
   profiles: WorkspaceProfile[]
   tabs: DesktopSessionTab[]
+  /** Open meetings show a chip on each session taking part. */
+  meetings?: readonly MeetingView[]
   installedCliVersion: string | null
   activeProfileId: string | null
   activeTabId: string | null
@@ -63,6 +66,7 @@ export interface SidebarProps {
 export function Sidebar({
   profiles,
   tabs,
+  meetings = [],
   installedCliVersion,
   activeProfileId,
   activeTabId,
@@ -228,7 +232,12 @@ export function Sidebar({
       : null
     const worktreeLabel = tab.worktree ? (tab.worktree.branch ?? tab.worktree.name) : null
     const fanOutLabel = tab.fanOutLabel ?? null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const meeting = meetings.find((candidate) => candidate.stage !== 'closed'
+      && (candidate.hostTabId === tab.id || candidate.participants.some((participant) => participant.tabId === tab.id)))
+    const meetingLabel = meeting
+      ? `Meeting ${meeting.id} · ${meeting.hostTabId === tab.id ? 'host' : meeting.waitingFor.includes(tab.id) ? 'reviewing' : 'reviewer'} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
+      : null
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -245,7 +254,8 @@ export function Sidebar({
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
         {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
       </span>}
-      {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel) && <span className="sidebar-session-activity">
+      {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel || meetingLabel) && <span className="sidebar-session-activity">
+        {meetingLabel && <span className={`session-meeting-chip${meeting?.stage === 'paused' ? ' session-meeting-paused' : ''}`} title={meetingLabel}>⇄ {meeting!.id}{meeting!.hostTabId === tab.id ? ' host' : ''} · R{meeting!.round}</span>}
         {fanOutLabel && <span className="session-fanout-chip" title={`Started together: ${fanOutLabel}`}>{fanOutLabel}</span>}
         {worktreeLabel && <span className="session-worktree-chip" title={`Worktree ${tab.worktree?.path ?? ''}`}>⎇ {worktreeLabel}</span>}
         {detail ? statusLabel : ''}

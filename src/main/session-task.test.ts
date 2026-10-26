@@ -28,6 +28,13 @@ test('a session that cannot edit files or run Git here is refused, not pasted in
   }
 })
 
+test('a task that only asks for an answer (a meeting round) reaches read-only sessions and side chats, never remote ones', () => {
+  assert.equal(sessionTaskDecision({ ...ready, preset: 'read-only' }, false).result, 'sent')
+  assert.equal(sessionTaskDecision({ ...ready, sideChat: true }, false).result, 'sent')
+  assert.equal(sessionTaskDecision({ ...ready, remote: true }, false).result, 'refused')
+  assert.equal(sessionTaskDecision({ ...ready, status: 'crashed' }, false).result, 'refused')
+})
+
 test('the task is one bracketed paste that its own text cannot end early', () => {
   assert.equal(taskPasteSequence('one\r\ntwo\rthree'), '\u001b[200~one\ntwo\nthree\u001b[201~')
   assert.equal(taskPasteSequence('a\u001b[201~\rrm -rf\u0003'), '\u001b[200~a[201~\nrm -rf\u001b[201~', 'ESC and Ctrl+C are removed')
