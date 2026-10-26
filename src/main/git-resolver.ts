@@ -1,4 +1,5 @@
 import type { GitResolverView } from './git-types.js'
+import type { SessionTaskSend } from './session-task.js'
 
 /** How long a task that was sent may take to show up as the session's turn before the claim lapses. */
 const SENT_GRACE_MS = 60_000
@@ -34,6 +35,20 @@ export class GitResolverClaims {
 
   claim(folder: string, tabId: string, title: string, sent: boolean, state: SessionState): void {
     this.claims.set(folderKey(folder), { folder, tabId, title, sent, at: this.now(), armed: sent || state !== 'busy', started: false })
+  }
+
+  /**
+   * Hand a resolve task to a session and claim the repository for it, in one synchronous step. While a claim on the folder is
+   * working, another request is refused before anything is typed: a second click must never replace the first task's claim
+   * with a weaker one (pasted, not yet sent) and so release the lock while the first task runs.
+   */
+  request(folder: string, tabId: string, title: string, stateOf: (tabId: string) => SessionState, send: () => SessionTaskSend): SessionTaskSend {
+    const existing = this.forFolder(folder, stateOf)
+    if (existing?.working) return { result: 'refused', message: `Copilot is already working on this repository in “${existing.title}”. Wait for it to finish.` }
+    const state = stateOf(tabId)
+    const decision = send()
+    if (decision.result !== 'refused') this.claim(folder, tabId, title, decision.result === 'sent', state)
+    return decision
   }
 
   /** Move every claim on with what its session is doing now. Called on each activity change, so a turn that starts and ends

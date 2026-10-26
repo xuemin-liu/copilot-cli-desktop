@@ -16,9 +16,10 @@ export interface ResolveTarget {
 }
 
 /** Why Resolve with Copilot is unavailable, or null when it is available. */
-export function resolveBlocker(target: ResolveTarget | null, gitRunning: boolean): string | null {
+export function resolveBlocker(target: ResolveTarget | null, gitRunning: boolean, sending = false): string | null {
   if (!target) return 'Open a session in this window first.'
   if (target.taskBlocker) return target.taskBlocker
+  if (sending) return `Handing the task to “${target.title}”…`
   if (gitRunning) return 'Wait for the running Git operation to finish.'
   return null
 }

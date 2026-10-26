@@ -449,6 +449,7 @@ test('Resolve with Copilot is disabled, with the reason, when no session here ca
   assert.match(resolveBlocker(null, false) ?? '', /Open a session in this window/)
   assert.match(resolveBlocker({ title: 'A', taskBlocker: 'This session is read-only, so it cannot edit files or run Git.' }, false) ?? '', /read-only/)
   assert.match(resolveBlocker({ title: 'A' }, true) ?? '', /running Git operation/)
+  assert.match(resolveBlocker({ title: 'A' }, false, true) ?? '', /Handing the task to “A”/, 'a second click waits for the first request')
   const blocked = resolveBar({ blocker: 'This session is read-only, so it cannot edit files or run Git.' })
   assert.match(blocked, /<button[^>]*disabled[^>]*>Resolve with Copilot/)
   assert.match(blocked, /git-note">This session is read-only/)

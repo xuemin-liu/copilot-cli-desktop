@@ -45,6 +45,31 @@ test('a task pasted into a busy session does not count that turn; it claims the 
   assert.equal(claims.forFolder('D:\\one', () => state), null)
 })
 
+test('a second request while the first task works is refused before anything is typed, and the first claim stays', () => {
+  const claims = new GitResolverClaims(clock().now)
+  const state = (): SessionState => 'idle'
+  let typed = 0
+  const first = claims.request('D:\\one', 'tab-1', 'Fix login', state, () => { typed++; return { result: 'sent' } })
+  assert.deepEqual(first, { result: 'sent' })
+  // A rapid second click: the prompt box still holds the first paste, so this one would only be pasted.
+  const second = claims.request('d:/one', 'tab-1', 'Fix login', state, () => { typed++; return { result: 'busy', message: 'The prompt box is in use.' } })
+  assert.equal(second.result, 'refused')
+  assert.match(second.result === 'refused' ? second.message : '', /already working on this repository in “Fix login”/)
+  assert.equal(typed, 1, 'the second task was never typed or pasted')
+  assert.equal(claims.forFolder('D:\\one', state)?.working, true, 'the first task still holds the repository')
+})
+
+test('a request replaces a claim that is not working (a paste that was never sent), and a refused send claims nothing', () => {
+  const claims = new GitResolverClaims(clock().now)
+  const state = (): SessionState => 'idle'
+  claims.request('D:\\one', 'tab-1', 'A', state, () => ({ result: 'busy', message: 'The prompt box is in use.' }))
+  assert.equal(claims.forFolder('D:\\one', state)?.working, false)
+  assert.deepEqual(claims.request('D:\\one', 'tab-1', 'A', state, () => ({ result: 'sent' })), { result: 'sent' })
+  assert.equal(claims.forFolder('D:\\one', state)?.working, true)
+  assert.equal(claims.request('D:\\two', 'tab-2', 'B', state, () => ({ result: 'refused', message: 'read-only' })).result, 'refused')
+  assert.equal(claims.forFolder('D:\\two', state), null)
+})
+
 test('a claim lapses when its session is gone, when a sent task never shows up, and when a pasted one is never sent', () => {
   const time = clock()
   const claims = new GitResolverClaims(time.now)

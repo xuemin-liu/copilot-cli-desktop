@@ -3171,11 +3171,9 @@ ipcMain.handle('desktop:git-resolve', (event, profileId: unknown, repoId: unknow
   const service = gitServiceInstance()
   if (!service) return { result: 'refused', message: 'The Git panel has stopped.' }
   const folder = service.repoFolder(event.sender.id, profileId, repoId)
-  const state = sessionStateOf(tabId)
-  const decision = sendSessionTask(tabId, text)
-  if (decision.result === 'refused') return decision
-  gitResolvers.claim(folder, tabId, tabsState.tabs.find((tab) => tab.id === tabId)?.title ?? 'A session', decision.result === 'sent', state)
-  service.requestRefresh(profileId)
+  const title = tabsState.tabs.find((tab) => tab.id === tabId)?.title ?? 'A session'
+  const decision = gitResolvers.request(folder, tabId, title, sessionStateOf, () => sendSessionTask(tabId, text))
+  if (decision.result !== 'refused') service.requestRefresh(profileId)
   return decision
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {

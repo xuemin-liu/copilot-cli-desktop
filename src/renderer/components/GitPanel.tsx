@@ -243,6 +243,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [pullFailure, setPullFailure] = useState<PullFailure | null>(null)
   // The resolver last seen working, per repository, so the panel can say when it has finished.
   const lastResolver = useRef<Map<string, string>>(new Map())
+  const resolveInFlight = useRef(false)
+  const [resolveSending, setResolveSending] = useState(false)
 
   // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
   useEffect(() => {
@@ -592,9 +594,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     })
     const owner = repo.id
     const deliver = sendTask ?? ((repoId: string, tabId: string, task: string) => sendOrPaste(profileId, repoId, tabId, task, insert))
+    // One request at a time, until main's answer (and its claim) is in: a second click must not hand the task over twice.
+    if (resolveInFlight.current) return
+    resolveInFlight.current = true
+    setResolveSending(true)
     setActionError(null)
     setNotice(null)
-    deliver(owner, target.id, text).then(outcome => {
+    deliver(owner, target.id, text).finally(() => { resolveInFlight.current = false; setResolveSending(false) }).then(outcome => {
       if (outcome.result === 'refused') { setActionError(outcome.message); return }
       setPullFailure(null)
       setOutput('')
@@ -777,7 +783,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
           {ready && situation && repo.branch && !copilotWriting && (
             <GitResolveBar situation={situation} branch={repo.branch} upstream={repo.upstream} folder={repo.folder} target={promptTarget}
               outside={promptTarget?.cwd ? !folderWithin(repo.folder, promptTarget.cwd) : false}
-              blocker={resolveBlocker(promptTarget, operation !== null)} onResolve={resolveWithCopilot} />
+              blocker={resolveBlocker(promptTarget, operation !== null, resolveSending)} onResolve={resolveWithCopilot} />
           )}
           {copilotWriting && <p className="git-message git-message-info" role="status">{lockedReason}</p>}
           {notice && <p className="git-message git-message-info" role="status">{notice}</p>}
