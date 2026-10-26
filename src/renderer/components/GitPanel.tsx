@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
-import { composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
+import { composeCommitMessagePrompt, composeDiffPrompt, composeResolvePullPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
+import type { ResolvePullSituation } from '../../main/git-prompt.js'
+import { filesInTheWay } from '../../main/git-sync.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
+import { GitResolveBar, folderWithin, resolveBlocker } from './GitResolveBar.js'
+import type { ResolveTarget } from './GitResolveBar.js'
 import { errorMessage } from '../errors.js'
 import { insertIntoPrompt } from '../prompt-insert.js'
 import { GitCommitBox } from './GitCommitBox.js'
@@ -20,8 +24,11 @@ import { GitReviewCard } from './GitReviewCard.js'
 
 export interface GitPanelProps {
   profileId: string
-  /** The session whose prompt box receives text, or null when there is none or it lives in another window. */
-  promptTarget: { id: string; title: string } | null
+  /** The session whose prompt box receives text, or null when there is none or it lives in another window. `cwd` is the folder it
+   * works in; `taskBlocker` says why it cannot take a task that edits files and runs Git. */
+  promptTarget: ({ id: string; cwd?: string | null } & ResolveTarget) | null
+  /** Sessions in the middle of something (a turn, an approval, starting up). */
+  busySessionIds?: readonly string[]
   /** The active session's worktree folder, when it runs in one: the panel shows that worktree's repository entry. */
   sessionWorktreePath?: string | null
   /** Every session that runs in a worktree, so the worktree list can say who uses which. */
@@ -31,7 +38,27 @@ export interface GitPanelProps {
   onClose(): void
   /** How text reaches a prompt box. Defaults to the app's own prompt insertion. */
   insert?: (tabId: string, text: string) => void
+  /** How a task reaches a session: sent when it is safe to, otherwise pasted. Defaults to main's send, then `insert`. */
+  sendTask?: (tabId: string, text: string) => Promise<TaskDelivery>
 }
+
+/** What became of a task for a session. */
+export type TaskDelivery = { result: 'sent' } | { result: 'pasted'; message: string } | { result: 'refused'; message: string }
+
+/** Main types the task and presses Enter only at a safe moment; otherwise it is pasted for the person to send. */
+async function sendOrPaste(tabId: string, text: string, insert: (tabId: string, text: string) => void): Promise<TaskDelivery> {
+  const outcome = await window.copilotDesktop.sendSessionTask(tabId, text)
+  if (outcome.result !== 'busy') return outcome
+  insert(tabId, text)
+  return { result: 'pasted', message: outcome.message }
+}
+
+/** A pull that failed in a way Copilot can finish, for the repository, branch and commit it was asked for. */
+interface PullFailure { repoId: string; branch: string; headOid: string; reason: 'diverged' | 'local-changes'; output: string }
+
+/** Copilot was asked to resolve a pull: in which repository, by which session, and whether that session has started on it
+ * (`armed` once it has been idle since the task arrived, `started` once it has worked after that). */
+interface Resolving { repoId: string; tabId: string; title: string; armed: boolean; started: boolean }
 
 type Tab = 'changes' | 'history' | 'branches'
 interface Selection { path: string; staged: boolean }
@@ -171,7 +198,7 @@ function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAc
   )
 }
 
-export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
+export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [], busySessionIds = [] }: GitPanelProps): JSX.Element {
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
@@ -218,6 +245,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const amendPrefill = useRef(false)
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
+  const [pullFailure, setPullFailure] = useState<PullFailure | null>(null)
+  const [resolving, setResolving] = useState<Resolving | null>(null)
 
   // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
   useEffect(() => {
@@ -429,9 +458,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     setNotice(null)
     setHooks(null)
     setPublish(null)
+    setPullFailure(null)
     const seenBranch = seen
     task().then((result: GitOperationResult) => {
       if (result.status) setStatus(result.status)
+      if (kind === 'pull' && seenBranch && (result.reason === 'diverged' || result.reason === 'local-changes')) {
+        setPullFailure({ repoId: owner.id, branch: seenBranch.branch, headOid: seenBranch.headOid, reason: result.reason, output: result.output })
+      }
       if (result.ok) {
         setNotice(result.message)
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
@@ -530,6 +563,50 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const pickEntry = (entry: GitEntryView, staged: boolean): void => { setSelection({ path: entry.path, staged }); setNotice(null) }
   const canInsert = promptTarget !== null
 
+  // Resolve with Copilot: after a pull Copilot can finish, or while a merge is stopped on conflicts.
+  const failure = pullFailure && repo && pullFailure.repoId === repo.id && pullFailure.branch === repo.branch && pullFailure.headOid === repo.headOid ? pullFailure : null
+  const situation: ResolvePullSituation | null = !repo || repo.detached || repo.branch === null ? null
+    : (currentStatus?.conflicted.length ?? 0) > 0 ? 'conflicts' : failure?.reason ?? null
+  const resolvingHere = resolving !== null && resolving.repoId === repo?.id
+  const resolverBusy = resolving !== null && busySessionIds.includes(resolving.tabId)
+  // While the session it asked works on this repository, the panel writes nothing to it: the two would race.
+  const copilotWriting = resolvingHere && resolverBusy
+  const writesLocked = operation !== null || copilotWriting
+  const lockedReason = copilotWriting ? `Copilot is working on this repository in “${resolving?.title ?? ''}”. Wait for it to finish.` : null
+  useEffect(() => {
+    if (!resolving) return
+    // A task pasted into a busy session waits for that turn to end first; only the turn after it is the one that resolves.
+    if (!resolving.armed) { if (!resolverBusy) setResolving({ ...resolving, armed: true }) }
+    else if (resolverBusy && !resolving.started) setResolving({ ...resolving, started: true })
+    else if (!resolverBusy && resolving.started) {
+      // The panel refreshes on the session's activity anyway; this only says the wait is over.
+      setResolving(null)
+      setNotice(`“${resolving.title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.`)
+    }
+  }, [resolving, resolverBusy])
+
+  const resolveWithCopilot = (): void => {
+    if (!repo || !repo.branch || !situation || !promptTarget || !currentStatus) return
+    const target = promptTarget
+    const text = composeResolvePullPrompt({
+      repoName: repo.name, folder: repo.folder, branch: repo.branch, upstream: repo.upstream, ahead: repo.ahead ?? 0, behind: repo.behind ?? 0, situation,
+      output: failure?.output ?? '', blocked: failure?.reason === 'local-changes' ? filesInTheWay(failure.output) : [], conflicted: currentStatus.conflicted.map(entry => entry.path),
+    })
+    const owner = repo.id
+    const deliver = sendTask ?? ((tabId: string, task: string) => sendOrPaste(tabId, task, insert))
+    setActionError(null)
+    setNotice(null)
+    deliver(target.id, text).then(outcome => {
+      if (outcome.result === 'refused') { setActionError(outcome.message); return }
+      setPullFailure(null)
+      setOutput('')
+      setResolving({ repoId: owner, tabId: target.id, title: target.title, armed: outcome.result === 'sent' || !busySessionIds.includes(target.id), started: false })
+      setNotice(outcome.result === 'sent'
+        ? `Asked “${target.title}” to pull and resolve the conflicts. Follow it in the session, and answer if it asks you something.`
+        : `${outcome.message} The task is in the prompt box of “${target.title}”; press Enter there when it is ready.`)
+    }).catch((cause: unknown) => setActionError(errorMessage(cause)))
+  }
+
   return (
     <aside className="git-panel" aria-label="Git">
       <header className="git-panel-header">
@@ -570,7 +647,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
           {ready && (
             <GitSyncBar upstream={repo.upstream} ahead={repo.ahead ?? 0} behind={repo.behind ?? 0}
               noBranch={repo.detached || repo.branch === null || repo.headOid === null}
-              locked={operation !== null} running={operation !== null && (operation.kind === 'fetch' || operation.kind === 'pull' || operation.kind === 'push') ? operation.kind : null}
+              locked={writesLocked} running={operation !== null && (operation.kind === 'fetch' || operation.kind === 'pull' || operation.kind === 'push') ? operation.kind : null}
               progress={progress}
               publish={publish && publish.repoKey === repo.relativePath && publish.branch === repo.branch && publish.headOid === repo.headOid ? { branch: publish.branch, remotes: publish.remotes, remote: publish.remote } : null}
               onSync={kind => sync(kind)} onChooseRemote={remote => setPublish(current => current ? { ...current, remote } : current)}
@@ -597,20 +674,20 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                   {currentStatus && (
                     <div className="git-files">
                       <EntryGroup title="Conflicts" entries={currentStatus.conflicted} codeOf={() => 'U'} staged={false} selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '✓', verb: 'Mark resolved:', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }} />
+                        rowAction={{ symbol: '✓', verb: 'Mark resolved:', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }} />
                       <EntryGroup title="Staged" entries={currentStatus.staged} codeOf={entry => entry.index} staged selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '−', verb: 'Unstage', disabled: operation !== null, run: entry => changeIndex('unstage', [entry]) }}
-                        groupAction={{ label: 'Unstage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only unstage the files shown' : 'Unstage every staged file', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('unstage', currentStatus.staged) }} />
+                        rowAction={{ symbol: '−', verb: 'Unstage', disabled: writesLocked, run: entry => changeIndex('unstage', [entry]) }}
+                        groupAction={{ label: 'Unstage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only unstage the files shown' : 'Unstage every staged file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('unstage', currentStatus.staged) }} />
                       <EntryGroup title="Changes" entries={currentStatus.unstaged} codeOf={entry => entry.worktree} staged={false} selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '+', verb: 'Stage', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }}
-                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: operation !== null, applies: canDiscard, run: entry => discard([entry]) }}
-                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Discard every changed file. You will be asked first, and a copy of each is saved.', disabled: operation !== null || currentStatus.truncated, run: () => discard(currentStatus.unstaged.filter(canDiscard)) }}
-                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every changed file (not untracked ones)', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.unstaged) }} />
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }}
+                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard([entry]) }}
+                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Discard every changed file. You will be asked first, and a copy of each is saved.', disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.unstaged.filter(canDiscard)) }}
+                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every changed file (not untracked ones)', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.unstaged) }} />
                       <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '+', verb: 'Stage', disabled: operation !== null, run: entry => changeIndex('stage', [entry]) }}
-                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: operation !== null, applies: canDiscard, run: entry => discard([entry]) }}
-                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Move every untracked file to the Recycle Bin. You will be asked first.', disabled: operation !== null || currentStatus.truncated, run: () => discard(currentStatus.untracked) }}
-                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every untracked file', disabled: operation !== null || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.untracked) }} />
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }}
+                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard([entry]) }}
+                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Move every untracked file to the Recycle Bin. You will be asked first.', disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.untracked) }}
+                        groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every untracked file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.untracked) }} />
                       {currentStatus.truncated && <p className="git-note" role="status">Showing the first {currentStatus.staged.length + currentStatus.unstaged.length + currentStatus.untracked.length} of {currentStatus.totalEntries.toLocaleString()} changed files.</p>}
                     </div>
                   )}
@@ -625,7 +702,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       draftTitle={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}
                       onDraft={draftMessage} onCommit={() => commit(null)} onCancel={cancelWrite}
                       hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)}
-                      amend={amendState} onToggleAmend={toggleAmend} />
+                      amend={amendState} onToggleAmend={toggleAmend} lockedReason={lockedReason} />
                   )}
 
                   {selection && (
@@ -668,12 +745,12 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
               {tab === 'branches' && (
                 <>
                   <GitBranchList branches={branches && branches.repoId === repo.id ? branches.items : null} error={branchError}
-                    locked={operation !== null || repo.headOid === null}
+                    locked={writesLocked || repo.headOid === null}
                     lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
                     newName={newBranch} onNewNameChange={setNewBranch}
                     onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
                   <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions}
-                    locked={operation !== null} onRemove={removeWorktree} />
+                    locked={writesLocked} onRemove={removeWorktree} />
                 </>
               )}
 
@@ -700,6 +777,12 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
           {actionError && <p className="git-message git-message-error" role="alert">{actionError}</p>}
           {output && <pre className="git-output" aria-label="What Git printed">{output}</pre>}
+          {ready && situation && repo.branch && !copilotWriting && (
+            <GitResolveBar situation={situation} branch={repo.branch} upstream={repo.upstream} folder={repo.folder} target={promptTarget}
+              outside={promptTarget?.cwd ? !folderWithin(repo.folder, promptTarget.cwd) : false}
+              blocker={resolveBlocker(promptTarget, operation !== null, resolvingHere && resolving.started)} onResolve={resolveWithCopilot} />
+          )}
+          {copilotWriting && <p className="git-message git-message-info" role="status">{lockedReason}</p>}
           {notice && <p className="git-message git-message-info" role="status">{notice}</p>}
         </div>
       )}

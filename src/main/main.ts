@@ -108,6 +108,7 @@ import { listStoredSessions, type SessionCatalogCache, type StoredSession } from
 import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
+import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
@@ -1661,6 +1662,49 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   return true
 }
 
+/**
+ * Types a task the desktop composed into the session and presses Enter, at the same safe moment as `/rename`: idle, nothing
+ * typed in the prompt box and no key pressed just now. Keys pressed meanwhile are held back, then passed on in order. When
+ * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
+ */
+function sendSessionTask(tabId: string, text: string): SessionTaskSend {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  const managed = managedTabs.get(tabId)
+  const draft = promptDrafts.get(tabId)
+  if (!tab || !managed || !draft) return { result: 'refused', message: 'This session is not running. Start or resume it first.' }
+  const session = managed.session
+  const decision = sessionTaskDecision({
+    status: tab.status,
+    activity: session.activity,
+    promptVisible: session.recentOutputText.includes('open sidebar'),
+    preset: tab.sessionPermissionPreset,
+    sideChat: tab.sideChat === true,
+    remote: tab.remote,
+    draft: !draft.empty,
+    recentInput: !draft.quiet(),
+    picker: draft.beforeFirstEnter,
+    typing: heldInput.has(tabId),
+    bracketedPaste: session.bracketedPaste,
+  })
+  if (decision.result !== 'sent') return decision
+  heldInput.set(tabId, [])
+  const release = (): void => {
+    const held = heldInput.get(tabId) ?? []
+    heldInput.delete(tabId)
+    const current = managedTabs.get(tabId)?.session
+    for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
+  }
+  const paste = taskPasteSequence(text)
+  draft.note(paste)
+  session.write(paste)
+  // Copilot needs a moment to take a large paste before Enter submits it.
+  setTimeout(() => {
+    if (managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
+    release()
+  }, 300)
+  return decision
+}
+
 /** Reads the session's name and acts on it: an unnamed tab takes Copilot's name, and a named one renames the session. */
 async function syncSessionName(tabId: string): Promise<boolean> {
   await readSessionName(tabId)
@@ -3101,6 +3145,13 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   if (held) { held.push(data); return }
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
+})
+ipcMain.handle('desktop:session-send-task', (event, tabId: unknown, text: unknown): SessionTaskSend => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || typeof text !== 'string' || text.trim() === '') throw new Error('Invalid session task')
+  // Only the window that shows the session's terminal may type into it, as for its keystrokes.
+  if (!ownsSessionTerminal(event, tabId)) return { result: 'refused', message: 'This session is open in another window.' }
+  return sendSessionTask(tabId, text)
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {
   assertTrustedIpcSender(event)

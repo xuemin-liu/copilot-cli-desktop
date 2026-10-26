@@ -6,6 +6,8 @@ import { GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/G
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import type { AmendState } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
+import { GitResolveBar, folderWithin, resolveBlocker } from '../renderer/components/GitResolveBar.js'
+import type { GitResolveBarProps } from '../renderer/components/GitResolveBar.js'
 import { GitSyncBar, pullBlocker, pushBlocker } from '../renderer/components/GitSyncBar.js'
 import type { GitSyncBarProps } from '../renderer/components/GitSyncBar.js'
 import { GitBranchList, upstreamLabel } from '../renderer/components/GitBranchList.js'
@@ -154,7 +156,7 @@ test('an unapproved hook is named in full and must be allowed before the commit 
 })
 
 const summary = (overrides: Partial<GitRepoSummary> = {}): GitRepoSummary => ({
-  id: 'repo-2', name: 'beta', relativePath: 'beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
+  id: 'repo-2', name: 'beta', relativePath: 'beta', folder: 'D:\\one\\beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
   changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], worktreeOf: null, configHash: null, ...overrides,
 })
 
@@ -377,7 +379,7 @@ test('inside a hunk, content starting with +++ or --- is an added or deleted lin
 
 test('a worktree repository row says so, and the worktree list names branch, folder, flags and the session using it', () => {
   const summary: GitRepoSummary = {
-    id: 'repo-2', name: 'desktop-fix-login-abc123', relativePath: 'D:\\one.worktrees\\desktop-fix-login-abc123', kind: 'worktree', worktreeOf: 'repo-1', state: 'ready',
+    id: 'repo-2', name: 'desktop-fix-login-abc123', relativePath: 'D:\\one.worktrees\\desktop-fix-login-abc123', folder: 'D:\\one.worktrees\\desktop-fix-login-abc123', kind: 'worktree', worktreeOf: 'repo-1', state: 'ready',
     branch: 'desktop-fix-login-abc123', detached: false, upstream: null, ahead: null, behind: null, changeCount: 1, generation: 1, headOid: 'a'.repeat(40),
     error: null, reviewItems: [], configHash: null,
   }
@@ -425,4 +427,44 @@ test('Remove is offered only for a merged, unlocked, unused worktree that is not
   const busy = renderToStaticMarkup(<GitWorktreeList worktrees={[main, base]} error={null} sessions={sessions} onRemove={() => undefined} locked />)
   assert.match(busy, /disabled="" aria-label="Remove worktree desktop-done-abc123"/, 'everything is locked while a write runs')
   assert.doesNotMatch(renderToStaticMarkup(<GitWorktreeList worktrees={[main, base]} error={null} sessions={sessions} />), /git-worktree-remove/, 'without a handler nothing is offered')
+})
+
+const resolveBar = (overrides: Partial<GitResolveBarProps> = {}): string => renderToStaticMarkup(
+  <GitResolveBar situation="diverged" branch="main" upstream="origin/main" folder="D:\one" target={{ title: 'Fix login' }} outside={false} blocker={null} onResolve={() => undefined} {...overrides} />)
+
+test('Resolve with Copilot says what Copilot will do, and where', () => {
+  const ready = resolveBar()
+  assert.match(ready, /merge origin\/main into main and resolve any conflicts/)
+  assert.doesNotMatch(ready, /<button[^>]*disabled[^>]*>Resolve with Copilot/)
+  assert.match(ready, /title="Ask “Fix login” to do it in D:\\one\. It merges and commits, but never pushes/)
+  assert.match(resolveBar({ situation: 'local-changes' }), /ask you what to do with them/)
+  assert.match(resolveBar({ situation: 'conflicts' }), /resolve these conflicts and finish the merge/)
+  const outside = resolveBar({ outside: true })
+  assert.match(outside, /outside the session&#x27;s folder|outside the session’s folder/)
+  assert.match(outside, /may ask for permission/)
+})
+
+test('Resolve with Copilot is disabled, with the reason, when no session here can do it', () => {
+  assert.equal(resolveBlocker({ title: 'A' }, false, false), null)
+  assert.match(resolveBlocker(null, false, false) ?? '', /Open a session in this window/)
+  assert.match(resolveBlocker({ title: 'A', taskBlocker: 'This session is read-only, so it cannot edit files or run Git.' }, false, false) ?? '', /read-only/)
+  assert.match(resolveBlocker({ title: 'A' }, true, false) ?? '', /running Git operation/)
+  assert.match(resolveBlocker({ title: 'A' }, false, true) ?? '', /already working on this pull/)
+  const blocked = resolveBar({ blocker: 'This session is read-only, so it cannot edit files or run Git.' })
+  assert.match(blocked, /<button[^>]*disabled[^>]*>Resolve with Copilot/)
+  assert.match(blocked, /git-note">This session is read-only/)
+})
+
+test('a repository inside the session\'s folder is told apart from one outside it, as Windows compares paths', () => {
+  assert.equal(folderWithin('D:\\one', 'd:/one/'), true)
+  assert.equal(folderWithin('D:\\one\\beta', 'D:\\one'), true)
+  assert.equal(folderWithin('D:\\one', 'D:\\one.worktrees\\desktop-x'), false, 'the main worktree is outside a worktree session')
+  assert.equal(folderWithin('D:\\one-two', 'D:\\one'), false)
+  assert.equal(folderWithin('D:\\one', ''), false)
+})
+
+test('Commit waits, and says why, while Copilot works on the repository', () => {
+  const locked = commitBox({ lockedReason: 'Copilot is working on this repository in “Fix login”. Wait for it to finish.' })
+  assert.match(locked, /<button[^>]*disabled[^>]*>Commit 2 files/)
+  assert.match(locked, /Copilot is working on this repository/)
 })

@@ -35,6 +35,8 @@ export interface GitCommitBoxProps {
   /** Null when the repository has no commit to amend. */
   amend: AmendState | null
   onToggleAmend(on: boolean): void
+  /** Set while something outside the panel (Copilot resolving a pull) is writing to the repository: Commit waits, and says why. */
+  lockedReason?: string | null
 }
 
 /** Why Commit is unavailable, or null when it is available. */
@@ -57,7 +59,7 @@ export function commitBlocker(stagedCount: number, conflictCount: number, messag
 export function GitCommitBox(props: GitCommitBoxProps): JSX.Element {
   const { stagedCount, conflictCount, message, busy, hooks, amend } = props
   const amending = amend?.on === true
-  const blocker = commitBlocker(stagedCount, conflictCount, message, amend)
+  const blocker = props.lockedReason ?? commitBlocker(stagedCount, conflictCount, message, amend)
   const canCommit = blocker === null && busy === null && hooks === null
   // Fetch, pull and push show their own output and Cancel in the sync bar.
   const writing = busy === 'stage' || busy === 'unstage' || busy === 'commit'

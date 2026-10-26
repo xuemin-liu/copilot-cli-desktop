@@ -12,6 +12,7 @@ import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
+import type { SessionTaskSend } from '../main/session-task.js'
 import type { GitBranchView, GitDiffView, GitHeadCommitView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
@@ -92,6 +93,8 @@ export interface CopilotDesktopBridge {
   restartTab(tabId: string): Promise<DesktopState>
   unloadTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
+  /** Type a desktop-composed task into the session and press Enter, when that is safe; otherwise `busy`, and the caller pastes it. */
+  sendSessionTask(tabId: string, text: string): Promise<SessionTaskSend>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>

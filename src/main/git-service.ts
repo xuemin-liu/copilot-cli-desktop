@@ -551,6 +551,7 @@ export class GitService {
       id: repo.id,
       name: repo.discovered.root.split('\\').filter(Boolean).at(-1) ?? repo.discovered.root,
       relativePath: relative,
+      folder: repo.discovered.root,
       kind: repo.discovered.kind,
       worktreeOf: repo.worktreeOfId,
       state: repo.state,

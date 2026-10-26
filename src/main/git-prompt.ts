@@ -215,3 +215,71 @@ export function composeReviewCommentsPrompt(input: { repoName: string; path: str
   while (text.length > PROMPT_BUDGET && count > 0) { count -= 1; text = build(count, quotes) }
   return { text, included: count, quotesDropped: !quotes && !withhold }
 }
+
+/** Why the panel's pull did not happen: the branches diverged, local changes were in the way, or a merge is already stopped on conflicts. */
+export type ResolvePullSituation = 'diverged' | 'local-changes' | 'conflicts'
+
+export interface ResolvePullPromptInput {
+  repoName: string
+  /** The repository's absolute folder: the main worktree or a linked one, which may not be the session's own folder. */
+  folder: string
+  branch: string
+  upstream: string | null
+  ahead: number
+  behind: number
+  situation: ResolvePullSituation
+  /** What Git printed for the failed pull (redacted by main); empty when there was no pull. */
+  output: string
+  /** Files Git said local changes would overwrite. */
+  blocked: readonly string[]
+  /** Files with unresolved conflicts. */
+  conflicted: readonly string[]
+}
+
+const MAX_OUTPUT_CHARS = 4_000
+const MAX_NAMES_CHARS = 1_500
+
+/** A fence longer than any run of backticks in `text`, so the text cannot close it. */
+function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map(match => match[0].length))
+  return '`'.repeat(Math.max(3, longest + 1))
+}
+
+/**
+ * The task the person would otherwise type in the terminal after a failed pull: pull with a merge and resolve the conflicts. It
+ * names the folder, because the selected repository is often not the session's own folder (a worktree session pulling the main
+ * worktree), and it rules out what would lose work or rewrite shared history.
+ */
+export function composeResolvePullPrompt(input: ResolvePullPromptInput): string {
+  const upstream = input.upstream ? inlineQuote(input.upstream) : 'its upstream'
+  const counts = input.ahead > 0 || input.behind > 0 ? ` (${input.ahead} local commit${input.ahead === 1 ? '' : 's'} not on ${upstream}, ${input.behind} new commit${input.behind === 1 ? '' : 's'} on it)` : ''
+  const where = `the Git repository ${inlineQuote(input.repoName)} at ${inlineQuote(input.folder)}`
+  const why = input.situation === 'conflicts'
+    ? `In ${where}, a merge into ${inlineQuote(input.branch)} has stopped on conflicts.`
+    : input.situation === 'local-changes'
+      ? `In ${where}, pulling ${upstream} into ${inlineQuote(input.branch)} failed because uncommitted changes would be overwritten${counts}.`
+      : `In ${where}, ${inlineQuote(input.branch)} could not be fast-forwarded to ${upstream} because both have new commits${counts}.`
+  const steps = [
+    'Work in that folder (change to it first if it is not your current folder).',
+    input.situation === 'conflicts'
+      ? 'Finish the merge that is in progress (`git status` shows it). Do not abort it.'
+      : `Pull ${upstream} into ${inlineQuote(input.branch)} with a merge.`,
+    'Do not rebase, force, `git reset --hard`, discard changes, or push.',
+    'If uncommitted changes are in the way, stop and ask me before stashing, committing or discarding them.',
+    'Resolve every conflict, keeping the intent of both sides, and leave no conflict markers.',
+    'Run the project\'s quick checks (type check, tests) if it has them.',
+    'Commit the merge with Git\'s default message.',
+    'Finish with a short note for each conflicted file saying what you kept from each side.',
+  ]
+  const parts = [`${why}\n\nPlease:\n${steps.map((step, index) => `${index + 1}. ${step}`).join('\n')}\n`]
+  if (input.blocked.length > 0) parts.push(`\nFiles in the way: ${listNames(input.blocked, MAX_NAMES_CHARS)}.\n`)
+  if (input.conflicted.length > 0) parts.push(`\nConflicted files: ${listNames(input.conflicted, MAX_NAMES_CHARS)}.\n`)
+  const printed = maskSecrets(input.output.replace(/\r\n/g, '\n').replace(CONTROL_CHARS, '').trim()).text
+  if (printed !== '') {
+    const fitted = fitLines(printed, MAX_OUTPUT_CHARS)
+    const body = fitted.omittedLines > 0 ? `${fitted.text}\n[… ${fitted.omittedLines} more line${fitted.omittedLines === 1 ? '' : 's'} not shown]` : fitted.text
+    const fence = fenceFor(body)
+    parts.push(`\nWhat Git printed:\n${fence}text\n${body}\n${fence}\n`)
+  }
+  return parts.join('')
+}

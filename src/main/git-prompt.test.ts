@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, composeReviewCommentsPrompt, fitLines, listNames, looksSensitivePath, maskSecrets, privateKeyLineRanges } from './git-prompt.js'
+import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, composeResolvePullPrompt, composeReviewCommentsPrompt, fitLines, listNames, looksSensitivePath, maskSecrets, privateKeyLineRanges } from './git-prompt.js'
 import type { DiffComment } from './git-prompt.js'
 import type { GitDiffView } from './git-types.js'
 
@@ -207,4 +207,41 @@ test('private-key block ranges are found in a diff, and a comment captured insid
     { side: 'new', line: 3, index: 3, quote: '+MIIEowIBAAKCAQEAu7secretsecretsecret', redacted: false, text: 'rotate this key' },
   ] })
   assert.match(unflagged.text, /MIIEow/, 'the composer trusts the flag: redaction is decided where the quote is captured (diff-comments.ts)')
+})
+
+const resolveInput = { repoName: 'app', folder: 'D:\\work\\app', branch: 'main', upstream: 'origin/main', ahead: 2, behind: 3, output: '', blocked: [] as string[], conflicted: [] as string[] }
+
+test('the resolve prompt names the folder and the branches, and rules out what loses work', () => {
+  const text = composeResolvePullPrompt({ ...resolveInput, situation: 'diverged', output: 'fatal: Not possible to fast-forward, aborting.' })
+  assert.match(text, /`app` at `D:\\work\\app`/)
+  assert.match(text, /`main` could not be fast-forwarded to `origin\/main` because both have new commits \(2 local commits not on `origin\/main`, 3 new commits on it\)/)
+  assert.match(text, /Pull `origin\/main` into `main` with a merge\./)
+  assert.match(text, /Do not rebase, force, `git reset --hard`, discard changes, or push\./)
+  assert.match(text, /stop and ask me before stashing, committing or discarding/)
+  assert.match(text, /Commit the merge/)
+  assert.match(text, /What Git printed:\n```text\nfatal: Not possible to fast-forward, aborting\.\n```/)
+  assert.ok(text.length < PROMPT_BUDGET)
+})
+
+test('the resolve prompt for local changes names the files in the way; for a stopped merge it finishes that merge', () => {
+  const blocked = composeResolvePullPrompt({ ...resolveInput, situation: 'local-changes', blocked: ['src/a.ts', 'b.txt'], output: 'error: Your local changes …' })
+  assert.match(blocked, /failed because uncommitted changes would be overwritten/)
+  assert.match(blocked, /Files in the way: src\/a\.ts, b\.txt\./)
+  const stopped = composeResolvePullPrompt({ ...resolveInput, situation: 'conflicts', upstream: null, ahead: 0, behind: 0, conflicted: ['x.ts'] })
+  assert.match(stopped, /a merge into `main` has stopped on conflicts/)
+  assert.match(stopped, /Finish the merge that is in progress/)
+  assert.doesNotMatch(stopped, /Pull .* with a merge/)
+  assert.match(stopped, /Conflicted files: x\.ts\./)
+  assert.doesNotMatch(stopped, /What Git printed/, 'no pull ran, so there is no output section')
+})
+
+test('the resolve prompt stays inside the budget, masks credentials and cannot be closed by backticks in the output', () => {
+  const output = ['To https://user:hunter2secret@example.org/r.git', '````', ...Array.from({ length: 2_000 }, (_item, index) => `line ${index} ${'x'.repeat(40)}`)].join('\n')
+  const many = Array.from({ length: 5_000 }, (_item, index) => `src/file-${index}.ts`)
+  const text = composeResolvePullPrompt({ ...resolveInput, situation: 'diverged', output, conflicted: many, blocked: many })
+  assert.ok(text.length < PROMPT_BUDGET, `${text.length}`)
+  assert.equal(text.includes('hunter2secret'), false)
+  assert.match(text, /What Git printed:\n`````text\n/, 'a fence longer than the four backticks inside')
+  assert.match(text, /more lines not shown\]/)
+  assert.match(text, /Conflicted files: .*, and \d+ more\./)
 })

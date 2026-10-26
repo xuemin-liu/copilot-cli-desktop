@@ -24,6 +24,8 @@ export interface GitRepoSummary {
   name: string
   /** Relative to the project folder; `.` for the project itself; the absolute folder for a worktree (which lives outside). */
   relativePath: string
+  /** The repository's absolute folder (its working tree), as Windows spells it. */
+  folder: string
   kind: GitRepoKind
   /** For a worktree: the id of the repository it belongs to, when that repository is listed. */
   worktreeOf: string | null

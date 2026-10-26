@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { fastForwardArgs, fetchArgs, fetchRefspecsArgs, pushArgs, remoteUrlArgs, upstreamConfigArgs, upstreamRefArgs } from './git-commands.js'
-import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
+import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure, filesInTheWay } from './git-sync.js'
 import type { GitRunResult } from './git-runner.js'
 
 const failed = (stderr: string): GitRunResult => ({ exitCode: 128, stdout: Buffer.alloc(0), stderr, stdoutTruncated: false, timedOut: false, cancelled: false, durationMs: 1 })
@@ -57,12 +57,24 @@ test('failures are told apart: credentials, a refused push, a pull that cannot f
     [' ! [rejected]        main -> main (non-fast-forward)', 'push', 'rejected'],
     ['fatal: Not possible to fast-forward, aborting.', 'pull', 'diverged'],
     ['fatal: unable to access \'https://example.org/r.git/\': Could not resolve host: example.org', 'fetch', 'failed'],
-    ['error: Your local changes to the following files would be overwritten by merge:\n\ta.txt', 'pull', 'failed'],
+    ['error: Your local changes to the following files would be overwritten by merge:\n\ta.txt', 'pull', 'local-changes'],
+    ['error: The following untracked working tree files would be overwritten by merge:\n\tb.txt\nPlease move or remove them before you merge.', 'pull', 'local-changes'],
+    ['error: Your local changes to the following files would be overwritten by merge:\n\ta.txt', 'fetch', 'failed'],
   ]
   for (const [stderr, operation, reason] of cases) assert.equal(describeSyncFailure(failed(stderr), operation).reason, reason, stderr)
   // A rejected push is only a rejection when pushing, and a diverged pull only when pulling.
   assert.equal(describeSyncFailure(failed('Not possible to fast-forward, aborting.'), 'push').reason, 'failed')
   assert.equal(describeSyncFailure(failed(' ! [rejected] main -> main (fetch first)'), 'fetch').reason, 'failed')
+})
+
+test('a pull stopped by local changes says nothing changed, and names the files in the way', () => {
+  const stderr = 'error: Your local changes to the following files would be overwritten by merge:\n\tsrc/a.txt\n\tb c.txt\nPlease commit your changes or stash them before you merge.\n'
+    + 'error: The following untracked working tree files would be overwritten by merge:\n\tnew.txt\n\tsrc/a.txt\nPlease move or remove them before you merge.\nAborting'
+  const failure = describeSyncFailure(failed(stderr), 'pull')
+  assert.equal(failure.reason, 'local-changes')
+  assert.match(failure.message, /would be overwritten.*Nothing was changed/)
+  assert.deepEqual(filesInTheWay(stderr), ['src/a.txt', 'b c.txt', 'new.txt'])
+  assert.deepEqual(filesInTheWay('fatal: Not possible to fast-forward, aborting.'), [])
 })
 
 test('a failure message shows the first useful line without the address\'s credentials', () => {

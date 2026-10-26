@@ -69,7 +69,7 @@ export function checkFetchRefspecs(remote: string, refspecs: readonly string[]):
 
 export type SyncOperation = 'fetch' | 'pull' | 'push'
 
-export type SyncFailureReason = 'auth-required' | 'rejected' | 'diverged' | 'failed'
+export type SyncFailureReason = 'auth-required' | 'rejected' | 'diverged' | 'local-changes' | 'failed'
 
 export interface SyncFailure {
   reason: SyncFailureReason
@@ -91,6 +91,7 @@ const AUTH_FAILURE = new RegExp([
 
 const NOT_FAST_FORWARD = /\[rejected\]|non-fast-forward|fetch first|failed to push some refs|updates were rejected/i
 const CANNOT_FAST_FORWARD = /not possible to fast-forward|have diverged|diverging branches/i
+const LOCAL_CHANGES_IN_THE_WAY = /would be overwritten by merge|untracked working tree files would be (?:overwritten|removed) by merge/i
 
 const AUTH_MESSAGE = 'Authentication required. In a terminal, run git fetch in this repository once, so Git can ask for your credentials or use the ones it has saved, then try again here. The panel never asks for or stores credentials.'
 
@@ -104,6 +105,24 @@ export function describeSyncFailure(result: GitRunResult, operation: SyncOperati
   if (operation === 'pull' && CANNOT_FAST_FORWARD.test(text)) {
     return { reason: 'diverged', message: 'Your branch and its upstream have each moved on, so the pull cannot fast-forward. Nothing was changed. Merge or rebase in a terminal.' }
   }
+  if (operation === 'pull' && LOCAL_CHANGES_IN_THE_WAY.test(text)) {
+    return { reason: 'local-changes', message: 'Your uncommitted changes would be overwritten by the pull, so Git refused it. Nothing was changed. Commit them or set them aside, then pull again.' }
+  }
   const line = redactDiagnosticText(text.split(/\r?\n/).map(item => item.trim()).find(item => item !== '' && !item.startsWith('hint:')) ?? '')
   return { reason: 'failed', message: line || `git ${operation} failed (exit ${result.exitCode ?? 'none'})` }
+}
+
+/**
+ * The files Git names when local changes stop a merge: the indented lines under each "would be overwritten" heading. Read
+ * from the output the panel shows (already redacted), so a caller can name them without running Git again.
+ */
+export function filesInTheWay(output: string): string[] {
+  const files: string[] = []
+  let listing = false
+  for (const line of output.split(/\r?\n/)) {
+    if (LOCAL_CHANGES_IN_THE_WAY.test(line)) { listing = true; continue }
+    if (listing && /^\s+\S/.test(line)) { const path = line.trim(); if (!files.includes(path)) files.push(path); continue }
+    listing = false
+  }
+  return files
 }

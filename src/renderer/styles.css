@@ -1206,6 +1206,9 @@ button:disabled {
 .git-publish { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid #3a4a66; border-radius: 6px; background: #101725; font-size: 12px; }
 .git-publish p { margin: 0; }
 .git-publish-remote { display: flex; align-items: center; gap: 8px; color: #929baa; }
+.git-resolve { display: grid; gap: 6px; margin: 6px 10px; padding: 8px 10px; border: 1px solid #3a4a66; border-radius: 6px; background: #101725; font-size: 12px; line-height: 1.45; }
+.git-resolve p { margin: 0; overflow-wrap: anywhere; }
+.git-resolve .primary-button { justify-self: start; min-height: 28px; font-size: 12px; padding: 0 12px; }
 .git-entry-danger:hover:not(:disabled) { color: #ff9a9a; border-color: #8a3a3a; }
 .git-amend-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #c8d3e3; }
 .git-amend-open { margin: 6px 10px; justify-self: start; }

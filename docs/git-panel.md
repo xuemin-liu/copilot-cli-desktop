@@ -2,7 +2,7 @@
 
 The Git panel shows the state of the Git repositories in your project folder next to the session, so you can review what
 Copilot changed without leaving the app. You can review changes, stage and unstage files, make local commits and hand context
-to Copilot. Fetch, pull, push, branches and discarding changes are not in the panel yet and are still done in the terminal (or by
+to Copilot, including a failed pull for Copilot to merge and resolve. Fetch, pull, push, branches and discarding changes are not in the panel yet and are still done in the terminal (or by
 Copilot). See the [plan](git-panel-plan.md) for what comes next.
 
 Open it from the Git icon in the session header, or with **Ctrl+Shift+G** (the key is handled before the terminal or the
@@ -75,7 +75,8 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   the repository has, so one that would write anywhere but under `refs/remotes/<name>/` (a local branch, a tag, another remote's
   branches) is refused, and says which setting. The `↑` and `↓` counts update afterwards.
 - **Pull** is fetch followed by a **fast-forward only** merge of the upstream. If the branches have each moved on, nothing changes
-  and the panel says so; merging or rebasing is left to you in a terminal. Git itself refuses a pull that would overwrite local changes.
+  and the panel says so. Git itself refuses a pull that would overwrite local changes. In both cases the panel offers
+  **Resolve with Copilot** (below), so you don't have to merge in a terminal.
 - **Push** sends the confirmed commit of the current branch to the branch of the same name on its upstream, with an explicit refspec,
   so a push the remote would have to overwrite is refused (the panel never forces, and ignores a configured `+` refspec). A branch that tracks a
   differently named branch is not pushed from the panel.
@@ -97,6 +98,29 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
 - **Hooks are not run.** Fetch, pull and push run with the repository's hooks switched off. A repository with a `pre-push` hook is
   not pushed from the panel at all, so a check you rely on is never skipped silently; push from a terminal.
 - Remote addresses are redacted (user names with passwords, tokens) before they reach the panel, a result or a log.
+
+## Resolve with Copilot
+
+When a pull stops because the branches have diverged or because local changes are in the way, or while a merge has stopped on
+conflicts, the panel shows **Resolve with Copilot**. It gives the active session the task you would otherwise type in its terminal.
+
+- **The task** names the repository's folder, the branch, its upstream and what Git printed (redacted). It tells Copilot to:
+  - merge (never rebase, force, `reset --hard`, discard or push);
+  - stop and ask you before stashing, committing or discarding uncommitted changes that are in the way;
+  - resolve every conflict, keeping the intent of both sides;
+  - run the project's quick checks and commit the merge;
+  - say what it kept from each side in every conflicted file.
+
+  The panel names the folder because the repository you selected (often the main worktree) may not be the session's own folder.
+  When it is outside, the button says so: Copilot may ask for permission to work there.
+- **Sent only when that is safe.** The task is typed into the session and sent only while it is idle, nothing is typed in its prompt
+  box, and no key was pressed just now, the same moment a rename from the desktop waits for. Keys you press meanwhile are held
+  back, then passed on. Otherwise the task is pasted into the prompt box and you press Enter when Copilot is ready.
+- **Which session.** The active session in this window, so the model is the one it runs. The button is disabled, with the reason,
+  when there is no session here, or the session is read-only, a side chat, remote or not running.
+- **While Copilot works** on the repository, the panel's own writes to it (Fetch, Pull, Push, stage, commit, switch, discard) wait, so
+  the two never write at once. When the session goes idle the list refreshes and the panel says it has finished. **Push stays
+  your click:** check the changes, History and Copilot's report first.
 
 ## Discarding changes
 
