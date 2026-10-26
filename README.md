@@ -251,6 +251,10 @@ A meeting lets several sessions review one session's plan or local changes witho
   each session's own usage records, with **Transcript** and **Stop**.
   A meeting pauses at its round limit (Settings, default 6) and asks whether to allow 3 more rounds. A round stops waiting
   for a reviewer after the round timeout (Settings, default 10 minutes).
+- **Reviewers answering each other** (Settings, off by default): with two or more reviews in a round, each reviewer reads the
+  others' reviews and answers them in one more turn: where it agrees, where it disagrees, and what changes in its own
+  review. The host then gets the reviews and that discussion together. It costs one more turn per reviewer per round;
+  votes are not discussed.
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
   answers your own message. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
   on what it reads, so prefer Restricted reviewers.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingError, MeetingHub, joinRequest, type MeetingDelivery, type MeetingTimers } from './meeting.js'
+import { MeetingError, MeetingHub, joinRequest, type MeetingDelivery, type MeetingSettings, type MeetingTimers } from './meeting.js'
 
 /** The Copilot session id behind each test tab; a saved meeting remembers sessions by these. */
 const SESSIONS: Record<string, string> = {
@@ -22,7 +22,7 @@ interface Harness {
   last(tabId: string): MeetingDelivery
 }
 
-function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }, existingFolders: readonly string[] = []): Harness {
+function harness(settings: MeetingSettings = { maxRounds: 6, roundTimeoutMinutes: 10 }, existingFolders: readonly string[] = []): Harness {
   let now = 1_000
   let timers: Array<{ at: number; callback: () => void; live: boolean }> = []
   const clock: MeetingTimers = {
@@ -211,6 +211,139 @@ test('a round held at the round limit keeps its changes only as filtered, in mem
   const later = harness()
   later.hub.restore(raw, '', (sessionId) => ({ tabId: sessionId === SESSIONS['tab-host'] ? 'h2' : 'b2', title: 't', folder: null }))
   assert.doesNotMatch(later.files.get('C:\\meetings\\K7QF\\meeting.json')!, /sk-live-0123456789abcdef|opaque-held-value-71/)
+})
+
+const DISCUSS: MeetingSettings = { maxRounds: 6, roundTimeoutMinutes: 10, discussion: true }
+
+test('with discussion on, reviewers answer each other\'s reviews before the host gets reviews and discussion together', () => {
+  const h = harness(DISCUSS)
+  h.hub.start(host, { topic: 'plan', post: 'plan v1', changes: null })
+  h.hub.join(reviewerB, 'K7QF', { role: 'security reviewer' })
+  h.hub.join(reviewerC, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B: the token leaks into logs')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C: retries are unbounded')
+  assert.equal(h.to('tab-host').length, 0, 'the host waits for the discussion')
+  const view = h.hub.views()[0]!
+  assert.equal(view.discussing, true)
+  assert.deepEqual(view.waitingFor.sort(), ['tab-b', 'tab-c'])
+  const toB = h.last('tab-b')
+  assert.equal(toB.kind, 'discussion')
+  assert.equal(toB.round, 1)
+  assert.match(toB.text, /^\[meeting K7QF · round 1 · discussion · from the desktop\]/)
+  assert.match(toB.text, /C: retries are unbounded/, 'B reads C\'s review')
+  assert.doesNotMatch(toB.text, /B: the token leaks/, 'not its own')
+  assert.match(toB.text, /You review as: security reviewer/)
+  assert.match(h.last('tab-c').text, /B: the token leaks into logs/)
+  assert.match(h.files.get('C:\\meetings\\K7QF\\round-1\\replies.md')!, /B: the token leaks[\s\S]*C: retries are unbounded/, 'the reviews are on disk for the discussion')
+
+  // A stale review reply (the post's turn) during the discussion counts as late, not as the discussion answer.
+  h.hub.turnCompleted('tab-b', { meetingId: 'K7QF', round: 1, kind: 'post', text: '' }, 'B again')
+  assert.deepEqual(h.hub.views()[0]!.waitingFor.sort(), ['tab-b', 'tab-c'])
+  h.hub.turnCompleted('tab-b', toB, 'B: agree with C, cap retries at 3')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C: the log leak matters more than retries')
+  const digest = h.last('tab-host')
+  assert.equal(digest.kind, 'digest')
+  assert.match(digest.text, /The reviewers then read each other's replies and answered them/)
+  assert.match(digest.text, /B: the token leaks[\s\S]*C: retries are unbounded[\s\S]*# Discussion: what the reviewers answered each other[\s\S]*B: agree with C[\s\S]*C: the log leak matters/)
+  assert.match(digest.text, /B again/, 'the stale reply reaches the host as a late one')
+  assert.equal(h.hub.views()[0]!.discussing, false)
+  assert.match(h.files.get('C:\\meetings\\K7QF\\round-1\\replies.md')!, /# Discussion[\s\S]*cap retries at 3/)
+  assert.match(h.files.get('C:\\meetings\\K7QF\\transcript.md')!, /## Round 1 discussion: "review opus"/)
+})
+
+test('no discussion with a single review, on a vote, or with the setting off', () => {
+  const single = harness(DISCUSS)
+  single.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  single.hub.join(reviewerB, 'K7QF')
+  single.hub.join(reviewerC, 'K7QF')
+  single.hub.turnCompleted('tab-b', single.last('tab-b'), 'B only')
+  single.advance(10 * 60_000)
+  assert.equal(single.last('tab-host').kind, 'digest', 'C timed out: one review has nobody to discuss with')
+
+  const vote = harness(DISCUSS)
+  vote.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  vote.hub.join(reviewerB, 'K7QF')
+  vote.hub.join(reviewerC, 'K7QF')
+  vote.hub.turnCompleted('tab-b', vote.last('tab-b'), 'b')
+  vote.hub.turnCompleted('tab-c', vote.last('tab-c'), 'c')
+  for (const tab of ['tab-b', 'tab-c']) vote.hub.turnCompleted(tab, vote.last(tab), `${tab} on the others`)
+  vote.hub.post('tab-host', 'propose-close', 'items', null)
+  vote.hub.turnCompleted('tab-b', vote.last('tab-b'), 'AGREE')
+  vote.hub.turnCompleted('tab-c', vote.last('tab-c'), 'AGREE')
+  assert.equal(vote.hub.views()[0]!.outcome, 'agreed', 'votes go straight to the result')
+
+  const off = harness()
+  off.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  off.hub.join(reviewerB, 'K7QF')
+  off.hub.join(reviewerC, 'K7QF')
+  off.hub.turnCompleted('tab-b', off.last('tab-b'), 'b')
+  off.hub.turnCompleted('tab-c', off.last('tab-c'), 'c')
+  assert.equal(off.last('tab-host').kind, 'digest')
+  assert.equal(off.delivered.some((delivery) => delivery.kind === 'discussion'), false)
+})
+
+test('a discussion that times out, a session joining during it, and a restart in the middle of it', () => {
+  const h = harness(DISCUSS)
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.join(reviewerC, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B review')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C review')
+  h.hub.join({ tabId: 'tab-d', title: 'late joiner', folder: null }, 'K7QF')
+  assert.equal(h.last('tab-d').kind, 'post', 'a late joiner gets the round itself')
+  assert.equal(h.hub.views()[0]!.waitingFor.includes('tab-d'), false, 'and is not waited for in the discussion')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B on C')
+
+  const saved = JSON.parse(h.files.get('C:\\meetings\\K7QF\\meeting.json')!)
+  assert.equal(saved.discussing, true)
+  const tabs: Record<string, string> = { [SESSIONS['tab-host']!]: 'h2', [SESSIONS['tab-b']!]: 'b2', [SESSIONS['tab-c']!]: 'c2' }
+  const after = harness(DISCUSS)
+  after.hub.restore(saved, h.files.get('C:\\meetings\\K7QF\\transcript.md')!, (sessionId) => tabs[sessionId] ? { tabId: tabs[sessionId]!, title: 't', folder: null } : null)
+  assert.equal(after.hub.views()[0]!.discussing, true)
+  assert.deepEqual(after.hub.views()[0]!.waitingFor, ['c2'])
+  const resent = after.last('c2')
+  assert.equal(resent.kind, 'discussion', 'C gets its discussion turn again')
+  assert.match(resent.text, /B review/)
+  after.hub.turnCompleted('c2', resent, 'C on B')
+  assert.match(after.last('h2').text, /B review[\s\S]*C review[\s\S]*# Discussion[\s\S]*B on C[\s\S]*C on B/, 'reviews from before the restart and the discussion reach the host')
+
+  h.advance(10 * 60_000)
+  const digest = h.last('tab-host')
+  assert.match(digest.text, /# Discussion[\s\S]*B on C[\s\S]*\(no reply in time\)/, 'a discussion that times out goes to the host with what came in')
+})
+
+test('a discussion everyone left is abandoned: the next reviewer\'s review counts and goes to the host alone', () => {
+  const reviewD = { tabId: 'tab-d', title: 'review d', folder: null }
+  const h = harness(DISCUSS)
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.join(reviewerC, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B stale review')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C stale review')
+  const saved = JSON.parse(h.files.get('C:\\meetings\\K7QF\\meeting.json')!)
+  h.hub.leave('tab-b')
+  h.hub.leave('tab-c')
+  let view = h.hub.views()[0]!
+  assert.equal(view.stage, 'waiting')
+  assert.equal(view.discussing, false)
+  h.hub.join(reviewD, 'K7QF')
+  assert.equal(h.last('tab-d').kind, 'post')
+  h.hub.turnCompleted('tab-d', h.last('tab-d'), 'D fresh review')
+  const digest = h.last('tab-host')
+  assert.equal(digest.kind, 'digest', 'the answer counts at once, not after the timeout')
+  assert.match(digest.text, /D fresh review/)
+  assert.doesNotMatch(digest.text, /stale review|# Discussion/, 'the abandoned reviews do not reach the host with it')
+
+  // The same after a restart where the saved reviewers are gone but the host is back.
+  const after = harness(DISCUSS)
+  after.hub.restore(saved, '', (sessionId) => sessionId === SESSIONS['tab-host'] ? { tabId: 'h2', title: 't', folder: null } : null)
+  view = after.hub.views()[0]!
+  assert.equal(view.stage, 'waiting')
+  assert.equal(view.discussing, false)
+  after.hub.join(reviewD, 'K7QF')
+  after.hub.turnCompleted('tab-d', after.last('tab-d'), 'D after restart')
+  assert.match(after.last('h2').text, /D after restart/)
+  assert.doesNotMatch(after.last('h2').text, /stale review/)
 })
 
 test('a host turn answering an earlier round does not count as silence in the current one', () => {

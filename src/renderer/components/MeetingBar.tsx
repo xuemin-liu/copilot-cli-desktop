@@ -23,7 +23,7 @@ export function meetingStageLabel(meeting: MeetingView, titleOf: (tabId: string)
     case 'waiting': return meeting.participants.length ? 'Waiting for the host' : 'Waiting for someone to join'
     case 'reviewing': {
       const waiting = meeting.waitingFor.map(titleOf)
-      return `${meeting.vote ? 'Voting' : 'Reviewing'}${waiting.length ? ` · waiting for ${waiting.join(', ')}` : ''}`
+      return `${meeting.discussing ? 'Reviewers answering each other' : meeting.vote ? 'Voting' : 'Reviewing'}${waiting.length ? ` · waiting for ${waiting.join(', ')}` : ''}`
     }
     case 'host': return 'The host is answering'
     case 'paused': return meeting.pauseReason === 'round-limit' ? `Paused at the ${meeting.maxRounds}-round limit` : 'Paused: the host did not answer'

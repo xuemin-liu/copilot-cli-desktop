@@ -1,7 +1,7 @@
 # Plan: review meetings between sessions
 
-Status: phase 1 merged (#112); phase 2 built on `feat/session-meetings-phase2` (see [Phase 2 as built](#phase-2-as-built));
-phase 3 not started. Revision 2: the first draft (one-click send and send back) was dropped; meetings run on their own once
+Status: complete. Phase 1 merged (#112), phase 2 merged (#113), phase 3 built on `feat/meeting-discussion` (see
+[Phase 3 as built](#phase-3-as-built)). Revision 2: the first draft (one-click send and send back) was dropped; meetings run on their own once
 started.
 
 ## The workflow this is for
@@ -236,6 +236,28 @@ the person approves).
     id reuse.
   - `npm run meeting:check` now runs the app twice. The first run opens the meeting and quits. In the second, the meeting is
     restored, a reviewer joins with a role, and the meeting closes by agreement through the restored host's new endpoint.
+
+## Phase 3 as built
+
+- **The setting.** Settings → "Let meeting reviewers answer each other before the host replies" (`meetingDiscussion`, off
+  by default; it costs one more turn per reviewer per round). It is read when a round's reviews are all in, so it applies
+  to open meetings from their next round.
+- **What happens.** When a review round (not a vote) ends with two or more reviews, the round is not sent to the host yet:
+  - The round enters a discussion (`discussing`). Each reviewer who replied gets a `discussion` delivery, with the other
+    reviews (never its own) and its role, asking where it agrees, where it disagrees, and what changes in its review.
+  - Those answers are collected like a round, with the same timeout. Then the host gets one digest: the reviews, then
+    "# Discussion", the same layout as `round-N/replies.md`.
+  - Votes are never discussed. A round with a single review (the others timed out or left) goes straight to the host.
+- **Edge cases.**
+  - A review reply that arrives during the discussion is late, not a discussion answer: the delivery's kind has to match
+    what the round expects.
+  - A session joining during a discussion gets the round's post and is not waited for; its review reaches the host as a
+    late reply.
+  - The discussion is saved (`discussing`, `reviewed`), so a restart sends each reviewer its unanswered discussion turn
+    again.
+- **Checks.** Unit tests cover the whole flow: what each reviewer sees, the stale reply, the digest and `replies.md`, no
+  discussion with one review, on a vote or with the setting off, a timeout mid-discussion, a late joiner, and a restart
+  mid-discussion. The message builder keeps other reviews below the separator.
 
 ## Open questions
 
