@@ -49,6 +49,21 @@ test('subagent records, other interactions and unreadable lines are ignored; chu
   assert.equal(reader.finish()?.reply, 'hello world')
 })
 
+test('usage totals come from checkpoints, in history too; only history never yields a prompt', () => {
+  const reader = new MeetingTurnReader()
+  const checkpoint = (nanoAiu: number, premium: number): string => record('session.usage_checkpoint', { totalNanoAiu: nanoAiu, totalPremiumRequests: premium })
+  assert.equal(reader.usage, null)
+  assert.equal(reader.consume(user('join meeting K7QF'), false), null, 'a prompt in history is not acted on')
+  reader.consume(checkpoint(2e9, 1), false)
+  assert.deepEqual(reader.usage, { nanoAiu: 2e9, premiumRequests: 1 })
+  assert.equal(reader.takeUsageChange(), null, 'history is the baseline, not a change')
+  reader.consume(checkpoint(3e9, 1))
+  assert.deepEqual(reader.takeUsageChange(), { nanoAiu: 3e9, premiumRequests: 1 })
+  assert.equal(reader.takeUsageChange(), null, 'once')
+  reader.consume(record('session.usage_checkpoint', { totalNanoAiu: 'lots', totalPremiumRequests: -4 }))
+  assert.deepEqual(reader.usage, { nanoAiu: 0, premiumRequests: 0 }, 'unreadable values count as nothing')
+})
+
 test('a turn that ends without an answer (aborted) reports an empty reply', () => {
   const reader = new MeetingTurnReader()
   reader.consume(user('Review this'))

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir, stat } from 'node:fs/promises'
+import { access, appendFile, mkdir, readdir, readFile, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -109,7 +110,7 @@ import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
-import { MeetingError, MeetingHub, joinRequestId, MEETING_ID_PATTERN } from './meeting.js'
+import { MeetingError, MeetingHub, joinRequest, MEETING_ID_PATTERN, MEETING_STATE_FILE } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
 import { MeetingTurnReader } from './meeting-turns.js'
@@ -1299,9 +1300,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (session.activity === 'idle') observe(refreshSessionNames(), 'Could not read session names')
     if (session.activity === 'idle') onMeetingIdle(id)
   })
-  session.on('session-record', (line: string) => {
+  session.on('session-record', (line: string, live: boolean) => {
     if (managedTabs.get(id)?.session !== session) return
-    onMeetingRecord(id, line)
+    onMeetingRecord(id, line, live)
   })
   session.on('activity-detail', () => {
     if (managedTabs.get(id)?.session !== session) return
@@ -1318,14 +1319,16 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('status', (status) => {
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
-    // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host).
-    if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) forgetMeetingSession(id)
+    // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host). Not while the app quits:
+    // its meetings are saved as they stand and go on after the next start.
+    if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed') && !shuttingDown()) forgetMeetingSession(id)
     else scheduleMeetingPump(0)
     syncTabState()
     refreshMenus()
     broadcastState()
   })
   session.on('log', (chunk: string) => {
+    sessionLastOutputAt.set(id, Date.now())
     const sequence = (sessionOutputSequences.get(id) ?? 0) + 1
     sessionOutputSequences.set(id, sequence)
     tabsState = touchTab(tabsState, id)
@@ -1775,9 +1778,26 @@ function meetingParty(tabId: string): { tabId: string; title: string; folder: st
   return { tabId, title: tab?.title ?? 'A session', folder: tab?.sessionCwd ?? managedTabs.get(tabId)?.session.sessionCwd ?? null }
 }
 
+/**
+ * A resumed session reads as idle from its history before its CLI is ready ("Resuming session…", then a "Loading" spinner);
+ * keys typed then are lost. A meeting types only once the CLI has turned on bracketed paste (its prompt takes input) and its
+ * output has been still for a moment (nothing is loading).
+ */
+const MEETING_SETTLE_MS = 1_500
+const sessionLastOutputAt = new Map<string, number>()
+function meetingPromptShown(tabId: string): boolean {
+  const session = managedTabs.get(tabId)?.session
+  return session !== undefined && session.bracketedPaste && Date.now() - (sessionLastOutputAt.get(tabId) ?? 0) >= MEETING_SETTLE_MS
+}
+
 const meetingOutbox = new MeetingOutbox({
-  sendTask: (tabId, text) => sendSessionTask(tabId, text, false),
-  sendCommand: sendSessionCommand,
+  sendTask: (tabId, text) => {
+    // A session restored with its meeting is still starting: its messages wait instead of being dropped.
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    if (tab && !tab.unloaded && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
+    return sendSessionTask(tabId, text, false)
+  },
+  sendCommand: (tabId, command) => meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
   sent: (tabId) => meetingReader(tabId).expectDesktopPrompt(),
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
@@ -1800,6 +1820,11 @@ const meetingHub = new MeetingHub(meetingRoot, {
     void writeAppLog(message).catch(() => {})
     showNotification('Copilot CLI Desktop', message)
   },
+  sessionIdOf: (tabId) => {
+    const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+    return tab?.lastSessionId ?? managedTabs.get(tabId)?.session.lastSessionId ?? null
+  },
+  folderExists: (id) => existsSync(join(meetingRoot(), id)),
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes }))
 
 const meetingControl = new MeetingControlServer(handleMeetingCommand)
@@ -1824,7 +1849,7 @@ function handleMeetingCommand(tabId: string, command: MeetingCommand, request: M
       case 'start': {
         // Only the person starts a meeting: the prompt this session is answering must be theirs, not a meeting message.
         if (!meetingReader(tabId).answeringPerson) return { ok: false, message: 'Start a meeting only when the person asks for one in their own message.' }
-        const meeting = meetingHub.start(meetingParty(tabId), { topic: request.topic, post: request.text, changes: request.changes })
+        const meeting = meetingHub.start(meetingParty(tabId), { topic: request.topic, post: request.text, changes: request.changes }, meetingReader(tabId).usage)
         return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.` }
       }
       case 'round':
@@ -1847,14 +1872,23 @@ function handleMeetingCommand(tabId: string, command: MeetingCommand, request: M
   }
 }
 
-/** A record appended to a session's event log: a prompt the person typed may ask to join a meeting. */
-function onMeetingRecord(tabId: string, line: string): void {
-  const prompt = meetingReader(tabId).consume(line)
+/**
+ * A record of a session's event log. Live ones may be a prompt the person typed asking to join a meeting, and usage totals
+ * add to the session's meeting cost. From the history read when the session (re)starts only the usage so far matters, so
+ * the rest of a long history is not parsed again.
+ */
+function onMeetingRecord(tabId: string, line: string, live: boolean): void {
+  if (!live && !line.includes('"session.usage_checkpoint"')) return
+  const reader = meetingReader(tabId)
+  const prompt = reader.consume(line, live)
+  const usage = reader.takeUsageChange()
+  if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
-  const id = joinRequestId(prompt.content)
-  if (!id) return
+  const request = joinRequest(prompt.content)
+  if (!request) return
+  const { id } = request
   if (!meetingHub.isOpen(id)) { showNotification('Copilot CLI Desktop', `There is no open meeting ${id}.`); return }
-  try { meetingHub.join(meetingParty(tabId), id) }
+  try { meetingHub.join(meetingParty(tabId), id, { role: request.role, usage: reader.usage }) }
   catch (error) {
     if (!(error instanceof MeetingError)) throw error
     showNotification('Copilot CLI Desktop', error.message)
@@ -1870,6 +1904,7 @@ function onMeetingIdle(tabId: string): void {
 }
 
 function forgetMeetingSession(tabId: string): void {
+  sessionLastOutputAt.delete(tabId)
   meetingHub.leave(tabId)
   meetingOutbox.forget(tabId)
   meetingReaders.delete(tabId)
@@ -2470,6 +2505,28 @@ async function restoreSavedWorkspaceTabs(): Promise<void> {
   persistProfileTabs()
   broadcastState()
   refreshMenus()
+  await restoreMeetings().catch((error) => writeAppLog(`Could not restore meetings: ${String(error)}`))
+}
+
+/**
+ * Meetings that were open when the app closed go on: each saved session is found among the restored tabs by its Copilot
+ * session id, and the tabs taking part are started, since a meeting cannot wait for each of them to be shown.
+ */
+async function restoreMeetings(): Promise<void> {
+  let entries
+  try { entries = await readdir(meetingRoot(), { withFileTypes: true }) } catch { return }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !MEETING_ID_PATTERN.test(entry.name)) continue
+    const folder = join(meetingRoot(), entry.name)
+    let saved: unknown
+    try { saved = JSON.parse(await readFile(join(folder, MEETING_STATE_FILE), 'utf8')) } catch { continue }
+    const transcript = await readFile(join(folder, 'transcript.md'), 'utf8').catch(() => '')
+    const tabs = meetingHub.restore(saved, transcript, (sessionId) => {
+      const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote && !candidate.unloaded)
+      return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
+    })
+    for (const tabId of tabs ?? []) observe(wakeDormantTab(tabId), 'Could not start a session of a restored meeting')
+  }
 }
 
 function observe(operation: Promise<unknown>, context: string): void {
@@ -3324,7 +3381,7 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   managedTabs.get(tabId)?.session.write(data)
 })
 /** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
-ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown): Promise<void> => {
+ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown, role: unknown): Promise<void> => {
   assertTrustedIpcSender(event)
   if (typeof meetingId !== 'string' || !MEETING_ID_PATTERN.test(meetingId)) throw new Error('Invalid meeting')
   if (action === 'stop') meetingHub.stop(meetingId)
@@ -3337,7 +3394,8 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     if (tab.unloaded || !managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
       throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
     }
-    try { meetingHub.join(meetingParty(tabId), meetingId) }
+    if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
+    try { meetingHub.join(meetingParty(tabId), meetingId, { role: role || null, usage: meetingReaders.get(tabId)?.usage ?? null }) }
     catch (error) { throw error instanceof MeetingError ? new Error(error.message) : error }
   } else if (action === 'transcript') {
     const folder = meetingHub.folderOf(meetingId)
@@ -4055,7 +4113,8 @@ app.on('before-quit', (event) => {
     .finally(async () => {
       usageService = null
       meetingHub.dispose()
-      await Promise.allSettled([service?.stop(), meetingControl.close(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      // Open meetings are saved as they stand, for the next start to restore.
+      await Promise.allSettled([service?.stop(), meetingControl.close(), ...meetingWrites.values(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)
         .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))

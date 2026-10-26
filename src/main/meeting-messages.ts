@@ -20,18 +20,26 @@ const SEPARATOR = '\n-----\n'
 
 export const MEETING_HELPER_COMMAND = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
 
-export interface MeetingParty { title: string; folder: string | null }
+/** `role` is what the person asked a reviewer to review as ("security reviewer"); none for the host or when not given. */
+export interface MeetingParty { title: string; folder: string | null; role?: string | null }
 
 export interface MeetingReplyView extends MeetingParty { text: string | null; vote?: MeetingVote | null }
 
 export type MeetingVote = 'agree' | 'object'
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
+export const MAX_MEETING_ROLE_CHARS = 60
 
 /** One line, bounded, quotes escaped: a session title is a name Copilot or the person chose. */
 export function partyLabel(party: MeetingParty): string {
   const title = party.title.replace(CONTROL_CHARS, ' ').replace(/\s+/g, ' ').replace(/"/g, "'").trim().slice(0, MAX_TITLE_CHARS) || 'Untitled session'
-  return `"${title}"${party.folder ? ` (${party.folder.replace(CONTROL_CHARS, '').slice(0, 260)})` : ''}`
+  const role = party.role ? cleanRole(party.role) : ''
+  return `"${title}"${party.folder ? ` (${party.folder.replace(CONTROL_CHARS, '').slice(0, 260)})` : ''}${role ? `, as ${role}` : ''}`
+}
+
+/** A role is words the person typed: one line, bounded, without quotes or brackets that could pass for desktop text. */
+export function cleanRole(role: string): string {
+  return role.replace(CONTROL_CHARS, ' ').replace(/["`[\]<>]/g, '').replace(/\s+/g, ' ').trim().replace(/[.,;:!?]+$/, '').slice(0, MAX_MEETING_ROLE_CHARS).trim()
 }
 
 export function cleanTopic(topic: string): string {
@@ -63,6 +71,13 @@ export interface PostMessage {
   /** Replies of the previous round exist, so reviewers can answer each other too. */
   previousReplies: boolean
   joinedLate: boolean
+  /** The reviewer's role, when the person gave one. */
+  role?: string | null
+}
+
+function roleLine(role: string | null | undefined): string[] {
+  const cleaned = role ? cleanRole(role) : ''
+  return cleaned ? [`You review as: ${cleaned}. Look at the material from that angle first.`] : []
 }
 
 /** A host's round, as a reviewer receives it. */
@@ -72,6 +87,7 @@ export function postMessage(message: PostMessage): string {
     `${MEETING_MARKER_PREFIX}${message.id} · round ${message.round} · from the desktop]`,
     `You are a reviewer in meeting ${message.id}, hosted by session ${partyLabel(message.host)}. Review only: do not edit files and do not run commands that change anything.`,
     `Topic: ${cleanTopic(message.topic) || 'not given'}`,
+    ...roleLine(message.role),
   ]
   if (message.joinedLate) lines.push(`You joined while the meeting was under way; earlier rounds are in ${paths.transcript}.`)
   if (message.hasChanges) lines.push(`The host's uncommitted changes for this round: ${paths.changes}`)
@@ -83,7 +99,7 @@ export function postMessage(message: PostMessage): string {
   return attach(lines.join('\n'), message.post, paths.post)
 }
 
-export interface VoteMessage { id: string; round: number; host: MeetingParty; summary: string; folder: string; joinedLate: boolean }
+export interface VoteMessage { id: string; round: number; host: MeetingParty; summary: string; folder: string; joinedLate: boolean; role?: string | null }
 
 /** The host proposes to close: every reviewer answers AGREE or OBJECT. */
 export function voteMessage(message: VoteMessage): string {
@@ -91,6 +107,7 @@ export function voteMessage(message: VoteMessage): string {
   const lines = [
     `${MEETING_MARKER_PREFIX}${message.id} · round ${message.round} · vote · from the desktop]`,
     `The host of meeting ${message.id}, session ${partyLabel(message.host)}, proposes to close it with the agreed items below (also in ${paths.post}).`,
+    ...roleLine(message.role),
   ]
   if (message.joinedLate) lines.push(`You joined while the meeting was under way; earlier rounds are in ${paths.transcript}.`)
   lines.push(

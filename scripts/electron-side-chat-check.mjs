@@ -141,15 +141,24 @@ if (process.versions.electron) {
     }
     await writeDesktopConfig(join(appData, 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles, activeProfileId: profile.id, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false, provider: { type: 'openai', baseUrl, model: 'ui-check-model', offline: true } })
     const electronPath = (await import('electron')).default
-    const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
-    console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
-    console.log(mode ? `[electron-check] Running ${mode.label} regression.` : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
-    // Automated runs must also end if Electron or a renderer stops responding.
-    const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, meetingMode ? 360_000 : 180_000) : undefined
-    try {
-      const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
-      assert.equal(code, 0, 'Electron did not exit normally')
-    } finally { clearTimeout(timeout) }
+    // The meeting check runs the app twice on the same data: the meeting opened in the first run must go on in the second.
+    for (const phase of meetingMode ? ['1', '2'] : [null]) {
+      if (phase) env.DESKTOP_UI_MEETING_PHASE = phase
+      const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
+      console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
+      console.log(mode ? `[electron-check] Running ${mode.label} regression${phase ? ` (run ${phase})` : ''}.` : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
+      // Automated runs must also end if Electron or a renderer stops responding.
+      const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, meetingMode ? 360_000 : 180_000) : undefined
+      try {
+        const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
+        assert.equal(code, 0, 'Electron did not exit normally')
+      } finally { clearTimeout(timeout) }
+      if (phase === '1') {
+        const first = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
+        assert.equal(first.passed, true, first.error || `${mode.label} first run failed (see ${artifacts})`)
+        env.DESKTOP_UI_MEETING_ID = first.meeting
+      }
+    }
     if (mode) {
       const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
       assert.equal(result.passed, true, result.error || `${mode.label} regression failed (see ${artifacts})`)

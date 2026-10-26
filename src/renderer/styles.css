@@ -1340,4 +1340,5 @@ button:disabled {
 .meeting-bar-detail { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 .meeting-bar-button, .meeting-bar-add { padding: 2px 8px; border: 1px solid #34404f; border-radius: 4px; background: #182231; color: inherit; font: inherit; cursor: pointer; }
 .meeting-bar-button:hover, .meeting-bar-add:hover { background: #213045; }
+.meeting-bar-role { width: 150px; padding: 2px 6px; border: 1px solid #34404f; border-radius: 4px; background: #0b121c; color: inherit; font: inherit; }
 .meeting-bar-stop { border-color: #5a2a2a; }

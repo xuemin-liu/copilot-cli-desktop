@@ -48,6 +48,18 @@ test('the rename command is one bounded line', () => {
   assert.equal(renameCommand(' \n '), null)
 })
 
+test('the terminal\'s answers to the CLI\'s queries are not typing, so a session nobody typed in stays empty', () => {
+  const draft = new PromptDraft()
+  // As seen when a restored session's terminal attaches: focus, the 16-colour palette, then focus out.
+  draft.note('\x1b[I', 1000)
+  for (let index = 0; index < 16; index++) draft.note(`\x1b]4;${index};rgb:2e2e/3434/3636\x1b\\`, 1000 + index)
+  draft.note('\x1b]11;rgb:0000/0000/0000\x07\x1b[24;80R\x1b[?1;2c\x1b[>0;276;0c\x1b[?2004;1$y\x1b[0n\x1b[O', 1100)
+  assert.equal(draft.empty, true)
+  assert.equal(draft.quiet(2_000), true, 'no key was pressed: the replies did not reset the quiet time')
+  draft.note('\x1b[A', 2000)
+  assert.equal(draft.empty, false, 'a key that recalls history still counts')
+})
+
 test('the prompt counts as empty only after Enter or Ctrl+C, and mouse or focus reports change nothing', () => {
   const draft = new PromptDraft()
   assert.equal(draft.empty, true, 'a new session starts with an empty prompt')

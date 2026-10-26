@@ -96,8 +96,8 @@ export interface CopilotDesktopBridge {
   /** Give the session the task of resolving a pull in the repository, and claim the repository for it until it has finished.
    * Typed and sent when that is safe; otherwise `busy`, and the caller pastes it. */
   gitResolve(profileId: string, repoId: string, tabId: string, text: string): Promise<SessionTaskSend>
-  /** The person's controls for a review meeting between sessions. `join` adds the session `tabId` to it. */
-  meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'transcript', tabId?: string): Promise<void>
+  /** The person's controls for a review meeting between sessions. `join` adds the session `tabId` to it, reviewing as `role`. */
+  meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'transcript', tabId?: string, role?: string): Promise<void>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>

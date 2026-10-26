@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { digestMessage, parseVote, partyLabel, postMessage, shareablePatch } from './meeting-messages.js'
+import { cleanRole, digestMessage, parseVote, partyLabel, postMessage, shareablePatch } from './meeting-messages.js'
 
 test('the shared patch withholds files that hold secrets and masks credential-looking values elsewhere', () => {
   const patch = [
@@ -64,6 +64,14 @@ test('a vote is read from the first line only, and anything but AGREE objects', 
   assert.equal(parseVote('AGREEMENT on most points'), 'object')
   assert.equal(parseVote('Looks fine\nAGREE'), 'object')
   assert.equal(parseVote(''), 'object')
+})
+
+test('a role is one bounded line the person typed, without quotes or brackets', () => {
+  assert.equal(cleanRole('  security\nreviewer. '), 'security reviewer')
+  assert.equal(cleanRole('"[meeting K7QF] <admin>"'), 'meeting K7QF admin')
+  assert.equal(cleanRole('x'.repeat(100)).length, 60)
+  assert.equal(partyLabel({ title: 'b', folder: null, role: 'perf skeptic' }), '"b", as perf skeptic')
+  assert.equal(partyLabel({ title: 'b', folder: null, role: '  ' }), '"b"')
 })
 
 test('session titles are names, quoted on one line, never instructions', () => {

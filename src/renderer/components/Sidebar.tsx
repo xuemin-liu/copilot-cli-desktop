@@ -235,7 +235,7 @@ export function Sidebar({
     const meeting = meetings.find((candidate) => candidate.stage !== 'closed'
       && (candidate.hostTabId === tab.id || candidate.participants.some((participant) => participant.tabId === tab.id)))
     const meetingLabel = meeting
-      ? `Meeting ${meeting.id} · ${meeting.hostTabId === tab.id ? 'host' : meeting.waitingFor.includes(tab.id) ? 'reviewing' : 'reviewer'} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
+      ? `Meeting ${meeting.id} · ${meeting.hostTabId === tab.id ? 'host' : meeting.waitingFor.includes(tab.id) ? 'reviewing' : 'reviewer'}${(() => { const role = meeting.participants.find((participant) => participant.tabId === tab.id)?.role; return role ? ` as ${role}` : '' })()} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
       : null
     const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'

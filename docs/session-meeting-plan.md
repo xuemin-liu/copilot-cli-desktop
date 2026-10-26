@@ -1,7 +1,8 @@
 # Plan: review meetings between sessions
 
-Status: phase 1 built on `feat/session-meetings` (see [Phase 1 as built](#phase-1-as-built)). Revision 2: the first draft
-(one-click send and send back) was dropped; meetings run on their own once started.
+Status: phase 1 merged (#112); phase 2 built on `feat/session-meetings-phase2` (see [Phase 2 as built](#phase-2-as-built));
+phase 3 not started. Revision 2: the first draft (one-click send and send back) was dropped; meetings run on their own once
+started.
 
 ## The workflow this is for
 
@@ -141,7 +142,7 @@ the person approves).
 | Phase | What the person gets |
 | --- | --- |
 | 1 | Meetings as described: start, join by typing or from the chip, rounds, propose-close and vote, Stop, round cap, Meeting pane, cleanup |
-| 2 | Meetings survive an app restart (state in `meeting.json`, resumed sessions rejoin); roles on join ("join meeting K7QF as security reviewer") |
+| 2 | Meetings survive an app restart (state in `meeting.json`, resumed sessions rejoin); roles on join ("join meeting K7QF as security reviewer"); the meeting's cost in the meeting bar |
 | 3 | Optional free discussion inside a round: participants get one extra turn to answer each other before the host sees the replies |
 
 ### Phase 1 pieces
@@ -177,7 +178,7 @@ the person approves).
    when the session goes idle. Newer CLIs mark the answer with `phase: "final_answer"` (one per prompt); older ones need the
    fallback, the last message with text and no tool requests, which held for all 22 prompts. `chunkIndex` / `chunkCount`
    exist but were always 0 / 1; chunks are joined anyway.
-3. Cost: a 3-reviewer meeting of 4 rounds is about 16 turns. Not shown in the app yet (phase 2).
+3. Cost: a 3-reviewer meeting of 4 rounds is about 16 turns. Shown since phase 2 (see below).
 
 ## Phase 1 as built
 
@@ -194,10 +195,47 @@ the person approves).
   its marker, so it does not matter how the CLI records a long paste.
 - `-Changes` runs `git diff HEAD` (plus untracked files as new-file diffs) inside the host session's own shell, with its own
   permissions; the desktop receives only text.
-- A session whose process ends leaves its meeting (a host's meeting closes). Meetings do not survive an app restart.
+- A session whose process ends leaves its meeting (a host's meeting closes). Meetings did not survive an app restart until
+  phase 2.
 - Checks: unit tests for each module (the helper end to end under Windows PowerShell against a real repository), and
   `npm run meeting:check`: the real app and CLI, a full-auto host with an uncommitted change and a read-only reviewer in
   another project, the mock model scripted to run the helper and vote.
+
+## Phase 2 as built
+
+- **Restarts.** Every change saves the meeting to `meeting.json` in its folder (desktop-written, validated on read).
+  - Parties are recorded by Copilot session id, because tab ids are new on every launch.
+  - The hub also records, per session, the message it was given and has not finished answering.
+  - After the saved tabs are restored, `restoreMeetings` (main) gives each open meeting to `MeetingHub.restore`. That maps
+    session ids back to tabs, starts those tabs, types `/add-dir` again, sends the unfinished messages again, and starts a
+    reviewed round's timeout over.
+  - A missing reviewer leaves; a missing host closes the meeting (saved as closed, so it is not restored again).
+  - When the app quits, sessions that stop do not leave their meetings, and pending meeting writes are awaited.
+- **Roles.** "join meeting K7QF as security reviewer" (or the role box beside **Add session…**) records a role. It is one
+  line of up to 60 characters, without quotes or brackets. It appears in that reviewer's posts and votes ("You review as: …"),
+  in the digest and transcript labels, on the chip and in the meeting bar.
+- **Cost.** Each session's event log has `session.usage_checkpoint` records with running totals (`totalNanoAiu`,
+  `totalPremiumRequests`).
+  - The turn reader keeps the latest totals. History read at a (re)start sets the baseline without counting.
+  - The hub adds each party's increase since it joined to the meeting's cost; totals that drop started over and count whole.
+  - The bar shows AI credits: nano AIU / 1e9, the CLI's own `NANO_AIU_PER_AIU`, as `--max-ai-credits` uses it. It also
+    shows premium requests when any.
+  - The monthly usage ledger is not used: it counts tokens per month, not per meeting.
+- **What the restart check found:**
+  - **Resume timing.** A resumed session reads as idle from its history before its CLI is ready ("Resuming session…", then
+    "Loading"), and keys typed then lose their Enter. Meeting typing now also waits for bracketed paste to be on and for the
+    session's output to be still for 1.5 s.
+  - **Terminal replies counted as typing.** When a terminal attaches, xterm answers the CLI's queries (OSC 4 palette, CPR,
+    DA, DSR, DECRPM). `PromptDraft` counted those answers as typing, so a session nobody had typed in looked like it held a
+    draft, and nothing the desktop types (meetings, `/rename`, Resolve with Copilot) could reach it. They no longer count.
+  - **Terminal size.** A restored tab's process starts at 80×24 when its pane reported its size before the process existed.
+    The CLI then draws narrower than the pane until the window is resized. This is not caused by meetings, so it is left for
+    its own fix.
+- **Checks.**
+  - Unit tests: save and restore (mid-round, missing reviewer, missing host, closed or malformed file), roles, cost deltas,
+    id reuse.
+  - `npm run meeting:check` now runs the app twice. The first run opens the meeting and quits. In the second, the meeting is
+    restored, a reviewer joins with a role, and the meeting closes by agreement through the restored host's new endpoint.
 
 ## Open questions
 

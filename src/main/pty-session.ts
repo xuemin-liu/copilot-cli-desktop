@@ -193,9 +193,9 @@ export class PtySession extends EventEmitter {
         this.sessionCwdValue = cwd
         this.emit('session-cwd', cwd)
       },
-      (line) => {
+      (line, live) => {
         if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
-        this.emit('session-record', line)
+        this.emit('session-record', line, live)
       },
     )
     this.permissionMonitor = monitor
