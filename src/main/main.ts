@@ -109,6 +109,7 @@ import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
+import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
@@ -314,6 +315,16 @@ function requestNewSession(attachments: boolean): void {
   window.webContents.send('desktop:new-session-request', attachments)
 }
 
+/** Repositories sessions were asked to resolve a pull in (Resolve with Copilot). */
+const gitResolvers = new GitResolverClaims()
+
+/** Whether a session is in the middle of something (a turn, an approval, starting up), idle, or no longer running at all. */
+function sessionStateOf(tabId: string): SessionState {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab || !managedTabs.has(tabId) || (tab.status !== 'starting' && tab.status !== 'running' && tab.status !== 'approval-needed')) return 'gone'
+  return tab.status === 'starting' || tab.status === 'approval-needed' || tab.activity === 'working' ? 'busy' : 'idle'
+}
+
 function gitServiceInstance(): GitService | null {
   if (gitServiceStopped || shuttingDown()) return null
   gitService ??= new GitService({
@@ -333,6 +344,8 @@ function gitServiceInstance(): GitService | null {
     },
     // A branch switch rewrites files, so it is refused while a session in the project is working and otherwise confirmed in a native window.
     sessionActivity: (profileId) => projectActivity(tabsState.tabs, profileId, Date.now()),
+    // A repository a session was asked to resolve a pull in: the panel's writes there wait for it.
+    resolverFor: (folder) => gitResolvers.forFolder(folder, sessionStateOf),
     // Folders the profile's sessions report running in; the service lists those that are worktrees of its repositories.
     sessionWorktrees: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.sessionCwd ? [tab.sessionCwd] : []),
     // Every live session of the app, whichever profile it belongs to (a worktree can be another profile's workspace), with its
@@ -1270,6 +1283,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
   session.on('activity', () => {
     if (managedTabs.get(id)?.session !== session) return
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activity: session.activity } : tab) }
+    gitResolvers.observe(sessionStateOf)
     syncTabState()
     broadcastState()
     // A session doing something probably changed files; the Git panel (if open) refreshes shortly.
@@ -3146,12 +3160,23 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
 })
-ipcMain.handle('desktop:session-send-task', (event, tabId: unknown, text: unknown): SessionTaskSend => {
+// Resolve with Copilot: the task goes to the session, and the repository is claimed for it in main, so the panel's writes
+// there are refused while it works, however often the panel is closed and reopened.
+ipcMain.handle('desktop:git-resolve', (event, profileId: unknown, repoId: unknown, tabId: unknown, text: unknown): SessionTaskSend => {
   assertTrustedIpcSender(event)
-  if (typeof tabId !== 'string' || typeof text !== 'string' || text.trim() === '') throw new Error('Invalid session task')
+  if (typeof profileId !== 'string' || !/^[0-9a-f]{16}$/.test(profileId) || typeof repoId !== 'string' || !/^repo-[1-9]\d{0,8}$/.test(repoId)
+    || !isSessionTabId(tabId) || typeof text !== 'string' || text.trim() === '') throw new Error('Invalid session task')
   // Only the window that shows the session's terminal may type into it, as for its keystrokes.
   if (!ownsSessionTerminal(event, tabId)) return { result: 'refused', message: 'This session is open in another window.' }
-  return sendSessionTask(tabId, text)
+  const service = gitServiceInstance()
+  if (!service) return { result: 'refused', message: 'The Git panel has stopped.' }
+  const folder = service.repoFolder(event.sender.id, profileId, repoId)
+  const state = sessionStateOf(tabId)
+  const decision = sendSessionTask(tabId, text)
+  if (decision.result === 'refused') return decision
+  gitResolvers.claim(folder, tabId, tabsState.tabs.find((tab) => tab.id === tabId)?.title ?? 'A session', decision.result === 'sent', state)
+  service.requestRefresh(profileId)
+  return decision
 })
 ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows: unknown) => {
   assertTrustedIpcSender(event)

@@ -17,7 +17,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitWorktreeView,
+  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -44,6 +44,9 @@ export interface GitServiceOptions {
   maxHookBytes?: number
   /** Whether a Copilot session is working in this project. A branch switch is refused while one is. */
   sessionActivity?(profileId: string): ProjectActivity
+  /** The session asked to resolve a pull in the repository at `folder`, if any. While it is `working`, every write the panel
+   * asks for in that repository is refused, so the two never race; it is shown on the repository's summary too. */
+  resolverFor?(folder: string): GitResolverView | null
   /** The folders the profile's Copilot sessions report as their cwd. Those that are linked worktrees of a listed
    * repository are shown as repositories of their own, for as long as a session reports them. */
   sessionWorktrees?(profileId: string): readonly string[]
@@ -111,6 +114,8 @@ interface RepoRuntime {
   writeAbort: AbortController | null
   /** For a worktree: the id of the repository it belongs to. */
   worktreeOfId: string | null
+  /** A merge is in progress (`MERGE_HEAD` exists). Read only while there are conflicts, the one time the panel needs it. */
+  merging: boolean
 }
 
 interface ProjectRuntime {
@@ -414,7 +419,7 @@ export class GitService {
       project.repos.set(key, {
         id: `repo-${this.nextRepoNumber++}`, discovered: found, state: 'ready', error: null, scan: null, worktreeOfId: null,
         generation: 0, signature: '', status: null, entries: new Map(), statusView: null,
-        writeQueue: Promise.resolve(), writeAbort: null,
+        writeQueue: Promise.resolve(), writeAbort: null, merging: false,
       })
     }
     for (const key of [...project.repos.keys()]) if (!seen.has(key)) project.repos.delete(key)
@@ -504,7 +509,16 @@ export class GitService {
       })
       if (result.cancelled || signal.aborted) return
       if (!gitSucceeded(result)) return fail(describeFailure(result, 'git status', root))
-      this.applyStatus(repo, parseStatusV2(result.stdout.toString('utf8')))
+      const status = parseStatusV2(result.stdout.toString('utf8'))
+      // Conflicts also come from a cherry-pick, a revert or a rebase; only a merge may be finished with "commit the merge".
+      let merging = false
+      if (status.entries.some(entry => entry.kind === 'unmerged')) {
+        const head = await runtime.runner.run({ cwd: root, args: verifyRefArgs('MERGE_HEAD'), signal, timeoutMs: STATUS_TIMEOUT_MS })
+        if (head.cancelled || signal.aborted) return
+        merging = gitSucceeded(head) && head.stdout.toString('utf8').trim() !== ''
+      }
+      repo.merging = merging
+      this.applyStatus(repo, status)
     } catch (error) {
       if (signal.aborted) return
       fail(redactDiagnosticText(error instanceof Error ? error.message : String(error)).slice(0, 300))
@@ -552,6 +566,8 @@ export class GitService {
       name: repo.discovered.root.split('\\').filter(Boolean).at(-1) ?? repo.discovered.root,
       relativePath: relative,
       folder: repo.discovered.root,
+      merging: repo.merging,
+      resolver: this.options.resolverFor?.(repo.discovered.root) ?? null,
       kind: repo.discovered.kind,
       worktreeOf: repo.worktreeOfId,
       state: repo.state,
@@ -693,10 +709,16 @@ export class GitService {
 
   // ---- writes -------------------------------------------------------------------------------------
 
-  /** Run `task` after any write already running on this repository, with a cancel handle of its own. */
-  private enqueueWrite<T>(repo: RepoRuntime, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  /** Run `task` after any write already running on this repository, with a cancel handle of its own. Refused, with nothing run,
+   * while a session asked to resolve a pull here is working on it: whatever the panel shows (it may have been closed and
+   * reopened), the two must not write to the same repository at once. */
+  private enqueueWrite(repo: RepoRuntime, task: (signal: AbortSignal) => Promise<GitOperationResult>): Promise<GitOperationResult> {
     if (this.disposed) return Promise.reject(new Error('The git service has stopped'))
-    const run = async (): Promise<T> => {
+    const run = async (): Promise<GitOperationResult> => {
+      const resolver = this.options.resolverFor?.(repo.discovered.root)
+      if (resolver?.working) {
+        return this.outcome({ ok: false, reason: 'agent-working', message: `Copilot is working on this repository in "${resolver.title}". Wait for it to finish.`, status: repo.statusView })
+      }
       const controller = new AbortController()
       repo.writeAbort = controller
       this.writeControllers.add(controller)
@@ -708,6 +730,11 @@ export class GitService {
     const result = repo.writeQueue.then(run, run)
     repo.writeQueue = result.catch(() => undefined)
     return result
+  }
+
+  /** The repository's folder, for a caller that hands it to a session (Resolve with Copilot). Throws for an unknown id. */
+  repoFolder(subscriberId: number, profileId: string, repoId: string): string {
+    return this.repoFor(this.projectFor(subscriberId, profileId), repoId).discovered.root
   }
 
   /** Stop the write running on this repository (a commit waiting on a slow hook, say). Writes still queued are not affected. */

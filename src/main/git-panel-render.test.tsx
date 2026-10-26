@@ -156,7 +156,7 @@ test('an unapproved hook is named in full and must be allowed before the commit 
 })
 
 const summary = (overrides: Partial<GitRepoSummary> = {}): GitRepoSummary => ({
-  id: 'repo-2', name: 'beta', relativePath: 'beta', folder: 'D:\\one\\beta', kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
+  id: 'repo-2', name: 'beta', relativePath: 'beta', folder: 'D:\\one\\beta', merging: false, resolver: null, kind: 'nested', state: 'ready', branch: 'main', detached: false, upstream: null, ahead: null, behind: null,
   changeCount: 0, generation: 1, headOid: null, error: null, reviewItems: [], worktreeOf: null, configHash: null, ...overrides,
 })
 
@@ -379,7 +379,7 @@ test('inside a hunk, content starting with +++ or --- is an added or deleted lin
 
 test('a worktree repository row says so, and the worktree list names branch, folder, flags and the session using it', () => {
   const summary: GitRepoSummary = {
-    id: 'repo-2', name: 'desktop-fix-login-abc123', relativePath: 'D:\\one.worktrees\\desktop-fix-login-abc123', folder: 'D:\\one.worktrees\\desktop-fix-login-abc123', kind: 'worktree', worktreeOf: 'repo-1', state: 'ready',
+    id: 'repo-2', name: 'desktop-fix-login-abc123', relativePath: 'D:\\one.worktrees\\desktop-fix-login-abc123', folder: 'D:\\one.worktrees\\desktop-fix-login-abc123', merging: false, resolver: null, kind: 'worktree', worktreeOf: 'repo-1', state: 'ready',
     branch: 'desktop-fix-login-abc123', detached: false, upstream: null, ahead: null, behind: null, changeCount: 1, generation: 1, headOid: 'a'.repeat(40),
     error: null, reviewItems: [], configHash: null,
   }
@@ -445,11 +445,10 @@ test('Resolve with Copilot says what Copilot will do, and where', () => {
 })
 
 test('Resolve with Copilot is disabled, with the reason, when no session here can do it', () => {
-  assert.equal(resolveBlocker({ title: 'A' }, false, false), null)
-  assert.match(resolveBlocker(null, false, false) ?? '', /Open a session in this window/)
-  assert.match(resolveBlocker({ title: 'A', taskBlocker: 'This session is read-only, so it cannot edit files or run Git.' }, false, false) ?? '', /read-only/)
-  assert.match(resolveBlocker({ title: 'A' }, true, false) ?? '', /running Git operation/)
-  assert.match(resolveBlocker({ title: 'A' }, false, true) ?? '', /already working on this pull/)
+  assert.equal(resolveBlocker({ title: 'A' }, false), null)
+  assert.match(resolveBlocker(null, false) ?? '', /Open a session in this window/)
+  assert.match(resolveBlocker({ title: 'A', taskBlocker: 'This session is read-only, so it cannot edit files or run Git.' }, false) ?? '', /read-only/)
+  assert.match(resolveBlocker({ title: 'A' }, true) ?? '', /running Git operation/)
   const blocked = resolveBar({ blocker: 'This session is read-only, so it cannot edit files or run Git.' })
   assert.match(blocked, /<button[^>]*disabled[^>]*>Resolve with Copilot/)
   assert.match(blocked, /git-note">This session is read-only/)

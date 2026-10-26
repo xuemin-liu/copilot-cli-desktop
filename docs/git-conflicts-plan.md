@@ -71,7 +71,8 @@ Built in `git-prompt.ts` next to the other prompt builders, under the same 11,00
   not by them, so sending it is what they asked for.
 - **Otherwise pasted, not sent**, with the notice "Copilot is busy. The task is in the prompt box of "{title}"; press Enter when it
   is ready." A busy session is never interrupted and a draft is never sent with the task attached.
-- A new IPC, `desktop:session-send-task` `{ tabId, text }`, returning `sent | busy | refused`; on `busy` the renderer pastes. The
+- A new IPC, `desktop:git-resolve` `{ profileId, repoId, tabId, text }`, which also claims the repository for the session in main
+  (`git-resolver.ts`); the Git service refuses every write there while the claim is working. Returns `sent | busy | refused`; on `busy` the renderer pastes. The
   renderer never writes Enter itself. Main sends the task as one bracketed paste, so it does so only when the CLI has bracketed
   paste on (tracked from its output); otherwise the task is pasted, which joins lines safely.
 - The target is always the active session in this window, so it is already in front: the person sees Copilot working and any

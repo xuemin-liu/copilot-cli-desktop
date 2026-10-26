@@ -102,7 +102,8 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
 ## Resolve with Copilot
 
 When a pull stops because the branches have diverged or because local changes are in the way, or while a merge has stopped on
-conflicts, the panel shows **Resolve with Copilot**. It gives the active session the task you would otherwise type in its terminal.
+conflicts, the panel shows **Resolve with Copilot**. Conflicts left by a cherry-pick, revert or rebase are not a merge (there is no
+`MERGE_HEAD`), and finishing them like one would leave that operation half done, so the button is not offered for them. It gives the active session the task you would otherwise type in its terminal.
 
 - **The task** names the repository's folder, the branch, its upstream and what Git printed (redacted). It tells Copilot to:
   - merge (never rebase, force, `reset --hard`, discard or push);
@@ -118,8 +119,11 @@ conflicts, the panel shows **Resolve with Copilot**. It gives the active session
   back, then passed on. Otherwise the task is pasted into the prompt box and you press Enter when Copilot is ready.
 - **Which session.** The active session in this window, so the model is the one it runs. The button is disabled, with the reason,
   when there is no session here, or the session is read-only, a side chat, remote or not running.
-- **While Copilot works** on the repository, the panel's own writes to it (Fetch, Pull, Push, stage, commit, switch, discard) wait, so
-  the two never write at once. When the session goes idle the list refreshes and the panel says it has finished. **Push stays
+- **While Copilot works** on the repository, the panel's own writes to it (Fetch, Pull, Push, stage, commit, switch, discard) are refused,
+  so the two never write at once. The app remembers which session was asked, not the panel: closing and reopening the panel, or
+  switching projects, keeps the claim. It holds from the moment a task is sent until that turn ends (or for a minute if the turn never
+  shows up). A task that was only pasted holds only while its own turn runs. When the session goes idle the list refreshes and the
+  panel says it has finished. **Push stays
   your click:** check the changes, History and Copilot's report first.
 
 ## Discarding changes

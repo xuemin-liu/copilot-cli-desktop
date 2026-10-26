@@ -290,8 +290,6 @@ export function App(): JSX.Element {
         taskBlocker: sessionTaskBlocker({ status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
       }
     : null
-  // Sessions in the middle of something: the Git panel waits for one it asked to resolve a pull.
-  const busySessionIds = state.tabs.filter((tab) => tab.activity === 'working' || tab.status === 'starting' || tab.status === 'approval-needed').map((tab) => tab.id)
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
   gitPanelAvailable.current = viewMode === 'desktop' && state.activeProfileId !== null
@@ -386,7 +384,6 @@ export function App(): JSX.Element {
           <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
             panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
               promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}
-              busySessionIds={busySessionIds}
               worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             gitOpen={gitOpen} onToggleGit={toggleGit}

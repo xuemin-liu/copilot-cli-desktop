@@ -27,8 +27,6 @@ export interface GitPanelProps {
   /** The session whose prompt box receives text, or null when there is none or it lives in another window. `cwd` is the folder it
    * works in; `taskBlocker` says why it cannot take a task that edits files and runs Git. */
   promptTarget: ({ id: string; cwd?: string | null } & ResolveTarget) | null
-  /** Sessions in the middle of something (a turn, an approval, starting up). */
-  busySessionIds?: readonly string[]
   /** The active session's worktree folder, when it runs in one: the panel shows that worktree's repository entry. */
   sessionWorktreePath?: string | null
   /** Every session that runs in a worktree, so the worktree list can say who uses which. */
@@ -38,16 +36,17 @@ export interface GitPanelProps {
   onClose(): void
   /** How text reaches a prompt box. Defaults to the app's own prompt insertion. */
   insert?: (tabId: string, text: string) => void
-  /** How a task reaches a session: sent when it is safe to, otherwise pasted. Defaults to main's send, then `insert`. */
-  sendTask?: (tabId: string, text: string) => Promise<TaskDelivery>
+  /** How a resolve task reaches a session and claims the repository: sent when it is safe to, otherwise pasted. Defaults to
+   * main's `gitResolve`, then `insert`. */
+  sendTask?: (repoId: string, tabId: string, text: string) => Promise<TaskDelivery>
 }
 
 /** What became of a task for a session. */
 export type TaskDelivery = { result: 'sent' } | { result: 'pasted'; message: string } | { result: 'refused'; message: string }
 
-/** Main types the task and presses Enter only at a safe moment; otherwise it is pasted for the person to send. */
-async function sendOrPaste(tabId: string, text: string, insert: (tabId: string, text: string) => void): Promise<TaskDelivery> {
-  const outcome = await window.copilotDesktop.sendSessionTask(tabId, text)
+/** Main claims the repository, then types the task and presses Enter only at a safe moment; otherwise it is pasted for the person to send. */
+async function sendOrPaste(profileId: string, repoId: string, tabId: string, text: string, insert: (tabId: string, text: string) => void): Promise<TaskDelivery> {
+  const outcome = await window.copilotDesktop.gitResolve(profileId, repoId, tabId, text)
   if (outcome.result !== 'busy') return outcome
   insert(tabId, text)
   return { result: 'pasted', message: outcome.message }
@@ -55,10 +54,6 @@ async function sendOrPaste(tabId: string, text: string, insert: (tabId: string, 
 
 /** A pull that failed in a way Copilot can finish, for the repository, branch and commit it was asked for. */
 interface PullFailure { repoId: string; branch: string; headOid: string; reason: 'diverged' | 'local-changes'; output: string }
-
-/** Copilot was asked to resolve a pull: in which repository, by which session, and whether that session has started on it
- * (`armed` once it has been idle since the task arrived, `started` once it has worked after that). */
-interface Resolving { repoId: string; tabId: string; title: string; armed: boolean; started: boolean }
 
 type Tab = 'changes' | 'history' | 'branches'
 interface Selection { path: string; staged: boolean }
@@ -198,7 +193,7 @@ function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAc
   )
 }
 
-export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [], busySessionIds = [] }: GitPanelProps): JSX.Element {
+export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
@@ -246,7 +241,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
   const [pullFailure, setPullFailure] = useState<PullFailure | null>(null)
-  const [resolving, setResolving] = useState<Resolving | null>(null)
+  // The resolver last seen working, per repository, so the panel can say when it has finished.
+  const lastResolver = useRef<Map<string, string>>(new Map())
 
   // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
   useEffect(() => {
@@ -565,25 +561,27 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
 
   // Resolve with Copilot: after a pull Copilot can finish, or while a merge is stopped on conflicts.
   const failure = pullFailure && repo && pullFailure.repoId === repo.id && pullFailure.branch === repo.branch && pullFailure.headOid === repo.headOid ? pullFailure : null
+  // Conflicts from a cherry-pick, revert or rebase are not a merge: the task's "finish and commit the merge" would leave that
+  // operation half done, so nothing is offered for them.
+  const conflicted = (currentStatus?.conflicted.length ?? 0) > 0
   const situation: ResolvePullSituation | null = !repo || repo.detached || repo.branch === null ? null
-    : (currentStatus?.conflicted.length ?? 0) > 0 ? 'conflicts' : failure?.reason ?? null
-  const resolvingHere = resolving !== null && resolving.repoId === repo?.id
-  const resolverBusy = resolving !== null && busySessionIds.includes(resolving.tabId)
-  // While the session it asked works on this repository, the panel writes nothing to it: the two would race.
-  const copilotWriting = resolvingHere && resolverBusy
+    : conflicted ? (repo.merging ? 'conflicts' : null) : failure?.reason ?? null
+  // The claim lives in main: closing and reopening the panel does not forget it, and main refuses the writes it covers.
+  const resolver = repo?.resolver ?? null
+  const copilotWriting = resolver?.working === true
   const writesLocked = operation !== null || copilotWriting
-  const lockedReason = copilotWriting ? `Copilot is working on this repository in “${resolving?.title ?? ''}”. Wait for it to finish.` : null
+  const lockedReason = copilotWriting ? `Copilot is working on this repository in “${resolver.title}”. Wait for it to finish.` : null
   useEffect(() => {
-    if (!resolving) return
-    // A task pasted into a busy session waits for that turn to end first; only the turn after it is the one that resolves.
-    if (!resolving.armed) { if (!resolverBusy) setResolving({ ...resolving, armed: true }) }
-    else if (resolverBusy && !resolving.started) setResolving({ ...resolving, started: true })
-    else if (!resolverBusy && resolving.started) {
-      // The panel refreshes on the session's activity anyway; this only says the wait is over.
-      setResolving(null)
-      setNotice(`“${resolving.title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.`)
+    if (!view) return
+    for (const item of view.repos) {
+      const title = lastResolver.current.get(item.id)
+      if (item.resolver?.working) lastResolver.current.set(item.id, item.resolver.title)
+      else if (title !== undefined) {
+        lastResolver.current.delete(item.id)
+        if (!item.resolver && item.id === repo?.id) setNotice(`“${title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.`)
+      }
     }
-  }, [resolving, resolverBusy])
+  }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const resolveWithCopilot = (): void => {
     if (!repo || !repo.branch || !situation || !promptTarget || !currentStatus) return
@@ -593,14 +591,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       output: failure?.output ?? '', blocked: failure?.reason === 'local-changes' ? filesInTheWay(failure.output) : [], conflicted: currentStatus.conflicted.map(entry => entry.path),
     })
     const owner = repo.id
-    const deliver = sendTask ?? ((tabId: string, task: string) => sendOrPaste(tabId, task, insert))
+    const deliver = sendTask ?? ((repoId: string, tabId: string, task: string) => sendOrPaste(profileId, repoId, tabId, task, insert))
     setActionError(null)
     setNotice(null)
-    deliver(target.id, text).then(outcome => {
+    deliver(owner, target.id, text).then(outcome => {
       if (outcome.result === 'refused') { setActionError(outcome.message); return }
       setPullFailure(null)
       setOutput('')
-      setResolving({ repoId: owner, tabId: target.id, title: target.title, armed: outcome.result === 'sent' || !busySessionIds.includes(target.id), started: false })
       setNotice(outcome.result === 'sent'
         ? `Asked “${target.title}” to pull and resolve the conflicts. Follow it in the session, and answer if it asks you something.`
         : `${outcome.message} The task is in the prompt box of “${target.title}”; press Enter there when it is ready.`)
@@ -780,7 +777,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
           {ready && situation && repo.branch && !copilotWriting && (
             <GitResolveBar situation={situation} branch={repo.branch} upstream={repo.upstream} folder={repo.folder} target={promptTarget}
               outside={promptTarget?.cwd ? !folderWithin(repo.folder, promptTarget.cwd) : false}
-              blocker={resolveBlocker(promptTarget, operation !== null, resolvingHere && resolving.started)} onResolve={resolveWithCopilot} />
+              blocker={resolveBlocker(promptTarget, operation !== null)} onResolve={resolveWithCopilot} />
           )}
           {copilotWriting && <p className="git-message git-message-info" role="status">{lockedReason}</p>}
           {notice && <p className="git-message git-message-info" role="status">{notice}</p>}

@@ -93,8 +93,9 @@ export interface CopilotDesktopBridge {
   restartTab(tabId: string): Promise<DesktopState>
   unloadTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string): Promise<void>
-  /** Type a desktop-composed task into the session and press Enter, when that is safe; otherwise `busy`, and the caller pastes it. */
-  sendSessionTask(tabId: string, text: string): Promise<SessionTaskSend>
+  /** Give the session the task of resolving a pull in the repository, and claim the repository for it until it has finished.
+   * Typed and sent when that is safe; otherwise `busy`, and the caller pastes it. */
+  gitResolve(profileId: string, repoId: string, tabId: string, text: string): Promise<SessionTaskSend>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>
