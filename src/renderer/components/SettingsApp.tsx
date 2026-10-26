@@ -12,6 +12,7 @@ import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
 import { MigrationSettings } from './MigrationSettings.js'
 import { MAX_WORKTREE_TIMEOUT_MINUTES } from '../../main/worktree-timeout.js'
+import { MAX_MEETING_MAX_ROUNDS, MAX_MEETING_ROUND_TIMEOUT_MINUTES } from '../../main/meeting-settings.js'
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
   value,
@@ -490,7 +491,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -548,6 +549,47 @@ export function SettingsApp(): JSX.Element | null {
           Nothing is lost when the worktree has no uncommitted changes: its branch is deleted too when every commit on it is
           also on another branch, and kept otherwise. A worktree with changes is removed only after you confirm, and goes to the Recycle
           Bin. Files Git ignores there (build output, node_modules) are deleted with it.
+        </p>
+        <label className="settings-row settings-row-number">
+          Meeting round limit
+          <input
+            key={snapshot.meetingMaxRounds}
+            type="number"
+            min={1}
+            max={MAX_MEETING_MAX_ROUNDS}
+            step={1}
+            required
+            defaultValue={snapshot.meetingMaxRounds}
+            onBlur={(event) => {
+              const input = event.currentTarget
+              if (!input.reportValidity()) return
+              const rounds = input.valueAsNumber
+              if (rounds !== snapshot.meetingMaxRounds) updatePreference({ meetingMaxRounds: rounds })
+            }}
+          />
+        </label>
+        <label className="settings-row settings-row-number">
+          Meeting round timeout (minutes)
+          <input
+            key={snapshot.meetingRoundTimeoutMinutes}
+            type="number"
+            min={1}
+            max={MAX_MEETING_ROUND_TIMEOUT_MINUTES}
+            step={1}
+            required
+            defaultValue={snapshot.meetingRoundTimeoutMinutes}
+            onBlur={(event) => {
+              const input = event.currentTarget
+              if (!input.reportValidity()) return
+              const minutes = input.valueAsNumber
+              if (minutes !== snapshot.meetingRoundTimeoutMinutes) updatePreference({ meetingRoundTimeoutMinutes: minutes })
+            }}
+          />
+        </label>
+        <p className="settings-disclaimer">
+          A review meeting between sessions pauses after this many rounds and asks whether to go on. Default: 6 rounds. A round
+          stops waiting for reviewers who have not replied after the timeout. Default: 10 minutes. Meetings already open keep their
+          round limit.
         </p>
         <label className="settings-row settings-row-select">
           When the main window closes

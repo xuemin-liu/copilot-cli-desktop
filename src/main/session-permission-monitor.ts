@@ -36,6 +36,8 @@ export class SessionPermissionMonitor {
     private readonly onActivity: (activity: SessionActivity | null) => void = () => {},
     private readonly onDetail: (detail: ActivityDetail | null) => void = () => {},
     private readonly onCwd: (cwd: string | null) => void = () => {},
+    /** Each complete record appended after the history was read, before activity sees it (meetings read the turns). */
+    private readonly onRecord: (line: string) => void = () => {},
   ) {}
 
   start(): Promise<void> {
@@ -160,6 +162,7 @@ export class SessionPermissionMonitor {
     let start = 0
     for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
       const line = buffer.subarray(start, end).toString('utf8').trim()
+      if (!this.seeding && line) this.onRecord(line)
       const activity = this.activity.consume(line)
       if (!this.seeding && activity !== undefined) this.onActivity(activity)
       this.publishDetail()

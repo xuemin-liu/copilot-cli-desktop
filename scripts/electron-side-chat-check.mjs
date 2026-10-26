@@ -46,8 +46,11 @@ if (process.versions.electron) {
   const recordingPath = mode?.flag === '--native-paste' || mode?.flag === '--activity' || mode?.flag === '--session-name' ? join(artifacts, 'model-requests.jsonl') : undefined
   if (recordingPath) await writeFile(recordingPath, '')
   const activityMode = mode?.flag === '--activity'
+  const meetingMode = mode?.flag === '--meeting'
   // The activity check makes the model read one workspace file so the real CLI writes a tool record to its event log.
-  const modelServer = createCheckModelServer({ recordingPath, delayMs: activityMode ? 7_000 : 0, toolCall: activityMode ? { name: 'view', arguments: { path: 'marker.txt' } } : undefined })
+  // The meeting check scripts the model: it runs the meeting helper as the host, and reviews and votes as the reviewer.
+  const reply = meetingMode ? (await import('./meeting-check-model.mjs')).meetingModelReply : undefined
+  const modelServer = createCheckModelServer({ recordingPath, delayMs: activityMode ? 7_000 : 0, toolCall: activityMode ? { name: 'view', arguments: { path: 'marker.txt' } } : undefined, reply })
   let rpc
   try {
     await Promise.all([workspace, appData, copilotHome].map((path) => mkdir(path)))
@@ -113,13 +116,36 @@ if (process.versions.electron) {
       env.GIT_CONFIG_NOSYSTEM = '1'
       env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
     }
-    await writeDesktopConfig(join(appData, 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false, provider: { type: 'openai', baseUrl, model: 'ui-check-model', offline: true } })
+    const profiles = [profile]
+    if (meetingMode) {
+      // Two projects: the host (full auto, so its helper runs without asking) has an uncommitted change and the files it
+      // posts; the reviewer is read-only, in a folder of its own.
+      const { execFileSync } = await import('node:child_process')
+      const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(directory, 'gitconfig') }
+      await writeFile(join(directory, 'gitconfig'), '[user]\n\tname = Check\n\temail = check@example.com\n[init]\n\tdefaultBranch = main\n[core]\n\tautocrlf = false\n')
+      const git = (...gitArgs) => execFileSync('git', gitArgs, { cwd: workspace, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      git('init', '-q')
+      await writeFile(join(workspace, 'login.cfg'), 'retry = 1\n')
+      git('add', 'login.cfg')
+      git('commit', '-q', '-m', 'init')
+      await writeFile(join(workspace, 'login.cfg'), 'retry = 3\n')
+      await writeFile(join(workspace, 'plan.md'), '# Plan\n\n1. Retry the login.\n2. Clear the token on logout.\n')
+      await writeFile(join(workspace, 'agreed.md'), '- Take the lock on logout too.\n')
+      const reviewerFolder = join(directory, 'reviewer')
+      await mkdir(reviewerFolder)
+      await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace, reviewerFolder] }))
+      env.GIT_CONFIG_NOSYSTEM = '1'
+      env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
+      Object.assign(profile, createWorkspaceProfile(workspace, 'full-auto'), { name: 'Meeting host', tabs: [], defaultResumeMode: 'new' })
+      profiles.push(Object.assign(createWorkspaceProfile(reviewerFolder, 'read-only'), { name: 'Meeting reviewer', tabs: [], defaultResumeMode: 'new' }))
+    }
+    await writeDesktopConfig(join(appData, 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles, activeProfileId: profile.id, closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false, provider: { type: 'openai', baseUrl, model: 'ui-check-model', offline: true } })
     const electronPath = (await import('electron')).default
     const child = spawn(electronPath, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: false })
     console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
     console.log(mode ? `[electron-check] Running ${mode.label} regression.` : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
     // Automated runs must also end if Electron or a renderer stops responding.
-    const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, 180_000) : undefined
+    const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, meetingMode ? 360_000 : 180_000) : undefined
     try {
       const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
       assert.equal(code, 0, 'Electron did not exit normally')
@@ -127,7 +153,7 @@ if (process.versions.electron) {
     if (mode) {
       const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
       assert.equal(result.passed, true, result.error || `${mode.label} regression failed (see ${artifacts})`)
-      if (mode.flag !== '--worktree' && mode.flag !== '--fan-out') assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
+      if (mode.flag !== '--worktree' && mode.flag !== '--fan-out' && mode.flag !== '--meeting') assert.equal(result.sourceSessionId, sessionId, 'UI result must belong to this run')
     }
     const remainingHistory = await readFile(historyPath, 'utf8')
     for (const event of originalHistory.trim().split('\n').map(JSON.parse)) assert.ok(remainingHistory.includes(event.id), 'Original history was changed')

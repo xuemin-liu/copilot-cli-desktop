@@ -1329,3 +1329,15 @@ button:disabled {
 .git-hooks p { margin: 0 0 6px; overflow-wrap: anywhere; }
 .git-hooks-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .git-hooks-actions .primary-button { min-height: 28px; font-size: 12px; padding: 0 12px; }
+
+.session-meeting-chip { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; background: #1f3b4d; color: #bfe3ff; font-size: 10px; font-weight: 500; white-space: nowrap; vertical-align: middle; }
+.session-meeting-chip.session-meeting-paused { background: #4d3a1f; color: #ffdcae; }
+.meeting-bars { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 0; }
+.meeting-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border: 1px solid #23415a; border-radius: 6px; background: #0f1a24; color: #dbe7f3; font-size: 12px; }
+.meeting-bar-paused { border-color: #6b5023; background: #1d170d; }
+.meeting-bar-closed { border-color: #2d3340; background: #121724; color: #a9b2c0; }
+.meeting-bar-id { font-weight: 600; }
+.meeting-bar-detail { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.meeting-bar-button, .meeting-bar-add { padding: 2px 8px; border: 1px solid #34404f; border-radius: 4px; background: #182231; color: inherit; font: inherit; cursor: pointer; }
+.meeting-bar-button:hover, .meeting-bar-add:hover { background: #213045; }
+.meeting-bar-stop { border-color: #5a2a2a; }

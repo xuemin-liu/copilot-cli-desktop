@@ -36,17 +36,18 @@ const MAX_TASK_CHARS = 12_000
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
 
 /** Why the session can never take a task that edits files and runs Git, or null when it can. The renderer shows it on the
- * button; main checks it again before typing anything. */
-export function sessionTaskBlocker(session: Pick<SessionTaskState, 'status' | 'preset' | 'sideChat' | 'remote'>): string | null {
+ * button; main checks it again before typing anything. A task that only asks for an answer (a meeting's review round) passes
+ * `needsWrite: false`, so read-only sessions and side chats can take it. */
+export function sessionTaskBlocker(session: Pick<SessionTaskState, 'status' | 'preset' | 'sideChat' | 'remote'>, needsWrite = true): string | null {
   if (session.remote) return 'This session runs on another machine, so it cannot work in this folder.'
-  if (session.sideChat) return 'A side chat cannot edit files or run Git. Use its main session.'
-  if (session.preset === 'read-only') return 'This session is read-only, so it cannot edit files or run Git. Start a session that can.'
+  if (needsWrite && session.sideChat) return 'A side chat cannot edit files or run Git. Use its main session.'
+  if (needsWrite && session.preset === 'read-only') return 'This session is read-only, so it cannot edit files or run Git. Start a session that can.'
   if (session.status !== 'running' && session.status !== 'approval-needed') return 'This session is not running. Start or resume it first.'
   return null
 }
 
-export function sessionTaskDecision(state: SessionTaskState): SessionTaskSend {
-  const blocker = sessionTaskBlocker(state)
+export function sessionTaskDecision(state: SessionTaskState, needsWrite = true): SessionTaskSend {
+  const blocker = sessionTaskBlocker(state, needsWrite)
   if (blocker) return { result: 'refused', message: blocker }
   const idle = state.activity === 'idle' || (state.activity === null && state.promptVisible)
   if (state.status === 'approval-needed' || !idle) return { result: 'busy', message: 'Copilot is busy.' }

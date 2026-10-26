@@ -11,6 +11,7 @@ import { DEFAULT_SESSION_LAUNCH_CONFIG, normalizeSessionLaunchConfig } from './s
 import type { RestoredTab, WorkspaceProfile } from './types.js'
 import { DEFAULT_WORKTREE_TIMEOUT_MINUTES, normalizeWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import { DEFAULT_WORKTREE_CLEANUP, isWorktreeCleanupMode, type WorktreeCleanupMode } from './session-worktree-cleanup.js'
+import { DEFAULT_MEETING_MAX_ROUNDS, DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES, normalizeMeetingMaxRounds, normalizeMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 
 export interface DesktopConfig {
   profiles: WorkspaceProfile[]
@@ -29,12 +30,16 @@ export interface DesktopConfig {
   worktreeTimeoutMinutes: number
   /** What happens to the worktree the desktop made for a session when its tab is closed. */
   worktreeCleanup: WorktreeCleanupMode
+  /** A meeting between sessions pauses after this many rounds; the person may allow more. */
+  meetingMaxRounds: number
+  /** How long a meeting round waits for every reviewer's reply. */
+  meetingRoundTimeoutMinutes: number
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes'
 >
 
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
@@ -74,6 +79,8 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   browserOverrides: 'shared',
   worktreeTimeoutMinutes: DEFAULT_WORKTREE_TIMEOUT_MINUTES,
   worktreeCleanup: DEFAULT_WORKTREE_CLEANUP,
+  meetingMaxRounds: DEFAULT_MEETING_MAX_ROUNDS,
+  meetingRoundTimeoutMinutes: DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -258,6 +265,8 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     browserOverrides: isBrowserOverridesMode(value.browserOverrides) ? value.browserOverrides : 'shared',
     worktreeTimeoutMinutes: normalizeWorktreeTimeoutMinutes(value.worktreeTimeoutMinutes),
     worktreeCleanup: isWorktreeCleanupMode(value.worktreeCleanup) ? value.worktreeCleanup : DEFAULT_WORKTREE_CLEANUP,
+    meetingMaxRounds: normalizeMeetingMaxRounds(value.meetingMaxRounds),
+    meetingRoundTimeoutMinutes: normalizeMeetingRoundTimeoutMinutes(value.meetingRoundTimeoutMinutes),
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }
