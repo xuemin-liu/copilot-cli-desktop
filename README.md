@@ -235,8 +235,9 @@ A meeting lets several sessions review one session's plan or local changes witho
 1. In the session that wrote the plan or made the changes, ask: **"start a meeting to review your plan"** (or "…your local
    changes"). Copilot writes the material to a file and runs the meeting helper; it tells you the meeting id, for example
    **K7QF**.
-2. In each session that should review it (any project, any model, read-only sessions too), type **"join meeting K7QF"**.
-   **Add session…** on the meeting bar does the same.
+2. In each session that should review it (any project, any model, read-only sessions too), type **"join meeting K7QF"**,
+   or give it a role: **"join meeting K7QF as security reviewer"**. **Add session…** on the meeting bar does the same, with
+   an optional role in the box beside it. A reviewer with a role is asked to look at the material from that angle first.
 3. The desktop does the rest, in rounds. It types the host's post (and its uncommitted changes, as a patch) into every
    reviewer, collects their replies, and gives them all to the host in one message. The host answers or revises, and the
    next round goes out, with what the other reviewers said. When the open items are settled the host proposes to close;
@@ -245,7 +246,9 @@ A meeting lets several sessions review one session's plan or local changes witho
 
 - The desktop types a meeting message only when that session is idle and its prompt box is empty, the same moment it uses
   for `/rename`. Type into any session at any time; the meeting waits for it.
-- The meeting bar above a session in a meeting shows the round and whom it waits for, with **Transcript** and **Stop**.
+- The meeting bar above a session in a meeting shows the round, whom it waits for, each reviewer's role, and what the
+  meeting has cost so far: the AI credits (and premium requests, if any) its sessions used since they joined, read from
+  each session's own usage records, with **Transcript** and **Stop**.
   A meeting pauses at its round limit (Settings, default 6) and asks whether to allow 3 more rounds. A round stops waiting
   for a reviewer after the round timeout (Settings, default 10 minutes).
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
@@ -258,8 +261,11 @@ A meeting lets several sessions review one session's plan or local changes witho
   meeting (closing the meeting, for the host). A reply that arrives after its round timed out is passed on as a late reply,
   never counted for a later round or vote.
 - The material and transcript live in `%APPDATA%\Copilot CLI Desktop\meetings\<id>`; the desktop adds that folder to each
-  session with `/add-dir`. Folders are removed a week after their last change. Meetings do not survive an app restart, and
-  remote sessions cannot take part.
+  session with `/add-dir`. Folders are removed a week after their last change. Remote sessions cannot take part.
+- An open meeting survives an app restart. Its state is saved in `meeting.json` with each session's Copilot session id; at
+  the next start the desktop finds those sessions among the restored tabs, starts them, adds the folder again, and sends
+  again whatever a session had been given and not finished answering. A round being reviewed starts its timeout over. A
+  reviewer whose tab is gone leaves the meeting; if the host's tab is gone, the meeting closes.
 - The host needs a session started (or resumed once) by this version, so that it has the meeting helper. The helper runs in
   the host's own shell, so it asks for approval like any other command unless the session allows it.
 

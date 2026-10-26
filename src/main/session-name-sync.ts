@@ -59,8 +59,10 @@ export function renameCommand(title: string): string | null {
   return name ? `/rename ${name}` : null
 }
 
-// Mouse reports (Copilot runs with --mouse=on) and focus reports are input that never touches the prompt box.
-const NON_TEXT_INPUT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[IO]/g
+// Mouse reports (Copilot runs with --mouse=on), focus reports, and the terminal's answers to the CLI's own queries are input
+// that never touches the prompt box. The answers arrive when a terminal attaches: colour replies (OSC 4/10/11, ended by BEL
+// or ST), cursor position (CPR), device attributes (DA) and status (DSR, DECRPM) reports.
+const NON_TEXT_INPUT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[\??\d+;\d+R|\x1b\[[?>]?[\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\[\??\d+n/g
 
 /**
  * Whether the prompt box may hold something the person typed. The desktop types `/rename` into the session only while

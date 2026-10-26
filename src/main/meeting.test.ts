@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingError, MeetingHub, joinRequestId, type MeetingDelivery, type MeetingTimers } from './meeting.js'
+import { MeetingError, MeetingHub, joinRequest, type MeetingDelivery, type MeetingTimers } from './meeting.js'
+
+/** The Copilot session id behind each test tab; a saved meeting remembers sessions by these. */
+const SESSIONS: Record<string, string> = {
+  'tab-host': '11111111-1111-4111-8111-111111111111',
+  'tab-b': '22222222-2222-4222-8222-222222222222',
+  'tab-c': '33333333-3333-4333-8333-333333333333',
+}
 
 interface Harness {
   hub: MeetingHub
@@ -15,7 +22,7 @@ interface Harness {
   last(tabId: string): MeetingDelivery
 }
 
-function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }): Harness {
+function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }, existingFolders: readonly string[] = []): Harness {
   let now = 1_000
   let timers: Array<{ at: number; callback: () => void; live: boolean }> = []
   const clock: MeetingTimers = {
@@ -37,7 +44,9 @@ function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }): Harness 
     write: (_meetingId, path, text) => files.set(path, text),
     changed: () => {},
     notify: (_meetingId, message) => notes.push(message),
-  }, () => settings, clock, () => ids.shift()!)
+    sessionIdOf: (tabId) => SESSIONS[tabId] ?? null,
+    folderExists: (id) => existingFolders.includes(id),
+  }, () => settings, clock, (taken) => { while (taken(ids[0]!)) ids.shift(); return ids.shift()! })
   return {
     hub, delivered, cancelled, files, notes,
     advance(ms) {
@@ -176,6 +185,34 @@ test('a vote still being answered when its round times out never counts for a la
   assert.equal(view.round, 3)
 })
 
+test('a round held at the round limit keeps its changes only as filtered, in memory and in the saved meeting', () => {
+  const patch = [
+    'diff --git a/config.txt b/config.txt', '--- a/config.txt', '+++ b/config.txt', '@@ -1 +1 @@', '+API_KEY=sk-live-0123456789abcdef0123456789',
+    'diff --git a/.env b/.env', '--- /dev/null', '+++ b/.env', '@@ -0,0 +1 @@', '+DATABASE_CONNECTION_STRING=Server=db;opaque-held-value-71', '',
+  ].join('\n')
+  const h = harness({ maxRounds: 1, roundTimeoutMinutes: 10 })
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  assert.match(h.hub.post('tab-host', 'round', 'v2 with changes', patch), /reached its limit/)
+  const saved = h.files.get('C:\\meetings\\K7QF\\meeting.json')!
+  assert.equal(JSON.parse(saved).stage, 'paused')
+  assert.doesNotMatch(saved, /sk-live-0123456789abcdef|opaque-held-value-71/, 'the paused meeting.json holds no secret')
+  assert.match(JSON.parse(saved).held.changes, /# Changes to \.env withheld/)
+  h.hub.resume('K7QF')
+  const shared = h.files.get('C:\\meetings\\K7QF\\round-2\\changes.patch')!
+  assert.doesNotMatch(shared, /sk-live-0123456789abcdef|opaque-held-value-71/)
+  assert.match(shared, /# Changes to \.env withheld/)
+  assert.equal(shared.match(/^# 1 file that looks like it holds secrets/gm)?.length, 1, 'filtering twice adds no second note')
+
+  // A meeting saved by an earlier build with the raw patch held is filtered when it is read back.
+  const raw = JSON.parse(saved)
+  raw.held.changes = patch
+  const later = harness()
+  later.hub.restore(raw, '', (sessionId) => ({ tabId: sessionId === SESSIONS['tab-host'] ? 'h2' : 'b2', title: 't', folder: null }))
+  assert.doesNotMatch(later.files.get('C:\\meetings\\K7QF\\meeting.json')!, /sk-live-0123456789abcdef|opaque-held-value-71/)
+})
+
 test('a host turn answering an earlier round does not count as silence in the current one', () => {
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
@@ -264,12 +301,118 @@ test('a large post is referenced by its path instead of being typed', () => {
   assert.match(message, /too long to include here; read it in full from C:\\meetings\\K7QF\\round-1\\post\.md/)
 })
 
-test('join requests are read from what the person typed', () => {
-  assert.equal(joinRequestId('join meeting K7QF'), 'K7QF')
-  assert.equal(joinRequestId('Please join the chat k7qf and review'), 'K7QF')
-  assert.equal(joinRequestId('join meeting #M2NB.'), 'M2NB')
-  assert.equal(joinRequestId('join meeting id: P3RT'), 'P3RT')
-  assert.equal(joinRequestId('join meeting K0QF'), null, 'not an id the desktop makes')
-  assert.equal(joinRequestId('the meeting K7QF went well'), null, 'no join asked')
-  assert.equal(joinRequestId('join meeting K7QFX'), null)
+test('join requests are read from what the person typed, with an optional role', () => {
+  assert.deepEqual(joinRequest('join meeting K7QF'), { id: 'K7QF', role: null })
+  assert.deepEqual(joinRequest('Please join the chat k7qf and review'), { id: 'K7QF', role: null })
+  assert.deepEqual(joinRequest('join meeting #M2NB.'), { id: 'M2NB', role: null })
+  assert.deepEqual(joinRequest('join meeting id: P3RT'), { id: 'P3RT', role: null })
+  assert.deepEqual(joinRequest('join meeting K7QF as security reviewer'), { id: 'K7QF', role: 'security reviewer' })
+  assert.deepEqual(joinRequest('join meeting K7QF, as a "performance" [skeptic].'), { id: 'K7QF', role: 'performance skeptic' })
+  assert.ok(joinRequest(`join meeting K7QF as the ${'very '.repeat(30)}picky reviewer`)!.role!.length <= 60, 'bounded')
+  assert.equal(joinRequest('join meeting K0QF'), null, 'not an id the desktop makes')
+  assert.equal(joinRequest('the meeting K7QF went well'), null, 'no join asked')
+  assert.equal(joinRequest('join meeting K7QFX'), null)
+})
+
+test('a reviewer\'s role is in its messages and in what the host and the others read', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF', { role: 'security reviewer' })
+  h.hub.join(reviewerC, 'K7QF')
+  assert.match(h.last('tab-b').text, /^You review as: security reviewer\. Look at the material from that angle first\.$/m)
+  assert.doesNotMatch(h.last('tab-c').text, /You review as/)
+  assert.deepEqual(h.hub.views()[0]!.participants.map((participant) => participant.role), ['security reviewer', null])
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B: the token leaks into logs')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C: fine')
+  assert.match(h.last('tab-host').text, /## "review opus" \(D:\\api\), as security reviewer\n\nB: the token leaks/)
+  h.hub.post('tab-host', 'propose-close', '- no tokens in logs', null)
+  assert.match(h.last('tab-b').text, /You review as: security reviewer/, 'the vote too')
+})
+
+test('the meeting\'s cost is what its sessions used since they joined, in AI credits', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null }, { nanoAiu: 5e9, premiumRequests: 2 })
+  h.hub.join(reviewerB, 'K7QF', { usage: { nanoAiu: 40e9, premiumRequests: 10 } })
+  h.hub.usage('tab-b', { nanoAiu: 41.5e9, premiumRequests: 11 })
+  h.hub.usage('tab-host', { nanoAiu: 5.25e9, premiumRequests: 2 })
+  assert.deepEqual(h.hub.views()[0]!.cost, { aiCredits: 1.75, premiumRequests: 1 })
+  h.hub.usage('tab-b', { nanoAiu: 0.5e9, premiumRequests: 0 })
+  assert.equal(h.hub.views()[0]!.cost.aiCredits, 2.25, 'totals that went down started over: all of the new value counts')
+  h.hub.usage('tab-c', { nanoAiu: 99e9, premiumRequests: 9 })
+  assert.equal(h.hub.views()[0]!.cost.aiCredits, 2.25, 'a session outside the meeting does not count')
+  h.hub.stop('K7QF')
+  h.hub.usage('tab-b', { nanoAiu: 9e9, premiumRequests: 0 })
+  assert.equal(h.hub.views()[0]!.cost.aiCredits, 2.25, 'nothing counts after the meeting closed')
+})
+
+test('a new meeting never reuses the id of an older meeting\'s folder', () => {
+  const h = harness(undefined, ['K7QF'])
+  assert.equal(h.hub.start(host, { topic: 'plan', post: 'plan', changes: null }).id, 'M2NB')
+})
+
+test('a meeting saved mid-round goes on after a restart: new tabs, the open round sent again, its timeout started over', () => {
+  const before = harness()
+  before.hub.start(host, { topic: 'login plan', post: 'plan v1', changes: null }, { nanoAiu: 1e9, premiumRequests: 0 })
+  before.hub.join(reviewerB, 'K7QF', { role: 'security reviewer' })
+  before.hub.join(reviewerC, 'K7QF')
+  before.hub.usage('tab-b', { nanoAiu: 3e9, premiumRequests: 0 })
+  before.hub.turnCompleted('tab-b', before.last('tab-b'), 'B: needs a lock')
+  const saved = JSON.parse(before.files.get('C:\\meetings\\K7QF\\meeting.json')!)
+  const transcript = before.files.get('C:\\meetings\\K7QF\\transcript.md')!
+  assert.equal(saved.host.sessionId, SESSIONS['tab-host'])
+  assert.deepEqual(saved.outstanding.map((entry: { sessionId: string }) => entry.sessionId), [SESSIONS['tab-c']], 'only C has not answered')
+
+  const after = harness()
+  const tabs: Record<string, string> = { [SESSIONS['tab-host']!]: 'tab-host2', [SESSIONS['tab-b']!]: 'tab-b2', [SESSIONS['tab-c']!]: 'tab-c2' }
+  const started = after.hub.restore(saved, transcript, (sessionId) => tabs[sessionId] ? { tabId: tabs[sessionId]!, title: `restored ${tabs[sessionId]}`, folder: null } : null)
+  assert.deepEqual(started, ['tab-host2', 'tab-b2', 'tab-c2'])
+  const view = after.hub.views()[0]!
+  assert.equal(view.stage, 'reviewing')
+  assert.deepEqual(view.waitingFor, ['tab-c2'])
+  assert.equal(view.cost.aiCredits, 3, 'B joined without a known baseline, so its 3 credits count; the cost survives the restart')
+  assert.deepEqual(view.participants.map((participant) => [participant.tabId, participant.role, participant.replied]), [['tab-b2', 'security reviewer', true], ['tab-c2', null, false]])
+  assert.deepEqual(after.delivered.filter((delivery) => delivery.kind === 'add-dir').map((delivery) => delivery.tabId), ['tab-host2', 'tab-b2', 'tab-c2'], 'every session gets the folder again')
+  const resent = after.to('tab-c2')
+  assert.equal(resent.length, 1, 'C gets the round it had not answered')
+  assert.equal(resent[0]!.round, 1)
+  assert.match(resent[0]!.text, /plan v1/)
+  assert.equal(after.to('tab-b2').length, 0, 'B had answered: nothing again')
+  assert.match(after.files.get('C:\\meetings\\K7QF\\transcript.md')!, /B: needs a lock[\s\S]*## Restored/)
+
+  after.hub.turnCompleted('tab-c2', resent[0]!, 'C: agreed with B')
+  const digest = after.last('tab-host2')
+  assert.equal(digest.kind, 'digest')
+  assert.match(digest.text, /2 of 2 reviewers replied/)
+  assert.match(digest.text, /B: needs a lock/, 'the reply from before the restart is in the digest')
+
+  const later = harness()
+  later.hub.restore(saved, transcript, (sessionId) => tabs[sessionId] ? { tabId: tabs[sessionId]!, title: 't', folder: null } : null)
+  later.advance(10 * 60_000)
+  assert.equal(later.last('tab-host2').kind, 'digest', 'the restored round times out like any other')
+})
+
+test('after a restart a missing reviewer leaves the meeting and a missing host closes it', () => {
+  const before = harness()
+  before.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  before.hub.join(reviewerB, 'K7QF')
+  before.hub.join(reviewerC, 'K7QF')
+  before.hub.turnCompleted('tab-b', before.last('tab-b'), 'B says')
+  const saved = JSON.parse(before.files.get('C:\\meetings\\K7QF\\meeting.json')!)
+  const transcript = before.files.get('C:\\meetings\\K7QF\\transcript.md')!
+
+  const withoutC = harness()
+  withoutC.hub.restore(saved, transcript, (sessionId) => sessionId === SESSIONS['tab-c'] ? null : { tabId: sessionId === SESSIONS['tab-host'] ? 'h2' : 'b2', title: 't', folder: null })
+  assert.equal(withoutC.last('h2').kind, 'digest', 'with C gone everyone left has answered: the round finishes')
+  assert.match(withoutC.files.get('C:\\meetings\\K7QF\\transcript.md')!, /"review gpt" \(D:\\web\) left[\s\S]*not open after the app restarted/)
+
+  const withoutHost = harness()
+  assert.equal(withoutHost.hub.restore(saved, transcript, (sessionId) => sessionId === SESSIONS['tab-host'] ? null : { tabId: 'x', title: 't', folder: null }), null)
+  assert.equal(withoutHost.hub.views().length, 0)
+  assert.equal(JSON.parse(withoutHost.files.get('C:\\meetings\\K7QF\\meeting.json')!).stage, 'closed', 'saved as closed, so it is not restored again')
+  assert.equal(withoutHost.delivered.length, 0)
+
+  const closed = harness()
+  before.hub.stop('K7QF')
+  assert.equal(closed.hub.restore(JSON.parse(before.files.get('C:\\meetings\\K7QF\\meeting.json')!), '', () => ({ tabId: 'x', title: 't', folder: null })), null, 'a closed meeting stays closed')
+  assert.equal(closed.hub.restore({ version: 1, id: '../x' }, '', () => null), null, 'a malformed file restores nothing')
 })

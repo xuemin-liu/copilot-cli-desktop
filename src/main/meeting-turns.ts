@@ -22,8 +22,13 @@ interface TurnRecord {
     toolRequests?: unknown
     chunkIndex?: unknown
     chunkCount?: unknown
+    totalNanoAiu?: unknown
+    totalPremiumRequests?: unknown
   }
 }
+
+/** What a session has used so far, from its latest `session.usage_checkpoint` (running totals for the session). */
+export interface MeetingUsage { nanoAiu: number; premiumRequests: number }
 
 export interface PromptSeen {
   content: string
@@ -45,6 +50,18 @@ const MAX_CHUNKS = 64
 export class MeetingTurnReader {
   private current: Interaction | null = null
   private expectingDesktop = false
+  private usageValue: MeetingUsage | null = null
+  private usageChanged = false
+
+  /** The session's latest usage totals, from its history or since; null before any checkpoint. */
+  get usage(): MeetingUsage | null { return this.usageValue }
+
+  /** The totals, once, when a record read live changed them. */
+  takeUsageChange(): MeetingUsage | null {
+    if (!this.usageChanged) return null
+    this.usageChanged = false
+    return this.usageValue
+  }
 
   /** The desktop is about to type a prompt; the next prompt recorded is that one. */
   expectDesktopPrompt(): void {
@@ -56,12 +73,22 @@ export class MeetingTurnReader {
     return this.current !== null && !this.current.desktop
   }
 
-  /** Returns the prompt when the record is a new one, so joins can be read from what the person typed. */
-  consume(line: string): PromptSeen | null {
+  /**
+   * Returns the prompt when the record is a new one, so joins can be read from what the person typed. History read when the
+   * session (re)starts is not `live`: it only tells the usage so far, never a prompt to act on.
+   */
+  consume(line: string, live = true): PromptSeen | null {
     let record: TurnRecord
     try { record = JSON.parse(line) } catch { return null }
     if (!record || typeof record !== 'object' || record.agentId || record.data?.parentToolCallId) return null
     const data = record.data ?? {}
+    if (record.type === 'session.usage_checkpoint') {
+      const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+      this.usageValue = { nanoAiu: count(data.totalNanoAiu), premiumRequests: count(data.totalPremiumRequests) }
+      this.usageChanged = live
+      return null
+    }
+    if (!live) return null
     if (record.type === 'user.message') {
       if (typeof data.content !== 'string') return null
       const desktop = this.expectingDesktop || data.content.startsWith(MEETING_MARKER_PREFIX)
