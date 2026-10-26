@@ -51,7 +51,8 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError }: MeetingBarP
     <div className="meeting-bars">
       {shown.map((meeting) => {
         const open = meeting.stage !== 'closed'
-        const candidates = tabs.filter((tab) => !tab.remote && !busy.has(tab.id) && tab.status !== 'completed' && tab.status !== 'crashed')
+        // Only a session whose CLI is running can take the material; an unloaded or stopped one has to be resumed first.
+        const candidates = tabs.filter((tab) => !tab.remote && !tab.unloaded && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
         const role = meeting.hostTabId === activeTabId ? 'Host' : 'Reviewer'
         return (
           <section key={meeting.id} className={`meeting-bar meeting-bar-${meeting.stage}`} aria-label={`Meeting ${meeting.id}`}>

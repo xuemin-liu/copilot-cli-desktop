@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { looksSensitivePath, maskSecrets } from './git-prompt.js'
 
 /**
  * The text the desktop types into sessions taking part in a meeting. Everything here is built by the desktop: ids, round
@@ -175,6 +176,44 @@ const VOTE_DECORATION = /^[\s>*_#`~\-[\]()]+/
 export function parseVote(text: string): MeetingVote {
   const first = text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? ''
   return /^AGREE\b/i.test(first.replace(VOTE_DECORATION, '')) ? 'agree' : 'object'
+}
+
+/** Every path a file's section of a patch names: the `diff --git` line, `---` / `+++`, renames and binary notes. */
+function sectionPaths(section: string): string[] {
+  const paths: string[] = []
+  const first = section.slice(0, section.indexOf('\n') === -1 ? undefined : section.indexOf('\n'))
+  const header = /^diff --git a\/(.*) b\/(.*)$/.exec(first)
+  if (header) paths.push(header[1]!, header[2]!)
+  for (const match of section.matchAll(/^(?:--- a\/|\+\+\+ b\/|rename from |rename to |copy from |copy to )(.+?)\t?$/gm)) paths.push(match[1]!)
+  for (const match of section.matchAll(/^Binary files (?:a\/)?(.+?) and (?:b\/)?(.+?) differ$/gm)) paths.push(match[1]!, match[2]!)
+  return paths.map((path) => path.trim()).filter((path) => path && path !== '/dev/null')
+}
+
+/**
+ * The host's patch as reviewers may see it, with the same protection as the Git panel's prompts: a file that holds secrets by
+ * convention (.env, keys, credentials) is named but its changes are withheld, and values that look like credentials or private
+ * keys are masked everywhere else. Every reviewer, in any project and with any model, gets this text.
+ */
+export function shareablePatch(patch: string): string {
+  const sections = patch.replace(/\r\n/g, '\n').split(/^(?=diff --git )/m)
+  const withheld: string[] = []
+  let masked = false
+  const kept = sections.map((section) => {
+    const paths = sectionPaths(section)
+    if (paths.some(looksSensitivePath)) {
+      const name = paths.at(-1) ?? 'a file'
+      withheld.push(name)
+      return `# Changes to ${name} withheld: the file looks like it holds secrets.\n`
+    }
+    const result = maskSecrets(section)
+    masked ||= result.masked
+    return result.text
+  })
+  const notes = [
+    ...(withheld.length ? [`# ${withheld.length} file${withheld.length === 1 ? '' : 's'} that look${withheld.length === 1 ? 's' : ''} like ${withheld.length === 1 ? 'it holds' : 'they hold'} secrets ${withheld.length === 1 ? 'is' : 'are'} named below, without changes.`] : []),
+    ...(masked ? ['# Values that looked like credentials were replaced with [REDACTED].'] : []),
+  ]
+  return (notes.length ? notes.join('\n') + '\n' : '') + kept.join('')
 }
 
 export function transcriptEntry(heading: string, body: string): string {

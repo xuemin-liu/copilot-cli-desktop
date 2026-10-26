@@ -24,8 +24,8 @@ function outbox(answers: Record<string, SessionTaskSend['result']>) {
 
 test('one prompt per session at a time: the next waits until the turn it started has ended', () => {
   const o = outbox({})
-  o.box.enqueue('tab-1', { meetingId: 'K7QF', kind: 'post', text: 'round 1' })
-  o.box.enqueue('tab-1', { meetingId: 'K7QF', kind: 'post', text: 'round 2' })
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 2' })
   assert.equal(o.box.pump(), true)
   assert.deepEqual(o.typed, ['tab-1: round 1'])
   assert.equal(o.box.inTurn('tab-1')?.text, 'round 1')
@@ -38,9 +38,9 @@ test('one prompt per session at a time: the next waits until the turn it started
 
 test('a busy session keeps its message for later; a refused one drops it; other sessions are not held up', () => {
   const o = outbox({ 'tab-busy': 'busy', 'tab-gone': 'refused' })
-  o.box.enqueue('tab-busy', { meetingId: 'K7QF', kind: 'post', text: 'wait' })
-  o.box.enqueue('tab-gone', { meetingId: 'K7QF', kind: 'post', text: 'never' })
-  o.box.enqueue('tab-ok', { meetingId: 'K7QF', kind: 'post', text: 'go' })
+  o.box.enqueue('tab-busy', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'wait' })
+  o.box.enqueue('tab-gone', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'never' })
+  o.box.enqueue('tab-ok', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'go' })
   assert.equal(o.box.pump(), true, 'the busy one is still waiting')
   assert.deepEqual(o.typed, ['tab-ok: go'])
   assert.deepEqual(o.refused, ['tab-gone: never'])
@@ -51,8 +51,8 @@ test('a busy session keeps its message for later; a refused one drops it; other 
 test('the meeting folder is added with a slash command, and the material follows once the CLI has taken it', () => {
   const o = outbox({})
   o.setCommands(false)
-  o.box.enqueue('tab-1', { meetingId: 'K7QF', kind: 'add-dir', text: 'C:\\Users\\me\\AppData\\Roaming\\Copilot CLI Desktop\\meetings\\K7QF' })
-  o.box.enqueue('tab-1', { meetingId: 'K7QF', kind: 'post', text: 'material' })
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'add-dir', text: 'C:\\Users\\me\\AppData\\Roaming\\Copilot CLI Desktop\\meetings\\K7QF' })
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'material' })
   o.box.pump()
   assert.deepEqual(o.typed, [], 'not while the prompt box is in use')
   o.setCommands(true)

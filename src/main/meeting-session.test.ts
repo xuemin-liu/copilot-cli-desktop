@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest } from './meeting-session.js'
+import { shareablePatch } from './meeting-messages.js'
 
 function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
   return new Promise((resolvePost, reject) => {
@@ -85,6 +86,8 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     git('commit', '-q', '-m', 'init')
     await writeFile(join(repo, 'a.txt'), 'one\ntwo ✓\n')
     await writeFile(join(repo, 'new file.txt'), 'brand new\n')
+    await writeFile(join(repo, '.env'), 'PASSWORD=hunter2-very-secret\n')
+    await writeFile(join(repo, 'config.txt'), 'API_KEY=sk-live-0123456789abcdef0123456789\n')
     await writeFile(join(directory, 'plan.md'), '# Plan ✓\n\n1. lock\n')
     const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab-host'), { ...gitEnv })
     assert.match(env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS!, /helper/)
@@ -104,6 +107,12 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     assert.match(sent.changes!, /\+two ✓/, 'tracked changes, UTF-8 intact')
     assert.match(sent.changes!, /new file\.txt/)
     assert.match(sent.changes!, /\+brand new/, 'untracked files are included as new files')
+    // The helper sends what Git shows; the desktop filters it before any reviewer can read it.
+    const shared = shareablePatch(sent.changes!)
+    assert.doesNotMatch(shared, /hunter2/, 'an untracked .env is withheld')
+    assert.match(shared, /# Changes to \.env withheld/)
+    assert.doesNotMatch(shared, /sk-live-0123456789abcdef/, 'a key in an ordinary file is masked')
+    assert.match(shared, /\+brand new/)
     const ended = await run('end')
     assert.equal(ended.code, 1)
     assert.match(ended.stdout, /does not host an open meeting/)

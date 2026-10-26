@@ -13,6 +13,7 @@ import {
   reminderMessage,
   repliesDocument,
   roundPaths,
+  shareablePatch,
   transcriptEntry,
   voteMessage,
   type MeetingParty,
@@ -72,7 +73,8 @@ export interface MeetingView {
   folder: string
 }
 
-export interface MeetingDelivery { meetingId: string; kind: MeetingDeliveryKind; text: string }
+/** `round` is the round the message belongs to: a reply counts only for that round, however late its turn ends. */
+export interface MeetingDelivery { meetingId: string; round: number; kind: MeetingDeliveryKind; text: string }
 
 export interface MeetingEffects {
   /** Queue a message (or, for `add-dir`, a command) for the session; it is typed when the session can take it. */
@@ -214,7 +216,7 @@ export class MeetingHub {
     }
     this.meetings.set(id, meeting)
     this.writePost(meeting, 'Opening post', request.changes)
-    this.effects.deliver(host.tabId, { meetingId: id, kind: 'add-dir', text: meeting.folder })
+    this.effects.deliver(host.tabId, { meetingId: id, round: meeting.round, kind: 'add-dir', text: meeting.folder })
     this.effects.changed()
     return this.view(meeting)
   }
@@ -230,7 +232,7 @@ export class MeetingHub {
     const joinedLate = meeting.round > 1 || meeting.stage !== 'waiting'
     meeting.participants.set(participant.tabId, { ...participant, joinedRound: meeting.round })
     this.appendTranscript(meeting, `Session ${partyLabel(participant)} joined`, `In round ${meeting.round}.`)
-    this.effects.deliver(participant.tabId, { meetingId: id, kind: 'add-dir', text: meeting.folder })
+    this.effects.deliver(participant.tabId, { meetingId: id, round: meeting.round, kind: 'add-dir', text: meeting.folder })
     if (meeting.stage === 'waiting') {
       this.openRound(meeting)
     } else {
@@ -291,27 +293,29 @@ export class MeetingHub {
     } else {
       meeting.stage = 'host'
       meeting.remindedHost = true
-      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, kind: 'reminder', text: reminderMessage(meeting.id) })
+      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, round: meeting.round, kind: 'reminder', text: reminderMessage(meeting.id) })
     }
     this.effects.changed()
   }
 
   /**
    * A turn the desktop started in this session ended. For a participant its reply is the turn's final answer; for the host it
-   * means the turn that received the replies (or a reminder) is over.
+   * means the turn that received the replies (or a reminder) is over. A reply to an earlier round (its turn outlasted that
+   * round's timeout) never counts for the current one, even of the same kind: it joins the next digest as a late reply.
    */
-  turnCompleted(tabId: string, meetingId: string, kind: MeetingDeliveryKind, reply: string): void {
-    const meeting = this.meetings.get(meetingId)
+  turnCompleted(tabId: string, delivery: MeetingDelivery, reply: string): void {
+    const { kind } = delivery
+    const meeting = this.meetings.get(delivery.meetingId)
     if (!meeting || meeting.stage === 'closed') return
     if (meeting.host.tabId === tabId) {
-      if ((kind === 'digest' || kind === 'reminder') && meeting.stage === 'host') this.hostSilent(meeting)
+      if ((kind === 'digest' || kind === 'reminder') && meeting.stage === 'host' && delivery.round === meeting.round) this.hostSilent(meeting)
       return
     }
     const participant = meeting.participants.get(tabId)
     if (!participant || (kind !== 'post' && kind !== 'vote')) return
     const text = bound(reply.trim(), MAX_MEETING_REPLY_CHARS) || '(an empty reply)'
-    const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && (kind === 'vote') === meeting.vote
-    this.appendTranscript(meeting, `Round ${meeting.round}: ${partyLabel(participant)}${answersThisRound ? '' : ' (late)'}`, text)
+    const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && (kind === 'vote') === meeting.vote
+    this.appendTranscript(meeting, `Round ${delivery.round}: ${partyLabel(participant)}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
     if (!answersThisRound) {
       meeting.late.push({ title: participant.title, folder: participant.folder, text })
       return
@@ -388,7 +392,7 @@ export class MeetingHub {
     const text = meeting.vote
       ? voteMessage({ id: meeting.id, round: meeting.round, host, summary: meeting.post, folder: meeting.folder, joinedLate })
       : postMessage({ id: meeting.id, round: meeting.round, topic: meeting.topic, host, post: meeting.post, folder: meeting.folder, hasChanges: meeting.hasChanges, previousReplies: meeting.round > 1, joinedLate })
-    this.effects.deliver(tabId, { meetingId: meeting.id, kind: meeting.vote ? 'vote' : 'post', text })
+    this.effects.deliver(tabId, { meetingId: meeting.id, round: meeting.round, kind: meeting.vote ? 'vote' : 'post', text })
   }
 
   private timeOut(meeting: Meeting): void {
@@ -411,14 +415,14 @@ export class MeetingHub {
     const paths = roundPaths(meeting.folder, meeting.round)
     this.effects.write(meeting.id, paths.replies, repliesDocument(meeting.id, meeting.round, replies, late))
     if (meeting.vote && replies.length > 0 && replies.every((reply) => reply.vote === 'agree')) {
-      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, kind: 'agreed', text: agreedMessage(meeting.id, meeting.round, replies.length, meeting.folder) })
+      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, round: meeting.round, kind: 'agreed', text: agreedMessage(meeting.id, meeting.round, replies.length, meeting.folder) })
       this.close(meeting, 'agreed')
       return
     }
     meeting.stage = 'host'
     meeting.remindedHost = false
     this.effects.deliver(meeting.host.tabId, {
-      meetingId: meeting.id, kind: 'digest',
+      meetingId: meeting.id, round: meeting.round, kind: 'digest',
       text: digestMessage({ id: meeting.id, round: meeting.round, vote: meeting.vote, folder: meeting.folder, replies, late }),
     })
     this.effects.changed()
@@ -427,7 +431,7 @@ export class MeetingHub {
   private hostSilent(meeting: Meeting): void {
     if (!meeting.remindedHost) {
       meeting.remindedHost = true
-      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, kind: 'reminder', text: reminderMessage(meeting.id) })
+      this.effects.deliver(meeting.host.tabId, { meetingId: meeting.id, round: meeting.round, kind: 'reminder', text: reminderMessage(meeting.id) })
       return
     }
     this.pause(meeting, 'host-silent')
@@ -468,7 +472,8 @@ export class MeetingHub {
     const paths = roundPaths(meeting.folder, meeting.round)
     meeting.hasChanges = changes !== null && changes.trim().length > 0
     this.effects.write(meeting.id, paths.post, meeting.post)
-    if (meeting.hasChanges) this.effects.write(meeting.id, paths.changes, bound(changes!, MAX_MEETING_PATCH_CHARS, '\n# The patch stops here: it exceeded the meeting limit.\n'))
+    // Filtered before it is cut to size, so a secret file's section is withheld whole, never cut in the middle.
+    if (meeting.hasChanges) this.effects.write(meeting.id, paths.changes, bound(shareablePatch(changes!), MAX_MEETING_PATCH_CHARS, '\n# The patch stops here: it exceeded the meeting limit.\n'))
     this.appendTranscript(meeting, heading, meeting.post + (meeting.hasChanges ? `\n\n(Changes: ${paths.changes})` : ''))
   }
 

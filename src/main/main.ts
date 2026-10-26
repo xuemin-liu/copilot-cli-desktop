@@ -1865,7 +1865,7 @@ function onMeetingRecord(tabId: string, line: string): void {
 function onMeetingIdle(tabId: string): void {
   const turn = meetingReaders.get(tabId)?.finish() ?? null
   const delivery = meetingOutbox.turnEnded(tabId)
-  if (delivery) meetingHub.turnCompleted(tabId, delivery.meetingId, delivery.kind, turn?.desktop ? turn.reply : '')
+  if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
   scheduleMeetingPump(0)
 }
 
@@ -1940,6 +1940,8 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
       if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
     }
     forgetSessionName(tabId)
+    // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
+    forgetMeetingSession(tabId)
     // Until the tab is marked unloaded, a browser request finds it closing rather than creating a new browser.
     closingBrowserTabs.add(tabId)
     const browser = sessionBrowsers.get(tabId)
@@ -3331,6 +3333,10 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     if (!isSessionTabId(tabId)) throw new Error('Invalid session')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || tab.remote) throw new Error('Only a local session can join a meeting')
+    // Nothing can be typed into a session without a running CLI: it would sit in the round as a reviewer that never answers.
+    if (tab.unloaded || !managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
+      throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
+    }
     try { meetingHub.join(meetingParty(tabId), meetingId) }
     catch (error) { throw error instanceof MeetingError ? new Error(error.message) : error }
   } else if (action === 'transcript') {

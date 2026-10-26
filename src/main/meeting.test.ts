@@ -11,6 +11,8 @@ interface Harness {
   advance(ms: number): void
   /** What was delivered to a tab, add-dir commands left out. */
   to(tabId: string): Array<{ tabId: string } & MeetingDelivery>
+  /** The latest message delivered to a tab: the one its next finished turn answers. */
+  last(tabId: string): MeetingDelivery
 }
 
 function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }): Harness {
@@ -45,6 +47,7 @@ function harness(settings = { maxRounds: 6, roundTimeoutMinutes: 10 }): Harness 
       for (const timer of due) { timer.live = false; timer.callback() }
     },
     to: (tabId) => delivered.filter((delivery) => delivery.tabId === tabId && delivery.kind !== 'add-dir'),
+    last: (tabId) => delivered.filter((delivery) => delivery.tabId === tabId && delivery.kind !== 'add-dir').at(-1)!,
   }
 }
 
@@ -57,7 +60,7 @@ test('a meeting opens with an id, waits for someone to join, and gives each sess
   const view = h.hub.start(host, { topic: 'login plan', post: '# Plan\n1. lock\n2. retry', changes: null })
   assert.equal(view.id, 'K7QF')
   assert.equal(view.stage, 'waiting')
-  assert.deepEqual(h.delivered, [{ tabId: 'tab-host', meetingId: 'K7QF', kind: 'add-dir', text: 'C:\\meetings\\K7QF' }])
+  assert.deepEqual(h.delivered, [{ tabId: 'tab-host', meetingId: 'K7QF', round: 1, kind: 'add-dir', text: 'C:\\meetings\\K7QF' }])
   assert.equal(h.files.get('C:\\meetings\\K7QF\\round-1\\post.md'), '# Plan\n1. lock\n2. retry')
   assert.match(h.files.get('C:\\meetings\\K7QF\\transcript.md')!, /Opening post/)
   assert.throws(() => h.hub.start(host, { topic: '', post: 'again', changes: null }), MeetingError, 'one meeting per session')
@@ -80,9 +83,9 @@ test('a round collects every reply, then the host gets them together and answers
   h.hub.join(reviewerB, 'K7QF')
   h.hub.join(reviewerC, 'K7QF')
   assert.throws(() => h.hub.post('tab-host', 'round', 'too early', null), /not all answered/)
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'B: step 2 races with logout')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B: step 2 races with logout')
   assert.equal(h.to('tab-host').length, 0, 'the host waits for everyone')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'post', 'C: looks fine')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C: looks fine')
   const [digest] = h.to('tab-host')
   assert.equal(digest?.kind, 'digest')
   assert.match(digest!.text, /2 of 2 reviewers replied/)
@@ -104,21 +107,21 @@ test('everyone agreeing to the host\'s proposal closes the meeting and tells onl
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
   h.hub.join(reviewerC, 'K7QF')
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'ok')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'post', 'ok')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'ok')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'ok')
   h.hub.post('tab-host', 'propose-close', '- lock around logout', null)
   const vote = h.to('tab-b').at(-1)!
   assert.equal(vote.kind, 'vote')
   assert.match(vote.text, /Start your reply with AGREE/)
-  h.hub.turnCompleted('tab-b', 'K7QF', 'vote', 'OBJECT: retries are unbounded')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'vote', 'AGREE')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'OBJECT: retries are unbounded')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'AGREE')
   const objection = h.to('tab-host').at(-1)!
   assert.equal(objection.kind, 'digest', 'one objection sends it back to the host')
   assert.match(objection.text, /Not everyone agreed/)
 
   h.hub.post('tab-host', 'propose-close', '- lock around logout\n- at most 3 retries', null)
-  h.hub.turnCompleted('tab-b', 'K7QF', 'vote', '**AGREE** now that retries are bounded')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'vote', 'agree')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), '**AGREE** now that retries are bounded')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'agree')
   const closed = h.to('tab-host').at(-1)!
   assert.equal(closed.kind, 'agreed')
   assert.match(closed.text, /All 2 reviewers agreed/)
@@ -135,28 +138,63 @@ test('a round that times out goes to the host without the silent reviewer, whose
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
   h.hub.join(reviewerC, 'K7QF')
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'B says')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B says')
   h.advance(10 * 60_000)
   const digest = h.to('tab-host').at(-1)!
   assert.match(digest.text, /1 of 2 reviewers replied/)
   assert.match(digest.text, /No reply in time from: "review gpt"/)
   assert.ok(h.cancelled.some((entry) => entry.tabId === 'tab-c'), 'its undelivered message is dropped')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'post', 'C was slow')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C was slow')
   h.hub.post('tab-host', 'round', 'v2', null)
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'B2')
-  h.hub.turnCompleted('tab-c', 'K7QF', 'post', 'C2')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B2')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C2')
   const next = h.to('tab-host').at(-1)!
   assert.match(next.text, /late reply to an earlier round/)
   assert.match(next.text, /C was slow/)
+})
+
+test('a vote still being answered when its round times out never counts for a later proposal', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  h.hub.post('tab-host', 'propose-close', 'proposal A', null)
+  const voteA = h.last('tab-b')
+  h.advance(10 * 60_000)
+  assert.equal(h.last('tab-host').kind, 'digest', 'round 2 timed out while B was still answering')
+  h.hub.post('tab-host', 'propose-close', 'proposal B, materially changed', null)
+  const voteB = h.last('tab-b')
+  assert.equal(voteB.round, 3)
+  h.hub.turnCompleted('tab-b', voteA, 'AGREE')
+  let view = h.hub.views()[0]!
+  assert.equal(view.stage, 'reviewing', 'an AGREE to proposal A does not close round 3')
+  assert.deepEqual(view.waitingFor, ['tab-b'])
+  assert.match(h.files.get('C:\\meetings\\K7QF\\transcript.md')!, /Round 2: "review opus" \(D:\\api\) \(late, read in round 3\)/)
+  h.hub.turnCompleted('tab-b', voteB, 'AGREE')
+  view = h.hub.views()[0]!
+  assert.equal(view.outcome, 'agreed')
+  assert.equal(view.round, 3)
+})
+
+test('a host turn answering an earlier round does not count as silence in the current one', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  const digest1 = h.last('tab-host')
+  h.hub.post('tab-host', 'round', 'v2', null)
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r2')
+  h.hub.turnCompleted('tab-host', digest1, 'answered round 1')
+  assert.equal(h.last('tab-host').kind, 'digest', 'no reminder for an old turn')
 })
 
 test('the round cap pauses the meeting with the host\'s post held until the person allows more rounds', () => {
   const h = harness({ maxRounds: 2, roundTimeoutMinutes: 10 })
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'r1')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
   h.hub.post('tab-host', 'round', 'v2', null)
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'r2')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r2')
   const sentBefore = h.to('tab-b').length
   assert.match(h.hub.post('tab-host', 'round', 'v3', null), /reached its limit of 2 rounds/)
   assert.equal(h.hub.views()[0]!.stage, 'paused')
@@ -173,10 +211,10 @@ test('a host that does not answer is reminded once, then the meeting pauses', ()
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'r1')
-  h.hub.turnCompleted('tab-host', 'K7QF', 'digest', 'I read it.')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  h.hub.turnCompleted('tab-host', h.last('tab-host'), 'I read it.')
   assert.equal(h.to('tab-host').at(-1)!.kind, 'reminder')
-  h.hub.turnCompleted('tab-host', 'K7QF', 'reminder', 'Still thinking.')
+  h.hub.turnCompleted('tab-host', h.last('tab-host'), 'Still thinking.')
   assert.equal(h.hub.views()[0]!.stage, 'paused')
   assert.equal(h.hub.views()[0]!.pauseReason, 'host-silent')
 })
@@ -186,7 +224,7 @@ test('closing sessions: a reviewer leaving finishes the round for the others; th
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
   h.hub.join(reviewerC, 'K7QF')
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'B says')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B says')
   h.hub.leave('tab-c')
   assert.equal(h.to('tab-host').at(-1)!.kind, 'digest')
   assert.equal(h.hub.views()[0]!.participants.length, 1)
@@ -203,7 +241,7 @@ test('the person can stop a meeting, which types nothing more anywhere', () => {
   h.hub.stop('K7QF')
   assert.equal(h.delivered.length, count)
   assert.deepEqual(h.cancelled.filter((entry) => entry.meetingId === 'K7QF').map((entry) => entry.tabId).sort(), ['tab-b', 'tab-host'])
-  h.hub.turnCompleted('tab-b', 'K7QF', 'post', 'too late')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'too late')
   assert.equal(h.to('tab-host').length, 0)
 })
 

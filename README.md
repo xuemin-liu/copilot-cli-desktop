@@ -251,6 +251,12 @@ A meeting lets several sessions review one session's plan or local changes witho
 - Only you start and join meetings: a join counts only from a message you typed, and a host can start one only while it
   answers your own message. Reviewers are told to review only; a reviewer that runs Full auto or Full access can still act
   on what it reads, so prefer Restricted reviewers.
+- The shared patch gets the same protection as the Git panel's prompts: files that hold secrets by convention (`.env`,
+  keys, credentials) are named but their changes are withheld, and values that look like credentials are masked. This
+  catches the common shapes, not every secret: review what you share.
+- Only running sessions can join; resume an unloaded session first. Unloading or closing a session takes it out of its
+  meeting (closing the meeting, for the host). A reply that arrives after its round timed out is passed on as a late reply,
+  never counted for a later round or vote.
 - The material and transcript live in `%APPDATA%\Copilot CLI Desktop\meetings\<id>`; the desktop adds that folder to each
   session with `/add-dir`. Folders are removed a week after their last change. Meetings do not survive an app restart, and
   remote sessions cannot take part.
