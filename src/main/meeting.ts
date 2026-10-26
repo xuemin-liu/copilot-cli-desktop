@@ -322,7 +322,8 @@ export class MeetingHub {
       return `Nobody has joined meeting ${meeting.id} yet; the revised post will be the first thing they see. End your turn.`
     }
     if (meeting.round >= meeting.maxRounds) {
-      meeting.held = { kind, text: post, changes }
+      // Saved with the meeting, in the folder every reviewer can read: filtered like any shared patch before it is kept.
+      meeting.held = { kind, text: post, changes: changes === null ? null : sharedChanges(changes) }
       this.pause(meeting, 'round-limit')
       return `Meeting ${meeting.id} reached its limit of ${meeting.maxRounds} rounds. The person decides whether it continues; end your turn.`
     }
@@ -681,8 +682,7 @@ export class MeetingHub {
     const paths = roundPaths(meeting.folder, meeting.round)
     meeting.hasChanges = changes !== null && changes.trim().length > 0
     this.effects.write(meeting.id, paths.post, meeting.post)
-    // Filtered before it is cut to size, so a secret file's section is withheld whole, never cut in the middle.
-    if (meeting.hasChanges) this.effects.write(meeting.id, paths.changes, bound(shareablePatch(changes!), MAX_MEETING_PATCH_CHARS, '\n# The patch stops here: it exceeded the meeting limit.\n'))
+    if (meeting.hasChanges) this.effects.write(meeting.id, paths.changes, sharedChanges(changes!))
     this.appendTranscript(meeting, heading, meeting.post + (meeting.hasChanges ? `\n\n(Changes: ${paths.changes})` : ''))
   }
 
@@ -698,6 +698,15 @@ export class MeetingHub {
       if (meeting.closedAt !== null && now - meeting.closedAt > CLOSED_MEETING_LINGER_MS) this.meetings.delete(id)
     }
   }
+}
+
+/**
+ * A patch as it may be kept anywhere in the meeting folder, which every reviewer can read: secret files withheld and
+ * credentials masked first, then cut to size, so a secret file's section is withheld whole, never cut in the middle.
+ * Filtering an already filtered patch changes nothing.
+ */
+function sharedChanges(changes: string): string {
+  return bound(shareablePatch(changes), MAX_MEETING_PATCH_CHARS, '\n# The patch stops here: it exceeded the meeting limit.\n')
 }
 
 function bound(text: string, limit: number, note = ''): string {
@@ -751,7 +760,7 @@ function readSavedMeeting(value: unknown): SavedMeeting | null {
     return [{ ...party, joinedRound: roundOf(entry.joinedRound) ?? 1, reply: replyOf(entry.reply), awaited: entry.awaited === true }]
   })
   const held = isRecord(value.held) && (value.held.kind === 'round' || value.held.kind === 'propose-close') && typeof value.held.text === 'string'
-    ? { kind: value.held.kind, text: value.held.text.slice(0, MAX_MEETING_POST_CHARS), changes: text(value.held.changes, MAX_MEETING_PATCH_CHARS) } as HeldPost
+    ? { kind: value.held.kind, text: value.held.text.slice(0, MAX_MEETING_POST_CHARS), changes: typeof value.held.changes === 'string' ? sharedChanges(value.held.changes) : null } as HeldPost
     : null
   const late = Array.isArray(value.late) ? value.late.flatMap((entry) => {
     const party = partyOf(entry)

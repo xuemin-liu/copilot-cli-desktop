@@ -185,6 +185,34 @@ test('a vote still being answered when its round times out never counts for a la
   assert.equal(view.round, 3)
 })
 
+test('a round held at the round limit keeps its changes only as filtered, in memory and in the saved meeting', () => {
+  const patch = [
+    'diff --git a/config.txt b/config.txt', '--- a/config.txt', '+++ b/config.txt', '@@ -1 +1 @@', '+API_KEY=sk-live-0123456789abcdef0123456789',
+    'diff --git a/.env b/.env', '--- /dev/null', '+++ b/.env', '@@ -0,0 +1 @@', '+DATABASE_CONNECTION_STRING=Server=db;opaque-held-value-71', '',
+  ].join('\n')
+  const h = harness({ maxRounds: 1, roundTimeoutMinutes: 10 })
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  assert.match(h.hub.post('tab-host', 'round', 'v2 with changes', patch), /reached its limit/)
+  const saved = h.files.get('C:\\meetings\\K7QF\\meeting.json')!
+  assert.equal(JSON.parse(saved).stage, 'paused')
+  assert.doesNotMatch(saved, /sk-live-0123456789abcdef|opaque-held-value-71/, 'the paused meeting.json holds no secret')
+  assert.match(JSON.parse(saved).held.changes, /# Changes to \.env withheld/)
+  h.hub.resume('K7QF')
+  const shared = h.files.get('C:\\meetings\\K7QF\\round-2\\changes.patch')!
+  assert.doesNotMatch(shared, /sk-live-0123456789abcdef|opaque-held-value-71/)
+  assert.match(shared, /# Changes to \.env withheld/)
+  assert.equal(shared.match(/^# 1 file that looks like it holds secrets/gm)?.length, 1, 'filtering twice adds no second note')
+
+  // A meeting saved by an earlier build with the raw patch held is filtered when it is read back.
+  const raw = JSON.parse(saved)
+  raw.held.changes = patch
+  const later = harness()
+  later.hub.restore(raw, '', (sessionId) => ({ tabId: sessionId === SESSIONS['tab-host'] ? 'h2' : 'b2', title: 't', folder: null }))
+  assert.doesNotMatch(later.files.get('C:\\meetings\\K7QF\\meeting.json')!, /sk-live-0123456789abcdef|opaque-held-value-71/)
+})
+
 test('a host turn answering an earlier round does not count as silence in the current one', () => {
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
