@@ -34,12 +34,14 @@ export interface DesktopConfig {
   meetingMaxRounds: number
   /** How long a meeting round waits for every reviewer's reply. */
   meetingRoundTimeoutMinutes: number
+  /** After a meeting round's reviews are in, each reviewer reads the others' and answers them before the host sees all of it. */
+  meetingDiscussion: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
 >
 
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
@@ -81,6 +83,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   worktreeCleanup: DEFAULT_WORKTREE_CLEANUP,
   meetingMaxRounds: DEFAULT_MEETING_MAX_ROUNDS,
   meetingRoundTimeoutMinutes: DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES,
+  meetingDiscussion: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -267,6 +270,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     worktreeCleanup: isWorktreeCleanupMode(value.worktreeCleanup) ? value.worktreeCleanup : DEFAULT_WORKTREE_CLEANUP,
     meetingMaxRounds: normalizeMeetingMaxRounds(value.meetingMaxRounds),
     meetingRoundTimeoutMinutes: normalizeMeetingRoundTimeoutMinutes(value.meetingRoundTimeoutMinutes),
+    meetingDiscussion: value.meetingDiscussion === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

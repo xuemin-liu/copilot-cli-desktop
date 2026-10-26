@@ -13,7 +13,7 @@ function tab(id: string, title: string, extra: Partial<DesktopSessionTab> = {}):
 }
 
 const meeting: MeetingView = {
-  id: 'K7QF', hostTabId: 'tab-host', hostTitle: 'host', topic: 'plan', stage: 'reviewing', round: 1, maxRounds: 6, vote: false,
+  id: 'K7QF', hostTabId: 'tab-host', hostTitle: 'host', topic: 'plan', stage: 'reviewing', round: 1, maxRounds: 6, vote: false, discussing: false,
   participants: [{ tabId: 'tab-b', title: 'reviewer', role: 'security reviewer', replied: false }], waitingFor: ['tab-b'], pauseReason: null, outcome: null, folder: 'C:\\m\\K7QF',
   cost: { aiCredits: 1.2345, premiumRequests: 0 },
 }

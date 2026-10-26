@@ -491,7 +491,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
     >>,
   ): void => {
     setSnapshot((previous) => {
@@ -590,6 +590,19 @@ export function SettingsApp(): JSX.Element | null {
           A review meeting between sessions pauses after this many rounds and asks whether to go on. Default: 6 rounds. A round
           stops waiting for reviewers who have not replied after the timeout. Default: 10 minutes. Meetings already open keep their
           round limit.
+        </p>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.meetingDiscussion}
+            onChange={(event) => updatePreference({ meetingDiscussion: event.target.checked })}
+          />
+          Let meeting reviewers answer each other before the host replies
+        </label>
+        <p className="settings-disclaimer">
+          With two or more reviewers, each one reads the others' replies to a round and answers them in one more turn; the host
+          then gets the reviews and that discussion together. It costs one more turn per reviewer per round. Votes are not
+          discussed. Off by default.
         </p>
         <label className="settings-row settings-row-select">
           When the main window closes

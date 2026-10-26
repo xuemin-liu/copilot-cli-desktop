@@ -1832,7 +1832,7 @@ const meetingHub = new MeetingHub(meetingRoot, {
     return tab?.lastSessionId ?? managedTabs.get(tabId)?.session.lastSessionId ?? null
   },
   folderExists: (id) => existsSync(join(meetingRoot(), id)),
-}, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes }))
+}, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
 const meetingControl = new MeetingControlServer(handleMeetingCommand)
 
@@ -3078,6 +3078,7 @@ function settingsPreferences(): DesktopPreferences {
     worktreeCleanup: desktopConfig.worktreeCleanup,
     meetingMaxRounds: desktopConfig.meetingMaxRounds,
     meetingRoundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes,
+    meetingDiscussion: desktopConfig.meetingDiscussion,
   }
 }
 
@@ -3566,6 +3567,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'worktreeCleanup',
     'meetingMaxRounds',
     'meetingRoundTimeoutMinutes',
+    'meetingDiscussion',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -3583,6 +3585,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('worktreeCleanup' in values && !isWorktreeCleanupMode(values.worktreeCleanup))
     || ('meetingMaxRounds' in values && !isMeetingMaxRounds(values.meetingMaxRounds))
     || ('meetingRoundTimeoutMinutes' in values && !isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes))
+    || ('meetingDiscussion' in values && typeof values.meetingDiscussion !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -3610,6 +3613,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   // Open meetings keep their round limit; the round timeout applies from the next round.
   if (isMeetingMaxRounds(values.meetingMaxRounds)) desktopConfig.meetingMaxRounds = values.meetingMaxRounds
   if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
+  // Read when a round's reviews are all in, so it applies to open meetings from their next round.
+  if (typeof values.meetingDiscussion === 'boolean') desktopConfig.meetingDiscussion = values.meetingDiscussion
   // A remembered tray action is unusable without a tray icon. Move back to
   // the explicit prompt and restore a hidden window before persisting.
   if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

@@ -8,6 +8,7 @@ import {
   cleanRole,
   cleanTopic,
   digestMessage,
+  discussionMessage,
   parseVote,
   partyLabel,
   postMessage,
@@ -61,10 +62,10 @@ const CLOSED_MEETING_LINGER_MS = 30 * 60_000
 export type MeetingStage = 'waiting' | 'reviewing' | 'host' | 'paused' | 'closed'
 export type MeetingOutcome = 'agreed' | 'ended' | 'stopped' | 'host-left'
 export type MeetingRole = 'host' | 'participant'
-export type MeetingDeliveryKind = 'add-dir' | 'post' | 'vote' | 'digest' | 'agreed' | 'reminder'
+export type MeetingDeliveryKind = 'add-dir' | 'post' | 'vote' | 'discussion' | 'digest' | 'agreed' | 'reminder'
 const STAGES: readonly MeetingStage[] = ['waiting', 'reviewing', 'host', 'paused', 'closed']
 const OUTCOMES: readonly MeetingOutcome[] = ['agreed', 'ended', 'stopped', 'host-left']
-const DELIVERY_KINDS: readonly MeetingDeliveryKind[] = ['post', 'vote', 'digest', 'agreed', 'reminder']
+const DELIVERY_KINDS: readonly MeetingDeliveryKind[] = ['post', 'vote', 'discussion', 'digest', 'agreed', 'reminder']
 
 export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean }
 
@@ -80,6 +81,8 @@ export interface MeetingView {
   round: number
   maxRounds: number
   vote: boolean
+  /** The round's reviews are in and the reviewers are answering each other. */
+  discussing: boolean
   participants: MeetingParticipantView[]
   /** Tab ids whose reply the round waits for. */
   waitingFor: string[]
@@ -116,7 +119,8 @@ export const realMeetingTimers: MeetingTimers = {
   set: (callback, ms) => { const timer = setTimeout(callback, ms); timer.unref?.(); return () => clearTimeout(timer) },
 }
 
-export interface MeetingSettings { maxRounds: number; roundTimeoutMinutes: number }
+/** `discussion`: after a review round's replies are in, reviewers answer each other before the host sees them. */
+export interface MeetingSettings { maxRounds: number; roundTimeoutMinutes: number; discussion?: boolean }
 
 export class MeetingError extends Error {
   override name = 'MeetingError'
@@ -143,9 +147,13 @@ interface Meeting {
   vote: boolean
   post: string
   hasChanges: boolean
+  /** The replies being collected: the round's reviews, or while `discussing`, what the reviewers answer each other. */
   replies: Map<string, Reply>
   awaiting: Set<string>
   late: MeetingReplyView[]
+  /** The round's reviews are in and each reviewer is answering the others (`reviewed`); the host sees both together. */
+  discussing: boolean
+  reviewed: MeetingReplyView[] | null
   /** A post the host made past the round cap, delivered if the person allows more rounds. */
   held: HeldPost | null
   pauseReason: 'round-limit' | 'host-silent' | null
@@ -181,6 +189,8 @@ interface SavedMeeting {
   post: string
   hasChanges: boolean
   late: MeetingReplyView[]
+  discussing: boolean
+  reviewed: MeetingReplyView[] | null
   held: HeldPost | null
   pauseReason: 'round-limit' | 'host-silent' | null
   remindedHost: boolean
@@ -233,6 +243,7 @@ export class MeetingHub {
       round: meeting.round,
       maxRounds: meeting.maxRounds,
       vote: meeting.vote,
+      discussing: meeting.discussing,
       participants: [...meeting.participants.values()].map((participant) => ({
         tabId: participant.tabId, title: participant.title, role: participant.role ?? null, replied: meeting.replies.has(participant.tabId),
       })),
@@ -265,6 +276,8 @@ export class MeetingHub {
       replies: new Map(),
       awaiting: new Set(),
       late: [],
+      discussing: false,
+      reviewed: null,
       held: null,
       pauseReason: null,
       remindedHost: false,
@@ -300,7 +313,8 @@ export class MeetingHub {
       this.openRound(meeting)
     } else {
       // Mid-round it answers this round; otherwise (host thinking, paused) its reply joins the next digest as a late one.
-      if (meeting.stage === 'reviewing') meeting.awaiting.add(participant.tabId)
+      // During a discussion it has no review for the others to answer: its review joins the next digest as a late one.
+      if (meeting.stage === 'reviewing' && !meeting.discussing) meeting.awaiting.add(participant.tabId)
       this.deliverRound(meeting, participant.tabId, joinedLate)
     }
     this.changed(meeting)
@@ -379,10 +393,12 @@ export class MeetingHub {
       return
     }
     const participant = meeting.participants.get(tabId)
-    if (!participant || (kind !== 'post' && kind !== 'vote')) return
+    if (!participant || (kind !== 'post' && kind !== 'vote' && kind !== 'discussion')) return
     const text = bound(reply.trim(), MAX_MEETING_REPLY_CHARS) || '(an empty reply)'
-    const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && (kind === 'vote') === meeting.vote
-    this.appendTranscript(meeting, `Round ${delivery.round}: ${partyLabel(participant)}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
+    const expected: MeetingDeliveryKind = meeting.discussing ? 'discussion' : meeting.vote ? 'vote' : 'post'
+    const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && kind === expected
+    const heading = `Round ${delivery.round}${kind === 'discussion' ? ' discussion' : ''}: ${partyLabel(participant)}`
+    this.appendTranscript(meeting, `${heading}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
     if (!answersThisRound) {
       meeting.late.push({ title: participant.title, folder: participant.folder, role: participant.role ?? null, text })
       this.changed(meeting)
@@ -457,6 +473,8 @@ export class MeetingHub {
       replies: new Map(),
       awaiting: new Set(),
       late: state.late,
+      discussing: state.discussing,
+      reviewed: state.reviewed,
       held: state.held,
       pauseReason: state.pauseReason,
       remindedHost: state.remindedHost,
@@ -546,6 +564,8 @@ export class MeetingHub {
       post: meeting.post,
       hasChanges: meeting.hasChanges,
       late: meeting.late,
+      discussing: meeting.discussing,
+      reviewed: meeting.reviewed,
       held: meeting.held,
       pauseReason: meeting.pauseReason,
       remindedHost: meeting.remindedHost,
@@ -613,26 +633,60 @@ export class MeetingHub {
     this.finishRound(meeting)
   }
 
+  /** Everything collected is in (or the round timed out): on to the discussion, the host, or the close. */
   private finishRound(meeting: Meeting): void {
     meeting.cancelTimer?.()
     meeting.cancelTimer = null
-    const replies: MeetingReplyView[] = [...meeting.participants.values()].map((participant) => {
+    const view = (participant: Participant): MeetingReplyView => {
       const reply = meeting.replies.get(participant.tabId)
       return { title: participant.title, folder: participant.folder, role: participant.role ?? null, text: reply?.text ?? null, vote: reply?.vote ?? null }
-    })
+    }
+    const collected = [...meeting.participants.values()].map(view)
     meeting.awaiting.clear()
+    const paths = roundPaths(meeting.folder, meeting.round)
+    if (meeting.discussing) {
+      const reviewed = meeting.reviewed ?? []
+      const late = meeting.late
+      meeting.late = []
+      meeting.discussing = false
+      meeting.reviewed = null
+      this.effects.write(meeting.id, paths.replies, repliesDocument(meeting.id, meeting.round, reviewed, late, collected))
+      this.toHost(meeting, reviewed, late, collected)
+      return
+    }
+    // With two or more reviews, and the setting on, each reviewer first answers the others' reviews.
+    const reviewers = [...meeting.participants.values()].filter((participant) => meeting.replies.get(participant.tabId)?.text)
+    if (!meeting.vote && this.settings().discussion === true && reviewers.length >= 2) {
+      this.effects.write(meeting.id, paths.replies, repliesDocument(meeting.id, meeting.round, collected, []))
+      const reviewOf = new Map(reviewers.map((reviewer) => [reviewer.tabId, view(reviewer)]))
+      meeting.discussing = true
+      meeting.reviewed = collected
+      meeting.replies = new Map()
+      meeting.awaiting = new Set(reviewers.map((participant) => participant.tabId))
+      meeting.cancelTimer = this.timers.set(() => this.timeOut(meeting), this.settings().roundTimeoutMinutes * 60_000)
+      this.appendTranscript(meeting, `Round ${meeting.round}: discussion`, `${reviewers.length} reviewers answer each other.`)
+      for (const reviewer of reviewers) {
+        const others = reviewers.filter((other) => other.tabId !== reviewer.tabId).map((other) => reviewOf.get(other.tabId)!)
+        this.send(meeting, reviewer.tabId, 'discussion', discussionMessage({ id: meeting.id, round: meeting.round, others, folder: meeting.folder, role: reviewer.role ?? null }))
+      }
+      this.changed(meeting)
+      return
+    }
     const late = meeting.late
     meeting.late = []
-    const paths = roundPaths(meeting.folder, meeting.round)
-    this.effects.write(meeting.id, paths.replies, repliesDocument(meeting.id, meeting.round, replies, late))
-    if (meeting.vote && replies.length > 0 && replies.every((reply) => reply.vote === 'agree')) {
-      this.send(meeting, meeting.host.tabId, 'agreed', agreedMessage(meeting.id, meeting.round, replies.length, meeting.folder))
+    this.effects.write(meeting.id, paths.replies, repliesDocument(meeting.id, meeting.round, collected, late))
+    if (meeting.vote && collected.length > 0 && collected.every((reply) => reply.vote === 'agree')) {
+      this.send(meeting, meeting.host.tabId, 'agreed', agreedMessage(meeting.id, meeting.round, collected.length, meeting.folder))
       this.close(meeting, 'agreed')
       return
     }
+    this.toHost(meeting, collected, late, null)
+  }
+
+  private toHost(meeting: Meeting, replies: MeetingReplyView[], late: MeetingReplyView[], discussion: MeetingReplyView[] | null): void {
     meeting.stage = 'host'
     meeting.remindedHost = false
-    this.send(meeting, meeting.host.tabId, 'digest', digestMessage({ id: meeting.id, round: meeting.round, vote: meeting.vote, folder: meeting.folder, replies, late }))
+    this.send(meeting, meeting.host.tabId, 'digest', digestMessage({ id: meeting.id, round: meeting.round, vote: meeting.vote, folder: meeting.folder, replies, late, discussion }))
     this.changed(meeting)
   }
 
@@ -731,6 +785,15 @@ function partyOf(value: unknown): SavedParty | null {
   }
 }
 
+/** Replies as the host reads them (a label and the text), saved for late replies and a round under discussion. */
+function replyViewsOf(values: readonly unknown[]): MeetingReplyView[] {
+  return values.slice(0, MAX_MEETING_PARTICIPANTS * 4).flatMap((entry) => {
+    const party = partyOf(entry)
+    if (!party || !isRecord(entry)) return []
+    return [{ title: party.title, folder: party.folder, role: party.role, text: text(entry.text, MAX_MEETING_REPLY_CHARS), vote: entry.vote === 'agree' || entry.vote === 'object' ? entry.vote : null }]
+  })
+}
+
 function replyOf(value: unknown): Reply | null {
   if (!isRecord(value)) return null
   return { text: text(value.text, MAX_MEETING_REPLY_CHARS), vote: value.vote === 'agree' || value.vote === 'object' ? value.vote : null }
@@ -762,10 +825,7 @@ function readSavedMeeting(value: unknown): SavedMeeting | null {
   const held = isRecord(value.held) && (value.held.kind === 'round' || value.held.kind === 'propose-close') && typeof value.held.text === 'string'
     ? { kind: value.held.kind, text: value.held.text.slice(0, MAX_MEETING_POST_CHARS), changes: typeof value.held.changes === 'string' ? sharedChanges(value.held.changes) : null } as HeldPost
     : null
-  const late = Array.isArray(value.late) ? value.late.flatMap((entry) => {
-    const party = partyOf(entry)
-    return party && isRecord(entry) ? [{ title: party.title, folder: party.folder, role: party.role, text: text(entry.text, MAX_MEETING_REPLY_CHARS) }] : []
-  }) : []
+  const late = Array.isArray(value.late) ? replyViewsOf(value.late) : []
   const outstanding = Array.isArray(value.outstanding) ? value.outstanding.flatMap((entry) => {
     if (!isRecord(entry)) return []
     const sessionId = sessionIdOf(entry.sessionId)
@@ -785,6 +845,9 @@ function readSavedMeeting(value: unknown): SavedMeeting | null {
     post,
     hasChanges: value.hasChanges === true,
     late,
+    // A discussion is only ever part of a review round being collected.
+    discussing: value.discussing === true && stage === 'reviewing' && Array.isArray(value.reviewed),
+    reviewed: value.discussing === true && Array.isArray(value.reviewed) ? replyViewsOf(value.reviewed) : null,
     held,
     pauseReason: value.pauseReason === 'round-limit' || value.pauseReason === 'host-silent' ? value.pauseReason : null,
     remindedHost: value.remindedHost === true,
