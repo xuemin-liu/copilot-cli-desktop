@@ -24,6 +24,12 @@ export interface GitRepoSummary {
   name: string
   /** Relative to the project folder; `.` for the project itself; the absolute folder for a worktree (which lives outside). */
   relativePath: string
+  /** The repository's absolute folder (its working tree), as Windows spells it. */
+  folder: string
+  /** A merge is in progress (`MERGE_HEAD`). Conflicts without one come from a cherry-pick, revert or rebase. */
+  merging: boolean
+  /** The session asked to resolve a pull here, until it has finished. */
+  resolver: GitResolverView | null
   kind: GitRepoKind
   /** For a worktree: the id of the repository it belongs to, when that repository is listed. */
   worktreeOf: string | null
@@ -43,6 +49,13 @@ export interface GitRepoSummary {
   reviewItems: GitReviewItem[]
   /** Pass back to `trust` so the user trusts exactly the config they were shown. */
   configHash: string | null
+}
+
+/** A session asked to resolve a pull in a repository. While `working`, the panel's writes to that repository are refused. */
+export interface GitResolverView {
+  tabId: string
+  title: string
+  working: boolean
 }
 
 export interface GitEntryView {

@@ -13,6 +13,7 @@ import { OperationError } from './components/OperationError.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
+import { sessionTaskBlocker } from '../main/session-task.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -282,8 +283,13 @@ export function App(): JSX.Element {
 
   // "Add to prompt" fills the active session's prompt box, unless that session lives in another window.
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId) ?? null
   const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'dormant' && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
-    ? { id: activeTab.id, title: activeTab.title } : null
+    ? {
+        id: activeTab.id, title: activeTab.title, cwd: activeTab.sessionCwd ?? activeProfile?.path ?? null,
+        taskBlocker: sessionTaskBlocker({ status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
+      }
+    : null
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
   gitPanelAvailable.current = viewMode === 'desktop' && state.activeProfileId !== null

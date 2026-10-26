@@ -12,6 +12,7 @@ import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
+import { BracketedPasteTracker } from './session-task.js'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_LINES = 500
@@ -64,6 +65,7 @@ export class PtySession extends EventEmitter {
   private readonly outputLines: string[] = []
   private pendingLine = ''
   private heuristicBuffer = ''
+  private readonly bracketedPasteTracker = new BracketedPasteTracker()
   private lastKnownSessionId: string | null
   private permissionMonitor: SessionPermissionMonitor | null = null
   private storeDiscovery: SessionStoreDiscovery | null = null
@@ -93,6 +95,9 @@ export class PtySession extends EventEmitter {
 
   /** The folder the CLI reports the session runs in (a worktree, for a worktree launch); null until its log says. */
   get sessionCwd(): string | null { return this.sessionCwdValue }
+
+  /** Whether the CLI has bracketed paste on (DECSET 2004), as the terminal pane sees it. */
+  get bracketedPaste(): boolean { return this.bracketedPasteTracker.on }
 
   get processId(): number | null {
     return this.pty?.pid ?? null
@@ -262,6 +267,7 @@ export class PtySession extends EventEmitter {
 
     pty.onData((data: string) => {
       this.recordOutput(data)
+      this.bracketedPasteTracker.note(data)
       // PTY reads can split a prompt or session-id banner at any byte boundary.
       // Scan a bounded rolling stream so the heuristics see text spanning
       // adjacent reads rather than treating transport chunks as message lines.

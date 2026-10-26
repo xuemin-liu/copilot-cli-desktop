@@ -668,6 +668,46 @@ shardedTest('unresolved conflicts block a commit', { skip }, async (t) => {
   assert.deepEqual([result.ok, result.reason], [false, 'conflicts'])
 })
 
+shardedTest('conflicts from a merge say a merge is in progress; conflicts from a cherry-pick do not', { skip }, async (t) => {
+  const diverged = (f: GitFixture, project: string): void => {
+    committed(f, project, { 'a.txt': 'base\n' })
+    f.plain(project, 'checkout', '-q', '-b', 'side'); writeFileSync(join(project, 'a.txt'), 'side\n'); f.plain(project, 'commit', '-q', '-am', 'side')
+    writeFileSync(join(project, 'b.txt'), 'two\n'); f.plain(project, 'add', 'b.txt'); f.plain(project, 'commit', '-q', '-m', 'second')
+    f.plain(project, 'checkout', '-q', 'main'); writeFileSync(join(project, 'a.txt'), 'main\n'); f.plain(project, 'commit', '-q', '-am', 'main')
+  }
+  const merge = await harness(t, (f, project) => { diverged(f, project); try { f.plain(project, 'merge', 'side') } catch { /* the conflict is the point */ } })
+  const merged = (await open(merge)).status
+  assert.deepEqual([(await merged()).conflicted.length, (await merged()).summary.merging], [1, true])
+  const pick = await harness(t, (f, project) => { diverged(f, project); try { f.plain(project, 'cherry-pick', 'side~1', 'side') } catch { /* stopped on the first */ } })
+  const picked = await (await open(pick)).status()
+  assert.equal(picked.conflicted.length, 1)
+  assert.equal(picked.summary.merging, false, 'CHERRY_PICK_HEAD is not MERGE_HEAD: "commit the merge" would drop the second commit')
+  const clean = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }) })
+  assert.equal((await (await open(clean)).status()).summary.merging, false)
+})
+
+shardedTest('while a session asked to resolve a pull works on the repository, the panel\'s writes are refused and nothing changes', { skip }, async (t) => {
+  let working = true
+  const asked: string[] = []
+  const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n') }, {
+    resolverFor: (folder) => { asked.push(folder); return { tabId: 'tab-1', title: 'Fix login', working } },
+  })
+  const { repoId, status } = await open(h)
+  const before = await status()
+  assert.deepEqual(before.summary.resolver, { tabId: 'tab-1', title: 'Fix login', working: true }, 'the summary carries it, so a reopened panel knows')
+  const refused = await h.service.stage(SUBSCRIBER, PROFILE, repoId, [idOf(before, 'a.txt')], before.generation)
+  assert.deepEqual([refused.ok, refused.reason], [false, 'agent-working'])
+  assert.match(refused.message, /Copilot is working on this repository in "Fix login"/)
+  assert.equal((await status()).staged.length, 0, 'nothing was staged')
+  const pulled = await h.service.pull(SUBSCRIBER, PROFILE, repoId, { branch: 'main', headOid: before.summary.headOid! })
+  assert.equal(pulled.reason, 'agent-working')
+  assert.ok(asked.length > 0 && asked.every(folder => folder === before.summary.folder), 'asked about this repository\'s folder')
+  working = false
+  const after = await status()
+  const staged = await h.service.stage(SUBSCRIBER, PROFILE, repoId, [idOf(after, 'a.txt')], after.generation)
+  assert.equal(staged.ok, true, staged.message)
+})
+
 shardedTest('a commit asks to configure git when it does not know who the author is', { skip }, async (t) => {
   const h = await harness(t, (f, project) => { committed(f, project, { 'a.txt': 'one\n' }); writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.') })
   writeFileSync(join(h.fixture.root, 'gitconfig'), '[init]\n\tdefaultBranch = main\n')
