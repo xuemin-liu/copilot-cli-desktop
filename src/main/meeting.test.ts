@@ -312,6 +312,40 @@ test('a discussion that times out, a session joining during it, and a restart in
   assert.match(digest.text, /# Discussion[\s\S]*B on C[\s\S]*\(no reply in time\)/, 'a discussion that times out goes to the host with what came in')
 })
 
+test('a discussion everyone left is abandoned: the next reviewer\'s review counts and goes to the host alone', () => {
+  const reviewD = { tabId: 'tab-d', title: 'review d', folder: null }
+  const h = harness(DISCUSS)
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.join(reviewerC, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B stale review')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C stale review')
+  const saved = JSON.parse(h.files.get('C:\\meetings\\K7QF\\meeting.json')!)
+  h.hub.leave('tab-b')
+  h.hub.leave('tab-c')
+  let view = h.hub.views()[0]!
+  assert.equal(view.stage, 'waiting')
+  assert.equal(view.discussing, false)
+  h.hub.join(reviewD, 'K7QF')
+  assert.equal(h.last('tab-d').kind, 'post')
+  h.hub.turnCompleted('tab-d', h.last('tab-d'), 'D fresh review')
+  const digest = h.last('tab-host')
+  assert.equal(digest.kind, 'digest', 'the answer counts at once, not after the timeout')
+  assert.match(digest.text, /D fresh review/)
+  assert.doesNotMatch(digest.text, /stale review|# Discussion/, 'the abandoned reviews do not reach the host with it')
+
+  // The same after a restart where the saved reviewers are gone but the host is back.
+  const after = harness(DISCUSS)
+  after.hub.restore(saved, '', (sessionId) => sessionId === SESSIONS['tab-host'] ? { tabId: 'h2', title: 't', folder: null } : null)
+  view = after.hub.views()[0]!
+  assert.equal(view.stage, 'waiting')
+  assert.equal(view.discussing, false)
+  after.hub.join(reviewD, 'K7QF')
+  after.hub.turnCompleted('tab-d', after.last('tab-d'), 'D after restart')
+  assert.match(after.last('h2').text, /D after restart/)
+  assert.doesNotMatch(after.last('h2').text, /stale review/)
+})
+
 test('a host turn answering an earlier round does not count as silence in the current one', () => {
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })

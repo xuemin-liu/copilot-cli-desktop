@@ -504,7 +504,7 @@ export class MeetingHub {
       if (tabId) this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round)
     }
     if (meeting.stage === 'reviewing') {
-      if (meeting.participants.size === 0) { meeting.stage = 'waiting'; meeting.replies.clear() }
+      if (meeting.participants.size === 0) this.backToWaiting(meeting)
       else if (meeting.awaiting.size === 0) { this.finishRound(meeting); return [host.tabId, ...meeting.participants.keys()] }
       else meeting.cancelTimer = this.timers.set(() => this.timeOut(meeting), this.settings().roundTimeoutMinutes * 60_000)
     }
@@ -586,11 +586,7 @@ export class MeetingHub {
     this.appendTranscript(meeting, heading, `In round ${meeting.round}.`)
     const wasAwaited = meeting.awaiting.delete(tabId)
     if (meeting.participants.size === 0 && meeting.stage === 'reviewing') {
-      // Nobody left to answer: the round starts over for whoever joins next.
-      meeting.cancelTimer?.()
-      meeting.cancelTimer = null
-      meeting.replies.clear()
-      meeting.stage = 'waiting'
+      this.backToWaiting(meeting)
     } else if (wasAwaited && meeting.awaiting.size === 0 && meeting.stage === 'reviewing') {
       this.finishRound(meeting)
       return
@@ -608,8 +604,23 @@ export class MeetingHub {
     this.changed(meeting)
   }
 
+  /**
+   * Nobody is left to answer the round: it starts over for whoever joins next. A discussion in progress is abandoned with
+   * it; otherwise the next review would be taken for a discussion answer, and the old reviews would reach the host with it.
+   */
+  private backToWaiting(meeting: Meeting): void {
+    meeting.cancelTimer?.()
+    meeting.cancelTimer = null
+    meeting.replies.clear()
+    meeting.discussing = false
+    meeting.reviewed = null
+    meeting.stage = 'waiting'
+  }
+
   private openRound(meeting: Meeting): void {
     meeting.stage = 'reviewing'
+    meeting.discussing = false
+    meeting.reviewed = null
     meeting.replies.clear()
     meeting.awaiting = new Set(meeting.participants.keys())
     meeting.cancelTimer?.()
