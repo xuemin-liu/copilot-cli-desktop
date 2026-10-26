@@ -72,7 +72,7 @@ interface Harness {
   blockBrowserDispose(work: Promise<void>, started: () => void): void
   request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
   cleanup(): Promise<void>
-  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; worktreeTimeoutMinutes?: number; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
+  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; cols: number; rows: number; worktreeTimeoutMinutes?: number; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -174,7 +174,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           const work = nextSpawn; nextSpawn = null; if (work) await work();
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, cwd: options.cwd, env: options.env, worktreeTimeoutMinutes: options.worktreeTimeoutMinutes, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, cwd: options.cwd, env: options.env, cols: options.cols, rows: options.rows, worktreeTimeoutMinutes: options.worktreeTimeoutMinutes, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
           return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
@@ -1104,6 +1104,32 @@ test('saved tabs that are never shown never start, and closing one starts nothin
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.title, tab.lastSessionId === FORK]), [['Second', true], ['Shown', false]])
+}))
+
+test('a restored tab whose pane measured itself before its process existed starts at the pane\'s size, as does a resumed one', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const secondPath = join(directory, 'second'); await mkdir(secondPath)
+  const second = createWorkspaceProfile(secondPath)
+  profile.tabs = [{ title: 'Shown first', lastSessionId: SOURCE }]
+  second.tabs = [{ title: 'Shown later', lastSessionId: FORK }]
+  for (const id of [SOURCE, FORK]) { await mkdir(join(directory, 'session-state', id), { recursive: true }); await writeFile(join(directory, 'session-state', id, 'events.jsonl'), '{"type":"session.start"}\n') }
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, second], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const state = await harness.request('desktop:get-state')
+  const dormant = state.tabs.find(tab => tab.lastSessionId === FORK)!
+  assert.equal(dormant.status, 'dormant')
+  // The pane mounts and measures itself while the tab's process does not exist yet: nothing to resize, but the size counts.
+  await harness.request('desktop:resize-tab', dormant.id, 160, 40)
+  await harness.request('desktop:activate-tab', dormant.id)
+  await waitFor(() => harness.spawns.length, (count) => count === 2, 'the shown tab starts')
+  assert.deepEqual([harness.spawns[1]!.cols, harness.spawns[1]!.rows], [160, 40], 'not the 80x24 default')
+  // Unloaded and resumed in the same pane, it starts at that size again rather than the default.
+  await harness.request('desktop:resize-tab', dormant.id, 150, 42)
+  await harness.request('desktop:unload-tab', dormant.id)
+  await harness.request('desktop:restart-tab', dormant.id)
+  assert.deepEqual([harness.spawns[2]!.cols, harness.spawns[2]!.rows], [150, 42])
+  // A size for a tab that does not exist is not kept.
+  await harness.request('desktop:resize-tab', 'tab-999', 70, 20)
 }))
 
 test('unloading a session stops its process and keeps its tab until Resume, which resumes the same conversation', async () => fixture(async (harness, directory) => {

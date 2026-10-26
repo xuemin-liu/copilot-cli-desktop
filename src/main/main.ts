@@ -1609,6 +1609,13 @@ function renameSessionTab(tabId: string, title: string): DesktopState {
   return snapshot()
 }
 
+/**
+ * The size each tab's terminal pane last reported, kept while the tab has no process. A restored (dormant) or unloaded tab
+ * has none when its pane first measures itself; without this its process would start at the 80x24 default and stay there,
+ * since the pane reports again only when its size changes.
+ */
+const terminalSizes = new Map<string, { cols: number; rows: number }>()
+
 /** Where each tab's session keeps its name, the prompt-draft state of its terminal, and the name last read from it. */
 const sessionNameRoots = new Map<string, string>()
 const promptDrafts = new Map<string, PromptDraft>()
@@ -1984,6 +1991,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       managedTabs.delete(tabId)
     }
     forgetSessionName(tabId)
+    terminalSizes.delete(tabId)
     forgetMeetingSession(tabId)
     meetingControl.forget(tabId)
     // Read before the tab is dropped: its worktree is cleaned up once it is gone.
@@ -2174,10 +2182,11 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     // `new PtySession(...)` below, so whatever size is current at this exact
     // point (including a resize that landed anywhere up to now, via
     // desktop:resize-tab on this same old, still-referenced session) is what
-    // the replacement actually gets. Without any managed session (a
-    // previously failed restart left none), fall back to undefined so
-    // PtySession uses its 80x24 default.
-    const dimensions = managed?.session.dimensions
+    // the replacement actually gets. Without any managed session (a dormant
+    // or unloaded tab, or a previously failed restart), use the size its
+    // pane last reported; only a tab never shown falls back to PtySession's
+    // 80x24 default, and its pane's first measurement resizes it.
+    const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
 
     const resumeMode: ResumeMode = resumeSessionId ? 'auto-resume' : 'new'
     let session: PtySession
@@ -3375,7 +3384,11 @@ ipcMain.handle('desktop:resize-tab', (event, tabId: unknown, cols: unknown, rows
   ) {
     throw new Error('Invalid pty resize request')
   }
-  if (ownsSessionTerminal(event, tabId)) managedTabs.get(tabId)?.session.resize(Math.max(1, Math.round(cols)), Math.max(1, Math.round(rows)))
+  if (!ownsSessionTerminal(event, tabId) || !tabsState.tabs.some((tab) => tab.id === tabId)) return
+  const size = { cols: Math.max(1, Math.round(cols)), rows: Math.max(1, Math.round(rows)) }
+  // Kept even when the tab has no process yet: a dormant tab's pane measures itself before its process starts.
+  terminalSizes.set(tabId, size)
+  managedTabs.get(tabId)?.session.resize(size.cols, size.rows)
 })
 ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
