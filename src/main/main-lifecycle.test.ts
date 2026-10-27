@@ -2194,3 +2194,35 @@ test('closing a worktree session removes its worktree and branch when nothing is
     assert.equal(await exists(kept.worktree), true)
   })
 })
+
+test('a workspace with a session open or still starting cannot be removed, and one without can', async () => fixture(async (harness, directory) => {
+  const first = createWorkspaceProfile(directory)
+  const secondPath = join(directory, 'second'); await mkdir(secondPath)
+  const thirdPath = join(directory, 'third'); await mkdir(thirdPath)
+  const second = createWorkspaceProfile(secondPath), third = createWorkspaceProfile(thirdPath)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second, third], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+  await harness.createMain()
+
+  // Its tab is registered only after the launch is planned: removal must not slip in before.
+  let release!: () => void
+  harness.blockSpawnPlanWhen((candidate) => candidate.id === second.id, new Promise<void>((resolve) => { release = resolve }))
+  const starting = harness.request('desktop:create-tab', null, second.id)
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(harness.request('desktop:remove-profile', second.id), /A session is starting in second/)
+  release()
+  const started = await starting
+  const tab = started.tabs.find((candidate) => candidate.workspaceProfileId === second.id)!
+  assert.ok(started.profiles.some((profile) => profile.id === second.id))
+  await assert.rejects(harness.request('desktop:remove-profile', second.id), /Close the session open in second/)
+  await assert.rejects(harness.requestSettings('desktop-settings:remove-workspace-profile', second.id), /Close the session open in second/)
+
+  await harness.request('desktop:close-tab', tab.id)
+  const removed = await harness.request('desktop:remove-profile', second.id)
+  assert.deepEqual(removed.profiles.map((profile) => profile.id), [first.id, third.id])
+  const viaSettings = await harness.requestSettings('desktop-settings:remove-workspace-profile', third.id) as { profiles: WorkspaceProfile[] }
+  assert.deepEqual(viaSettings.profiles.map((profile) => profile.id), [first.id])
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8'))
+  assert.deepEqual(saved.profiles.map((profile: WorkspaceProfile) => profile.id), [first.id])
+  assert.equal(harness.spawns.length, 2)
+}))

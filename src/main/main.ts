@@ -1407,7 +1407,28 @@ function applySessionPermissionMode(id: string, session: PtySession, mode: Sessi
   refreshMenus()
 }
 
-async function createSessionTab(
+/** Sessions still starting in each workspace: their tab does not exist yet, but removing the workspace must wait. */
+const startingWorkspaceSessions = new Map<string, number>()
+
+/** Workspaces a session uses or is starting in, which the profile limit must not drop. */
+function workspacesInUse(): Set<string> {
+  return new Set([...tabsState.tabs.map((tab) => tab.workspaceProfileId), ...startingWorkspaceSessions.keys()])
+}
+
+async function createSessionTab(...args: Parameters<typeof startSessionTab>): Promise<DesktopState> {
+  const profileId = (args[0] === undefined ? activeWorkspaceProfile(desktopConfig) : args[0])?.id
+  if (!profileId) return startSessionTab(...args)
+  startingWorkspaceSessions.set(profileId, (startingWorkspaceSessions.get(profileId) ?? 0) + 1)
+  try {
+    return await startSessionTab(...args)
+  } finally {
+    const remaining = (startingWorkspaceSessions.get(profileId) ?? 1) - 1
+    if (remaining > 0) startingWorkspaceSessions.set(profileId, remaining)
+    else startingWorkspaceSessions.delete(profileId)
+  }
+}
+
+async function startSessionTab(
   profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
   resumeModeOverride: ResumeMode | null = null,
   restoreLastSessionId: string | null = null,
@@ -2442,7 +2463,7 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   if (!target) {
     const folder = session.gitRoot && sameOrInside(session.cwd, session.gitRoot) ? session.gitRoot : session.cwd
     if (!await stat(folder).then((info) => info.isDirectory(), () => false)) throw new Error(`The folder that session ran in no longer exists: ${folder}`)
-    target = { profile: activateWorkspaceProfile(desktopConfig, folder, new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId))) }
+    target = { profile: activateWorkspaceProfile(desktopConfig, folder, workspacesInUse()) }
     syncWorkspaceState()
     await persistConfig()
   }
@@ -2580,7 +2601,7 @@ async function selectWorkspace(): Promise<DesktopState> {
     profile = activateWorkspaceProfile(
       desktopConfig,
       workspace,
-      new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId)),
+      workspacesInUse(),
     )
   } catch (error) {
     await dialog.showMessageBox(mainWindow, {
@@ -2632,6 +2653,10 @@ async function removeWorkspace(profileId: string): Promise<void> {
     const open = tabsState.tabs.filter((tab) => tab.workspaceProfileId === profileId).length
     if (open > 0) {
       throw new Error(`Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} before removing it`)
+    }
+    // Its tab is registered only after the launch is prepared, so it is not in tabsState yet.
+    if (startingWorkspaceSessions.has(profileId)) {
+      throw new Error(`A session is starting in ${profile.name}. Close it once it opens, then remove the workspace`)
     }
     // The active session's workspace takes over, so the sidebar and the session stay in step.
     const activeTabProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId ?? null
