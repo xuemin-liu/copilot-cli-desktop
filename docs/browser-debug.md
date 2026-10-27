@@ -61,8 +61,12 @@ including after a restart.
 
 The browser footer shows whether Local Overrides applies to the selected page: **on** with the overrides
 folder (green), **off**, or a warning when it is enabled but no folder is selected, or when the page's
-DevTools has not run yet. Overrides apply to a page only while its DevTools runs, shown or hidden, so
-open **DevTools / Overrides** once for each page; the warning has a button for it. Once DevTools runs the
+DevTools has not run yet. Popup tabs automatically use their opener's configured Local Overrides, including a
+session's private folder. When overrides are enabled and a folder is selected, the popup starts native DevTools
+in the background and applies matching overrides to its first response without displaying a DevTools panel or
+reloading the page. POST submissions and opener callbacks are preserved. Disabled overrides remain disabled.
+For the initial page or a page created with **+**, open **DevTools / Overrides** once; the warning has a button
+for it. Overrides apply while that page's DevTools runs, shown or hidden. Once DevTools runs the
 status comes from DevTools itself and follows changes within about a second; before that it comes from
 the saved settings.
 
