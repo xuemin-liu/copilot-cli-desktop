@@ -1,8 +1,12 @@
 # macOS and Linux support: plan
 
-Status: proposed. Nothing here is built yet.
+Status: built on branch `feat/cross-platform`, all seven steps. Verified by the unit tests on Windows, macOS and Linux in
+CI (`.github/workflows/ci.yml`), and by building unsigned macOS and Linux packages there. Not yet verified: running the
+packaged app on a real Mac or Linux desktop, signing and notarization (no Apple Developer ID yet), and the Electron
+integration checks in `scripts/` (they still launch Windows PowerShell). The table below is the assessment the work
+started from.
 
-## Where the app stands today
+## Where the app stood before
 
 The app does not support macOS or Linux. It is Windows-first by design: the only build target is the Windows NSIS
 installer, the release workflow runs only on `windows-latest`, and the README lists Windows 10 or later as the
