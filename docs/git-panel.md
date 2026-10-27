@@ -178,10 +178,12 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
 
 ## Giving context to Copilot
 
-Hover over or click a code line in the diff, then type a question such as **“Why is this code needed?”** in the CLI and press
-Enter. The last pointed-to line is highlighted, and **CLI context** below the diff identifies it. Your question automatically
+Click a code line in the diff, then type a question such as **“Why is this code needed?”** in the CLI and press
+Enter. The selected line is highlighted, and **CLI context** below the diff identifies it. Your next question automatically
 includes the repository folder, file, staged/working-tree side, old/new line number and a short excerpt around that line.
-Moving the pointer back to the CLI keeps the reference. **Clear**, closing the panel, changing files, repositories, sessions,
+Moving the pointer or scrolling keeps the selected reference. It clears after the CLI confirms that the excerpt was attached,
+so later prompts do not reuse it. If context cannot be attached, the panel says so and keeps the reference selected.
+**Clear**, closing the panel, changing files, repositories, sessions,
 views or branches, or a changed diff clears it. No inline comment is required. Credential-like values and private keys are
 redacted, and contents of files named for secrets are withheld, just as with **Add to prompt**.
 

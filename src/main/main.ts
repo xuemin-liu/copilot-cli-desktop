@@ -3495,9 +3495,9 @@ ipcMain.handle('desktop:fork-side-chat', (event, tabId: unknown, sourceSessionId
 ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCursorContext?: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof data !== 'string') throw new Error('Invalid pty input')
-  if (!ownsSessionTerminal(event, tabId)) return
+  if (!ownsSessionTerminal(event, tabId)) return { gitCursorContextAttached: false }
   const held = heldInput.get(tabId)
-  if (held) { held.push(data); return }
+  if (held) { held.push(data); return { gitCursorContextAttached: false } }
   const draft = promptDrafts.get(tabId)
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
@@ -3519,10 +3519,11 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
       draft.note('\r')
       for (const input of queued) { draft.note(input); session.write(input) }
     }, 300)
-    return
+    return { gitCursorContextAttached: true }
   }
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
+  return { gitCursorContextAttached: false }
 })
 /** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
 ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown, role: unknown): Promise<void> => {

@@ -206,7 +206,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [wholeFile, setWholeFile] = useState(readWholeFile)
-  const [cursor, setCursor] = useState<{ scope: string; diffText: string; anchor: DiffCommentAnchor } | null>(null)
+  const [cursor, setCursor] = useState<{ scope: string; diffText: string; anchor: DiffCommentAnchor; id: number; declined: boolean } | null>(null)
+  const cursorSequence = useRef(0)
   // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
   // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
   const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
@@ -301,13 +302,19 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (!activeCursor || !repo || !selection || !diff || !promptTarget || !ready || statusError) return
     const text = composeGitCursorContext({ folder: repo.folder, path: selection.path, staged: selection.staged,
       diffText: diff.value.text, ...activeCursor })
+    const id = cursor!.id
     const provide = (event: Event): void => {
       const request = (event as CustomEvent<GitCursorContextRequest>).detail
-      if (request.tabId === promptTarget.id) request.text = text
+      if (request.tabId !== promptTarget.id) return
+      request.text = text
+      // An acknowledgement for an older submission must not clear a line selected in the meantime.
+      request.complete = attached => setCursor(current => current?.id === id
+        ? attached ? null : { ...current, declined: true }
+        : current)
     }
     window.addEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
     return () => window.removeEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
-  }, [activeCursor, repo, selection, diff, promptTarget?.id, ready, statusError])
+  }, [activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, statusError])
   const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
   const commentKey = commentTarget ? bucketKey(commentTarget) : null
   const activeComments = commentKey ? comments.get(commentKey) ?? null : null
@@ -749,12 +756,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       {!diffError && selectedEntry === null && <p className="git-message" role="status">That file is no longer changed.</p>}
                       {!diffError && selectedEntry !== null && diff?.key === diffKey && (
                         <GitDiffView diff={diff.value} cursorKey={activeCursor ? `${activeCursor.side}:${activeCursor.line}` : null}
-                          onCursor={anchor => setCursor(current => current?.scope === cursorScope && current.diffText === diff.value.text && current.anchor.order === anchor.order
-                            ? current : { scope: cursorScope, diffText: diff.value.text, anchor })}
+                          onCursor={anchor => setCursor({ scope: cursorScope, diffText: diff.value.text, anchor, id: ++cursorSequence.current, declined: false })}
                           comments={{ items: new Map([...(activeComments?.items ?? [])].map(([key, item]) => [key, item.text])), onChange: changeComment }} />
                       )}
                       {activeCursor && <p className="git-cursor-status" role="status">
-                        CLI context: {activeCursor.side === 'old' ? 'old line' : 'line'} {activeCursor.line}. Ask about this code in the CLI.
+                        CLI context: {activeCursor.side === 'old' ? 'old line' : 'line'} {activeCursor.line}. {cursor?.declined
+                          ? 'Not added to the last prompt. The reference is still selected.'
+                          : 'Added to your next question in the CLI.'}
                         <button type="button" onClick={() => setCursor(null)} aria-label="Clear cursor context">Clear</button>
                       </p>}
                       {!diffError && selectedEntry !== null && activeComments && (

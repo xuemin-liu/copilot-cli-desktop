@@ -1605,7 +1605,7 @@ test('Enter appends Git cursor context once to an ordinary prompt and holds subs
   const context = 'Git panel cursor context\nFile: src/a.ts\nCursor: new line 42\n> +needed()'
   spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
   await harness.request('desktop:write-tab', id, 'why is this code needed?')
-  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.deepEqual(await harness.request('desktop:write-tab', id, '\r', context), { gitCursorContextAttached: true })
   assert.equal(spawn.written.length, 2)
   assert.equal(spawn.written[0], 'why is this code needed?')
   assert.equal(spawn.written[1], `\x1b[200~\n\n${context}\x1b[201~`)
@@ -1617,13 +1617,13 @@ test('Enter appends Git cursor context once to an ordinary prompt and holds subs
   for (const question of ['', '/help', '!git status', 'question\x1b[D', '\t']) {
     await harness.request('desktop:write-tab', id, question)
     const before: number = spawn.written.length
-    await harness.request('desktop:write-tab', id, '\r', context)
+    assert.deepEqual(await harness.request('desktop:write-tab', id, '\r', context), { gitCursorContextAttached: false })
     assert.deepEqual(spawn.written.slice(before), ['\r'], `native Enter: ${JSON.stringify(question)}`)
   }
   spawn.emitData('\x1b[?2004l')
   await harness.request('desktop:write-tab', id, 'no bracketed paste')
   const before = spawn.written.length
-  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.deepEqual(await harness.request('desktop:write-tab', id, '\r', context), { gitCursorContextAttached: false })
   assert.deepEqual(spawn.written.slice(before), ['\r'], 'no unsafe multiline fallback')
   spawn.emitData('\x1b[?2004h')
   await harness.request('desktop:write-tab', id, 'no cursor reference')
@@ -1634,7 +1634,7 @@ test('Enter appends Git cursor context once to an ordinary prompt and holds subs
   assert.equal((await harness.request('desktop:get-state')).tabs[0]?.status, 'approval-needed')
   await harness.request('desktop:write-tab', id, 'yes')
   const approval = spawn.written.length
-  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.deepEqual(await harness.request('desktop:write-tab', id, '\r', context), { gitCursorContextAttached: false })
   assert.deepEqual(spawn.written.slice(approval), ['\r'], 'approval input never receives code context')
 }))
 

@@ -145,7 +145,6 @@ export function GitDiffView({ diff, comments, cursorKey, onCursor }: {
           return (
             <span key={index} className={`git-diff-row${existing !== undefined ? ' git-diff-row-commented' : ''}`}>
               <span className={`git-diff-line git-diff-${line.kind}${key !== null && key === cursorKey ? ' git-diff-cursor' : ''}`}
-                onMouseEnter={() => { if (key !== null) onCursor?.(anchor()) }}
                 onClick={() => { if (key !== null) onCursor?.(anchor()) }}>
                 {key !== null && comments && (
                   <button type="button" className="git-diff-gutter" aria-label={`Comment on ${where}`} title={existing !== undefined ? 'Edit the comment on this line' : 'Comment on this line'}

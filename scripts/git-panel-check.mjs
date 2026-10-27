@@ -22,10 +22,11 @@ if (!process.versions.electron) {
     import { useState } from 'react';
     import { GitPanel } from './src/renderer/components/GitPanel';
     import { TerminalPane } from './src/renderer/components/TerminalPane';
-    import { readGitCursorContext } from './src/renderer/git-cursor-context';
+    import { readGitCursorContext, requestGitCursorContext } from './src/renderer/git-cursor-context';
     import './src/renderer/styles.css';
     window.__inserted = [];
     window.__cursorContext = tabId => readGitCursorContext(tabId);
+    window.__cursorRequest = tabId => requestGitCursorContext(tabId);
     window.addEventListener('copilot-desktop:insert-prompt', event => window.__inserted.push(event.detail));
     function Harness() {
       const [open, setOpen] = useState(true);
@@ -137,9 +138,13 @@ if (!process.versions.electron) {
       debounceMs: 20, fallbackMs: 120_000,
     })
     const terminalWrites = []
+    let acceptCursorContext = true
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\x1b[?2004h> ' }))
     ipcMain.handle('desktop:resize-tab', () => undefined)
-    ipcMain.handle('desktop:write-tab', (_event, tabId, data, context) => { terminalWrites.push({ tabId, data, context }) })
+    ipcMain.handle('desktop:write-tab', (_event, tabId, data, context) => {
+      terminalWrites.push({ tabId, data, context })
+      return { gitCursorContextAttached: acceptCursorContext && data === '\r' && context !== undefined }
+    })
     window = new BrowserWindow({ width: cursorOnly ? 1_000 : 460, height: 900, show: false, webPreferences: {
       preload: join(process.cwd(), 'dist', 'src', 'preload', 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } })
     registerGitIpc({ ipcMain, service: () => service, assertTrustedSender: () => undefined, isMainWindowSender: event => event.sender.id === window.webContents.id })
@@ -210,7 +215,7 @@ ${point.missing}`)
     assert.match(await text('.git-diff-side'), /working tree/)
     results.diff = true
 
-    // A line under the mouse becomes CLI context without a comment or an explicit paste.
+    // A clicked line becomes CLI context without a comment or an explicit paste.
     await click('.git-diff-add')
     await until('!!document.querySelector(".git-diff-cursor")', 'cursor line highlighted')
     const cursorContext = await ui('window.__cursorContext("tab-1")')
@@ -227,13 +232,20 @@ ${point.missing}`)
     results.cursorContext = true
 
     if (cursorOnly) {
-      // Native hover alone (no click/comment), followed by real xterm input through the preload bridge.
+      // Hover never arms a reference; native clicks and real xterm input go through the preload bridge.
       await ui('window.__showTerminal()')
       await until('!!document.querySelector(".xterm-helper-textarea")', 'terminal mounted')
       await click('[aria-label="Clear cursor context"]')
       const point = await ui('(() => { const r = document.querySelector(".git-diff-add").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()')
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
-      await until('!!window.__cursorContext("tab-1")', 'hover supplies context')
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.equal(await ui('window.__cursorContext("tab-1")'), undefined, 'hover does not arm context')
+      await click('.git-diff-add')
+      await until('!!window.__cursorContext("tab-1")', 'click supplies context')
+      const transit = await ui('(() => { const r = document.querySelector(".git-diff-context").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()')
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...transit })
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 2/, 'pointer transit keeps the clicked line')
       await screenshot('cursor-context.png')
       await ui('document.querySelector(".xterm-helper-textarea").focus()')
       window.webContents.insertText('why is this code needed?')
@@ -246,17 +258,47 @@ ${point.missing}`)
       assert.match(submitted?.context ?? '', /Cursor: new line 2[\s\S]*> \+two/)
       assert.ok(terminalWrites.some(write => write.data.includes('why is this code needed?')))
       assert.equal(terminalWrites.filter(write => write.context !== undefined).length, 1, 'context is supplied only on Enter')
+      await until('!window.__cursorContext("tab-1")', 'successful attachment consumes the reference')
+      window.webContents.insertText('now run the tests')
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+      const followUpDeadline = Date.now() + 5_000
+      while (terminalWrites.filter(write => write.data === '\r').length < 2 && Date.now() < followUpDeadline) await delay(20)
+      assert.equal(terminalWrites.filter(write => write.data === '\r').length, 2)
+      assert.equal(terminalWrites.filter(write => write.data === '\r')[1].context, undefined, 'a follow-up has no stale excerpt')
+
+      await click('.git-diff-add')
+      await until('!!window.__cursorContext("tab-1")', 'reference selected for declined attachment')
+      acceptCursorContext = false
+      await ui('document.querySelector(".xterm-helper-textarea").focus()')
+      window.webContents.insertText('/help')
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+      await until('/Not added to the last prompt/.test(document.querySelector(".git-cursor-status")?.textContent || "")', 'declined attachment is reported')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 2/, 'declined attachment keeps its reference')
+      acceptCursorContext = true
+      // Explicitly hold a provider acknowledgement, select another line, then complete the old request.
+      await ui('window.__pendingCursor = window.__cursorRequest("tab-1"); true')
+      await click('.git-diff-context')
+      await until('/Cursor: new line 1/.test(window.__cursorContext("tab-1") || "")', 'a new reference is selected while the old request is pending')
+      await ui('window.__pendingCursor.complete(true); true')
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 1/, 'old acknowledgement cannot consume a newer selection')
+      results.oneShotContext = true
+      results.clickOnlyContext = true
+      results.declinedContext = true
+      results.acknowledgementIsolation = true
       await ui('window.__setTarget("tab-2")')
       await until('!document.querySelector(".git-diff-cursor")', 'session switch clears cursor')
       assert.equal(await ui('window.__cursorContext("tab-1")'), undefined)
       assert.equal(await ui('window.__cursorContext("tab-2")'), undefined)
       await click('.git-diff-add')
-      assert.match(await ui('window.__cursorContext("tab-2")'), /a.txt/)
+      await until('/a.txt/.test(window.__cursorContext("tab-2") || "")', 'new session reference selected')
       await clickByText('.git-entry', 'b.txt')
       await until('/buzz/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'another file loaded')
       assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'switching files clears context')
       await click('.git-diff-add')
-      assert.match(await ui('window.__cursorContext("tab-2")'), /Change: staged/)
+      await until('/Change: staged/.test(window.__cursorContext("tab-2") || "")', 'staged line selected')
       await click('.git-diff-whole-file')
       assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'switching views clears context')
       await until('/ bee/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'whole-file view loaded')
@@ -267,7 +309,7 @@ ${point.missing}`)
       await until('/new diff content/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'changed diff loaded')
       assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'a changed diff clears context')
       await click('.git-diff-del')
-      assert.match(await ui('window.__cursorContext("tab-2")'), /Cursor: old line 1[\s\S]*> -bee/, 'deleted code points to the old file line')
+      await until('/Cursor: old line 1[\\s\\S]*> -bee/.test(window.__cursorContext("tab-2") || "")', 'deleted code points to the old file line')
       await click('.git-diff-add')
       await click('button[aria-label="Close Git panel"]')
       await until('!!document.querySelector("#closed")', 'panel closed')
