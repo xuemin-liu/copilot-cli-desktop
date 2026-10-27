@@ -1,5 +1,5 @@
 import { copyFile, lstat, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
-import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 import { isPathWithinRoot } from './external-targets.js'
 import { safeRepoSegments } from './git-untracked.js'
 import { realPathNative } from './real-path.js'
@@ -66,7 +66,7 @@ async function ancestorProblem(repoRoot: string, relativePath: string): Promise<
   if (!segments) return `"${relativePath}" has a name that is not safe to touch`
   let current = repoRoot
   for (const segment of segments.slice(0, -1)) {
-    current = win32.join(current, segment)
+    current = hostPath.join(current, segment)
     const info = await lstat(current).catch(() => null)
     if (info === null) return null
     if (info.isSymbolicLink()) return `"${relativePath}" is inside a folder that is a link, so it could reach outside the repository`
@@ -85,7 +85,7 @@ async function ancestorProblem(repoRoot: string, relativePath: string): Promise<
 function repoFile(repoRoot: string, relativePath: string): { ok: true; absolute: string } | { ok: false; reason: string } {
   const segments = safeRepoSegments(relativePath)
   if (!segments) return { ok: false, reason: `"${relativePath}" has a name that is not safe to touch` }
-  const absolute = win32.join(repoRoot, ...segments)
+  const absolute = hostPath.join(repoRoot, ...segments)
   if (!isPathWithinRoot(repoRoot, absolute)) return { ok: false, reason: `"${relativePath}" is outside the repository` }
   return { ok: true, absolute }
 }
@@ -123,7 +123,7 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
   const problems = await checkSnapshotable(repoRoot, relativePaths, limits)
   if (problems.length > 0) throw new DiscardRefused(problems[0] ?? 'A copy cannot be saved')
   const repoName = repoRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? 'repository'
-  const directory = win32.join(snapshotRoot, `${stamp(now)}-${repoName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40)}`)
+  const directory = hostPath.join(snapshotRoot, `${stamp(now)}-${repoName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40)}`)
   if (!isPathWithinRoot(snapshotRoot, directory)) throw new DiscardRefused('The place for saved copies is not usable')
   await mkdir(directory, { recursive: true })
   const saved: Array<{ path: string; bytes: number }> = []
@@ -135,9 +135,9 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
     const before = await lstat(file.absolute).catch(() => null)
     stamps.set(relativePath, before === null ? 'missing' : `${before.size}:${before.mtimeMs}`)
     if (before === null) continue
-    const target = win32.join(directory, 'files', ...(safeRepoSegments(relativePath) ?? []))
+    const target = hostPath.join(directory, 'files', ...(safeRepoSegments(relativePath) ?? []))
     if (!isPathWithinRoot(directory, target)) throw new DiscardRefused(`"${relativePath}" cannot be saved safely`)
-    await mkdir(win32.dirname(target), { recursive: true })
+    await mkdir(hostPath.dirname(target), { recursive: true })
     await copyFile(file.absolute, target)
     await limits.afterCopy?.(relativePath)
     const after = await lstat(file.absolute).catch(() => null)
@@ -145,7 +145,7 @@ export async function saveSnapshot(snapshotRoot: string, repoRoot: string, relat
     saved.push({ path: relativePath, bytes: before.size })
     bytes += before.size
   }
-  await writeFile(win32.join(directory, 'manifest.json'), JSON.stringify({ repository: repoRoot, savedAt: now.toISOString(), files: saved }, null, 2), 'utf8')
+  await writeFile(hostPath.join(directory, 'manifest.json'), JSON.stringify({ repository: repoRoot, savedAt: now.toISOString(), files: saved }, null, 2), 'utf8')
   return { directory, files: saved.length, bytes, stamps }
 }
 
@@ -154,7 +154,7 @@ export async function pruneSnapshots(snapshotRoot: string, keep = KEEP_SNAPSHOTS
   const names = (await readdir(snapshotRoot).catch(() => [] as string[])).filter(name => /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[A-Za-z0-9._-]+$/.test(name)).sort()
   const old = names.slice(0, Math.max(0, names.length - keep))
   for (const name of old) {
-    const target = win32.join(snapshotRoot, name)
+    const target = hostPath.join(snapshotRoot, name)
     if (isPathWithinRoot(snapshotRoot, target)) await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => undefined)
   }
   return old.length
@@ -193,7 +193,7 @@ export async function checkTrashable(repoRoot: string, relativePath: string): Pr
     for (const entry of await readdir(directory, { withFileTypes: true }).catch(() => [])) {
       if (++seen > MAX_TRASH_ENTRIES) return { ok: false, reason: `"${relativePath}" has more than ${MAX_TRASH_ENTRIES.toLocaleString()} items, too many to check. Delete it in File Explorer.` }
       if (entry.name.toLowerCase() === '.git') return { ok: false, reason: `"${relativePath}" contains a git repository, so it is not deleted from the panel` }
-      if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(win32.join(directory, entry.name))
+      if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(hostPath.join(directory, entry.name))
     }
   }
   return { ok: true, absolute: file.absolute }

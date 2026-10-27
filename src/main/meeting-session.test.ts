@@ -67,7 +67,7 @@ test('meeting folders older than a week are removed at startup; anything else in
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('the helper sends the file and the uncommitted changes, and prints the desktop\'s answer', { skip: process.platform !== 'win32' }, async () => {
+test('the helper sends the file and the uncommitted changes, and prints the desktop\'s answer', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'meeting-helper-'))
   const repo = join(directory, 'repo')
   const calls: Array<{ tabId: string; command: MeetingCommand; request: MeetingRequest }> = []
@@ -99,7 +99,9 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     assert.match(env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS!, /helper/)
     assert.match(await readFile(join(directory, 'helper', '.github', 'instructions', 'meeting.instructions.md'), 'utf8'), /join meeting/)
     const run = (...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => new Promise((resolveRun) => {
-      execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', env.COPILOT_DESKTOP_MEETING_HELPER!, ...args],
+      // Windows PowerShell runs meeting.ps1; sh runs meeting.sh on macOS and Linux.
+      const [shell, ...shellArgs] = process.platform === 'win32' ? ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File'] : ['sh']
+      execFile(shell!, [...shellArgs, env.COPILOT_DESKTOP_MEETING_HELPER!, ...args],
         { cwd: repo, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 },
         (error, stdout, stderr) => resolveRun({ code: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr }))
     })
@@ -128,7 +130,7 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     assert.match(ended.stdout, /does not host an open meeting/)
     const usage = await run('round')
     assert.equal(usage.code, 1)
-    assert.match(usage.stderr, /Usage: meeting\.ps1 round -File/)
+    assert.match(usage.stderr, /Usage: meeting\.(ps1|sh) round -File/)
     assert.equal(calls.length, 2, 'a usage error sends nothing')
   } finally {
     await server.close()

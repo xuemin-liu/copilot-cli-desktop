@@ -6,6 +6,15 @@ import {
   type BufferLineLike,
 } from '../renderer/terminal-links.js'
 
+test('scanLineForLinks finds absolute macOS and Linux paths, without their location or a lone folder', () => {
+  const texts = (line: string): string[] => scanLineForLinks(line).map((link) => link.text)
+  assert.deepEqual(texts('error at /home/me/app/src/main.ts:12:4'), ['/home/me/app/src/main.ts'])
+  assert.deepEqual(texts('see /usr/bin/git.'), ['/usr/bin/git'])
+  assert.deepEqual(texts('and/or /tmp only'), [], 'neither "and/or" nor a single name')
+  assert.deepEqual(texts('`/Users/me/My Project/file.ts`'), ['/Users/me/My Project/file.ts'])
+  assert.deepEqual(texts('https://example.com/a/b'), ['https://example.com/a/b'], 'a URL stays one link')
+})
+
 test('scanLineForLinks finds a bare https URL and trims trailing punctuation', () => {
   const links = scanLineForLinks('See https://github.com/github/copilot-cli/issues/42.')
   assert.equal(links.length, 1)

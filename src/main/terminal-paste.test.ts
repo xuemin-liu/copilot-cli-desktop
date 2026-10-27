@@ -30,8 +30,15 @@ test('oversized text is bounded before xterm frames it, without splitting a surr
 
 test('only Ctrl+V keydown is yielded to browser paste, preserving Alt+V and keyup', () => {
   const key = { type: 'keydown', key: 'V', ctrlKey: true, altKey: false, metaKey: false }
-  assert.equal(isNativePasteKey(key), true)
+  assert.equal(isNativePasteKey(key, false), true)
   for (const change of [{ type: 'keyup' }, { altKey: true }, { metaKey: true }, { ctrlKey: false }]) {
-    assert.equal(isNativePasteKey({ ...key, ...change }), false)
+    assert.equal(isNativePasteKey({ ...key, ...change }, false), false)
   }
+})
+
+test('on macOS Cmd+V pastes and Ctrl+V stays a terminal key', () => {
+  const key = { type: 'keydown', key: 'v', ctrlKey: false, altKey: false, metaKey: true }
+  assert.equal(isNativePasteKey(key, true), true)
+  assert.equal(isNativePasteKey({ ...key, metaKey: false, ctrlKey: true }, true), false)
+  assert.equal(isNativePasteKey({ ...key, ctrlKey: true }, true), false)
 })

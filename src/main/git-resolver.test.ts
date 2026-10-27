@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { GitResolverClaims } from './git-resolver.js'
 import type { SessionState } from './git-resolver.js'
+import { caseInsensitivePaths } from './host-path.js'
+
+/** `D:\one` spelled another way: other separators and a trailing one, and lower case where the platform ignores case. */
+const otherSpelling = caseInsensitivePaths ? 'd:/one/' : 'D:/one/'
 
 function clock(): { now: () => number; advance(ms: number): void } {
   let at = 1_000_000
@@ -13,7 +17,7 @@ test('a sent task claims the repository from the moment it is sent until its tur
   const claims = new GitResolverClaims(time.now)
   let state: SessionState = 'idle'
   claims.claim('D:\\one', 'tab-1', 'Fix login', true, 'idle')
-  assert.deepEqual(claims.forFolder('d:/one/', () => state), { tabId: 'tab-1', title: 'Fix login', working: true }, 'before Copilot reports the turn, and whatever the spelling')
+  assert.deepEqual(claims.forFolder(otherSpelling, () => state), { tabId: 'tab-1', title: 'Fix login', working: true }, 'before Copilot reports the turn, and whatever the spelling')
   state = 'busy'
   assert.equal(claims.forFolder('D:\\one', () => state)?.working, true)
   state = 'idle'
@@ -52,7 +56,7 @@ test('a second request while the first task works is refused before anything is 
   const first = claims.request('D:\\one', 'tab-1', 'Fix login', state, () => { typed++; return { result: 'sent' } })
   assert.deepEqual(first, { result: 'sent' })
   // A rapid second click: the prompt box still holds the first paste, so this one would only be pasted.
-  const second = claims.request('d:/one', 'tab-1', 'Fix login', state, () => { typed++; return { result: 'busy', message: 'The prompt box is in use.' } })
+  const second = claims.request(otherSpelling, 'tab-1', 'Fix login', state, () => { typed++; return { result: 'busy', message: 'The prompt box is in use.' } })
   assert.equal(second.result, 'refused')
   assert.match(second.result === 'refused' ? second.message : '', /already working on this repository in “Fix login”/)
   assert.equal(typed, 1, 'the second task was never typed or pasted')

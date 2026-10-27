@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deleteMigrationBackup, listMigrationBackups } from './migration-backups.js'
+
+/** Migration is Windows to Windows only; on other platforms the app does not offer it. */
+const test = (process.platform === 'win32' ? nodeTest : nodeTest.skip) as typeof nodeTest
 
 async function fixture(t: { after: (fn: () => Promise<void>) => void }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'migration-backups-test-'))

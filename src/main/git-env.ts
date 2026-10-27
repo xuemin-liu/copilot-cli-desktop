@@ -1,4 +1,4 @@
-import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 
 /**
  * Hardened command line and environment for every git process the desktop starts.
@@ -87,6 +87,6 @@ export function assertGitArgument(value: string, label = 'git argument'): void {
 
 /** `GIT_CEILING_DIRECTORIES` keeps repository discovery from walking above the project folder. */
 export function ceilingDirectories(projectPath: string): string | null {
-  const parent = win32.dirname(win32.resolve(projectPath))
-  return parent === win32.resolve(projectPath) ? null : parent
+  const parent = hostPath.dirname(hostPath.resolve(projectPath))
+  return parent === hostPath.resolve(projectPath) ? null : parent
 }

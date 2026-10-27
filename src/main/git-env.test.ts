@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { join, parse, resolve } from 'node:path'
 import test from 'node:test'
 import { commitArgs, configGetArgs, diffArgs, gitPathArgs, logArgs, stageArgs, statusArgs, unstageArgs } from './git-commands.js'
 import { assertGitArgument, buildGitEnvironment, ceilingDirectories, gitArgsPrefix } from './git-env.js'
@@ -61,8 +62,9 @@ test('arguments cannot contain NUL', () => {
 })
 
 test('the ceiling is the parent of the project, and absent at a drive root', () => {
-  assert.equal(ceilingDirectories('C:\\work\\repo'), 'C:\\work')
-  assert.equal(ceilingDirectories('C:\\'), null)
+  const root = parse(resolve('/')).root
+  assert.equal(ceilingDirectories(join(root, 'work', 'repo')), join(root, 'work'))
+  assert.equal(ceilingDirectories(root), null)
 })
 
 test('status, diff and log arguments carry the read-safety flags', () => {

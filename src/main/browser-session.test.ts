@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
+import { isFormType, parseFormFields } from './form-body.js'
 
 test('each terminal gets its own endpoint and additive browser instructions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'browser-sessions-'))
@@ -82,6 +83,73 @@ test('PowerShell page-reading commands preserve scoped arguments, method and scr
         { env, windowsHide: true, timeout: 60000 }), /local absolute .png/)
     }
     assert.equal(seen.length, requestCount, 'invalid paths never contact the browser endpoint')
+  } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('the sh helper sends the same requests, names a new screenshot file, and uploads a test plan with its inputs', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-sh-helper-'))
+  const exec = promisify(execFile)
+  const token = 'd'.repeat(64)
+  const seen: { method: string | undefined; url: string | undefined; form?: Map<string, string> }[] = []
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.authorization, `Bearer ${token}`)
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => void (async () => {
+      const type = request.headers['content-type']
+      const form = isFormType(type) ? await parseFormFields(Buffer.concat(chunks), type!) ?? undefined : undefined
+      seen.push({ method: request.method, url: request.url, ...(form ? { form } : {}) })
+      response.setHeader('content-type', 'application/json')
+      if (request.url === '/console') { response.statusCode = 400; response.end(JSON.stringify({ message: 'Capture "paused"' })); return }
+      response.end(JSON.stringify({ state: 'available' }))
+    })())
+  })
+  try {
+    await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept))
+    const env = await prepareBrowserSessionEnvironment(root, 'tab-1', { ...process.env, COPILOT_TEST_PASSWORD: 'pa"ss\\word', OTHER_SECRET: 'nope' })
+    const paths = browserSessionPaths(root, 'tab-1')
+    assert.match(paths.helper, /browser\.sh$/)
+    await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token }))
+    const run = (...args: string[]) => exec('sh', [paths.helper, ...args], { env, timeout: 60000 })
+    for (const args of [['snapshot', '123', 'FRAME'], ['select', '123'], ['scroll', '123', 'FRAME', '-700'], ['response', 'b123-7'], ['status']]) {
+      const result = await run(...args)
+      assert.equal(JSON.parse(result.stdout).state, 'available')
+      assert.ok(!result.stdout.includes(token))
+    }
+    // The sh helper percent-encodes every byte of an argument; the server reads the same values.
+    assert.deepEqual(seen.map(({ method, url }) => ({ method, url: decodeURIComponent(url!) })), [
+      { method: 'GET', url: '/read/snapshot?arg=123&arg=FRAME' },
+      { method: 'POST', url: '/read/select?arg=123' },
+      { method: 'POST', url: '/read/scroll?arg=123&arg=FRAME&arg=-700' },
+      { method: 'GET', url: '/read/response?arg=b123-7' },
+      { method: 'GET', url: '/status' },
+    ])
+    const image = join(root, 'shot one.png')
+    await run('screenshot', '-OutputPath', image)
+    const shot = new URL(seen.at(-1)!.url!, 'http://127.0.0.1')
+    assert.equal(shot.pathname, '/read/screenshot')
+    assert.equal(shot.searchParams.get('save'), image, 'the desktop is told which new file to write')
+    const count = seen.length
+    for (const invalid of ['ticket.png', join(root, 'ticket.exe'), '//host/share/ticket.png', '']) {
+      await assert.rejects(run('screenshot', '-OutputPath', invalid), /local absolute .png/)
+    }
+    await assert.rejects(run('status', '-OutputPath', image), /only supported for screenshots/)
+    assert.equal(seen.length, count, 'invalid paths never contact the browser endpoint')
+    await assert.rejects(run('console'), /Browser diagnostics failed: Capture "paused"/)
+    const plan = join(root, 'plan.json')
+    await writeFile(plan, '{"description":"x","steps":[{"action":"fill","selector":"#p","valueFromEnv":"COPILOT_TEST_PASSWORD"}]}')
+    const report = join(root, 'report.json')
+    await run('test', plan, '-OutputPath', report)
+    const sent = seen.at(-1)!
+    assert.equal(sent.url, '/test')
+    assert.equal(sent.form?.get('plan'), await readFile(plan, 'utf8'))
+    assert.equal(sent.form?.get('output'), report)
+    assert.equal(sent.form?.get('env:COPILOT_TEST_PASSWORD'), 'pa"ss\\word')
+    assert.ok(![...sent.form!.keys()].some((key) => key.includes('OTHER_SECRET')), 'only COPILOT_TEST_ inputs are sent')
+    await run('test', plan)
+    assert.match(seen.at(-1)!.form!.get('output')!, /plan\.report-[0-9a-f]{16}\.json$/)
+    await rm(paths.endpoint)
+    await assert.rejects(run('console'), /Open the Browser pane for this session/)
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
 })
 

@@ -7,10 +7,11 @@ import type { Socket } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import type test from 'node:test'
 import { shardedTest } from './fixtures/sharded-test.js'
-import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
+import { createGitFixture, findGitForTests, folderLink, shellPath } from './fixtures/git-fixture.js'
+import { TRASH_NAME } from './host-path.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, isIndexLockFailure } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
@@ -20,6 +21,8 @@ import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 
 const git = await findGitForTests()
 const skip = git ? false : 'git is not installed'
+/** Network shares exist only on Windows, and so does refusing them. */
+const windowsSkip = skip || (process.platform === 'win32' ? false : 'Windows shares')
 const PROFILE = '0123456789abcdef'
 const SUBSCRIBER = 7
 
@@ -136,7 +139,7 @@ shardedTest('nested repositories keep their ids across rescans and a removed id 
 })
 
 shardedTest('a repository whose config runs a program waits for review and is never read until trusted', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-service-filter-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-service-filter-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await harness(t, (f, project) => {
@@ -357,8 +360,8 @@ shardedTest('dispose stops the service and refuses new subscriptions', { skip },
 shardedTest('a missing git reports itself instead of failing', async (t) => {
   const service = new GitService({
     getRuntime: async () => null,
-    trustStore: new GitTrustStore(join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-none-${process.pid}.json`)),
-    resolveProject: () => process.env.TEMP ?? 'C:\\Windows\\Temp',
+    trustStore: new GitTrustStore(join(tmpdir(), `git-none-${process.pid}.json`)),
+    resolveProject: () => tmpdir(),
     onChanged: () => undefined,
   })
   t.after(() => service.dispose())
@@ -368,7 +371,7 @@ shardedTest('a missing git reports itself instead of failing', async (t) => {
   assert.deepEqual(view.repos, [])
 })
 
-shardedTest('an unknown profile and an unsafe .git are reported without running git', { skip }, async (t) => {
+shardedTest('an unknown profile and an unsafe .git are reported without running git', { skip: windowsSkip }, async (t) => {
   const h = await harness(t, (_f, project) => { mkdirSync(join(project, 'bad')); writeFileSync(join(project, 'bad', '.git'), 'gitdir: \\\\attacker\\share\\x\n') })
   await assert.rejects(h.service.subscribe(SUBSCRIBER, 'ffffffffffffffff'), /Unknown workspace/)
   const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
@@ -387,7 +390,7 @@ shardedTest('a corrupt repository is an error row, not an exception', { skip }, 
 })
 
 shardedTest('an explicit diff re-checks the settings and refuses a config that appeared after the last refresh', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-service-diffgate-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-service-diffgate-${process.pid}.marker`)
   const control = `${marker}.control`
   for (const file of [marker, control]) rmSync(file, { force: true })
   t.after(() => { for (const file of [marker, control]) rmSync(file, { force: true }) })
@@ -422,7 +425,7 @@ shardedTest('an explicit diff re-checks the settings and refuses a config that a
   assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'needs-review', 'the panel is told at once')
 })
 
-shardedTest('a .git pointer that turns unsafe after discovery is caught before the next command', { skip }, async (t) => {
+shardedTest('a .git pointer that turns unsafe after discovery is caught before the next command', { skip: windowsSkip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'ready')
@@ -722,11 +725,11 @@ shardedTest('a commit asks to configure git when it does not know who the author
 
 const hookFile = (project: string, name: string, body: string): void => {
   mkdirSync(join(project, '.git', 'hooks'), { recursive: true })
-  writeFileSync(join(project, '.git', 'hooks', name), `#!/bin/sh\n${body}\n`)
+  writeFileSync(join(project, '.git', 'hooks', name), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
 }
 
 shardedTest('hooks a commit would run need approval of their exact contents, once per change', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await harness(t, (f, project) => {
@@ -788,7 +791,7 @@ shardedTest('a failing hook blocks the commit, its output is shown and streamed,
 })
 
 shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what to check', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-cancel-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-cancel-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   // The hook sleeps far longer than a cancel can take under full-suite load, so "returned before the hook finished"
@@ -837,7 +840,7 @@ shardedTest('isIndexLockFailure recognises git\'s lock message and nothing else'
 // ---- review fixes on phase 2 ------------------------------------------------------------------------------------
 
 shardedTest('replacing an approved oversized hook with different contents of the same size needs a new approval', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-big-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-big-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const hookText = (word: string): string => `#!/bin/sh\n#${'x'.repeat(524_300)}\necho ${word} >> "${shellPath(marker)}"\n`
@@ -845,7 +848,7 @@ shardedTest('replacing an approved oversized hook with different contents of the
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
     mkdirSync(join(project, '.git', 'hooks'), { recursive: true })
-    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), hookText('OLD'))
+    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), hookText('OLD'), { mode: 0o755 })
   })
   assert.ok(hookText('OLD').length > 512 * 1024, 'the hook is larger than the old hashing limit')
   const { repoId, status } = await open(h)
@@ -856,7 +859,7 @@ shardedTest('replacing an approved oversized hook with different contents of the
   assert.equal(readFileSync(marker, 'utf8').trim(), 'OLD')
 
   // Same size, different contents: the replacement must not inherit the approval.
-  writeFileSync(join(h.project, '.git', 'hooks', 'pre-commit'), hookText('NEW'))
+  writeFileSync(join(h.project, '.git', 'hooks', 'pre-commit'), hookText('NEW'), { mode: 0o755 })
   assert.equal(hookText('NEW').length, hookText('OLD').length)
   writeFileSync(join(h.project, 'a.txt'), 'three\n'); h.fixture.plain(h.project, 'add', '.')
   current = await status()
@@ -867,14 +870,14 @@ shardedTest('replacing an approved oversized hook with different contents of the
 })
 
 shardedTest('a hook that cannot be fully checked can never be approved, and a commit refuses to run it', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-unverifiable-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-unverifiable-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
     mkdirSync(join(project, '.git', 'hooks'), { recursive: true })
-    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n#${'x'.repeat(2_000)}\necho ran > "${shellPath(marker)}"\n`)
+    writeFileSync(join(project, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\n#${'x'.repeat(2_000)}\necho ran > "${shellPath(marker)}"\n`, { mode: 0o755 })
   }, { maxHookBytes: 1_000 })
   const { repoId, status } = await open(h)
   const current = await status()
@@ -961,7 +964,7 @@ const lockWaitHarness = (t: test.TestContext, setup: (f: GitFixture, project: st
   harness(t, setup, { lockWaitMs: 5_000, lockPollMs: 100 })
 
 shardedTest('a hook swapped while the commit waits for the index lock is not run on the old approval', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-lockwait-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-lockwait-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await lockWaitHarness(t, (f, project) => {
@@ -987,7 +990,7 @@ shardedTest('a hook swapped while the commit waits for the index lock is not run
 })
 
 shardedTest('a hook that appears while the commit waits for the lock needs approval too', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-appeared-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-appeared-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await lockWaitHarness(t, (f, project) => {
@@ -1006,7 +1009,7 @@ shardedTest('a hook that appears while the commit waits for the lock needs appro
 })
 
 shardedTest('repository settings that start naming a program while the commit waits stop it', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-settings-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-settings-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await lockWaitHarness(t, (f, project) => {
@@ -1026,7 +1029,7 @@ shardedTest('repository settings that start naming a program while the commit wa
 })
 
 shardedTest('a commit whose hooks stay approved still goes through after waiting for a lock', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hook-ok-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-hook-ok-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await lockWaitHarness(t, (f, project) => {
@@ -1154,7 +1157,7 @@ shardedTest('a pull that cannot fast-forward changes nothing and says so', { ski
 })
 
 shardedTest('pull does not run the repository\'s hooks', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-pull-hook-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-pull-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withOrigin(t, (f, project) => {
@@ -1235,7 +1238,7 @@ shardedTest('pull and push need a branch, fetch does not', { skip }, async (t) =
 })
 
 shardedTest('a remote that points at a network share or runs a program is never contacted', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-ext-remote-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-ext-remote-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withOrigin(t)
@@ -1252,7 +1255,7 @@ shardedTest('a remote that points at a network share or runs a program is never 
 })
 
 shardedTest('a push is refused while the repository has a pre-push hook, which the panel does not run', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-prepush-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-prepush-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withOrigin(t, (f, project) => hookFile(project, 'pre-push', `echo ran >> "${shellPath(marker)}"`))
@@ -1664,7 +1667,7 @@ shardedTest('the target must be a local branch that exists and is not the curren
 })
 
 shardedTest('a switch runs no repository hook, and works from a detached HEAD', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-switch-hook-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-switch-hook-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withFeature(t, {}, (f, project) => {
@@ -1798,7 +1801,7 @@ shardedTest('untracked files and folders go to the Recycle Bin, not away for goo
   assert.equal(readdirSync(kit.bin).length, 2, 'both are in the bin')
   assert.deepEqual(savedCopies(kit), [], 'untracked items need no copy')
   assert.match(kit.asked[0]!.detail, /scratch\.txt {2}\(untracked\)/)
-  assert.match(kit.asked[0]!.detail, /moved to the Recycle Bin/)
+  assert.match(kit.asked[0]!.detail, new RegExp(`moved to the ${TRASH_NAME}`))
 })
 
 shardedTest('a folder that holds a git repository is not offered for deletion, and nothing else in the request happens either', { skip }, async (t) => {
@@ -1934,7 +1937,7 @@ shardedTest('if one untracked item cannot be moved, the rest still are, the trac
   const current = await status()
   const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)], current.generation)
   assert.deepEqual([result.ok, result.reason], [false, 'failed'])
-  assert.match(result.message, /1 of 2 untracked items was not moved to the Recycle Bin: .*in use by another process/)
+  assert.match(result.message, new RegExp(`1 of 2 untracked items was not moved to the ${TRASH_NAME}: .*in use by another process`))
   assert.match(result.message, /A copy of the changed file is saved in/)
   assert.equal(text(join(h.project, 'a.txt')), 'one\n', 'the tracked file was restored')
   assert.equal(readdirSync(kit.bin).length, 1, 'the other item is in the bin')
@@ -2185,7 +2188,7 @@ shardedTest('a merge commit is not amended from the panel', { skip }, async (t) 
 })
 
 shardedTest('an amend runs the repository\'s hooks, including post-rewrite, only after they are approved', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-hooks-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-amend-hooks-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withTwoCommits(t, (f, project) => {
@@ -2238,7 +2241,7 @@ shardedTest('an empty commit can be reworded, but an amend that would empty an o
 })
 
 shardedTest('a refused amend never asks the person to approve hooks first', { skip }, async (t) => {
-  const marker = join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-amend-refused-${process.pid}.marker`)
+  const marker = join(tmpdir(), `git-amend-refused-${process.pid}.marker`)
   rmSync(marker, { force: true })
   t.after(() => rmSync(marker, { force: true }))
   const h = await withOrigin(t, (f, project) => {
@@ -2470,11 +2473,11 @@ shardedTest('a merged, unused worktree is removed after confirmation; everything
   assert.ok(existsSync(wip) && existsSync(locked))
   live = [null]
   assert.match((await remove(done)).message, /has not reported where it runs/)
-  live = [done + '\\']
+  live = [done + sep]
   assert.match((await remove(done)).message, /running in this worktree/)
   // The session reaches the worktree through a junction: a different spelling of the same physical folder.
   const alias = join(h.fixture.root, 'alias-to-done')
-  execFileSync('cmd.exe', ['/c', 'mklink', '/J', alias, done], { stdio: 'ignore' })
+  folderLink(alias, done)
   live = [alias]
   assert.match((await remove(done)).message, /running in this worktree/, 'a junction alias is the same folder')
   assert.ok(existsSync(done))

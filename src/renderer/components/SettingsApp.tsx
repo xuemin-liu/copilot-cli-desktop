@@ -11,6 +11,7 @@ import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copi
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
 import { MigrationSettings } from './MigrationSettings.js'
+import { isMac, isWindows, TRASH_LABEL } from '../platform.js'
 import { MAX_WORKTREE_TIMEOUT_MINUTES } from '../../main/worktree-timeout.js'
 import { MAX_MEETING_MAX_ROUNDS, MAX_MEETING_ROUND_TIMEOUT_MINUTES } from '../../main/meeting-settings.js'
 
@@ -547,8 +548,8 @@ export function SettingsApp(): JSX.Element | null {
         <p className="settings-disclaimer">
           Applies to the worktree the desktop created for a session, not to an existing worktree a session was started in.
           Nothing is lost when the worktree has no uncommitted changes: its branch is deleted too when every commit on it is
-          also on another branch, and kept otherwise. A worktree with changes is removed only after you confirm, and goes to the Recycle
-          Bin. Files Git ignores there (build output, node_modules) are deleted with it.
+          also on another branch, and kept otherwise. A worktree with changes is removed only after you confirm, and goes to the
+          {' '}{TRASH_LABEL}. Files Git ignores there (build output, node_modules) are deleted with it.
         </p>
         <label className="settings-row settings-row-number">
           Meeting round limit
@@ -733,7 +734,7 @@ export function SettingsApp(): JSX.Element | null {
         <h2>Access status</h2>
         <dl className="settings-definition-list">
           <div><dt>Configured startup permission</dt><dd>{snapshot.access.permissionLabel} ({snapshot.access.permissionSource})</dd></div>
-          <div><dt>Windows process</dt><dd>{snapshot.access.elevation === 'administrator' ? 'Administrator' : snapshot.access.elevation === 'standard-user' ? 'Standard user' : 'Unknown'}</dd></div>
+          <div><dt>{isWindows ? 'Windows process' : 'Desktop process'}</dt><dd>{snapshot.access.elevation === 'administrator' ? 'Administrator' : snapshot.access.elevation === 'standard-user' ? 'Standard user' : 'Unknown'}</dd></div>
         </dl>
         {snapshot.access.warning && <p className="settings-warning">{snapshot.access.warning}</p>}
         <p className="settings-disclaimer">This setting is the startup default for newly created sessions. Existing sessions keep their own launch restrictions and Copilot approval mode across Restart and app restoration. It cannot remove rights already held by this Windows account — e.g. if the desktop app itself is running elevated, its Copilot sessions inherit administrator rights regardless of this preset.</p>
@@ -741,14 +742,15 @@ export function SettingsApp(): JSX.Element | null {
 
       <ProviderSettings provider={snapshot.provider} onSaved={refresh} />
       <UsageSettings />
-      <MigrationSettings onSaved={refresh} />
+      {/* Migration moves a setup between Windows computers only. */}
+      {isWindows && <MigrationSettings onSaved={refresh} />}
 
       <CopilotResourcesSettings snapshot={snapshot} onSaved={refresh} onMessage={showMessage} />
 
       <section>
         <h2>Protected credential vault</h2>
         <p>
-          Values are encrypted with Windows DPAPI via Electron <code>safeStorage</code> and injected only into
+          Values are encrypted with {isWindows ? 'Windows DPAPI' : isMac ? 'the macOS Keychain' : 'your keyring (libsecret or KWallet)'} via Electron <code>safeStorage</code> and injected only into
           spawned <code>copilot</code> sessions — never returned to any renderer. If protected storage is
           unavailable, saving is refused rather than falling back to plaintext.
         </p>

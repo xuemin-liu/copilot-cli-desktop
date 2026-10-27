@@ -1,7 +1,8 @@
+import { tmpdir } from 'node:os'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import { GitRunner, gitSucceeded, resolveGitExecutable } from './git-runner.js'
@@ -15,6 +16,7 @@ const skip = git ? false : 'git is not installed'
 test('resolveGitExecutable returns an absolute .exe and never searches the working folder', async () => {
   const probed: string[] = []
   const found = await resolveGitExecutable({
+    platform: 'win32',
     env: { ProgramFiles: 'C:\\Program Files', SystemRoot: 'C:\\Windows' },
     findExecutable: async () => 'C:\\tools\\git\\git.exe',
     probeVersion: async (path) => { probed.push(path); return { major: 2, minor: 40, patch: 1, text: 'git version 2.40.1' } },
@@ -27,22 +29,39 @@ test('resolveGitExecutable returns an absolute .exe and never searches the worki
 test('resolveGitExecutable falls back to Program Files, skips relative and non-exe results, and reports old versions', async () => {
   const probed: string[] = []
   const found = await resolveGitExecutable({
+    platform: 'win32',
     env: { ProgramFiles: 'C:\\Program Files', SystemRoot: 'C:\\Windows' },
     findExecutable: async () => 'git.exe',
     probeVersion: async (path) => { probed.push(path); return { major: 2, minor: 10, patch: 0, text: 'git version 2.10.0' } },
   })
   assert.deepEqual(probed, ['C:\\Program Files\\Git\\cmd\\git.exe'])
   assert.equal(found?.supported, false)
-  const none = await resolveGitExecutable({ env: { SystemRoot: 'C:\\Windows' }, findExecutable: async () => null, probeVersion: async () => null })
+  const none = await resolveGitExecutable({ platform: 'win32', env: { SystemRoot: 'C:\\Windows' }, findExecutable: async () => null, probeVersion: async () => null })
   assert.equal(none, null)
 })
 
+test('on macOS and Linux Git is found on PATH or in the usual folders, and the macOS stub only with the developer tools', async () => {
+  const version = { major: 2, minor: 45, patch: 0, text: 'git version 2.45.0' }
+  const probed: string[] = []
+  const probe = async (path: string) => { probed.push(path); return path === '/usr/bin/git' || path === '/opt/homebrew/bin/git' ? version : null }
+  assert.equal((await resolveGitExecutable({ platform: 'linux', env: {}, findExecutable: async () => '/home/me/bin/git', probeVersion: async () => version }))?.path, '/home/me/bin/git')
+  assert.equal((await resolveGitExecutable({ platform: 'linux', env: {}, findExecutable: async () => 'git', probeVersion: probe }))?.path, '/usr/bin/git', 'a relative PATH result is skipped')
+  assert.deepEqual(probed, ['/usr/local/bin/git', '/usr/bin/git'])
+  probed.length = 0
+  assert.equal((await resolveGitExecutable({ platform: 'darwin', env: {}, findExecutable: async () => null, probeVersion: probe }))?.path, '/opt/homebrew/bin/git')
+  const stub = async (hasTools: boolean) => resolveGitExecutable({ platform: 'darwin', env: {}, findExecutable: async () => '/usr/bin/git',
+    probeVersion: async (path) => path === '/usr/bin/git' ? version : null, hasDeveloperTools: async () => hasTools })
+  assert.equal(await stub(false), null, 'the stub that opens an installer is never run')
+  assert.equal((await stub(true))?.path, '/usr/bin/git')
+})
+
 test('the runner refuses a relative git path and a non-local working folder', async () => {
-  assert.throws(() => new GitRunner({ gitPath: 'git', hooksDirectory: 'C:\\h' }), /absolute/)
-  const runner = new GitRunner({ gitPath: 'C:\\git.exe', hooksDirectory: 'C:\\h', trackProcess: null })
-  await assert.rejects(runner.run({ cwd: '\\\\server\\share', args: ['status'] }), /local, absolute/)
+  const absolute = (...parts: string[]): string => resolve('/', ...parts)
+  assert.throws(() => new GitRunner({ gitPath: 'git', hooksDirectory: absolute('h') }), /absolute/)
+  const runner = new GitRunner({ gitPath: absolute('git.exe'), hooksDirectory: absolute('h'), trackProcess: null })
+  if (process.platform === 'win32') await assert.rejects(runner.run({ cwd: '\\\\server\\share', args: ['status'] }), /local, absolute/)
   await assert.rejects(runner.run({ cwd: 'relative', args: ['status'] }), /local, absolute/)
-  await assert.rejects(runner.run({ cwd: 'C:\\work', args: ['status\0'] }), /NUL/)
+  await assert.rejects(runner.run({ cwd: absolute('work'), args: ['status\0'] }), /NUL/)
 })
 
 test('a planted git.exe in the working folder never runs', { skip }, async (t) => {
@@ -134,7 +153,7 @@ test('a timeout kills the whole tree, including a hook that is still running', {
   t.after(() => fixture.cleanup())
   const marker = join(fixture.root, 'hook-finished.txt')
   const repo = fixture.repo('timeout', (directory) => {
-    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\nsleep 3\necho done > "${shellPath(marker)}"\n`)
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\nsleep 3\necho done > "${shellPath(marker)}"\n`, { mode: 0o755 })
   })
   writeFileSync(join(repo, 'b.txt'), 'b\n')
   await fixture.runner.run({ cwd: repo, kind: 'write', args: ['add', '--', 'b.txt'] })
@@ -150,7 +169,7 @@ test('an AbortSignal cancels a running command', { skip }, async (t) => {
   const fixture = (await createGitFixture())!
   t.after(() => fixture.cleanup())
   const repo = fixture.repo('abort', (directory) => {
-    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nsleep 3\n')
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nsleep 3\n', { mode: 0o755 })
   })
   writeFileSync(join(repo, 'b.txt'), 'b\n')
   await fixture.runner.run({ cwd: repo, kind: 'write', args: ['add', '--', 'b.txt'] })
@@ -197,8 +216,8 @@ test('the process is tracked by the watchdog and released when it ends', { skip 
 })
 
 test('a missing git executable surfaces as GitUnavailableError', async () => {
-  const runner = new GitRunner({ gitPath: 'C:\\definitely\\not\\here\\git.exe', hooksDirectory: join(process.env.TEMP ?? 'C:\\Windows\\Temp', 'git-runner-no-git'), trackProcess: null })
-  await assert.rejects(runner.run({ cwd: process.env.TEMP ?? 'C:\\Windows\\Temp', args: ['--version'] }), { name: 'GitUnavailableError' })
+  const runner = new GitRunner({ gitPath: resolve('/', 'definitely', 'not', 'here', 'git.exe'), hooksDirectory: join(tmpdir(), 'git-runner-no-git'), trackProcess: null })
+  await assert.rejects(runner.run({ cwd: tmpdir(), args: ['--version'] }), { name: 'GitUnavailableError' })
 })
 
 test('disableHooks keeps a repository hook from running, and its absence lets it run', { skip }, async (t) => {
@@ -207,7 +226,7 @@ test('disableHooks keeps a repository hook from running, and its absence lets it
   const marker = join(fixture.root, 'hook.marker')
   const repo = fixture.repo('hooks', (directory) => {
     mkdirSync(join(directory, '.git', 'hooks'), { recursive: true })
-    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho ran > "${shellPath(marker)}"\n`)
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho ran > "${shellPath(marker)}"\n`, { mode: 0o755 })
   })
   writeFileSync(join(repo, 'b.txt'), 'b\n')
   await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['add', '--', 'b.txt'] })
@@ -226,7 +245,7 @@ test('onOutput delivers what a hook prints as it arrives, in whole characters', 
   t.after(() => fixture.cleanup())
   const repo = fixture.repo('stream', (directory) => {
     mkdirSync(join(directory, '.git', 'hooks'), { recursive: true })
-    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho "hello 名前 from the hook" >&2\nexit 0\n')
+    writeFileSync(join(directory, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\necho "hello 名前 from the hook" >&2\nexit 0\n', { mode: 0o755 })
   })
   writeFileSync(join(repo, 'b.txt'), 'b\n')
   await fixture.runner.run({ cwd: repo, kind: 'write', disableHooks: true, args: ['add', '--', 'b.txt'] })

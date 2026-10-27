@@ -165,7 +165,8 @@ test('parseStagedRaw reads modes and paths, including a submodule entry and a pa
   assert.deepEqual(parseStagedRaw(''), [])
 })
 
-test('worktree list blocks are parsed with their flags, paths with backslashes, and bounded', () => {
+test('worktree list blocks are parsed with their flags, paths spelled the platform way, and bounded', () => {
+  const native = (path: string): string => process.platform === 'win32' ? path.replace(/\//g, '\\') : path
   const output = [
     'worktree C:/Users/me/repo', 'HEAD ' + 'a'.repeat(40), 'branch refs/heads/main', '',
     'worktree C:/Users/me/repo.worktrees/desktop-x-abc123', 'HEAD ' + 'b'.repeat(40), 'branch refs/heads/desktop-x-abc123', 'locked', '',
@@ -175,11 +176,11 @@ test('worktree list blocks are parsed with their flags, paths with backslashes, 
   ].join('\n')
   const parsed = parseWorktrees(output)
   assert.deepEqual(parsed, [
-    { path: 'C:\\Users\\me\\repo', head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null },
-    { path: 'C:\\Users\\me\\repo.worktrees\\desktop-x-abc123', head: 'b'.repeat(40), branch: 'desktop-x-abc123', detached: false, bare: false, locked: 'locked', prunable: null },
-    { path: 'C:\\Users\\me\\elsewhere', head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location' },
-    { path: 'C:\\Users\\me\\bare', head: null, branch: null, detached: false, bare: true, locked: null, prunable: null },
-    { path: 'C:\\Users\\me\\odd', head: null, branch: null, detached: false, bare: false, locked: null, prunable: null },
+    { path: native('C:/Users/me/repo'), head: 'a'.repeat(40), branch: 'main', detached: false, bare: false, locked: null, prunable: null },
+    { path: native('C:/Users/me/repo.worktrees/desktop-x-abc123'), head: 'b'.repeat(40), branch: 'desktop-x-abc123', detached: false, bare: false, locked: 'locked', prunable: null },
+    { path: native('C:/Users/me/elsewhere'), head: 'c'.repeat(40), branch: null, detached: true, bare: false, locked: null, prunable: 'gitdir file points to non-existent location' },
+    { path: native('C:/Users/me/bare'), head: null, branch: null, detached: false, bare: true, locked: null, prunable: null },
+    { path: native('C:/Users/me/odd'), head: null, branch: null, detached: false, bare: false, locked: null, prunable: null },
   ])
   assert.equal(parseWorktrees('worktree C:/a\r\nHEAD ' + 'd'.repeat(40) + '\r\n').length, 1, 'a final block without a blank line, with CRLF, still counts')
   assert.equal(parseWorktrees(Array.from({ length: 10 }, (_item, index) => `worktree C:/w${index}\n\n`).join(''), 3).length, 3)

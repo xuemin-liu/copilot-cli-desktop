@@ -21,6 +21,7 @@ import type { DiffCommentAnchor } from './GitDiffView.js'
 import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
+import { TRASH_LABEL } from '../platform.js'
 
 export interface GitPanelProps {
   profileId: string
@@ -689,7 +690,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} onSelect={pickEntry}
                         rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }}
                         extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard([entry]) }}
-                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Move every untracked file to the Recycle Bin. You will be asked first.', disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.untracked) }}
+                        extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : `Move every untracked file to the ${TRASH_LABEL}. You will be asked first.`, disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.untracked) }}
                         groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every untracked file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.untracked) }} />
                       {currentStatus.truncated && <p className="git-note" role="status">Showing the first {currentStatus.staged.length + currentStatus.unstaged.length + currentStatus.untracked.length} of {currentStatus.totalEntries.toLocaleString()} changed files.</p>}
                     </div>

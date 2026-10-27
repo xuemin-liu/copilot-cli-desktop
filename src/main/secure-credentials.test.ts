@@ -6,10 +6,23 @@ import test from 'node:test'
 import {
   SecureCredentialStore,
   SENSITIVE_ENVIRONMENT_NAME,
+  protectedStorage,
   secretEnvArgs,
   withoutSensitiveEnvironment,
   type EncryptionProvider,
 } from './secure-credentials.js'
+
+test('on Linux the vault refuses safeStorage\'s fallback key and accepts a real keyring', () => {
+  const storage = (backend: string) => ({ isEncryptionAvailable: () => true, getSelectedStorageBackend: () => backend,
+    encryptString: (value: string) => Buffer.from(value), decryptString: (value: Buffer) => value.toString() })
+  assert.equal(protectedStorage(storage('basic_text'), 'linux').isEncryptionAvailable(), false)
+  assert.equal(protectedStorage(storage('unknown'), 'linux').isEncryptionAvailable(), false)
+  assert.equal(protectedStorage(storage('gnome_libsecret'), 'linux').isEncryptionAvailable(), true)
+  assert.equal(protectedStorage(storage('kwallet5'), 'linux').isEncryptionAvailable(), true)
+  assert.equal(protectedStorage(storage('basic_text'), 'win32').isEncryptionAvailable(), true, 'Windows uses DPAPI')
+  assert.equal(protectedStorage({ ...storage('gnome_libsecret'), isEncryptionAvailable: () => false }, 'linux').isEncryptionAvailable(), false)
+  assert.equal(protectedStorage(storage('gnome_libsecret'), 'linux').decryptString(Buffer.from('x')), 'x')
+})
 
 test('helper environment filtering covers signing/auth secrets without stripping author or scope metadata', () => {
   const secrets = ['AUTH', 'auth', 'SIGNING_KEY', 'SIGNINGKEY', 'api-key', 'api.key', 'x-api-key']

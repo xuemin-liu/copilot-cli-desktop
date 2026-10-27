@@ -37,7 +37,7 @@ export async function installCopilotCli(): Promise<string> {
     })
     return `${winget.stdout}\n${winget.stderr}`.trim()
   }
-  throw new Error('Automatic installation is supported only on Windows through WinGet. Install Copilot CLI from a trusted package source.')
+  throw new Error('Automatic installation is available on Windows only. Install Copilot CLI from a terminal (for example `npm install -g @github/copilot`), then retry detection.')
 }
 
 export async function updateCopilotCli(resolution: CopilotResolution): Promise<string> {

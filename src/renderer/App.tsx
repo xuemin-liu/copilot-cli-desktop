@@ -15,6 +15,7 @@ import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
 import { sessionTaskBlocker } from '../main/session-task.js'
+import { isShortcutModifier } from './platform.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -246,7 +247,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
-      const modifier = event.ctrlKey || event.metaKey
+      const modifier = isShortcutModifier(event)
       if (!modifier) return
       if (state.windowSessionId) {
         if (event.key.toLowerCase() === 'w') {

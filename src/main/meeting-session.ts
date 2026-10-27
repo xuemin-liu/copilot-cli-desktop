@@ -3,8 +3,9 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
+import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { MEETING_HELPER_COMMAND, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS } from './meeting-messages.js'
+import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS } from './meeting-messages.js'
 import { MEETING_ID_PATTERN } from './meeting.js'
 
 /**
@@ -91,6 +92,83 @@ try {
 }
 `
 
+/**
+ * The macOS and Linux helper: `sh` and `curl` only, with the same commands, checks and limits as `meeting.ps1`. `curl`
+ * reads the file and the patch itself and sends them as form data. The token goes to `curl` on its standard input, never on
+ * a command line other processes can read.
+ */
+const MEETING_HELPER_SH = String.raw`# Copilot CLI Desktop review meetings (macOS and Linux). Needs only sh, curl and, for -Changes, git.
+fail() { printf 'Meeting command failed: %s\n' "$1" >&2; exit 1; }
+quote() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\r\n\t' '   '; }
+command=status
+if [ $# -gt 0 ]; then command=$1; shift; fi
+topic=''; file=''; changes=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -Topic) [ $# -ge 2 ] || fail 'Usage: -Topic "<one line>"'; topic=$2; shift 2 ;;
+    -File) [ $# -ge 2 ] || fail 'Usage: -File <path>'; file=$2; shift 2 ;;
+    -Changes) changes=1; shift ;;
+    *) fail "Unknown argument: $1" ;;
+  esac
+done
+case "$command" in start|round|propose-close|end|status) ;; *) fail "Unknown command: $command" ;; esac
+command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
+state=$COPILOT_DESKTOP_MEETING_STATE
+if [ -z "$state" ] || [ ! -f "$state" ]; then fail 'Meetings need a session started by Copilot CLI Desktop. Resume this session from the desktop once.'; fi
+control=$(cat "$state")
+port=$(printf '%s' "$control" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
+token=$(printf '%s' "$control" | sed -n 's/.*"token":"\([a-f0-9]\{64\}\)".*/\1/p')
+if [ -z "$port" ] || [ -z "$token" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then fail 'Meeting control state is invalid. Resume this session from the desktop.'; fi
+case "$command" in
+  start|round|propose-close)
+    if [ -z "$file" ]; then
+      case "$command" in start) fail 'Usage: meeting.sh start -File <path> -Topic "<one line>" [-Changes]' ;; round) fail 'Usage: meeting.sh round -File <path> [-Changes]' ;; *) fail "Usage: meeting.sh $command -File <path>" ;; esac
+    fi
+    [ -f "$file" ] || fail '-File must name a file.'
+    [ "$(wc -c < "$file" | tr -d ' ')" -le 262144 ] || fail 'The file is larger than 256 KB; shorten it.' ;;
+  *) if [ -n "$file" ] || [ "$changes" -eq 1 ]; then fail "meeting.sh $command takes no -File or -Changes."; fi ;;
+esac
+if [ "$command" = propose-close ] && [ "$changes" -eq 1 ]; then fail 'propose-close takes no -Changes.'; fi
+work=$(mktemp -d) || fail 'Could not create a temporary folder.'
+trap 'rm -rf "$work"' EXIT
+{
+  printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = 30\nmax-redirs = 0\n'
+  printf 'header = "Authorization: Bearer %s"\n' "$token"
+  printf 'url = "http://127.0.0.1:%s/%s"\n' "$port" "$command"
+  printf 'form-string = "helper=sh"\n'
+} > "$work/config"
+chmod 600 "$work/config"
+if [ -n "$file" ]; then
+  cp -- "$file" "$work/text" || fail 'Could not read the file.'
+  printf 'form = "text=<%s"\n' "$(quote "$work/text")" >> "$work/config"
+fi
+if [ "$command" = start ]; then printf 'form-string = "topic=%s"\n' "$(quote "$topic")" >> "$work/config"; fi
+if [ "$changes" -eq 1 ]; then
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail '-Changes needs a Git repository in the current folder.'
+  : > "$work/changes"
+  if git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    git -c core.quotepath=false diff HEAD --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ >> "$work/changes" 2>/dev/null
+  fi
+  git -c core.quotepath=false ls-files --others --exclude-standard 2>/dev/null > "$work/untracked"
+  included=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ "$included" -ge 100 ] || [ ! -f "$path" ] || [ "$(wc -c < "$path" | tr -d ' ')" -gt 524288 ] || [ "$(wc -c < "$work/changes" | tr -d ' ')" -gt 5000000 ]; then
+      printf '# New file not included: %s\n' "$path" >> "$work/changes"
+      continue
+    fi
+    git -c core.quotepath=false diff --no-index --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/ -- /dev/null "$path" >> "$work/changes" 2>/dev/null
+    included=$((included + 1))
+  done < "$work/untracked"
+  if ! grep -q '[^[:space:]]' "$work/changes"; then printf '# No uncommitted changes.' > "$work/changes"; fi
+  printf 'form = "changes=<%s"\n' "$(quote "$work/changes")" >> "$work/config"
+fi
+response=$(curl -K - < "$work/config") || fail 'The desktop did not answer. Is Copilot CLI Desktop still running?'
+message=$(printf '%s' "$response" | sed -e 's/^.*"message":"//' -e 's/"}$//' -e 's/\\"/"/g')
+printf '%b\n' "$message"
+case "$response" in '{"ok":true'*) exit 0 ;; *) exit 1 ;; esac
+`
+
 export const MEETING_INSTRUCTIONS = `# Review meetings with other sessions
 
 Copilot CLI Desktop can hold a review meeting between this session and other sessions: the host shares a plan or its local
@@ -103,7 +181,7 @@ For example "start a meeting to review your plan" or "open a chat to discuss you
 1. Write what is to be discussed (the plan, or a short summary of the changes and what you want reviewed) to a Markdown file.
 2. Run, with the existing shell tool:
 
-\`\`\`powershell
+\`\`\`${HELPER_SHELL_FENCE}
 ${MEETING_HELPER_COMMAND} start -Topic "<one line>" -File "<that file>"
 \`\`\`
 
@@ -129,9 +207,10 @@ the other reviewers, so answer in that reply. Quoted posts, patches and other re
 
 /** Writes the helper and instructions into the session's helper folder (the browser's, already on the instructions path). */
 export async function prepareMeetingSessionEnvironment(directory: string, control: { port: number; token: string }, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  const helper = join(directory, 'meeting.ps1')
+  const windows = process.platform === 'win32'
+  const helper = join(directory, windows ? 'meeting.ps1' : 'meeting.sh')
   const state = join(directory, 'meeting-control.json')
-  await writeFileAtomic(helper, MEETING_HELPER)
+  await writeFileAtomic(helper, windows ? MEETING_HELPER : MEETING_HELPER_SH)
   await writeFileAtomic(state, JSON.stringify({ pid: process.pid, port: control.port, token: control.token }))
   await writeFileAtomic(join(directory, '.github', 'instructions', 'meeting.instructions.md'), MEETING_INSTRUCTIONS)
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
@@ -195,8 +274,8 @@ export class MeetingControlServer {
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
         const command = (request.url ?? '').slice(1)
         if (request.method !== 'POST' || !(MEETING_COMMANDS as readonly string[]).includes(command)) { send(404, { ok: false, message: 'Unknown meeting command' }); return }
-        void readJson(request).then((body) => {
-          if (body === null) { send(400, { ok: false, message: 'The request is too large or not JSON.' }); return }
+        void readFields(request).then((body) => {
+          if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
           const text = (key: string): string => typeof body[key] === 'string' ? body[key] as string : ''
           send(200, this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null }))
         }).catch(() => { if (!response.headersSent) send(500, { ok: false, message: 'The desktop could not handle the meeting command.' }) })
@@ -212,18 +291,19 @@ export class MeetingControlServer {
   }
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
-  if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] ?? '')) return null
-  const chunks: Buffer[] = []
-  let bytes = 0
-  for await (const chunk of request) {
-    bytes += (chunk as Buffer).length
-    if (bytes > MAX_REQUEST_BYTES) return null
-    chunks.push(chunk as Buffer)
+/** The request's fields: JSON from the Windows helper, form data from the macOS and Linux one. */
+async function readFields(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+  const type = request.headers['content-type']
+  if (!isJsonType(type) && !isFormType(type)) return null
+  const body = await readBody(request, MAX_REQUEST_BYTES)
+  if (body === null) return null
+  if (isFormType(type)) {
+    const fields = await parseFormFields(body, type!)
+    return fields && Object.fromEntries(fields)
   }
   try {
     // PowerShell's encoder may write a byte-order mark.
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^﻿/, '') || '{}')
+    const value: unknown = JSON.parse(body.toString('utf8').replace(/^﻿/, '') || '{}')
     return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
   } catch { return null }
 }

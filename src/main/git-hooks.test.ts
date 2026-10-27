@@ -51,7 +51,7 @@ test('a repository that points git at another hooks folder is inspected there', 
   mkdirSync(custom, { recursive: true })
   writeFileSync(join(custom, 'post-commit'), '#!/bin/sh\n')
   mkdirSync(join(repo, '.git', 'hooks'), { recursive: true })
-  writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n')
+  writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n', { mode: 0o755 })
   fixture.plain(repo, 'config', 'core.hooksPath', custom)
   const inventory = await inspectCommitHooks(fixture.runner, repo)
   assert.deepEqual(inventory.hooks, ['post-commit'], 'git would run the custom folder, not .git/hooks')

@@ -1,5 +1,5 @@
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
-import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
+import { signalProcessGroup, startProcessWatchdog } from './process-tree.js'
 import { prepareSessionWorktree } from './session-worktree-launch.js'
 
 /**
@@ -46,9 +46,8 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
     rows: options.rows,
     name: 'xterm-256color',
   })
-  const watchdog = process.platform === 'win32' && child.pid
-    ? startWindowsProcessWatchdog(child.pid)
-    : null
+  // A terminal session leads its own process group, so the watchdog's group kill reaches everything it started.
+  const watchdog = child.pid ? startProcessWatchdog(child.pid) : null
   let exited = false
   child.onExit(() => {
     exited = true
@@ -67,7 +66,11 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
         // Resizing a pty that has already exited throws; ignore.
       }
     },
-    kill: (signal) => child.kill(signal),
+    kill: (signal) => {
+      // Outside Windows the session leads its own process group: signal the group so the commands it started stop too.
+      if (process.platform !== 'win32' && !exited && child.pid > 1) signalProcessGroup(child.pid, (signal ?? 'SIGHUP') as NodeJS.Signals)
+      else child.kill(signal)
+    },
     dispose: () => {
       if (disposed) return
       disposed = true

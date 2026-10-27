@@ -3,7 +3,7 @@ import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { basename, dirname, join, resolve, win32 } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -13,6 +13,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  nativeImage,
   Notification,
   safeStorage,
   session as electronSession,
@@ -120,6 +121,9 @@ import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
+import { isSameOrInside } from './host-path.js'
+import { desktopPosixPath } from './posix-executables.js'
+import { linuxAutostartEnabled, setLinuxAutostart } from './linux-autostart.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -131,6 +135,7 @@ import {
 import {
   SecureCredentialStore,
   isCredentialName,
+  protectedStorage,
   secretEnvArgs,
   withoutSensitiveEnvironment,
   type CredentialName,
@@ -710,21 +715,25 @@ function persistProfileTabs(): void {
 }
 
 function loginItemOptions(): { path: string; args: string[] } {
-  return { path: process.execPath, args: [BACKGROUND_START_ARGUMENT] }
+  // An AppImage runs from a temporary mount; APPIMAGE names the file to start next time.
+  return { path: process.platform === 'linux' && process.env.APPIMAGE ? process.env.APPIMAGE : process.execPath, args: [BACKGROUND_START_ARGUMENT] }
 }
 
 function launchAtLoginAvailable(): boolean {
-  return app.isPackaged && (process.platform === 'win32' || process.platform === 'darwin')
+  return app.isPackaged
 }
 
 function launchAtLoginEnabled(): boolean {
   if (!launchAtLoginAvailable()) return false
+  if (process.platform === 'linux') return linuxAutostartEnabled()
   return app.getLoginItemSettings(loginItemOptions()).openAtLogin
 }
 
 function setLaunchAtLogin(enabled: boolean): void {
   if (!launchAtLoginAvailable()) throw new Error('Launch at login is available in installed builds.')
-  app.setLoginItemSettings({ openAtLogin: enabled, ...loginItemOptions() })
+  const options = loginItemOptions()
+  if (process.platform === 'linux') setLinuxAutostart(enabled, options.path, options.args)
+  else app.setLoginItemSettings({ openAtLogin: enabled, ...options })
 }
 
 function applyGlobalShortcut(enabled: boolean): void {
@@ -935,7 +944,8 @@ function rebuildTrayMenu(): void {
 
 function updateTrayVisibility(): void {
   if (desktopConfig.trayEnabled && !tray) {
-    tray = new Tray(iconPath())
+    // macOS draws menu-bar icons at their pixel size, so the window icon would fill the bar.
+    tray = new Tray(process.platform === 'darwin' ? nativeImage.createFromPath(iconPath()).resize({ width: 18, height: 18 }) : iconPath())
     tray.setToolTip('Copilot CLI Desktop')
     tray.on('click', restoreMainWindow)
     rebuildTrayMenu()
@@ -1194,8 +1204,8 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
 
 async function sessionWorktreeIn(profile: WorkspaceProfile | undefined, cwd: string | null): Promise<{ worktree: SessionWorktreeInfo | null; gitDir: string | null }> {
   if (!cwd || !profile) return { worktree: null, gitDir: null }
-  const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
-  const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
+  const base = await realPathNative(profile.path).catch(() => profile.path)
+  const within = (mainRoot: string): boolean => isSameOrInside(mainRoot, base)
   const found = await inspectSessionWorktree(cwd, within)
   return found ? { worktree: { path: found.root, name: found.name, branch: found.branch }, gitDir: found.gitDir } : { worktree: null, gitDir: null }
 }
@@ -2072,17 +2082,16 @@ let worktreeCleanupQueue: Promise<void> = Promise.resolve()
 
 /** Whether a tab still open (running or not, since it can be restarted) runs in the folder or below it, or was started there. */
 async function openTabUsesFolder(folder: string): Promise<boolean> {
-  const canonical = (path: string): Promise<string> => realPathNative(path).then((real) => real.replace(/[\\/]+$/, '').toLowerCase())
   let target: string
-  try { target = await canonical(folder) } catch { return false }
+  try { target = await realPathNative(folder) } catch { return false }
   // A dormant tab whose saved folder is still being read may resume in this one.
   await Promise.all(dormantFolderReads.values())
   for (const tab of tabsState.tabs) {
     for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
       if (!where) continue
       let real: string
-      try { real = await canonical(where) } catch { continue }
-      if (real === target || real.startsWith(`${target}\\`)) return true
+      try { real = await realPathNative(where) } catch { continue }
+      if (isSameOrInside(real, target)) return true
     }
   }
   return false
@@ -2373,11 +2382,7 @@ function wakeDormantTab(tabId: string): Promise<void> {
 
 const sessionCatalogCache: SessionCatalogCache = new Map()
 
-function sameOrInside(path: string, folder: string): boolean {
-  const target = win32.resolve(path).replace(/[\\/]+$/, '').toLowerCase()
-  const base = win32.resolve(folder).replace(/[\\/]+$/, '').toLowerCase()
-  return target === base || target.startsWith(`${base}\\`)
-}
+const sameOrInside = isSameOrInside
 
 /** The open project a stored session belongs to: one whose folder holds where it ran, or whose repository it ran in a
  * linked worktree of (then it resumes in that worktree). */
@@ -2824,7 +2829,25 @@ function installApplicationMenu(): void {
   const focusedWindow = BrowserWindow.getFocusedWindow()
   const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
   const menuTabId = focusedPopoutId ?? tabsState.activeTabId
+  const mac = process.platform === 'darwin'
+  const settingsItem = { label: mac ? 'Settings…' : 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') }
+  const quitItem = { label: mac ? 'Quit Copilot CLI Desktop' : 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() }
   const menu = Menu.buildFromTemplate([
+    // macOS puts About, Settings and Quit in the application menu, and its copy and paste keys work only through an Edit menu.
+    ...(mac ? [{
+      label: app.name,
+      submenu: [
+        { role: 'about' as const },
+        { type: 'separator' as const },
+        settingsItem,
+        { type: 'separator' as const },
+        { role: 'hide' as const },
+        { role: 'hideOthers' as const },
+        { role: 'unhide' as const },
+        { type: 'separator' as const },
+        quitItem,
+      ],
+    }, { role: 'editMenu' as const }] : []),
     {
       label: 'File',
       submenu: [
@@ -2873,9 +2896,7 @@ function installApplicationMenu(): void {
           enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && tab.status !== 'dormant'),
           click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
-        { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
-        { type: 'separator' },
-        { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() },
+        ...(mac ? [] : [settingsItem, { type: 'separator' as const }, quitItem]),
       ],
     },
     {
@@ -2918,9 +2939,10 @@ function installApplicationMenu(): void {
         { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },
         { type: 'separator' },
         { label: 'Open Releases', click: () => observe(shell.openExternal(RELEASES_URL), 'Could not open releases') },
-        { role: 'about' },
+        ...(mac ? [] : [{ role: 'about' as const }]),
       ],
     },
+    ...(mac ? [{ role: 'windowMenu' as const }] : []),
   ])
   Menu.setApplicationMenu(menu)
   // On Windows/Linux this setter installs the menu on every existing window.
@@ -3965,6 +3987,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('activate', restoreMainWindow)
 
   app.whenReady().then(async () => {
+    // Opened from Finder or a launcher, the app lacks the PATH the person's shell sets up, where the Copilot CLI and Git live.
+    if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')
@@ -4047,8 +4071,11 @@ if (!app.requestSingleInstanceLock()) {
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(
-      app.isPackaged && process.platform === 'win32' ? autoUpdater as unknown as UpdateAdapter : null,
+      // In-app updates: the Windows installer, and a Linux AppImage. A .deb updates through its package manager, and macOS
+      // can only replace a signed app.
+      app.isPackaged && (process.platform === 'win32' || (process.platform === 'linux' && process.env.APPIMAGE)) ? autoUpdater as unknown as UpdateAdapter : null,
       app.getVersion(),
+      ...(app.isPackaged ? ['Get new versions from the Releases page (Help → Open Releases).'] : []),
     )
     updateController.on('state-changed', (update: DesktopUpdateState) => {
       if (installInProgress && update.status === 'error') {
@@ -4064,7 +4091,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage, (message) => void writeAppLog(message))
+    credentialStore = new SecureCredentialStore(protectedCredentialPath(), protectedStorage(safeStorage), (message) => void writeAppLog(message))
 
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'

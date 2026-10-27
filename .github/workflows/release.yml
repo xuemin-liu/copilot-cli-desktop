@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   release:
@@ -92,3 +93,10 @@ jobs:
             release/*.exe
             release/*.blockmap
             release/latest.yml
+      # A release published with GITHUB_TOKEN starts no `release` workflows, but a dispatch does.
+      - name: Add the macOS and Linux builds
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh workflow run release-unix.yml --repo "$env:GITHUB_REPOSITORY" --ref "$env:RELEASE_TAG" -f tag="$env:RELEASE_TAG"

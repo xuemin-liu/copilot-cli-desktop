@@ -20,12 +20,16 @@ function fakeExecFile(handlers: Record<string, { stdout: string } | Error>): Exe
 
 const WHERE = 'C:\\Windows\\System32\\where.exe'
 
+/** A PATH lookup that finds only the named programs, in /usr/local/bin. */
+const onPath = (...names: string[]) => async (name: string): Promise<string | null> => names.includes(name) ? `/usr/local/bin/${name}` : null
+
 test('resolveCopilotBinary prefers copilot directly on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
-    'copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
-  }), 'linux')
+    '/usr/local/bin/copilot --version': { stdout: 'GitHub Copilot CLI 0.9.1\n' },
+  }), 'linux', undefined, undefined, onPath('copilot', 'gh'))
   assert.equal(resolution.kind, 'direct')
-  assert.equal(resolution.command, 'copilot')
+  assert.equal(resolution.command, '/usr/local/bin/copilot')
+  assert.equal(resolution.resolvedPath, '/usr/local/bin/copilot')
   assert.deepEqual(resolution.prefixArgs, [])
   assert.equal(resolution.version, '0.9.1')
 })
@@ -169,20 +173,20 @@ test('windowsSystemExecutable never depends on the current directory', () => {
 
 test('resolveCopilotBinary falls back to gh copilot when Copilot is not on PATH', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
-    'copilot --version': new Error('ENOENT'),
-    'gh copilot -- --version': { stdout: '0.9.1\n' },
-  }), 'linux')
+    '/usr/local/bin/gh copilot -- --version': { stdout: '0.9.1\n' },
+  }), 'linux', undefined, undefined, onPath('gh'))
   assert.equal(resolution.kind, 'gh-wrapped')
-  assert.equal(resolution.command, 'gh')
+  assert.equal(resolution.command, '/usr/local/bin/gh')
   assert.deepEqual(resolution.prefixArgs, ['copilot', '--'])
 })
 
 test('resolveCopilotBinary reports diagnostics when nothing resolves', async () => {
   const resolution = await resolveCopilotBinary({}, fakeExecFile({
-    'copilot --version': new Error('ENOENT'),
-    'gh copilot -- --version': new Error('ENOENT'),
-  }), 'linux')
+    '/usr/local/bin/copilot --version': new Error('EACCES'),
+    '/usr/local/bin/gh copilot -- --version': new Error('ENOENT'),
+  }), 'linux', undefined, undefined, onPath('copilot', 'gh'))
   assert.equal(resolution.version, null)
   assert.match(resolution.error ?? '', /was not found/i)
-  assert.match(resolution.error ?? '', /copilot --version/)
+  assert.match(resolution.error ?? '', /\/usr\/local\/bin\/copilot --version: EACCES/)
+  assert.match(resolution.error ?? '', /npm install -g @github\/copilot/)
 })

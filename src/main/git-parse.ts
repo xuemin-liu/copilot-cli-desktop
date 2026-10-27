@@ -349,7 +349,8 @@ export function parseWorktrees(output: string, max = 200): GitWorktreeEntry[] {
     if (key === 'worktree') {
       finish()
       if (value === '') continue
-      current = { path: value.replace(/\//g, '\\'), head: null, branch: null, detached: false, bare: false, locked: null, prunable: null }
+      // Git prints forward slashes on Windows too; spell the path the platform's way.
+      current = { path: process.platform === 'win32' ? value.replace(/\//g, '\\') : value, head: null, branch: null, detached: false, bare: false, locked: null, prunable: null }
       continue
     }
     if (!current) continue

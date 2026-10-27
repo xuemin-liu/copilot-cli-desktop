@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { readUntrackedFile, safeRepoSegments } from './git-untracked.js'
+import { folderLink } from './fixtures/git-fixture.js'
 
 function repoFolder(t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), 'git-untracked-'))
@@ -58,7 +58,7 @@ test('a path through a junction that leaves the repository is refused', async (t
   const outside = join(repo, '..', 'outside')
   mkdirSync(outside)
   writeFileSync(join(outside, 'secret.txt'), 'top secret')
-  execFileSync('cmd.exe', ['/c', 'mklink', '/J', join(repo, 'portal'), outside], { stdio: 'ignore' })
+  folderLink(join(repo, 'portal'), outside)
   const result = await readUntrackedFile(repo, 'portal/secret.txt')
   assert.equal(result.kind, 'unsafe')
   assert.match(result.kind === 'unsafe' ? result.reason : '', /outside the repository/)

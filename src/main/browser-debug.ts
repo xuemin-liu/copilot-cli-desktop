@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto'
-import { readFile, rm } from 'node:fs/promises'
-import { createServer, type Server } from 'node:http'
+import { open, readFile, rm } from 'node:fs/promises'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { join } from 'node:path'
 import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
-import { browserControlPath } from '../cli/browser-control.js'
+import { browserControlPath, validateBrowserScreenshotPath } from '../cli/browser-control.js'
+import { executeBrowserTest, parseBrowserTest } from '../cli/browser-test-client.js'
+import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { parseSafeHttpUrl } from './external-targets.js'
@@ -14,6 +16,19 @@ import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './
 import { BrowserReader } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
+
+/** A plan sent as form data, with its test inputs. */
+const MAX_TEST_FORM_BYTES = 2 * MAX_TEST_BYTES + 64 * 1024
+
+/** Save a screenshot in a new file and answer with its metadata and path, as `browser.ps1 screenshot -OutputPath` does. */
+async function saveScreenshot(value: unknown, path: string): Promise<unknown> {
+  const result = value as { imageBase64?: unknown } | null
+  if (typeof result?.imageBase64 !== 'string') return value
+  const { imageBase64, ...metadata } = result
+  const file = await open(path, 'wx')
+  try { await file.writeFile(Buffer.from(imageBase64, 'base64')) } finally { await file.close() }
+  return { ...metadata, path }
+}
 import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePermission } from './browser-permissions.js'
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
@@ -742,6 +757,24 @@ export class BrowserDebug {
     return this.serverStart
   }
 
+  /**
+   * A test sent by the macOS and Linux helper: the plan's text (read by `curl`), its `COPILOT_TEST_` inputs, and the new
+   * report file to write. The files are reserved and written the way `copilot-desktop browser test` does it.
+   */
+  private async testFromForm(request: IncomingMessage, type: string, signal: AbortSignal): Promise<unknown> {
+    const body = await readBody(request, MAX_TEST_FORM_BYTES)
+    if (body === null) throw new Error('Test plan exceeds 128 KiB.')
+    const fields = await parseFormFields(body, type)
+    const text = fields?.get('plan')
+    const output = fields?.get('output')
+    if (text === undefined || output === undefined) throw new Error('Invalid test request.')
+    if (Buffer.byteLength(text) > MAX_TEST_BYTES) throw new Error('Test plan exceeds 128 KiB.')
+    const inputs: Record<string, string> = {}
+    for (const [name, value] of fields!) if (name.startsWith('env:')) inputs[name.slice(4)] = value
+    const plan = parseBrowserTest(text, inputs)
+    return executeBrowserTest(plan, output, output, value => this.reader.test(value, signal))
+  }
+
   private async listen(): Promise<void> {
     const server = createServer((request, response) => {
       const send = (status: number, body: unknown): void => {
@@ -755,9 +788,15 @@ export class BrowserDebug {
       if (!constantTimeTokenEqual(authorization, `Bearer ${this.token}`)) { send(401, { message: 'Unauthorized' }); return }
       if (request.url === '/test') {
         if (request.method !== 'POST') { send(405, { message: 'Tests require POST.' }); return }
-        if (!/^application\/json(?:;|$)/i.test(request.headers['content-type'] ?? '')) { send(415, { message: 'Tests require JSON.' }); return }
+        const type = request.headers['content-type']
         const cancelled = new AbortController()
         response.once('close', () => cancelled.abort())
+        if (isFormType(type)) {
+          void this.testFromForm(request, type!, cancelled.signal).then(result => { if (!response.destroyed) send(200, result) },
+            error => { if (!response.destroyed && !response.headersSent) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Test unavailable.') }) })
+          return
+        }
+        if (!isJsonType(type)) { send(415, { message: 'Tests require JSON.' }); return }
         void (async () => {
           const chunks: Buffer[] = []; let bytes = 0
           for await (const chunk of request) {
@@ -781,9 +820,15 @@ export class BrowserDebug {
         const args = url.searchParams.getAll('arg')
         try { validateBrowserReadCommand(command, args) }
         catch (error) { send(400, { message: error instanceof Error ? error.message : 'Invalid browser read arguments' }); return }
+        // The macOS and Linux helper cannot decode the image itself, so it names a new file for the desktop to save it in.
+        const save = command === 'screenshot' ? url.searchParams.get('save') : null
+        if (save !== null) {
+          try { validateBrowserScreenshotPath(save) }
+          catch (error) { send(400, { message: error instanceof Error ? error.message : 'Invalid screenshot path' }); return }
+        }
         const cancelled = new AbortController()
         response.once('close', () => cancelled.abort())
-        void this.reader.read(command, args, cancelled.signal).then(value => { if (!response.destroyed) send(200, value) }, error => {
+        void this.reader.read(command, args, cancelled.signal).then(value => save === null ? value : saveScreenshot(value, save)).then(value => { if (!response.destroyed) send(200, value) }, error => {
           if (!response.destroyed) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Browser content unavailable') })
         })
         return

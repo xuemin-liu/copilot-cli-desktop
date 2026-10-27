@@ -1,9 +1,10 @@
-import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createConnection, type Socket } from 'node:net'
 import type { CopilotResolution } from './types.js'
-import { windowsSystemExecutable, withCopilotPathAdditions } from './resolve-copilot.js'
+import { withCopilotPathAdditions } from './resolve-copilot.js'
 import { secretEnvArgs } from './secure-credentials.js'
-import { startWindowsProcessWatchdog, type ProcessWatchdogLease } from './windows-process-watchdog.js'
+import { detachedGroup, killProcessTree, startProcessWatchdog } from './process-tree.js'
+import type { ProcessWatchdogLease } from './windows-process-watchdog.js'
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024
 
@@ -45,11 +46,10 @@ export class CopilotRpc {
       cwd,
       env: withCopilotPathAdditions({ ...env, NODE_DEBUG: '' }, resolution.pathAdditions),
       windowsHide: true,
+      detached: detachedGroup(),
       stdio: 'pipe',
     })
-    this.watchdog = process.platform === 'win32' && this.child.pid
-      ? startWindowsProcessWatchdog(this.child.pid, env)
-      : null
+    this.watchdog = this.child.pid ? startProcessWatchdog(this.child.pid, env) : null
     this.child.stdout.on('data', (chunk: Buffer) => this.read(chunk))
     // Drain logs without exposing credentials or session contents to the UI.
     this.child.stderr.resume()
@@ -136,12 +136,7 @@ export class CopilotRpc {
     try {
       if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.pid) return
       // Stop the whole helper tree, never any of the independent interactive PTYs.
-      if (process.platform === 'win32') {
-        const pid = this.child.pid
-        await new Promise<void>((resolveStop) => {
-          execFile(windowsSystemExecutable('taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5000 }, () => resolveStop())
-        })
-      } else this.child.kill('SIGKILL')
+      await killProcessTree(this.child.pid)
     } finally {
       this.watchdog?.release()
     }

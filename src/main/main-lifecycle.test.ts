@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { writeFileSync } from 'node:fs'
+import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -16,6 +16,8 @@ import { MigrationImportFailure } from './migration-import.js'
 import { realPathNative } from './real-path.js'
 import { findGitForTests } from './fixtures/git-fixture.js'
 
+/** Migration is Windows to Windows only; on other platforms the app does not offer it. */
+const migrationOnly = { skip: process.platform === 'win32' ? false : 'migration is Windows only' }
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
@@ -138,7 +140,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, Notification = {}, safeStorage = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = {}, safeStorage = {}, Tray = {};
         export const browserStorageClears = [];
         export const session = { fromPartition(partition) {
           return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>
@@ -550,7 +552,7 @@ test('failed workspace starts restore consistent selection without overriding a 
   })
 })
 
-test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', async () => fixture(async (harness, directory) => {
+test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', migrationOnly, async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   let release!: () => void
@@ -567,7 +569,7 @@ test('read-only migration preserves pending sessions, typing and resize while im
   assert.equal(harness.spawns[0]!.stopped, false)
 }))
 
-test('export IPC snapshots settings while a Desktop session stays open and accepts input', async () => fixture(async (harness, directory) => {
+test('export IPC snapshots settings while a Desktop session stays open and accepts input', migrationOnly, async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   const state = await harness.createMain()
@@ -589,7 +591,7 @@ test('export IPC snapshots settings while a Desktop session stays open and accep
   assert.equal(harness.spawns[0]!.stopped, false)
 }))
 
-test('export IPC silences only expected cancellation from a destroyed Settings sender', async () => fixture(async (harness, directory) => {
+test('export IPC silences only expected cancellation from a destroyed Settings sender', migrationOnly, async () => fixture(async (harness, directory) => {
   for (const [destroyed, aborted] of [[true, true], [false, true], [true, false]]) {
     const error = aborted ? new DOMException('Cancelled', 'AbortError') : new Error('export failed')
     const service = new MigrationService({
@@ -605,7 +607,7 @@ test('export IPC silences only expected cancellation from a destroyed Settings s
   }
 }))
 
-test('closed Settings cancellation is quiet for inventory, archive open and preview', async () => fixture(async (harness, directory) => {
+test('closed Settings cancellation is quiet for inventory, archive open and preview', migrationOnly, async () => fixture(async (harness, directory) => {
   const zip = join(directory, 'snapshot.zip')
   await writeFile(join(directory, 'copilot-instructions.md'), 'before')
   await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
@@ -626,7 +628,7 @@ test('closed Settings cancellation is quiet for inventory, archive open and prev
   }
 }))
 
-test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', async () => fixture(async (harness, directory) => {
+test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', migrationOnly, async () => fixture(async (harness, directory) => {
   for (const [index, [destroyed, breakRollback]] of [[true, false], [true, true], [false, false]].entries()) {
     const root = join(directory, String(index)); await mkdir(root)
     const destination = join(root, 'copilot-instructions.md'), zip = join(root, 'snapshot.zip')
@@ -1379,7 +1381,7 @@ test('file reveal rejects paths outside the session workspace', async () => {
   await fixture(async (harness, directory) => {
     configure(harness, directory)
     const state = await harness.createMain()
-    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'), { ok: false, reason: 'outside-workspace' })
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, join('..', 'outside.txt')), { ok: false, reason: 'outside-workspace' })
     assert.deepEqual(harness.shellCalls, [])
   })
 })
@@ -2144,11 +2146,13 @@ test('closing a worktree session removes its worktree and branch when nothing is
     // Changes, confirmed: the folder goes to the Recycle Bin and git forgets it.
     const confirmed = await startWorktreeSession(harness, directory, git.path)
     writeFileSync(join(confirmed.worktree, 'notes.txt'), 'unsaved\n')
+    // Git names the folder by its real path (macOS: /private/var for /var).
+    const confirmedReal = realpathSync.native(confirmed.worktree).toLowerCase()
     let accepted = harness.answerMessageBoxes(0)
     await harness.request('desktop:close-tab', confirmed.tabId)
     await harness.worktreeCleanups()
     assert.equal(accepted.length, 1)
-    assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmed.worktree.toLowerCase()))
+    assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmedReal))
     assert.equal(await exists(confirmed.worktree), false)
     assert.ok(!execFileSync(git.path, ['worktree', 'list', '--porcelain'], { cwd: confirmed.repo, encoding: 'utf8' }).includes(confirmed.name))
 

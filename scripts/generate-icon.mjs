@@ -1,15 +1,13 @@
-// Generates build/icon.png from scratch with zero image-processing
-// dependencies (no sharp/canvas): a minimal raw PNG encoder draws a simple
-// open-ring "C" monogram. Keeping this dependency-free avoids adding another
-// native module (sharp) alongside node-pty.
+// Generates build/icon.png (256 px: the window, tray and Windows installer
+// icon) and build/icon-1024.png (macOS needs at least 512 px for its .icns)
+// from scratch with zero image-processing dependencies (no sharp/canvas): a
+// minimal raw PNG encoder draws a simple open-ring "C" monogram. Keeping this
+// dependency-free avoids adding another native module (sharp) alongside node-pty.
 import { deflateSync } from 'node:zlib'
 import { writeFileSync, mkdirSync } from 'node:fs'
 
-const SIZE = 256
 const BACKGROUND = [11, 16, 32]
 const ACCENT = [88, 166, 255]
-const OUTER_RADIUS = SIZE * 0.36
-const INNER_RADIUS = SIZE * 0.22
 const GAP_START = -Math.PI / 4
 const GAP_END = Math.PI / 4
 
@@ -35,47 +33,53 @@ function chunk(type, data) {
   return Buffer.concat([lenBuf, typeBuf, data, crcBuf])
 }
 
-const stride = 1 + SIZE * 4
-const raw = Buffer.alloc(SIZE * stride)
-const cx = SIZE / 2
-const cy = SIZE / 2
+function render(size) {
+  const outerRadius = size * 0.36
+  const innerRadius = size * 0.22
+  const stride = 1 + size * 4
+  const raw = Buffer.alloc(size * stride)
+  const cx = size / 2
+  const cy = size / 2
 
-for (let y = 0; y < SIZE; y += 1) {
-  const rowStart = y * stride
-  raw[rowStart] = 0 // filter type: none
-  for (let x = 0; x < SIZE; x += 1) {
-    const dx = x - cx
-    const dy = y - cy
-    const distance = Math.sqrt(dx * dx + dy * dy)
-    const angle = Math.atan2(dy, dx)
-    const inRing = distance <= OUTER_RADIUS && distance >= INNER_RADIUS
-    const inGap = angle > GAP_START && angle < GAP_END
-    const [r, g, b] = inRing && !inGap ? ACCENT : BACKGROUND
-    const idx = rowStart + 1 + x * 4
-    raw[idx] = r
-    raw[idx + 1] = g
-    raw[idx + 2] = b
-    raw[idx + 3] = 255
+  for (let y = 0; y < size; y += 1) {
+    const rowStart = y * stride
+    raw[rowStart] = 0 // filter type: none
+    for (let x = 0; x < size; x += 1) {
+      const dx = x - cx
+      const dy = y - cy
+      const distance = Math.sqrt(dx * dx + dy * dy)
+      const angle = Math.atan2(dy, dx)
+      const inRing = distance <= outerRadius && distance >= innerRadius
+      const inGap = angle > GAP_START && angle < GAP_END
+      const [r, g, b] = inRing && !inGap ? ACCENT : BACKGROUND
+      const idx = rowStart + 1 + x * 4
+      raw[idx] = r
+      raw[idx + 1] = g
+      raw[idx + 2] = b
+      raw[idx + 3] = 255
+    }
   }
+
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(size, 0)
+  ihdr.writeUInt32BE(size, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 6 // color type: RGBA
+  ihdr[10] = 0
+  ihdr[11] = 0
+  ihdr[12] = 0
+
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+  return Buffer.concat([
+    signature,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
 }
 
-const ihdr = Buffer.alloc(13)
-ihdr.writeUInt32BE(SIZE, 0)
-ihdr.writeUInt32BE(SIZE, 4)
-ihdr[8] = 8 // bit depth
-ihdr[9] = 6 // color type: RGBA
-ihdr[10] = 0
-ihdr[11] = 0
-ihdr[12] = 0
-
-const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
-const png = Buffer.concat([
-  signature,
-  chunk('IHDR', ihdr),
-  chunk('IDAT', deflateSync(raw)),
-  chunk('IEND', Buffer.alloc(0)),
-])
-
 mkdirSync('build', { recursive: true })
-writeFileSync('build/icon.png', png)
-console.log('[generate-icon] Wrote build/icon.png')
+for (const [file, size] of [['build/icon.png', 256], ['build/icon-1024.png', 1024]]) {
+  writeFileSync(file, render(size))
+  console.log(`[generate-icon] Wrote ${file}`)
+}

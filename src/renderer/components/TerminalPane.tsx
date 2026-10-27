@@ -7,6 +7,7 @@ import { OperationError } from './OperationError.js'
 import { errorMessage } from '../errors.js'
 import { TerminalReplay } from '../terminal-replay.js'
 import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
+import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
@@ -242,6 +243,10 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     terminal.attachCustomKeyEventHandler((event) => {
       // Let Chromium dispatch paste; keyup still runs xterm's focus handling.
       if (isNativePasteKey(event)) return false
+      // macOS copies with Cmd+C, which never reaches Copilot; Ctrl+C there stays the interrupt key below.
+      if (isMac && event.type === 'keydown' && event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'c') {
+        return !copySelection()
+      }
       if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'c') {
         if (copySelection()) return false
         // Ctrl+C is Copilot's interrupt key unless a recent native mouse or

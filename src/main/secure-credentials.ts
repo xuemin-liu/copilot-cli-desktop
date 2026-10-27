@@ -49,6 +49,20 @@ export interface EncryptionProvider {
   decryptString(value: Buffer): string
 }
 
+/**
+ * Electron's `safeStorage`, except Linux's fallback: with no keyring (libsecret or KWallet) it encrypts with a fixed
+ * password every program can read, which is not protection. The vault then reports itself unavailable instead.
+ */
+export function protectedStorage(storage: EncryptionProvider & { getSelectedStorageBackend?: () => string },
+  platform: NodeJS.Platform = process.platform): EncryptionProvider {
+  return {
+    isEncryptionAvailable: () => storage.isEncryptionAvailable()
+      && (platform !== 'linux' || !['basic_text', 'unknown'].includes(storage.getSelectedStorageBackend?.() ?? 'unknown')),
+    encryptString: (value) => storage.encryptString(value),
+    decryptString: (value) => storage.decryptString(value),
+  }
+}
+
 interface CredentialRecord {
   name: CredentialName
   encryptedValue: string

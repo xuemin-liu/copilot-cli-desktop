@@ -2,14 +2,16 @@ import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
-import { win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
+import { hostPath } from './host-path.js'
+import { POSIX_PROBE_DIRECTORY, findPosixExecutable } from './posix-executables.js'
 import { assertGitArgument, buildGitEnvironment, gitArgsPrefix } from './git-env.js'
 import type { GitCommandKind, GitEnvironmentOptions } from './git-env.js'
 import { isSupportedGitVersion, parseGitVersion } from './git-parse.js'
 import type { GitVersion } from './git-parse.js'
 import { isLocalFilesystemPath } from './external-targets.js'
 import { findWindowsExecutable, windowsSystemDirectory, windowsSystemExecutable } from './resolve-copilot.js'
-import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
+import { detachedGroup, killProcessTree, startProcessWatchdog } from './process-tree.js'
 import type { ProcessWatchdogLease } from './windows-process-watchdog.js'
 
 export class GitUnavailableError extends Error {
@@ -30,8 +32,9 @@ const VERSION_PROBE_TIMEOUT_MS = 8_000
 
 function probeGitVersion(path: string, env: NodeJS.ProcessEnv): Promise<GitVersion | null> {
   return new Promise(resolve => {
-    // The working directory is System32, never a workspace, so a planted `git.exe` cannot win a lookup.
-    execFile(path, ['--version'], { cwd: windowsSystemDirectory(env), env: buildGitEnvironment(env), timeout: VERSION_PROBE_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
+    // The working directory is System32 (or the root folder), never a workspace, so a planted `git.exe` cannot win a lookup.
+    const cwd = process.platform === 'win32' ? windowsSystemDirectory(env) : POSIX_PROBE_DIRECTORY
+    execFile(path, ['--version'], { cwd, env: buildGitEnvironment(env), timeout: VERSION_PROBE_TIMEOUT_MS, windowsHide: true }, (error, stdout) => {
       resolve(error ? null : parseGitVersion(String(stdout)))
     })
   })
@@ -41,13 +44,27 @@ export interface ResolveGitOptions {
   env?: NodeJS.ProcessEnv
   findExecutable?: (command: string, env: NodeJS.ProcessEnv) => Promise<string | null>
   probeVersion?: (path: string, env: NodeJS.ProcessEnv) => Promise<GitVersion | null>
+  platform?: NodeJS.Platform
+  /** macOS: whether the Command Line Tools (or Xcode) are installed. */
+  hasDeveloperTools?: () => Promise<boolean>
 }
 
-/** Locate one absolute `git.exe` without searching any workspace folder. */
+/** On macOS, /usr/bin/git is a stub that opens an installer dialog when the Command Line Tools are missing. */
+export const MACOS_GIT_STUB = '/usr/bin/git'
+
+function macDeveloperToolsInstalled(): Promise<boolean> {
+  return new Promise(resolve => {
+    execFile('/usr/bin/xcode-select', ['-p'], { cwd: POSIX_PROBE_DIRECTORY, timeout: VERSION_PROBE_TIMEOUT_MS }, (error, stdout) => resolve(!error && String(stdout).trim().length > 0))
+  })
+}
+
+/** Locate one absolute Git executable without searching any workspace folder. */
 export async function resolveGitExecutable(options: ResolveGitOptions = {}): Promise<GitExecutable | null> {
   const env = options.env ?? process.env
-  const find = options.findExecutable ?? ((command, environment) => findWindowsExecutable(command, environment))
+  const platform = options.platform ?? process.platform
   const probe = options.probeVersion ?? probeGitVersion
+  if (platform !== 'win32') return resolvePosixGit(env, platform, options, probe)
+  const find = options.findExecutable ?? ((command, environment) => findWindowsExecutable(command, environment))
   const candidates: string[] = []
   const located = await find('git', env).catch(() => null)
   if (located) candidates.push(located)
@@ -63,19 +80,30 @@ export async function resolveGitExecutable(options: ResolveGitOptions = {}): Pro
   return null
 }
 
+async function resolvePosixGit(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, options: ResolveGitOptions,
+  probe: (path: string, env: NodeJS.ProcessEnv) => Promise<GitVersion | null>): Promise<GitExecutable | null> {
+  const find = options.findExecutable ?? findPosixExecutable
+  const located = await find('git', env).catch(() => null)
+  const candidates = [located, ...(platform === 'darwin' ? ['/opt/homebrew/bin/git'] : []), '/usr/local/bin/git', '/usr/bin/git']
+  let developerTools: boolean | null = null
+  for (const candidate of new Set(candidates)) {
+    if (!candidate || !posix.isAbsolute(candidate)) continue
+    if (platform === 'darwin' && candidate === MACOS_GIT_STUB) {
+      developerTools ??= await (options.hasDeveloperTools ?? macDeveloperToolsInstalled)()
+      if (!developerTools) continue
+    }
+    const version = await probe(candidate, env)
+    if (version) return { path: candidate, version, supported: isSupportedGitVersion(version) }
+  }
+  return null
+}
+
 export type KillProcessTree = (pid: number) => Promise<void>
 export type TrackProcess = (pid: number) => ProcessWatchdogLease
 export type SpawnFn = (file: string, args: string[], options: SpawnOptions) => ChildProcess
 
 /** Kill git and everything it started: ssh, credential helpers and hooks do not die with `git.exe`. */
-export const killGitProcessTree: KillProcessTree = (pid) => new Promise(resolve => {
-  if (process.platform !== 'win32') {
-    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
-    resolve()
-    return
-  }
-  execFile(windowsSystemExecutable('taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 }, () => resolve())
-})
+export const killGitProcessTree: KillProcessTree = (pid) => killProcessTree(pid)
 
 export interface GitRunnerOptions {
   gitPath: string
@@ -128,13 +156,13 @@ export class GitRunner {
   private hooksReady: Promise<void> | null = null
 
   constructor(options: GitRunnerOptions) {
-    if (!win32.isAbsolute(options.gitPath)) throw new GitUnavailableError('The git executable path must be absolute')
+    if (!hostPath.isAbsolute(options.gitPath)) throw new GitUnavailableError('The git executable path must be absolute')
     this.options = options
   }
 
   async run(options: GitRunOptions): Promise<GitRunResult> {
     const kind = options.kind ?? 'read'
-    if (!win32.isAbsolute(options.cwd) || !isLocalFilesystemPath(options.cwd)) throw new Error('git must run in a local, absolute folder')
+    if (!hostPath.isAbsolute(options.cwd) || !isLocalFilesystemPath(options.cwd)) throw new Error('git must run in a local, absolute folder')
     assertGitArgument(options.cwd, 'working folder')
     for (const arg of options.args) assertGitArgument(arg)
     if (options.signal?.aborted) return emptyResult({ cancelled: true })
@@ -153,7 +181,7 @@ export class GitRunner {
 
     return new Promise<GitRunResult>((resolve, reject) => {
       const child = spawnFn(this.options.gitPath, args, {
-        cwd: options.cwd, env, shell: false, windowsHide: true, stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        cwd: options.cwd, env, shell: false, windowsHide: true, detached: detachedGroup(), stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       })
       const stdout: Buffer[] = []
       const stderr: Buffer[] = []
@@ -244,7 +272,7 @@ export class GitRunner {
 }
 
 function defaultTrack(pid: number): ProcessWatchdogLease {
-  return process.platform === 'win32' ? startWindowsProcessWatchdog(pid) : { release: () => undefined }
+  return startProcessWatchdog(pid)
 }
 
 function emptyResult(overrides: Partial<GitRunResult>): GitRunResult {

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { open, readdir } from 'node:fs/promises'
-import { join, win32 } from 'node:path'
+import { join } from 'node:path'
+import { samePath } from './host-path.js'
 import { isValidSessionId } from './session-id.js'
 import { worktreeNamePrefix } from './session-name.js'
 
@@ -83,9 +84,7 @@ function folderName(path: string): string {
   return trimmed.slice(Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/')) + 1)
 }
 
-function sameFolder(left: string, right: string): boolean {
-  return win32.resolve(left).replace(/[\\/]+$/, '').toLowerCase() === win32.resolve(right).replace(/[\\/]+$/, '').toLowerCase()
-}
+const sameFolder = samePath
 
 async function listSessionIds(root: string): Promise<Set<string>> {
   try {

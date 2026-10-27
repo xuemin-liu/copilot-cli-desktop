@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { constants } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import type { PtyLike, SpawnOptions } from './pty-backend.js'
-import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
+import { detachedGroup, signalProcessGroup, startProcessWatchdog } from './process-tree.js'
 
 /**
  * Headless backend for the background CLI daemon (src/cli/daemon.ts). Unlike
@@ -29,15 +29,14 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     env: options.env,
     shell: false,
     windowsHide: true,
+    detached: detachedGroup(),
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   // A child can exit between PtySession's liveness check and a stdin write.
   // Writable streams emit an unhandled `error` in that race unless a listener
   // is present, which would otherwise terminate the background daemon.
   child.stdin?.on('error', () => undefined)
-  const watchdog = process.platform === 'win32' && child.pid
-    ? startWindowsProcessWatchdog(child.pid)
-    : null
+  const watchdog = child.pid ? startProcessWatchdog(child.pid) : null
   child.once('exit', () => watchdog?.release())
 
   // Spawn failures (ENOENT/EACCES) emit `error` and never `exit`; without a
@@ -113,7 +112,10 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     // already fixed at spawn time via the environment.
     resize: () => {},
     kill: (signal) => {
-      child.kill(signal as NodeJS.Signals | undefined)
+      // Outside Windows the child leads its own group: signal the group so the commands it started stop too.
+      if (detachedGroup() && child.pid && child.exitCode === null && child.signalCode === null) {
+        signalProcessGroup(child.pid, (signal ?? 'SIGTERM') as NodeJS.Signals)
+      } else child.kill(signal as NodeJS.Signals | undefined)
     },
     dispose: () => {
       watchdog?.release()

@@ -1,5 +1,6 @@
 import type { GitResolverView } from './git-types.js'
 import type { SessionTaskSend } from './session-task.js'
+import { caseInsensitivePaths } from './host-path.js'
 
 /** How long a task that was sent may take to show up as the session's turn before the claim lapses. */
 const SENT_GRACE_MS = 60_000
@@ -22,7 +23,11 @@ interface Claim {
 /** What main knows about a session: whether it is in the middle of something, or gone (closed, exited). */
 export type SessionState = 'busy' | 'idle' | 'gone'
 
-const folderKey = (folder: string): string => folder.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+/** One spelling of a folder: either separator, no trailing one, and lower case where the platform ignores case. */
+const folderKey = (folder: string): string => {
+  const key = folder.replace(/\//g, '\\').replace(/\\+$/, '')
+  return caseInsensitivePaths ? key.toLowerCase() : key
+}
 
 /**
  * The repositories a session was asked to resolve a pull in. Kept in the main process, so closing and reopening the Git panel

@@ -22,6 +22,7 @@ import type {
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
 import { realPathNative } from './real-path.js'
+import { TRASH_NAME } from './host-path.js'
 
 export interface GitRuntime {
   runner: GitRunner
@@ -563,7 +564,7 @@ export class GitService {
     const relative = repo.discovered.relativePath
     return {
       id: repo.id,
-      name: repo.discovered.root.split('\\').filter(Boolean).at(-1) ?? repo.discovered.root,
+      name: repo.discovered.root.split(/[\\/]/).filter(Boolean).at(-1) ?? repo.discovered.root,
       relativePath: relative,
       folder: repo.discovered.root,
       merging: repo.merging,
@@ -1051,7 +1052,7 @@ export class GitService {
       let target: GitWorktreeView
       try { target = await check() } catch (error) { if (error instanceof WriteRefused) return error.result; throw error }
       if (!this.options.confirm) return refused('failed', 'Removing a worktree needs a confirmation window, which is not available.')
-      const label = target.branch ?? target.path.split('\\').filter(Boolean).at(-1) ?? target.path
+      const label = target.branch ?? target.path.split(/[\\/]/).filter(Boolean).at(-1) ?? target.path
       const confirmed = await this.options.confirm(profileId, {
         title: `Remove worktree "${label}"?`,
         detail: `${target.path} will be deleted, including files Git ignores there (build output, node_modules, local .env files).\n\n`
@@ -1246,7 +1247,7 @@ export class GitService {
 
       if (!this.options.confirm) return refused('failed', 'Discarding needs a confirmation window, which is not available.')
       if (tracked.length > 0 && !this.options.snapshotDirectory) return refused('failed', 'Discarding tracked changes saves a copy first, and there is no place to keep it.')
-      if (untracked.length > 0 && !this.options.trash) return refused('failed', 'Discarding untracked files moves them to the Recycle Bin, which is not available.')
+      if (untracked.length > 0 && !this.options.trash) return refused('failed', `Discarding untracked files moves them to the ${TRASH_NAME}, which is not available.`)
       const busy = working()
       if (busy) return busy
       const first = await prepare()
@@ -1257,7 +1258,7 @@ export class GitService {
         title: `Discard ${entries.length} change${entries.length === 1 ? '' : 's'}?`,
         detail: `${shown.slice(0, 12).join('\n')}${shown.length > 12 ? `\n  …and ${shown.length - 12} more` : ''}\n\n`
           + (tracked.length > 0 ? `Tracked files go back to their last committed or staged version. A copy of what is on disk now is saved first.\n` : '')
-          + (untracked.length > 0 ? `Untracked items are moved to the Recycle Bin.` : ''),
+          + (untracked.length > 0 ? `Untracked items are moved to the ${TRASH_NAME}.` : ''),
         confirmLabel: 'Discard', danger: true,
       })
       if (!confirmed) return this.outcome({ ok: false, reason: 'cancelled', message: 'Nothing was discarded.', status: repo.statusView })
@@ -1326,7 +1327,7 @@ export class GitService {
       }
       const status = await this.statusAfterWrite(project, repo)
       if (problems.length > 0) {
-        return this.outcome({ ok: false, reason: 'failed', message: `${untracked.length - moved} of ${untracked.length} untracked item${untracked.length === 1 ? '' : 's'} ${untracked.length - moved === 1 ? 'was' : 'were'} not moved to the Recycle Bin: ${problems[0]}.${note}`, status })
+        return this.outcome({ ok: false, reason: 'failed', message: `${untracked.length - moved} of ${untracked.length} untracked item${untracked.length === 1 ? '' : 's'} ${untracked.length - moved === 1 ? 'was' : 'were'} not moved to the ${TRASH_NAME}: ${problems[0]}.${note}`, status })
       }
       return this.outcome({ ok: true, message: `Discarded ${entries.length} change${entries.length === 1 ? '' : 's'}.${note}`, status })
     })

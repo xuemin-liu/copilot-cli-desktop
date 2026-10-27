@@ -1,10 +1,27 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { listPackage } from '@electron/asar'
 import { FuseState, FuseV1Options, getCurrentFuseWire } from '@electron/fuses'
 
-const unpackedRoot = resolve(process.argv[2] ?? 'release/win-unpacked')
-const resourcesRoot = join(unpackedRoot, 'resources')
+/**
+ * Where electron-builder leaves the unpacked app on each platform: `win-unpacked` and `linux-unpacked` hold the executable
+ * and a `resources` folder; on macOS it is `mac*` / `<name>.app`, with `Contents/Resources` and `Contents/MacOS/<name>`.
+ */
+function defaultRoot(): string {
+  if (process.platform === 'win32') return 'release/win-unpacked'
+  if (process.platform === 'linux') return 'release/linux-unpacked'
+  for (const folder of ['mac-arm64', 'mac', 'mac-universal']) {
+    const directory = join('release', folder)
+    if (!existsSync(directory)) continue
+    const app = readdirSync(directory).find((entry) => entry.endsWith('.app'))
+    if (app) return join(directory, app)
+  }
+  throw new Error('No packaged macOS application was found under release/')
+}
+
+const unpackedRoot = resolve(process.argv[2] ?? defaultRoot())
+const macApp = unpackedRoot.endsWith('.app')
+const resourcesRoot = macApp ? join(unpackedRoot, 'Contents', 'Resources') : join(unpackedRoot, 'resources')
 const asarPath = join(resourcesRoot, 'app.asar')
 const unpackedAsarRoot = join(resourcesRoot, 'app.asar.unpacked')
 
@@ -33,14 +50,21 @@ if (!nativeAddons.some((path) => /node-pty/i.test(path))) {
   throw new Error('The packaged native addons do not include node-pty')
 }
 
-const executables = readdirSync(unpackedRoot).filter((entry) => entry.toLowerCase().endsWith('.exe'))
-if (executables.length === 0) throw new Error(`No Windows executable was found in ${unpackedRoot}`)
+/** The Electron binary: the `.exe` on Windows, `Contents/MacOS/<name>` on macOS, the executable file named for the app on Linux. */
+function applicationExecutables(): string[] {
+  if (macApp) return readdirSync(join(unpackedRoot, 'Contents', 'MacOS')).map((entry) => join(unpackedRoot, 'Contents', 'MacOS', entry))
+  if (process.platform === 'win32') return readdirSync(unpackedRoot).filter((entry) => entry.toLowerCase().endsWith('.exe')).map((entry) => join(unpackedRoot, entry))
+  return readdirSync(unpackedRoot).map((entry) => join(unpackedRoot, entry))
+    .filter((path) => basename(path) === 'copilot-cli-desktop' && statSync(path).isFile() && (statSync(path).mode & 0o111) !== 0)
+}
+const executables = applicationExecutables()
+if (executables.length === 0) throw new Error(`No application executable was found in ${unpackedRoot}`)
 
 const archiveEntries = listPackage(asarPath, { isPack: false })
 const forbiddenEntries = archiveEntries.filter((entry) => /(?:\.test\.js|\.map)$|[\\/]fixtures[\\/]|^[\\/]dist[\\/]scripts[\\/]/i.test(entry))
 if (forbiddenEntries.length > 0) throw new Error(`Packaged archive contains development-only files: ${forbiddenEntries.join(', ')}`)
 
-const applicationExecutable = join(unpackedRoot, executables[0]!)
+const applicationExecutable = executables[0]!
 const fuses = await getCurrentFuseWire(applicationExecutable)
 const expectedFuses = new Map([
   [FuseV1Options.RunAsNode, FuseState.DISABLE],

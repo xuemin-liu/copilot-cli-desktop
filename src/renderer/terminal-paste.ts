@@ -1,7 +1,10 @@
+import { isMac } from './platform.js'
 export const MAX_PASTE_CHARS = 1_000_000
 
-export function isNativePasteKey(event: Pick<KeyboardEvent, 'type' | 'ctrlKey' | 'altKey' | 'metaKey' | 'key'>): boolean {
-  return event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === 'v'
+/** The paste key: Ctrl+V, or Cmd+V on macOS, where Ctrl+V stays a terminal key. */
+export function isNativePasteKey(event: Pick<KeyboardEvent, 'type' | 'ctrlKey' | 'altKey' | 'metaKey' | 'key'>, mac = isMac): boolean {
+  const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+  return event.type === 'keydown' && modifier && !event.altKey && event.key.toLowerCase() === 'v'
 }
 
 // Capture before xterm: ordinary text stays on its native paste path. Only

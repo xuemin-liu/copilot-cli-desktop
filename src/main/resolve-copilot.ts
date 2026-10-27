@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { delimiter, win32 } from 'node:path'
 import { promisify } from 'node:util'
+import { findPosixExecutable } from './posix-executables.js'
 import type { CopilotResolution } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -240,6 +241,7 @@ export async function resolveCopilotBinary(
   platform: NodeJS.Platform = process.platform,
   pathExists: (path: string) => boolean = existsSync,
   readTextFile: ReadTextFileFn = defaultReadTextFile,
+  findExecutable: (name: string, env: NodeJS.ProcessEnv) => Promise<string | null> = findPosixExecutable,
 ): Promise<CopilotResolution> {
   const attempts: string[] = []
 
@@ -264,11 +266,14 @@ export async function resolveCopilotBinary(
       attempts.push(`${candidate}: ${error}`)
     }
   } else {
-    const direct = await tryVersion('copilot', ['--version'], env, execFileFn)
-    if (direct.ok) {
-      return { kind: 'direct', command: 'copilot', prefixArgs: [], resolvedPath: null, version: direct.version, error: null }
-    }
-    attempts.push(`copilot --version: ${describeError(direct.error)}`)
+    const located = await findExecutable('copilot', env)
+    if (located) {
+      const direct = await tryVersion(located, ['--version'], env, execFileFn)
+      if (direct.ok) {
+        return { kind: 'direct', command: located, prefixArgs: [], resolvedPath: located, version: direct.version, error: null }
+      }
+      attempts.push(`${located} --version: ${describeError(direct.error)}`)
+    } else attempts.push('copilot: not found on PATH')
   }
 
   const localAppData = env.LOCALAPPDATA
@@ -301,11 +306,14 @@ export async function resolveCopilotBinary(
       attempts.push(`${ghExe} copilot -- --version: ${describeError(wrapped.error)}`)
     } else if (located.error) attempts.push(`where.exe gh: ${describeError(located.error)}`)
   } else {
-    const wrapped = await tryVersion('gh', ['copilot', '--', '--version'], env, execFileFn)
-    if (wrapped.ok) {
-      return { kind: 'gh-wrapped', command: 'gh', prefixArgs: ['copilot', '--'], resolvedPath: null, version: wrapped.version, error: null }
+    const gh = await findExecutable('gh', env)
+    if (gh) {
+      const wrapped = await tryVersion(gh, ['copilot', '--', '--version'], env, execFileFn)
+      if (wrapped.ok) {
+        return { kind: 'gh-wrapped', command: gh, prefixArgs: ['copilot', '--'], resolvedPath: gh, version: wrapped.version, error: null }
+      }
+      attempts.push(`${gh} copilot -- --version: ${describeError(wrapped.error)}`)
     }
-    attempts.push(`gh copilot -- --version: ${describeError(wrapped.error)}`)
   }
 
   return {
@@ -316,7 +324,9 @@ export async function resolveCopilotBinary(
     version: null,
     error: [
       'The Copilot CLI was not found as a directly executable binary or a verifiable npm installation.',
-      'Install it with `winget install GitHub.Copilot`, repair the npm installation, or use the Install action in this app.',
+      platform === 'win32'
+        ? 'Install it with `winget install GitHub.Copilot`, repair the npm installation, or use the Install action in this app.'
+        : 'Install it with `npm install -g @github/copilot` (or your package manager), make sure your shell finds it, then retry.',
       ...attempts,
     ].join('\n'),
   }

@@ -1,4 +1,5 @@
 import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 
 export function parseSafeHttpUrl(value: string, label = 'URL'): URL {
   let parsed: URL
@@ -14,22 +15,26 @@ export function parseSafeHttpUrl(value: string, label = 'URL'): URL {
   return parsed
 }
 
-/** Reject UNC and Windows device namespaces before any filesystem operation. */
-export function isLocalFilesystemPath(candidate: string): boolean {
+/**
+ * Reject UNC and Windows device namespaces before any filesystem operation. Elsewhere a network mount looks like any other
+ * folder, so only an empty path or one with a NUL is refused.
+ */
+export function isLocalFilesystemPath(candidate: string, platform: NodeJS.Platform = process.platform): boolean {
   if (!candidate || candidate.includes('\0')) return false
+  if (platform !== 'win32') return true
   const normalizedSeparators = candidate.replaceAll('/', '\\')
   if (normalizedSeparators.startsWith('\\\\') || normalizedSeparators.startsWith('\\??\\')) return false
   const root = win32.parse(normalizedSeparators).root
   return !root.startsWith('\\\\')
 }
 
-/** Lexically contain a resolved Windows path to its owning workspace. */
+/** Lexically contain a resolved path to its owning workspace. */
 export function isPathWithinRoot(root: string, candidate: string): boolean {
-  const relative = win32.relative(win32.resolve(root), win32.resolve(candidate))
+  const relative = hostPath.relative(hostPath.resolve(root), hostPath.resolve(candidate))
   return relative === '' || (
     relative !== '..'
-    && !relative.startsWith(`..${win32.sep}`)
-    && !win32.isAbsolute(relative)
+    && !relative.startsWith(`..${hostPath.sep}`)
+    && !hostPath.isAbsolute(relative)
   )
 }
 
