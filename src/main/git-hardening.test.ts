@@ -48,7 +48,7 @@ const cases: Case[] = [
     name: 'diff.external on diff',
     blockedByHardening: true,
     setup: (f, repo, marker) => {
-      writeFileSync(join(repo, 'ext.sh'), `#!/bin/sh\necho x > "${shellPath(marker)}"\n`)
+      writeFileSync(join(repo, 'ext.sh'), `#!/bin/sh\necho x > "${shellPath(marker)}"\n`, { mode: 0o755 })
       f.plain(repo, 'config', 'diff.external', `sh ${shellPath(join(repo, 'ext.sh'))}`)
       writeFileSync(join(repo, 'a.txt'), 'changed\n')
     },
@@ -59,7 +59,7 @@ const cases: Case[] = [
     name: 'gpg.program through log.showSignature on log',
     blockedByHardening: true,
     setup: (f, repo, marker) => {
-      writeFileSync(join(repo, 'gpg.sh'), `#!/bin/sh\necho x > "${shellPath(marker)}"\nexit 1\n`)
+      writeFileSync(join(repo, 'gpg.sh'), `#!/bin/sh\necho x > "${shellPath(marker)}"\nexit 1\n`, { mode: 0o755 })
       f.plain(repo, 'config', 'gpg.program', shellPath(join(repo, 'gpg.sh')))
       f.plain(repo, 'config', 'log.showSignature', 'true')
       const tree = f.plain(repo, 'write-tree').trim()

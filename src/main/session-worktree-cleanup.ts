@@ -1,4 +1,5 @@
-import { hostPath } from './host-path.js'
+import { hostPath, TRASH_NAME } from './host-path.js'
+import { realPathNative } from './real-path.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitRunOptions, GitRunResult } from './git-runner.js'
 import { parseWorktrees } from './git-parse.js'
@@ -55,7 +56,9 @@ export async function inspectDesktopWorktree(path: string, runGit: RunGit, signa
   if (!listed) return null
   const entries = parseWorktrees(listed.stdout.toString('utf8'))
   const main = entries[0]
-  const index = entries.findIndex(entry => sameFolder(entry.path, path))
+  // Git lists real paths; the folder may be spelled another way (a Windows short name, macOS's /var for /private/var).
+  const real = await realPathNative(path).catch(() => path)
+  const index = entries.findIndex(entry => sameFolder(entry.path, path) || sameFolder(entry.path, real))
   const entry = entries[index]
   // The main checkout is never a session worktree; a prunable entry has already lost its folder.
   if (!main || index < 1 || !entry || entry.bare || entry.prunable !== null || !entry.head) return null
@@ -103,7 +106,7 @@ const plural = (count: number, word: string): string => `${count} ${word}${count
 /** The confirmation shown before a worktree is removed: what goes, and what is kept. */
 export function worktreeCleanupPrompt(state: DesktopWorktreeState): { title: string; detail: string } {
   const lines = [`${state.path} will be deleted, including files Git ignores there (build output, node_modules, local .env files).`]
-  if (state.changes > 0) lines.push(`It has ${plural(state.changes, 'uncommitted change')}. The folder goes to the Recycle Bin, so they can be restored from there.`)
+  if (state.changes > 0) lines.push(`It has ${plural(state.changes, 'uncommitted change')}. The folder goes to the ${TRASH_NAME}, so they can be restored from there.`)
   const branch = ownBranch(state)
   if (state.branch === null) {
     if (state.uniqueCommits > 0) lines.push(`Its detached HEAD has ${plural(state.uniqueCommits, 'commit')} that no branch has. They will be hard to find once the worktree is gone.`)

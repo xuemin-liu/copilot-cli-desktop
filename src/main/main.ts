@@ -2822,7 +2822,25 @@ function installApplicationMenu(): void {
   const focusedWindow = BrowserWindow.getFocusedWindow()
   const focusedPopoutId = focusedWindow ? sessionWindowId(focusedWindow.webContents) : undefined
   const menuTabId = focusedPopoutId ?? tabsState.activeTabId
+  const mac = process.platform === 'darwin'
+  const settingsItem = { label: mac ? 'Settings…' : 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') }
+  const quitItem = { label: mac ? 'Quit Copilot CLI Desktop' : 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() }
   const menu = Menu.buildFromTemplate([
+    // macOS puts About, Settings and Quit in the application menu, and its copy and paste keys work only through an Edit menu.
+    ...(mac ? [{
+      label: app.name,
+      submenu: [
+        { role: 'about' as const },
+        { type: 'separator' as const },
+        settingsItem,
+        { type: 'separator' as const },
+        { role: 'hide' as const },
+        { role: 'hideOthers' as const },
+        { role: 'unhide' as const },
+        { type: 'separator' as const },
+        quitItem,
+      ],
+    }, { role: 'editMenu' as const }] : []),
     {
       label: 'File',
       submenu: [
@@ -2871,9 +2889,7 @@ function installApplicationMenu(): void {
           enabled: !shuttingDown() && tabsState.tabs.some(tab => tab.id === menuTabId && !tab.remote && tab.status !== 'dormant'),
           click: () => menuTabId && observe(unloadSessionTab(menuTabId), 'Could not unload session tab'),
         },
-        { label: 'Desktop Settings…', accelerator: 'CmdOrCtrl+,', click: () => observe(showSettingsWindow(), 'Could not open Settings') },
-        { type: 'separator' },
-        { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => void requestExplicitQuit() },
+        ...(mac ? [] : [settingsItem, { type: 'separator' as const }, quitItem]),
       ],
     },
     {
@@ -2916,9 +2932,10 @@ function installApplicationMenu(): void {
         { label: 'Copy Diagnostics', click: copyDiagnosticsToClipboard },
         { type: 'separator' },
         { label: 'Open Releases', click: () => observe(shell.openExternal(RELEASES_URL), 'Could not open releases') },
-        { role: 'about' },
+        ...(mac ? [] : [{ role: 'about' as const }]),
       ],
     },
+    ...(mac ? [{ role: 'windowMenu' as const }] : []),
   ])
   Menu.setApplicationMenu(menu)
   // On Windows/Linux this setter installs the menu on every existing window.

@@ -111,8 +111,8 @@ test('a round collects every reply, then the host gets them together and answers
   assert.match(answer, /Sent round 2 to 2 reviewers/)
   const round2 = h.to('tab-c').at(-1)!
   assert.match(round2.text, /round 2/)
-  assert.match(round2.text, /round-1\\replies\.md/, 'reviewers see what the others said')
-  assert.match(round2.text, /round-2\\changes\.patch/)
+  assert.ok(round2.text.includes(at('K7QF', 'round-1', 'replies.md')), 'reviewers see what the others said')
+  assert.ok(round2.text.includes(at('K7QF', 'round-2', 'changes.patch')))
   assert.equal(h.files.get(at('K7QF', 'round-2', 'changes.patch')), '--- a/x\n+++ b/x')
 })
 

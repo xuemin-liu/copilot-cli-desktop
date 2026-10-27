@@ -15,7 +15,10 @@ export function pathKey(path: string): string {
   return caseInsensitivePaths ? resolved.toLowerCase() : resolved
 }
 
-export const samePath = (left: string, right: string): boolean => pathKey(left) === pathKey(right)
+/** What the platform calls the place deleted files go, for messages. */
+export const TRASH_NAME = process.platform === 'win32' ? 'Recycle Bin' : 'Trash'
+
+export const samePath =(left: string, right: string): boolean => pathKey(left) === pathKey(right)
 
 /** Whether `path` is `folder` or inside it, compared the way this platform compares names. */
 export function isSameOrInside(path: string, folder: string): boolean {

@@ -8,6 +8,7 @@ import { attachClipboardImage, insertIntoPrompt } from '../prompt-insert.js'
 import { formatBrowserContext } from '../../main/browser-context-format.js'
 import { MAX_PICKED_ELEMENTS, composeElementSelection, pickedElementLabel } from '../../main/browser-pick-compose.js'
 import { overridesStatus } from '../../main/browser-overrides-status.js'
+import { isShortcutModifier } from '../platform.js'
 
 const EMPTY_BROWSER: BrowserDebugState = {
   activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
@@ -136,7 +137,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
-    onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); openFind() } }}>
+    onKeyDown={event => { if (isShortcutModifier(event) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); openFind() } }}>
     <form className="browser-toolbar" onSubmit={event => { event.preventDefault(); run(window.copilotDesktop.browserNavigate(tabId, url.trim())) }}>
       <button type="button" title="Back" aria-label="Browser back" disabled={!state.canGoBack} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'back'))}>←</button>
       <button type="button" title="Forward" aria-label="Browser forward" disabled={!state.canGoForward} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forward'))}>→</button>

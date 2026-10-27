@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join, win32 } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import test from 'node:test'
 import {
   inspectDesktopWorktree,
@@ -14,20 +14,24 @@ import {
   type DesktopWorktreeState,
 } from './session-worktree-cleanup.js'
 import { createGitFixture, type GitFixture } from './fixtures/git-fixture.js'
+import { TRASH_NAME } from './host-path.js'
 
 const name = 'desktop-fix-the-bug-abc123'
+/** A main checkout and the folder beside it where the desktop makes worktrees, in this platform's spelling. */
+const PROJECT = resolve('/project')
+const WORKTREES = `${PROJECT}.worktrees`
 
 const state = (patch: Partial<DesktopWorktreeState> = {}): DesktopWorktreeState => ({
-  path: `C:\\project.worktrees\\${name}`, name, mainPath: 'C:\\project', branch: name, head: 'a'.repeat(40),
+  path: join(WORKTREES, name), name, mainPath: PROJECT, branch: name, head: 'a'.repeat(40),
   locked: false, changes: 0, uniqueCommits: 0, ...patch,
 })
 
 test('only the desktop\'s own worktree folders qualify', () => {
-  assert.equal(isDesktopWorktreeFolder(`C:\\project.worktrees\\${name}`), true)
-  assert.equal(isDesktopWorktreeFolder(`C:\\project.worktrees\\${name}\\`), true)
-  assert.equal(isDesktopWorktreeFolder(`C:\\project\\${name}`), false, 'not beside the main checkout')
-  assert.equal(isDesktopWorktreeFolder('C:\\project.worktrees\\feature'), false)
-  assert.equal(isDesktopWorktreeFolder('C:\\project.worktrees\\desktop-fix-zzzzzz'), false)
+  assert.equal(isDesktopWorktreeFolder(join(WORKTREES, name)), true)
+  assert.equal(isDesktopWorktreeFolder(join(WORKTREES, name) + sep), true)
+  assert.equal(isDesktopWorktreeFolder(join(PROJECT, name)), false, 'not beside the main checkout')
+  assert.equal(isDesktopWorktreeFolder(join(WORKTREES, 'feature')), false)
+  assert.equal(isDesktopWorktreeFolder(join(WORKTREES, 'desktop-fix-zzzzzz')), false)
   assert.equal(isWorktreeCleanupMode('safe'), true)
   assert.equal(isWorktreeCleanupMode('always'), false)
 })
@@ -55,7 +59,7 @@ test('only the desktop branch without commits of its own is deleted', () => {
 test('the prompt says what is deleted and what is kept', () => {
   assert.match(worktreeCleanupPrompt(state()).detail, /branch "desktop-fix-the-bug-abc123" has no commits .* deleted too/)
   assert.match(worktreeCleanupPrompt(state({ uniqueCommits: 2 })).detail, /is kept, with 2 commits no other branch has/)
-  assert.match(worktreeCleanupPrompt(state({ changes: 1 })).detail, /1 uncommitted change\. .*Recycle Bin/)
+  assert.match(worktreeCleanupPrompt(state({ changes: 1 })).detail, new RegExp(`1 uncommitted change\\. .*${TRASH_NAME}`))
   assert.match(worktreeCleanupPrompt(state({ branch: null, uniqueCommits: 1 })).detail, /detached HEAD has 1 commit that no branch has/)
   assert.equal(worktreeCleanupPrompt(state()).title, `Remove worktree "${name}"?`)
 })
@@ -69,7 +73,7 @@ async function withWorktree(t: test.TestContext, run: (fixture: GitFixture, repo
       fixture.plain(directory, 'add', '.gitignore')
       fixture.plain(directory, 'commit', '-q', '-m', 'ignore build')
     })
-    const worktree = win32.join(`${repo}.worktrees`, name)
+    const worktree = join(`${repo}.worktrees`, name)
     fixture.plain(repo, 'worktree', 'add', '-q', '-b', name, worktree, 'HEAD')
     await run(fixture, repo, worktree)
   } finally { fixture.cleanup() }
@@ -162,7 +166,7 @@ test('locked worktrees, the main checkout and other folders are not inspected as
     const locked = await inspectDesktopWorktree(worktree, run)
     assert.equal(locked?.locked, true)
     assert.equal(locked && worktreeCleanupDecision('safe', locked), 'keep')
-    const other = win32.join(`${repo}.worktrees`, 'feature')
+    const other = join(`${repo}.worktrees`, 'feature')
     fixture.plain(repo, 'worktree', 'add', '-q', '-b', 'feature', other)
     assert.equal(await inspectDesktopWorktree(other, run), null)
   })

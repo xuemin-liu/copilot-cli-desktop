@@ -7,10 +7,11 @@ import type { Socket } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import type test from 'node:test'
 import { shardedTest } from './fixtures/sharded-test.js'
-import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
+import { createGitFixture, findGitForTests, folderLink, shellPath } from './fixtures/git-fixture.js'
+import { TRASH_NAME } from './host-path.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, isIndexLockFailure } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
@@ -20,6 +21,8 @@ import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 
 const git = await findGitForTests()
 const skip = git ? false : 'git is not installed'
+/** Network shares exist only on Windows, and so does refusing them. */
+const windowsSkip = skip || (process.platform === 'win32' ? false : 'Windows shares')
 const PROFILE = '0123456789abcdef'
 const SUBSCRIBER = 7
 
@@ -368,7 +371,7 @@ shardedTest('a missing git reports itself instead of failing', async (t) => {
   assert.deepEqual(view.repos, [])
 })
 
-shardedTest('an unknown profile and an unsafe .git are reported without running git', { skip }, async (t) => {
+shardedTest('an unknown profile and an unsafe .git are reported without running git', { skip: windowsSkip }, async (t) => {
   const h = await harness(t, (_f, project) => { mkdirSync(join(project, 'bad')); writeFileSync(join(project, 'bad', '.git'), 'gitdir: \\\\attacker\\share\\x\n') })
   await assert.rejects(h.service.subscribe(SUBSCRIBER, 'ffffffffffffffff'), /Unknown workspace/)
   const view = await h.service.subscribe(SUBSCRIBER, PROFILE)
@@ -422,7 +425,7 @@ shardedTest('an explicit diff re-checks the settings and refuses a config that a
   assert.equal(repoAt(h.events.at(-1)!, '.')?.state, 'needs-review', 'the panel is told at once')
 })
 
-shardedTest('a .git pointer that turns unsafe after discovery is caught before the next command', { skip }, async (t) => {
+shardedTest('a .git pointer that turns unsafe after discovery is caught before the next command', { skip: windowsSkip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
   assert.equal(repo.state, 'ready')
@@ -1798,7 +1801,7 @@ shardedTest('untracked files and folders go to the Recycle Bin, not away for goo
   assert.equal(readdirSync(kit.bin).length, 2, 'both are in the bin')
   assert.deepEqual(savedCopies(kit), [], 'untracked items need no copy')
   assert.match(kit.asked[0]!.detail, /scratch\.txt {2}\(untracked\)/)
-  assert.match(kit.asked[0]!.detail, /moved to the Recycle Bin/)
+  assert.match(kit.asked[0]!.detail, new RegExp(`moved to the ${TRASH_NAME}`))
 })
 
 shardedTest('a folder that holds a git repository is not offered for deletion, and nothing else in the request happens either', { skip }, async (t) => {
@@ -1934,7 +1937,7 @@ shardedTest('if one untracked item cannot be moved, the rest still are, the trac
   const current = await status()
   const result = await h.service.discard(SUBSCRIBER, PROFILE, repoId, [idOf(current, 'a.txt'), ...current.untracked.map(item => item.id)], current.generation)
   assert.deepEqual([result.ok, result.reason], [false, 'failed'])
-  assert.match(result.message, /1 of 2 untracked items was not moved to the Recycle Bin: .*in use by another process/)
+  assert.match(result.message, new RegExp(`1 of 2 untracked items was not moved to the ${TRASH_NAME}: .*in use by another process`))
   assert.match(result.message, /A copy of the changed file is saved in/)
   assert.equal(text(join(h.project, 'a.txt')), 'one\n', 'the tracked file was restored')
   assert.equal(readdirSync(kit.bin).length, 1, 'the other item is in the bin')
@@ -2470,11 +2473,11 @@ shardedTest('a merged, unused worktree is removed after confirmation; everything
   assert.ok(existsSync(wip) && existsSync(locked))
   live = [null]
   assert.match((await remove(done)).message, /has not reported where it runs/)
-  live = [done + '\\']
+  live = [done + sep]
   assert.match((await remove(done)).message, /running in this worktree/)
   // The session reaches the worktree through a junction: a different spelling of the same physical folder.
   const alias = join(h.fixture.root, 'alias-to-done')
-  execFileSync('cmd.exe', ['/c', 'mklink', '/J', alias, done], { stdio: 'ignore' })
+  folderLink(alias, done)
   live = [alias]
   assert.match((await remove(done)).message, /running in this worktree/, 'a junction alias is the same folder')
   assert.ok(existsSync(done))

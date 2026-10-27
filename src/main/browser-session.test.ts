@@ -116,7 +116,8 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
       assert.equal(JSON.parse(result.stdout).state, 'available')
       assert.ok(!result.stdout.includes(token))
     }
-    assert.deepEqual(seen.map(({ method, url }) => ({ method, url })), [
+    // The sh helper percent-encodes every byte of an argument; the server reads the same values.
+    assert.deepEqual(seen.map(({ method, url }) => ({ method, url: decodeURIComponent(url!) })), [
       { method: 'GET', url: '/read/snapshot?arg=123&arg=FRAME' },
       { method: 'POST', url: '/read/select?arg=123' },
       { method: 'POST', url: '/read/scroll?arg=123&arg=FRAME&arg=-700' },

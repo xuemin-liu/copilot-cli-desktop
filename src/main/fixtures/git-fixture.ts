@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GitRunner, resolveGitExecutable } from '../git-runner.js'
@@ -51,6 +51,12 @@ export async function createGitFixture(): Promise<GitFixture | null> {
     // Windows keeps a folder busy for a moment after its last process dies.
     cleanup() { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) },
   }
+}
+
+/** Another name for a folder: a junction on Windows, a symbolic link elsewhere. Both are links the code must not follow. */
+export function folderLink(link: string, target: string): void {
+  if (process.platform === 'win32') execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, target], { stdio: 'ignore' })
+  else symlinkSync(target, link, 'dir')
 }
 
 /** Forward slashes, for embedding a path in a shell command that git runs through sh. */

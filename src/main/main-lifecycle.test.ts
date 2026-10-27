@@ -16,6 +16,8 @@ import { MigrationImportFailure } from './migration-import.js'
 import { realPathNative } from './real-path.js'
 import { findGitForTests } from './fixtures/git-fixture.js'
 
+/** Migration is Windows to Windows only; on other platforms the app does not offer it. */
+const migrationOnly = { skip: process.platform === 'win32' ? false : 'migration is Windows only' }
 const SOURCE = '11111111-1111-4111-8111-111111111111'
 const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
@@ -550,7 +552,7 @@ test('failed workspace starts restore consistent selection without overriding a 
   })
 })
 
-test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', async () => fixture(async (harness, directory) => {
+test('read-only migration preserves pending sessions, typing and resize while import admission counts pending creation', migrationOnly, async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   let release!: () => void
@@ -567,7 +569,7 @@ test('read-only migration preserves pending sessions, typing and resize while im
   assert.equal(harness.spawns[0]!.stopped, false)
 }))
 
-test('export IPC snapshots settings while a Desktop session stays open and accepts input', async () => fixture(async (harness, directory) => {
+test('export IPC snapshots settings while a Desktop session stays open and accepts input', migrationOnly, async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
   harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   const state = await harness.createMain()
@@ -589,7 +591,7 @@ test('export IPC snapshots settings while a Desktop session stays open and accep
   assert.equal(harness.spawns[0]!.stopped, false)
 }))
 
-test('export IPC silences only expected cancellation from a destroyed Settings sender', async () => fixture(async (harness, directory) => {
+test('export IPC silences only expected cancellation from a destroyed Settings sender', migrationOnly, async () => fixture(async (harness, directory) => {
   for (const [destroyed, aborted] of [[true, true], [false, true], [true, false]]) {
     const error = aborted ? new DOMException('Cancelled', 'AbortError') : new Error('export failed')
     const service = new MigrationService({
@@ -605,7 +607,7 @@ test('export IPC silences only expected cancellation from a destroyed Settings s
   }
 }))
 
-test('closed Settings cancellation is quiet for inventory, archive open and preview', async () => fixture(async (harness, directory) => {
+test('closed Settings cancellation is quiet for inventory, archive open and preview', migrationOnly, async () => fixture(async (harness, directory) => {
   const zip = join(directory, 'snapshot.zip')
   await writeFile(join(directory, 'copilot-instructions.md'), 'before')
   await writeMigrationArchive(zip, { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: 'test', cliVersion: null, projects: [], entries: [], warnings: [] }, [fileEntry('copilot/copilot-instructions.md', 'knowledge', Buffer.from('after'))])
@@ -626,7 +628,7 @@ test('closed Settings cancellation is quiet for inventory, archive open and prev
   }
 }))
 
-test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', async () => fixture(async (harness, directory) => {
+test('import IPC quiets completed cancellation rollback but preserves failed rollback and live-sender errors', migrationOnly, async () => fixture(async (harness, directory) => {
   for (const [index, [destroyed, breakRollback]] of [[true, false], [true, true], [false, false]].entries()) {
     const root = join(directory, String(index)); await mkdir(root)
     const destination = join(root, 'copilot-instructions.md'), zip = join(root, 'snapshot.zip')
@@ -1379,7 +1381,7 @@ test('file reveal rejects paths outside the session workspace', async () => {
   await fixture(async (harness, directory) => {
     configure(harness, directory)
     const state = await harness.createMain()
-    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, '..\\outside.txt'), { ok: false, reason: 'outside-workspace' })
+    assert.deepEqual(await harness.request('desktop:reveal-path', state.activeTabId, join('..', 'outside.txt')), { ok: false, reason: 'outside-workspace' })
     assert.deepEqual(harness.shellCalls, [])
   })
 })
