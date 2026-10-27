@@ -10,8 +10,10 @@ type SpawnWatchdog = (
 
 /**
  * The macOS and Linux counterpart of the Windows watchdog: one detached `/bin/sh` reads `track <pid>` and `release <pid>`
- * lines, and when its input closes (this process died without releasing them) it kills each tracked process group. Every
- * tracked process leads its own group (started `detached`, or a terminal session), so its children go with it.
+ * lines, and when its input closes (this process died without releasing them) it kills what each tracked process started
+ * and the process itself. Most tracked processes lead their own group (started `detached`, or a terminal session), and the
+ * whole group is killed. One that stays in a terminal's group (`copilot-desktop run`, so Ctrl+C reaches it) leads none, so
+ * its descendants are found through `ps` first, the way `taskkill /T` finds them; the terminal's group is never signalled.
  */
 export const POSIX_WATCHDOG_SCRIPT = [
   "tracked=' '",
@@ -21,7 +23,13 @@ export const POSIX_WATCHDOG_SCRIPT = [
   "    'release '*) pid=${line#release }; next=' '; for p in $tracked; do [ \"$p\" = \"$pid\" ] || next=\"$next$p \"; done; tracked=$next ;;",
   '  esac',
   'done',
-  'for pid in $tracked; do kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; done',
+  // Every descendant of $1, listed before anything is killed, so nothing is reparented away from the tree first.
+  'tree() { ps -A -o pid= -o ppid= 2>/dev/null | while read -r child parent; do [ "$parent" = "$1" ] && echo "$child" && tree "$child"; done; }',
+  'for pid in $tracked; do',
+  '  descendants=$(tree "$pid")',
+  '  kill -KILL -"$pid" 2>/dev/null',
+  '  kill -KILL "$pid" $descendants 2>/dev/null',
+  'done',
 ].join('\n')
 
 interface SharedWatchdog { child: ChildProcess }

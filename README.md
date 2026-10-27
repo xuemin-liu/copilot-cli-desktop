@@ -519,8 +519,9 @@ Both run the same package audit as Windows. CI builds both, unsigned, on every p
 
 Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the NSIS
 installer and publishes it plus `latest.yml` (required by the in-app updater) to a GitHub
-release. It refuses to publish without Windows code signing. When a release is published,
-`.github/workflows/release-unix.yml` builds the macOS and Linux packages from its tag and adds them,
+release. It refuses to publish without Windows code signing. Then it dispatches
+`.github/workflows/release-unix.yml` (which also runs when a person publishes a release), which builds the macOS and Linux
+packages from the tag and adds them,
 with `latest-mac.yml` and `latest-linux.yml`, to the same release. macOS builds are signed and
 notarized when the `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`
 and `APPLE_TEAM_ID` secrets are set, and unsigned otherwise. The detailed DeepSeek Harness

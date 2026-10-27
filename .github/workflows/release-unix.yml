@@ -1,6 +1,8 @@
 name: macOS and Linux release
 
-# Adds macOS and Linux builds to a GitHub release once it is published (the Windows installer is published with it).
+# Adds macOS and Linux builds to a GitHub release. release.yml dispatches this after it publishes (a release it publishes
+# with GITHUB_TOKEN starts no `release` workflows); a release published by a person, such as a manual unsigned one, starts
+# it through the `release` event.
 on:
   release:
     types:
