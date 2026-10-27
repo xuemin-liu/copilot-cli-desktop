@@ -1,11 +1,36 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, composeResolvePullPrompt, composeReviewCommentsPrompt, fitLines, listNames, looksSensitivePath, maskSecrets, privateKeyLineRanges } from './git-prompt.js'
+import { PROMPT_BUDGET, composeCommitMessagePrompt, composeDiffPrompt, composeGitCursorContext, composeResolvePullPrompt, composeReviewCommentsPrompt, fitLines, listNames, looksSensitivePath, maskSecrets, privateKeyLineRanges } from './git-prompt.js'
 import type { DiffComment } from './git-prompt.js'
 import type { GitDiffView } from './git-types.js'
 
 const textDiff = (text: string, extra: Partial<GitDiffView> = {}): GitDiffView => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 0, ...extra })
 const manyLines = (count: number): string => Array.from({ length: count }, (_item, index) => `+line ${index} ${'x'.repeat(40)}`).join('\n')
+
+test('cursor context identifies the exact file, side and line with a bounded nearby excerpt', () => {
+  const input = { folder: 'D:\\repo.worktrees\\one', path: 'src/a.ts', staged: true, side: 'old' as const, line: 42,
+    order: 5, diffText: Array.from({ length: 15 }, (_, index) => `-${index} ${'x'.repeat(2_000)}`).join('\r\n') }
+  const text = composeGitCursorContext(input)
+  assert.match(text, /repo.worktrees/)
+  assert.match(text, /src\/a.ts/)
+  assert.match(text, /Change: staged\nCursor: old line 42/)
+  assert.match(text, /> -5 /)
+  assert.doesNotMatch(text, /-0 |\n  -9 /)
+  assert.ok(text.length < 8_000)
+})
+
+test('cursor excerpts redact key bodies even when the BEGIN marker is outside the excerpt', () => {
+  const input = { folder: 'D:\\repo', path: 'a.ts', staged: false, side: 'new' as const, line: 6, order: 6,
+    diffText: ['@@ -0,0 +1,10 @@', '+-----BEGIN PRIVATE KEY-----', ...Array(6).fill('+PRIVATE-BODY'), '+-----END PRIVATE KEY-----', '+password: hunter2'].join('\n') }
+  const text = composeGitCursorContext(input)
+  assert.doesNotMatch(text, /PRIVATE-BODY|hunter2/)
+  assert.match(text, /> \[REDACTED PRIVATE KEY\]/)
+  assert.match(text, /Change: working tree/)
+  const withheld = composeGitCursorContext({ ...input, path: '.env', diffText: '+secret value', order: 0 })
+  assert.match(withheld, /contents withheld/)
+  assert.doesNotMatch(withheld, /secret value/)
+  assert.doesNotMatch(composeGitCursorContext({ ...input, diffText: '+safe\x1b[201~\x00', order: 0 }), /\x1b|\x00/)
+})
 
 test('secrets files are recognized by name, whatever the separators or case', () => {
   for (const path of ['.env', 'app/.env.local', 'config\\.env.production', 'certs/server.PEM', 'keys/id_rsa', 'a/b/secrets.json', 'credentials', 'deploy/.npmrc', 'x.pfx']) {

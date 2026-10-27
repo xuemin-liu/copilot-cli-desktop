@@ -1374,6 +1374,10 @@ button:disabled {
 .git-diff-added { color: #20c9a6; } .git-diff-deleted { color: #ff6b7a; }
 .git-diff-lines { margin: 0; padding: 4px 0 6px; overflow-x: auto; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11.5px; line-height: 1.5; max-height: 55vh; overflow-y: auto; }
 .git-diff-row { display: block; }
+.git-diff-line.git-diff-cursor { box-shadow: inset 3px 0 #58a6ff; outline: 1px solid #58a6ff66; outline-offset: -1px; }
+.git-diff-line:hover { background: #58a6ff0d; }
+.git-cursor-status { margin: 4px 10px; font-size: 11px; color: #9da7b3; }
+.git-cursor-status button { margin-left: 8px; }
 .git-diff-line { display: block; padding: 0 8px; white-space: pre; min-width: max-content; }
 /* Line comments (phase 2 of the agent workbench plan): a gutter button per numbered line, the comment under it. */
 .git-diff-gutter { width: 14px; height: 14px; margin: 0 6px 0 -4px; padding: 0; border: 1px solid #3b4252; border-radius: 3px; background: #1a1f2a; color: #aab1bd; font-size: 10px; line-height: 12px; vertical-align: middle; opacity: 0; cursor: pointer; }

@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const artifacts = resolve('test-results/git-panel')
+const cursorOnly = process.argv.includes('--cursor-context')
+const artifacts = resolve(cursorOnly ? 'test-results/git-cursor-context' : 'test-results/git-panel')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const PROFILE = '0123456789abcdef'
 
@@ -20,13 +21,22 @@ if (!process.versions.electron) {
     import { createRoot } from 'react-dom/client';
     import { useState } from 'react';
     import { GitPanel } from './src/renderer/components/GitPanel';
+    import { TerminalPane } from './src/renderer/components/TerminalPane';
+    import { readGitCursorContext, requestGitCursorContext } from './src/renderer/git-cursor-context';
     import './src/renderer/styles.css';
     window.__inserted = [];
+    window.__cursorContext = tabId => readGitCursorContext(tabId);
+    window.__cursorRequest = tabId => requestGitCursorContext(tabId);
     window.addEventListener('copilot-desktop:insert-prompt', event => window.__inserted.push(event.detail));
     function Harness() {
       const [open, setOpen] = useState(true);
+      const [target, setTarget] = useState('tab-1');
+      const [terminal, setTerminal] = useState(false);
+      window.__setTarget = setTarget;
+      window.__showTerminal = () => setTerminal(true);
       return open
-        ? <GitPanel profileId="${PROFILE}" promptTarget={{ id: 'tab-1', title: 'Main session' }} onClose={() => setOpen(false)} />
+        ? <><div style={{ width: '100%', minWidth: 0 }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
+            {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
         : <p id="closed">closed</p>;
     }
     createRoot(document.getElementById('root')).render(<Harness />);
@@ -35,13 +45,14 @@ if (!process.versions.electron) {
   const directory = await mkdtemp(join(tmpdir(), 'git-panel-check-'))
   const env = { ...process.env, GIT_PANEL_CHECK_DIR: directory, GIT_PANEL_CHECK_ARTIFACTS: artifacts }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...(cursorOnly ? ['--cursor-context'] : [])], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 300_000)
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Git panel check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log('Git panel: repositories, changes, diffs, history, trust review, add-to-prompt, live refresh and teardown all work in Electron.')
+    console.log(cursorOnly ? 'Git cursor context: native pointer, terminal Enter, preload IPC, target isolation and invalidation passed.'
+      : 'Git panel: repositories, changes, diffs, history, trust review, add-to-prompt, live refresh and teardown all work in Electron.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }).catch(() => {})
@@ -126,7 +137,15 @@ if (!process.versions.electron) {
       onProgress: (_subscriber, profileId, event) => { if (window && !window.isDestroyed()) window.webContents.send('desktop:git-progress', { profileId, event }) },
       debounceMs: 20, fallbackMs: 120_000,
     })
-    window = new BrowserWindow({ width: 460, height: 900, show: false, webPreferences: {
+    const terminalWrites = []
+    let acceptCursorContext = true
+    ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\x1b[?2004h> ' }))
+    ipcMain.handle('desktop:resize-tab', () => undefined)
+    ipcMain.handle('desktop:write-tab', (_event, tabId, data, context) => {
+      terminalWrites.push({ tabId, data, context })
+      return { gitCursorContextAttached: acceptCursorContext && data === '\r' && context !== undefined }
+    })
+    window = new BrowserWindow({ width: cursorOnly ? 1_000 : 460, height: 900, show: false, webPreferences: {
       preload: join(process.cwd(), 'dist', 'src', 'preload', 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } })
     registerGitIpc({ ipcMain, service: () => service, assertTrustedSender: () => undefined, isMainWindowSender: event => event.sender.id === window.webContents.id })
     await window.loadFile(join(out, 'index.html'))
@@ -195,6 +214,111 @@ ${point.missing}`)
     assert.equal(await ui('document.querySelectorAll(".git-diff-hunk").length > 0'), true)
     assert.match(await text('.git-diff-side'), /working tree/)
     results.diff = true
+
+    // A clicked line becomes CLI context without a comment or an explicit paste.
+    await click('.git-diff-add')
+    await until('!!document.querySelector(".git-diff-cursor")', 'cursor line highlighted')
+    const cursorContext = await ui('window.__cursorContext("tab-1")')
+    assert.match(cursorContext, /File: "a.txt"/)
+    assert.match(cursorContext, /Cursor: new line 2/)
+    assert.match(cursorContext, /> \+two/)
+    assert.equal(await ui('document.querySelectorAll(".git-diff-comment").length'), 0)
+    assert.equal(await ui('window.__cursorContext("other-tab")'), undefined, 'context stays in the target session')
+    await click('.git-diff-path')
+    assert.equal(await ui('window.__cursorContext("tab-1")'), cursorContext, 'moving back out of the diff retains the line')
+    await click('[aria-label="Clear cursor context"]')
+    assert.equal(await ui('window.__cursorContext("tab-1")'), undefined)
+    await click('.git-diff-add')
+    results.cursorContext = true
+
+    if (cursorOnly) {
+      // Hover never arms a reference; native clicks and real xterm input go through the preload bridge.
+      await ui('window.__showTerminal()')
+      await until('!!document.querySelector(".xterm-helper-textarea")', 'terminal mounted')
+      await click('[aria-label="Clear cursor context"]')
+      const point = await ui('(() => { const r = document.querySelector(".git-diff-add").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()')
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.equal(await ui('window.__cursorContext("tab-1")'), undefined, 'hover does not arm context')
+      await click('.git-diff-add')
+      await until('!!window.__cursorContext("tab-1")', 'click supplies context')
+      const transit = await ui('(() => { const r = document.querySelector(".git-diff-context").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()')
+      window.webContents.sendInputEvent({ type: 'mouseMove', ...transit })
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 2/, 'pointer transit keeps the clicked line')
+      await screenshot('cursor-context.png')
+      await ui('document.querySelector(".xterm-helper-textarea").focus()')
+      window.webContents.insertText('why is this code needed?')
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+      const end = Date.now() + 5_000
+      while (!terminalWrites.some(write => write.data === '\r') && Date.now() < end) await delay(20)
+      const submitted = terminalWrites.find(write => write.data === '\r')
+      assert.equal(submitted?.tabId, 'tab-1')
+      assert.match(submitted?.context ?? '', /Cursor: new line 2[\s\S]*> \+two/)
+      assert.ok(terminalWrites.some(write => write.data.includes('why is this code needed?')))
+      assert.equal(terminalWrites.filter(write => write.context !== undefined).length, 1, 'context is supplied only on Enter')
+      await until('!window.__cursorContext("tab-1")', 'successful attachment consumes the reference')
+      window.webContents.insertText('now run the tests')
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+      const followUpDeadline = Date.now() + 5_000
+      while (terminalWrites.filter(write => write.data === '\r').length < 2 && Date.now() < followUpDeadline) await delay(20)
+      assert.equal(terminalWrites.filter(write => write.data === '\r').length, 2)
+      assert.equal(terminalWrites.filter(write => write.data === '\r')[1].context, undefined, 'a follow-up has no stale excerpt')
+
+      await click('.git-diff-add')
+      await until('!!window.__cursorContext("tab-1")', 'reference selected for declined attachment')
+      acceptCursorContext = false
+      await ui('document.querySelector(".xterm-helper-textarea").focus()')
+      window.webContents.insertText('/help')
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+      await until('/Not added to the last prompt/.test(document.querySelector(".git-cursor-status")?.textContent || "")', 'declined attachment is reported')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 2/, 'declined attachment keeps its reference')
+      acceptCursorContext = true
+      // Explicitly hold a provider acknowledgement, select another line, then complete the old request.
+      await ui('window.__pendingCursor = window.__cursorRequest("tab-1"); true')
+      await click('.git-diff-context')
+      await until('/Cursor: new line 1/.test(window.__cursorContext("tab-1") || "")', 'a new reference is selected while the old request is pending')
+      await ui('window.__pendingCursor.complete(true); true')
+      await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.match(await ui('window.__cursorContext("tab-1")'), /Cursor: new line 1/, 'old acknowledgement cannot consume a newer selection')
+      results.oneShotContext = true
+      results.clickOnlyContext = true
+      results.declinedContext = true
+      results.acknowledgementIsolation = true
+      await ui('window.__setTarget("tab-2")')
+      await until('!document.querySelector(".git-diff-cursor")', 'session switch clears cursor')
+      assert.equal(await ui('window.__cursorContext("tab-1")'), undefined)
+      assert.equal(await ui('window.__cursorContext("tab-2")'), undefined)
+      await click('.git-diff-add')
+      await until('/a.txt/.test(window.__cursorContext("tab-2") || "")', 'new session reference selected')
+      await clickByText('.git-entry', 'b.txt')
+      await until('/buzz/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'another file loaded')
+      assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'switching files clears context')
+      await click('.git-diff-add')
+      await until('/Change: staged/.test(window.__cursorContext("tab-2") || "")', 'staged line selected')
+      await click('.git-diff-whole-file')
+      assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'switching views clears context')
+      await until('/ bee/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'whole-file view loaded')
+      await click('.git-diff-add')
+      await writeFile(join(alpha, 'b.txt'), 'new diff content\n')
+      git(alpha, 'add', 'b.txt')
+      service.requestRefresh(PROFILE)
+      await until('/new diff content/.test(document.querySelector(".git-diff-lines")?.innerText || "")', 'changed diff loaded')
+      assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'a changed diff clears context')
+      await click('.git-diff-del')
+      await until('/Cursor: old line 1[\\s\\S]*> -bee/.test(window.__cursorContext("tab-2") || "")', 'deleted code points to the old file line')
+      await click('.git-diff-add')
+      await click('button[aria-label="Close Git panel"]')
+      await until('!!document.querySelector("#closed")', 'panel closed')
+      assert.equal(await ui('window.__cursorContext("tab-2")'), undefined, 'unmount removes context provider')
+      await service.dispose()
+      await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, ...results, terminalInput: true, invalidation: true }, null, 2))
+      app.quit()
+      return
+    }
 
     // 4. Add to prompt puts a bounded, fenced diff in the target session's prompt.
     await click('.git-diff-head .git-diff-add-prompt')

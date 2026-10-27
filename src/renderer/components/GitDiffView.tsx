@@ -122,7 +122,9 @@ function CommentEditor({ initial, onSave, onCancel, onRemove }: { initial: strin
 
 /** A unified diff as plain text lines. Every line is a text node: nothing from the repository is ever parsed as markup.
  * With `comments`, each numbered line can take a comment, kept by the caller and shown under the line. */
-export function GitDiffView({ diff, comments }: { diff: GitDiff; comments?: DiffCommentsProps }): JSX.Element {
+export function GitDiffView({ diff, comments, cursorKey, onCursor }: {
+  diff: GitDiff; comments?: DiffCommentsProps; cursorKey?: string | null; onCursor?: (anchor: DiffCommentAnchor) => void
+}): JSX.Element {
   const [editing, setEditing] = useState<string | null>(null)
   if (diff.kind !== 'text') return <p className="git-diff-notice" role="status">{NOTICE[diff.kind] ?? 'Nothing to show.'}</p>
   const lines = diff.text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n')
@@ -136,13 +138,14 @@ export function GitDiffView({ diff, comments }: { diff: GitDiff; comments?: Diff
       </div>
       <pre className="git-diff-lines">
         {shown.map((line, index) => {
-          const key = comments ? diffCommentKey(line) : null
+          const key = diffCommentKey(line)
           const existing = key !== null ? comments?.items.get(key) : undefined
           const where = line.newLine !== null ? `line ${line.newLine}` : `old line ${line.oldLine}`
           const anchor = (): DiffCommentAnchor => ({ side: line.newLine !== null ? 'new' : 'old', line: line.newLine ?? line.oldLine ?? 0, quote: line.text, order: index, position: line.position ?? 0 })
           return (
             <span key={index} className={`git-diff-row${existing !== undefined ? ' git-diff-row-commented' : ''}`}>
-              <span className={`git-diff-line git-diff-${line.kind}`}>
+              <span className={`git-diff-line git-diff-${line.kind}${key !== null && key === cursorKey ? ' git-diff-cursor' : ''}`}
+                onClick={() => { if (key !== null) onCursor?.(anchor()) }}>
                 {key !== null && comments && (
                   <button type="button" className="git-diff-gutter" aria-label={`Comment on ${where}`} title={existing !== undefined ? 'Edit the comment on this line' : 'Comment on this line'}
                     onClick={() => setEditing(current => current === key ? null : key)}>{existing !== undefined ? '✎' : '+'}</button>

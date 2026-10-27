@@ -93,7 +93,7 @@ export interface CopilotDesktopBridge {
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
   unloadTab(tabId: string): Promise<DesktopState>
-  writeTab(tabId: string, data: string): Promise<void>
+  writeTab(tabId: string, data: string, gitCursorContext?: string): Promise<{ gitCursorContextAttached: boolean }>
   /** Give the session the task of resolving a pull in the repository, and claim the repository for it until it has finished.
    * Typed and sent when that is safe; otherwise `busy`, and the caller pastes it. */
   gitResolve(profileId: string, repoId: string, tabId: string, text: string): Promise<SessionTaskSend>

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
-import { composeCommitMessagePrompt, composeDiffPrompt, composeResolvePullPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
+import { composeCommitMessagePrompt, composeDiffPrompt, composeGitCursorContext, composeResolvePullPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
 import type { ResolvePullSituation } from '../../main/git-prompt.js'
 import { filesInTheWay } from '../../main/git-sync.js'
 import { appendOutput, readableOutput } from '../../main/git-output.js'
@@ -22,6 +22,8 @@ import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, u
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
 import { TRASH_LABEL } from '../platform.js'
+import { GIT_CURSOR_CONTEXT_EVENT } from '../git-cursor-context.js'
+import type { GitCursorContextRequest } from '../git-cursor-context.js'
 
 export interface GitPanelProps {
   profileId: string
@@ -204,6 +206,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [wholeFile, setWholeFile] = useState(readWholeFile)
+  const [cursor, setCursor] = useState<{ scope: string; diffText: string; anchor: DiffCommentAnchor; id: number; declined: boolean } | null>(null)
+  const cursorSequence = useRef(0)
   // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
   // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
   const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
@@ -286,6 +290,31 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
       .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
     return () => { stale = true }
   }, [profileId, diffKey, reload]) // eslint-disable-line react-hooks/exhaustive-deps
+  const cursorScope = JSON.stringify([repo?.id, repo?.branch, repo?.headOid, selection, wholeFile, tab, promptTarget?.id])
+  const activeCursor = cursor?.scope === cursorScope && diff?.key === diffKey && !diffError && tab === 'changes'
+    && cursor.diffText === diff.value.text ? cursor.anchor : null
+  useLayoutEffect(() => { setCursor(null) }, [cursorScope])
+  useLayoutEffect(() => {
+    setCursor(current => current && diff && current.diffText !== diff.value.text ? null : current)
+  }, [diff?.value.text])
+  // Answer synchronously at submission time. Unmounting/closing the panel removes the provider.
+  useLayoutEffect(() => {
+    if (!activeCursor || !repo || !selection || !diff || !promptTarget || !ready || statusError) return
+    const text = composeGitCursorContext({ folder: repo.folder, path: selection.path, staged: selection.staged,
+      diffText: diff.value.text, ...activeCursor })
+    const id = cursor!.id
+    const provide = (event: Event): void => {
+      const request = (event as CustomEvent<GitCursorContextRequest>).detail
+      if (request.tabId !== promptTarget.id) return
+      request.text = text
+      // An acknowledgement for an older submission must not clear a line selected in the meantime.
+      request.complete = attached => setCursor(current => current?.id === id
+        ? attached ? null : { ...current, declined: true }
+        : current)
+    }
+    window.addEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
+    return () => window.removeEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
+  }, [activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, statusError])
   const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
   const commentKey = commentTarget ? bucketKey(commentTarget) : null
   const activeComments = commentKey ? comments.get(commentKey) ?? null : null
@@ -726,8 +755,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       {diffError && <p className="git-message git-message-error" role="alert">{diffError}</p>}
                       {!diffError && selectedEntry === null && <p className="git-message" role="status">That file is no longer changed.</p>}
                       {!diffError && selectedEntry !== null && diff?.key === diffKey && (
-                        <GitDiffView diff={diff.value} comments={{ items: new Map([...(activeComments?.items ?? [])].map(([key, item]) => [key, item.text])), onChange: changeComment }} />
+                        <GitDiffView diff={diff.value} cursorKey={activeCursor ? `${activeCursor.side}:${activeCursor.line}` : null}
+                          onCursor={anchor => setCursor({ scope: cursorScope, diffText: diff.value.text, anchor, id: ++cursorSequence.current, declined: false })}
+                          comments={{ items: new Map([...(activeComments?.items ?? [])].map(([key, item]) => [key, item.text])), onChange: changeComment }} />
                       )}
+                      {activeCursor && <p className="git-cursor-status" role="status">
+                        CLI context: {activeCursor.side === 'old' ? 'old line' : 'line'} {activeCursor.line}. {cursor?.declined
+                          ? 'Not added to the last prompt. The reference is still selected.'
+                          : 'Added to your next question in the CLI.'}
+                        <button type="button" onClick={() => setCursor(null)} aria-label="Clear cursor context">Clear</button>
+                      </p>}
                       {!diffError && selectedEntry !== null && activeComments && (
                         <div className="git-diff-comments-bar">
                           <span className="git-diff-comments-count">{activeComments.items.size} comment{activeComments.items.size === 1 ? '' : 's'}</span>

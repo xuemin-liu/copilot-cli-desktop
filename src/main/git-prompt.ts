@@ -169,6 +169,25 @@ export function privateKeyLineRanges(diffText: string): Array<[number, number]> 
   return ranges
 }
 
+/** A small excerpt around the pointer, with redaction applied before selecting any private-key lines. */
+export function composeGitCursorContext(input: {
+  folder: string; path: string; staged: boolean; diffText: string; order: number; side: 'new' | 'old'; line: number
+}): string {
+  const label = (text: string): string => JSON.stringify(text.replace(CONTROL_CHARS, '').slice(0, 1_000))
+  const header = `Git panel cursor context (reference for the user's question):\nRepository: ${label(input.folder)}\nFile: ${label(input.path)}\nChange: ${input.staged ? 'staged' : 'working tree'}\nCursor: ${input.side === 'old' ? 'old' : 'new'} line ${input.line}\n`
+  if (looksSensitivePath(input.path)) return `${header}(contents withheld: this file looks like it holds secrets)`
+  const lines = input.diffText.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n')
+  const ranges = privateKeyLineRanges(input.diffText)
+  const start = Math.max(0, input.order - 3)
+  const excerpt = lines.slice(start, input.order + 4).map((line, offset) => {
+    const index = start + offset
+    const safe = ranges.some(([from, to]) => index >= from && index <= to)
+      ? '[REDACTED PRIVATE KEY]' : maskSecrets(line.replace(CONTROL_CHARS, '')).text
+    return `${index === input.order ? '> ' : '  '}${safe.length > 600 ? `${safe.slice(0, 600)}…` : safe}`
+  }).join('\n')
+  return `${header}The line marked > is the code at the cursor. Nearby diff lines follow:\n${FENCE}diff\n${excerpt}\n${FENCE}`
+}
+
 const MAX_QUOTE_CHARS = 200
 const MAX_COMMENT_CHARS = 2_000
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
