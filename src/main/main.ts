@@ -40,11 +40,14 @@ import {
   preferenceRollback,
   queueConfigWrite,
   readDesktopConfig,
+  removeWorkspaceProfile,
+  restoreWorkspaceProfile,
   recordDesktopVersion,
   writeDesktopConfig,
   type CloseBehavior,
   type DesktopConfig,
   type DesktopPreferences,
+  type RemovedWorkspaceProfile,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
@@ -2618,6 +2621,35 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   return snapshot()
 }
 
+/** Forgets a workspace with no sessions open in it. Its folder is not touched. */
+async function removeWorkspace(profileId: string): Promise<void> {
+  let removed: RemovedWorkspaceProfile | null = null
+  // Checked and applied when this save's turn comes, so a session opened in the
+  // meantime still blocks it.
+  await persistConfig(() => {
+    const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
+    if (!profile) throw new Error('The selected workspace profile no longer exists')
+    const open = tabsState.tabs.filter((tab) => tab.workspaceProfileId === profileId).length
+    if (open > 0) {
+      throw new Error(`Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} before removing it`)
+    }
+    // The active session's workspace takes over, so the sidebar and the session stay in step.
+    const activeTabProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId ?? null
+    removed = removeWorkspaceProfile(desktopConfig, profileId, activeTabProfileId)
+    profilesWithSessionTabs.delete(profileId)
+    unrestoredProfileTabs.delete(profileId)
+    syncWorkspaceState()
+  }, () => {
+    if (!removed) return
+    restoreWorkspaceProfile(desktopConfig, removed)
+    syncWorkspaceState()
+    broadcastState()
+    refreshMenus()
+  })
+  broadcastState()
+  refreshMenus()
+}
+
 async function updateWorkspaceProfile(
   profileId: string,
   name: string,
@@ -3347,6 +3379,12 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
+ipcMain.handle('desktop:remove-profile', async (event, profileId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  await removeWorkspace(profileId)
+  return snapshot()
+})
 ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
@@ -3734,6 +3772,12 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     defaultResumeMode as ResumeMode,
     launch as SessionLaunchConfig,
   )
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:remove-workspace-profile', async (event, profileId: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  await removeWorkspace(profileId)
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:update-provider', async (event, provider: unknown) => {

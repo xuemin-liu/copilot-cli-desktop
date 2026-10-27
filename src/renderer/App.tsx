@@ -342,6 +342,10 @@ export function App(): JSX.Element {
         }}
         onSelectWorkspace={() => void window.copilotDesktop.selectWorkspace()}
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
+        onRemoveProfile={(profile) => {
+          if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?\n\nIts folder and files are not changed. Add it again any time.`)) return
+          handleOperation(window.copilotDesktop.removeProfile(profile.id))
+        }}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}
         onPopOutTab={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
         onRenameTab={requestTabRename}

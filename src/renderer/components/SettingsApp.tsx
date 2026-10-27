@@ -251,20 +251,39 @@ function WorkspaceProfileEditor({
         />
         Enable Copilot screen-reader optimizations
       </label>
-      <button
-        type="button"
-        disabled={saving}
-        onClick={() => {
-          setSaving(true)
-          void onSave(
-            window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch),
-            `Saved profile "${name.trim() || profile.name}".`,
-            `Could not save profile "${profile.name}"`,
-          ).finally(() => setSaving(false))
-        }}
-      >
-        {saving ? 'Saving…' : 'Save profile'}
-      </button>
+      <div className="settings-actions">
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => {
+            setSaving(true)
+            void onSave(
+              window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch),
+              `Saved profile "${name.trim() || profile.name}".`,
+              `Could not save profile "${profile.name}"`,
+            ).finally(() => setSaving(false))
+          }}
+        >
+          {saving ? 'Saving…' : 'Save profile'}
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => {
+            if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?
+
+Its folder and files are not changed. Add it again any time.`)) return
+            setSaving(true)
+            void onSave(
+              window.copilotDesktopSettings.removeWorkspaceProfile(profile.id),
+              `Removed workspace "${profile.name}".`,
+              `Could not remove workspace "${profile.name}"`,
+            ).finally(() => setSaving(false))
+          }}
+        >
+          Remove workspace
+        </button>
+      </div>
     </div>
   )
 }

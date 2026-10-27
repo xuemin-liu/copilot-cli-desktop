@@ -68,6 +68,7 @@ export interface CopilotDesktopBridge {
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
+  removeProfile(profileId: string): Promise<DesktopState>
   /** `title` names the session; empty or absent uses the project's name. */
   createTab(resumeMode?: ResumeMode | null, profileId?: string, title?: string | null, options?: NewSessionOptions | null): Promise<DesktopState>
   forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState>
@@ -177,6 +178,7 @@ export interface CopilotDesktopSettingsBridge {
     defaultResumeMode: ResumeMode,
     launch: SessionLaunchConfig,
   ): Promise<DesktopSettingsSnapshot>
+  removeWorkspaceProfile(profileId: string): Promise<DesktopSettingsSnapshot>
   updateProvider(provider: CopilotProviderConfig): Promise<DesktopSettingsSnapshot>
   checkForUpdates(): Promise<DesktopSettingsSnapshot>
   downloadUpdate(): Promise<DesktopSettingsSnapshot>

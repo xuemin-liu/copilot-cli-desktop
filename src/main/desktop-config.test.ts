@@ -12,6 +12,8 @@ import {
   preferenceRollback,
   queueConfigWrite,
   readDesktopConfig,
+  removeWorkspaceProfile,
+  restoreWorkspaceProfile,
   recordDesktopVersion,
   workspaceProfileId,
   writeDesktopConfig,
@@ -381,4 +383,51 @@ test('an earlier successful save does not write a later change whose own save fa
     { notifications: true, meetingDiscussion: true },
   ])
   assert.equal(config.notifications, true)
+})
+
+test('removing a workspace forgets it and picks another active workspace', () => {
+  const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
+  for (const path of ['/work/c', '/work/b', '/work/a']) activateWorkspaceProfile(config, path)
+  const [a, b, c] = config.profiles.map((profile) => profile.id)
+  assert.equal(config.activeProfileId, a)
+
+  // The active workspace goes: the requested one takes over when it still exists.
+  removeWorkspaceProfile(config, a!, c!)
+  assert.deepEqual(config.profiles.map((profile) => profile.id), [b, c])
+  assert.equal(config.activeProfileId, c)
+  // An inactive one goes: the active workspace stays.
+  removeWorkspaceProfile(config, b!, null)
+  assert.equal(config.activeProfileId, c)
+  // Without a usable choice the first remaining one is active, or none when the list is empty.
+  activateWorkspaceProfile(config, '/work/d')
+  removeWorkspaceProfile(config, config.activeProfileId!, 'missing')
+  assert.equal(config.activeProfileId, c)
+  removeWorkspaceProfile(config, c!)
+  assert.deepEqual(config.profiles, [])
+  assert.equal(config.activeProfileId, null)
+  assert.throws(() => removeWorkspaceProfile(config, 'missing'), /no longer exists/)
+})
+
+test('a workspace whose removal failed to save comes back in its place', () => {
+  const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
+  for (const path of ['/work/c', '/work/b', '/work/a']) activateWorkspaceProfile(config, path)
+  const ids = config.profiles.map((profile) => profile.id)
+
+  const removed = removeWorkspaceProfile(config, ids[0]!)
+  restoreWorkspaceProfile(config, removed)
+  assert.deepEqual(config.profiles.map((profile) => profile.id), ids)
+  assert.equal(config.activeProfileId, ids[0])
+
+  // Someone switched workspaces after the removal: keep their choice.
+  const again = removeWorkspaceProfile(config, ids[0]!)
+  config.activeProfileId = ids[2]!
+  restoreWorkspaceProfile(config, again)
+  assert.deepEqual(config.profiles.map((profile) => profile.id), ids)
+  assert.equal(config.activeProfileId, ids[2])
+
+  // Added back since: not duplicated.
+  const third = removeWorkspaceProfile(config, ids[1]!)
+  activateWorkspaceProfile(config, '/work/b')
+  restoreWorkspaceProfile(config, third)
+  assert.equal(config.profiles.filter((profile) => profile.id === ids[1]).length, 1)
 })

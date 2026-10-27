@@ -19,6 +19,7 @@ function renderAccess(profiles: WorkspaceProfile[], tab: DesktopSessionTab, coll
       onToggleCollapsed={() => undefined}
       onSelectWorkspace={() => undefined}
       onActivateProfile={() => undefined}
+      onRemoveProfile={() => undefined}
       onActivateTab={() => undefined} onPopOutTab={() => undefined}
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}
@@ -145,6 +146,7 @@ test('Sidebar groups live sessions under their workspace and exposes primary act
       onToggleCollapsed={() => undefined}
       onSelectWorkspace={() => undefined}
       onActivateProfile={() => undefined}
+      onRemoveProfile={() => undefined}
       onActivateTab={() => undefined} onPopOutTab={() => undefined}
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}
@@ -203,6 +205,7 @@ test('Sidebar shows current session access and marks changed access as applying 
       onToggleCollapsed={() => undefined}
       onSelectWorkspace={() => undefined}
       onActivateProfile={() => undefined}
+      onRemoveProfile={() => undefined}
       onActivateTab={() => undefined} onPopOutTab={() => undefined}
       onRenameTab={() => undefined}
       onCloseTab={() => undefined}

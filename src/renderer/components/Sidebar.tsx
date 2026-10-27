@@ -7,6 +7,7 @@ import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
 import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
+import { RemoveIcon } from './Icons.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   dormant: 'Not started',
@@ -48,6 +49,7 @@ export interface SidebarProps {
   onToggleCollapsed: () => void
   onSelectWorkspace: () => void
   onActivateProfile: (profileId: string) => void
+  onRemoveProfile: (profile: WorkspaceProfile) => void
   onActivateTab: (tabId: string) => void
   onPopOutTab: (tabId: string) => void
   onRenameTab: (tabId: string, currentTitle: string) => void
@@ -76,6 +78,7 @@ export function Sidebar({
   onToggleCollapsed,
   onSelectWorkspace,
   onActivateProfile,
+  onRemoveProfile,
   onActivateTab,
   onPopOutTab,
   onRenameTab,
@@ -206,6 +209,15 @@ export function Sidebar({
         disabled={!canOpenTab} onClick={() => onCreateTab(profile.id)}>+</button>
     </div>
   )
+  const removeProfileButton = (profile: WorkspaceProfile): JSX.Element => {
+    const open = tabs.filter((tab) => tab.workspaceProfileId === profile.id).length
+    const title = open > 0
+      ? `Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} to remove it`
+      : `Remove ${profile.name} from the list (its folder is not changed)`
+    return <button type="button" className="icon-button" disabled={open > 0}
+      aria-label={`Remove ${profile.name}`} title={title}
+      onClick={() => { closeProjects(); onRemoveProfile(profile) }}><RemoveIcon /></button>
+  }
   const [now, setNow] = useState(() => Date.now())
   const ticking = tabs.some((tab) => tab.status === 'running' && tab.activityDetail)
   useEffect(() => {
@@ -419,6 +431,7 @@ export function Sidebar({
               <button type="button" className="icon-button" disabled={!canOpenTab}
                 aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}`}
                 onClick={() => { closeProjects(); onCreateTab(profile.id) }}>+</button>
+              {removeProfileButton(profile)}
             </div>)}
             {profiles.length === 0 && <p className="sidebar-projects-empty">No projects yet.</p>}
           </nav>

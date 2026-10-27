@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('copilotDesktopSettings', {
   clearBrowserHistory: () => ipcRenderer.invoke('desktop-settings:clear-browser-history'),
   updateWorkspaceProfile: (profileId, name, permissionPreset, defaultResumeMode, launch) =>
     ipcRenderer.invoke('desktop-settings:update-workspace-profile', profileId, name, permissionPreset, defaultResumeMode, launch),
+  removeWorkspaceProfile: (profileId) => ipcRenderer.invoke('desktop-settings:remove-workspace-profile', profileId),
   updateProvider: (provider) => ipcRenderer.invoke('desktop-settings:update-provider', provider),
   checkForUpdates: () => ipcRenderer.invoke('desktop-settings:check-for-updates'),
   downloadUpdate: () => ipcRenderer.invoke('desktop-settings:download-update'),

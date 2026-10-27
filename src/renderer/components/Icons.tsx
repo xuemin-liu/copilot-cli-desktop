@@ -55,3 +55,11 @@ export function GitBranchIcon(): JSX.Element {
     <path d="M4.5 5v6M11.5 7c0 3-4.5 2.2-7 4.2" />
   </Icon>
 }
+
+/** Waste bin: remove an item from a list. */
+export function RemoveIcon(): JSX.Element {
+  return <Icon>
+    <path d="M2.5 4h11M6 4V2.5h4V4" />
+    <path d="M3.75 4l.75 9.5h7l.75-9.5M6.5 6.5v4.5M9.5 6.5v4.5" />
+  </Icon>
+}
