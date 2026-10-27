@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import test from 'node:test'
 import { createGitFixture } from './fixtures/git-fixture.js'
 import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import { realPathNative } from './real-path.js'
+import { caseInsensitivePaths, samePath } from './host-path.js'
 
 function workspace(t: test.TestContext): string {
   const root = mkdtempSync(join(tmpdir(), 'git-discovery-'))
@@ -15,8 +16,16 @@ function workspace(t: test.TestContext): string {
 }
 
 const makeRepo = (folder: string): void => { mkdirSync(join(folder, '.git'), { recursive: true }) }
-const sameFolderText = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase()
-const junction = (link: string, target: string): void => { execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, target], { stdio: 'ignore' }) }
+const sameFolderText = samePath
+/** A junction on Windows; a symbolic link to the folder elsewhere, which discovery treats the same way. */
+const junction = (link: string, target: string): void => {
+  if (process.platform === 'win32') execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, target], { stdio: 'ignore' })
+  else symlinkSync(target, link, 'dir')
+}
+/** Network shares and 8.3 short names exist only on Windows, so do these refusals. */
+const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows shares and short names' }
+/** A path spelled differently by case: the same folder where the platform ignores case. */
+const otherCase = (path: string): string => caseInsensitivePaths ? path.toUpperCase() : path
 
 test('a project that is itself a repository is returned alone and its children are not scanned', async (t) => {
   const root = workspace(t)
@@ -35,7 +44,7 @@ test('nested repositories are found to depth three, skipping build folders, and 
   makeRepo(join(root, 'node_modules', 'pkg'))
   makeRepo(join(root, 'a', 'inner'))
   const result = await discoverRepos(root)
-  assert.deepEqual(result.repos.map(repo => repo.relativePath), ['a', 'group\\b', 'group\\deep\\c'])
+  assert.deepEqual(result.repos.map(repo => repo.relativePath), ['a', join('group', 'b'), join('group', 'deep', 'c')])
   assert.ok(result.repos.every(repo => repo.kind === 'nested'))
 })
 
@@ -54,7 +63,7 @@ test('a project inside a larger repository reports it as the parent', async (t) 
   const project = join(root, 'packages', 'app')
   mkdirSync(project, { recursive: true })
   const result = await discoverRepos(project, { homeDirectory: 'C:\\somewhere\\else' })
-  assert.deepEqual(result.repos.map(repo => [repo.kind, repo.relativePath]), [['parent', '..\\..']])
+  assert.deepEqual(result.repos.map(repo => [repo.kind, repo.relativePath]), [['parent', join('..', '..')]])
 })
 
 test('an enclosing repository at the home folder or a drive root is ignored', async (t) => {
@@ -79,7 +88,7 @@ test('the home folder is recognized when it is reached through a junction', asyn
   assert.match(result.notes.join(' '), /home folder/)
 })
 
-test('the home folder is recognized through its 8.3 short name', async (t) => {
+test('the home folder is recognized through its 8.3 short name', windowsOnly, async (t) => {
   const root = workspace(t)
   makeRepo(root)
   const project = join(root, 'work', 'app')
@@ -92,7 +101,7 @@ test('the home folder is recognized through its 8.3 short name', async (t) => {
   assert.match(result.notes.join(' '), /home folder/)
 })
 
-test('a .git file must point at a local git directory', async (t) => {
+test('a .git file must point at a local git directory', windowsOnly, async (t) => {
   const root = workspace(t)
   const real = join(root, 'real-gitdir')
   mkdirSync(real)
@@ -113,7 +122,7 @@ test('a .git file must point at a local git directory', async (t) => {
   assert.match(issues['empty'] ?? '', /does not name/)
 })
 
-test('a linked worktree whose commondir points at a share is refused', async (t) => {
+test('a linked worktree whose commondir points at a share is refused', windowsOnly, async (t) => {
   const root = workspace(t)
   const gitDir = join(root, 'wt-gitdir')
   mkdirSync(gitDir)
@@ -137,7 +146,7 @@ test('a .git junction is listed but marked unsafe, and junctioned folders are no
   assert.match(result.repos[0]?.issue ?? '', /link/)
 })
 
-test('UNC and device project folders are refused', async () => {
+test('UNC and device project folders are refused', windowsOnly, async () => {
   await assert.rejects(discoverRepos('\\\\server\\share\\project'), /local project folders/)
   await assert.rejects(discoverRepos('\\\\?\\C:\\work'), /local project folders/)
 })
@@ -146,7 +155,7 @@ test('an absent project folder rejects instead of reporting no repositories', as
   await assert.rejects(discoverRepos(join(tmpdir(), 'git-discovery-missing-folder-xyz')))
 })
 
-test('a directory-form .git whose commondir points at a share is refused', async (t) => {
+test('a directory-form .git whose commondir points at a share is refused', windowsOnly, async (t) => {
   const root = workspace(t)
   mkdirSync(join(root, 'repo', '.git'), { recursive: true })
   writeFileSync(join(root, 'repo', '.git', 'commondir'), '\\\\review-invalid-host\\share\\repo\n')
@@ -168,7 +177,7 @@ test('a local commondir is accepted, in the directory form and through a .git fi
   assert.equal((await inspectGitEntry(join(root, 'wt')))?.issue, null)
 })
 
-test('alternates that borrow objects from a share are refused in both forms; local ones are fine', async (t) => {
+test('alternates that borrow objects from a share are refused in both forms; local ones are fine', windowsOnly, async (t) => {
   const root = workspace(t)
   for (const [name, text] of [['dir-unc', '\\\\review-invalid-host\\share\\objects\n'], ['dir-local', '../../other/objects\n']] as const) {
     mkdirSync(join(root, name, '.git', 'objects', 'info'), { recursive: true })
@@ -184,7 +193,7 @@ test('alternates that borrow objects from a share are refused in both forms; loc
   assert.match((await inspectGitEntry(join(root, 'file-form')))?.issue ?? '', /borrows objects/)
 })
 
-test('a share named past the first 4 KB of a long alternates file is still found', async (t) => {
+test('a share named past the first 4 KB of a long alternates file is still found', windowsOnly, async (t) => {
   const root = workspace(t)
   mkdirSync(join(root, 'repo', '.git', 'objects', 'info'), { recursive: true })
   const local = Array.from({ length: 150 }, (_item, index) => `../../donor-${String(index).padStart(3, '0')}/objects-with-a-long-name-to-pad`).join('\n')
@@ -238,7 +247,7 @@ test('decodeGitQuoted follows git\'s C-style quoting and refuses anything it can
   }
 })
 
-test('a quoted alternates line that decodes to a share is refused, whatever the quoting', async (t) => {
+test('a quoted alternates line that decodes to a share is refused, whatever the quoting', windowsOnly, async (t) => {
   const root = workspace(t)
   const cases: Array<[string, string]> = [
     ['json-escaped', JSON.stringify('\\\\review-invalid-host\\share\\objects')],
@@ -279,7 +288,7 @@ const setAlternates = (directory: string, ...lines: string[]): void => {
 }
 const slashes = (path: string): string => path.replace(/\\/g, '/')
 
-test('a share named by a later hop of the alternates chain is found', async (t) => {
+test('a share named by a later hop of the alternates chain is found', windowsOnly, async (t) => {
   const root = workspace(t)
   const [a, b, c] = ['a', 'b', 'c'].map(name => objectsDir(root, name)) as [string, string, string]
   setAlternates(a, slashes(b))
@@ -292,7 +301,7 @@ test('a share named by a later hop of the alternates chain is found', async (t) 
   assert.match((await inspectGitEntry(join(root, 'a')))?.issue ?? '', /borrows objects/, 'a quoted entry on the third hop')
 })
 
-test('git really follows a chained alternate, so the chain has to be checked', async (t) => {
+test('git really follows a chained alternate, so the chain has to be checked', windowsOnly, async (t) => {
   const fixture = await createGitFixture()
   if (!fixture) { t.skip('git is not installed'); return }
   t.after(() => fixture.cleanup())
@@ -330,7 +339,7 @@ test('a chain deeper than git follows, or wider than any real repository, is ref
   assert.match((await inspectGitEntry(join(root, 'wide')))?.issue ?? '', /could not be checked completely/)
 })
 
-test('an alternate reached through a junction is checked where it really lives', async (t) => {
+test('an alternate reached through a junction is checked where it really lives', windowsOnly, async (t) => {
   const root = workspace(t)
   const real = objectsDir(root, 'real')
   setAlternates(real, '\\\\review-invalid-host\\share\\objects')
@@ -341,7 +350,7 @@ test('an alternate reached through a junction is checked where it really lives',
   assert.match((await inspectGitEntry(join(root, 'front')))?.issue ?? '', /borrows objects/)
 })
 
-test('the repository\'s own objects directory and a shared common directory are both walked', async (t) => {
+test('the repository\'s own objects directory and a shared common directory are both walked', windowsOnly, async (t) => {
   const root = workspace(t)
   const common = join(root, 'common')
   mkdirSync(join(common, 'objects', 'info'), { recursive: true })
@@ -373,7 +382,7 @@ test('a session folder is a worktree only when its .git file leads into an accep
   assert.equal(found.branch, 'desktop-task-abc123')
   assert.equal(found.issue, null)
   assert.equal(found.gitDir.toLowerCase(), join(repo, '.git', 'worktrees', 'desktop-task-abc123').toLowerCase())
-  assert.equal((await inspectSessionWorktree(mine + '\\', accept))?.root.toLowerCase(), mine.toLowerCase(), 'a trailing separator resolves to the same folder')
+  assert.equal((await inspectSessionWorktree(mine + sep, accept))?.root.toLowerCase(), mine.toLowerCase(), 'a trailing separator resolves to the same folder')
   assert.equal(await inspectSessionWorktree(mine, () => false), null, 'a repository the caller does not accept is not followed')
   assert.equal(await inspectSessionWorktree(repo, accept), null, 'the main repository is not a linked worktree')
   assert.equal(await inspectSessionWorktree(join(fixture.root, 'nowhere'), accept), null)
@@ -436,7 +445,7 @@ test('a project\'s linked worktrees are listed from the filesystem, from the mai
   assert.deepEqual(fromMain.map(entry => entry.branch), ['one', null])
   assert.deepEqual(roots(await listLinkedWorktrees(join(repo, 'sub'))), roots(fromMain), 'a project inside the repository')
   assert.deepEqual(roots(await listLinkedWorktrees(one)), [two.toLowerCase()], 'from a worktree: the others, not itself')
-  assert.equal((await resolveLinkedWorktree(repo, one.toUpperCase() + '\\'))?.root.toLowerCase(), one.toLowerCase(), 'matched as a folder')
+  assert.equal((await resolveLinkedWorktree(repo, otherCase(one) + sep))?.root.toLowerCase(), one.toLowerCase(), 'matched as a folder')
   const capped = await listLinkedWorktrees(repo, { max: 1 })
   assert.equal(capped.length, 1, 'the list is capped')
   const beyond = [one, two].find(folder => !sameFolderText(folder, capped[0]!.root))!

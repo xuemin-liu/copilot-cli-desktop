@@ -17,8 +17,13 @@ export function validateTestPath(path: string): void {
 export async function loadBrowserTest(path: string, environment = process.env): Promise<BrowserTestPlan> {
   validateTestPath(path)
   if ((await stat(path)).size > MAX_TEST_BYTES) throw new Error('Test plan exceeds 128 KiB.')
+  return parseBrowserTest(await readFile(path, 'utf8'), environment)
+}
+
+/** A plan's text with its `valueFromEnv` inputs filled in from `environment`, validated. */
+export function parseBrowserTest(text: string, environment: Record<string, string | undefined>): BrowserTestPlan {
   let raw: any
-  try { raw = JSON.parse((await readFile(path, 'utf8')).replace(/^\uFEFF/, '')) }
+  try { raw = JSON.parse(text.replace(/^\uFEFF/, '')) }
   catch { throw new Error('Invalid test JSON.') }
   if (Array.isArray(raw?.steps)) for (const step of raw.steps) {
     if (step && typeof step === 'object' && 'valueFromEnv' in step) {

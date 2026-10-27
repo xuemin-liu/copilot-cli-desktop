@@ -6,8 +6,116 @@ import { BROWSER_TEST_HELPER } from './browser-test-helper.js'
 export function browserSessionPaths(root: string, tabId: string): { directory: string; endpoint: string; settings: string; helper: string } {
   if (!isSessionTabId(tabId)) throw new Error('Invalid browser session')
   const directory = join(root, tabId)
-  return { directory, endpoint: join(directory, 'control.json'), settings: join(directory, 'settings.json'), helper: join(directory, 'browser.ps1') }
+  return { directory, endpoint: join(directory, 'control.json'), settings: join(directory, 'settings.json'),
+    helper: join(directory, process.platform === 'win32' ? 'browser.ps1' : 'browser.sh') }
 }
+
+/**
+ * The macOS and Linux helper: `sh` and `curl` only, with the commands and checks of `browser.ps1`. It cannot decode images
+ * or edit JSON, so the desktop writes a screenshot or a test's report and images to the new files it names; `curl` reads the
+ * plan. The token goes to `curl` on its standard input, never on a command line other processes can read.
+ */
+const BROWSER_HELPER_SH = String.raw`# Copilot CLI Desktop debug browser (macOS and Linux). Needs only sh and curl.
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+quote() { printf '%s' "$1" | awk 'BEGIN { ORS = "" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\r/, "\\r"); gsub(/\t/, "\\t"); if (NR > 1) print "\\n"; print }'; }
+encode() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'; }
+local_path() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in //*) return 1 ;; esac
+  printf '%s' "$1" | grep -q '[[:cntrl:]]' && return 1
+  return 0
+}
+command=status
+if [ $# -gt 0 ]; then command=$1; shift; fi
+prefix='Browser diagnostics failed: '
+[ "$command" = test ] && prefix='Browser test failed. '
+output=''; output_state=none; count=0
+for argument do
+  if [ "$output_state" = pending ]; then output=$argument; output_state=given; continue; fi
+  if [ "$argument" = -OutputPath ]; then output_state=pending; continue; fi
+  count=$((count + 1)); eval "arg$count=\$argument"
+done
+[ "$output_state" = pending ] && fail "$prefix-OutputPath needs a path."
+case "$command" in
+  status|console|network|request) read_command=0 ;;
+  tabs|select|frames|snapshot|screenshot|scroll|activate|responses|response|test-targets) read_command=1 ;;
+  test) read_command=0 ;;
+  *) fail "$prefix""Usage: browser.sh status|console|network|request <id>|tabs|frames|snapshot|screenshot|scroll|activate|responses|response|test-targets|test" ;;
+esac
+command -v curl >/dev/null 2>&1 || fail "$prefix""The browser helper needs curl. Install it and try again."
+work=$(mktemp -d) || fail "$prefix""Could not create a temporary folder."
+trap 'rm -rf "$work"' EXIT
+if [ "$command" = test ]; then
+  [ "$count" -eq 1 ] || fail "$prefix""Usage: browser.sh test <absolute-plan.json> [-OutputPath new-report.json]"
+  plan=$arg1
+  if ! local_path "$plan" || ! printf '%s' "$plan" | grep -qi '\.json$'; then fail "$prefix""Test files must use local absolute .json paths."; fi
+  [ -f "$plan" ] || fail "$prefix""The test plan does not exist."
+  [ "$(wc -c < "$plan" | tr -d ' ')" -le 131072 ] || fail "$prefix""Test plan exceeds 128 KiB."
+  if [ "$output_state" = none ]; then
+    output="$(printf '%s' "$plan" | sed 's/\.[jJ][sS][oO][nN]$//').report-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').json"
+  fi
+  if ! local_path "$output" || ! printf '%s' "$output" | grep -qi '\.json$'; then fail "$prefix""Test files must use local absolute .json paths."; fi
+  cp -- "$plan" "$work/plan" || fail "$prefix""Could not read the test plan."
+elif [ "$output_state" = given ]; then
+  [ "$command" = screenshot ] || fail "$prefix""OutputPath is only supported for screenshots."
+  if ! local_path "$output" || ! printf '%s' "$output" | grep -qi '\.png$'; then
+    fail "$prefix""Screenshot output must be a local absolute .png path; network and device paths are not allowed."
+  fi
+fi
+if [ "$read_command" -eq 0 ] && [ "$command" != test ]; then
+  if [ "$command" = request ]; then
+    if [ "$count" -ne 1 ] || ! printf '%s' "$arg1" | grep -q '^[0-9][0-9]*$'; then fail "$prefix""Usage: browser.sh status|console|network|request <id>"; fi
+  elif [ "$count" -gt 0 ]; then fail "$prefix""Usage: browser.sh status|console|network|request <id>"
+  fi
+fi
+state=$COPILOT_DESKTOP_BROWSER_STATE
+if [ -z "$state" ] || [ ! -f "$state" ]; then fail "$prefix""Open the Browser pane for this session first."; fi
+control=$(cat "$state")
+pid=$(printf '%s' "$control" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
+port=$(printf '%s' "$control" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
+token=$(printf '%s' "$control" | sed -n 's/.*"token":"\([a-f0-9]\{64\}\)".*/\1/p')
+if [ -z "$pid" ] || [ -z "$port" ] || [ -z "$token" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] || ! kill -0 "$pid" 2>/dev/null; then
+  fail "$prefix""Browser control state is stale or invalid. Reopen this session Browser pane."
+fi
+timeout=30
+if [ "$command" = test ]; then
+  route=test; timeout=315
+elif [ "$read_command" -eq 1 ]; then
+  route="read/$command"; separator='?'; index=1
+  while [ "$index" -le "$count" ]; do
+    eval "value=\$arg$index"
+    route="$route$separator""arg=$(encode "$value")"; separator='&'; index=$((index + 1))
+  done
+  [ "$output_state" = given ] && route="$route$separator""save=$(encode "$output")"
+  [ "$command" = activate ] && timeout=300
+elif [ "$command" = request ]; then route="request/$arg1"
+else route=$command
+fi
+{
+  printf 'noproxy = "*"\nsilent\nshow-error\nmax-redirs = 0\nmax-time = %s\n' "$timeout"
+  printf 'write-out = "\\n%%{http_code}"\n'
+  printf 'header = "Authorization: Bearer %s"\n' "$token"
+  printf 'url = "http://127.0.0.1:%s/%s"\n' "$port" "$route"
+  case "$command" in select|scroll|activate) printf 'request = "POST"\n' ;; esac
+} > "$work/config"
+chmod 600 "$work/config"
+if [ "$command" = test ]; then
+  printf 'form = "plan=<%s"\n' "$(quote "$work/plan")" >> "$work/config"
+  printf 'form-string = "output=%s"\n' "$(quote "$output")" >> "$work/config"
+  env | sed -n 's/^\(COPILOT_TEST_[A-Z0-9_]\{1,115\}\)=.*/\1/p' | sort -u > "$work/inputs"
+  while IFS= read -r name; do
+    value=$(printenv "$name") || continue
+    printf 'form-string = "env:%s=%s"\n' "$name" "$(quote "$value")" >> "$work/config"
+  done < "$work/inputs"
+fi
+response=$(curl -K - < "$work/config") || fail "$prefix""The desktop did not answer. Is Copilot CLI Desktop still running?"
+status=$(printf '%s\n' "$response" | tail -n 1)
+body=$(printf '%s\n' "$response" | sed '$d')
+if [ "$status" = 200 ]; then printf '%s\n' "$body"; exit 0; fi
+message=$(printf '%s' "$body" | sed -n 's/^.*"message":"\(.*\)"}$/\1/p' | sed 's/\\"/"/g')
+[ -n "$message" ] || message="The desktop answered with HTTP $status."
+fail "$prefix$message"
+`
 
 // Uses Windows PowerShell already present on supported Windows installations.
 // No Node installation, installed desktop CLI, or third-party MCP is required.
@@ -80,7 +188,7 @@ try {
 }
 `
 
-export const BROWSER_INSTRUCTIONS = `# This session's desktop debug browser
+const WINDOWS_BROWSER_INSTRUCTIONS = `# This session's desktop debug browser
 
 This Copilot CLI session has its own embedded browser, console, and network capture.
 When asked to read the browser console, find exceptions, or inspect network activity,
@@ -135,7 +243,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" snapshot
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" snapshot 123 FRAME_ID
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" scroll 123 FRAME_ID 800
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" screenshot -OutputPath "$env:TEMP\ticket-browser.png"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" screenshot -OutputPath "$env:TEMP\\ticket-browser.png"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" responses
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" response b123-1
 \`\`\`
@@ -258,10 +366,24 @@ with an image tool. Summarize passed, failed and skipped checks, relevant consol
 network evidence (recording limits still apply), and link the report/screenshots.
 `
 
+/** The instructions with the commands for this platform's shell: `sh` and the helper's path outside Windows. */
+export function browserInstructions(platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') return WINDOWS_BROWSER_INSTRUCTIONS
+  return WINDOWS_BROWSER_INSTRUCTIONS
+    .replaceAll('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER"', 'sh "$COPILOT_DESKTOP_BROWSER_HELPER"')
+    .replaceAll('powershell.exe -NoProfile -ExecutionPolicy Bypass -File\n"$env:COPILOT_DESKTOP_BROWSER_HELPER"', 'sh "$COPILOT_DESKTOP_BROWSER_HELPER"')
+    .replaceAll('"$env:TEMP\\ticket-browser.png"', '"/tmp/ticket-browser.png"')
+    .replaceAll('```powershell', '```sh')
+}
+
+export const BROWSER_INSTRUCTIONS = browserInstructions()
+
 export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
   const paths = browserSessionPaths(root, tabId)
-  await writeFileAtomic(paths.helper, BROWSER_HELPER)
-  await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
+  if (process.platform === 'win32') {
+    await writeFileAtomic(paths.helper, BROWSER_HELPER)
+    await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
+  } else await writeFileAtomic(paths.helper, BROWSER_HELPER_SH)
   await writeFileAtomic(join(paths.directory, '.github', 'instructions', 'browser.instructions.md'), BROWSER_INSTRUCTIONS)
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
   return { ...environment,

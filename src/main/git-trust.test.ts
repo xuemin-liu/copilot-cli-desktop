@@ -1,10 +1,16 @@
+import { tmpdir } from 'node:os'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { createGitFixture, findGitForTests, shellPath } from './fixtures/git-fixture.js'
 import { GitTrustStore, configItemsHash, isBenignConfigItem, parseConfigScan, scanRepoConfig } from './git-trust.js'
 import { statusArgs } from './git-commands.js'
+import { caseInsensitivePaths, pathKey } from './host-path.js'
+
+/** A repository folder in this platform's spelling, and the same text in lower case. */
+const REPO = resolve('/Work/Repo')
+const LOWER = REPO.toLowerCase()
 
 const git = await findGitForTests()
 const skip = git ? false : 'git is not installed'
@@ -96,32 +102,32 @@ test('the gate holds: a repository with a clean filter is never asked to run it 
 
 test('trust is remembered by repository and exact config hash, and survives a restart', async (t) => {
   const fixture = (await createGitFixture())
-  const folder = fixture?.root ?? join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-trust-${process.pid}`)
+  const folder = fixture?.root ?? join(tmpdir(), `git-trust-${process.pid}`)
   mkdirSync(folder, { recursive: true })
   t.after(() => fixture?.cleanup())
   const file = join(folder, 'git-trust.json')
   const hashA = 'a'.repeat(64)
   const hashB = 'b'.repeat(64)
   const store = new GitTrustStore(file)
-  assert.equal(await store.isTrusted('C:\\Work\\Repo', hashA), false)
-  await store.trust('C:\\Work\\Repo', hashA)
-  assert.equal(await store.isTrusted('c:\\work\\repo', hashA), true, 'path comparison ignores case')
-  assert.equal(await store.isTrusted('C:\\Work\\Repo', hashB), false, 'a changed config is a new question')
+  assert.equal(await store.isTrusted(REPO, hashA), false)
+  await store.trust(REPO, hashA)
+  assert.equal(await store.isTrusted(LOWER, hashA), caseInsensitivePaths, 'path comparison ignores case where the platform does')
+  assert.equal(await store.isTrusted(REPO, hashB), false, 'a changed config is a new question')
   assert.equal(await store.isTrusted('C:\\Work\\Other', hashA), false)
   const reopened = new GitTrustStore(file)
-  assert.equal(await reopened.isTrusted('C:\\Work\\Repo', hashA), true)
+  assert.equal(await reopened.isTrusted(REPO, hashA), true)
 })
 
 test('a corrupt trust file is treated as empty, not as trust', async (t) => {
   const fixture = (await createGitFixture())
-  const folder = fixture?.root ?? join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-trust-bad-${process.pid}`)
+  const folder = fixture?.root ?? join(tmpdir(), `git-trust-bad-${process.pid}`)
   mkdirSync(folder, { recursive: true })
   t.after(() => fixture?.cleanup())
   const file = join(folder, 'git-trust.json')
   writeFileSync(file, '{"version":1,"repos":{"c:\\\\work\\\\repo":"not-a-hash"}}')
-  assert.equal(await new GitTrustStore(file).isTrusted('C:\\Work\\Repo', 'not-a-hash'), false)
+  assert.equal(await new GitTrustStore(file).isTrusted(REPO, 'not-a-hash'), false)
   writeFileSync(file, 'not json')
-  assert.equal(await new GitTrustStore(file).isTrusted('C:\\Work\\Repo', 'a'.repeat(64)), false)
+  assert.equal(await new GitTrustStore(file).isTrusted(REPO, 'a'.repeat(64)), false)
 })
 
 test('values that contain newlines or key=value text cannot imitate a different configuration', () => {
@@ -144,33 +150,33 @@ test('a repository-local excludes or attributes file needs review, because statu
 
 test('hook approvals are remembered by repository and exact hash, separately from config trust, and survive a restart', async (t) => {
   const fixture = (await createGitFixture())
-  const folder = fixture?.root ?? join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hooks-trust-${process.pid}`)
+  const folder = fixture?.root ?? join(tmpdir(), `git-hooks-trust-${process.pid}`)
   mkdirSync(folder, { recursive: true })
   t.after(() => fixture?.cleanup())
   const file = join(folder, 'git-trust-hooks.json')
   const hashA = 'a'.repeat(64)
   const hashB = 'b'.repeat(64)
   const store = new GitTrustStore(file)
-  assert.equal(await store.areHooksApproved('C:\\Work\\Repo', hashA), false)
-  await store.approveHooks('C:\\Work\\Repo', hashA)
-  assert.equal(await store.areHooksApproved('c:\\work\\repo', hashA), true, 'path comparison ignores case')
-  assert.equal(await store.areHooksApproved('C:\\Work\\Repo', hashB), false, 'a changed hook is a new question')
-  assert.equal(await store.isTrusted('C:\\Work\\Repo', hashA), false, 'approving hooks does not trust the config')
-  await store.trust('C:\\Work\\Repo', hashB)
-  assert.equal(await store.areHooksApproved('C:\\Work\\Repo', hashA), true, 'trusting the config does not undo a hook approval')
+  assert.equal(await store.areHooksApproved(REPO, hashA), false)
+  await store.approveHooks(REPO, hashA)
+  assert.equal(await store.areHooksApproved(LOWER, hashA), caseInsensitivePaths, 'path comparison ignores case where the platform does')
+  assert.equal(await store.areHooksApproved(REPO, hashB), false, 'a changed hook is a new question')
+  assert.equal(await store.isTrusted(REPO, hashA), false, 'approving hooks does not trust the config')
+  await store.trust(REPO, hashB)
+  assert.equal(await store.areHooksApproved(REPO, hashA), true, 'trusting the config does not undo a hook approval')
   const reopened = new GitTrustStore(file)
-  assert.equal(await reopened.areHooksApproved('C:\\Work\\Repo', hashA), true)
-  assert.equal(await reopened.isTrusted('C:\\Work\\Repo', hashB), true)
+  assert.equal(await reopened.areHooksApproved(REPO, hashA), true)
+  assert.equal(await reopened.isTrusted(REPO, hashB), true)
 })
 
 test('an older trust file without hook approvals still loads', async (t) => {
   const fixture = (await createGitFixture())
-  const folder = fixture?.root ?? join(process.env.TEMP ?? 'C:\\Windows\\Temp', `git-hooks-old-${process.pid}`)
+  const folder = fixture?.root ?? join(tmpdir(), `git-hooks-old-${process.pid}`)
   mkdirSync(folder, { recursive: true })
   t.after(() => fixture?.cleanup())
   const file = join(folder, 'old-trust.json')
-  writeFileSync(file, JSON.stringify({ version: 1, repos: { 'c:\\work\\repo': 'c'.repeat(64) } }))
+  writeFileSync(file, JSON.stringify({ version: 1, repos: { [pathKey(REPO)]: 'c'.repeat(64) } }))
   const store = new GitTrustStore(file)
-  assert.equal(await store.isTrusted('C:\\Work\\Repo', 'c'.repeat(64)), true)
-  assert.equal(await store.areHooksApproved('C:\\Work\\Repo', 'c'.repeat(64)), false)
+  assert.equal(await store.isTrusted(REPO, 'c'.repeat(64)), true)
+  assert.equal(await store.areHooksApproved(REPO, 'c'.repeat(64)), false)
 })
