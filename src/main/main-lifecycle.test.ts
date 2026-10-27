@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { writeFileSync } from 'node:fs'
+import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -140,7 +140,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, Notification = {}, safeStorage = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = {}, safeStorage = {}, Tray = {};
         export const browserStorageClears = [];
         export const session = { fromPartition(partition) {
           return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>
@@ -2146,11 +2146,13 @@ test('closing a worktree session removes its worktree and branch when nothing is
     // Changes, confirmed: the folder goes to the Recycle Bin and git forgets it.
     const confirmed = await startWorktreeSession(harness, directory, git.path)
     writeFileSync(join(confirmed.worktree, 'notes.txt'), 'unsaved\n')
+    // Git names the folder by its real path (macOS: /private/var for /var).
+    const confirmedReal = realpathSync.native(confirmed.worktree).toLowerCase()
     let accepted = harness.answerMessageBoxes(0)
     await harness.request('desktop:close-tab', confirmed.tabId)
     await harness.worktreeCleanups()
     assert.equal(accepted.length, 1)
-    assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmed.worktree.toLowerCase()))
+    assert.ok(harness.shellCalls.some((call) => call.action === 'trash' && call.target.toLowerCase() === confirmedReal))
     assert.equal(await exists(confirmed.worktree), false)
     assert.ok(!execFileSync(git.path, ['worktree', 'list', '--porcelain'], { cwd: confirmed.repo, encoding: 'utf8' }).includes(confirmed.name))
 

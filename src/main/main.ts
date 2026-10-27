@@ -13,6 +13,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  nativeImage,
   Notification,
   safeStorage,
   session as electronSession,
@@ -943,7 +944,8 @@ function rebuildTrayMenu(): void {
 
 function updateTrayVisibility(): void {
   if (desktopConfig.trayEnabled && !tray) {
-    tray = new Tray(iconPath())
+    // macOS draws menu-bar icons at their pixel size, so the window icon would fill the bar.
+    tray = new Tray(process.platform === 'darwin' ? nativeImage.createFromPath(iconPath()).resize({ width: 18, height: 18 }) : iconPath())
     tray.setToolTip('Copilot CLI Desktop')
     tray.on('click', restoreMainWindow)
     rebuildTrayMenu()

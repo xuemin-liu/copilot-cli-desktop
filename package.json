@@ -133,7 +133,7 @@
       "artifactName": "Copilot-CLI-Desktop-Setup-${version}.${ext}"
     },
     "mac": {
-      "icon": "build/icon.png",
+      "icon": "build/icon-1024.png",
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
@@ -157,7 +157,7 @@
       ]
     },
     "linux": {
-      "icon": "build/icon.png",
+      "icon": "build/icon-1024.png",
       "category": "Development",
       "maintainer": "copilot-cli-desktop contributors",
       "synopsis": "Desktop shell for the GitHub Copilot CLI",
