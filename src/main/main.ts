@@ -1410,6 +1410,13 @@ function applySessionPermissionMode(id: string, session: PtySession, mode: Sessi
 /** Sessions still starting in each workspace: their tab does not exist yet, but removing the workspace must wait. */
 const startingWorkspaceSessions = new Map<string, number>()
 
+/** A session can be prepared across awaits while its workspace is removed: no tab may be registered for one that is gone. */
+function assertWorkspaceListed(profile: WorkspaceProfile): void {
+  if (!desktopConfig.profiles.some((candidate) => candidate.id === profile.id)) {
+    throw new Error(`The workspace ${profile.name} was removed while the session was opening`)
+  }
+}
+
 /** Workspaces a session uses or is starting in, which the profile limit must not drop. */
 function workspacesInUse(): Set<string> {
   return new Set([...tabsState.tabs.map((tab) => tab.workspaceProfileId), ...startingWorkspaceSessions.keys()])
@@ -1489,6 +1496,7 @@ async function startSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  assertWorkspaceListed(profile)
   const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
 
@@ -2363,6 +2371,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 /** Lists a saved tab without starting it: its process starts the first time it is shown (`wakeDormantTab`), so a launch
  * with many saved tabs starts one Copilot process instead of all of them. */
 function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
+  assertWorkspaceListed(profile)
   const id = `tab-${nextTabSequence++}`
   const parent = candidate.sideParentSessionId
     ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
