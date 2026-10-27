@@ -60,6 +60,21 @@ export function preferenceRollback(
   return rollback
 }
 
+/**
+ * Chains a config write after the ones already queued. `write` should copy the config when it runs, not
+ * when it is queued, and `onFailure` runs before the next write starts: together a failed change is
+ * undone before any later write copies the config, so a later successful write cannot save it after all.
+ */
+export function queueConfigWrite(
+  queue: Promise<void>,
+  write: () => Promise<void>,
+  onFailure?: () => void,
+): { operation: Promise<void>; queue: Promise<void> } {
+  const operation = queue.then(write)
+  // The second catch keeps the queue usable if undoing the change throws.
+  return { operation, queue: operation.catch(() => onFailure?.()).catch(() => {}) }
+}
+
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
 export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
 

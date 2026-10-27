@@ -10,6 +10,7 @@ import {
   activeWorkspaceProfile,
   normalizeDesktopConfig,
   preferenceRollback,
+  queueConfigWrite,
   readDesktopConfig,
   recordDesktopVersion,
   workspaceProfileId,
@@ -317,4 +318,39 @@ test('a failed preference save restores the values it changed but not a newer ch
   // A newer save already changed close behavior again: leave that one alone.
   assert.deepEqual(preferenceRollback(before, applied, { ...applied, closeBehavior: 'quit' }), { trayEnabled: true })
   assert.deepEqual(preferenceRollback(before, before, before), {})
+})
+
+test('a save queued behind a failing one does not write the rejected preference', async () => {
+  const config = { ...DEFAULT_DESKTOP_CONFIG, notifications: true, meetingDiscussion: false }
+  const saved: DesktopConfig[] = []
+  let failFirst!: () => void
+  const firstBlocked = new Promise<void>((_resolve, reject) => { failFirst = () => reject(new Error('disk full')) })
+  let writes = 0
+  const write = async (): Promise<void> => {
+    const copy = structuredClone(config)
+    if (writes++ === 0) await firstBlocked
+    saved.push(copy)
+  }
+
+  // notifications=false is requested while the disk write is blocked...
+  config.notifications = false
+  const first = queueConfigWrite(Promise.resolve(), write, () => { config.notifications = true })
+  // ...and a separate meeting change is saved behind it before it fails.
+  config.meetingDiscussion = true
+  const second = queueConfigWrite(first.queue, write)
+  failFirst()
+
+  await assert.rejects(first.operation, /disk full/)
+  await second.operation
+  assert.deepEqual(saved.map(({ notifications, meetingDiscussion }) => ({ notifications, meetingDiscussion })), [
+    { notifications: true, meetingDiscussion: true },
+  ])
+})
+
+test('the config write queue keeps going when undoing a failed change throws', async () => {
+  const failed = queueConfigWrite(Promise.resolve(), async () => { throw new Error('disk full') }, () => { throw new Error('undo failed') })
+  await assert.rejects(failed.operation, /disk full/)
+  let ran = false
+  await queueConfigWrite(failed.queue, async () => { ran = true }).operation
+  assert.equal(ran, true)
 })

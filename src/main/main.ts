@@ -38,6 +38,7 @@ import {
   isBrowserProfileMode,
   isCloseBehavior,
   preferenceRollback,
+  queueConfigWrite,
   readDesktopConfig,
   recordDesktopVersion,
   writeDesktopConfig,
@@ -670,11 +671,15 @@ function dockSessionTab(tabId: string): DesktopState {
   return snapshot()
 }
 
-async function persistConfig(): Promise<void> {
+/** `onFailure` undoes the caller's change before the next queued write copies the config. */
+async function persistConfig(onFailure?: () => void): Promise<void> {
   if (configWritesBlocked) return
-  const nextConfig = structuredClone(desktopConfig)
-  const operation = configWriteQueue.then(() => writeDesktopConfig(configPath(), nextConfig))
-  configWriteQueue = operation.catch(() => {})
+  const { operation, queue } = queueConfigWrite(
+    configWriteQueue,
+    () => writeDesktopConfig(configPath(), structuredClone(desktopConfig)),
+    onFailure,
+  )
+  configWriteQueue = queue
   await operation
 }
 
@@ -3647,17 +3652,14 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
   updateTrayVisibility()
   const applied = settingsPreferences()
-  try {
-    await persistConfig()
-  } catch (error) {
-    // Settings reads this in-memory config, so an unsaved change would otherwise
-    // keep showing (and keep taking effect) until the app restarts.
+  // Settings reads this in-memory config, so an unsaved change would otherwise
+  // keep showing, keep taking effect, and be written by the next save.
+  await persistConfig(() => {
     Object.assign(desktopConfig, preferenceRollback(before, applied, settingsPreferences()))
     if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
     updateTrayVisibility()
     broadcastSettingsPreferences()
-    throw error
-  }
+  })
   broadcastSettingsPreferences()
   if (overridesChanged) broadcastState()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
