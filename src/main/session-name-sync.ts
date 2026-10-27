@@ -71,6 +71,7 @@ const NON_TEXT_INPUT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\
  */
 export class PromptDraft {
   private dirty: boolean
+  private contextText: string | null = ''
   private lastInputAt = 0
   private pickerShowing: boolean
 
@@ -87,6 +88,7 @@ export class PromptDraft {
   note(data: string, now = Date.now()): void {
     const text = data.replace(NON_TEXT_INPUT, '')
     if (!text) return
+    this.noteContextText(text)
     this.lastInputAt = now
     const last = text.at(-1)
     // Alt+Enter (`ESC CR`) adds a line to the draft rather than sending it.
@@ -95,6 +97,35 @@ export class PromptDraft {
   }
 
   get empty(): boolean { return !this.dirty }
+
+  /** Only attach to a known ordinary prompt with the caret at its end. Commands, history/picker navigation and
+   * unrecognized editing sequences must keep their native Enter behavior. */
+  get canAttachContext(): boolean {
+    const text = this.contextText?.trimStart()
+    return !this.pickerShowing && !!text && !text.startsWith('/') && !text.startsWith('!')
+  }
+
+  /** Approval input can clear the CLI's badge before its Enter arrives. Keep that entire response free of context. */
+  suppressContext(): void { this.contextText = null }
+
+  private noteContextText(text: string): void {
+    if (text === '\r' || text === '\x03') { this.contextText = ''; return }
+    if (this.contextText === null) return
+    if (text.startsWith('\x1b[200~') && text.endsWith('\x1b[201~')) {
+      const pasted = text.slice(6, -6).replace(/\r\n?/g, '\n')
+      this.contextText = /[\x00-\x08\x0b-\x1f\x7f]/.test(pasted) ? null : this.contextText + pasted
+    } else if (text === '\x1b\r') this.contextText += '\n'
+    else {
+      for (const char of text) {
+        if (char === '\x7f' || char === '\b') this.contextText = Array.from(this.contextText).slice(0, -1).join('')
+        else if (char === '\x15') this.contextText = this.contextText.slice(0, this.contextText.lastIndexOf('\n') + 1)
+        else if (char === '\x17') this.contextText = this.contextText.replace(/\S+\s*$/, '')
+        else if (char >= ' ' || char === '\n') this.contextText += char
+        else { this.contextText = null; break }
+      }
+    }
+    if (this.contextText !== null && this.contextText.length > 12_000) this.contextText = null
+  }
 
   /** No input for a while: a prompt just sent has had time to show up as Copilot's turn. */
   quiet(now = Date.now(), ms = 2_000): boolean { return now - this.lastInputAt >= ms }

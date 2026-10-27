@@ -8,6 +8,43 @@ import { PromptDraft, nameSyncAction, parseWorkspaceName, readCopilotSessionName
 const yaml = (name: string, userNamed = false): string =>
   `id: 11111111-1111-4111-8111-111111111111\ncwd: D:\\work\nname: ${name}\nuser_named: ${userNamed}\nsummary_count: 0\n`
 
+test('cursor context attaches only to an ordinary draft with a known insertion point', () => {
+  const draft = new PromptDraft()
+  assert.equal(draft.canAttachContext, false)
+  for (const char of 'why is this code needed?') draft.note(char)
+  assert.equal(draft.canAttachContext, true)
+  draft.note('\x1b[<0;4;8M')
+  assert.equal(draft.canAttachContext, true, 'terminal mouse reports do not edit the prompt')
+  draft.note('\x7f')
+  draft.note('?')
+  assert.equal(draft.canAttachContext, true)
+  draft.note('\r')
+  assert.equal(draft.canAttachContext, false)
+  for (const command of ['/help', '  /rename name', '!git status', ' \t']) {
+    draft.note(command)
+    assert.equal(draft.canAttachContext, false, command)
+    draft.note('\x03')
+  }
+  draft.note('\x1b[200~why is this\nneeded?\x1b[201~')
+  assert.equal(draft.canAttachContext, true, 'multiline paste is a draft, not a submission')
+  draft.note('\x1b\r')
+  draft.note('explain')
+  assert.equal(draft.canAttachContext, true, 'Alt+Enter continues the question')
+  draft.note('\x1b[D')
+  assert.equal(draft.canAttachContext, false, 'do not insert into the middle of an edited draft')
+  draft.note('\r')
+  draft.note('fresh question')
+  assert.equal(draft.canAttachContext, true)
+  draft.note('\t')
+  assert.equal(draft.canAttachContext, false, 'autocomplete may change the draft')
+  const picker = new PromptDraft({ awaitingFirstEnter: true })
+  picker.note('search text')
+  assert.equal(picker.canAttachContext, false)
+  picker.note('\r')
+  picker.note('question')
+  assert.equal(picker.canAttachContext, true)
+})
+
 test('the name is read from Copilot\'s workspace.yaml in the forms Copilot writes', () => {
   assert.deepEqual(parseWorkspaceName(yaml('Say hello please')), { name: 'Say hello please', userNamed: false })
   assert.deepEqual(parseWorkspaceName(yaml('copilot-cli-desktop', true)), { name: 'copilot-cli-desktop', userNamed: true })

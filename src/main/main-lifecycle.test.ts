@@ -142,7 +142,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = {}, safeStorage = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = { isSupported: () => false }, safeStorage = {}, Tray = {};
         export const browserStorageClears = [];
         export const session = { fromPartition(partition) {
           return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>
@@ -1595,6 +1595,64 @@ async function waitFor<T>(read: () => Promise<T> | T, done: (value: T) => boolea
 }
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('Enter appends Git cursor context once to an ordinary prompt and holds subsequent keys until submission', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const opened = await harness.createMain()
+  const id = opened.activeTabId!
+  const spawn = harness.spawns[0]!
+  const context = 'Git panel cursor context\nFile: src/a.ts\nCursor: new line 42\n> +needed()'
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await harness.request('desktop:write-tab', id, 'why is this code needed?')
+  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.equal(spawn.written.length, 2)
+  assert.equal(spawn.written[0], 'why is this code needed?')
+  assert.equal(spawn.written[1], `\x1b[200~\n\n${context}\x1b[201~`)
+  await harness.request('desktop:write-tab', id, 'next draft')
+  assert.equal(spawn.written.length, 2, 'new keys cannot become part of the context paste')
+  await waitFor(() => spawn.written.length, value => value === 4, 'cursor prompt submitted')
+  assert.deepEqual(spawn.written.slice(-2), ['\r', 'next draft'])
+  await harness.request('desktop:write-tab', id, '\x03')
+  for (const question of ['', '/help', '!git status', 'question\x1b[D', '\t']) {
+    await harness.request('desktop:write-tab', id, question)
+    const before: number = spawn.written.length
+    await harness.request('desktop:write-tab', id, '\r', context)
+    assert.deepEqual(spawn.written.slice(before), ['\r'], `native Enter: ${JSON.stringify(question)}`)
+  }
+  spawn.emitData('\x1b[?2004l')
+  await harness.request('desktop:write-tab', id, 'no bracketed paste')
+  const before = spawn.written.length
+  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.deepEqual(spawn.written.slice(before), ['\r'], 'no unsafe multiline fallback')
+  spawn.emitData('\x1b[?2004h')
+  await harness.request('desktop:write-tab', id, 'no cursor reference')
+  const noContext = spawn.written.length
+  await harness.request('desktop:write-tab', id, '\r')
+  assert.deepEqual(spawn.written.slice(noContext), ['\r'], 'a closed panel preserves native submission')
+  spawn.emitData('Allow this command?')
+  assert.equal((await harness.request('desktop:get-state')).tabs[0]?.status, 'approval-needed')
+  await harness.request('desktop:write-tab', id, 'yes')
+  const approval = spawn.written.length
+  await harness.request('desktop:write-tab', id, '\r', context)
+  assert.deepEqual(spawn.written.slice(approval), ['\r'], 'approval input never receives code context')
+}))
+
+test('a process restart during a Git context paste cannot submit or replay input into the replacement process', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const opened = await harness.createMain()
+  const id = opened.activeTabId!
+  const old = harness.spawns[0]!
+  old.emitData('\x1b[?2004h <- open sidebar\r\n')
+  await harness.request('desktop:write-tab', id, 'why is this needed?')
+  await harness.request('desktop:write-tab', id, '\r', 'Git panel cursor context')
+  await harness.request('desktop:write-tab', id, 'queued input')
+  await harness.request('desktop:restart-tab', id)
+  await pause(400)
+  assert.equal(old.written.length, 2, 'the old process received only the draft and paste')
+  assert.deepEqual(harness.spawns[1]?.written, [], 'no old Enter or queued keys reach the replacement')
+}))
 
 test('an unnamed session starts without --name and its tab takes the name Copilot gives it', async () => {
   await fixture(async (harness, directory) => {

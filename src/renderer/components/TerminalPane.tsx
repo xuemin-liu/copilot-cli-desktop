@@ -9,6 +9,7 @@ import { TerminalReplay } from '../terminal-replay.js'
 import { handleTerminalPaste, isNativePasteKey } from '../terminal-paste.js'
 import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
+import { readGitCursorContext } from '../git-cursor-context.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
@@ -308,7 +309,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
     terminal.onData((data) => {
       if (!data || data === '\u001b[200~\u001b[201~') return
-      void window.copilotDesktop.writeTab(tabId, data)
+      void window.copilotDesktop.writeTab(tabId, data, data === '\r' ? readGitCursorContext(tabId) : undefined)
     })
 
     // Subscribe before fetching the backlog so startup output cannot fall in

@@ -1346,6 +1346,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     observe(applySessionCwd(id, session, cwd, generation), 'Could not inspect the session folder')
   })
   session.on('status', (status) => {
+    if (status === 'approval-needed') promptDrafts.get(id)?.suppressContext()
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
     // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host). Not while the app quits:
@@ -3491,12 +3492,35 @@ ipcMain.handle('desktop:fork-side-chat', (event, tabId: unknown, sourceSessionId
   }
   return forkSideChat(tabId, sourceSessionId, title)
 })
-ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown) => {
+ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCursorContext?: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || typeof data !== 'string') throw new Error('Invalid pty input')
   if (!ownsSessionTerminal(event, tabId)) return
   const held = heldInput.get(tabId)
   if (held) { held.push(data); return }
+  const draft = promptDrafts.get(tabId)
+  const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
+  const session = managedTabs.get(tabId)?.session
+  const idle = session?.activity === 'idle' || (session?.activity === null && session.recentOutputText.includes('open sidebar'))
+  if (data === '\r' && typeof gitCursorContext === 'string' && gitCursorContext.trim() && gitCursorContext.length <= 8_000
+    && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && session?.bracketedPaste && idle) {
+    // This Enter belongs to the person. Append one bracketed excerpt to their existing draft, then submit once it has
+    // landed, holding subsequent input just as sendSessionTask does. No cursor movement or draft replacement is needed.
+    const paste = taskPasteSequence(`\n\n${gitCursorContext}`)
+    const queued: string[] = []
+    heldInput.set(tabId, queued)
+    draft.note(paste)
+    session.write(paste)
+    setTimeout(() => {
+      if (heldInput.get(tabId) !== queued) return
+      heldInput.delete(tabId)
+      if (managedTabs.get(tabId)?.session !== session) return
+      session.write('\r')
+      draft.note('\r')
+      for (const input of queued) { draft.note(input); session.write(input) }
+    }, 300)
+    return
+  }
   promptDrafts.get(tabId)?.note(data)
   managedTabs.get(tabId)?.session.write(data)
 })

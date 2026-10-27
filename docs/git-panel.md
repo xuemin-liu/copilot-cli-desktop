@@ -178,6 +178,17 @@ shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upst
 
 ## Giving context to Copilot
 
+Hover over or click a code line in the diff, then type a question such as **“Why is this code needed?”** in the CLI and press
+Enter. The last pointed-to line is highlighted, and **CLI context** below the diff identifies it. Your question automatically
+includes the repository folder, file, staged/working-tree side, old/new line number and a short excerpt around that line.
+Moving the pointer back to the CLI keeps the reference. **Clear**, closing the panel, changing files, repositories, sessions,
+views or branches, or a changed diff clears it. No inline comment is required. Credential-like values and private keys are
+redacted, and contents of files named for secrets are withheld, just as with **Add to prompt**.
+
+Automatic context accompanies ordinary prompts in a local, idle CLI with bracketed paste enabled. Slash commands, shell
+commands (`!`), approvals, the resume picker, and empty Enter presses keep their normal behavior. If prompt navigation or an
+unrecognized editing key makes the caret position uncertain, that submission is left alone; a fresh prompt can attach context.
+
 - **Add to prompt** puts the selected diff in the prompt box of the active session. Nothing is sent: review it and press
   Enter. The text is kept under 11,000 characters and says how many lines were left out. With **Whole file** on, it still
   adds the changes with their usual context, not the whole file.
