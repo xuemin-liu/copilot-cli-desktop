@@ -37,6 +37,7 @@ import {
   isBrowserOverridesMode,
   isBrowserProfileMode,
   isCloseBehavior,
+  preferenceRollback,
   readDesktopConfig,
   recordDesktopVersion,
   writeDesktopConfig,
@@ -3612,6 +3613,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     throw new Error('Invalid desktop preferences')
   }
 
+  const before = settingsPreferences()
   const updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'
     && desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
   const shortcutChanged = typeof values.globalShortcutEnabled === 'boolean'
@@ -3644,7 +3646,18 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   }
   if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
   updateTrayVisibility()
-  await persistConfig()
+  const applied = settingsPreferences()
+  try {
+    await persistConfig()
+  } catch (error) {
+    // Settings reads this in-memory config, so an unsaved change would otherwise
+    // keep showing (and keep taking effect) until the app restarts.
+    Object.assign(desktopConfig, preferenceRollback(before, applied, settingsPreferences()))
+    if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    updateTrayVisibility()
+    broadcastSettingsPreferences()
+    throw error
+  }
   broadcastSettingsPreferences()
   if (overridesChanged) broadcastState()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)

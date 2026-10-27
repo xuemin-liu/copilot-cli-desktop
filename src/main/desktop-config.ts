@@ -44,6 +44,22 @@ export type DesktopPreferences = Pick<
   'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
 >
 
+/**
+ * What to put back when saving a preference change fails: each value the change set returns to what it was
+ * before, unless another change has replaced it since, so a failed save never undoes a newer one.
+ */
+export function preferenceRollback(
+  before: DesktopPreferences,
+  applied: DesktopPreferences,
+  current: DesktopPreferences,
+): Partial<DesktopPreferences> {
+  const rollback: Partial<DesktopPreferences> = {}
+  for (const key of Object.keys(before) as Array<keyof DesktopPreferences>) {
+    if (before[key] !== applied[key] && current[key] === applied[key]) Object.assign(rollback, { [key]: before[key] })
+  }
+  return rollback
+}
+
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
 export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
 

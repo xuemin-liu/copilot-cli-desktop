@@ -9,6 +9,7 @@ import {
   activateWorkspaceProfile,
   activeWorkspaceProfile,
   normalizeDesktopConfig,
+  preferenceRollback,
   readDesktopConfig,
   recordDesktopVersion,
   workspaceProfileId,
@@ -292,4 +293,28 @@ test('worktree cleanup defaults to removing safe worktrees and keeps a valid sav
     await writeDesktopConfig(filename, { ...DEFAULT_DESKTOP_CONFIG, worktreeCleanup: 'keep' })
     assert.equal((await readDesktopConfig(filename)).worktreeCleanup, 'keep')
   })
+})
+
+test('a failed preference save restores the values it changed but not a newer change', () => {
+  const preferences = (config: DesktopConfig) => ({
+    closeBehavior: config.closeBehavior,
+    trayEnabled: config.trayEnabled,
+    notifications: config.notifications,
+    automaticUpdateChecks: config.automaticUpdateChecks,
+    globalShortcutEnabled: config.globalShortcutEnabled,
+    browserProfile: config.browserProfile,
+    browserOverrides: config.browserOverrides,
+    worktreeTimeoutMinutes: config.worktreeTimeoutMinutes,
+    worktreeCleanup: config.worktreeCleanup,
+    meetingMaxRounds: config.meetingMaxRounds,
+    meetingRoundTimeoutMinutes: config.meetingRoundTimeoutMinutes,
+    meetingDiscussion: config.meetingDiscussion,
+  })
+  const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
+  // Turning the tray off also moved close behavior back to asking.
+  const applied = { ...before, trayEnabled: false, closeBehavior: 'ask' as const }
+  assert.deepEqual(preferenceRollback(before, applied, applied), { trayEnabled: true, closeBehavior: 'tray' })
+  // A newer save already changed close behavior again: leave that one alone.
+  assert.deepEqual(preferenceRollback(before, applied, { ...applied, closeBehavior: 'quit' }), { trayEnabled: true })
+  assert.deepEqual(preferenceRollback(before, before, before), {})
 })
