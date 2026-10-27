@@ -39,6 +39,8 @@ interface Harness {
   blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
   /** Dormant tabs' reads of their saved session's folder wait for `work`. */
   blockDormantFolderReads(work: Promise<void>): void
+  /** Linked-worktree lookups finish, call `started`, then wait for `work` before returning. */
+  blockWorktreeLookups(work: Promise<void>, started: () => void): void
   setNextSpawn(work: () => Promise<void>): void
   flushConfig(): Promise<void>
   checkMigrationIdle(): void
@@ -182,6 +184,18 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
         }
       `,
+      // The real module, with linked-worktree lookups a test can hold after they resolve.
+      './git-discovery.js': `
+        import * as real from ${JSON.stringify(join(dirname(mainPath), 'git-discovery.js'))};
+        export * from ${JSON.stringify(join(dirname(mainPath), 'git-discovery.js'))};
+        let gate = null;
+        export function blockWorktreeLookups(work, started) { gate = { work, started }; }
+        export async function resolveLinkedWorktree(...args) {
+          const result = await real.resolveLinkedWorktree(...args);
+          if (gate) { gate.started(); await gate.work; }
+          return result;
+        }
+      `,
       './resolve-copilot.js': `
         export async function resolveCopilotBinary() {
           return { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] };
@@ -204,6 +218,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
+        import { blockWorktreeLookups } from './git-discovery.js';
         import { browserStorageClears } from 'electron';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
@@ -222,6 +237,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
           blockDormantFolderReads(work) { const original = applyDormantSessionCwd; applyDormantSessionCwd = async (...args) => { await work; return original(...args); }; },
+          blockWorktreeLookups,
           checkMigrationIdle,
           spawns,
           setNextSpawn,
@@ -272,8 +288,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
-        builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
     const bundlePath = join(directory, 'main-harness.mjs')
@@ -2192,5 +2208,83 @@ test('closing a worktree session removes its worktree and branch when nothing is
     await harness.request('desktop:close-tab', kept.tabId)
     await harness.worktreeCleanups()
     assert.equal(await exists(kept.worktree), true)
+  })
+})
+
+test('a workspace with a session open or still starting cannot be removed, and one without can', async () => fixture(async (harness, directory) => {
+  const first = createWorkspaceProfile(directory)
+  const secondPath = join(directory, 'second'); await mkdir(secondPath)
+  const thirdPath = join(directory, 'third'); await mkdir(thirdPath)
+  const second = createWorkspaceProfile(secondPath), third = createWorkspaceProfile(thirdPath)
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second, third], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+  await harness.createMain()
+
+  // Its tab is registered only after the launch is planned: removal must not slip in before.
+  let release!: () => void
+  harness.blockSpawnPlanWhen((candidate) => candidate.id === second.id, new Promise<void>((resolve) => { release = resolve }))
+  const starting = harness.request('desktop:create-tab', null, second.id)
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(harness.request('desktop:remove-profile', second.id), /A session is starting in second/)
+  release()
+  const started = await starting
+  const tab = started.tabs.find((candidate) => candidate.workspaceProfileId === second.id)!
+  assert.ok(started.profiles.some((profile) => profile.id === second.id))
+  await assert.rejects(harness.request('desktop:remove-profile', second.id), /Close the session open in second/)
+  await assert.rejects(harness.requestSettings('desktop-settings:remove-workspace-profile', second.id), /Close the session open in second/)
+
+  await harness.request('desktop:close-tab', tab.id)
+  const removed = await harness.request('desktop:remove-profile', second.id)
+  assert.deepEqual(removed.profiles.map((profile) => profile.id), [first.id, third.id])
+  const viaSettings = await harness.requestSettings('desktop-settings:remove-workspace-profile', third.id) as { profiles: WorkspaceProfile[] }
+  assert.deepEqual(viaSettings.profiles.map((profile) => profile.id), [first.id])
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8'))
+  assert.deepEqual(saved.profiles.map((profile: WorkspaceProfile) => profile.id), [first.id])
+  assert.equal(harness.spawns.length, 2)
+}))
+
+test('a History session whose workspace is removed while its worktree is looked up opens no orphan tab', async (t) => {
+  const git = await findGitForTests()
+  if (!git) return t.skip('Git unavailable')
+  await fixture(async (harness, directory) => {
+    const { execFileSync } = await import('node:child_process')
+    // Outside the first project, so History finds this one only through its linked worktree.
+    const repo = `${directory}-repo`, worktree = `${directory}-repo.worktrees`
+    t.after(() => Promise.all([rm(repo, { recursive: true, force: true }), rm(worktree, { recursive: true, force: true })]))
+    const globalConfig = join(directory, 'gitconfig')
+    writeFileSync(globalConfig, '[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n')
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }
+    const run = (cwd: string, ...args: string[]): void => { execFileSync(git.path, args, { cwd, env, stdio: 'ignore' }) }
+    await mkdir(repo)
+    run(repo, 'init', '-q')
+    writeFileSync(join(repo, 'a.txt'), 'one\n')
+    run(repo, 'add', '.')
+    run(repo, 'commit', '-q', '-m', 'init')
+    run(repo, 'worktree', 'add', '-q', '-b', 'side', worktree, 'HEAD')
+    const first = createWorkspaceProfile(directory), second = createWorkspaceProfile(repo)
+    harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [first, second], activeProfileId: first.id }, EMPTY_COPILOT_CAPABILITIES)
+    await harness.createMain()
+    const sessionId = randomSessionId()
+    await mkdir(join(directory, 'session-state', sessionId), { recursive: true })
+    await writeFile(join(directory, 'session-state', sessionId, 'workspace.yaml'), `cwd: ${worktree}\nname: Side work\nuser_named: true\nbranch: side\n`)
+    await writeFile(join(directory, 'session-state', sessionId, 'events.jsonl'), [
+      { type: 'session.start', data: { sessionId, startTime: new Date().toISOString(), context: { cwd: worktree } } },
+      { type: 'user.message', data: { content: 'tidy the side branch' } },
+    ].map((event) => JSON.stringify(event)).join('\n') + '\n')
+
+    let release!: () => void, looking!: () => void
+    const lookedUp = new Promise<void>((resolve) => { looking = resolve })
+    harness.blockWorktreeLookups(new Promise<void>((resolve) => { release = resolve }), () => looking())
+    const opening = harness.request('desktop:open-session-history', sessionId)
+    const refused = assert.rejects(opening, /The workspace .* was removed while the session was opening/)
+    // Settles early only if the open never reached the lookup, which the assertion then reports.
+    await Promise.race([lookedUp, opening.catch(() => {})])
+    // Nothing of the session is registered yet, so the removal itself is allowed.
+    await harness.request('desktop:remove-profile', second.id)
+    release()
+    await refused
+    const state = await harness.request('desktop:get-state')
+    assert.ok(state.profiles.every((profile) => profile.id !== second.id))
+    assert.ok(state.tabs.every((tab) => tab.workspaceProfileId !== second.id && tab.lastSessionId !== sessionId))
   })
 })

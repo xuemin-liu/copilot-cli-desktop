@@ -166,6 +166,47 @@ export function activateWorkspaceProfile(
   return profile
 }
 
+export interface RemovedWorkspaceProfile {
+  profile: WorkspaceProfile
+  index: number
+  previousActiveId: string | null
+  activeIdAfterRemoval: string | null
+}
+
+/**
+ * Forgets a workspace; its folder and Copilot's own session history are left alone. When it was the
+ * active workspace, `nextActiveId` (or else the first remaining one) becomes active.
+ */
+export function removeWorkspaceProfile(
+  config: DesktopConfig,
+  profileId: string,
+  nextActiveId: string | null = null,
+): RemovedWorkspaceProfile {
+  const index = config.profiles.findIndex((profile) => profile.id === profileId)
+  const profile = config.profiles[index]
+  if (!profile) throw new Error('The selected workspace profile no longer exists')
+  const previousActiveId = config.activeProfileId
+  config.profiles = config.profiles.filter((candidate) => candidate.id !== profileId)
+  if (previousActiveId === profileId) {
+    config.activeProfileId = config.profiles.some((candidate) => candidate.id === nextActiveId)
+      ? nextActiveId
+      : config.profiles[0]?.id ?? null
+  }
+  return { profile, index, previousActiveId, activeIdAfterRemoval: config.activeProfileId }
+}
+
+/** Undoes removeWorkspaceProfile after its save failed, unless the workspace was added back since. */
+export function restoreWorkspaceProfile(config: DesktopConfig, removed: RemovedWorkspaceProfile): void {
+  if (config.profiles.some((candidate) => candidate.id === removed.profile.id)) return
+  const profiles = [...config.profiles]
+  profiles.splice(Math.min(removed.index, profiles.length), 0, removed.profile)
+  config.profiles = profiles
+  // Make it active again only if nothing has changed the active workspace since.
+  if (removed.previousActiveId === removed.profile.id && config.activeProfileId === removed.activeIdAfterRemoval) {
+    config.activeProfileId = removed.profile.id
+  }
+}
+
 export function activeWorkspaceProfile(config: DesktopConfig): WorkspaceProfile | null {
   return config.profiles.find((profile) => profile.id === config.activeProfileId) ?? null
 }

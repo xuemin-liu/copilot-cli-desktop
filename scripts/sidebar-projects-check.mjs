@@ -53,6 +53,7 @@ if (!process.versions.electron) {
           onProjectsOpenChange={recordOpen} onToggleCollapsed={() => setCollapsed(value => !value)}
           onSelectWorkspace={() => window.fixture.calls.push('add')}
           onActivateProfile={id => window.fixture.calls.push('activate:' + id)}
+          onRemoveProfile={profile => window.fixture.calls.push('remove:' + profile.id)}
           onCreateTab={id => window.fixture.calls.push('create:' + id)}
           onActivateTab={noop} onPopOutTab={noop} onRenameTab={noop} onCloseTab={noop}
           onRestartTab={noop} onUnloadTab={noop} onOpenHistory={noop} onCreateTabWithAttachments={noop} onResumePicker={noop}
@@ -170,6 +171,7 @@ if (!process.versions.electron) {
       for (const [selector, call] of [
         ['.sidebar-project-choice[aria-label="Project 2"]', 'activate:project-2'],
         ['.sidebar-project-row button[aria-label="New session in Project 2"]', 'create:project-2'],
+        ['.sidebar-project-row button[aria-label="Remove Project 2"]', 'remove:project-2'],
         ['.sidebar-project-add', 'add'],
       ]) {
         await ui('window.fixture.calls.length = 0')
@@ -178,7 +180,7 @@ if (!process.versions.electron) {
         await closed()
         assert.deepEqual(await ui('window.fixture.calls'), [call])
       }
-      checks.push('Project, new-session and add actions fire once and close')
+      checks.push('Project, new-session, remove and add actions fire once and close')
 
       await open()
       // Moving within the flyout or back to the trigger must not close it.

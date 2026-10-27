@@ -40,11 +40,14 @@ import {
   preferenceRollback,
   queueConfigWrite,
   readDesktopConfig,
+  removeWorkspaceProfile,
+  restoreWorkspaceProfile,
   recordDesktopVersion,
   writeDesktopConfig,
   type CloseBehavior,
   type DesktopConfig,
   type DesktopPreferences,
+  type RemovedWorkspaceProfile,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
@@ -1404,7 +1407,35 @@ function applySessionPermissionMode(id: string, session: PtySession, mode: Sessi
   refreshMenus()
 }
 
-async function createSessionTab(
+/** Sessions still starting in each workspace: their tab does not exist yet, but removing the workspace must wait. */
+const startingWorkspaceSessions = new Map<string, number>()
+
+/** A session can be prepared across awaits while its workspace is removed: no tab may be registered for one that is gone. */
+function assertWorkspaceListed(profile: WorkspaceProfile): void {
+  if (!desktopConfig.profiles.some((candidate) => candidate.id === profile.id)) {
+    throw new Error(`The workspace ${profile.name} was removed while the session was opening`)
+  }
+}
+
+/** Workspaces a session uses or is starting in, which the profile limit must not drop. */
+function workspacesInUse(): Set<string> {
+  return new Set([...tabsState.tabs.map((tab) => tab.workspaceProfileId), ...startingWorkspaceSessions.keys()])
+}
+
+async function createSessionTab(...args: Parameters<typeof startSessionTab>): Promise<DesktopState> {
+  const profileId = (args[0] === undefined ? activeWorkspaceProfile(desktopConfig) : args[0])?.id
+  if (!profileId) return startSessionTab(...args)
+  startingWorkspaceSessions.set(profileId, (startingWorkspaceSessions.get(profileId) ?? 0) + 1)
+  try {
+    return await startSessionTab(...args)
+  } finally {
+    const remaining = (startingWorkspaceSessions.get(profileId) ?? 1) - 1
+    if (remaining > 0) startingWorkspaceSessions.set(profileId, remaining)
+    else startingWorkspaceSessions.delete(profileId)
+  }
+}
+
+async function startSessionTab(
   profile: WorkspaceProfile | null = activeWorkspaceProfile(desktopConfig),
   resumeModeOverride: ResumeMode | null = null,
   restoreLastSessionId: string | null = null,
@@ -1465,6 +1496,7 @@ async function createSessionTab(
   // have completed during the await. Register the new tab synchronously.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  assertWorkspaceListed(profile)
   const { args, deterministicSessionId, worktreeName } = finalizeSessionArgs(plan, resumeMode, resumeSessionId)
   if (sideOptions.sideChat) args.push('--mode=interactive')
 
@@ -2339,6 +2371,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 /** Lists a saved tab without starting it: its process starts the first time it is shown (`wakeDormantTab`), so a launch
  * with many saved tabs starts one Copilot process instead of all of them. */
 function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
+  assertWorkspaceListed(profile)
   const id = `tab-${nextTabSequence++}`
   const parent = candidate.sideParentSessionId
     ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
@@ -2439,7 +2472,7 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   if (!target) {
     const folder = session.gitRoot && sameOrInside(session.cwd, session.gitRoot) ? session.gitRoot : session.cwd
     if (!await stat(folder).then((info) => info.isDirectory(), () => false)) throw new Error(`The folder that session ran in no longer exists: ${folder}`)
-    target = { profile: activateWorkspaceProfile(desktopConfig, folder, new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId))) }
+    target = { profile: activateWorkspaceProfile(desktopConfig, folder, workspacesInUse()) }
     syncWorkspaceState()
     await persistConfig()
   }
@@ -2577,7 +2610,7 @@ async function selectWorkspace(): Promise<DesktopState> {
     profile = activateWorkspaceProfile(
       desktopConfig,
       workspace,
-      new Set(tabsState.tabs.map((tab) => tab.workspaceProfileId)),
+      workspacesInUse(),
     )
   } catch (error) {
     await dialog.showMessageBox(mainWindow, {
@@ -2616,6 +2649,39 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
     }
   }
   return snapshot()
+}
+
+/** Forgets a workspace with no sessions open in it. Its folder is not touched. */
+async function removeWorkspace(profileId: string): Promise<void> {
+  let removed: RemovedWorkspaceProfile | null = null
+  // Checked and applied when this save's turn comes, so a session opened in the
+  // meantime still blocks it.
+  await persistConfig(() => {
+    const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
+    if (!profile) throw new Error('The selected workspace profile no longer exists')
+    const open = tabsState.tabs.filter((tab) => tab.workspaceProfileId === profileId).length
+    if (open > 0) {
+      throw new Error(`Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} before removing it`)
+    }
+    // Its tab is registered only after the launch is prepared, so it is not in tabsState yet.
+    if (startingWorkspaceSessions.has(profileId)) {
+      throw new Error(`A session is starting in ${profile.name}. Close it once it opens, then remove the workspace`)
+    }
+    // The active session's workspace takes over, so the sidebar and the session stay in step.
+    const activeTabProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId ?? null
+    removed = removeWorkspaceProfile(desktopConfig, profileId, activeTabProfileId)
+    profilesWithSessionTabs.delete(profileId)
+    unrestoredProfileTabs.delete(profileId)
+    syncWorkspaceState()
+  }, () => {
+    if (!removed) return
+    restoreWorkspaceProfile(desktopConfig, removed)
+    syncWorkspaceState()
+    broadcastState()
+    refreshMenus()
+  })
+  broadcastState()
+  refreshMenus()
 }
 
 async function updateWorkspaceProfile(
@@ -3347,6 +3413,12 @@ ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
   return activateProfile(profileId)
 })
+ipcMain.handle('desktop:remove-profile', async (event, profileId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  await removeWorkspace(profileId)
+  return snapshot()
+})
 ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unknown, title: unknown, options: unknown) => {
   assertTrustedIpcSender(event)
   const override = isResumeMode(resumeMode) ? resumeMode : null
@@ -3734,6 +3806,12 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     defaultResumeMode as ResumeMode,
     launch as SessionLaunchConfig,
   )
+  return settingsSnapshot()
+})
+ipcMain.handle('desktop-settings:remove-workspace-profile', async (event, profileId: unknown) => {
+  assertTrustedSettingsSender(event)
+  if (typeof profileId !== 'string') throw new Error('Invalid workspace profile')
+  await removeWorkspace(profileId)
   return settingsSnapshot()
 })
 ipcMain.handle('desktop-settings:update-provider', async (event, provider: unknown) => {
