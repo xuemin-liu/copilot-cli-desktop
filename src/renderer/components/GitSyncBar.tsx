@@ -25,11 +25,13 @@ export interface GitSyncBarProps {
   onCancel(): void
 }
 
-/** Why Pull is unavailable, or null when it is available. */
-export function pullBlocker(upstream: string | null, behind: number, noBranch: boolean): string | null {
+/**
+ * Why Pull is unavailable, or null when it is available. A pull fetches first, so `↓0` only means none were seen at the last
+ * fetch, not that there is nothing to pull.
+ */
+export function pullBlocker(upstream: string | null, noBranch: boolean): string | null {
   if (noBranch) return 'There is no current branch to pull into.'
   if (upstream === null) return 'This branch has no upstream to pull from.'
-  if (behind === 0) return 'Nothing to pull. Fetch first to look for new commits.'
   return null
 }
 
@@ -43,7 +45,7 @@ export function pushBlocker(upstream: string | null, ahead: number, noBranch: bo
 /** Fetch, Pull and Push for the selected repository, with the confirmation a first push needs and live output while one runs. */
 export function GitSyncBar(props: GitSyncBarProps): JSX.Element {
   const { upstream, ahead, behind, noBranch, locked, running, publish } = props
-  const pull = pullBlocker(upstream, behind, noBranch)
+  const pull = pullBlocker(upstream, noBranch)
   const push = pushBlocker(upstream, ahead, noBranch)
   return (
     <section className="git-sync" aria-label="Sync">
@@ -52,7 +54,7 @@ export function GitSyncBar(props: GitSyncBarProps): JSX.Element {
           {running === 'fetch' ? 'Fetching…' : 'Fetch'}
         </button>
         <button type="button" disabled={locked || pull !== null} onClick={() => props.onSync('pull')}
-          title={pull ?? `Move this branch forward to ${upstream ?? 'its upstream'}. Refused, and nothing changes, unless it is a fast-forward.`}>
+          title={pull ?? `Fetch, then move this branch forward to ${upstream ?? 'its upstream'}. Refused, and nothing changes, unless it is a fast-forward.`}>
           {running === 'pull' ? 'Pulling…' : behind > 0 ? `Pull ↓${behind}` : 'Pull'}
         </button>
         <button type="button" disabled={locked || push !== null} onClick={() => props.onSync('push')}

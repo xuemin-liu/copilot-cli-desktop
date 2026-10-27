@@ -1358,6 +1358,9 @@ button:disabled {
 .git-entry { display: grid; grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr); column-gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px; border: 0; border-radius: 4px; background: transparent; color: #e6edf3; }
 .git-entry:hover { background: #151d2b; }
 .git-entry-selected { background: #1b2740; box-shadow: inset 2px 0 0 #4f88ff; }
+.git-entry-marked { background: #1b2740; }
+.git-marked { display: flex; align-items: baseline; gap: 4px; margin: 4px 0 2px; padding: 0 0 4px 4px; border-bottom: 1px solid #1b2230; }
+.git-marked-count { flex: 1; min-width: 0; color: #e6edf3; font-size: 11px; font-weight: 600; }
 .git-entry-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-entry-folder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #596477; font-size: 11px; direction: rtl; text-align: left; }
 .git-code { font-weight: 700; text-align: center; color: #ffb84d; }

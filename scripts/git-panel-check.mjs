@@ -158,7 +158,7 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}\n--- panel text ---\n${text}`)
     }
     const text = selector => ui(`(document.querySelector(${JSON.stringify(selector)}) || {}).innerText || ''`)
-    const click = async selector => {
+    const click = async (selector, modifiers = []) => {
       // A missing target is reported as a value, with what the panel was showing, so a failure says where it stopped.
       const point = await ui(`(() => {
         const element = document.querySelector(${JSON.stringify(selector)});
@@ -170,8 +170,8 @@ if (!process.versions.electron) {
       if (point.missing !== undefined) throw new Error(`No click target ${selector}. The panel showed:
 ${point.missing}`)
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
-      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
-      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, modifiers, ...point })
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, modifiers, ...point })
     }
     const clickByText = async (selector, label) => {
       // Mark exactly one element, clearing any earlier mark, then click it with native input.
@@ -459,6 +459,34 @@ ${point.missing}`)
     await click('button[aria-label="Unstage a.txt"]')
     await until('/Staged \\(1\\)/.test(document.body.textContent) && /Changes \\(1\\)/.test(document.body.textContent)', 'a.txt unstaged again')
     assert.equal(await ui('document.body.textContent.includes("Mark resolved")'), false)
+
+    // 11b. Several files at once: Ctrl+click (Cmd on macOS) a changed and an untracked file, stage both, then unstage both.
+    const pickKey = process.platform === 'darwin' ? 'meta' : 'control'
+    const entryIn = (group, index) => `[...document.querySelectorAll(".git-group")].find(candidate => candidate.getAttribute("aria-label") === ${JSON.stringify(group)}).querySelectorAll(".git-entry")[${index}]`
+    const pickEntryIn = async (group, index, modifiers = []) => {
+      await ui(`(() => { for (const old of document.querySelectorAll("[data-pick]")) old.removeAttribute("data-pick"); ${entryIn(group, index)}.setAttribute("data-pick", "") })()`)
+      await click('[data-pick]', modifiers)
+    }
+    const untrackedName = await ui(`${entryIn('Untracked', 0)}.querySelector(".git-entry-name").textContent`)
+    await pickEntryIn('Changes', 0)
+    assert.equal(await ui('!document.querySelector(".git-marked")'), true, 'one file selected: no bar')
+    await pickEntryIn('Untracked', 0, [pickKey])
+    await until('/2 selected/.test(document.querySelector(".git-marked")?.innerText || "")', 'two files selected across Changes and Untracked')
+    assert.equal(await ui('document.querySelectorAll(".git-entry-marked").length'), 2)
+    await clickByText('.git-marked button', 'Stage')
+    await until('/Staged \\(3\\)/.test(document.body.textContent) && /Untracked \\(1\\)/.test(document.body.textContent) && !document.querySelector(".git-marked")', 'both staged together')
+    assert.match(gitIn('status', '--porcelain'), /^M[ M] a\.txt$/m, 'the changed file is in the real index')
+    assert.ok(gitIn('status', '--porcelain').split(/\r?\n/).some(line => line.startsWith('A ') && line.endsWith(untrackedName.replace(/\/$/, ''))), 'and so is the untracked one')
+    const stagedNames = await ui('[...[...document.querySelectorAll(".git-group")].find(group => group.getAttribute("aria-label") === "Staged").querySelectorAll(".git-entry-name")].map(element => element.textContent)')
+    const aIndex = stagedNames.indexOf('a.txt')
+    const newIndex = stagedNames.indexOf(untrackedName)
+    await pickEntryIn('Staged', aIndex)
+    await pickEntryIn('Staged', newIndex, [pickKey])
+    await until('/2 selected/.test(document.querySelector(".git-marked")?.innerText || "")', 'two staged files selected')
+    await click(`button[aria-label="Unstage the 2 selected files"]`)
+    await until('/Staged \\(1\\)/.test(document.body.textContent) && /Changes \\(1\\)/.test(document.body.textContent) && /Untracked \\(2\\)/.test(document.body.textContent)', 'a row button unstages the whole selection')
+    results.multiSelect = true
+
     const untrackedGroup = await ui('[...document.querySelectorAll(".git-group")].find(group => group.getAttribute("aria-label") === "Untracked").querySelector(".git-group-action").textContent')
     assert.equal(untrackedGroup, 'Stage all')
     await ui('(() => { const group = [...document.querySelectorAll(".git-group")].find(candidate => candidate.getAttribute("aria-label") === "Untracked"); group.querySelector(".git-group-action").setAttribute("data-pick", "") })()')
@@ -546,7 +574,7 @@ ${point.missing}`)
     await until('document.querySelector(".git-branch-upstream")?.innerText === "origin/main"', 'the upstream is shown')
     await screenshot('sync-idle.png')
     assert.equal(await ui('[...document.querySelectorAll(".git-sync-row button")].map(element => element.innerText).join("|")'), 'Fetch|Pull|Push', 'nothing to pull or push yet')
-    assert.equal(await ui('[...document.querySelectorAll(".git-sync-row button")].filter(element => element.disabled).length'), 2, 'Pull and Push say there is nothing to do')
+    assert.equal(await ui('[...document.querySelectorAll(".git-sync-row button")].filter(element => element.disabled).map(element => element.innerText).join("|")'), 'Push', 'Push says there is nothing to do; Pull fetches first, so it stays available')
 
     await writeFile(join(colleague, 'theirs.txt'), 'from a colleague\n')
     git(colleague, 'add', '.'); git(colleague, 'commit', '-q', '-m', 'colleague work'); git(colleague, 'push', '-q', 'origin', 'HEAD')
