@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
 import type { CopilotResolution } from '../../main/types.js'
+import { isWindows } from '../platform.js'
 
 export interface DiagnosticsViewProps {
   resolution: CopilotResolution | null
@@ -43,7 +44,8 @@ export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnost
         <p role="status">Existing terminals remain available, but new sessions need the Copilot CLI. Install it or retry detection.</p>
       ) : (
         <p>
-          This desktop app could not locate the <code>copilot</code> binary. Install the official npm package below, or get it from{' '}
+          This desktop app could not locate the <code>copilot</code> binary.{' '}
+          {isWindows ? 'Install the official package below' : <>Install it from a terminal with <code>npm install -g @github/copilot</code></>}, or get it from{' '}
           <a href="https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli" target="_blank" rel="noreferrer">
             GitHub's installation guide
           </a>
@@ -51,9 +53,12 @@ export function DiagnosticsView({ resolution, onRetry, onInstall, onCopyDiagnost
         </p>
       )}
       <div className="diagnostics-actions">
-        <button type="button" className="primary-button" onClick={handleInstall} disabled={installing || retrying}>
-          {installing ? 'Installing…' : 'Install Copilot CLI'}
-        </button>
+        {/* Installing from the app uses WinGet; elsewhere the person installs it from a terminal. */}
+        {isWindows && (
+          <button type="button" className="primary-button" onClick={handleInstall} disabled={installing || retrying}>
+            {installing ? 'Installing…' : 'Install Copilot CLI'}
+          </button>
+        )}
         <button type="button" onClick={handleRetry} disabled={retrying}>
           {retrying ? 'Retrying…' : 'Retry'}
         </button>

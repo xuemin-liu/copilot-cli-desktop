@@ -25,7 +25,9 @@ test('compact CLI diagnostics preserve recovery actions beside existing terminal
   assert.match(markup, /<h2>Copilot CLI is unavailable<\/h2>/)
   assert.match(markup, /<p role="status">Existing terminals remain available/)
   assert.match(markup, /Existing terminals remain available/)
-  assert.match(markup, />Install Copilot CLI</)
+  // Installing from the app is WinGet, so the button is there on Windows only.
+  if (process.platform === 'win32') assert.match(markup, />Install Copilot CLI</)
+  else assert.doesNotMatch(markup, />Install Copilot CLI</)
   assert.match(markup, />Retry</)
   assert.match(markup, />Copy diagnostic summary</)
 })
