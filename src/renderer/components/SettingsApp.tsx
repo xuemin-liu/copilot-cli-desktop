@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { CredentialName } from '../../main/secure-credentials.js'
 import { PERMISSION_PRESET_INFO, PERMISSION_PRESETS, type PermissionPreset } from '../../main/permission-presets.js'
@@ -14,6 +14,46 @@ import { MigrationSettings } from './MigrationSettings.js'
 import { isMac, isWindows, TRASH_LABEL } from '../platform.js'
 import { MAX_WORKTREE_TIMEOUT_MINUTES } from '../../main/worktree-timeout.js'
 import { MAX_MEETING_MAX_ROUNDS, MAX_MEETING_ROUND_TIMEOUT_MINUTES } from '../../main/meeting-settings.js'
+import { errorMessage } from '../errors.js'
+import { matchesSearch, searchHits, searchTerms } from '../settings-search.js'
+
+type NoticeKind = 'success' | 'error' | 'info'
+type Notify = (text: string, kind?: NoticeKind) => void
+/** Runs a settings save, applies the returned snapshot, and reports success or the error. */
+type Save = (operation: Promise<DesktopSettingsSnapshot>, success: string, failure?: string) => Promise<void>
+
+const SEARCH_HIGHLIGHT = 'settings-search'
+
+/** What a search can find in a section: its text (including closed <select> options) plus field placeholders and labels. */
+function searchableText(section: HTMLElement): string {
+  const attributes = Array.from(section.querySelectorAll('[placeholder], [aria-label]'), (element) =>
+    `${element.getAttribute('placeholder') ?? ''} ${element.getAttribute('aria-label') ?? ''}`)
+  return `${section.textContent ?? ''} ${attributes.join(' ')}`
+}
+
+/** Marks matches with the CSS Custom Highlight API, which styles text without changing the DOM React owns. */
+function highlightMatches(sections: HTMLElement[], terms: readonly string[]): void {
+  if (typeof Highlight === 'undefined' || !('highlights' in CSS)) return
+  CSS.highlights.delete(SEARCH_HIGHLIGHT)
+  if (terms.length === 0) return
+  const ranges: Range[] = []
+  for (const section of sections) {
+    const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => node.parentElement?.closest('option, script, style') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    })
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = node.textContent?.length ?? 0
+      for (const hit of searchHits(node.textContent ?? '', terms)) {
+        if (hit.end > length) continue
+        const range = document.createRange()
+        range.setStart(node, hit.start)
+        range.setEnd(node, hit.end)
+        ranges.push(range)
+      }
+    }
+  }
+  CSS.highlights.set(SEARCH_HIGHLIGHT, new Highlight(...ranges))
+}
 
 const PERMISSION_OPTIONS: Array<{ value: PermissionPreset; label: string }> = PERMISSION_PRESETS.map((value) => ({
   value,
@@ -37,12 +77,13 @@ const CREDENTIAL_LABELS: Record<CredentialName, string> = {
 function WorkspaceProfileEditor({
   profile,
   active,
-  onSaved,
+  onSave,
 }: {
   profile: WorkspaceProfile
   active: boolean
-  onSaved: (snapshot: DesktopSettingsSnapshot) => void
+  onSave: Save
 }): JSX.Element {
+  const [saving, setSaving] = useState(false)
   const [name, setName] = useState(profile.name)
   const [permissionPreset, setPermissionPreset] = useState(profile.permissionPreset)
   const [defaultResumeMode, setDefaultResumeMode] = useState(profile.defaultResumeMode)
@@ -212,11 +253,17 @@ function WorkspaceProfileEditor({
       </label>
       <button
         type="button"
-        onClick={() => void window.copilotDesktopSettings
-          .updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch)
-          .then(onSaved)}
+        disabled={saving}
+        onClick={() => {
+          setSaving(true)
+          void onSave(
+            window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch),
+            `Saved profile "${name.trim() || profile.name}".`,
+            `Could not save profile "${profile.name}"`,
+          ).finally(() => setSaving(false))
+        }}
       >
-        Save profile
+        {saving ? 'Saving…' : 'Save profile'}
       </button>
     </div>
   )
@@ -224,11 +271,12 @@ function WorkspaceProfileEditor({
 
 function ProviderSettings({
   provider,
-  onSaved,
+  onSave,
 }: {
   provider: CopilotProviderConfig
-  onSaved: (snapshot: DesktopSettingsSnapshot) => void
+  onSave: Save
 }): JSX.Element {
+  const [saving, setSaving] = useState(false)
   const [draft, setDraft] = useState(provider)
   const custom = draft.type !== 'github'
   return (
@@ -278,8 +326,19 @@ function ProviderSettings({
         />
         Offline mode (prevent GitHub network access; the configured provider may still be remote)
       </label>
-      <button type="button" onClick={() => void window.copilotDesktopSettings.updateProvider(draft).then(onSaved)}>
-        Save provider
+      <button
+        type="button"
+        disabled={saving}
+        onClick={() => {
+          setSaving(true)
+          void onSave(
+            window.copilotDesktopSettings.updateProvider(draft),
+            'Saved model provider. New sessions will use it.',
+            'Could not save the model provider',
+          ).finally(() => setSaving(false))
+        }}
+      >
+        {saving ? 'Saving…' : 'Save provider'}
       </button>
       <p className="settings-disclaimer">Provider changes apply to new Copilot sessions.</p>
     </section>
@@ -289,11 +348,11 @@ function ProviderSettings({
 function CopilotResourcesSettings({
   snapshot,
   onSaved,
-  onMessage,
+  notify,
 }: {
   snapshot: DesktopSettingsSnapshot
   onSaved: (snapshot: DesktopSettingsSnapshot) => void
-  onMessage: (message: string) => void
+  notify: Notify
 }): JSX.Element {
   const [resourceName, setResourceName] = useState('')
   const [resourceKind, setResourceKind] = useState<CopilotResourceKind>('plugin')
@@ -306,8 +365,8 @@ function CopilotResourcesSettings({
   const run = (operation: Promise<DesktopSettingsSnapshot>, success: string): void => {
     void operation.then((next) => {
       onSaved(next)
-      onMessage(success)
-    }).catch((error: unknown) => onMessage(error instanceof Error ? error.message : String(error)))
+      notify(success)
+    }).catch((error: unknown) => notify(errorMessage(error), 'error'))
   }
   const mutate = (action: CopilotResourceAction): void => {
     if (action === 'remove' && !window.confirm(`Remove ${resourceKind} "${resourceName}" from Copilot?`)) return
@@ -329,7 +388,7 @@ function CopilotResourcesSettings({
         <button
           type="button"
           onClick={() => void window.copilotDesktopSettings.openCopilotConfig()
-            .catch((error: unknown) => onMessage(error instanceof Error ? error.message : String(error)))}
+            .catch((error: unknown) => notify(errorMessage(error), 'error'))}
         >
           Open Copilot config folder
         </button>
@@ -435,10 +494,54 @@ function CopilotResourcesSettings({
 export function SettingsApp(): JSX.Element | null {
   const [snapshot, setSnapshot] = useState<DesktopSettingsSnapshot | null>(null)
   const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({})
-  const [message, setMessage] = useState<string | null>(null)
   const [cliMaintenancePending, setCliMaintenancePending] = useState(false)
   const [capabilityCheckPending, setCapabilityCheckPending] = useState(false)
   const [cliAutoUpdatePending, setCliAutoUpdatePending] = useState(false)
+  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const [query, setQuery] = useState('')
+  const [visibleSections, setVisibleSections] = useState<Array<{ element: HTMLElement; title: string }>>([])
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const terms = searchTerms(query)
+
+  // Filtering reads the rendered text instead of a hand-kept keyword list, so a new
+  // setting is findable by its label, help text and option names without extra work.
+  useLayoutEffect(() => {
+    const content = scrollRef.current
+    if (!content) return
+    const sections = Array.from(content.querySelectorAll<HTMLElement>(':scope > section'))
+    const visible: HTMLElement[] = []
+    for (const section of sections) {
+      section.hidden = !matchesSearch(searchableText(section), terms)
+      if (!section.hidden) visible.push(section)
+    }
+    highlightMatches(visible, terms)
+    setVisibleSections(visible.map((element) => ({
+      element,
+      title: element.querySelector('h2')?.textContent ?? '',
+    })))
+  }, [query, snapshot])
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+  }, [query])
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        searchRef.current?.focus()
+        searchRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', focusSearch)
+    return () => {
+      window.removeEventListener('keydown', focusSearch)
+      clearTimeout(noticeTimer.current)
+      if ('highlights' in CSS) CSS.highlights.delete(SEARCH_HIGHLIGHT)
+    }
+  }, [])
 
   useEffect(() => {
     void window.copilotDesktopSettings.get().then(setSnapshot)
@@ -461,30 +564,39 @@ export function SettingsApp(): JSX.Element | null {
   if (!snapshot) return <div className="loading-screen"><p>Loading settings…</p></div>
 
   const refresh = (next: DesktopSettingsSnapshot): void => setSnapshot(next)
-  const showMessage = (text: string): void => {
-    setMessage(text)
-    setTimeout(() => setMessage(null), 3_000)
+  // Errors stay up longer than confirmations so there is time to read them.
+  const notify: Notify = (text, kind = 'success') => {
+    clearTimeout(noticeTimer.current)
+    setNotice({ text, kind })
+    noticeTimer.current = setTimeout(() => setNotice(null), kind === 'error' ? 10_000 : 3_000)
   }
+  const notifyError = (error: unknown, context?: string): void =>
+    notify(context ? `${context}: ${errorMessage(error)}` : errorMessage(error), 'error')
+  const save: Save = (operation, success, failure = 'Could not save') => operation.then(
+    (next) => {
+      refresh(next)
+      notify(success)
+    },
+    (error: unknown) => notifyError(error, failure),
+  )
   const maintainCli = (operation: 'install' | 'update'): void => {
     setCliMaintenancePending(true)
-    showMessage(operation === 'install' ? 'Installing Copilot CLI…' : 'Updating Copilot CLI…')
+    notify(operation === 'install' ? 'Installing Copilot CLI…' : 'Updating Copilot CLI…', 'info')
     const request = operation === 'install'
       ? window.copilotDesktopSettings.installCopilot()
       : window.copilotDesktopSettings.updateCopilot()
     void request
       .then(refresh)
-      .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
+      .catch((error: unknown) => notifyError(error))
       .finally(() => setCliMaintenancePending(false))
   }
   const setCopilotAutoUpdate = (enabled: boolean, channel: CopilotUpdateChannel): void => {
     setCliAutoUpdatePending(true)
-    void window.copilotDesktopSettings.setCopilotAutoUpdate(enabled, channel)
-      .then((next) => {
-        refresh(next)
-        showMessage(`Copilot CLI automatic updates ${enabled ? `enabled on the ${channel} channel` : 'disabled'}.`)
-      })
-      .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
-      .finally(() => setCliAutoUpdatePending(false))
+    void save(
+      window.copilotDesktopSettings.setCopilotAutoUpdate(enabled, channel),
+      `Copilot CLI automatic updates ${enabled ? `enabled on the ${channel} channel` : 'disabled'}.`,
+      'Could not change Copilot CLI automatic updates',
+    ).finally(() => setCliAutoUpdatePending(false))
   }
   // Send only the field(s) the user changed. Besides making rapid toggles
   // independent, this prevents an open Settings window from posting an old
@@ -495,22 +607,108 @@ export function SettingsApp(): JSX.Element | null {
       'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
     >>,
   ): void => {
-    setSnapshot((previous) => {
-      if (!previous) return previous
-      const next = { ...previous, ...patch }
-      void window.copilotDesktopSettings
-        .updatePreferences(patch)
-        .then(refresh)
-      return next
-    })
+    setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
+    void window.copilotDesktopSettings
+      .updatePreferences(patch)
+      .then((next) => {
+        refresh(next)
+        notify('Setting saved.')
+      })
+      .catch((error: unknown) => {
+        notifyError(error, 'Setting not saved')
+        // Drop the optimistic value so the control shows what is really stored.
+        void window.copilotDesktopSettings.get().then(refresh)
+      })
   }
 
   return (
-    <div className="settings-app">
-      {message && <div className="settings-toast">{message}</div>}
+    <div className="settings-app" ref={scrollRef}>
+      <header className="settings-search-bar">
+        <input
+          ref={searchRef}
+          type="search"
+          className="settings-search"
+          value={query}
+          placeholder="Search settings"
+          aria-label="Search settings"
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && query) {
+              event.preventDefault()
+              setQuery('')
+            }
+          }}
+        />
+        <nav className="settings-nav" aria-label="Settings sections">
+          {visibleSections.map(({ element, title }) => (
+            <button key={title} type="button" onClick={() => element.scrollIntoView({ block: 'start' })}>{title}</button>
+          ))}
+        </nav>
+      </header>
+
+      {terms.length > 0 && visibleSections.length === 0 && (
+        <p className="settings-search-empty">No settings match "{query.trim()}".</p>
+      )}
 
       <section>
-        <h2>General</h2>
+        <h2>Window and startup</h2>
+        <label className="settings-row settings-row-select">
+          When the main window closes
+          <select
+            value={snapshot.closeBehavior}
+            onChange={(event) => updatePreference({
+              closeBehavior: event.target.value as DesktopSettingsSnapshot['closeBehavior'],
+            })}
+          >
+            <option value="ask">Ask every time</option>
+            <option value="tray">Minimize to tray</option>
+            <option value="quit">Exit the application</option>
+          </select>
+        </label>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.trayEnabled}
+            onChange={(event) => updatePreference({ trayEnabled: event.target.checked })}
+          />
+          Show a tray icon
+        </label>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.notifications}
+            onChange={(event) => updatePreference({ notifications: event.target.checked })}
+          />
+          Show native notifications (approval needed, session finished/crashed)
+        </label>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.globalShortcutEnabled}
+            onChange={(event) => updatePreference({ globalShortcutEnabled: event.target.checked })}
+          />
+          Register {snapshot.globalShortcutAccelerator} to show/hide the window
+        </label>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.launchAtLogin}
+            disabled={!snapshot.launchAtLoginAvailable}
+            onChange={(event) => {
+              const enabled = event.target.checked
+              void save(
+                window.copilotDesktopSettings.setLaunchAtLogin(enabled),
+                enabled ? 'Copilot CLI Desktop will launch at sign-in.' : 'Launch at sign-in turned off.',
+                'Could not change launch at sign-in',
+              )
+            }}
+          />
+          Launch at sign-in{!snapshot.launchAtLoginAvailable ? ' (installed builds only)' : ''}
+        </label>
+      </section>
+
+      <section>
+        <h2>Worktrees</h2>
         <label className="settings-row settings-row-number">
           Worktree timeout (minutes)
           <input
@@ -551,6 +749,10 @@ export function SettingsApp(): JSX.Element | null {
           also on another branch, and kept otherwise. A worktree with changes is removed only after you confirm, and goes to the
           {' '}{TRASH_LABEL}. Files Git ignores there (build output, node_modules) are deleted with it.
         </p>
+      </section>
+
+      <section>
+        <h2>Review meetings</h2>
         <label className="settings-row settings-row-number">
           Meeting round limit
           <input
@@ -605,54 +807,6 @@ export function SettingsApp(): JSX.Element | null {
           then gets the reviews and that discussion together. It costs one more turn per reviewer per round. Votes are not
           discussed. Off by default.
         </p>
-        <label className="settings-row settings-row-select">
-          When the main window closes
-          <select
-            value={snapshot.closeBehavior}
-            onChange={(event) => updatePreference({
-              closeBehavior: event.target.value as DesktopSettingsSnapshot['closeBehavior'],
-            })}
-          >
-            <option value="ask">Ask every time</option>
-            <option value="tray">Minimize to tray</option>
-            <option value="quit">Exit the application</option>
-          </select>
-        </label>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.trayEnabled}
-            onChange={(event) => updatePreference({ trayEnabled: event.target.checked })}
-          />
-          Show a tray icon
-        </label>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.notifications}
-            onChange={(event) => updatePreference({ notifications: event.target.checked })}
-          />
-          Show native notifications (approval needed, session finished/crashed)
-        </label>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.globalShortcutEnabled}
-            onChange={(event) => updatePreference({ globalShortcutEnabled: event.target.checked })}
-          />
-          Register {snapshot.globalShortcutAccelerator} to show/hide the window
-        </label>
-        <label className="settings-row">
-          <input
-            type="checkbox"
-            checked={snapshot.launchAtLogin}
-            disabled={!snapshot.launchAtLoginAvailable}
-            onChange={(event) =>
-              void window.copilotDesktopSettings.setLaunchAtLogin(event.target.checked).then(refresh)
-            }
-          />
-          Launch at sign-in{!snapshot.launchAtLoginAvailable ? ' (installed builds only)' : ''}
-        </label>
       </section>
 
       <section>
@@ -700,7 +854,7 @@ export function SettingsApp(): JSX.Element | null {
             onClick={() => {
               if (!window.confirm('Sign every session out of the shared browser profile and remove its cookies, site storage and cache?')) return
               void window.copilotDesktopSettings.clearSharedBrowserData()
-                .then(() => showMessage('Cleared shared browser data.'), (error: unknown) => showMessage(String(error)))
+                .then(() => notify('Cleared shared browser data.'), (error: unknown) => notifyError(error, 'Could not clear shared browser data'))
             }}
           >
             Clear shared browser data
@@ -709,7 +863,7 @@ export function SettingsApp(): JSX.Element | null {
             type="button"
             onClick={() =>
               void window.copilotDesktopSettings.clearBrowserHistory()
-                .then(() => showMessage('Cleared browsing history.'), (error: unknown) => showMessage(String(error)))
+                .then(() => notify('Cleared browsing history.'), (error: unknown) => notifyError(error, 'Could not clear browsing history'))
             }
           >
             Clear browsing history
@@ -725,7 +879,7 @@ export function SettingsApp(): JSX.Element | null {
             key={profile.id}
             profile={profile}
             active={profile.id === snapshot.activeProfileId}
-            onSaved={refresh}
+            onSave={save}
           />
         ))}
       </section>
@@ -740,12 +894,12 @@ export function SettingsApp(): JSX.Element | null {
         <p className="settings-disclaimer">This setting is the startup default for newly created sessions. Existing sessions keep their own launch restrictions and Copilot approval mode across Restart and app restoration. It cannot remove rights already held by this Windows account — e.g. if the desktop app itself is running elevated, its Copilot sessions inherit administrator rights regardless of this preset.</p>
       </section>
 
-      <ProviderSettings provider={snapshot.provider} onSaved={refresh} />
+      <ProviderSettings provider={snapshot.provider} onSave={save} />
       <UsageSettings />
       {/* Migration moves a setup between Windows computers only. */}
       {isWindows && <MigrationSettings onSaved={refresh} />}
 
-      <CopilotResourcesSettings snapshot={snapshot} onSaved={refresh} onMessage={showMessage} />
+      <CopilotResourcesSettings snapshot={snapshot} onSaved={refresh} notify={notify} />
 
       <section>
         <h2>Protected credential vault</h2>
@@ -774,8 +928,8 @@ export function SettingsApp(): JSX.Element | null {
                 void window.copilotDesktopSettings.saveCredential(entry.name, credentialDrafts[entry.name] ?? '').then((next) => {
                   refresh(next)
                   setCredentialDrafts((prev) => ({ ...prev, [entry.name]: '' }))
-                  showMessage('Saved protected credential.')
-                })
+                  notify(`Saved ${entry.name}.`)
+                }, (error: unknown) => notifyError(error, `Could not save ${entry.name}`))
               }
             >
               Save
@@ -783,7 +937,11 @@ export function SettingsApp(): JSX.Element | null {
             <button
               type="button"
               disabled={!entry.configured || entry.source !== 'protected-store'}
-              onClick={() => void window.copilotDesktopSettings.deleteCredential(entry.name).then(refresh)}
+              onClick={() => void save(
+                window.copilotDesktopSettings.deleteCredential(entry.name),
+                `Removed ${entry.name}.`,
+                `Could not remove ${entry.name}`,
+              )}
             >
               Remove
             </button>
@@ -854,14 +1012,12 @@ export function SettingsApp(): JSX.Element | null {
             disabled={!snapshot.cliVersion || cliMaintenancePending || capabilityCheckPending || snapshot.cliMaintenance.status === 'running'}
             onClick={() => {
               setCapabilityCheckPending(true)
-              showMessage('Rechecking Copilot CLI capabilities…')
-              void window.copilotDesktopSettings.recheckCopilotCapabilities()
-                .then((next) => {
-                  refresh(next)
-                  showMessage('Copilot CLI capabilities rechecked.')
-                })
-                .catch((error: unknown) => showMessage(error instanceof Error ? error.message : String(error)))
-                .finally(() => setCapabilityCheckPending(false))
+              notify('Rechecking Copilot CLI capabilities…', 'info')
+              void save(
+                window.copilotDesktopSettings.recheckCopilotCapabilities(),
+                'Copilot CLI capabilities rechecked.',
+                'Could not recheck Copilot CLI capabilities',
+              ).finally(() => setCapabilityCheckPending(false))
             }}
           >
             {capabilityCheckPending ? 'Rechecking capabilities…' : 'Recheck capabilities'}
@@ -879,14 +1035,16 @@ export function SettingsApp(): JSX.Element | null {
           <button
             type="button"
             disabled={!snapshot.update.canCheck}
-            onClick={() => void window.copilotDesktopSettings.checkForUpdates().then(refresh)}
+            onClick={() => void window.copilotDesktopSettings.checkForUpdates()
+              .then(refresh, (error: unknown) => notifyError(error, 'Could not check for updates'))}
           >
             Check for updates
           </button>
           <button
             type="button"
             disabled={!snapshot.update.canDownload}
-            onClick={() => void window.copilotDesktopSettings.downloadUpdate().then(refresh)}
+            onClick={() => void window.copilotDesktopSettings.downloadUpdate()
+              .then(refresh, (error: unknown) => notifyError(error, 'Could not download the update'))}
           >
             Download
           </button>
@@ -908,6 +1066,13 @@ export function SettingsApp(): JSX.Element | null {
         </div>
         {snapshot.rollbackVersion && <p>Previous version: {snapshot.rollbackVersion}</p>}
       </section>
+
+      {notice && (
+        <div className={`settings-toast settings-toast-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
+          <span>{notice.text}</span>
+          <button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button>
+        </div>
+      )}
 
       <p className="settings-disclaimer">
         Copilot CLI Desktop is an unofficial, community-built wrapper around the public <code>copilot</code> CLI.
