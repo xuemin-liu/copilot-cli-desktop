@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffChangeSignature, diffCommentKey, diffLineKind, numberDiffLines } from '../renderer/components/GitDiffView.js'
-import { GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
+import { GitMarkedBar, GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
+import type { GitMarkedBarProps } from '../renderer/components/GitPanel.js'
+import { markedEntries, nextMarks } from '../renderer/git-marks.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
 import type { AmendState } from '../renderer/components/GitCommitBox.js'
 import { GitReviewCard } from '../renderer/components/GitReviewCard.js'
@@ -179,13 +181,52 @@ test('the sync bar offers Fetch, Pull and Push with the commit counts, and says 
   assert.match(ready, />Push ↑2</)
   assert.doesNotMatch(ready, /<button[^>]*disabled/)
   assert.doesNotMatch(ready, />Cancel</, 'nothing to cancel when idle')
-  assert.match(syncBar({ behind: 0 }), /<button[^>]*disabled[^>]*>Pull</)
+  assert.doesNotMatch(syncBar({ behind: 0 }), /<button[^>]*disabled[^>]*>Pull</, 'a pull fetches first, so ↓0 may be out of date')
+  assert.match(syncBar({ behind: 0 }), />Pull</)
   assert.match(syncBar({ ahead: 0 }), /<button[^>]*disabled[^>]*>Push</)
-  assert.equal(pullBlocker('origin/main', 0, false), 'Nothing to pull. Fetch first to look for new commits.')
-  assert.equal(pullBlocker(null, 0, false), 'This branch has no upstream to pull from.')
+  assert.equal(pullBlocker('origin/main', false), null)
+  assert.equal(pullBlocker(null, false), 'This branch has no upstream to pull from.')
   assert.equal(pushBlocker('origin/main', 0, false), 'Nothing to push.')
-  assert.match(pullBlocker('origin/main', 2, true) ?? '', /no current branch/)
+  assert.match(pullBlocker('origin/main', true) ?? '', /no current branch/)
   assert.match(pushBlocker(null, 0, true) ?? '', /no current branch/)
+})
+
+test('a plain click picks one file, Ctrl adds or removes one, and Shift picks a range in the same list', () => {
+  const list = ['a', 'b', 'c', 'd']
+  const one = nextMarks(null, 'working', 'b', list, 'only')
+  assert.deepEqual(one, { side: 'working', paths: ['b'], anchor: 'b' })
+  const two = nextMarks(one, 'working', 'd', list, 'toggle')
+  assert.deepEqual(two.paths, ['b', 'd'])
+  assert.deepEqual(nextMarks(two, 'working', 'b', list, 'toggle').paths, ['d'], 'Ctrl+click on a selected file removes it')
+  assert.deepEqual(nextMarks(one, 'working', 'd', list, 'range').paths, ['b', 'c', 'd'])
+  assert.deepEqual(nextMarks(nextMarks(null, 'working', 'c', list, 'only'), 'working', 'a', list, 'range').paths, ['a', 'b', 'c'], 'a range runs upwards too')
+  assert.deepEqual(nextMarks(two, 'working', 'a', list, 'only').paths, ['a'], 'a plain click starts again')
+  assert.deepEqual(nextMarks(two, 'staged', 'a', list, 'toggle'), { side: 'staged', paths: ['a'], anchor: 'a' }, 'staged and unstaged files are never selected together')
+  assert.deepEqual(nextMarks(one, 'working', 'x', ['x', 'y'], 'range').paths, ['x'], 'no range across two lists')
+})
+
+test('the selection names only the files still on its side, in list order', () => {
+  const entries = [{ path: 'a' }, { path: 'b' }, { path: 'c' }]
+  assert.deepEqual(markedEntries({ side: 'working', paths: ['c', 'gone', 'a'], anchor: 'a' }, 'working', entries).map(entry => entry.path), ['a', 'c'])
+  assert.deepEqual(markedEntries({ side: 'working', paths: ['a'], anchor: 'a' }, 'staged', entries), [])
+  assert.deepEqual(markedEntries(null, 'working', entries), [])
+})
+
+const markedBar = (extra: Partial<GitMarkedBarProps> = {}): string => renderToStaticMarkup(
+  <GitMarkedBar count={3} side="working" discardable={3} disabled={false} onChangeIndex={() => undefined} onDiscard={() => undefined} onClear={() => undefined} {...extra} />)
+
+test('several selected files can be staged, unstaged or discarded together', () => {
+  const working = markedBar()
+  assert.match(working, /3 selected/)
+  assert.match(working, />Stage</)
+  assert.match(working, />Discard</)
+  assert.match(working, />Clear</)
+  assert.match(markedBar({ discardable: 2 }), />Discard 2</, 'says how many when Discard does not apply to them all')
+  assert.doesNotMatch(markedBar({ discardable: 0 }), /Discard/)
+  const staged = markedBar({ side: 'staged', discardable: 0 })
+  assert.match(staged, />Unstage</)
+  assert.doesNotMatch(staged, /Discard/)
+  assert.equal((markedBar({ disabled: true }).match(/<button[^>]*disabled/g) ?? []).length, 2, 'Stage and Discard wait for the running write; Clear does not')
 })
 
 test('a branch with no upstream offers Publish instead of Push, even with nothing ahead', () => {

@@ -28,6 +28,12 @@ debug browser sees it). Close it the same way. Its width and open state are reme
 - **Stage and unstage** with the **+** and **−** button on each file, or **Stage all** / **Unstage all** on a group. Folders of
   untracked files stage as a whole. A conflicted file has a **✓** that marks it resolved. Only the files you can see are acted
   on: when the list is cut off at 5,000 files, the group-wide buttons are disabled rather than doing half the job.
+- **Several files at once.** Ctrl+click (Cmd+click on macOS) adds a file to the selection or takes it out, and Shift+click selects
+  every file from the last one clicked to this one in the same group. While two or more are selected, a bar above the list
+  says how many and offers **Stage** (or **Unstage**), **Discard** and **Clear**, and a file's own **+**, **−** or **↶** acts on
+  the whole selection when that file is part of it. Changed and untracked files can be selected together; staged files are a
+  selection of their own, and conflicts are marked resolved one at a time. Discard still asks first, and leaves out a selected
+  file it does not apply to (the bar then says **Discard 2**, for example).
 - **Commit** takes the message you type (Ctrl+Enter also commits) and records exactly that text, whatever it contains. It is
   refused, with a reason, when nothing is staged, the message is empty or conflicts are unresolved.
 - Git has to know who you are. If `user.name` or `user.email` is missing the panel says so and shows the two commands to run;
@@ -74,8 +80,9 @@ Git prints while it runs, and has a **Cancel** that stops the whole process tree
   your folder, never prunes (whatever `fetch.prune` says) and writes no tags. A fetch applies every `remote.<name>.fetch` setting
   the repository has, so one that would write anywhere but under `refs/remotes/<name>/` (a local branch, a tag, another remote's
   branches) is refused, and says which setting. The `↑` and `↓` counts update afterwards.
-- **Pull** is fetch followed by a **fast-forward only** merge of the upstream. If the branches have each moved on, nothing changes
-  and the panel says so. Git itself refuses a pull that would overwrite local changes. In both cases the panel offers
+- **Pull** is fetch followed by a **fast-forward only** merge of the upstream, so it is available whenever the branch has an
+  upstream, without a Fetch first; when the fetch finds nothing new the panel says "Already up to date." If the branches have
+  each moved on, nothing changes and the panel says so. Git itself refuses a pull that would overwrite local changes. In both cases the panel offers
   **Resolve with Copilot** (below), so you don't have to merge in a terminal.
 - **Push** sends the confirmed commit of the current branch to the branch of the same name on its upstream, with an explicit refspec,
   so a push the remote would have to overwrite is refused (the panel never forces, and ignores a configured `+` refspec). A branch that tracks a

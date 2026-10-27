@@ -21,7 +21,9 @@ import type { DiffCommentAnchor } from './GitDiffView.js'
 import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
-import { TRASH_LABEL } from '../platform.js'
+import { TRASH_LABEL, isMac, isShortcutModifier } from '../platform.js'
+import { markedEntries, nextMarks } from '../git-marks.js'
+import type { MarkMode, MarkSide, Marks } from '../git-marks.js'
 import { GIT_CURSOR_CONTEXT_EVENT } from '../git-cursor-context.js'
 import type { GitCursorContextRequest } from '../git-cursor-context.js'
 
@@ -143,26 +145,70 @@ interface RowAction {
   verb: string
   disabled: boolean
   run(entry: GitEntryView): void
+  /** What the button says for this row when it acts on more than the row (the selected files); `verb` and the path otherwise. */
+  labelOf?(entry: GitEntryView): string | null
 }
 
-function EntryRow({ entry, code, selected, onSelect, action, extra }: { entry: GitEntryView; code: string; selected: boolean; onSelect(): void; action?: RowAction | undefined; extra?: RowAction | undefined }): JSX.Element {
+const MULTI_SELECT_HINT = `${isMac ? 'Cmd' : 'Ctrl'}+click or Shift+click to select several`
+
+/** How a click on a file row picks it: Shift for a range, Ctrl (Cmd on macOS) to add or remove one, otherwise only this one. */
+const markMode = (event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): MarkMode =>
+  event.shiftKey ? 'range' : isShortcutModifier(event) ? 'toggle' : 'only'
+
+function EntryRow({ entry, code, selected, marked, multiple, onSelect, action, extra }: {
+  entry: GitEntryView; code: string; selected: boolean; marked: boolean; multiple: boolean; onSelect(mode: MarkMode): void; action?: RowAction | undefined; extra?: RowAction | undefined
+}): JSX.Element {
   const { name, folder } = fileParts(entry.path)
+  const path = entry.originalPath ? `${entry.originalPath} → ${entry.path}` : entry.path
+  const actionLabel = (row: RowAction): string => row.labelOf?.(entry) ?? `${row.verb} ${entry.path}`
   return (
     <div className="git-entry-row">
-      <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}`} aria-pressed={selected} onClick={onSelect}
-        title={entry.originalPath ? `${entry.originalPath} → ${entry.path}` : entry.path}>
+      <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}${marked ? ' git-entry-marked' : ''}`} aria-pressed={selected || marked}
+        // Shift+click would otherwise select the text of every row in between.
+        onMouseDown={event => { if (multiple && event.shiftKey) event.preventDefault() }}
+        onClick={event => onSelect(multiple ? markMode(event) : 'only')}
+        title={multiple ? `${path}\n${MULTI_SELECT_HINT}` : path}>
         <span className={`git-code git-code-${code === '?' ? 'untracked' : code}`} aria-hidden="true">{code}</span>
         <span className="git-entry-name">{name}</span>
         {folder && <span className="git-entry-folder">{folder}</span>}
       </button>
       {action && (
-        <button type="button" className="git-entry-action" disabled={action.disabled} aria-label={`${action.verb} ${entry.path}`} title={`${action.verb} ${entry.path}`}
+        <button type="button" className="git-entry-action" disabled={action.disabled} aria-label={actionLabel(action)} title={actionLabel(action)}
           onClick={() => action.run(entry)}>{action.symbol}</button>
       )}
       {extra && (
-        <button type="button" className="git-entry-action git-entry-danger" disabled={extra.disabled} aria-label={`${extra.verb} ${entry.path}`} title={`${extra.verb} ${entry.path}`}
+        <button type="button" className="git-entry-action git-entry-danger" disabled={extra.disabled} aria-label={actionLabel(extra)} title={actionLabel(extra)}
           onClick={() => extra.run(entry)}>{extra.symbol}</button>
       )}
+    </div>
+  )
+}
+
+export interface GitMarkedBarProps {
+  count: number
+  side: MarkSide
+  /** How many of the selected files Discard applies to (none on the staged side). */
+  discardable: number
+  disabled: boolean
+  onChangeIndex(): void
+  onDiscard(): void
+  onClear(): void
+}
+
+/** What can be done with the selected files at once; shown while two or more are selected. */
+export function GitMarkedBar({ count, side, discardable, disabled, onChangeIndex, onDiscard, onClear }: GitMarkedBarProps): JSX.Element {
+  const verb = side === 'staged' ? 'Unstage' : 'Stage'
+  return (
+    <div className="git-marked" role="toolbar" aria-label="Selected files">
+      <span className="git-marked-count">{count} selected</span>
+      <button type="button" className="git-group-action" disabled={disabled} onClick={onChangeIndex} title={`${verb} the ${count} selected files`}>{verb}</button>
+      {side === 'working' && discardable > 0 && (
+        <button type="button" className="git-group-action git-entry-danger" disabled={disabled} onClick={onDiscard}
+          title={`Discard ${discardable === count ? 'the selected files' : `the ${discardable} selected files that can be discarded`}. You will be asked first; a copy of each changed file is saved, and untracked files go to the ${TRASH_LABEL}.`}>
+          {discardable === count ? 'Discard' : `Discard ${discardable}`}
+        </button>
+      )}
+      <button type="button" className="git-group-action" onClick={onClear} title="Select only the file shown">Clear</button>
     </div>
   )
 }
@@ -174,13 +220,19 @@ interface GroupAction {
   run(): void
 }
 
-function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAction, groupAction, extraRowAction, extraGroupAction }: {
-  title: string; entries: GitEntryView[]; codeOf(entry: GitEntryView): string; staged: boolean; selection: Selection | null; onSelect(entry: GitEntryView, staged: boolean): void
+function EntryGroup({ title, entries, codeOf, staged, selection, marked, multiple = true, onSelect, rowAction, groupAction, extraRowAction, extraGroupAction }: {
+  title: string; entries: GitEntryView[]; codeOf(entry: GitEntryView): string; staged: boolean; selection: Selection | null
+  /** Paths selected together on this group's side, when two or more are. */
+  marked: ReadonlySet<string>
+  /** Whether several of these files can be selected at once (not conflicts, which are marked resolved one at a time). */
+  multiple?: boolean
+  onSelect(entry: GitEntryView, staged: boolean, mode: MarkMode, list: readonly string[]): void
   rowAction?: RowAction; groupAction?: GroupAction
   /** A second, destructive action (Discard): on the rows that can be discarded, and on the group. */
   extraRowAction?: RowAction & { applies(entry: GitEntryView): boolean }; extraGroupAction?: GroupAction
 }): JSX.Element | null {
   if (entries.length === 0) return null
+  const paths = entries.map(entry => entry.path)
   return (
     <section className="git-group" aria-label={title}>
       <div className="git-group-head">
@@ -190,7 +242,8 @@ function EntryGroup({ title, entries, codeOf, staged, selection, onSelect, rowAc
       </div>
       {entries.map(entry => (
         <EntryRow key={`${staged ? 's' : 'u'}:${entry.path}`} entry={entry} code={codeOf(entry)} action={rowAction} extra={extraRowAction?.applies(entry) ? extraRowAction : undefined}
-          selected={selection?.path === entry.path && selection.staged === staged} onSelect={() => onSelect(entry, staged)} />
+          selected={selection?.path === entry.path && selection.staged === staged} marked={multiple && marked.has(entry.path)} multiple={multiple}
+          onSelect={mode => onSelect(entry, staged, mode, paths)} />
       ))}
     </section>
   )
@@ -201,6 +254,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
   const [selection, setSelection] = useState<Selection | null>(null)
+  const [marks, setMarks] = useState<Marks | null>(null)
   const [status, setStatus] = useState<GitRepoStatusView | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
@@ -259,6 +313,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     followedWorktree.current = sessionWorktreePath
     setStoredRepo(match.relativePath)
     setSelection(null)
+    setMarks(null)
   }, [view, sessionWorktreePath])
   const repo = view ? pickRepo(view, storedRepo) : null
   const ready = repo?.state === 'ready'
@@ -415,6 +470,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     setAmending(false)
     setStoredRepo(next.relativePath)
     setSelection(null)
+    setMarks(null)
     setNotice(null)
     setActionError(null)
     try { localStorage.setItem(repoStorageKey(profileId), next.relativePath) } catch { /* Keep the in-memory choice. */ }
@@ -520,6 +576,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (!repo || !currentStatus || entries.length === 0) return
     const generation = currentStatus.generation
     const ids = entries.map(entry => entry.id)
+    setMarks(null)
     runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
   }
 
@@ -549,6 +606,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     if (!repo || !currentStatus || entries.length === 0) return
     const generation = currentStatus.generation
     const ids = entries.map(entry => entry.id)
+    setMarks(null)
     runWrite('discard', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitDiscard(profileId, repo.id, ids, generation))
   }
 
@@ -588,7 +646,22 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   // Cancel the repository that owns the running write, not whichever one is selected.
   const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
 
-  const pickEntry = (entry: GitEntryView, staged: boolean): void => { setSelection({ path: entry.path, staged }); setNotice(null) }
+  const pickEntry = (entry: GitEntryView, staged: boolean, mode: MarkMode, list: readonly string[]): void => {
+    setSelection({ path: entry.path, staged })
+    setMarks(current => nextMarks(current, staged ? 'staged' : 'working', entry.path, list, mode))
+    setNotice(null)
+  }
+  // Two or more selected files on one side: the bar acts on them, and so does a row's own button when that row is one of them.
+  const sideEntries = (side: MarkSide): GitEntryView[] => !currentStatus ? [] : side === 'staged' ? currentStatus.staged : [...currentStatus.unstaged, ...currentStatus.untracked]
+  const markedNow = marks ? markedEntries(marks, marks.side, sideEntries(marks.side)) : []
+  const several = markedNow.length > 1 ? markedNow : []
+  const markedPaths = (side: MarkSide): ReadonlySet<string> => new Set(several.length > 0 && marks?.side === side ? several.map(entry => entry.path) : [])
+  const forRow = (entry: GitEntryView, side: MarkSide): GitEntryView[] => markedPaths(side).has(entry.path) ? several : [entry]
+  const discardableOf = (entries: readonly GitEntryView[]): GitEntryView[] => entries.filter(canDiscard)
+  const rowLabel = (verb: string, side: MarkSide, pick: (entries: GitEntryView[]) => GitEntryView[] = entries => entries) => (entry: GitEntryView): string | null => {
+    const entries = forRow(entry, side)
+    return entries.length > 1 ? `${verb} the ${pick(entries).length} selected files` : null
+  }
   const canInsert = promptTarget !== null
 
   // Resolve with Copilot: after a pull Copilot can finish, or while a merge is stopped on conflicts.
@@ -706,19 +779,24 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                   {currentStatus && currentStatus.totalEntries === 0 && <p className="git-message" role="status">Nothing to commit. The working tree is clean.</p>}
                   {currentStatus && (
                     <div className="git-files">
-                      <EntryGroup title="Conflicts" entries={currentStatus.conflicted} codeOf={() => 'U'} staged={false} selection={selection} onSelect={pickEntry}
+                      {several.length > 0 && marks && (
+                        <GitMarkedBar count={several.length} side={marks.side} discardable={marks.side === 'working' ? discardableOf(several).length : 0} disabled={writesLocked}
+                          onChangeIndex={() => changeIndex(marks.side === 'staged' ? 'unstage' : 'stage', several)} onDiscard={() => discard(discardableOf(several))}
+                          onClear={() => setMarks(selection ? { side: selection.staged ? 'staged' : 'working', paths: [selection.path], anchor: selection.path } : null)} />
+                      )}
+                      <EntryGroup title="Conflicts" entries={currentStatus.conflicted} codeOf={() => 'U'} staged={false} selection={selection} marked={markedPaths('working')} multiple={false} onSelect={pickEntry}
                         rowAction={{ symbol: '✓', verb: 'Mark resolved:', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }} />
-                      <EntryGroup title="Staged" entries={currentStatus.staged} codeOf={entry => entry.index} staged selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '−', verb: 'Unstage', disabled: writesLocked, run: entry => changeIndex('unstage', [entry]) }}
+                      <EntryGroup title="Staged" entries={currentStatus.staged} codeOf={entry => entry.index} staged selection={selection} marked={markedPaths('staged')} onSelect={pickEntry}
+                        rowAction={{ symbol: '−', verb: 'Unstage', disabled: writesLocked, run: entry => changeIndex('unstage', forRow(entry, 'staged')), labelOf: rowLabel('Unstage', 'staged') }}
                         groupAction={{ label: 'Unstage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only unstage the files shown' : 'Unstage every staged file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('unstage', currentStatus.staged) }} />
-                      <EntryGroup title="Changes" entries={currentStatus.unstaged} codeOf={entry => entry.worktree} staged={false} selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }}
-                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard([entry]) }}
+                      <EntryGroup title="Changes" entries={currentStatus.unstaged} codeOf={entry => entry.worktree} staged={false} selection={selection} marked={markedPaths('working')} onSelect={pickEntry}
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', forRow(entry, 'working')), labelOf: rowLabel('Stage', 'working') }}
+                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard(discardableOf(forRow(entry, 'working'))), labelOf: rowLabel('Discard', 'working', discardableOf) }}
                         extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Discard every changed file. You will be asked first, and a copy of each is saved.', disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.unstaged.filter(canDiscard)) }}
                         groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every changed file (not untracked ones)', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.unstaged) }} />
-                      <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} onSelect={pickEntry}
-                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }}
-                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard([entry]) }}
+                      <EntryGroup title="Untracked" entries={currentStatus.untracked} codeOf={() => '?'} staged={false} selection={selection} marked={markedPaths('working')} onSelect={pickEntry}
+                        rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', forRow(entry, 'working')), labelOf: rowLabel('Stage', 'working') }}
+                        extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard(discardableOf(forRow(entry, 'working'))), labelOf: rowLabel('Discard', 'working', discardableOf) }}
                         extraGroupAction={{ label: 'Discard all', title: currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : `Move every untracked file to the ${TRASH_LABEL}. You will be asked first.`, disabled: writesLocked || currentStatus.truncated, run: () => discard(currentStatus.untracked) }}
                         groupAction={{ label: 'Stage all', title: currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every untracked file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', currentStatus.untracked) }} />
                       {currentStatus.truncated && <p className="git-note" role="status">Showing the first {currentStatus.staged.length + currentStatus.unstaged.length + currentStatus.untracked.length} of {currentStatus.totalEntries.toLocaleString()} changed files.</p>}
