@@ -33,10 +33,11 @@ import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePe
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
-import { OVERRIDES_SCRIPT, overridesFromDevtools, overridesFromPreferences, type OverridesSetting } from './browser-overrides.js'
+import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, overridesFromPreferences, popupOverrideResponseScript, type OverridesSetting } from './browser-overrides.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
+const POPUP_OVERRIDES_DRAIN_MS = 2000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
 interface BrowserPage {
@@ -222,6 +223,7 @@ export class BrowserDebug {
             webviewTag: false, webSecurity: true, allowRunningInsecureContent: false, devTools: true,
           } })
           const childPage = this.addPage(child, details.disposition !== 'background-tab')
+          this.startPopupOverrides(page, childPage)
           this.layout()
           // Electron supplies no guest for browser-initiated background links.
           // In that case createWindow is also responsible for the original load.
@@ -322,6 +324,140 @@ export class BrowserDebug {
     if (this.state.network.length > MAX_ENTRIES) {
       const removed = this.state.network.shift()
       if (removed) this.started.delete(removed.id)
+    }
+  }
+
+  /** Hold early responses until native DevTools is ready; enabling Fetch after a request starts misses its HTML. */
+  private startPopupOverrides(opener: BrowserPage, popup: BrowserPage): void {
+    const contents = popup.contents
+    const debuggerClient = contents.debugger
+    const pending = new Set<Promise<void>>()
+    let phase: 'active' | 'draining' | 'disabling' | 'closed' = 'active'
+    let drainTimer: ReturnType<typeof setTimeout> | undefined
+    let finishDrain: (() => void) | undefined
+    const handingOff = (): boolean => phase === 'disabling' || phase === 'closed'
+    const intercepting = debuggerClient.sendCommand('Fetch.enable', { patterns: [
+      { urlPattern: 'http://*/*', requestStage: 'Response' }, { urlPattern: 'https://*/*', requestStage: 'Response' },
+    ] })
+    const ready = Promise.all([intercepting, this.inheritPopupOverrides(opener, popup)]).then(([, applied]) => applied)
+    const paused = (_event: Electron.Event, method: string, params: Record<string, unknown>): void => {
+      if (method !== 'Fetch.requestPaused') return
+      if (phase !== 'active') {
+        // Native DevTools owns new responses now, but this temporary Fetch session must still release its pause.
+        if (phase !== 'closed') void debuggerClient.sendCommand('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {})
+        return
+      }
+      const response = (async () => {
+        if (!await ready) throw new Error('Popup overrides did not activate')
+        if (handingOff()) return
+        const tools = popup.tools?.webContents
+        if (!tools || !popup.overrides?.enabled) {
+          await debuggerClient.sendCommand('Fetch.continueRequest', { requestId: params.requestId })
+          return
+        }
+        let action = await tools.executeJavaScript(popupOverrideResponseScript(params)) as { method: string; params: Record<string, unknown> }
+        if (handingOff()) return
+        if (action.method === 'Fetch.getResponseBody') {
+          const body = await debuggerClient.sendCommand(action.method, action.params).catch(error => ({ error: String(error) }))
+          if (handingOff()) return
+          action = await tools.executeJavaScript(popupOverrideResponseScript(params, body)) as typeof action
+        }
+        if (handingOff()) return
+        if (!['Fetch.fulfillRequest', 'Fetch.continueRequest'].includes(action.method)) throw new Error('Unexpected popup override response')
+        if (action.params.requestId !== params.requestId) throw new Error('Popup override response belongs to another request')
+        await debuggerClient.sendCommand(action.method, action.params)
+      })().catch(error => {
+        if (!handingOff() && !contents.isDestroyed()) {
+          popup.error ??= `Could not apply Local Overrides to this popup: ${sanitizedText(String(error))}`
+          void debuggerClient.sendCommand('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }).catch(() => {})
+        }
+      })
+      pending.add(response)
+      void response.finally(() => pending.delete(response))
+    }
+    debuggerClient.on('message', paused)
+    const detached = (): void => {
+      phase = 'closed'
+      finishDrain?.()
+      if (drainTimer) clearTimeout(drainTimer)
+      debuggerClient.off('message', paused)
+      contents.off('did-finish-load', cleanup)
+      contents.off('destroyed', detached)
+      contents.off('did-fail-load', failed)
+    }
+    const cleanup = (): void => {
+      if (phase !== 'active') return
+      phase = 'draining'
+      contents.off('did-finish-load', cleanup)
+      contents.off('did-fail-load', failed)
+      const deadline = new Promise<void>(accept => {
+        finishDrain = accept
+        drainTimer = setTimeout(accept, POPUP_OVERRIDES_DRAIN_MS)
+      })
+      // A header-only stream can outlive the document indefinitely. Preserve finite early responses, then release
+      // outstanding pauses with Fetch.disable; detach the handler only after that command has finished.
+      void Promise.race([Promise.allSettled([...pending]), deadline]).then(async () => {
+        if (drainTimer) clearTimeout(drainTimer)
+        finishDrain = undefined
+        if (phase === 'closed' || contents.isDestroyed()) return
+        phase = 'disabling'
+        await debuggerClient.sendCommand('Fetch.disable').catch(() => {})
+      }).finally(detached)
+    }
+    const failed = (_event: Electron.Event, _code: number, _description: string, _url: string, main: boolean): void => { if (main) cleanup() }
+    contents.once('did-finish-load', cleanup)
+    contents.once('destroyed', detached)
+    contents.on('did-fail-load', failed)
+    void ready.then(applied => {
+      if (!applied && !contents.isDestroyed()) { contents.stop(); cleanup() }
+    }).catch(error => {
+      if (!contents.isDestroyed()) { popup.error = `Could not activate popup overrides: ${sanitizedText(String(error))}`; contents.stop() }
+      cleanup()
+    })
+  }
+
+  /** Electron's native auto-open-for-popups handler is a no-op. Keep its override engine alive without showing its UI. */
+  private async inheritPopupOverrides(opener: BrowserPage, popup: BrowserPage): Promise<boolean> {
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let closed: (() => void) | undefined
+    const checkOpen = (): void => {
+      if (stopped || this.disposed || popup.contents.isDestroyed()) throw new Error('Popup closed or overrides activation timed out')
+    }
+    try {
+      await Promise.race([
+        (async () => {
+          // Query the opener live: a toggle changed just before window.open must not use the footer's cached value.
+          await this.readOverrides(opener)
+          checkOpen()
+          const setting = opener.overrides ?? this.savedOverrides
+          if (!setting?.enabled || !setting.folder) return
+          const tools = this.ensureDevtools(popup)
+          this.layout()
+          for (;;) {
+            checkOpen()
+            if (!tools.isDestroyed() && !tools.isLoading() && tools.getURL().startsWith('devtools://devtools/')) {
+              const ready = overridesFromDevtools(await tools.executeJavaScript(POPUP_OVERRIDES_READY_SCRIPT))
+              checkOpen()
+              if (ready) { popup.overrides = ready; return }
+            }
+            await new Promise(accept => setTimeout(accept, 25))
+          }
+        })(),
+        new Promise<never>((_accept, reject) => {
+          closed = () => { stopped = true; reject(new Error('Popup closed before overrides activated')) }
+          popup.contents.once('destroyed', closed)
+          timer = setTimeout(() => { stopped = true; reject(new Error('Local Overrides activation timed out')) }, 15000)
+        }),
+      ])
+      return true
+    } catch (error) {
+      if (!this.disposed && !popup.contents.isDestroyed()) popup.error = `Could not activate Local Overrides for this popup: ${sanitizedText(String(error))}`
+      // Do not silently load an unmodified document or replay a POST after a failed activation.
+      return false
+    } finally {
+      if (timer) clearTimeout(timer)
+      if (closed) popup.contents.off('destroyed', closed)
     }
   }
 
@@ -654,11 +790,18 @@ export class BrowserDebug {
     page.devtools = ['console', 'network', 'devtools'].includes(view)
     if (!page.devtools) { this.layout(); return }
     page.panel = view === 'devtools' ? 'sources' : view as 'console' | 'network'
+    this.ensureDevtools(page)
+    this.layout()
+  }
+
+  /** Create a page's native DevTools independently of which page or panel is visible. */
+  private ensureDevtools(page: BrowserPage): WebContents {
     if (!page.tools) {
       // DevTools keeps its added folders (the Local Overrides folder) in its own view's session: the default one, shared by
       // every session, or this session's own partition.
       page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true,
         ...(this.devtoolsPartition ? { partition: this.devtoolsPartition } : {}) } })
+      page.tools.setVisible(false)
       if (page.attached) this.owner.contentView.addChildView(page.tools)
       page.tools.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
       page.tools.webContents.on('did-finish-load', () => this.selectDevtoolsPanel(page))
@@ -667,7 +810,7 @@ export class BrowserDebug {
     } else if (!page.tools.webContents.isLoading()) {
       this.selectDevtoolsPanel(page)
     }
-    this.layout()
+    return page.tools.webContents
   }
 
   private selectDevtoolsPanel(page: BrowserPage): void {
