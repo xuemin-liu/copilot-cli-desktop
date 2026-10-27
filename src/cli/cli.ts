@@ -23,7 +23,7 @@ import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-
 import { secretEnvArgs } from '../main/secure-credentials.js'
 import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES } from '../main/copilot-command.js'
 import { needsToolAllowlistProbe, permissionCompatibilityWarning } from '../main/permission-presets.js'
-import { startWindowsProcessWatchdog } from '../main/windows-process-watchdog.js'
+import { startProcessWatchdog } from '../main/process-tree.js'
 
 const paths = getCliPaths()
 const daemonEntry = fileURLToPath(new URL('./daemon.js', import.meta.url))
@@ -225,9 +225,8 @@ async function runProgrammatic(rawArgs: string[]): Promise<void> {
       stdio: 'inherit',
       windowsHide: false,
     })
-    const watchdog = process.platform === 'win32' && child.pid
-      ? startWindowsProcessWatchdog(child.pid, environment)
-      : null
+    // It stays in the terminal's process group, so Ctrl+C still reaches it.
+    const watchdog = child.pid ? startProcessWatchdog(child.pid, environment) : null
     child.once('error', (error) => {
       watchdog?.release()
       reject(error)

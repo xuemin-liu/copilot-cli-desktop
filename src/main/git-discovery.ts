@@ -1,6 +1,6 @@
 import { lstat, open, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { win32 } from 'node:path'
+import { hostPath, samePath } from './host-path.js'
 import { isLocalFilesystemPath } from './external-targets.js'
 import type { GitRepoKind } from './git-types.js'
 import { realPathNative } from './real-path.js'
@@ -47,7 +47,7 @@ const GIT_POINTER_MAX_BYTES = 4_096
 /** `objects/info/alternates` lists one directory per line, so it may be longer; real ones are a few hundred bytes. */
 const GIT_ALTERNATES_MAX_BYTES = 64 * 1024
 
-export const sameFolder = (left: string, right: string): boolean => win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase()
+export const sameFolder = samePath
 
 type PointerRead = { kind: 'absent' } | { kind: 'text'; text: string } | { kind: 'unsafe' }
 
@@ -97,8 +97,8 @@ export function decodeGitQuoted(line: string): string | null {
 }
 
 function localAbsolute(base: string, value: string): string | null {
-  const resolved = win32.resolve(base, value.trim())
-  return win32.isAbsolute(resolved) && isLocalFilesystemPath(resolved) ? resolved : null
+  const resolved = hostPath.resolve(base, value.trim())
+  return hostPath.isAbsolute(resolved) && isLocalFilesystemPath(resolved) ? resolved : null
 }
 
 /**
@@ -107,11 +107,11 @@ function localAbsolute(base: string, value: string): string | null {
  * them in both the `.git` directory form and the `gitdir:` file form.
  */
 async function pointerIssue(gitDir: string): Promise<string | null> {
-  const common = await readPointerFile(win32.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  const common = await readPointerFile(hostPath.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
   if (common.kind === 'unsafe') return 'The repository\'s commondir could not be checked completely, so it is not opened'
   const commonDir = common.kind === 'absent' ? gitDir : localAbsolute(gitDir, common.text)
   if (!commonDir) return 'The repository points outside local storage, so it is not opened'
-  return alternatesIssue([...new Set([gitDir, commonDir])].map(directory => win32.join(directory, 'objects')))
+  return alternatesIssue([...new Set([gitDir, commonDir])].map(directory => hostPath.join(directory, 'objects')))
 }
 
 /** Git ignores alternates nested deeper than this; a longer chain is refused rather than trusted to be ignored. */
@@ -135,7 +135,7 @@ async function alternatesIssue(roots: readonly string[]): Promise<string | null>
     if (seen.has(key)) continue
     seen.add(key)
     if (seen.size > ALTERNATES_MAX_DIRECTORIES) return ALTERNATES_INCOMPLETE
-    const alternates = await readPointerFile(win32.join(directory, 'info', 'alternates'), GIT_ALTERNATES_MAX_BYTES)
+    const alternates = await readPointerFile(hostPath.join(directory, 'info', 'alternates'), GIT_ALTERNATES_MAX_BYTES)
     if (alternates.kind === 'absent') continue
     if (alternates.kind === 'unsafe') return ALTERNATES_INCOMPLETE
     for (const raw of alternates.text.split(/\r?\n/)) {
@@ -157,7 +157,7 @@ async function alternatesIssue(roots: readonly string[]): Promise<string | null>
 
 /** What lives at `<folder>\.git`: `null` when absent, otherwise whether git may be pointed at it. */
 export async function inspectGitEntry(folder: string): Promise<{ issue: string | null } | null> {
-  const entry = win32.join(folder, '.git')
+  const entry = hostPath.join(folder, '.git')
   let info
   try { info = await lstat(entry) } catch { return null }
   if (info.isSymbolicLink()) return { issue: 'The .git entry is a link, so it is not opened' }
@@ -172,8 +172,8 @@ export async function inspectGitEntry(folder: string): Promise<{ issue: string |
 }
 
 function isAncestorTooBroad(candidate: string, homeDirectory: string): boolean {
-  const resolved = win32.resolve(candidate)
-  return resolved === win32.parse(resolved).root || sameFolder(resolved, homeDirectory)
+  const resolved = hostPath.resolve(candidate)
+  return resolved === hostPath.parse(resolved).root || sameFolder(resolved, homeDirectory)
 }
 
 export async function discoverRepos(projectPath: string, options: DiscoveryOptions = {}): Promise<DiscoveryResult> {
@@ -192,7 +192,7 @@ export async function discoverRepos(projectPath: string, options: DiscoveryOptio
   const notes: string[] = []
   const repos: DiscoveredRepo[] = []
   let truncated = false
-  const relative = (root: string): string => win32.relative(project, root) || '.'
+  const relative = (root: string): string => hostPath.relative(project, root) || '.'
 
   const own = await inspectGitEntry(project)
   if (own) {
@@ -201,7 +201,7 @@ export async function discoverRepos(projectPath: string, options: DiscoveryOptio
   }
 
   // The project may sit inside a larger repository.
-  for (let folder = win32.dirname(project), previous = project; folder !== previous; previous = folder, folder = win32.dirname(folder)) {
+  for (let folder = hostPath.dirname(project), previous = project; folder !== previous; previous = folder, folder = hostPath.dirname(folder)) {
     const entry = await inspectGitEntry(folder)
     if (!entry) continue
     if (isAncestorTooBroad(folder, home)) {
@@ -224,7 +224,7 @@ export async function discoverRepos(projectPath: string, options: DiscoveryOptio
       // Dirent.isDirectory() is false for links and junctions, so they are never followed.
       if (!child.isDirectory() || skip.has(child.name.toLowerCase())) continue
       if (++visited > maxDirectories || Date.now() > deadline) { truncated = true; queue.length = 0; break }
-      const folder = win32.join(current.folder, child.name)
+      const folder = hostPath.join(current.folder, child.name)
       const found = await inspectGitEntry(folder)
       if (found) {
         if (repos.filter(repo => repo.kind !== 'parent').length >= maxRepos) { truncated = true; queue.length = 0; break }
@@ -267,7 +267,7 @@ export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: str
   let root: string
   try { root = await realPathNative(cwd) } catch { return null }
   if (!isLocalFilesystemPath(root)) return null
-  const entry = win32.join(root, '.git')
+  const entry = hostPath.join(root, '.git')
   let info
   try { info = await lstat(entry) } catch { return null }
   if (!info.isFile()) return null
@@ -287,14 +287,14 @@ export async function inspectSessionWorktree(cwd: string, accept: (mainRoot: str
   // Where the git directory sits says nothing about which repository git will read: `commondir` does. It must be the
   // accepted repository's own .git, and the backpointer must name this folder's .git file, or the folder is not a
   // worktree of that repository and is not shown at all.
-  const common = await readPointerFile(win32.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  const common = await readPointerFile(hostPath.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
   if (common.kind !== 'text') return null
   const commonNamed = localAbsolute(gitDir, common.text)
   if (!commonNamed) return null
   let commonDir: string
   try { commonDir = await realPathNative(commonNamed) } catch { return null }
-  if (!sameFolder(commonDir, win32.join(mainRoot, '.git'))) return null
-  const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+  if (!sameFolder(commonDir, hostPath.join(mainRoot, '.git'))) return null
+  const back = await readPointerFile(hostPath.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
   if (back.kind !== 'text') return null
   const backNamed = localAbsolute(gitDir, back.text)
   if (!backNamed) return null
@@ -318,9 +318,9 @@ async function projectRepository(projectPath: string, homeDirectory?: string): P
   try { project = await realPathNative(projectPath) } catch { return null }
   const rawHome = homeDirectory ?? homedir()
   const home = await realPathNative(rawHome).catch(() => rawHome)
-  for (let folder = project, previous = ''; folder !== previous; previous = folder, folder = win32.dirname(folder)) {
+  for (let folder = project, previous = ''; folder !== previous; previous = folder, folder = hostPath.dirname(folder)) {
     let info
-    try { info = await lstat(win32.join(folder, '.git')) } catch { continue }
+    try { info = await lstat(hostPath.join(folder, '.git')) } catch { continue }
     if (folder !== project && isAncestorTooBroad(folder, home)) return null
     if (info.isDirectory()) return (await inspectGitEntry(folder))?.issue === null ? { project, mainRoot: folder } : null
     const mainRoot = (await inspectSessionWorktree(folder, () => true))?.mainRoot
@@ -347,16 +347,16 @@ export async function listLinkedWorktrees(projectPath: string, options: { homeDi
   const { project, mainRoot } = repository
   const max = options.max ?? MAX_LISTED_WORKTREES
   let entries
-  try { entries = await readdir(win32.join(mainRoot, '.git', 'worktrees'), { withFileTypes: true }) } catch { return [] }
+  try { entries = await readdir(hostPath.join(mainRoot, '.git', 'worktrees'), { withFileTypes: true }) } catch { return [] }
   const found: SessionWorktree[] = []
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     if (found.length >= max) break
-    const gitDir = win32.join(mainRoot, '.git', 'worktrees', entry.name)
-    const back = await readPointerFile(win32.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
+    const gitDir = hostPath.join(mainRoot, '.git', 'worktrees', entry.name)
+    const back = await readPointerFile(hostPath.join(gitDir, 'gitdir'), GIT_POINTER_MAX_BYTES)
     const dotGit = back.kind === 'text' ? localAbsolute(gitDir, back.text) : null
     if (!dotGit) continue
-    const worktree = await linkedWorktreeOf(win32.dirname(dotGit), mainRoot, project)
+    const worktree = await linkedWorktreeOf(hostPath.dirname(dotGit), mainRoot, project)
     // The folder must lead back to this very entry; one whose backpointer names another entry's worktree is not listed twice.
     if (worktree && sameFolder(worktree.gitDir, gitDir)) found.push(worktree)
   }
@@ -376,7 +376,7 @@ export async function resolveLinkedWorktree(projectPath: string, path: string): 
 
 /** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
 export async function readWorktreeBranch(gitDir: string): Promise<string | null> {
-  const head = await readPointerFile(win32.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)
+  const head = await readPointerFile(hostPath.join(gitDir, 'HEAD'), GIT_POINTER_MAX_BYTES)
   const ref = head.kind === 'text' ? /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(head.text) : null
   return ref?.[1] ?? null
 }

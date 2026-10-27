@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createWriteStream, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,6 +16,9 @@ import { assertMigrationWritersStopped } from './migration-writers.js'
 import { CREDENTIAL_NAMES, SENSITIVE_ENVIRONMENT_NAME } from './secure-credentials.js'
 import type { DaemonState } from '../cli/runtime-state.js'
 import type { MigrationChoices, MigrationManifest, MigrationRoots } from './migration-types.js'
+
+/** Migration is Windows to Windows only; on other platforms the app does not offer it. */
+const test = (process.platform === 'win32' ? nodeTest : nodeTest.skip) as typeof nodeTest
 
 const choices: MigrationChoices = { categories: ['settings', 'knowledge', 'skills', 'desktop', 'projects', 'tools'], replace: [], allowPermissions: false }
 function manifest(): MigrationManifest { return { version: 1, createdAt: new Date().toISOString(), platform: 'win32', appVersion: '0.1.17', cliVersion: '1.0.82', projects: [], entries: [], warnings: [] } }

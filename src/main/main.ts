@@ -3,7 +3,7 @@ import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { basename, dirname, join, resolve, win32 } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -120,6 +120,8 @@ import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
+import { isSameOrInside } from './host-path.js'
+import { desktopPosixPath } from './posix-executables.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -2373,11 +2375,7 @@ function wakeDormantTab(tabId: string): Promise<void> {
 
 const sessionCatalogCache: SessionCatalogCache = new Map()
 
-function sameOrInside(path: string, folder: string): boolean {
-  const target = win32.resolve(path).replace(/[\\/]+$/, '').toLowerCase()
-  const base = win32.resolve(folder).replace(/[\\/]+$/, '').toLowerCase()
-  return target === base || target.startsWith(`${base}\\`)
-}
+const sameOrInside = isSameOrInside
 
 /** The open project a stored session belongs to: one whose folder holds where it ran, or whose repository it ran in a
  * linked worktree of (then it resumes in that worktree). */
@@ -3965,6 +3963,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('activate', restoreMainWindow)
 
   app.whenReady().then(async () => {
+    // Opened from Finder or a launcher, the app lacks the PATH the person's shell sets up, where the Copilot CLI and Git live.
+    if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')

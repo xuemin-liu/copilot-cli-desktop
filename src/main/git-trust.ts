@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { win32 } from 'node:path'
+import { pathKey } from './host-path.js'
 import { writeFileAtomic } from './atomic-file.js'
 import type { GitRunner } from './git-runner.js'
 import { splitNul } from './git-parse.js'
@@ -81,7 +81,7 @@ export async function scanRepoConfig(runner: GitRunner, repoRoot: string, signal
 
 /** Canonical map key for a repository root. */
 export function repoTrustKey(root: string): string {
-  return win32.resolve(root).toLowerCase()
+  return pathKey(root)
 }
 
 interface TrustFile {

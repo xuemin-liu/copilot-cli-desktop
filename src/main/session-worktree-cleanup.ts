@@ -1,4 +1,4 @@
-import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitRunOptions, GitRunResult } from './git-runner.js'
 import { parseWorktrees } from './git-parse.js'
@@ -20,8 +20,8 @@ export const DESKTOP_WORKTREE_NAME = /^desktop-[a-z0-9-]+-[0-9a-f]{6}$/
 
 /** Whether a folder is where the desktop creates a session worktree: `<main checkout>.worktrees\desktop-<title>-<6 hex>`. */
 export function isDesktopWorktreeFolder(path: string): boolean {
-  const trimmed = win32.resolve(path)
-  return DESKTOP_WORKTREE_NAME.test(win32.basename(trimmed)) && win32.basename(win32.dirname(trimmed)).toLowerCase().endsWith('.worktrees')
+  const trimmed = hostPath.resolve(path)
+  return DESKTOP_WORKTREE_NAME.test(hostPath.basename(trimmed)) && hostPath.basename(hostPath.dirname(trimmed)).toLowerCase().endsWith('.worktrees')
 }
 
 export interface DesktopWorktreeState {
@@ -70,7 +70,7 @@ export async function inspectDesktopWorktree(path: string, runGit: RunGit, signa
   const uniqueCommits = Number.parseInt(unique.stdout.toString('utf8').trim(), 10)
   if (!Number.isInteger(uniqueCommits) || uniqueCommits < 0) return null
   return {
-    path: entry.path, name: win32.basename(win32.resolve(entry.path)), mainPath: main.path, branch: entry.branch, head: entry.head,
+    path: entry.path, name: hostPath.basename(hostPath.resolve(entry.path)), mainPath: main.path, branch: entry.branch, head: entry.head,
     locked: entry.locked !== null, changes, uniqueCommits,
   }
 }

@@ -1,5 +1,5 @@
 import { lstat, open } from 'node:fs/promises'
-import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 import { isPathWithinRoot } from './external-targets.js'
 import { realPathNative } from './real-path.js'
 
@@ -34,7 +34,7 @@ export async function readUntrackedFile(repoRoot: string, relativePath: string, 
   if (relativePath.endsWith('/')) return { kind: 'directory' }
   const segments = safeRepoSegments(relativePath)
   if (!segments) return { kind: 'unsafe', reason: 'The file name is not safe to open' }
-  const target = win32.join(repoRoot, ...segments)
+  const target = hostPath.join(repoRoot, ...segments)
   let info
   try { info = await lstat(target) } catch { return { kind: 'unsafe', reason: 'The file no longer exists' } }
   if (info.isSymbolicLink()) return { kind: 'unsafe', reason: 'The file is a link, so it is not opened' }

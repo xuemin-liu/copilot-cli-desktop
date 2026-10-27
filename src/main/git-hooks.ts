@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, readdir } from 'node:fs/promises'
-import { win32 } from 'node:path'
+import { hostPath } from './host-path.js'
 import { gitPathArgs } from './git-commands.js'
 import { isLocalFilesystemPath } from './external-targets.js'
 import { gitSucceeded } from './git-runner.js'
@@ -79,7 +79,7 @@ export async function inspectHooks(runner: GitRunner, repoRoot: string, hookName
   if (!gitSucceeded(located)) throw new Error('Could not find the repository\'s hooks folder')
   const printed = located.stdout.toString('utf8').split(/\r?\n/, 1)[0]?.trim() ?? ''
   if (!printed) throw new Error('Could not find the repository\'s hooks folder')
-  const directory = win32.resolve(repoRoot, printed)
+  const directory = hostPath.resolve(repoRoot, printed)
   if (!isLocalFilesystemPath(directory)) throw new Error('The repository\'s hooks folder is not on local storage')
   let names: string[] = []
   try { names = await readdir(directory) } catch (error) {
@@ -90,7 +90,7 @@ export async function inspectHooks(runner: GitRunner, repoRoot: string, hookName
   const unverifiable: Array<{ name: string; reason: string }> = []
   for (const name of names.sort()) {
     if (!hookNameOf(name, hookNames)) continue
-    const result = await digest(win32.join(directory, name), maxBytes)
+    const result = await digest(hostPath.join(directory, name), maxBytes)
     if ('unverifiable' in result) {
       unverifiable.push({ name, reason: result.unverifiable })
       found.push([name, `unverifiable: ${result.unverifiable}`])

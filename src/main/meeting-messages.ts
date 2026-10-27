@@ -18,7 +18,13 @@ export const MAX_MEETING_TOPIC_CHARS = 200
 const MAX_TITLE_CHARS = 80
 const SEPARATOR = '\n-----\n'
 
-export const MEETING_HELPER_COMMAND = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
+/** How Copilot runs the meeting helper from its shell tool: Windows PowerShell on Windows, `sh` elsewhere. */
+export const MEETING_HELPER_COMMAND = process.platform === 'win32'
+  ? 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
+  : 'sh "$COPILOT_DESKTOP_MEETING_HELPER"'
+
+/** The code-fence language for helper commands in the instructions. */
+export const HELPER_SHELL_FENCE = process.platform === 'win32' ? 'powershell' : 'sh'
 
 /** `role` is what the person asked a reviewer to review as ("security reviewer"); none for the host or when not given. */
 export interface MeetingParty { title: string; folder: string | null; role?: string | null }

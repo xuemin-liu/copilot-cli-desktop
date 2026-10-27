@@ -1,4 +1,5 @@
-import { join, win32 } from 'node:path'
+import { join } from 'node:path'
+import { hostPath } from './host-path.js'
 import { tmpdir } from 'node:os'
 import { GitRunner, gitSucceeded, resolveGitExecutable } from './git-runner.js'
 import type { GitRunOptions, GitRunResult } from './git-runner.js'
@@ -37,7 +38,7 @@ export async function prepareSessionWorktree(
   const listed = await run({ cwd: options.cwd, args: ['worktree', 'list', '--porcelain', '-z'] })
   const first = listed.stdout.toString('utf8').split('\0')[0]
   if (!first?.startsWith('worktree ')) throw new Error('Could not locate the main Git checkout')
-  const target = win32.join(`${first.slice('worktree '.length)}.worktrees`, name)
+  const target = hostPath.join(`${first.slice('worktree '.length)}.worktrees`, name)
   await run({ cwd: options.cwd, kind: 'write', disableHooks: true,
     args: ['worktree', 'add', '-b', name, target, 'HEAD'],
     timeoutMs: normalizeWorktreeTimeoutMinutes(options.worktreeTimeoutMinutes) * 60_000 })
