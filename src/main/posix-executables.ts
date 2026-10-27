@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -55,10 +55,24 @@ export function wellKnownBinDirectories(home: string = homedir(), platform: Node
 
 export type LoginShellRunner = (shell: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<string>
 
+/**
+ * Run the login shell in its own session with no input: an interactive shell attached to the terminal the app was started
+ * from takes that terminal over and stops, and it ignores SIGTERM. So a timeout kills its whole group with SIGKILL.
+ */
 const runLoginShell: LoginShellRunner = (shell, args, env, timeoutMs) => new Promise((resolve, reject) => {
-  execFile(shell, args, { env, cwd: POSIX_PROBE_DIRECTORY, timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error, stdout) => {
-    if (error) reject(error)
-    else resolve(String(stdout))
+  const child = spawn(shell, args, { env, cwd: POSIX_PROBE_DIRECTORY, detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  const chunks: Buffer[] = []
+  let bytes = 0
+  child.stdout!.on('data', (chunk: Buffer) => { if ((bytes += chunk.length) <= 1024 * 1024) chunks.push(chunk) })
+  const timer = setTimeout(() => {
+    try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
+    reject(new Error('The login shell did not answer in time'))
+  }, timeoutMs)
+  child.once('error', (error) => { clearTimeout(timer); reject(error) })
+  child.once('close', (code) => {
+    clearTimeout(timer)
+    if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'))
+    else reject(new Error(`The login shell exited with ${String(code)}`))
   })
 })
 
