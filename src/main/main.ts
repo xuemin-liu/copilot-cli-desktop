@@ -671,12 +671,22 @@ function dockSessionTab(tabId: string): DesktopState {
   return snapshot()
 }
 
-/** `onFailure` undoes the caller's change before the next queued write copies the config. */
-async function persistConfig(onFailure?: () => void): Promise<void> {
-  if (configWritesBlocked) return
+/**
+ * `change`, when given, runs when this write's turn comes, right before the config is copied, and
+ * `onFailure` undoes it before the next queued write copies the config: a change that fails to save
+ * is never written by another write.
+ */
+async function persistConfig(change?: () => void, onFailure?: () => void): Promise<void> {
+  if (configWritesBlocked) {
+    change?.()
+    return
+  }
   const { operation, queue } = queueConfigWrite(
     configWriteQueue,
-    () => writeDesktopConfig(configPath(), structuredClone(desktopConfig)),
+    () => {
+      change?.()
+      return writeDesktopConfig(configPath(), structuredClone(desktopConfig))
+    },
     onFailure,
   )
   configWriteQueue = queue
@@ -3618,44 +3628,54 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     throw new Error('Invalid desktop preferences')
   }
 
-  const before = settingsPreferences()
-  const updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'
-    && desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
-  const shortcutChanged = typeof values.globalShortcutEnabled === 'boolean'
-    && desktopConfig.globalShortcutEnabled !== values.globalShortcutEnabled
-  if (isCloseBehavior(values.closeBehavior)) desktopConfig.closeBehavior = values.closeBehavior
-  if (typeof values.trayEnabled === 'boolean') desktopConfig.trayEnabled = values.trayEnabled
-  if (typeof values.notifications === 'boolean') desktopConfig.notifications = values.notifications
-  if (typeof values.automaticUpdateChecks === 'boolean') {
-    desktopConfig.automaticUpdateChecks = values.automaticUpdateChecks
-  }
-  if (typeof values.globalShortcutEnabled === 'boolean') {
-    desktopConfig.globalShortcutEnabled = values.globalShortcutEnabled
-  }
-  // Browsers already open keep their profile until their session closes or the app restarts.
-  if (isBrowserProfileMode(values.browserProfile)) desktopConfig.browserProfile = values.browserProfile
-  // Only new sessions follow it; the new-session dialog shows it as its default.
-  const overridesChanged = isBrowserOverridesMode(values.browserOverrides) && desktopConfig.browserOverrides !== values.browserOverrides
-  if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
-  if (isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes)) desktopConfig.worktreeTimeoutMinutes = values.worktreeTimeoutMinutes
-  if (isWorktreeCleanupMode(values.worktreeCleanup)) desktopConfig.worktreeCleanup = values.worktreeCleanup
-  // Open meetings keep their round limit; the round timeout applies from the next round.
-  if (isMeetingMaxRounds(values.meetingMaxRounds)) desktopConfig.meetingMaxRounds = values.meetingMaxRounds
-  if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
-  // Read when a round's reviews are all in, so it applies to open meetings from their next round.
-  if (typeof values.meetingDiscussion === 'boolean') desktopConfig.meetingDiscussion = values.meetingDiscussion
-  // A remembered tray action is unusable without a tray icon. Move back to
-  // the explicit prompt and restore a hidden window before persisting.
-  if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
-    desktopConfig.closeBehavior = 'ask'
-  }
-  if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
-  updateTrayVisibility()
-  const applied = settingsPreferences()
-  // Settings reads this in-memory config, so an unsaved change would otherwise
-  // keep showing, keep taking effect, and be written by the next save.
+  let before: DesktopPreferences | null = null
+  let applied: DesktopPreferences | null = null
+  let updateChecksChanged = false
+  let shortcutChanged = false
+  let overridesChanged = false
+  // The change is made when this save's turn in the write queue comes, not now, so no
+  // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
-    Object.assign(desktopConfig, preferenceRollback(before, applied, settingsPreferences()))
+    before = settingsPreferences()
+    updateChecksChanged = typeof values.automaticUpdateChecks === 'boolean'
+      && desktopConfig.automaticUpdateChecks !== values.automaticUpdateChecks
+    shortcutChanged = typeof values.globalShortcutEnabled === 'boolean'
+      && desktopConfig.globalShortcutEnabled !== values.globalShortcutEnabled
+    if (isCloseBehavior(values.closeBehavior)) desktopConfig.closeBehavior = values.closeBehavior
+    if (typeof values.trayEnabled === 'boolean') desktopConfig.trayEnabled = values.trayEnabled
+    if (typeof values.notifications === 'boolean') desktopConfig.notifications = values.notifications
+    if (typeof values.automaticUpdateChecks === 'boolean') {
+      desktopConfig.automaticUpdateChecks = values.automaticUpdateChecks
+    }
+    if (typeof values.globalShortcutEnabled === 'boolean') {
+      desktopConfig.globalShortcutEnabled = values.globalShortcutEnabled
+    }
+    // Browsers already open keep their profile until their session closes or the app restarts.
+    if (isBrowserProfileMode(values.browserProfile)) desktopConfig.browserProfile = values.browserProfile
+    // Only new sessions follow it; the new-session dialog shows it as its default.
+    overridesChanged = isBrowserOverridesMode(values.browserOverrides) && desktopConfig.browserOverrides !== values.browserOverrides
+    if (isBrowserOverridesMode(values.browserOverrides)) desktopConfig.browserOverrides = values.browserOverrides
+    if (isWorktreeTimeoutMinutes(values.worktreeTimeoutMinutes)) desktopConfig.worktreeTimeoutMinutes = values.worktreeTimeoutMinutes
+    if (isWorktreeCleanupMode(values.worktreeCleanup)) desktopConfig.worktreeCleanup = values.worktreeCleanup
+    // Open meetings keep their round limit; the round timeout applies from the next round.
+    if (isMeetingMaxRounds(values.meetingMaxRounds)) desktopConfig.meetingMaxRounds = values.meetingMaxRounds
+    if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
+    // Read when a round's reviews are all in, so it applies to open meetings from their next round.
+    if (typeof values.meetingDiscussion === 'boolean') desktopConfig.meetingDiscussion = values.meetingDiscussion
+    // A remembered tray action is unusable without a tray icon. Move back to
+    // the explicit prompt and restore a hidden window before persisting.
+    if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
+      desktopConfig.closeBehavior = 'ask'
+    }
+    if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    updateTrayVisibility()
+    applied = settingsPreferences()
+  }, () => {
+    // Settings reads this in-memory config, so an unsaved change would otherwise
+    // keep showing, keep taking effect, and be written by the next save.
+    // When applying the change threw partway, undo whatever it had set.
+    if (!before) return
+    Object.assign(desktopConfig, preferenceRollback(before, applied ?? settingsPreferences(), settingsPreferences()))
     if (shortcutChanged) applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
     updateTrayVisibility()
     broadcastSettingsPreferences()

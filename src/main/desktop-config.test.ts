@@ -354,3 +354,31 @@ test('the config write queue keeps going when undoing a failed change throws', a
   await queueConfigWrite(failed.queue, async () => { ran = true }).operation
   assert.equal(ran, true)
 })
+
+test('an earlier successful save does not write a later change whose own save fails', async () => {
+  const config = { ...DEFAULT_DESKTOP_CONFIG, notifications: true, meetingDiscussion: false }
+  const saved: DesktopConfig[] = []
+  let releaseHeld!: () => void
+  const held = new Promise<void>((resolve) => { releaseHeld = resolve })
+  // Like persistConfig(): apply the change when the write's turn comes, then copy the config.
+  const write = (change: () => void, fail = false) => async (): Promise<void> => {
+    change()
+    const copy = structuredClone(config)
+    if (fail) throw new Error('disk full')
+    saved.push(copy)
+  }
+
+  const c = queueConfigWrite(Promise.resolve(), async () => { await held; saved.push(structuredClone(config)) })
+  const a = queueConfigWrite(c.queue, write(() => { config.meetingDiscussion = true }))
+  const b = queueConfigWrite(a.queue, write(() => { config.notifications = false }, true), () => { config.notifications = true })
+  releaseHeld()
+
+  await a.operation
+  await assert.rejects(b.operation, /disk full/)
+  await b.queue
+  assert.deepEqual(saved.map(({ notifications, meetingDiscussion }) => ({ notifications, meetingDiscussion })), [
+    { notifications: true, meetingDiscussion: false },
+    { notifications: true, meetingDiscussion: true },
+  ])
+  assert.equal(config.notifications, true)
+})
