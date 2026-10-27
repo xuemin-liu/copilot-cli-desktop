@@ -1,7 +1,8 @@
 # Copilot CLI Desktop
 
-A Windows-first Electron desktop shell and background CLI for the
-[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`).
+An Electron desktop shell and background CLI for the
+[GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`), for Windows, macOS and Linux.
+See [Platforms](#platforms) for what differs between them.
 
 > **This is an unofficial, community-built wrapper around the public `copilot`
 > CLI.** It is not affiliated with, endorsed by, or supported by GitHub or
@@ -107,7 +108,7 @@ handle, only input/output/resize events.
   (Ctrl+Alt+H), both opt-in via Settings.
 - Provider settings for GitHub Copilot, OpenAI, Azure OpenAI, and Anthropic,
   including base URL, model, and offline mode. A secure credential vault
-  (Windows DPAPI via Electron `safeStorage`) protects
+  (Electron `safeStorage`: Windows DPAPI, the macOS Keychain, or a Linux keyring) protects
   `COPILOT_PROVIDER_API_KEY`, the legacy `COPILOT_PROVIDER_BASE_URL`, and the
   supported GitHub token overrides `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and
   `GITHUB_TOKEN`. If protected storage is unavailable, saving is refused
@@ -139,14 +140,15 @@ handle, only input/output/resize events.
 - Visible Windows elevation and permission-access status, with warnings for
   high-trust modes and elevated launches.
 - Stops the full process tree for every running session on app quit, with a
-  detached Windows watchdog covering abrupt desktop-process termination.
+  detached watchdog covering abrupt desktop-process termination (PowerShell on
+  Windows, `sh` on macOS and Linux, where each child leads its own process group).
 - A background CLI (`copilot-desktop`) with a token-protected, loopback-only
   HTTP control server (`start` / `status` / `restart` / `logs` / `stop`) and a
   first-class `run --prompt` command for official non-interactive Copilot
   execution, JSONL output, custom agents, models, and transcript export.
-- Windows packaging via `electron-builder` (NSIS), post-package runtime
-  auditing, and signed tag-triggered releases with unsigned publication
-  blocked.
+- Packaging via `electron-builder` (Windows NSIS installer, macOS dmg and zip,
+  Linux AppImage and deb), post-package runtime auditing, and signed
+  tag-triggered Windows releases with unsigned publication blocked.
 
 ## Session windows
 
@@ -370,20 +372,42 @@ available, but requires all active sessions to be closed.
 
 ## Requirements
 
-- Windows 10 or later for the packaged desktop application.
+- Windows 10 or later, macOS 12 or later, or a 64-bit Linux desktop for the packaged application.
 - Node.js 24 and pnpm 11.5.3 for source development and the CLI.
-- The [`copilot` CLI](https://github.com/github/copilot-cli) itself on PATH to
-  actually spawn sessions. It can also be installed or repaired from Desktop Settings using
-  the official Windows WinGet package. Verified npm installations remain
+- The [`copilot` CLI](https://github.com/github/copilot-cli) itself to
+  actually spawn sessions. On Windows it can also be installed or repaired from Desktop Settings using
+  the official WinGet package. Verified npm installations remain
   supported for launch, but the desktop never runs npm lifecycle scripts to install one.
+  On macOS and Linux, install it with npm or your package manager; the desktop reads your login
+  shell's `PATH` at startup, so it finds what your terminal finds even when opened from Finder or a launcher.
   Neither is required to build, typecheck, or run the unit tests.
-- Git for Windows 2.30 or newer, only for the Git panel. Everything else works without it.
+- Git 2.30 or newer, only for the Git panel (Git for Windows on Windows; on macOS, the Command
+  Line Tools or Homebrew Git). Everything else works without it.
+- On macOS and Linux, `curl`, for Copilot's browser and review-meeting helpers.
 
 `node-pty` 1.x's native addon is built on `node-addon-api` (N-API), which is
 ABI-stable across Node.js and Electron — no `@electron/rebuild` or other
 native-rebuild step is required. This was verified in this repository's setup
 by loading the package's prebuilt Windows binary both under plain Node and
-under Electron (`ELECTRON_RUN_AS_NODE=1`) with no rebuild.
+under Electron (`ELECTRON_RUN_AS_NODE=1`) with no rebuild. node-pty ships prebuilt
+binaries for Windows and macOS; on Linux `pnpm install` compiles it, which needs Python, `make` and a C++ compiler.
+
+## Platforms
+
+The features are the same on all three platforms, except:
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Copilot's browser and meeting helpers | `browser.ps1`, `meeting.ps1` (Windows PowerShell) | `browser.sh`, `meeting.sh` (`sh` and `curl`) | same as macOS |
+| Shortcut key | Ctrl | Cmd; Ctrl keys go to the terminal | Ctrl |
+| Saved secrets | DPAPI | Keychain | libsecret or KWallet; without one, saving is refused |
+| Launch at login | login item | login item | `~/.config/autostart` entry |
+| In-app updates | installer | not available unsigned: download from Releases | AppImage only; a `.deb` updates through the package manager |
+| Migration (Settings → Migration) | yes | no | no |
+| Network shares in Git folders | refused | not detected (a network mount looks like a local folder) | same as macOS |
+
+macOS builds are not signed or notarized unless the release has an Apple Developer ID, so
+macOS asks you to confirm the first time you open the app (System Settings → Privacy & Security → Open Anyway).
 
 ## Development
 
@@ -482,11 +506,24 @@ the release workflow ends with a notice, builds nothing and publishes nothing, s
 unsigned publication stays impossible without failing the run. Packaging audits the archive, native
 `node-pty` addon, required executables, Electron fuses, and production-only files.
 
+## macOS and Linux packaging
+
+```bash
+pnpm dist:mac     # dmg and zip, arm64 and x64 (on a Mac)
+pnpm dist:linux   # AppImage and deb, x64 (on Linux)
+```
+
+Both run the same package audit as Windows. CI builds both, unsigned, on every push.
+
 ## Releases
 
 Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the NSIS
 installer and publishes it plus `latest.yml` (required by the in-app updater) to a GitHub
-release. It refuses to publish without Windows code signing. The detailed DeepSeek Harness
+release. It refuses to publish without Windows code signing. When a release is published,
+`.github/workflows/release-unix.yml` builds the macOS and Linux packages from its tag and adds them,
+with `latest-mac.yml` and `latest-linux.yml`, to the same release. macOS builds are signed and
+notarized when the `MAC_CSC_LINK`, `MAC_CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`
+and `APPLE_TEAM_ID` secrets are set, and unsigned otherwise. The detailed DeepSeek Harness
 comparison and every applicability decision are recorded in
 [`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
 

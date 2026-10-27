@@ -4069,8 +4069,11 @@ if (!app.requestSingleInstanceLock()) {
     syncWorkspaceState()
 
     updateController = new DesktopUpdateController(
-      app.isPackaged && process.platform === 'win32' ? autoUpdater as unknown as UpdateAdapter : null,
+      // In-app updates: the Windows installer, and a Linux AppImage. A .deb updates through its package manager, and macOS
+      // can only replace a signed app.
+      app.isPackaged && (process.platform === 'win32' || (process.platform === 'linux' && process.env.APPIMAGE)) ? autoUpdater as unknown as UpdateAdapter : null,
       app.getVersion(),
+      ...(app.isPackaged ? ['Get new versions from the Releases page (Help → Open Releases).'] : []),
     )
     updateController.on('state-changed', (update: DesktopUpdateState) => {
       if (installInProgress && update.status === 'error') {

@@ -1,0 +1,77 @@
+name: macOS and Linux release
+
+# Adds macOS and Linux builds to a GitHub release once it is published (the Windows installer is published with it).
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload to, for example v0.1.56
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: dist:linux
+            files: release/*.AppImage release/*.deb release/latest-linux.yml
+          - os: macos-latest
+            command: dist:mac
+            files: release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+      - name: Validate release tag
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "Release tag $RELEASE_TAG does not match package version $version" >&2
+            exit 1
+          fi
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: Verify source
+        run: |
+          corepack pnpm typecheck
+          corepack pnpm test
+      - name: Check macOS signing
+        id: signing
+        if: runner.os == 'macOS'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Unsigned macOS build::MAC_CSC_LINK is not set, so the app is not signed or notarized. macOS blocks it until the person allows it in System Settings, and it cannot update itself."
+          fi
+      - name: Build
+        env:
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.signing.outputs.configured == 'true' }}
+        run: corepack pnpm ${{ matrix.command }}
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" ${{ matrix.files }} --clobber

@@ -31,3 +31,8 @@ jobs:
         run: corepack pnpm typecheck
       - name: Unit tests
         run: corepack pnpm test
+      - name: Package (unsigned)
+        if: runner.os != 'Windows'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: corepack pnpm ${{ runner.os == 'macOS' && 'dist:mac' || 'dist:linux' }}

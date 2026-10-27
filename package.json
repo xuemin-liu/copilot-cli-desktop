@@ -3,7 +3,8 @@
   "version": "0.1.55",
   "private": true,
   "author": "copilot-cli-desktop contributors",
-  "description": "An unofficial Windows-first Electron desktop shell for the GitHub Copilot CLI",
+  "description": "An unofficial Electron desktop shell for the GitHub Copilot CLI, for Windows, macOS and Linux",
+  "homepage": "https://github.com/xuemin-liu/copilot-cli-desktop",
   "type": "module",
   "packageManager": "pnpm@11.5.3",
   "main": "dist/src/main/main.js",
@@ -36,6 +37,8 @@
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
     "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
     "dist:win": "npm run build && electron-builder --win --publish never && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
+    "dist:mac": "npm run build && electron-builder --mac --publish never && node dist/scripts/audit-package.js",
+    "dist:linux": "npm run build && electron-builder --linux --publish never && node dist/scripts/audit-package.js",
     "migration:smoke": "npm run build && node dist/scripts/migration-smoke.js",
     "migration:check": "npm run build && node scripts/migration-electron-check.mjs",
     "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity",
@@ -128,6 +131,41 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "Copilot-CLI-Desktop-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "artifactName": "Copilot-CLI-Desktop-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Development",
+      "maintainer": "copilot-cli-desktop contributors",
+      "synopsis": "Desktop shell for the GitHub Copilot CLI",
+      "artifactName": "Copilot-CLI-Desktop-${version}-${arch}.${ext}",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
     }
   }
 }
