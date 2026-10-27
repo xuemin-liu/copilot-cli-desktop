@@ -9,14 +9,16 @@ const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
 const QUOTED_PATH_PATTERN = /"([^"\r\n]{1,4096})"|'([^'\r\n]{1,4096})'/g
 const BACKTICK_PATH_PATTERN = /`([^`\r\n]{1,4096})`/g
 // Matches an absolute Windows/UNC path or an explicit relative path (./, ../),
-// or a bare relative path that has at least one separator and a file
-// extension (the common shape of paths CLI tools print, e.g. "dist\app.js").
-const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}/g
+// an absolute macOS/Linux path of two or more names ("/usr/bin/git", not a
+// lone "/tmp" or the "/or" of "and/or"), or a bare relative path that has at
+// least one separator and a file extension (the common shape of paths CLI
+// tools print, e.g. "dist\app.js").
+const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}/g
 // Trailing "path:line" or "path:line:column" location suffix many CLIs print
 // (e.g. tsc, eslint) — the number(s) are not part of the filesystem path.
 const LOCATION_SUFFIX = /:\d+(?::\d+)?$/
 const WHOLE_PATH_PATTERN = new RegExp(`^(?:${PATH_PATTERN.source})$`)
-const EXPLICIT_PATH_PREFIX = /^(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])/
+const EXPLICIT_PATH_PREFIX = /^(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/]|\/[^\s/])/
 
 function isBacktickPath(text: string): boolean {
   if (/[<>"'`|*?\r\n]/.test(text)) return false

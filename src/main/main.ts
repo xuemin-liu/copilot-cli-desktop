@@ -122,6 +122,7 @@ import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './typ
 import { realPathNative } from './real-path.js'
 import { isSameOrInside } from './host-path.js'
 import { desktopPosixPath } from './posix-executables.js'
+import { linuxAutostartEnabled, setLinuxAutostart } from './linux-autostart.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
 import { resolveCopilotBinary, withCopilotPathAdditions } from './resolve-copilot.js'
 import { buildResumeArgs, isResumeMode, type ResumeMode } from './resume-args.js'
@@ -133,6 +134,7 @@ import {
 import {
   SecureCredentialStore,
   isCredentialName,
+  protectedStorage,
   secretEnvArgs,
   withoutSensitiveEnvironment,
   type CredentialName,
@@ -712,21 +714,25 @@ function persistProfileTabs(): void {
 }
 
 function loginItemOptions(): { path: string; args: string[] } {
-  return { path: process.execPath, args: [BACKGROUND_START_ARGUMENT] }
+  // An AppImage runs from a temporary mount; APPIMAGE names the file to start next time.
+  return { path: process.platform === 'linux' && process.env.APPIMAGE ? process.env.APPIMAGE : process.execPath, args: [BACKGROUND_START_ARGUMENT] }
 }
 
 function launchAtLoginAvailable(): boolean {
-  return app.isPackaged && (process.platform === 'win32' || process.platform === 'darwin')
+  return app.isPackaged
 }
 
 function launchAtLoginEnabled(): boolean {
   if (!launchAtLoginAvailable()) return false
+  if (process.platform === 'linux') return linuxAutostartEnabled()
   return app.getLoginItemSettings(loginItemOptions()).openAtLogin
 }
 
 function setLaunchAtLogin(enabled: boolean): void {
   if (!launchAtLoginAvailable()) throw new Error('Launch at login is available in installed builds.')
-  app.setLoginItemSettings({ openAtLogin: enabled, ...loginItemOptions() })
+  const options = loginItemOptions()
+  if (process.platform === 'linux') setLinuxAutostart(enabled, options.path, options.args)
+  else app.setLoginItemSettings({ openAtLogin: enabled, ...options })
 }
 
 function applyGlobalShortcut(enabled: boolean): void {
@@ -1196,8 +1202,8 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
 
 async function sessionWorktreeIn(profile: WorkspaceProfile | undefined, cwd: string | null): Promise<{ worktree: SessionWorktreeInfo | null; gitDir: string | null }> {
   if (!cwd || !profile) return { worktree: null, gitDir: null }
-  const base = (await realPathNative(profile.path).catch(() => profile.path)).replace(/[\\/]+$/, '').toLowerCase()
-  const within = (mainRoot: string): boolean => { const root = mainRoot.replace(/[\\/]+$/, '').toLowerCase(); return root === base || root.startsWith(`${base}\\`) }
+  const base = await realPathNative(profile.path).catch(() => profile.path)
+  const within = (mainRoot: string): boolean => isSameOrInside(mainRoot, base)
   const found = await inspectSessionWorktree(cwd, within)
   return found ? { worktree: { path: found.root, name: found.name, branch: found.branch }, gitDir: found.gitDir } : { worktree: null, gitDir: null }
 }
@@ -2074,17 +2080,16 @@ let worktreeCleanupQueue: Promise<void> = Promise.resolve()
 
 /** Whether a tab still open (running or not, since it can be restarted) runs in the folder or below it, or was started there. */
 async function openTabUsesFolder(folder: string): Promise<boolean> {
-  const canonical = (path: string): Promise<string> => realPathNative(path).then((real) => real.replace(/[\\/]+$/, '').toLowerCase())
   let target: string
-  try { target = await canonical(folder) } catch { return false }
+  try { target = await realPathNative(folder) } catch { return false }
   // A dormant tab whose saved folder is still being read may resume in this one.
   await Promise.all(dormantFolderReads.values())
   for (const tab of tabsState.tabs) {
     for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
       if (!where) continue
       let real: string
-      try { real = await canonical(where) } catch { continue }
-      if (real === target || real.startsWith(`${target}\\`)) return true
+      try { real = await realPathNative(where) } catch { continue }
+      if (isSameOrInside(real, target)) return true
     }
   }
   return false
@@ -4081,7 +4086,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     })
 
-    credentialStore = new SecureCredentialStore(protectedCredentialPath(), safeStorage, (message) => void writeAppLog(message))
+    credentialStore = new SecureCredentialStore(protectedCredentialPath(), protectedStorage(safeStorage), (message) => void writeAppLog(message))
 
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'

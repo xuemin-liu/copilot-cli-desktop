@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import test from 'node:test'
 import {
@@ -140,8 +140,10 @@ test('uncommitted changes need a confirmation, and then go to the trash', async 
     assert.equal(inspected.changes, 2)
     assert.equal(worktreeCleanupDecision('safe', inspected), 'ask')
     const trashed: string[] = []
+    // Git names the folder by its real path (macOS: /private/var for /var).
+    const real = realpathSync.native(worktree)
     await removeDesktopWorktree(inspected, run, { trash: async path => { trashed.push(path); await trashByDeleting(path) } })
-    assert.deepEqual(trashed.map(path => path.toLowerCase()), [worktree.toLowerCase()])
+    assert.deepEqual(trashed.map(path => path.toLowerCase()), [real.toLowerCase()])
     assert.equal(fixture.plain(repo, 'worktree', 'list', '--porcelain').includes(name), false, 'git forgot the worktree')
   })
 })
