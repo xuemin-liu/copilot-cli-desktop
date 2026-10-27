@@ -9,6 +9,8 @@ import {
   activateWorkspaceProfile,
   activeWorkspaceProfile,
   normalizeDesktopConfig,
+  preferenceRollback,
+  queueConfigWrite,
   readDesktopConfig,
   recordDesktopVersion,
   workspaceProfileId,
@@ -292,4 +294,91 @@ test('worktree cleanup defaults to removing safe worktrees and keeps a valid sav
     await writeDesktopConfig(filename, { ...DEFAULT_DESKTOP_CONFIG, worktreeCleanup: 'keep' })
     assert.equal((await readDesktopConfig(filename)).worktreeCleanup, 'keep')
   })
+})
+
+test('a failed preference save restores the values it changed but not a newer change', () => {
+  const preferences = (config: DesktopConfig) => ({
+    closeBehavior: config.closeBehavior,
+    trayEnabled: config.trayEnabled,
+    notifications: config.notifications,
+    automaticUpdateChecks: config.automaticUpdateChecks,
+    globalShortcutEnabled: config.globalShortcutEnabled,
+    browserProfile: config.browserProfile,
+    browserOverrides: config.browserOverrides,
+    worktreeTimeoutMinutes: config.worktreeTimeoutMinutes,
+    worktreeCleanup: config.worktreeCleanup,
+    meetingMaxRounds: config.meetingMaxRounds,
+    meetingRoundTimeoutMinutes: config.meetingRoundTimeoutMinutes,
+    meetingDiscussion: config.meetingDiscussion,
+  })
+  const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
+  // Turning the tray off also moved close behavior back to asking.
+  const applied = { ...before, trayEnabled: false, closeBehavior: 'ask' as const }
+  assert.deepEqual(preferenceRollback(before, applied, applied), { trayEnabled: true, closeBehavior: 'tray' })
+  // A newer save already changed close behavior again: leave that one alone.
+  assert.deepEqual(preferenceRollback(before, applied, { ...applied, closeBehavior: 'quit' }), { trayEnabled: true })
+  assert.deepEqual(preferenceRollback(before, before, before), {})
+})
+
+test('a save queued behind a failing one does not write the rejected preference', async () => {
+  const config = { ...DEFAULT_DESKTOP_CONFIG, notifications: true, meetingDiscussion: false }
+  const saved: DesktopConfig[] = []
+  let failFirst!: () => void
+  const firstBlocked = new Promise<void>((_resolve, reject) => { failFirst = () => reject(new Error('disk full')) })
+  let writes = 0
+  const write = async (): Promise<void> => {
+    const copy = structuredClone(config)
+    if (writes++ === 0) await firstBlocked
+    saved.push(copy)
+  }
+
+  // notifications=false is requested while the disk write is blocked...
+  config.notifications = false
+  const first = queueConfigWrite(Promise.resolve(), write, () => { config.notifications = true })
+  // ...and a separate meeting change is saved behind it before it fails.
+  config.meetingDiscussion = true
+  const second = queueConfigWrite(first.queue, write)
+  failFirst()
+
+  await assert.rejects(first.operation, /disk full/)
+  await second.operation
+  assert.deepEqual(saved.map(({ notifications, meetingDiscussion }) => ({ notifications, meetingDiscussion })), [
+    { notifications: true, meetingDiscussion: true },
+  ])
+})
+
+test('the config write queue keeps going when undoing a failed change throws', async () => {
+  const failed = queueConfigWrite(Promise.resolve(), async () => { throw new Error('disk full') }, () => { throw new Error('undo failed') })
+  await assert.rejects(failed.operation, /disk full/)
+  let ran = false
+  await queueConfigWrite(failed.queue, async () => { ran = true }).operation
+  assert.equal(ran, true)
+})
+
+test('an earlier successful save does not write a later change whose own save fails', async () => {
+  const config = { ...DEFAULT_DESKTOP_CONFIG, notifications: true, meetingDiscussion: false }
+  const saved: DesktopConfig[] = []
+  let releaseHeld!: () => void
+  const held = new Promise<void>((resolve) => { releaseHeld = resolve })
+  // Like persistConfig(): apply the change when the write's turn comes, then copy the config.
+  const write = (change: () => void, fail = false) => async (): Promise<void> => {
+    change()
+    const copy = structuredClone(config)
+    if (fail) throw new Error('disk full')
+    saved.push(copy)
+  }
+
+  const c = queueConfigWrite(Promise.resolve(), async () => { await held; saved.push(structuredClone(config)) })
+  const a = queueConfigWrite(c.queue, write(() => { config.meetingDiscussion = true }))
+  const b = queueConfigWrite(a.queue, write(() => { config.notifications = false }, true), () => { config.notifications = true })
+  releaseHeld()
+
+  await a.operation
+  await assert.rejects(b.operation, /disk full/)
+  await b.queue
+  assert.deepEqual(saved.map(({ notifications, meetingDiscussion }) => ({ notifications, meetingDiscussion })), [
+    { notifications: true, meetingDiscussion: false },
+    { notifications: true, meetingDiscussion: true },
+  ])
+  assert.equal(config.notifications, true)
 })

@@ -44,6 +44,37 @@ export type DesktopPreferences = Pick<
   'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
 >
 
+/**
+ * What to put back when saving a preference change fails: each value the change set returns to what it was
+ * before, unless another change has replaced it since, so a failed save never undoes a newer one.
+ */
+export function preferenceRollback(
+  before: DesktopPreferences,
+  applied: DesktopPreferences,
+  current: DesktopPreferences,
+): Partial<DesktopPreferences> {
+  const rollback: Partial<DesktopPreferences> = {}
+  for (const key of Object.keys(before) as Array<keyof DesktopPreferences>) {
+    if (before[key] !== applied[key] && current[key] === applied[key]) Object.assign(rollback, { [key]: before[key] })
+  }
+  return rollback
+}
+
+/**
+ * Chains a config write after the ones already queued. `write` should copy the config when it runs, not
+ * when it is queued, and `onFailure` runs before the next write starts: together a failed change is
+ * undone before any later write copies the config, so a later successful write cannot save it after all.
+ */
+export function queueConfigWrite(
+  queue: Promise<void>,
+  write: () => Promise<void>,
+  onFailure?: () => void,
+): { operation: Promise<void>; queue: Promise<void> } {
+  const operation = queue.then(write)
+  // The second catch keeps the queue usable if undoing the change throws.
+  return { operation, queue: operation.catch(() => onFailure?.()).catch(() => {}) }
+}
+
 export const CLOSE_BEHAVIORS = ['ask', 'tray', 'quit'] as const
 export type CloseBehavior = (typeof CLOSE_BEHAVIORS)[number]
 
