@@ -37,6 +37,7 @@ import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, 
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
+const POPUP_OVERRIDES_DRAIN_MS = 2000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
 interface BrowserPage {
@@ -331,29 +332,42 @@ export class BrowserDebug {
     const contents = popup.contents
     const debuggerClient = contents.debugger
     const pending = new Set<Promise<void>>()
+    let phase: 'active' | 'draining' | 'disabling' | 'closed' = 'active'
+    let drainTimer: ReturnType<typeof setTimeout> | undefined
+    let finishDrain: (() => void) | undefined
+    const handingOff = (): boolean => phase === 'disabling' || phase === 'closed'
     const intercepting = debuggerClient.sendCommand('Fetch.enable', { patterns: [
       { urlPattern: 'http://*/*', requestStage: 'Response' }, { urlPattern: 'https://*/*', requestStage: 'Response' },
     ] })
     const ready = Promise.all([intercepting, this.inheritPopupOverrides(opener, popup)]).then(([, applied]) => applied)
     const paused = (_event: Electron.Event, method: string, params: Record<string, unknown>): void => {
       if (method !== 'Fetch.requestPaused') return
+      if (phase !== 'active') {
+        // Native DevTools owns new responses now, but this temporary Fetch session must still release its pause.
+        if (phase !== 'closed') void debuggerClient.sendCommand('Fetch.continueRequest', { requestId: params.requestId }).catch(() => {})
+        return
+      }
       const response = (async () => {
         if (!await ready) throw new Error('Popup overrides did not activate')
+        if (handingOff()) return
         const tools = popup.tools?.webContents
         if (!tools || !popup.overrides?.enabled) {
           await debuggerClient.sendCommand('Fetch.continueRequest', { requestId: params.requestId })
           return
         }
         let action = await tools.executeJavaScript(popupOverrideResponseScript(params)) as { method: string; params: Record<string, unknown> }
+        if (handingOff()) return
         if (action.method === 'Fetch.getResponseBody') {
           const body = await debuggerClient.sendCommand(action.method, action.params).catch(error => ({ error: String(error) }))
+          if (handingOff()) return
           action = await tools.executeJavaScript(popupOverrideResponseScript(params, body)) as typeof action
         }
+        if (handingOff()) return
         if (!['Fetch.fulfillRequest', 'Fetch.continueRequest'].includes(action.method)) throw new Error('Unexpected popup override response')
         if (action.params.requestId !== params.requestId) throw new Error('Popup override response belongs to another request')
         await debuggerClient.sendCommand(action.method, action.params)
       })().catch(error => {
-        if (!contents.isDestroyed()) {
+        if (!handingOff() && !contents.isDestroyed()) {
           popup.error ??= `Could not apply Local Overrides to this popup: ${sanitizedText(String(error))}`
           void debuggerClient.sendCommand('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }).catch(() => {})
         }
@@ -362,18 +376,37 @@ export class BrowserDebug {
       void response.finally(() => pending.delete(response))
     }
     debuggerClient.on('message', paused)
-    const cleanup = (): void => {
+    const detached = (): void => {
+      phase = 'closed'
+      finishDrain?.()
+      if (drainTimer) clearTimeout(drainTimer)
       debuggerClient.off('message', paused)
       contents.off('did-finish-load', cleanup)
-      contents.off('destroyed', cleanup)
+      contents.off('destroyed', detached)
       contents.off('did-fail-load', failed)
-      void Promise.allSettled([...pending]).then(() => {
-        if (!contents.isDestroyed()) void debuggerClient.sendCommand('Fetch.disable').catch(() => {})
+    }
+    const cleanup = (): void => {
+      if (phase !== 'active') return
+      phase = 'draining'
+      contents.off('did-finish-load', cleanup)
+      contents.off('did-fail-load', failed)
+      const deadline = new Promise<void>(accept => {
+        finishDrain = accept
+        drainTimer = setTimeout(accept, POPUP_OVERRIDES_DRAIN_MS)
       })
+      // A header-only stream can outlive the document indefinitely. Preserve finite early responses, then release
+      // outstanding pauses with Fetch.disable; detach the handler only after that command has finished.
+      void Promise.race([Promise.allSettled([...pending]), deadline]).then(async () => {
+        if (drainTimer) clearTimeout(drainTimer)
+        finishDrain = undefined
+        if (phase === 'closed' || contents.isDestroyed()) return
+        phase = 'disabling'
+        await debuggerClient.sendCommand('Fetch.disable').catch(() => {})
+      }).finally(detached)
     }
     const failed = (_event: Electron.Event, _code: number, _description: string, _url: string, main: boolean): void => { if (main) cleanup() }
     contents.once('did-finish-load', cleanup)
-    contents.once('destroyed', cleanup)
+    contents.once('destroyed', detached)
     contents.on('did-fail-load', failed)
     void ready.then(applied => {
       if (!applied && !contents.isDestroyed()) { contents.stop(); cleanup() }

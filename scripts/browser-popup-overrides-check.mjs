@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 const artifacts = resolve('test-results/browser-popup-overrides')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
-const until = async (read, label) => {
-  const end = Date.now() + 20000
+const until = async (read, label, timeoutMs = 20000) => {
+  const end = Date.now() + timeoutMs
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(50) }
   throw new Error(`Timed out: ${label}`)
 }
@@ -21,6 +21,12 @@ if (!process.versions.electron) {
   const sharedFolder = join(profile, 'shared-overrides')
   const privateFolder = join(profile, 'private-overrides')
   const posts = []
+  let drainImage
+  let releaseDrainImage = false
+  const finishDrainImage = response => {
+    response.writeHead(200, { 'content-type': 'image/gif' })
+    response.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'))
+  }
   const site = createServer(async (request, response) => {
     response.setHeader('cache-control', 'no-store')
     if (request.method === 'POST') {
@@ -32,6 +38,27 @@ if (!process.versions.electron) {
       response.writeHead(200, { 'content-type': 'text/html' })
       response.write('<!doctype html><title>incomplete network stream</title>')
       return // A content override must not wait for this response body to finish.
+    }
+    if (request.url === '/header-stream') {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.write('never-ending header-only response')
+      return
+    }
+    if (request.url === '/drain-image') {
+      drainImage = response
+      if (releaseDrainImage) finishDrainImage(response)
+      return
+    }
+    if (request.url === '/release-drain-image') {
+      releaseDrainImage = true
+      if (drainImage) finishDrainImage(drainImage)
+      response.end('released')
+      return
+    }
+    if (request.url === '/post-load') {
+      response.setHeader('content-type', 'text/plain')
+      response.end('post-load fetch completed')
+      return
     }
     if (request.url === '/shared.js') {
       response.setHeader('content-type', 'application/javascript')
@@ -53,6 +80,8 @@ if (!process.versions.electron) {
     ] }]))
     for (const name of ['popup', 'post', 'nested', 'stream']) await writeFile(join(folder, host, name), document(marker))
   }
+  await writeFile(join(sharedFolder, host, 'drain'), document('shared') +
+    '<img src="/drain-image"><script>fetch("/header-stream").then(r=>r.text()).catch(()=>{});</script>')
   // DevTools populates folders in 1000-file chunks; the first popup must wait for the final chunk too.
   await mkdir(join(sharedFolder, 'unrelated'), { recursive: true })
   await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(sharedFolder, 'unrelated', `${index}.txt`), 'fixture')))
@@ -162,6 +191,36 @@ if (!process.versions.electron) {
         assert.equal(await headerOnly.executeJavaScript('document.title'), 'network document', 'header-only override preserves the network body')
         browser.action(`close-page:${headerOnly.id}`)
         if (!entry.private) {
+          browser.action(`select-page:${parent.id}`)
+          await parent.executeJavaScript('window.drain=window.open("/drain","_blank");void 0')
+          await until(() => browser.view.webContents.id !== parent.id, 'draining popup selected')
+          const drain = browser.view.webContents
+          const streamIds = new Set()
+          let readingStream = false
+          let disabled = false
+          const observe = (_event, method, params) => {
+            if (method === 'Fetch.requestPaused' && params.request.url === `${origin}/header-stream`) streamIds.add(params.requestId)
+          }
+          const send = drain.debugger.sendCommand.bind(drain.debugger)
+          drain.debugger.on('message', observe)
+          drain.debugger.sendCommand = (method, params, ...rest) => {
+            if (method === 'Fetch.getResponseBody' && streamIds.has(params.requestId)) readingStream = true
+            const result = send(method, params, ...rest)
+            return method === 'Fetch.disable' ? result.then(value => { disabled = true; return value }) : result
+          }
+          try {
+            // Release the load-blocking image only after the real Fetch body read is pending, without a timing sleep.
+            await until(() => readingStream, 'header-only streaming body read started')
+            await fetch(`${origin}/release-drain-image`)
+            await loaded(drain, marker)
+            await drain.executeJavaScript('window.afterLoad=""; fetch("/post-load").then(r=>r.text()).then(text=>{window.afterLoad=text}).catch(error=>{window.afterLoad=String(error)}); void 0')
+            await until(() => drain.executeJavaScript('window.afterLoad === "post-load fetch completed"'), 'post-load fetch while a header stream remains open', 5000)
+            await until(() => disabled, 'temporary Fetch interception disabled within a bounded drain', 5000)
+          } finally {
+            drain.debugger.off('message', observe)
+            drain.debugger.sendCommand = send
+          }
+          browser.action(`close-page:${drain.id}`)
           browser.action(`select-page:${parent.id}`)
           await parent.executeJavaScript('window.stream=window.open("/stream","_blank");void 0')
           await until(() => browser.view.webContents.id !== parent.id, 'streaming popup selected')
