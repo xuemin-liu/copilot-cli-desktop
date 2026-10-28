@@ -67,6 +67,26 @@ test('a repository whose own config names a program is refused, and nothing runs
   }
 })
 
+test('GIT_DIR and GIT_WORK_TREE in the desktop\'s environment cannot point the patch at another repository', async () => {
+  const repo = await repository()
+  const other = await repository()
+  try {
+    await writeFile(join(other.folder, 'secret.txt'), 'from the other repository\n')
+    other.git('add', 'secret.txt')
+    other.git('commit', '-q', '-m', 'other')
+    await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    const env = { ...process.env, GIT_DIR: join(other.folder, '.git'), GIT_WORK_TREE: repo.folder }
+    const executable = (await resolveGitExecutable())!
+    const runner = new GitRunner({ gitPath: executable.path, hooksDirectory: join(repo.folder, '..', 'no-hooks'), trackProcess: null, baseEnvironment: env })
+    const patch = await folderChanges(repo.folder, { runner, trust: repo.trust })
+    assert.match(patch, /^\+retry = 3$/m)
+    assert.ok(!patch.includes('from the other repository'), 'only the picked folder\'s repository')
+  } finally {
+    await repo.cleanup()
+    await other.cleanup()
+  }
+})
+
 test('a Git command that fails is an error that says why, never an empty patch', async () => {
   const repo = await repository()
   try {
