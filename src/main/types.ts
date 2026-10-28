@@ -178,6 +178,8 @@ export interface DesktopState {
   newSessionPrivateOverrides?: boolean
   /** Review meetings between sessions, open ones and recently closed ones. Runtime-only. */
   meetings?: MeetingView[]
+  /** Where outside agents reach the meeting tools over MCP; null when the port was taken. Runtime-only. */
+  meetingToolsUrl?: string | null
 }
 
 /** Desktop event surfaced to the renderer/tray/notifications layer. */

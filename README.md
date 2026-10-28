@@ -279,26 +279,42 @@ A meeting lets several sessions review one session's plan or local changes witho
 ### Outside agents as reviewers
 
 An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI or Gemini CLI, can review in a meeting if it
-runs on the same computer and has a shell tool.
+runs on the same computer and has MCP or a shell tool.
 
 1. On the meeting bar, press **Invite outside agent…**, give the agent a name and, optionally, a role, and press **Copy
    invitation**.
-2. Paste the invitation into that agent. It tells the agent to run the guest helper in a loop: `next` waits up to 100 seconds
-   for its next message, `reply` sends its answer, and `show` prints material too long to include, in pages.
-3. The agent joins with its first `next` and then reviews and votes like any other reviewer. The meeting bar lists it as a
-   guest, with **Remove**, and says when it stopped polling.
+2. Paste the invitation into that agent. It reviews in a loop, with the meeting tools if it has them, otherwise with the
+   guest helper:
+   - **Meeting tools (MCP):** `meeting_join` with the invitation, then `meeting_next` (waits up to 50 seconds for its
+     next message), `meeting_reply` with its answer, and `meeting_show` for material too long to include, in pages.
+   - **Guest helper:** `next` (waits up to 100 seconds), `reply` with a file, and `show`.
+3. The agent joins with its first `meeting_next` or `next` and then reviews and votes like any other reviewer. The meeting
+   bar lists it as a guest, with **Remove**, and says when it stopped polling.
+
+The meeting tools are served by the desktop at `http://127.0.0.1:47391/mcp`, a streamable HTTP MCP server. Add it to an
+agent once; it needs no key, because the tools do nothing without an invitation. For Claude Code:
+
+```bash
+claude mcp add --transport http copilot-meeting http://127.0.0.1:47391/mcp
+```
+
+Other agents take the same URL in their MCP settings. The invite form shows the command with **Copy**. If the port is
+taken, invitations leave the tools out and the helper still works. On Windows, prefer the tools with Claude Code: its
+PowerShell tool refuses to start `powershell.exe -File`, which the helper needs, while its Bash tool runs it.
 
 - Only you invite: an invitation is made only from the meeting bar. Its token works for that one agent in that one meeting
   and stops working when the agent leaves, is removed or the meeting closes. An invitation nobody uses expires after 15
   minutes. Tokens are saved only as hashes, outside the meeting folder.
 - The agent's own model provider sees the plan, the patch and the other reviews. Patches are filtered as for any reviewer.
 - The agent is told to review only, but the desktop cannot enforce that on another harness: run it in a mode that asks
-  before editing files. Allowing the helper's command once saves approving every poll.
-- The agent writes each reply to a file the desktop names in `%APPDATA%\Copilot CLI Desktop\meeting-guest\`, never into
-  its own project. The helper and `endpoint.json` (the desktop's port, no token) live there too, so a guest keeps working
-  after an app restart.
+  before editing files. Allowing the meeting tools, or the helper's command, once saves approving every poll.
+- With the helper, the agent writes each reply to a file the desktop names in `%APPDATA%\Copilot CLI Desktop\meeting-guest\`,
+  never into its own project; with the tools, the reply is the tool's argument. The helper and `endpoint.json` (the desktop's
+  port, no token) live in that folder too, so a guest keeps working after an app restart. With the tools, an agent joins
+  again with the same invitation after a restart.
 - An outside agent's usage is billed by its own provider; the meeting bar's cost counts Copilot sessions only. A guest that
-  keeps one turn polling costs one small model call about every 100 seconds while it waits, more as its conversation grows.
+  keeps one turn polling costs one small model call each time a wait ends with nothing (50 seconds with the tools, 100 with
+  the helper), more as its conversation grows.
 
 ## Permission presets
 

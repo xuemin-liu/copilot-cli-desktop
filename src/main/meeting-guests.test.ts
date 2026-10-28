@@ -135,7 +135,7 @@ test('a guest message names show commands instead of meeting files, only in the 
   const seatId = 'guest:0123456789abcdef'
   const replyPath = guestReplyPath(GUESTS, seatId, delivery(2))
   assert.equal(replyPath, join(GUESTS, '0123456789abcdef', 'reply-2-post.md'))
-  const message = guestMessage(text, folder, 2, replyPath)
+  const message = guestMessage(text, folder, 2, { via: 'helper', path: replyPath })
   assert.match(message, /changes for this round: the output of: show -Name changes -Round 2$/m)
   assert.match(message, /round 1: the output of: show -Name replies -Round 1$/m)
   assert.match(message, /earlier rounds are in the output of: show -Name transcript\.$/m)
@@ -169,7 +169,7 @@ function meeting(): {
     deliver: (tabId, item) => {
       if (tabId === 'tab-host') { if (item.kind !== 'add-dir') toHost.push(item); return }
       if (item.kind === 'add-dir') return
-      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, guestReplyPath(GUESTS, tabId, item)) })
+      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, mailbox.seat(tabId)?.via === 'mcp' ? { via: 'mcp' } : { via: 'helper', path: guestReplyPath(GUESTS, tabId, item) }) })
     },
     cancel: (meetingId, tabId) => mailbox.cancel(meetingId, tabId),
     write: (_meetingId, path, text) => files.set(path, text),
@@ -227,8 +227,8 @@ test('a guest joins with its first next, reviews, pages a long patch, votes, and
   const first = await call(seat, 'show', { name: 'changes', round: '2' })
   assert.ok(first.endsWith(`[5 more characters: show -Name changes -Round 2 -Offset ${GUEST_PAGE_CHARS}]`))
   assert.equal(await call(seat, 'show', { name: 'changes', round: 2, offset: GUEST_PAGE_CHARS }), 'xxxxx\n[end]')
-  assert.equal(await call(seat, 'show', { name: 'secrets', round: 2 }), 'ERROR -Name takes one of: post, changes, replies, transcript.')
-  assert.match(await call(seat, 'show', { name: 'post', round: 9 }), /^ERROR There is no post in round 9\./)
+  assert.equal(await call(seat, 'show', { name: 'secrets', round: 2 }), 'ERROR The name takes one of: post, changes, replies, transcript.')
+  assert.match(await call(seat, 'show', { name: 'post', round: 9 }), /^ERROR Round 9 has no post\./)
   await call(seat, 'reply', { text: 'Looks right now.' })
 
   hub.post('tab-host', 'propose-close', 'Agreed: key by session.', null)

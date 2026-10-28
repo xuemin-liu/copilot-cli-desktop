@@ -10,6 +10,13 @@ export interface MeetingBarProps {
   onError(message: string): void
   /** Now, for how long ago a guest last asked for a message; tests fix it, otherwise the bar keeps its own clock. */
   now?: number
+  /** Where agents reach the meeting tools over MCP; null when they are not served (the helper still works). */
+  toolsUrl?: string | null
+}
+
+/** The command that gives Claude Code the meeting tools, once; other agents take the same URL in their settings. */
+export function meetingToolsSetup(url: string): string {
+  return `claude mcp add --transport http copilot-meeting ${url}`
 }
 
 const OUTCOME: Record<NonNullable<MeetingView['outcome']>, string> = {
@@ -52,7 +59,7 @@ export function formatMeetingCost(cost: MeetingView['cost'], withGuests = false)
  * The meetings the active session hosts or takes part in, with the person's controls: add a session, invite an outside
  * agent, remove a guest, open the transcript, let a paused meeting go on, stop it.
  */
-export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow }: MeetingBarProps): JSX.Element | null {
+export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow, toolsUrl = null }: MeetingBarProps): JSX.Element | null {
   const [clock, setClock] = useState(() => Date.now())
   const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && meeting.participants.some((participant) => participant.guest))
   useEffect(() => {
@@ -167,6 +174,15 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
                     ? 'Invitation copied. Paste it into the agent on this computer; unused, it expires in 15 minutes.'
                     : 'The agent\'s own model provider sees the plan, the patch and the other reviews. Run it in a mode that asks before editing files.'}
                 </span>
+                {toolsUrl && (
+                  <span className="meeting-bar-note meeting-bar-tools">
+                    Agents with MCP can use the meeting tools instead of the helper. Add them once:{' '}
+                    <code>{meetingToolsSetup(toolsUrl)}</code>{' '}
+                    <button type="button" className="meeting-bar-button"
+                      onClick={() => { void window.copilotDesktop.copyText(meetingToolsSetup(toolsUrl)).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error))) }}>Copy</button>
+                    {' '}Other agents take <code>{toolsUrl}</code> as a streamable HTTP server in their settings.
+                  </span>
+                )}
               </div>
             )}
           </section>
