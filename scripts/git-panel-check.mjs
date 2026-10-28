@@ -35,7 +35,7 @@ if (!process.versions.electron) {
       window.__setTarget = setTarget;
       window.__showTerminal = () => setTerminal(true);
       return open
-        ? <><div style={{ width: '100%', minWidth: 0 }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
+        ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
             {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
         : <p id="closed">closed</p>;
     }
@@ -447,6 +447,33 @@ ${point.missing}`)
     await clickByText('.git-entry', 'a.txt')
     await until('!!document.querySelector(".git-diff-add")', 'diff for the screenshot')
     await screenshot('panel.png')
+
+    // The divider between the file list and the diff: dragging it down gives the list more of the height, and the diff the rest.
+    const listHeight = () => ui('document.querySelector(".git-changes-list").getBoundingClientRect().height')
+    const divider = await ui('(() => { const r = document.querySelector(".git-changes .splitter-horizontal").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } })()')
+    const listBefore = await listHeight()
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...divider })
+    window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...divider })
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: divider.x, y: divider.y + 80 })
+    window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: divider.x, y: divider.y + 80 })
+    await until(`document.querySelector(".git-changes-list").getBoundingClientRect().height > ${listBefore + 40}`, 'list grew after dragging the divider')
+    assert.ok(await ui('document.querySelector(".git-diff-lines").getBoundingClientRect().height > 40'), 'the diff still has room')
+    assert.equal(await ui('localStorage.getItem("git-changes-list-share") !== null'), true)
+    // A short window with the list at its largest share: the list gives way, and the diff still starts on screen.
+    window.setContentSize(460, 560)
+    await until('window.innerHeight === 560', 'window shortened')
+    await ui('document.querySelector(".git-changes .splitter-horizontal").focus()')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' })
+    await until('document.querySelector(".git-changes .splitter-horizontal").getAttribute("aria-valuenow") === "80"', 'list share at its maximum')
+    const short = await ui('(() => { const area = document.querySelector(".git-diff-area").getBoundingClientRect(); const lines = document.querySelector(".git-diff-lines").getBoundingClientRect(); return { areaTop: area.top, linesTop: lines.top, height: window.innerHeight } })()')
+    assert.ok(short.linesTop < short.height, `the diff starts on screen in a short window (diff lines at ${short.linesTop}, window ${short.height})`)
+    await screenshot('short-window.png')
+    // Back to the default share (80 → 40 in steps of 5) and size for the rest of the check.
+    for (let step = 0; step < 8; step++) { window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Up' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Up' }) }
+    await until('document.querySelector(".git-changes .splitter-horizontal").getAttribute("aria-valuenow") === "40"', 'list share back to 40')
+    window.setContentSize(460, 900)
+    await until('window.innerHeight === 900', 'window restored')
+    results.listDiffDivider = true
 
     // 11. Stage and unstage with the row buttons, and "Stage all", against the real repository.
     const slash = String.fromCharCode(92)

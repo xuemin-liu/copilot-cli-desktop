@@ -21,6 +21,7 @@ import type { DiffCommentAnchor } from './GitDiffView.js'
 import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
+import { Splitter } from './Splitter.js'
 import { TRASH_LABEL, isMac, isShortcutModifier } from '../platform.js'
 import { markedEntries, nextMarks } from '../git-marks.js'
 import type { MarkMode, MarkSide, Marks } from '../git-marks.js'
@@ -75,6 +76,18 @@ function readStoredRepo(profileId: string): string | null {
 const WHOLE_FILE_KEY = 'git-diff-whole-file'
 function readWholeFile(): boolean {
   try { return localStorage.getItem(WHOLE_FILE_KEY) === '1' } catch { return false }
+}
+
+/** How much of the Changes tab's height (in percent) the file list takes while a diff is shown below it: one choice for every repository. */
+const LIST_SHARE_KEY = 'git-changes-list-share'
+const LIST_SHARE_MIN = 15
+const LIST_SHARE_MAX = 80
+function readListShare(): number {
+  try {
+    const stored = Number(localStorage.getItem(LIST_SHARE_KEY))
+    if (stored >= LIST_SHARE_MIN && stored <= LIST_SHARE_MAX) return stored
+  } catch { /* Use the default. */ }
+  return 40
 }
 
 /** Opens the project in the main process, follows its pushed changes, and closes it again on unmount. */
@@ -260,6 +273,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [wholeFile, setWholeFile] = useState(readWholeFile)
+  const [listShare, setListShare] = useState(readListShare)
+  const changesRef = useRef<HTMLDivElement>(null)
   const [cursor, setCursor] = useState<{ scope: string; diffText: string; anchor: DiffCommentAnchor; id: number; declined: boolean } | null>(null)
   const cursorSequence = useRef(0)
   // Comments on diff lines: one bucket per file and side (entry ids change with every status generation, so they are not
@@ -389,6 +404,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     const next = !wholeFile
     setWholeFile(next)
     try { localStorage.setItem(WHOLE_FILE_KEY, next ? '1' : '0') } catch { /* Keep the in-memory choice. */ }
+  }
+  const changeListShare = (next: number): void => {
+    setListShare(next)
+    try { localStorage.setItem(LIST_SHARE_KEY, String(Math.round(next))) } catch { /* Keep the in-memory choice. */ }
   }
   const changeComment = (key: string, anchor: DiffCommentAnchor, text: string | null): void => {
     if (!commentKey || !diff || diff.key !== diffKey) return
@@ -775,7 +794,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
               {statusError && <p className="git-message git-message-error" role="alert">{statusError}</p>}
 
               {tab === 'changes' && (
-                <div className="git-changes">
+                // While a diff is shown, the list and the commit box scroll on their own above it, and the divider sets how
+                // much of the height each gets: a long list must not push the diff out of sight.
+                <div className={`git-changes${selection ? ' git-changes-split' : ''}`} ref={changesRef}>
+                  <div className="git-changes-list" style={selection ? { flexBasis: `${listShare}%` } : undefined}>
                   {currentStatus && currentStatus.totalEntries === 0 && <p className="git-message" role="status">Nothing to commit. The working tree is clean.</p>}
                   {currentStatus && (
                     <div className="git-files">
@@ -815,7 +837,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)}
                       amend={amendState} onToggleAmend={toggleAmend} lockedReason={lockedReason} />
                   )}
+                  {!selection && currentStatus && currentStatus.totalEntries > 0 && <p className="git-note">Select a file to see its diff.</p>}
+                  </div>
 
+                  {selection && (
+                    <Splitter label="Resize file list and diff" orientation="horizontal" value={listShare} min={LIST_SHARE_MIN} max={LIST_SHARE_MAX} step={5}
+                      containerRef={changesRef} fromPointer={(clientY, bounds) => (clientY - bounds.top) / bounds.height * 100} onChange={changeListShare} />
+                  )}
                   {selection && (
                     <div className="git-diff-area">
                       <div className="git-diff-head">
@@ -857,7 +885,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
                       {!diffError && selectedEntry !== null && diff?.key !== diffKey && <p className="git-message" role="status">Loading diff…</p>}
                     </div>
                   )}
-                  {!selection && currentStatus && currentStatus.totalEntries > 0 && <p className="git-note">Select a file to see its diff.</p>}
                 </div>
               )}
 
