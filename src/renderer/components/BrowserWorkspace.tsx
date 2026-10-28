@@ -216,7 +216,7 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
     <footer className="browser-footer">{state.loading ? 'Loading…' : 'This session’s browser activity is available to Copilot CLI.'}
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>
         <p>{state.testing.report.description}</p><p>Expected: {state.testing.report.expected}</p>
-        <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>
+        <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.outcome?.replaceAll('-', ' ') ?? step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>
       </details>}
       <div className="browser-footer-details">
         <details className="browser-permissions"><summary>Site permissions ({state.sitePermissions.length})</summary>

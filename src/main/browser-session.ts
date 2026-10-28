@@ -287,6 +287,75 @@ temporarily interrupt capture; report unavailable bodies and retry page reading.
 
 ## General web-app automation tests
 
+Unattended tests require the selected Page view and desktop window to remain
+visible; minimized/background input is unsupported. No manual application
+interaction is needed after Testing mode is enabled for the described test.
+
+Use test-targets [FRAME_ID] or a discover plan step for fresh controls after
+hover, menu expansion, or application changes. Discovery includes ref, selector,
+selectorUnique, name, title, role, selected/expanded/disabled states, bounds,
+pageId/frameId, generation and coverage reasons. Hidden candidates are described
+without exporting hidden text. Nonstandard div/span icons are included when they
+have pointer cursors, handlers or control metadata. Coverage is sampled at the
+visible center; actual input points are always hit-tested independently.
+Use exactly one selector or targetRef in a target action. References are valid
+only in their page/frame/document and latest discovery generation. Set frame to
+the returned frameId for a child. Re-discovery and reload invalidate old refs;
+replaced elements fail as stale. Do not invent references or reuse stale ones.
+
+click, doubleClick and hover accept point:{x,y}, using the same CSS pixels
+relative to selector/targetRef as drag. They support canvas/SVG and a separate
+inputSelector or inputRef; a click/hover overlay requires point. For example:
+{action:"doubleClick",selector:"#image",inputSelector:"#overlay",point:{x:140,y:70}}.
+Pointer actions support button left/middle/right (default left), and pointer
+actions and press support modifiers:["Shift","Control","Alt","Meta"] (unique
+entries). Drag is a bounded down/move/up sequence; buttons/modifiers are always
+released, including on cancellation. Never bypass covering elements.
+
+Use reload(), not F5 or Ctrl+R. A reload step accepts optional all:[conditions],
+timeoutMs and dialog. Its data reports navigation completed/cancelled, loading,
+testingEnabled and fresh discovery. Declare dialog:{accept:false} to cancel a
+leave-page prompt. Old references are invalid even when reload is cancelled.
+Navigation completion alone is not application readiness.
+
+waitFor and assert accept all:[conditions] (1–10) instead of a single condition.
+Additional conditions: enabled; attribute with attribute data-test-*, aria-*,
+role, title or class and string expected; numericValue with number expected and
+optional nonnegative tolerance (default zero). Numeric values are checked without
+exporting the field value. requestComplete takes request:{urlPattern,method,
+state:"finished"|"failed",optional status} and no target; it observes only this run.
+Combine request completion with explicit DOM readiness for the current rendering
+revision. Changed labels, nonempty canvases and animation frames are insufficient
+proof that application work has finished. Request explicit discover/screenshot
+steps after interactions and readiness waits for fresh before/after observations.
+Screenshot-region comparison is optional and unavailable; inspect saved screenshots
+separately and never treat visual change alone as proof of application semantics.
+
+Only when the user authorized the specific failure scenario, a plan may set
+allowNetworkFailures:true and networkFailures:[{urlPattern,method,failure,
+optional status,maxRequests,durationMs}]. URL patterns use the literal enabled
+origin and * in the path, no credentials/query/fragment. Methods are uppercase.
+failure is transport or http; http requires status 400–599. maxRequests is 1–20;
+durationMs is 100–60000; at most eight rules. No custom headers/bodies or replay.
+Rules are restricted to this page's known same-origin frames, removed at count,
+expiry or run termination, and never installed on shared browser storage sessions.
+Service workers/cache may bypass them: assert affectedRequests evidence. They
+cannot simulate every server-side partial success. Do not disrupt shared services
+or broaden failure patterns beyond the user-authorized test.
+
+Report outcome separately from legacy status: delivered actions, passed/failed
+assertions, observed screenshots/discovery, skipped checks, cancelled or uncertain
+actions. A delivered drag is not a successful application-state assertion. Test
+plans must assert the intended outcome independently. The report includes bounded
+run-specific network metadata, console evidence, hit diagnostics and limitations.
+Known credentials and supplied inputs are filtered, but arbitrary app content can
+still contain sensitive information. No arbitrary JavaScript/storage is exposed.
+After transport loss, read status: testing.runId, currentAction (ID/action/delivery),
+lastCompletedAction, live journal and last completed report are available during and after runs. A journal has
+completed:false while running. Delivery can be not-attempted, partial, delivered
+or uncertain. Never repeat a possibly completed save blindly. Recovery is in memory
+and cannot establish what happened after a desktop process crash.
+
 When the user asks to test the web app, follow their described steps and expected
 results in the CURRENT selected browser page. This is general testing, not a
 domain-specific workflow. Use status to check testing.enabled. If disabled, tell
@@ -322,7 +391,7 @@ box top-left (not canvas backing-store pixels or screen coordinates). Points mus
 stay inside that target and the visible viewport; the whole target need not fit
 onscreen. durationMs is 100–5000, default
 500. Example: {action:"drag",selector:"#canvas",path:[{x:20,y:20},{x:100,y:80}]}.
-Native left-button input follows the path; covered, moved or replaced targets stop
+  Native input with the selected button follows the path; covered, moved or replaced targets stop
 the drag and release the button. File/DataTransfer drag-and-drop is unsupported.
 For viewers that receive input on an overlay, explicitly set inputSelector to that
 visible interaction surface (including SVG). Coordinates remain relative to selector.

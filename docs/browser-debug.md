@@ -411,6 +411,149 @@ that a natural-language console question reports the live exception.
 
 ## General web-app automation testing
 
+### Unattended testing contract
+
+Unattended means no manual application interaction after the user enables Testing
+mode for the described test. The desktop window and selected **Page** view must
+remain visible; minimized/background execution is unsupported. Origin restrictions
+still apply. The runner never exposes arbitrary JavaScript, browser storage,
+credentials, request replay, request bodies or custom response scripts.
+
+Use `test-targets [FRAME_ID]` or a `discover` plan step after opening a menu,
+hovering a control, or changing the application. Discovery returns page/frame IDs,
+a generation, timestamp, CSS-pixel bounds, accessible names, title/tooltips, roles,
+selected/expanded/disabled states, suggested selectors and `selectorUnique`.
+Nonstandard div/span controls with pointer cursors, handlers, titles or accessibility
+attributes are included. `unavailable` describes hidden candidates without hidden
+labels. `reason` explains disabled, offscreen and center-covered controls. Coverage
+is sampled at the visible center; coordinate input always checks its actual point.
+Results are bounded to 200 visible targets and 50 hidden candidates. Closed shadow
+roots and controls beyond the traversal limit remain unavailable.
+
+When a selector is ambiguous, use `targetRef` from that frame's latest discovery:
+
+```json
+{ "action": "click", "targetRef": "0123456789abcdef0123456789abcdef-t3" }
+```
+
+Supply either `selector` or `targetRef`. References are bound to the page, frame,
+document and discovery generation; another discovery in that frame invalidates
+the old generation. Reload invalidates references even when cancelled. Removed or
+replaced elements fail as stale rather than being resolved to a replacement. Use
+the returned `frameId` as `frame` for child-frame actions. Targets are revalidated
+for identity, visibility, enablement and native hit-testing before input.
+
+`click`, `doubleClick`, and `hover` accept `point: {x,y}` in the same CSS-pixel
+coordinate system as drag paths. All pointer actions support canvas and SVG.
+`inputSelector` or `inputRef` can explicitly identify a separate interaction
+overlay; click/hover overlays require `point`. Coordinates stay relative to the
+primary target, never the backing-store dimensions. Browser zoom and display
+scaling are reflected in discovery and pointer diagnostics; fractional native
+positions can differ by about one CSS pixel. Input never bypasses a covering
+element or accepts a broad ancestor as an overlay.
+
+```json
+{ "action": "doubleClick", "selector": "#image", "inputSelector": "#overlay", "point": { "x": 140, "y": 70 } }
+```
+
+Pointer actions support `button` (`left`, `middle`, `right`, default `left`). Pointer
+actions and `press` support unique `modifiers` from `Alt`, `Control`, `Meta`, `Shift`.
+Drag performs movement, button down, intermediate moves and button up within one
+bounded action (2–100 points, 100–5000 ms). Buttons/modifiers are released on
+completion, errors and cancellation; no held input crosses plan steps. Target
+replacement, obstruction or geometry movement fails safely with hit diagnostics.
+
+`reload` is independent of F5/Ctrl+R. It waits for navigation and reports
+`navigation: completed|cancelled`, `loading`, and `testingEnabled`, plus fresh target
+discovery. Declare `dialog: {accept:false}` to cancel a leave-page prompt. To wait
+for application readiness after navigation, supply `all`:
+
+```json
+{
+  "action": "reload",
+  "timeoutMs": 30000,
+  "all": [
+    { "selector": "#viewer", "condition": "attribute", "attribute": "data-test-render", "expected": "ready" },
+    { "selector": "#loading", "condition": "hidden" },
+    { "selector": "#save", "condition": "enabled" }
+  ]
+}
+```
+
+`waitFor` and `assert` also accept `all` (1–10 conditions) instead of one condition.
+Every condition must hold in the same polling pass; observations across frames are
+sequential, not an atomic application snapshot. Additional conditions are `enabled`,
+`attribute` (public `data-test-*`, `aria-*`, `role`, `title`, `class`) and
+`numericValue` (`expected` number, optional nonnegative `tolerance`, default zero).
+Numeric checks read visible field values or numeric element text without exporting
+the value. A `requestComplete` condition takes
+`request: {urlPattern,method,state:"finished"|"failed",optional status}` and no target.
+It matches requests observed during this run, never an earlier run.
+
+Combine network completion with application signals for the current render revision.
+A completed request, changed label, animation frames, decoded image or nonempty
+canvas cannot prove that asynchronous rendering has finished. Use explicit
+`discover` and `screenshot` steps for fresh after-action observations and before/after
+evidence, following readiness waits. Screenshot-region comparison is optional and
+not implemented; saved screenshots require separate visual inspection. Visual
+differences must never be presented as proof of application semantics.
+
+### Opt-in network failures and recovery
+
+A plan may set `allowNetworkFailures: true` and 1–8 `networkFailures`. Each rule
+requires a user-approved `urlPattern` (literal enabled origin, `*` wildcard in path,
+no credentials/query/fragment), uppercase `method`, `failure: transport|http`,
+`maxRequests: 1–20`, and `durationMs: 100–60000`. HTTP errors additionally require
+`status: 400–599`; arbitrary bodies/headers are not accepted. For example:
+
+```json
+{
+  "allowNetworkFailures": true,
+  "networkFailures": [
+    { "urlPattern": "http://localhost:3000/api/save", "method": "POST", "failure": "http", "status": 503, "maxRequests": 1, "durationMs": 10000 }
+  ]
+}
+```
+
+Rules intercept requests only in the selected page's known same-origin frames,
+never another page or a shared browser storage Session. New out-of-process frames
+are not enrolled. Rules expire, stop at their request limit, and are removed when
+the test ends, fails, disconnects or is cancelled. If removal fails, the debugger
+is detached to remove interception. Affected request metadata and cleanup status
+are recorded. Service workers/caches can bypass interception; a test must assert
+that the intended request was affected. Transport/HTTP failures cannot reproduce
+every server-side partial-success scenario.
+
+Reports retain legacy step `status` and separately identify `outcome` as `delivered`,
+`assertion-passed`, `assertion-failed`, `observed`, `failed`, `skipped`, `cancelled`
+or `uncertain`. `delivery` distinguishes `not-attempted`, `partial`, `delivered`
+and `uncertain`. A delivered drag can be followed by a failed assertion; delivery
+does not establish application change. A screenshot outcome means pixels were
+captured, not visually approved. Capture failures are failed checks with reasons.
+
+`status` exposes `testing.runId`, `currentAction` (step ID/action/delivery),
+`lastCompletedAction`, and the incremental `journal`. `journal.completed` is false
+while it is in progress; `report` retains the last completed run so progress cannot
+resize the browser viewport. Polling status remains available during a run.
+After HTTP transport loss, inspect these fields before issuing another save or
+other mutation; uncertain or partial delivery must not be blindly retried. The
+journal is in memory and cannot establish recovery after a desktop process crash.
+
+Final reports include bounded run-specific request metadata, affected requests,
+console evidence, capture limitations and pointer/hit diagnostics. Bodies, headers,
+storage and credentials are excluded; known credentials and supplied input values
+are filtered. Arbitrary application prose/images can still contain sensitive data.
+Screenshots remain explicit plan steps (maximum five), and files are never
+overwritten. Report skipped/cancelled/unavailable checks and human visual inspection
+separately; do not mark an unverified application expectation passed.
+
+Run `npm run browser-unattended:check` for the isolated generic toolbar, hover menu,
+modal numeric input and overlay-canvas acceptance page. It covers reload/cancel,
+references, drawing, handle movement, ineffective input, readiness, network-failure
+isolation/cleanup and recovery, at zoom factors 0.8, 1, 1.25, 1.5 with host display
+scaling and forced 1.25 scaling. Evidence is under `test-results/browser-unattended/`.
+This fixture uses synthetic data and does not contact shared application services.
+
 1. Open the web app in the session browser and select the page to test.
 2. Enable **Testing mode** below the browser views.
 3. Tell the session assistant the steps, inputs, and expected results. For example:
@@ -460,7 +603,7 @@ screen coordinates or the canvas backing-store resolution. `test-targets` expose
 CSS-pixel bounds to help choose points. Points must remain within the target and
 visible viewport; the entire canvas or input surface need not fit onscreen.
 The runner preserves an already visible starting point, scrolls if needed before pressing, then
-holds the native left mouse button while interpolating the path. `durationMs`
+holds the selected native mouse button (left by default) while interpolating the path. `durationMs`
 defaults to 500 and accepts 100–5000 milliseconds; event processing can extend the
 elapsed time. Covered, moved, replaced, or navigated targets stop the drag. The
 button is released on completion, failure, cancellation, or page switching.

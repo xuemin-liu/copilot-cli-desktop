@@ -125,6 +125,9 @@ export class BrowserDebug {
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
       active: () => this.activePageId, select: id => { this.action(`select-page:${id}`) }, owner: () => this.owner,
       recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
+      evidence: (pageId, startedAt) => ({ console: this.state.console.filter(entry => entry.pageId === pageId && entry.timestamp >= startedAt).slice(-100),
+        capture: { recordingConsole: this.state.recordingConsole, recordingNetwork: this.state.recordingNetwork,
+          limitations: ['Console evidence retains at most 100 entries from this run; activity retains at most 300. Capture settings, navigation, clearing and debugger attachment can make evidence incomplete. Arbitrary application text can contain sensitive data.'] } }),
       ...(options.approveInteraction ? { approve: options.approveInteraction } : {}) })
     const view = new WebContentsView({ webPreferences: {
       partition: this.partition, sandbox: true, contextIsolation: true,
