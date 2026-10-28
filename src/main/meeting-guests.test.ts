@@ -156,6 +156,31 @@ test('the invitation tells the agent how to poll, read and reply, with its token
   assert.match(text, /Do not end your turn until the meeting is closed/)
 })
 
+/** The patch a host seat's folder gives, in these tests. */
+const FOLDER_PATCH = 'diff --git a/login.cfg b/login.cfg\n--- a/login.cfg\n+++ b/login.cfg\n-retry = 1\n+retry = 3\n'
+
+/** The host's part of `GuestDeps`, wired to a hub as main wires it. */
+function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes'> {
+  return {
+    start: (seat, topic, post, changes) => {
+      try { return { meetingId: hub().start({ tabId: seat.id, title: `${seat.name} (guest)`, folder: seat.folder }, { topic, post, changes }).id } }
+      catch (error) { return { error: (error as Error).message } }
+    },
+    post: (seat, kind, text, changes) => {
+      try { return { ok: true, message: hub().post(seat.id, kind, text, changes) } } catch (error) { return { ok: false, message: (error as Error).message } }
+    },
+    end: (seat) => { hub().end(seat.id); return { ok: true, message: 'The meeting is closed.' } },
+    status: (seat) => `status of ${seat.meetingId}`,
+    changes: async () => FOLDER_PATCH,
+  }
+}
+
+/** For tests whose guests never host. */
+const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes'> = {
+  start: () => ({ error: 'not here' }), post: () => ({ ok: false, message: 'not here' }), end: () => ({ ok: false, message: 'not here' }),
+  status: () => '', changes: async () => '',
+}
+
 /** A hub with a host, and a mailbox whose guests take part through `handleGuestRequest`, wired as main wires them. */
 function meeting(): {
   hub: MeetingHub; mailbox: GuestMailbox; timers: ReturnType<typeof clock>; files: Map<string, string>; toHost: MeetingDelivery[]
@@ -169,7 +194,10 @@ function meeting(): {
     deliver: (tabId, item) => {
       if (tabId === 'tab-host') { if (item.kind !== 'add-dir') toHost.push(item); return }
       if (item.kind === 'add-dir') return
-      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, mailbox.seat(tabId)?.via === 'mcp' ? { via: 'mcp' } : { via: 'helper', path: guestReplyPath(GUESTS, tabId, item) }) })
+      const seat = mailbox.seat(tabId)
+      const via = seat?.via === 'mcp' ? 'mcp' as const : 'helper' as const
+      const reply = seat?.kind === 'host' ? { via, host: true as const } : via === 'mcp' ? { via } : { via, path: guestReplyPath(GUESTS, tabId, item) }
+      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, reply) })
     },
     cancel: (meetingId, tabId) => mailbox.cancel(meetingId, tabId),
     write: (_meetingId, path, text) => files.set(path, text),
@@ -188,6 +216,7 @@ function meeting(): {
       const paths = roundPaths(hub.folderOf(id)!, round)
       return files.get(name === 'transcript' ? paths.transcript : paths[name]) ?? null
     },
+    ...hostDeps(() => hub),
   }
   return {
     hub, mailbox, timers, files, toHost,
@@ -280,7 +309,7 @@ test('a guest is told to wait while the desktop starts, and an invitation to a c
   const { seat } = mailbox.invite('K7QF', 'Claude Code', null)
   let ready = false
   const deps: GuestDeps = {
-    ready: () => ready, isOpen: () => false, join: () => null, leave: () => {}, turnCompleted: () => {}, material: async () => null,
+    ready: () => ready, isOpen: () => false, join: () => null, leave: () => {}, turnCompleted: () => {}, material: async () => null, ...NO_HOST,
   }
   assert.match((await handleGuestRequest(mailbox, deps, seat, 'next', {})).message, /The desktop is starting/)
   assert.equal(mailbox.seat(seat.id)?.closed, null)
@@ -305,7 +334,7 @@ function post(port: number, path: string, token: string, body: string): Promise<
 function endpoint(mailbox: GuestMailbox, onListening?: (port: number) => void, replied: (text: string) => void = () => {}): MeetingControlServer {
   const deps: GuestDeps = {
     ready: () => true, isOpen: () => true, join: () => null, leave: () => {}, turnCompleted: (_seat, _delivery, text) => replied(text),
-    material: async (_id, name) => name === 'post' ? 'the post' : null,
+    material: async (_id, name) => name === 'post' ? 'the post' : null, ...NO_HOST,
   }
   return new MeetingControlServer(() => ({ ok: true, message: 'host command' }), {
     handle: async (token, command, fields, signal) => {
@@ -376,7 +405,8 @@ test('the endpoint keeps guest and session tokens apart, and a waiting next answ
     assert.equal(announced, session.port, 'main learns the port when the server starts listening')
     assert.equal((await post(session.port, '/guest/next', session.token, '{}')).status, 401, 'a session token is not a guest token')
     assert.equal((await post(session.port, '/status', token, '{}')).status, 401, 'a guest token cannot run host commands')
-    assert.equal((await post(session.port, '/guest/start', token, '{}')).status, 404)
+    assert.equal((await post(session.port, '/guest/nope', token, '{}')).status, 404)
+    assert.match(JSON.parse((await post(session.port, '/guest/start', token, '{}')).body).message, /This invitation is for reviewing/, 'a reviewer token cannot start a meeting')
 
     const waiting = post(session.port, '/guest/next', token, JSON.stringify({ wait: 30 }))
     await new Promise((resolveSoon) => setTimeout(resolveSoon, 100))
@@ -425,4 +455,82 @@ test('the guest helper polls, pages and replies through the real endpoint', asyn
     await server.close()
     await rm(folder, { recursive: true, force: true })
   }
+})
+
+test('an outside host starts a meeting, answers the rounds, is reminded when it lets a turn pass, and hears the agreement once', async () => {
+  const { hub, mailbox, call } = meeting()
+  const host = mailbox.invite('', 'Claude Code', null, { kind: 'host', folder: 'D:\\api' }).seat
+  const reviewer = mailbox.invite('K7QF', 'Codex', null).seat
+  assert.equal(host.meetingId, '')
+  assert.equal(await call(reviewer, 'start', { text: 'x' }), 'ERROR This invitation is for reviewing. Hosting a meeting needs a host invitation from the person.')
+  assert.equal(await call(host, 'next'), 'ERROR Start the meeting first, with start.')
+  assert.equal(await call(host, 'start', { topic: 'login', text: ' ' }), 'ERROR The post is empty. Send your whole plan, answer or agreed items.')
+
+  const started = await call(host, 'start', { topic: 'login race', text: 'Plan v1', changes: '1' })
+  assert.match(started, /^Meeting K7QF is open\. The person adds the reviewers from the desktop\. Run next to wait for their replies/)
+  assert.equal(host.meetingId, 'K7QF')
+  const view = hub.views()[0]!
+  assert.equal(view.hostTabId, host.id)
+  assert.equal(view.hostTitle, 'Claude Code (guest)')
+  assert.equal(await call(host, 'start', { text: 'again' }), 'ERROR This invitation already started meeting K7QF.')
+  assert.equal(await call(host, 'reply', { text: 'x' }), 'ERROR As the host, answer with round, propose-close or end.')
+
+  const post = await call(reviewer, 'next')
+  assert.match(post, /the output of: show -Name changes -Round 1/, 'the folder\'s changes went with the opening post')
+  assert.match(await call(reviewer, 'show', { name: 'changes', round: 1 }), /\+retry = 3/)
+  await call(reviewer, 'reply', { text: 'Review: retry 3 is fine.' })
+
+  const digest = await call(host, 'next')
+  assert.match(digest, /^\[meeting K7QF · round 1 · replies · from the desktop\]/)
+  assert.match(digest, /Review: retry 3 is fine\./)
+  assert.match(digest, /^ {2}round -File <your answer\.md> \[-Changes\]$/m, 'the host\'s commands as the outside host runs them')
+  assert.ok(!digest.includes('COPILOT_DESKTOP_MEETING_HELPER'), 'no Copilot helper command in what an outside host reads')
+  assert.match(digest, /Run them with the helper and token from your invitation, then run next/)
+
+  // It asks for the replies again without answering: its turn has passed. A reminder, then a pause.
+  assert.match(await call(host, 'next'), /^\[meeting K7QF · reminder · from the desktop\]/)
+  assert.equal(await call(host, 'next', { wait: 1 }), 'Nothing yet. Run next again.')
+  assert.equal(hub.views()[0]!.stage, 'paused')
+  assert.equal(hub.views()[0]!.pauseReason, 'host-silent')
+  hub.resume('K7QF')
+  assert.match(await call(host, 'next'), /reminder · from the desktop\]/)
+
+  assert.equal(await call(host, 'round', { text: 'Plan v2: lock on logout.', changes: true }), 'Sent round 2 to 1 reviewer. Run next to wait for their replies.')
+  assert.equal(mailbox.given(host.id), null, 'answering the round answered what it had been given')
+  assert.match(await call(reviewer, 'next'), /round 2 · from the desktop\]/)
+  await call(reviewer, 'reply', { text: 'Good.' })
+  await call(host, 'next')
+  assert.equal(await call(host, 'status'), 'status of K7QF')
+  assert.match(await call(host, 'propose-close', { text: 'Lock on logout.' }), /^Sent round 3/)
+  await call(reviewer, 'next')
+  await call(reviewer, 'reply', { text: 'AGREE' })
+  assert.equal(hub.views()[0]!.outcome, 'agreed')
+  assert.match(await call(host, 'next'), /^\[meeting K7QF · closed · from the desktop\]\nAll 1 reviewers agreed\./, 'the agreed message, once')
+  assert.equal(await call(host, 'next'), 'The meeting is closed.')
+})
+
+test('a host can attach changes only from a folder the person picked', async () => {
+  const { mailbox, call } = meeting()
+  const host = mailbox.invite('', 'Claude Code', 'ignored role', { kind: 'host' }).seat
+  assert.equal(host.folder, null)
+  assert.equal(host.role, null, 'a host has no reviewer role')
+  assert.match(await call(host, 'start', { topic: 't', text: 'Plan', changes: true }), /^ERROR The person picked no project folder for this meeting/)
+  assert.match(await call(host, 'start', { topic: 't', text: 'Plan' }), /^Meeting K7QF is open/)
+})
+
+test('a host seat is saved before and after its meeting starts, with its folder and its pending agreed message', () => {
+  const mailbox = new GuestMailbox(clock())
+  const unstarted = mailbox.invite('', 'Claude Code', null, { kind: 'host', folder: 'D:\\api' })
+  const started = mailbox.invite('', 'Codex', null, { kind: 'host', folder: null })
+  mailbox.started(started.seat, 'K7QF')
+  mailbox.enqueue(started.seat.id, { meetingId: 'K7QF', round: 2, kind: 'agreed', text: 'All agreed.' })
+  mailbox.closeEnded(() => false)
+  assert.equal(mailbox.seat(unstarted.seat.id)?.closed, null, 'a host seat with no meeting yet is not closed with the meetings')
+  const restored = new GuestMailbox(clock())
+  restored.restore(JSON.parse(mailbox.serialize()))
+  assert.deepEqual(restored.seat(unstarted.seat.id), unstarted.seat)
+  const back = restored.seatOf(started.token)!
+  assert.equal(back.kind, 'host')
+  assert.equal(restored.closing(back), 'All agreed.')
+  assert.equal(restored.closing(back), 'The meeting is closed.')
 })

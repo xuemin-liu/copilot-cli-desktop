@@ -3,7 +3,7 @@ import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   app,
@@ -122,10 +122,11 @@ import { MeetingOutbox } from './meeting-delivery.js'
 import { MeetingTurnReader } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, roundPaths } from './meeting-messages.js'
 import {
-  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestInvitation,
-  guestMessage, guestReplyPath, guestSeatFolder, handleGuestRequest, type GuestDeps,
+  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
+  guestMessage, guestReplyPath, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
+import { folderChanges } from './meeting-folder-changes.js'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
@@ -347,6 +348,24 @@ function sessionStateOf(tabId: string): SessionState {
   return tab.status === 'starting' || tab.status === 'approval-needed' || tab.activity === 'working' ? 'busy' : 'idle'
 }
 
+/** What the person accepted about repositories' Git settings, shared by the Git panel and meetings so one answer counts in both. */
+let sharedGitTrust: GitTrustStore | null = null
+function gitTrustStore(): GitTrustStore {
+  sharedGitTrust ??= new GitTrustStore(join(app.getPath('userData'), 'git-trust.json'))
+  return sharedGitTrust
+}
+
+/** A hardened Git runner, as the Git panel has, for the changes an outside host attaches; null without Git. */
+let meetingRunner: Promise<GitRunner | null> | null = null
+function meetingGitRunner(): Promise<GitRunner | null> {
+  meetingRunner ??= resolveGitExecutable().then((executable) => executable?.supported
+    ? new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') })
+    : null)
+  // Git installed later is found on the next try.
+  void meetingRunner.then((runner) => { if (!runner) meetingRunner = null })
+  return meetingRunner
+}
+
 function gitServiceInstance(): GitService | null {
   if (gitServiceStopped || shuttingDown()) return null
   gitService ??= new GitService({
@@ -354,7 +373,7 @@ function gitServiceInstance(): GitService | null {
       const executable = await resolveGitExecutable()
       return executable ? { executable, runner: new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') }) } : null
     },
-    trustStore: new GitTrustStore(join(app.getPath('userData'), 'git-trust.json')),
+    trustStore: gitTrustStore(),
     resolveProject: (profileId) => desktopConfig.profiles.find((profile) => profile.id === profileId)?.path ?? null,
     onProgress: (subscriberId, profileId, event) => {
       const window = mainWindow
@@ -1927,10 +1946,16 @@ function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {
   if (delivery.kind === 'add-dir') return
   const folder = meetingHub.folderOf(delivery.meetingId)
   if (!folder) return
-  // Worded for the channel the guest uses now: the meeting tools take the reply as an argument, the helper a file.
-  const reply = guestMailbox.seat(seatId)?.via === 'mcp' ? { via: 'mcp' as const } : { via: 'helper' as const, path: guestReplyPath(guestRoot(), seatId, delivery) }
+  // Worded for the channel the guest uses now: the meeting tools take the reply as an argument, the helper a file. A host
+  // answers with its commands, which the message names.
+  const seat = guestMailbox.seat(seatId)
+  const via = seat?.via === 'mcp' ? 'mcp' as const : 'helper' as const
+  const reply = seat?.kind === 'host' ? { via, host: true as const }
+    : via === 'mcp' ? { via } : { via, path: guestReplyPath(guestRoot(), seatId, delivery) }
   guestMailbox.enqueue(seatId, { ...delivery, text: guestMessage(delivery.text, folder, delivery.round, reply) })
 }
+
+const guestHostTitle = (seat: GuestSeat): string => `${seat.name} (guest)`
 
 const guestDeps: GuestDeps = {
   ready: () => guestsReady,
@@ -1947,6 +1972,24 @@ const guestDeps: GuestDeps = {
     await meetingWrites.get(id)
     const paths = roundPaths(folder, round)
     return readFile(name === 'transcript' ? paths.transcript : paths[name], 'utf8').catch(() => null)
+  },
+  start: (seat, topic, post, changes) => {
+    try { return { meetingId: meetingHub.start({ tabId: seat.id, title: guestHostTitle(seat), folder: seat.folder }, { topic, post, changes }).id } }
+    catch (error) { if (error instanceof MeetingError) return { error: error.message }; throw error }
+  },
+  post: (seat, kind, text, changes) => {
+    try { return { ok: true, message: meetingHub.post(seat.id, kind, text, changes) } }
+    catch (error) { if (error instanceof MeetingError) return { ok: false, message: error.message }; throw error }
+  },
+  end: (seat) => {
+    try { meetingHub.end(seat.id); return { ok: true, message: 'The meeting is closed.' } }
+    catch (error) { if (error instanceof MeetingError) return { ok: false, message: error.message }; throw error }
+  },
+  status: (seat) => meetingStatus(seat.id),
+  changes: async (seat) => {
+    const runner = await meetingGitRunner()
+    if (!runner) throw new Error('Git is not available on this computer, so no changes can be attached.')
+    return folderChanges(seat.folder!, { runner, trust: gitTrustStore() })
   },
 }
 
@@ -2034,19 +2077,23 @@ function handleMeetingCommand(tabId: string, command: MeetingCommand, request: M
       case 'end':
         meetingHub.end(tabId)
         return { ok: true, message: 'The meeting is closed.' }
-      case 'status': {
-        const current = meetingHub.meetingOf(tabId)
-        const view = current ? meetingHub.views().find((meeting) => meeting.id === current.id) : undefined
-        if (!view) return { ok: true, message: 'This session is not in an open meeting.' }
-        const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title
-          ?? view.participants.find((participant) => participant.tabId === id)?.title ?? id)
-        return { ok: true, message: `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s)${waiting.length ? `; waiting for ${waiting.join(', ')}` : ''}.` }
-      }
+      case 'status':
+        return { ok: true, message: meetingStatus(tabId) }
     }
   } catch (error) {
     if (error instanceof MeetingError) return { ok: false, message: error.message }
     throw error
   }
+}
+
+/** Where a party's meeting stands, for its `status` command: a tab's, or an outside host's. */
+function meetingStatus(partyId: string): string {
+  const current = meetingHub.meetingOf(partyId)
+  const view = current ? meetingHub.views().find((meeting) => meeting.id === current.id) : undefined
+  if (!view) return 'You are not in an open meeting.'
+  const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title
+    ?? view.participants.find((participant) => participant.tabId === id)?.title ?? id)
+  return `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s)${waiting.length ? `; waiting for ${waiting.join(', ')}` : ''}.`
 }
 
 /**
@@ -3065,6 +3112,10 @@ function installApplicationMenu(): void {
           click: () => requestNewSession(false),
         },
         {
+          label: 'Host a Meeting from an Outside Agent…',
+          click: () => observe(inviteHostFromMenu(), 'Could not make a host invitation'),
+        },
+        {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
           enabled: tabsState.activeTabId !== null,
@@ -3703,6 +3754,61 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
   clipboard.writeText(invitation)
   return invitation
 })
+
+/**
+ * A host invitation: a seat whose outside agent may start one meeting of its own. Only the person makes one (this IPC, or
+ * File → Host a Meeting from an Outside Agent…). `folder` is the project the person picked, whose changes the desktop
+ * may attach; null for none.
+ */
+async function inviteHost(folder: string | null): Promise<string> {
+  await meetingControl.port()
+  await guestEndpointWrite
+  const { seat, token } = guestMailbox.invite('', 'Outside agent', null, { kind: 'host', folder })
+  const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
+  const invitation = guestHostInvitation({ token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null, folder: seat.folder })
+  clipboard.writeText(invitation)
+  return invitation
+}
+
+ipcMain.handle('desktop:meeting-host-invite', async (event, folder: unknown): Promise<string> => {
+  assertTrustedIpcSender(event)
+  if (folder !== null && (typeof folder !== 'string' || !isAbsolute(folder) || folder.length > 4096)) throw new Error('Invalid folder')
+  if (folder !== null && !(await stat(folder).then((info) => info.isDirectory(), () => false))) throw new Error(`${folder} is not a folder`)
+  return inviteHost(folder)
+})
+
+/** The menu's way to a host invitation: ask whether to attach a project's changes, then copy the invitation. */
+async function inviteHostFromMenu(): Promise<void> {
+  const window = BrowserWindow.getFocusedWindow() ?? undefined
+  const options = {
+    type: 'question' as const,
+    title: 'Host a meeting from an outside agent',
+    message: 'Let an outside agent, such as Claude Code, host a review meeting?',
+    detail: 'You get an invitation to paste into the agent. It starts the meeting and answers the reviewers you add. To let it attach its uncommitted changes, pick its project folder.',
+    buttons: ['Pick a Project Folder…', 'No Changes', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+  }
+  const choice = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options)
+  if (choice.response === 2) return
+  let folder: string | null = null
+  if (choice.response === 0) {
+    const picked = window
+      ? await dialog.showOpenDialog(window, { title: 'The agent\'s project folder', properties: ['openDirectory'] })
+      : await dialog.showOpenDialog({ title: 'The agent\'s project folder', properties: ['openDirectory'] })
+    if (picked.canceled || !picked.filePaths[0]) return
+    folder = picked.filePaths[0]
+  }
+  await inviteHost(folder)
+  const done = {
+    type: 'info' as const,
+    title: 'Host invitation copied',
+    message: 'The host invitation is on the clipboard.',
+    detail: 'Paste it into the agent on this computer, with what you want reviewed. Unused, it expires in 15 minutes. Once the agent starts the meeting, its bar appears here: add the reviewers from it.',
+  }
+  if (window) await dialog.showMessageBox(window, done)
+  else await dialog.showMessageBox(done)
+}
 
 // Resolve with Copilot: the task goes to the session, and the repository is claimed for it in main, so the panel's writes
 // there are refused while it works, however often the panel is closed and reopened.

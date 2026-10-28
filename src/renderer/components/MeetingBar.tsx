@@ -14,6 +14,14 @@ export interface MeetingBarProps {
   toolsUrl?: string | null
 }
 
+/**
+ * A meeting an outside agent hosts, with no Copilot tab in it yet: it belongs to no tab, so its bar shows above every tab
+ * until the person adds a session (then it shows above that one) or dismisses it.
+ */
+export function outsideHostedWithoutTabs(meeting: MeetingView): boolean {
+  return meeting.hostTabId.startsWith('guest:') && !meeting.participants.some((participant) => !participant.guest)
+}
+
 /** The command that gives Claude Code the meeting tools, once; other agents take the same URL in their settings. */
 export function meetingToolsSetup(url: string): string {
   return `claude mcp add --transport http copilot-meeting ${url}`
@@ -79,7 +87,8 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
   const [invited, setInvited] = useState<string | null>(null)
   if (!activeTabId) return null
   const shown = meetings.filter((meeting) => !dismissed.has(meeting.id)
-    && (meeting.hostTabId === activeTabId || meeting.participants.some((participant) => participant.tabId === activeTabId)))
+    && (meeting.hostTabId === activeTabId || meeting.participants.some((participant) => participant.tabId === activeTabId)
+      || outsideHostedWithoutTabs(meeting)))
   if (!shown.length) return null
   const busy = new Set(meetings.filter((meeting) => meeting.stage !== 'closed')
     .flatMap((meeting) => [meeting.hostTabId, ...meeting.participants.map((participant) => participant.tabId)]))
@@ -104,7 +113,9 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
         const pending = meeting.invited ?? []
         // Only a session whose CLI is running can take the material; an unloaded or stopped one has to be resumed first.
         const candidates = tabs.filter((tab) => !tab.remote && !tab.unloaded && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
-        const role = meeting.hostTabId === activeTabId ? 'Host' : 'Reviewer'
+        const role = meeting.hostTabId === activeTabId ? 'Host'
+          : meeting.participants.some((participant) => participant.tabId === activeTabId) ? 'Reviewer'
+          : `Hosted by ${meeting.hostTitle}`
         return (
           <section key={meeting.id} className={`meeting-bar meeting-bar-${meeting.stage}`} aria-label={`Meeting ${meeting.id}`}>
             <span className="meeting-bar-id">Meeting {meeting.id}</span>

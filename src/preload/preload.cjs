@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   gitResolve: (profileId, repoId, tabId, text) => ipcRenderer.invoke('desktop:git-resolve', profileId, repoId, tabId, text),
   meetingAction: (meetingId, action, tabId, role) => ipcRenderer.invoke('desktop:meeting-action', meetingId, action, tabId, role),
   meetingInvite: (meetingId, name, role) => ipcRenderer.invoke('desktop:meeting-invite', meetingId, name, role),
+  meetingHostInvite: (folder) => ipcRenderer.invoke('desktop:meeting-host-invite', folder),
   resizeTab: (tabId, cols, rows) => ipcRenderer.invoke('desktop:resize-tab', tabId, cols, rows),
   getTabBacklog: (tabId) => ipcRenderer.invoke('desktop:get-tab-backlog', tabId),
   getTabSnapshot: (tabId) => ipcRenderer.invoke('desktop:get-tab-snapshot', tabId),
