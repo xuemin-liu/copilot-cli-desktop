@@ -333,7 +333,8 @@ An outside agent can also host: Copilot sessions (and other agents) review its p
    with `meeting_propose_close`. When everyone agrees, it gets the agreed message and carries on.
 
 - Only you make host invitations. One starts a single meeting and expires after 15 minutes unused.
-- The changes come from the folder you picked: the desktop runs Git there as the Git panel does, with the same hardening
+- The changes come from the folder you picked, and only from inside it (a subfolder of a repository attaches just that
+  subfolder's changes): the desktop runs Git there as the Git panel does, with the same hardening
   and the same trust check. If the repository's own Git settings name a program (a filter, for example), accept them in
   the Git panel first; until then the agent is told the changes cannot be attached. The patch is filtered as for any
   meeting. Without a folder, the agent describes its changes in its post. A repository around your home folder or a

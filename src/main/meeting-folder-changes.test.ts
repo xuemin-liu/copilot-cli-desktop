@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -138,16 +138,40 @@ test('a repository that encloses the home folder is never the one attached: a do
   }
 })
 
-test('a picked subfolder attaches the changes of its whole repository, found from its root', async () => {
+test('a picked subfolder attaches only the changes inside it, tracked and new, found from its repository\'s root', async () => {
   const repo = await repository()
   try {
     await mkdir(join(repo.folder, 'docs'))
+    await writeFile(join(repo.folder, 'docs', 'notes.md'), 'v1\n')
+    repo.git('add', 'docs/notes.md')
+    repo.git('commit', '-q', '-m', 'notes')
     await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    await writeFile(join(repo.folder, 'outside.txt'), 'not picked\n')
+    await writeFile(join(repo.folder, 'docs', 'notes.md'), 'v2\n')
     await writeFile(join(repo.folder, 'docs', 'plan.md'), '# Plan\n')
     const patch = await folderChanges(join(repo.folder, 'docs'), repo)
-    assert.match(patch, /^\+retry = 3$/m)
+    assert.match(patch, /^\+v2$/m)
     assert.match(patch, /^\+\+\+ b\/docs\/plan\.md$/m)
+    assert.ok(!patch.includes('retry = 3') && !patch.includes('outside.txt'), 'nothing from outside the picked folder')
+    assert.match(await folderChanges(repo.folder, repo), /outside\.txt/, 'the repository root attaches it all')
   } finally {
+    await repo.cleanup()
+  }
+})
+
+test('an approval made under the canonical path counts for an alias of the folder (a junction or symlink)', async () => {
+  const repo = await repository()
+  const alias = `${repo.folder}-alias`
+  try {
+    repo.git('config', 'filter.probe.clean', 'cat')
+    await writeFile(join(repo.folder, '.gitattributes'), '* filter=probe\n')
+    await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    const root = resolve(repo.git('rev-parse', '--show-toplevel').trim())
+    await repo.trust.trust(root, (await scanRepoConfig(repo.runner, root)).hash)
+    await symlink(repo.folder, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.match(await folderChanges(alias, repo), /^\+retry = 3$/m, 'the same repository, by another name')
+  } finally {
+    await rm(alias, { force: true, recursive: false }).catch(() => undefined)
     await repo.cleanup()
   }
 })

@@ -177,7 +177,7 @@ function isAncestorTooBroad(candidate: string, homeDirectory: string): boolean {
 }
 
 export type EnclosingRepository =
-  | { kind: 'found'; root: string; issue: string | null }
+  | { kind: 'found'; root: string; issue: string | null; folder: string }
   | { kind: 'too-broad'; root: string }
   | { kind: 'none' }
 
@@ -196,7 +196,7 @@ export async function enclosingRepository(folderPath: string, homeDirectory?: st
     const entry = await inspectGitEntry(current)
     if (!entry) continue
     if (current !== folder && isAncestorTooBroad(current, home)) return { kind: 'too-broad', root: current }
-    return { kind: 'found', root: current, issue: entry.issue }
+    return { kind: 'found', root: current, issue: entry.issue, folder }
   }
   return { kind: 'none' }
 }

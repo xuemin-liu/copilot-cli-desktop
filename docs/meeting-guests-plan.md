@@ -413,6 +413,11 @@ post.
   diff and untracked files (an `.npmrc` with a token, say). `git-discovery.ts` now exports `enclosingRepository`, the
   Git panel's own rule (canonical folder, filesystem only, `isAncestorTooBroad`), and the patch uses it: such a folder is
   refused with a message, before any Git process starts.
+- **Canonical paths, and only the picked folder** (findings on #130). The root is the canonical path that
+  `enclosingRepository` finds (8.3 names, junctions and `/var` → `/private/var` resolved), so an approval the person made in
+  the Git panel, stored under that path, counts when they pick the folder by another name. And the patch holds only what is
+  inside the picked folder: a subfolder of a repository attaches its own tracked and new files (`-- <folder>` pathspecs),
+  not the rest of the repository.
 
 ## Open questions, decided
 

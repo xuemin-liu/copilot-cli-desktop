@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { isLocalFilesystemPath } from './external-targets.js'
 import { enclosingRepository, type EnclosingRepository } from './git-discovery.js'
 import { ceilingDirectories } from './git-env.js'
@@ -75,9 +75,13 @@ export async function folderChanges(folder: string, deps: FolderChangesDeps): Pr
     throw new FolderChangesError(`The Git settings of ${root} name programs Git could run (${scan.items.map((item) => item.key).join(', ')}). The person has to review them in the Git panel first; then the changes can be attached.`)
   }
 
+  // Only what is inside the folder the person picked, which may be a subfolder of its repository: the rest of the
+  // repository is not what they chose to share. Both paths are canonical, so the pathspec is the folder itself.
+  const inside = relative(root, repository.folder).split(sep).join('/')
+  const scope = inside ? ['--', inside] : []
   let patch = ''
-  if ((await git(['rev-parse', '--verify', '--quiet', 'HEAD'])).exitCode === 0) patch += await output([...DIFF, 'HEAD'], 'tracked changes')
-  const untracked = (await output(['ls-files', '--others', '--exclude-standard', '-z'], 'new files')).split('\0').filter(Boolean)
+  if ((await git(['rev-parse', '--verify', '--quiet', 'HEAD'])).exitCode === 0) patch += await output([...DIFF, 'HEAD', ...scope], 'tracked changes')
+  const untracked = (await output(['ls-files', '--others', '--exclude-standard', '-z', ...scope], 'new files')).split('\0').filter(Boolean)
   let included = 0
   for (const path of untracked) {
     const size = await stat(join(root, path)).then((info) => info.isFile() ? info.size : null, () => null)
