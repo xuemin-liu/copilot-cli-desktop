@@ -40,7 +40,8 @@ if (!process.versions.electron) {
       <input id="direct" data-private value="123456">
       <div data-private><input id="nested" type="number" value="123456"><span id="private-text">123456</span></div>
       <div id="aggregate"><span data-private>123456</span></div>
-      <div id="shadow" data-private></div><script>shadow.attachShadow({mode:'open'}).innerHTML='<input id="shadow-number" type="number" value="123456">'</script>`
+      <div id="shadow" data-private></div><script>shadow.attachShadow({mode:'open'}).innerHTML='<input id="shadow-number" type="number" value="123456"><span id="shadow-text">123456</span>'</script>
+      <span id="public-text">Public result</span>`
     const site = createServer((request, response) => {
       const route = new URL(request.url, 'http://localhost')
       response.setHeader('content-type', 'text/html')
@@ -113,6 +114,16 @@ if (!process.versions.electron) {
       })
       await check('numeric', async () => {
         await browser.navigate(url + '/numeric')
+        for (const selector of ['#private-text', '#aggregate', '#shadow-text', 'body']) {
+          for (const text of ['123', '999']) for (const condition of ['visible', 'hidden', 'count']) {
+            const report = await execute([{ action: 'assert', selector, text, condition,
+              ...(condition === 'count' ? { expected: 0 } : {}), timeoutMs: 100 }])
+            assert.equal(report.status, condition === 'visible' ? 'failed' : 'passed',
+              `${selector}/${condition}/${text} must not match protected text`)
+          }
+        }
+        passed(await execute([{ action: 'assert', selector: '#public-text', text: 'Public', condition: 'visible' },
+          { action: 'assert', selector: '#public-text', text: 'Public', condition: 'count', expected: 1 }]))
         passed(await execute([{ action: 'assert', selector: '#public-number', condition: 'numericValue', expected: 42.5, tolerance: 0.01 }]))
         for (const id of ['password', 'otp', 'card', 'new-password', 'direct', 'nested', 'shadow-number']) for (const condition of ['numericValue', 'value', 'text']) {
           const report = await execute([{ action: 'assert', selector: '#' + id, condition, expected: condition === 'numericValue' ? 123456 : '123456', timeoutMs: 100,

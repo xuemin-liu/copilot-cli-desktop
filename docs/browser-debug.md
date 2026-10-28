@@ -498,6 +498,8 @@ the value. Content assertions (`numericValue`, `value`, `text`, `attribute`) ref
 private regions, aggregates containing private content, password fields, and
 autocomplete fields for passwords, one-time codes or payment details. This also
 prevents repeated numeric-range assertions from disclosing protected values.
+Text target filters also exclude these protected elements and private aggregates
+before reading their text, including for visibility and count assertions or actions.
 Use a public application-state indicator for assertions instead. A `requestComplete` condition takes
 `request: {urlPattern,method,state:"finished"|"failed",optional status}` and no target.
 It matches requests observed during this run, never an earlier run.

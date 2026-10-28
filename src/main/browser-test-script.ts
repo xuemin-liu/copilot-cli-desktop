@@ -20,6 +20,8 @@ export function browserTestScript(operation: string, args: Record<string, any>):
   }
   const sensitiveField = (element: Element): boolean => element instanceof HTMLInputElement && element.type === 'password'
     || (element.getAttribute('autocomplete') ?? '').split(/\s+/).some(token => /^(one-time-code|cc-.*|current-password|new-password)$/i.test(token))
+  const privateContent = (element: Element): boolean => privateRegion(element) || sensitiveField(element)
+    || element.querySelector('[data-private]') !== null
   const visible = (element: Element): boolean => {
     for (let node: Element | null = element; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
       const style = styleOf(node)
@@ -63,7 +65,10 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       }
     }
     walk(document)
-    return matches.filter(element => !filterText || !args.text || (element as HTMLElement).innerText?.includes(args.text))
+    // A text target filter is a content query too: even visible/hidden/count
+    // would otherwise expose private text one matching guess at a time.
+    return matches.filter(element => !filterText || !args.text
+      || !privateContent(element) && (element as HTMLElement).innerText?.includes(args.text))
   }
   const scope = globalThis as typeof globalThis & { __desktopTestDiscovery?: { generation: string; nodes: Map<string, Element> } }
   const fromRef = (ref: string): Element => {
@@ -175,7 +180,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       if (matches.length !== 1) return { passed: false, reason: matches.length ? 'Selector matches multiple visible elements.' : 'Expected element is not visible.' }
       const target = matches[0]!
       if (['text', 'value', 'numericValue', 'attribute'].includes(args.condition)
-        && (privateRegion(target) || sensitiveField(target) || target.querySelector('[data-private]'))) {
+        && privateContent(target)) {
         return { passed: false, reason: 'Content assertions are unavailable for private regions or sensitive password, one-time-code and payment fields. Select a public application-state indicator instead.' }
       }
       switch (args.condition) {
