@@ -8,7 +8,7 @@ import test from 'node:test'
 import { MeetingHub, type MeetingDelivery, type MeetingTimers } from './meeting.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_PAGE_CHARS, GUEST_UNUSED_SEAT_MS, GuestMailbox, guestHelperCommand,
-  guestDeliveryText, guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestChannel, type GuestDeps, type GuestSeat,
+  guestDeliveryText, guestHostInvitation, guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestChannel, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { MeetingControlServer } from './meeting-session.js'
 import { roundPaths } from './meeting-messages.js'
@@ -154,6 +154,28 @@ test('the invitation tells the agent how to poll, read and reply, with its token
   assert.ok(text.includes(`${helper} reply -File "<that file>" -Token ${'a'.repeat(64)}`))
   assert.match(text, /Review only: do not edit files/)
   assert.match(text, /Do not end your turn until the meeting is closed/)
+})
+
+test('a short invitation, for an agent that has the meeting tools, names only them and keeps the rules', () => {
+  const token = 'b'.repeat(64)
+  const helper = guestHelperCommand('C:\\data\\meeting-guest\\meeting-guest.ps1', true)
+  const full = guestInvitation({ meetingId: 'K7QF', role: 'security reviewer', token, helper, tools: true })
+  const short = guestInvitation({ meetingId: 'K7QF', role: 'security reviewer', token, helper, tools: true, toolsOnly: true })
+  assert.match(short, /^Review meeting K7QF in Copilot CLI Desktop as security reviewer with the copilot-meeting tools: call meeting_join with invitation "b{64}"/)
+  assert.match(short, /meeting_next.*meeting_show.*meeting_reply/)
+  assert.match(short, /Review only: do not edit files/)
+  assert.match(short, /Do not end your turn until the meeting is closed/)
+  assert.ok(!short.includes('meeting-guest.ps1') && !short.includes('-Token'), 'no helper in it')
+  assert.ok(short.length * 3 < full.length, `a third of the full one or less (${short.length} of ${full.length})`)
+  assert.equal(guestInvitation({ meetingId: 'K7QF', role: null, token, helper, tools: false, toolsOnly: true }), guestInvitation({ meetingId: 'K7QF', role: null, token, helper }),
+    'without the tools served, the full invitation: the helper is all the agent has')
+
+  const host = guestHostInvitation({ token, helper, tools: true, toolsOnly: true, folder: 'D:\\api' })
+  assert.match(host, /^Host a review meeting in Copilot CLI Desktop with the copilot-meeting tools: call meeting_start with invitation "b{64}"/)
+  assert.match(host, /changes: true attaches your uncommitted changes in D:\\api/)
+  assert.match(host, /meeting_round.*meeting_propose_close.*meeting_end/s)
+  assert.ok(!host.includes('meeting-guest.ps1') && host.length * 2 < guestHostInvitation({ token, helper, tools: true, folder: 'D:\\api' }).length)
+  assert.ok(!guestHostInvitation({ token, helper, tools: true, toolsOnly: true, folder: null }).includes('changes: true'), 'no folder, no changes')
 })
 
 /** The patch a host seat's folder gives, in these tests. */
