@@ -9,7 +9,8 @@ This page is the one-time setup per agent. How meetings work is in the [README](
 
 ## What you need
 
-- **Copilot CLI Desktop 0.1.61 or later, running.** The desktop serves the tools; there is nothing else to install.
+- **Copilot CLI Desktop 0.1.62 or later, running.** The desktop serves the tools; there is nothing else to install. (The
+  tools arrived in 0.1.61; the short invitations this page uses, in 0.1.62.)
 - **The agent on the same computer.** The tools listen only on `127.0.0.1`, so an agent on another machine, or in WSL with
   its default (NAT) networking, cannot reach them. WSL works with mirrored networking.
 - **The address:** `http://127.0.0.1:47391/mcp`, a Streamable HTTP MCP server. It needs no key or header: the tools do
@@ -110,7 +111,8 @@ Any MCP client that supports **Streamable HTTP** works. What it needs to know ab
 - Answers are plain JSON (`application/json`), never a stream; a `GET` for the optional event stream gets 405, which
   clients are expected to accept.
 - An unknown session gets 404 (after the desktop restarts, for example); the client should start a new session, and the
-  agent then calls `meeting_join` (or `meeting_start`) again with the invitation it still has.
+  agent then calls `meeting_join` again with the invitation it still has, or, as host, `meeting_start` again (see
+  [Troubleshooting](#troubleshooting) for what 0.1.62 answers).
 - Tool calls can take up to 50 seconds (`meeting_next` waits for the next message); allow at least 60.
 
 ## Using the tools
@@ -137,8 +139,8 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 
 | What you see | Why, and what to do |
 | --- | --- |
-| "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61, or the port is taken (its log says so). Start or update the desktop. |
+| "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the port is taken (its log says so). Start or update the desktop. |
 | The agent does not list the tools | The server was added after the session started: start a new session. In Codex, see the experimental flag above. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one. |
-| "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It joins again with the same invitation. |
+| "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
 | The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |
