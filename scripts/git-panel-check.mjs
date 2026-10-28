@@ -459,6 +459,20 @@ ${point.missing}`)
     await until(`document.querySelector(".git-changes-list").getBoundingClientRect().height > ${listBefore + 40}`, 'list grew after dragging the divider')
     assert.ok(await ui('document.querySelector(".git-diff-lines").getBoundingClientRect().height > 40'), 'the diff still has room')
     assert.equal(await ui('localStorage.getItem("git-changes-list-share") !== null'), true)
+    // A short window with the list at its largest share: the list gives way, and the diff still starts on screen.
+    window.setContentSize(460, 560)
+    await until('window.innerHeight === 560', 'window shortened')
+    await ui('document.querySelector(".git-changes .splitter-horizontal").focus()')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' })
+    await until('document.querySelector(".git-changes .splitter-horizontal").getAttribute("aria-valuenow") === "80"', 'list share at its maximum')
+    const short = await ui('(() => { const area = document.querySelector(".git-diff-area").getBoundingClientRect(); const lines = document.querySelector(".git-diff-lines").getBoundingClientRect(); return { areaTop: area.top, linesTop: lines.top, height: window.innerHeight } })()')
+    assert.ok(short.linesTop < short.height, `the diff starts on screen in a short window (diff lines at ${short.linesTop}, window ${short.height})`)
+    await screenshot('short-window.png')
+    // Back to the default share (80 → 40 in steps of 5) and size for the rest of the check.
+    for (let step = 0; step < 8; step++) { window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Up' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Up' }) }
+    await until('document.querySelector(".git-changes .splitter-horizontal").getAttribute("aria-valuenow") === "40"', 'list share back to 40')
+    window.setContentSize(460, 900)
+    await until('window.innerHeight === 900', 'window restored')
     results.listDiffDivider = true
 
     // 11. Stage and unstage with the row buttons, and "Stage all", against the real repository.
