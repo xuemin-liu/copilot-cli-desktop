@@ -136,6 +136,8 @@ if (process.versions.electron) {
       await writeFile(join(copilotHome, 'config.json'), JSON.stringify({ trustedFolders: [workspace, reviewerFolder] }))
       env.GIT_CONFIG_NOSYSTEM = '1'
       env.GIT_CONFIG_GLOBAL = join(directory, 'gitconfig')
+      // Any free port for the meeting tools, so the check never meets an app already serving them on the fixed one.
+      env.COPILOT_DESKTOP_MEETING_MCP_PORT = '0'
       Object.assign(profile, createWorkspaceProfile(workspace, 'full-auto'), { name: 'Meeting host', tabs: [], defaultResumeMode: 'new' })
       profiles.push(Object.assign(createWorkspaceProfile(reviewerFolder, 'read-only'), { name: 'Meeting reviewer', tabs: [], defaultResumeMode: 'new' }))
     }

@@ -1451,3 +1451,5 @@ button:disabled {
 .meeting-bar-quiet { color: #e0b46a; }
 .meeting-bar-invite { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .meeting-bar-note { flex: 1 1 240px; color: #a9b2c0; }
+.meeting-bar-tools { flex-basis: 100%; }
+.meeting-bar-tools code { padding: 0 4px; border-radius: 3px; background: #0b121c; overflow-wrap: anywhere; }

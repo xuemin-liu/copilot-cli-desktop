@@ -388,7 +388,7 @@ export function App(): JSX.Element {
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
-          <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} />
+          <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} />
           <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
             panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
               promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}

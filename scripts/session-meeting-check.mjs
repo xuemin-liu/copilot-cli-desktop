@@ -1,9 +1,10 @@
 // A review meeting in the real app, across an app restart. Run 1: a host session (full auto, with uncommitted changes) starts
 // a meeting through its helper, the person invites an outside agent, and the app quits with the meeting open. Run 2, on the
 // same data: the meeting is restored and its host started again; the outside agent (the guest helper, run as another harness
-// would run it) joins with its first `next`; a read-only session in another project joins because the person typed "join
-// meeting <id> as security reviewer"; the desktop delivers the plan and the patch to both, collects their reviews, hands them
-// to the host (whose helper now talks to the new app), runs the vote, and closes the meeting when everyone agrees.
+// would run it) joins with its first `next`; a second outside agent is invited and joins through the meeting tools over MCP;
+// a read-only session in another project joins because the person typed "join meeting <id> as security reviewer"; the
+// desktop delivers the plan and the patch to all three, collects their reviews, hands them to the host (whose helper now
+// talks to the new app), runs the vote, and closes the meeting when everyone agrees.
 // Real CLI and real helpers; the loopback mock model plays both sessions (no paid requests).
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -13,6 +14,7 @@ import { app, BrowserWindow, clipboard } from 'electron'
 import { MEETING_REVIEW_MARK } from './meeting-check-model.mjs'
 
 const GUEST_REVIEW_MARK = 'guest-review-mark-5150'
+const TOOL_REVIEW_MARK = 'tool-review-mark-6261'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(action, label, timeoutMs = 60_000) {
@@ -109,6 +111,29 @@ export async function runMeetingCheck() {
     console.log(`[meeting] run 1: meeting ${opening.id} is open with an outside agent invited; quitting with it open`)
   }
 
+  /** An outside agent with the meeting tools: a minimal MCP client, as a harness speaks to the desktop's endpoint. */
+  function mcpClient(url) {
+    let session = null
+    let id = 0
+    const post = async (body) => {
+      const response = await fetch(url, { method: 'POST', body: JSON.stringify(body),
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session } : {}) } })
+      session ??= response.headers.get('mcp-session-id')
+      return response.status === 202 ? null : response.json()
+    }
+    return {
+      async initialize() {
+        await post({ jsonrpc: '2.0', id: ++id, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'meeting-check', version: '1' } } })
+        await post({ jsonrpc: '2.0', method: 'notifications/initialized' })
+      },
+      async call(name, args) {
+        const answer = await post({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name, arguments: args } })
+        if (answer.result.isError) throw new Error(`${name}: ${answer.result.content[0].text}`)
+        return answer.result.content[0].text
+      },
+    }
+  }
+
   /** The outside agent: the helper from the invitation, run as another harness would run it. */
   function guestHelper(invitation) {
     const token = /next -Token ([a-f0-9]{64})/.exec(invitation)[1]
@@ -143,6 +168,22 @@ export async function runMeetingCheck() {
     assert.ok(replyPath?.includes('meeting-guest'), 'the reply file is in the app\'s guest folder, not in a project')
     assert.match((await guest('show', '-Name', 'changes', '-Round', '1')).out, /\+retry = 3[\s\S]*\[end\]$/)
 
+    // A second outside agent uses the meeting tools over MCP: invited now, it joins the same round with its invitation.
+    const toolsUrl = (await state()).meetingToolsUrl
+    assert.match(toolsUrl ?? '', /^http:\/\/127\.0\.0\.1:\d+\/mcp$/, 'the meeting tools are served')
+    const savedClipboard = await clipboard.readText()
+    const toolInvitation = await ui(`window.copilotDesktop.meetingInvite(${JSON.stringify(id)}, 'Tool agent', null)`)
+    clipboard.writeText(savedClipboard)
+    assert.match(toolInvitation, /If you have the copilot-meeting tools/, 'the invitation offers the tools first')
+    const tools = mcpClient(toolsUrl)
+    await tools.initialize()
+    assert.match(await tools.call('meeting_join', { invitation: /meeting_join with invitation "([a-f0-9]{64})"/.exec(toolInvitation)[1] }), new RegExp(`^Joined meeting ${id}\\.`))
+    const toolPost = await tools.call('meeting_next', { wait_seconds: 30 })
+    assert.match(toolPost, new RegExp(`^\\[meeting ${id} · round 1 · from the desktop\\]`))
+    assert.match(toolPost, /the result of meeting_show\(name: "changes", round: 1\)/, 'material named as a tool call')
+    assert.ok(toolPost.endsWith('To answer, call meeting_reply with your whole reply.'), 'no reply file for an agent with the tools')
+    assert.match(await tools.call('meeting_show', { name: 'changes', round: 1 }), /\+retry = 3[\s\S]*\[end\]$/)
+
     // The person asks the reviewer, in another project, to join with a role; the desktop does the rest. It joins the round
     // the guest is in, so the round waits for both.
     await ui(`window.copilotDesktop.activateTab(${JSON.stringify(reviewer.id)})`)
@@ -150,18 +191,21 @@ export async function runMeetingCheck() {
     await type(reviewer.id, `join meeting ${id} as security reviewer`)
     const joined = await until(async () => (await state()).meetings?.find(meeting => meeting.id === id)?.participants.find(participant => participant.tabId === reviewer.id), 'reviewer joined')
     assert.equal(joined.role, 'security reviewer')
-    await until(() => ui('/reviewers: Script agent \\(guest\\) \\(performance reviewer\\), meeting reviewer \\(security reviewer\\)[\\s\\S]*AI credits used \\(Copilot sessions only\\)/.test(document.querySelector(".meeting-bar")?.innerText || "")'), 'meeting bar shows the guest, the role and the cost')
+    await until(() => ui('/reviewers: Script agent \\(guest\\) \\(performance reviewer\\), Tool agent \\(guest\\), meeting reviewer \\(security reviewer\\)[\\s\\S]*AI credits used \\(Copilot sessions only\\)/.test(document.querySelector(".meeting-bar")?.innerText || "")'), 'meeting bar shows the guests, the role and the cost')
     await screenshot('01-joined-after-restart').catch(cause => console.error('[meeting] no screenshot:', cause))
     await until(async () => (await backlog(reviewer.id)).includes('Added directory to allowed list'), 'the meeting folder added to the reviewer', 90_000)
 
     await mkdir(dirname(replyPath), { recursive: true })
     await writeFile(replyPath, `Guest review: three retries is fine. ${GUEST_REVIEW_MARK}\n`)
     assert.equal((await guest('reply', '-File', replyPath)).out, 'Reply sent. Run next for the next message.')
-    // The vote: the guest polls until it comes, then agrees.
+    assert.equal(await tools.call('meeting_reply', { text: `Tool review: the lock looks right. ${TOOL_REVIEW_MARK}` }), 'Reply sent. Call meeting_next for the next message.')
+    // The vote: each guest polls until it comes, then agrees.
     const vote = await until(async () => { const next = await guest('next', '-Wait', '30'); return / · vote · from the desktop\]/.test(next.out) ? next : null }, 'vote reached the guest', 150_000)
     const votePath = /To answer, write your whole reply to (.+?) and run the reply command/.exec(vote.out)[1]
     await writeFile(votePath, 'AGREE: the guest agrees.\n')
     assert.equal((await guest('reply', '-File', votePath)).out, 'Reply sent. Run next for the next message.')
+    await until(async () => / · vote · from the desktop\]/.test(await tools.call('meeting_next', { wait_seconds: 30 })), 'vote reached the tool agent', 150_000)
+    await tools.call('meeting_reply', { text: 'AGREE: the tool agent agrees.' })
 
     const closed = await until(async () => {
       const meeting = (await state()).meetings?.find(candidate => candidate.id === id)
@@ -169,7 +213,8 @@ export async function runMeetingCheck() {
     }, 'meeting closed by agreement', 150_000)
     assert.equal(closed.outcome, 'agreed', JSON.stringify(closed))
     assert.equal(closed.round, 2, 'one review round, then the vote')
-    const transcript = await readFile(join(folder, 'transcript.md'), 'utf8')
+    // The desktop writes the transcript in order but asynchronously: wait for the entry that closed the meeting.
+    const transcript = await until(async () => { const text = await readFile(join(folder, 'transcript.md'), 'utf8'); return /## Closed/.test(text) ? text : null }, 'transcript written to the close')
     assert.match(transcript, /"meeting reviewer" \([^)]*\), as security reviewer joined/)
     assert.match(transcript, new RegExp(MEETING_REVIEW_MARK), 'the review reached the transcript')
     assert.match(transcript, /the host proposes to close/)
@@ -178,6 +223,10 @@ export async function runMeetingCheck() {
     assert.match(transcript, new RegExp(GUEST_REVIEW_MARK), 'the guest\'s review reached the transcript')
     assert.match(transcript, /AGREE: the guest agrees/)
     assert.equal((await guest('next', '-Wait', '5')).out, 'The meeting is closed.', 'the guest hears that the meeting closed')
+    assert.match(transcript, /"Tool agent \(guest\)" joined/)
+    assert.match(transcript, new RegExp(TOOL_REVIEW_MARK), 'the tool agent\'s review reached the transcript')
+    assert.match(transcript, /AGREE: the tool agent agrees/)
+    assert.equal(await tools.call('meeting_next', { wait_seconds: 5 }), 'The meeting is closed.', 'the tool agent hears that the meeting closed')
     assert.match((await readFile(join(folder, 'round-2', 'post.md'), 'utf8')).replace(/\r\n/g, '\n'), /Take the lock on logout too/, 'the restored host\'s helper reached the new app')
     assert.equal(JSON.parse(await readFile(join(folder, 'meeting.json'), 'utf8')).stage, 'closed', 'saved as closed: it will not be restored again')
     await until(async () => (await backlog(host.id)).includes('Everyone agreed; here is the outcome.'), 'host told the meeting agreed', 60_000)
@@ -188,7 +237,8 @@ export async function runMeetingCheck() {
       checks: ['host helper starts a meeting with plan and patch', 'meeting saved with session ids and restored after the app restarts', 'restored host started and given the folder again',
         'join with a role by typed request from a read-only session in another project', 'role and cost in the meeting bar', 'review collected and delivered to the host',
         'restored host proposes to close through the new endpoint', 'reviewer agrees and the meeting closes, saved as closed', 'host told',
-        'outside agent invited, its seat restored after the restart', 'guest reads show commands and pages the patch', 'guest review and vote counted', 'guest told the meeting closed'] }, null, 2))
+        'outside agent invited, its seat restored after the restart', 'guest reads show commands and pages the patch', 'guest review and vote counted', 'guest told the meeting closed',
+        'second outside agent joins, reviews and votes through the meeting tools over MCP'] }, null, 2))
     console.log(`[meeting] PASS: meeting ${id} survived a restart, took a reviewer with a role and an outside agent, and closed by agreement`)
   }
 }

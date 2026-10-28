@@ -1,7 +1,7 @@
 # Plan: outside agents as meeting reviewers
 
-Status: phase 1 built (see [Phase 1 as built](#phase-1-as-built)). Spike 1 passed for Claude Code (see
-[Spikes](#spikes-before-phase-1)). Builds on [review meetings](session-meeting-plan.md).
+Status: phases 1 and 2 built (see [Phase 1 as built](#phase-1-as-built) and [Phase 2 as built](#phase-2-as-built)).
+Spikes passed for Claude Code (see [Spikes](#spikes-before-phase-1)). Builds on [review meetings](session-meeting-plan.md).
 
 ## The workflow this is for
 
@@ -207,6 +207,69 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
   instead of paths, pages the patch, replies to the file the desktop named, votes, and hears that the meeting closed.
 - Not covered by a check: an app restart while a guest is waiting inside `next` (the endpoint's `release` is unit tested),
   and other harnesses than Claude Code.
+
+## Phase 2: the meeting tools over MCP
+
+With the helper, every poll is a shell command the harness may ask about, and the token is in each one. Phase 2 gives
+agents that speak MCP five tools instead: `meeting_join`, `meeting_next`, `meeting_reply`, `meeting_show`, `meeting_leave`.
+
+### Served by the desktop, over HTTP
+
+- **No runtime to ship.** A stdio server needs a program to run. The packaged app cannot be one (its `RunAsNode` fuse is
+  off, see `scripts/audit-package.ts`), and Node is not on every computer. So the desktop serves MCP itself, over
+  Streamable HTTP, at `http://127.0.0.1:47391/mcp`. The port is fixed because the agent's configuration names it;
+  `COPILOT_DESKTOP_MEETING_MCP_PORT` changes it (the checks use it). If the port is taken, the invitation leaves the
+  tools out and the helper still works.
+- **Set up once per agent, with no secret.** For Claude Code: `claude mcp add --transport http copilot-meeting
+  http://127.0.0.1:47391/mcp`. Codex CLI and Gemini CLI take the same URL in their own configuration. The invite form shows
+  the command with a copy button.
+- **The invitation still decides.** The tools do nothing until `meeting_join` gets a valid invitation token, so only the
+  person can bring an agent into a meeting, as in phase 1. The token is the seat token of phase 1: one invitation works
+  for both the tools and the helper.
+- **Plain JSON-RPC over POST.** `initialize` answers with a `Mcp-Session-Id`, and `meeting_join` ties that session to the
+  seat. Responses are `application/json`, never a stream; `GET` gets 405. An unknown session gets 404, so the client
+  starts a new one, and the agent calls `meeting_join` again with the invitation it still has. The same Origin and Host
+  checks apply as for the helper's endpoint.
+
+### What changes for the agent
+
+- **`meeting_reply` takes the reply as an argument**, so there is no reply file. A message for a seat that uses the tools
+  ends with "call meeting_reply with your whole reply", and names material as `meeting_show(name: "changes", round: 2)`.
+  A seat is marked as using the tools or the helper by its latest request.
+- **`meeting_next` waits 50 s by default** (at most 540), under Codex CLI's default tool timeout of 60 s.
+- **The invitation lists both ways**: the tools first, then the helper for an agent without them.
+
+### Phase 2 spike (done, passed)
+
+`claude -p` (CLI 2.1.206) got the invitation, and the tools through `--mcp-config` with `--strict-mcp-config`. It ran
+against the real `GuestMcpServer` and mailbox, with the same scripted meeting as spike 1: round 2 was held back 130 s and
+came with a 45,000-character patch; then a vote; then the meeting closed.
+
+- **It connected over plain JSON.** The client sent `initialize`, `notifications/initialized` (202), a `GET` for the
+  optional stream (405, which it accepts) and `tools/list`.
+- **One turn of 5 minutes, all through the tools.** It made 18 model calls and ran no shell command. It called
+  `meeting_join` with the invitation, then `meeting_next`, and got two 50-second "Nothing yet." answers in a row. It read
+  the patch in three `meeting_show` pages, replied each round with `meeting_reply`, voted, and stopped at "The meeting is
+  closed."
+- **$0.82**, against $1.23 for the helper in spike 1. There are fewer calls: no file to write before each reply.
+- **Found in passing, with the helper:** in a first run the tools did not connect (the spike's own server had exited). The
+  agent fell back to the helper, and Claude Code's PowerShell tool refused `powershell.exe -File …` outright ("Command
+  spawns a nested PowerShell process which cannot be validated"). Its Bash tool runs the same command, as in spike 1. On
+  Windows the tools are therefore the dependable way for Claude Code; the helper works when the agent uses Bash.
+
+## Phase 2 as built
+
+- **`meeting-guest-mcp.ts`**: `GuestMcpSessions` (bounded at 64, least recently used first), `handleMcpMessage`
+  (`initialize`, `ping`, `tools/list`, `tools/call`), and `GuestMcpServer`, the HTTP side. The tools go through the
+  same `handleGuestRequest` as the helper, with the channel `mcp`, which words the answers ("Call meeting_next",
+  `meeting_show(name: "changes", round: 2)`) and the messages (no reply file).
+- **main** starts the endpoint once meetings are restored, on 47391 or `COPILOT_DESKTOP_MEETING_MCP_PORT`, and puts its
+  URL in the state (`meetingToolsUrl`). The invitation offers the tools only while they are served. The invite form
+  shows the `claude mcp add` command with **Copy**.
+- **Checks**: unit tests for the protocol, a whole meeting through the tools against a real hub, a new session joining
+  again after a restart, the bounded sessions, and the HTTP endpoint (refusals, a disconnected `meeting_next`, a taken
+  port). `npm run meeting:check` adds a second outside agent that joins, reviews and votes through the tools, beside the
+  helper guest and the Copilot reviewer.
 
 ## Open questions
 

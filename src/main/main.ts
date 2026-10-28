@@ -125,6 +125,7 @@ import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestInvitation,
   guestMessage, guestReplyPath, guestSeatFolder, handleGuestRequest, type GuestDeps,
 } from './meeting-guests.js'
+import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
@@ -580,6 +581,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
+    meetingToolsUrl: guestMcp.url(),
   }
 }
 
@@ -1925,7 +1927,9 @@ function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {
   if (delivery.kind === 'add-dir') return
   const folder = meetingHub.folderOf(delivery.meetingId)
   if (!folder) return
-  guestMailbox.enqueue(seatId, { ...delivery, text: guestMessage(delivery.text, folder, delivery.round, guestReplyPath(guestRoot(), seatId, delivery)) })
+  // Worded for the channel the guest uses now: the meeting tools take the reply as an argument, the helper a file.
+  const reply = guestMailbox.seat(seatId)?.via === 'mcp' ? { via: 'mcp' as const } : { via: 'helper' as const, path: guestReplyPath(guestRoot(), seatId, delivery) }
+  guestMailbox.enqueue(seatId, { ...delivery, text: guestMessage(delivery.text, folder, delivery.round, reply) })
 }
 
 const guestDeps: GuestDeps = {
@@ -1965,6 +1969,18 @@ const meetingControl = new MeetingControlServer(handleMeetingCommand, {
   },
   release: () => guestMailbox.release(),
 }, writeGuestEndpoint)
+
+// The meeting tools over MCP, on a fixed port the agent's configuration names; started once meetings are restored.
+const guestMcp = new GuestMcpServer(guestMailbox, guestDeps, () => broadcastState())
+
+async function startGuestMcp(): Promise<void> {
+  const configured = Number(process.env.COPILOT_DESKTOP_MEETING_MCP_PORT ?? DEFAULT_GUEST_MCP_PORT)
+  const port = Number.isInteger(configured) && configured >= 0 && configured <= 65535 ? configured : DEFAULT_GUEST_MCP_PORT
+  if (await guestMcp.listen(port) === null) {
+    await writeAppLog(`The meeting tools could not listen on port ${port}; outside agents can still use the helper.`).catch(() => {})
+  }
+  broadcastState()
+}
 
 /** The hub's views, with what only main knows: which parties are guests, and who is invited but not connected yet. */
 function meetingViews(): MeetingView[] {
@@ -2696,6 +2712,7 @@ async function restoreMeetings(): Promise<void> {
   } finally {
     guestsReady = true
     guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
+    await startGuestMcp()
   }
 }
 
@@ -3682,7 +3699,7 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
   const { seat, token } = guestMailbox.invite(meetingId, name, typeof role === 'string' ? role : null)
   await mkdir(guestSeatFolder(guestRoot(), seat.id), { recursive: true })
   const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
-  const invitation = guestInvitation({ meetingId, role: seat.role, token, helper: guestHelperCommand(helper) })
+  const invitation = guestInvitation({ meetingId, role: seat.role, token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null })
   clipboard.writeText(invitation)
   return invitation
 })
@@ -4434,7 +4451,7 @@ app.on('before-quit', (event) => {
       usageService = null
       meetingHub.dispose()
       // Open meetings are saved as they stand, for the next start to restore.
-      await Promise.allSettled([service?.stop(), meetingControl.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      await Promise.allSettled([service?.stop(), meetingControl.close(), guestMcp.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)
         .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))
