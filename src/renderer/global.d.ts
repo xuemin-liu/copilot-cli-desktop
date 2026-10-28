@@ -102,6 +102,8 @@ export interface CopilotDesktopBridge {
   meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): Promise<void>
   /** Invite an outside agent to review: returns the invitation to paste into it, also put on the clipboard. */
   meetingInvite(meetingId: string, name: string, role?: string): Promise<string>
+  /** Let an outside agent host a meeting: returns the host invitation, also put on the clipboard. `folder`: its project, or null. */
+  meetingHostInvite(folder: string | null): Promise<string>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>

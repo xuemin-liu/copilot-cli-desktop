@@ -1,7 +1,8 @@
 # Plan: outside agents as meeting reviewers
 
-Status: phases 1 and 2 built (see [Phase 1 as built](#phase-1-as-built) and [Phase 2 as built](#phase-2-as-built)).
-Spikes passed for Claude Code (see [Spikes](#spikes-before-phase-1)). Builds on [review meetings](session-meeting-plan.md).
+Status: phases 1, 2 and 3 built (see [Phase 1 as built](#phase-1-as-built), [Phase 2 as built](#phase-2-as-built) and
+[Phase 3 as built](#phase-3-as-built)). Spikes passed for Claude Code (see [Spikes](#spikes-before-phase-1)). Builds on
+[review meetings](session-meeting-plan.md).
 
 ## The workflow this is for
 
@@ -143,7 +144,7 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 | --- | --- |
 | 1 | Outside agents as reviewers through the guest helper: invite, poll, reply, vote, remove, restarts |
 | 2 | A bundled MCP server (`meeting_next`, `meeting_reply`, `meeting_show`) for harnesses that use MCP, so no shell approvals and no token in commands. The invitation gives the one-line `claude mcp add` / Codex config |
-| 3 | Maybe: an outside host. The person picks **Host from outside agent** on a new meeting; the host gets the digest through `next` and posts with `round` / `propose-close`. Only if phase 1 shows people want it |
+| 3 | An outside host: the person makes a host invitation, the agent starts the meeting and answers its rounds with the host's tools or helper commands. See [Phase 3](#phase-3-an-outside-agent-as-host) |
 
 ## Tests
 
@@ -270,6 +271,124 @@ came with a 45,000-character patch; then a vote; then the meeting closed.
   again after a restart, the bounded sessions, and the HTTP endpoint (refusals, a disconnected `meeting_next`, a taken
   port). `npm run meeting:check` adds a second outside agent that joins, reviews and votes through the tools, beside the
   helper guest and the Copilot reviewer.
+
+## Phase 3: an outside agent as host
+
+Before phase 3, only a Copilot tab could host. Phase 3 lets an outside agent host a meeting about its own plan or changes,
+with Copilot tabs and other outside agents reviewing.
+
+### The workflow
+
+1. In the desktop, the person chooses **File → Host a Meeting from an Outside Agent…**. They may pick the agent's project
+   folder, if they want its uncommitted changes attached; the host invitation goes to the clipboard.
+2. They paste it into the agent with what they want reviewed: "review my plan with Copilot, then implement it".
+3. The agent calls `meeting_start` with the invitation, a topic and its post. The desktop opens meeting **K7QF** and shows
+   its meeting bar, where the person adds Copilot sessions or invites other agents, as for any meeting.
+4. The agent calls `meeting_next` and gets each round's replies as one digest. It answers with `meeting_round`, or proposes
+   to close with `meeting_propose_close`, and polls again. When everyone agrees, `meeting_next` gives it the agreed
+   message, and it goes on with what the person asked.
+
+### What the host gets
+
+The host's commands, as tools and as helper commands, with the same names and limits as `meeting.ps1`:
+
+| Tool | Helper | What it does |
+| --- | --- | --- |
+| `meeting_start(invitation, topic, post, changes?)` | `start -Token -Topic -File [-Changes]` | Opens the meeting; answers its id |
+| `meeting_next(wait_seconds?)` | `next` | The next digest, reminder or agreed message, or "Nothing yet." |
+| `meeting_round(post, changes?)` | `round -File [-Changes]` | Answers the round and sends the next one |
+| `meeting_propose_close(items)` | `propose-close -File` | Asks every reviewer to agree |
+| `meeting_end()` | `end` | Closes the meeting without a vote |
+| `meeting_status()` | `status` | Round, reviewers, whom it waits for |
+
+- **A host seat** is a guest seat with `kind: 'host'` and no meeting yet. `meeting_start` makes the meeting and binds the
+  seat to it. A host invitation starts at most one meeting; a reviewer invitation cannot start one, and a host invitation
+  cannot join someone else's meeting.
+- **The hub hardly changes.** `MeetingHub.start` takes the seat as its host party (`guest:` id, title "Claude Code (guest)",
+  the folder the person picked). Digests, reminders and the agreed message go through the mailbox, as reviewers'
+  messages do. `post` and `end` are called by seat id. Save and restore work as for guest reviewers.
+- **Two gaps to close in the hub and the mailbox:**
+  - *The agreed message.* It is queued for the host just before the meeting closes, and closing a seat drops its queue.
+    For a host seat it becomes the seat's closing message, so the next `meeting_next` returns it once, then "The meeting is
+    closed."
+  - *A silent host.* For a Copilot host, the hub reminds it when its turn ends without an answer, then pauses the meeting.
+    An outside host has no turn end the desktop can see. See decision 4.
+
+### The changes
+
+For both channels the desktop runs Git in the folder the person picked (decision 2): `changes: true` with the tools,
+`-Changes` with the helper, which only asks for it. The guest helper therefore needs no Git code, and the host helpers of
+Copilot tabs stay as they are. A host invitation without a folder attaches no changes; the agent describes them in its
+post.
+
+### Safety
+
+- **Only the person starts a meeting.** A host invitation is made only from the desktop, like a reviewer invitation. This
+  keeps the rule of phase 1: a model never brings an agent into a meeting, or starts one, on its own.
+- **The host acts on what reviewers write.** That is the point of a meeting, as with a Copilot host. The person runs the
+  host agent in whatever mode they trust it with.
+- **A patch from a folder the person picked** is filtered by `sharedChanges` like any other: secret files withheld, credentials
+  masked. The desktop runs Git there only because the person named the folder, never a folder a model named.
+- **Bounded as now:** one meeting per host seat, the round cap, the round timeout for reviewers, and **Stop**.
+
+### Decisions (made by the person on 2026-10-28)
+
+1. **Who starts a meeting.** (a) The person makes a host invitation in the desktop and pastes it, as above. (b) The agent
+   starts one on its own whenever it likes, with no invitation. **Chosen: (a).** It keeps "only the person starts"; (b)
+   would let any agent with the tools open meetings.
+2. **The patch, for a host using the tools.** (a) The desktop runs Git in the folder the person picked in the host
+   invitation. (b) The agent passes the patch as a tool argument. (c) No patch for tool hosts; they describe their changes in
+   the post, or use the helper for `-Changes`. **Chosen: (a).** (b) makes the model write out the patch as output, which
+   is slow, costly and can be cut or altered on the way.
+3. **Where the meeting bar shows** when no Copilot tab is in the meeting yet. (a) Above every tab, until the person dismisses
+   it or adds a session. (b) In a new **Meetings** panel. **Chosen: (a)**: no new panel, and such meetings are rare. Once a
+   Copilot tab takes part, the bar shows above it, as today.
+4. **A silent host.** (a) When `meeting_next` hands the host the same digest a second time, its "turn" has ended without
+   an answer: it gets the reminder once, and the meeting pauses the time after that, as for a Copilot host. (b) A host
+   timeout, the round timeout again, then pause. **Chosen: (a).** A host revising its code can take longer than any
+   timeout, but it does not poll while it works.
+
+### Pieces
+
+- `meeting-guests.ts`: `kind` on seats; host commands in `handleGuestRequest`; the agreed message kept as a host seat's
+  closing message; the reminder rule of decision 4.
+- `meeting-guest-mcp.ts`: the host tools; `tools/list` lists them all. A reviewer seat calling a host tool, or the other
+  way round, gets an error that says which invitation it has.
+- `meeting-guests.ts` helpers: `start`, `round`, `propose-close`, `end` and `status`; `-Changes` asks the desktop for the
+  picked folder's changes.
+- main: the host invitation (IPC, folder picker), `MeetingHub.start` for a seat, and Git for decision 2 (a).
+- UI: the menu entry and its dialog; the meeting bar for a meeting that no tab is in (decision 3).
+- Checks: unit tests for every host command over both channels, the agreed message, the reminder and pause, and a host
+  seat restored after a restart. `npm run meeting:check` gets a run where a scripted outside host starts a meeting, a
+  Copilot tab reviews, and the meeting closes by agreement.
+
+### Phase 3 as built
+
+- **Seats** have a `kind` (`reviewer` or `host`), a host's `folder`, and a `farewell`: the agreed message, kept when the
+  meeting closes and handed out once by the next `next`. A host seat's meeting id is empty until it starts one; such a
+  seat is not closed with the meetings, and it expires after 15 minutes unused, like any invitation.
+- **`handleGuestRequest`** checks which invitation a seat has before anything else, answers a host's `reply` with its
+  own commands, and maps `round`, `propose-close`, `end` and `status` to the hub. After a successful post it answers what
+  the host had been given, so a restart does not send old replies again. The hub's answers to a Copilot host ("end your
+  turn") are reworded for an outside host ("Run next to wait for their replies").
+- **Messages for a host** have the Copilot helper commands of digests and reminders replaced by the host's own
+  (`meeting_round(…)`, or `round -File …` with the helper), and no reviewer footer.
+- **`meeting-folder-changes.ts`** makes the patch: tracked changes against HEAD, then up to 100 new files of at most 512 KB
+  while the patch is under 5 MB, the same limits as `-Changes`. Git runs with no external diff, no text conversion and
+  fsmonitor off, so a folder's configuration runs no program. The hub filters the patch like any other.
+- **main**: **File → Host a Meeting from an Outside Agent…** (a question, then an optional folder picker, then the
+  invitation on the clipboard), the `meetingHostInvite` IPC that the check uses, and `meetingStatus` shared with the
+  Copilot host's `status`.
+- **The meeting bar** shows a meeting that an outside agent hosts, with no Copilot tab in it, above every tab ("Hosted by
+  Outside agent (guest)"), with **Add session…** to bring one in.
+- **Checks**: unit tests for a whole hosted meeting through each channel (start, a reviewer, the digest's wording, the
+  reminder and the pause, the round with changes, the vote, the agreed message once), invitation kinds kept apart, changes
+  only from a picked folder, host seats saved and restored, the folder patch against a real repository, and the bar.
+  `npm run meeting:check` ends with an outside host that starts a meeting with the host project's changes through the
+  tools; the person adds the Copilot reviewer from the bar; the host proposes to close, and the meeting closes by
+  agreement.
+- **The silent-host rule** counts a second `next` for the same replies as a passed turn. A host whose call timed out
+  before it saw the replies may therefore get one reminder it did not need; the meeting pauses only at the second.
 
 ## Open questions
 

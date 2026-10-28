@@ -150,7 +150,7 @@ if (process.versions.electron) {
       console.log(`[electron-check] Real app PID ${child.pid}; isolated data: ${directory}`)
       console.log(mode ? `[electron-check] Running ${mode.label} regression${phase ? ` (run ${phase})` : ''}.` : '[electron-check] Use the Fork into side chat button. Close the app when finished.')
       // Automated runs must also end if Electron or a renderer stops responding.
-      const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, meetingMode ? 360_000 : 180_000) : undefined
+      const timeout = mode ? setTimeout(() => { console.error('[electron-check] Child timed out'); child.kill() }, meetingMode ? 480_000 : 180_000) : undefined
       try {
         const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
         assert.equal(code, 0, 'Electron did not exit normally')

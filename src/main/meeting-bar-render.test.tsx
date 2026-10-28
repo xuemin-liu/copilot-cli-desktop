@@ -62,3 +62,15 @@ test('the meeting cost reads as AI credits, with premium requests only when ther
   assert.equal(formatMeetingCost({ aiCredits: 12.345, premiumRequests: 1 }), '12.35 AI credits used · 1 premium request')
   assert.equal(formatMeetingCost({ aiCredits: 2, premiumRequests: 3 }), '2.00 AI credits used · 3 premium requests')
 })
+
+test('a meeting an outside agent hosts shows above any tab until a Copilot session joins it', () => {
+  const hosted: MeetingView = {
+    ...meeting, hostTabId: 'guest:0123456789abcdef', hostTitle: 'Claude Code (guest)', stage: 'waiting', participants: [], waitingFor: [],
+  }
+  const html = renderToStaticMarkup(<MeetingBar meetings={[hosted]} tabs={[tab('tab-a', 'some session')]} activeTabId="tab-a" onError={() => undefined} />)
+  assert.match(html, /Hosted by Claude Code \(guest\) · round 1 of 6 · Waiting for someone to join/)
+  assert.match(html, /<option value="tab-a">some session<\/option>/, 'the person adds Copilot sessions from it')
+  const joined: MeetingView = { ...hosted, participants: [{ tabId: 'tab-b', title: 'reviewer', role: null, replied: false }] }
+  const elsewhere = renderToStaticMarkup(<MeetingBar meetings={[joined]} tabs={[tab('tab-a', 'some session'), tab('tab-b', 'reviewer')]} activeTabId="tab-a" onError={() => undefined} />)
+  assert.equal(elsewhere, '', 'once a session is in it, it shows above that session only')
+})

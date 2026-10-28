@@ -4,7 +4,9 @@
 // would run it) joins with its first `next`; a second outside agent is invited and joins through the meeting tools over MCP;
 // a read-only session in another project joins because the person typed "join meeting <id> as security reviewer"; the
 // desktop delivers the plan and the patch to all three, collects their reviews, hands them to the host (whose helper now
-// talks to the new app), runs the vote, and closes the meeting when everyone agrees.
+// talks to the new app), runs the vote, and closes the meeting when everyone agrees. Then an outside agent hosts a meeting of
+// its own through the tools, with the host project's changes; the person adds the read-only session from the bar, and that
+// meeting closes by agreement too.
 // Real CLI and real helpers; the loopback mock model plays both sessions (no paid requests).
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -233,12 +235,44 @@ export async function runMeetingCheck() {
     await ui(`window.copilotDesktop.activateTab(${JSON.stringify(host.id)})`)
     await until(() => ui('/everyone agreed/i.test(document.querySelector(".meeting-bar")?.innerText || "")'), 'closed meeting shown on the host')
     await screenshot('02-agreed').catch(cause => console.error('[meeting] no screenshot:', cause))
+
+    // Phase 3: an outside agent hosts a meeting of its own. The person makes a host invitation for the host project's
+    // folder; the agent starts the meeting with the tools and that folder's changes; the person adds the Copilot reviewer.
+    const hostFolder = (await state()).profiles.find(profile => profile.name === 'Meeting host').path
+    const hostSavedClipboard = await clipboard.readText()
+    const hostInvitation = await ui(`window.copilotDesktop.meetingHostInvite(${JSON.stringify(hostFolder)})`)
+    clipboard.writeText(hostSavedClipboard)
+    assert.match(hostInvitation, /You may host a review meeting in Copilot CLI Desktop/)
+    assert.ok(hostInvitation.includes(hostFolder), 'the invitation names the folder the person picked')
+    const outsideHost = mcpClient(toolsUrl)
+    await outsideHost.initialize()
+    const opened = await outsideHost.call('meeting_start', { invitation: /meeting_start with invitation "([a-f0-9]{64})"/.exec(hostInvitation)[1], topic: 'outside plan', post: '# Plan\n\nRetry the login three times.', changes: true })
+    const hostedId = /^Meeting ([2-9A-HJ-NP-Z]{4}) is open\./.exec(opened)?.[1]
+    assert.ok(hostedId, opened)
+    const hosted = (await state()).meetings.find(meeting => meeting.id === hostedId)
+    assert.equal(hosted.hostTitle, 'Outside agent (guest)')
+    // Written in order but asynchronously, like the transcript.
+    const hostedPatch = await until(() => readFile(join(hosted.folder, 'round-1', 'changes.patch'), 'utf8').catch(() => null), 'the hosted meeting\'s patch written')
+    assert.match(hostedPatch, /\+retry = 3/, 'the desktop attached the picked folder\'s changes')
+    await until(() => ui(`/Meeting ${hostedId}[\\s\\S]*Hosted by Outside agent \\(guest\\)/.test(document.querySelector(".meeting-bars")?.innerText || "")`), 'the outside host\'s meeting shown on a tab not in it')
+    await screenshot('03-outside-host').catch(cause => console.error('[meeting] no screenshot:', cause))
+    await ui(`window.copilotDesktop.meetingAction(${JSON.stringify(hostedId)}, 'join', ${JSON.stringify(reviewer.id)})`)
+    const digest = await until(async () => { const next = await outsideHost.call('meeting_next', { wait_seconds: 30 }); return / · replies · from the desktop\]/.test(next) ? next : null }, 'the review reached the outside host', 150_000)
+    assert.match(digest, new RegExp(MEETING_REVIEW_MARK), 'the Copilot reviewer\'s review')
+    assert.match(digest, /meeting_propose_close\(items: "<the agreed items>"\)/, 'worded for the host\'s tools')
+    assert.match(await outsideHost.call('meeting_propose_close', { items: 'Take the lock on logout too.' }), /^Sent round 2 to 1 reviewer\./)
+    const agreed = await until(async () => { const next = await outsideHost.call('meeting_next', { wait_seconds: 30 }); return / · closed · from the desktop\]/.test(next) ? next : null }, 'the outside host told everyone agreed', 150_000)
+    assert.match(agreed, /All 1 reviewers agreed/)
+    assert.equal(await outsideHost.call('meeting_next', { wait_seconds: 5 }), 'The meeting is closed.')
+    assert.equal((await state()).meetings.find(meeting => meeting.id === hostedId).outcome, 'agreed')
+
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, meeting: id, cli: (await state()).resolution.version,
       checks: ['host helper starts a meeting with plan and patch', 'meeting saved with session ids and restored after the app restarts', 'restored host started and given the folder again',
         'join with a role by typed request from a read-only session in another project', 'role and cost in the meeting bar', 'review collected and delivered to the host',
         'restored host proposes to close through the new endpoint', 'reviewer agrees and the meeting closes, saved as closed', 'host told',
         'outside agent invited, its seat restored after the restart', 'guest reads show commands and pages the patch', 'guest review and vote counted', 'guest told the meeting closed',
-        'second outside agent joins, reviews and votes through the meeting tools over MCP'] }, null, 2))
+        'second outside agent joins, reviews and votes through the meeting tools over MCP',
+        'an outside agent hosts a meeting with the picked folder\'s changes, a Copilot tab reviews, and it closes by agreement'] }, null, 2))
     console.log(`[meeting] PASS: meeting ${id} survived a restart, took a reviewer with a role and an outside agent, and closed by agreement`)
   }
 }

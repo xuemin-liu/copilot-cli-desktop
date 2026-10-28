@@ -316,6 +316,24 @@ PowerShell tool refuses to start `powershell.exe -File`, which the helper needs,
   keeps one turn polling costs one small model call each time a wait ends with nothing (50 seconds with the tools, 100 with
   the helper), more as its conversation grows.
 
+### An outside agent as host
+
+An outside agent can also host: Copilot sessions (and other agents) review its plan or changes.
+
+1. Choose **File → Host a Meeting from an Outside Agent…**. To let the agent attach its uncommitted changes, pick its
+   project folder; the host invitation goes to the clipboard.
+2. Paste it into the agent with what you want reviewed, for example "review your plan with Copilot, then implement it".
+3. The agent starts the meeting (`meeting_start`, or the helper's `start`). Its meeting bar appears above your tabs: add
+   Copilot sessions with **Add session…**, or invite other agents.
+4. The agent waits for each round's replies with `meeting_next` and answers with `meeting_round`, or proposes to close
+   with `meeting_propose_close`. When everyone agrees, it gets the agreed message and carries on.
+
+- Only you make host invitations. One starts a single meeting and expires after 15 minutes unused.
+- The changes come from the folder you picked: the desktop runs Git there (no external diff or text conversion drivers,
+  no fsmonitor) and filters the patch as for any meeting. Without a folder, the agent describes its changes in its post.
+- If the host asks for the same replies again without answering them, it is reminded once; the next time the meeting
+  pauses, as for a Copilot host that lets a turn pass. **Stop** on the meeting bar ends it at any time.
+
 ## Permission presets
 
 Copilot CLI exposes the runtime modes `manual`, `assisted`, and `allow-all`,
