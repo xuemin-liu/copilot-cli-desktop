@@ -35,7 +35,7 @@ if (!process.versions.electron) {
       window.__setTarget = setTarget;
       window.__showTerminal = () => setTerminal(true);
       return open
-        ? <><div style={{ width: '100%', minWidth: 0 }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
+        ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
             {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
         : <p id="closed">closed</p>;
     }
@@ -447,6 +447,19 @@ ${point.missing}`)
     await clickByText('.git-entry', 'a.txt')
     await until('!!document.querySelector(".git-diff-add")', 'diff for the screenshot')
     await screenshot('panel.png')
+
+    // The divider between the file list and the diff: dragging it down gives the list more of the height, and the diff the rest.
+    const listHeight = () => ui('document.querySelector(".git-changes-list").getBoundingClientRect().height')
+    const divider = await ui('(() => { const r = document.querySelector(".git-changes .splitter-horizontal").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } })()')
+    const listBefore = await listHeight()
+    window.webContents.sendInputEvent({ type: 'mouseMove', ...divider })
+    window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...divider })
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: divider.x, y: divider.y + 80 })
+    window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: divider.x, y: divider.y + 80 })
+    await until(`document.querySelector(".git-changes-list").getBoundingClientRect().height > ${listBefore + 40}`, 'list grew after dragging the divider')
+    assert.ok(await ui('document.querySelector(".git-diff-lines").getBoundingClientRect().height > 40'), 'the diff still has room')
+    assert.equal(await ui('localStorage.getItem("git-changes-list-share") !== null'), true)
+    results.listDiffDivider = true
 
     // 11. Stage and unstage with the row buttons, and "Stage all", against the real repository.
     const slash = String.fromCharCode(92)
