@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { validateBrowserTestPlan } from './browser-test-plan.js'
-import { runBrowserTest } from './browser-test-runner.js'
+import { redactTestEvidence, runBrowserTest } from './browser-test-runner.js'
 
 const assertion = { action: 'assert', label: 'Result visible', selector: '#result', condition: 'visible' }
 const plan = (steps: unknown[] = [assertion], extra = {}) => validateBrowserTestPlan({ description: 'Test the app', expected: 'The result is visible', steps, ...extra })
@@ -18,7 +18,44 @@ test('drag plans accept bounded CSS-pixel paths and reject malformed input', () 
     [{ x: 1, y: 0, script: 'alert(1)' }, { x: 1, y: 1 }]]) assert.throws(() => plan([{ ...drag, path }, assertion]))
   for (const durationMs of [0, 99, 5001, 100.5, '500', NaN]) assert.throws(() => plan([{ ...drag, durationMs }, assertion]))
   assert.throws(() => plan([{ ...drag, selector: undefined }, assertion]))
-  assert.throws(() => plan([{ ...drag, button: 'right' }, assertion]))
+  assert.equal(plan([{ ...drag, button: 'right' }, assertion]).steps[0]?.button, 'right')
+})
+
+test('references, coordinate pointers, modifiers and combined public-state assertions have closed bounded shapes', () => {
+  const ref = `${'a'.repeat(32)}-t1`
+  for (const action of ['click', 'doubleClick', 'hover']) {
+    assert.ok(plan([{ action, targetRef: ref, inputRef: `${'a'.repeat(32)}-t2`, point: { x: 20.5, y: 10 }, modifiers: ['Shift'] }, assertion]))
+    for (const extra of [{ point: { x: -1, y: 0 } }, { modifiers: ['Shift', 'Shift'] }, { modifiers: ['F5'] }, { point: { x: 0, y: 0, script: 'x' } }, { selector: '#also' }]) {
+      assert.throws(() => plan([{ action, targetRef: ref, ...extra }, assertion]))
+    }
+  }
+  assert.ok(plan([{ action: 'reload', all: [{ selector: '#ready', condition: 'attribute', attribute: 'data-test-ready', expected: 'true' },
+    { selector: '#busy', condition: 'hidden' }, { selector: '#angle', condition: 'numericValue', expected: 12.5, tolerance: 0.01 }] }, assertion]))
+  for (const extra of [{ all: [] }, { all: [{ selector: '#a', condition: 'attribute', attribute: 'value', expected: 'secret' }] },
+    { all: [{ selector: '#a', condition: 'numericValue', expected: 1, tolerance: -1 }] }, { all: [assertion] }]) assert.throws(() => plan([{ action: 'reload', ...extra }, assertion]))
+  assert.throws(() => plan([{ ...assertion, all: [{ selector: '#ready', condition: 'visible' }] }]))
+})
+
+test('network failure simulation is explicit, bounded and cannot supply scripts, credentials, headers or response bodies', () => {
+  const rule = { urlPattern: 'http://localhost:3000/api/*', method: 'POST', failure: 'http', status: 503, maxRequests: 1, durationMs: 1000 }
+  assert.ok(plan([assertion], { allowNetworkFailures: true, networkFailures: [rule] }))
+  assert.throws(() => plan([assertion], { networkFailures: [rule] }))
+  for (const extra of [{ maxRequests: 0 }, { maxRequests: 21 }, { durationMs: 60001 }, { durationMs: undefined }, { status: 200 }, { method: '*' },
+    { urlPattern: 'http://user:secret@localhost/api/*' }, { urlPattern: 'http://*/api' }, { urlPattern: 'http://localhost/api?token=x' },
+    { headers: {} }, { body: 'response' }, { script: 'fetch()' }]) assert.throws(() => plan([assertion], { allowNetworkFailures: true, networkFailures: [{ ...rule, ...extra }] }))
+})
+
+test('delivery, failed semantic assertions, uncertain actions and live recovery checkpoints stay distinct', async () => {
+  const value = plan([{ action: 'drag', selector: '#canvas', path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }, { ...assertion, timeoutMs: 100 }])
+  const checkpoints: unknown[] = []
+  const report = await runBrowserTest(value, 1, { active: () => true, progress: () => {}, checkpoint: (report, current) => checkpoints.push(structuredClone({ report, current })),
+    execute: async step => ({ passed: step.action === 'drag', delivery: step.action === 'drag' ? 'delivered' : 'not-attempted' }) }, new AbortController().signal)
+  assert.equal(report.status, 'failed'); assert.equal(report.steps[0]?.outcome, 'delivered'); assert.equal(report.steps[1]?.outcome, 'assertion-failed')
+  assert.ok(report.runId); assert.ok(checkpoints.length >= 4)
+  const uncertain = await runBrowserTest(plan([{ action: 'click', selector: '#save' }, assertion]), 1, { active: () => true, progress: () => {}, execute: async () => {
+    throw Object.assign(new Error('Disconnected after sending input.'), { delivery: 'uncertain' })
+  } }, new AbortController().signal)
+  assert.equal(uncertain.steps[0]?.outcome, 'uncertain'); assert.equal(uncertain.steps[1]?.outcome, 'skipped')
 })
 
 test('test plans require real assertions and bounded fixed operations', () => {
@@ -55,12 +92,28 @@ test('failed assertions stop writes; report redacts inputs and marks remaining s
   assert.ok(!JSON.stringify(report).includes('private-value'))
 })
 
+test('run evidence filters supplied inputs and explicitly reports capture truncation', () => {
+  const value = plan([{ action: 'fill', selector: '#private', value: 'private-input-value' }, assertion])
+  const evidence = redactTestEvidence(value, { console: [{ message: 'private-input-value' }, { message: 'x'.repeat(100000) }] })
+  assert.ok(!JSON.stringify(evidence).includes('private-input-value'))
+  assert.equal(evidence.redacted, true)
+  assert.equal(evidence.truncated, true)
+})
+
 test('cancellation interrupts waits and prevents any subsequent action', async () => {
   const cancelled = new AbortController(); let calls = 0
   const report = await runBrowserTest(plan([{ action: 'waitFor', label: 'Waiting', selector: '#later', condition: 'visible' }, assertion]), 12, {
     active: () => true, progress: () => {}, execute: async () => { calls++; cancelled.abort(); return { passed: false } },
   }, cancelled.signal)
   assert.equal(report.status, 'cancelled'); assert.equal(calls, 1)
+})
+
+test('cancellation immediately after confirmed delivery does not erase the completed action', async () => {
+  const cancelled = new AbortController()
+  const report = await runBrowserTest(plan([{ action: 'click', selector: '#save' }, assertion]), 1, {
+    active: () => true, progress: () => {}, execute: async () => { cancelled.abort(); return { passed: true, delivery: 'delivered' } },
+  }, cancelled.signal)
+  assert.equal(report.status, 'cancelled'); assert.equal(report.steps[0]?.delivery, 'delivered'); assert.equal(report.steps[1]?.outcome, 'skipped')
 })
 
 test('page changes and overall deadline fail closed', async () => {

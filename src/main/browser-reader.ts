@@ -10,8 +10,9 @@ import { browserTestScript } from './browser-test-script.js'
 import { browserPickScript } from './browser-pick-script.js'
 import { formatPickedElement } from './browser-pick-format.js'
 import { validateBrowserTestPlan } from './browser-test-plan.js'
-import type { BrowserTestState, BrowserTestStep } from './browser-test-plan.js'
-import { runBrowserTest, type TestObservation } from './browser-test-runner.js'
+import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-test-plan.js'
+import { BrowserTestNetwork } from './browser-test-network.js'
+import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { sanitizedText } from './browser-privacy.js'
 
 const MAX_RESPONSES = 100
@@ -41,6 +42,7 @@ interface ResponseRecord {
 export interface PendingDialog { type: string; message: string; sessionId?: string }
 interface DialogRule { spec?: NonNullable<BrowserTestStep['dialog']>; handled: { type: string; message: string; accepted: boolean } | null }
 interface PageReader {
+  testNetwork: BrowserTestNetwork | null
   dialog: PendingDialog | null; dialogRule: DialogRule | null
   contents: WebContents; sessions: Map<string, string>; contexts: Map<string, number>; ready: Promise<void> | null
   capture: 'starting' | 'ready' | 'unavailable'
@@ -55,6 +57,7 @@ export interface BrowserReaderOptions {
   visible: (id: number) => boolean
   /** Main-process dependency used by isolated fixtures. Never accepted from HTTP. */
   approve?: (description: string) => Promise<boolean>
+  evidence?: (pageId: number, startedAt: string) => Record<string, unknown>
 }
 
 /** A fixed-function broker. The private transport never accepts CDP commands,
@@ -70,6 +73,9 @@ export class BrowserReader {
   private testBlocked = false
   private testUnexpectedDialog: string | null = null
   private testAbort: AbortController | null = null
+  private testDelivery: TestDelivery = 'not-attempted'
+  private testInputUncertain = false
+  private testDiagnostics: Params = {}
   private picker: { pageId: number; choose: (backendNodeId: number | null) => void; next: () => Promise<number | null> } | null = null
   private pickAbort: AbortController | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
@@ -108,24 +114,51 @@ export class BrowserReader {
     this.testAbort = new AbortController()
     // Keep the last completed report so polling cannot resize the viewport when
     // a new run starts. The running-step indicator describes the current test.
-    this.testProgress = { running: true, step: 0, total: plan.steps.length, label: '', report: this.testProgress.report }
+    this.testProgress = { running: true, step: 0, total: plan.steps.length, label: '', report: this.testProgress.report, lastCompletedAction: this.testProgress.lastCompletedAction ?? null }
     const active = (): boolean => !this.disposed && !page.contents.isDestroyed() && this.options.active() === page.contents.id && this.testPageId === page.contents.id
     try {
+      const frames = await this.frames(page, this.testAbort.signal)
+      page.testNetwork = new BrowserTestNetwork(plan.networkFailures ?? [], origin,
+        new Set(frames.filter(frame => this.httpOrigin(frame.url) === origin).map(frame => frame.id)),
+        (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted)
+      await page.testNetwork.start()
       const report = await runBrowserTest(plan, page.contents.id, { active,
         execute: (step, stop) => this.testStep(page, step, stop),
         progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
+        checkpoint: (report, currentAction) => {
+          const { screenshots: _screenshots, ...summary } = report
+          this.testProgress.journal = structuredClone(summary)
+          this.testProgress.runId = report.runId!
+          this.testProgress.currentAction = currentAction
+          const completed = report.steps.findLast(step => step.outcome === 'delivered' || step.delivery === 'delivered')
+          if (completed) this.testProgress.lastCompletedAction = structuredClone(completed)
+        },
       }, AbortSignal.any([signal, this.testAbort.signal]))
       report.origin = origin
+      report.testingEnabled = this.testState.enabled
+      await page.testNetwork.stop()
+      // If the transport cannot remove interception, detaching Chromium's
+      // debugger removes Fetch interception rather than leaving a live rule.
+      if (page.testNetwork.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
+      report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt),
+        visibilityRequired: true, screenshotRegionComparison: 'unsupported; screenshots require separate visual inspection' }) as Params
       const { screenshots: _screenshots, ...summary } = report
       this.testProgress.report = summary
+      this.testProgress.journal = summary
       return report
-    } finally { this.busy = false; this.testProgress.running = false; this.testAbort = null }
+    } finally {
+      await page.testNetwork?.stop()
+      if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
+      page.testNetwork = null
+      this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
+    }
   }
 
   add(contents: WebContents): void {
-    const page: PageReader = { dialog: null, dialogRule: null, contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
+    const page: PageReader = { testNetwork: null, dialog: null, dialogRule: null, contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
     this.readers.set(contents.id, page)
     contents.debugger.on('detach', () => {
+      page.testNetwork?.detached()
       page.ready = null; page.capture = 'unavailable'; page.sessions.clear(); page.contexts.clear()
       for (const pending of page.requests.values()) { pending.response.state = 'unavailable'; pending.response.reason = 'Debugger disconnected before the body was captured.' }
       page.requests.clear()
@@ -158,13 +191,24 @@ export class BrowserReader {
 
   private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
     if (signal?.aborted) throw new Error('Test stopped.')
+    const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') || method === 'Page.reload' || method === 'Page.navigate'))
+    if (delivery) {
+      this.testDelivery = 'uncertain'
+      if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = 'uncertain'
+    }
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await abortable(Promise.race([
+      const result = await abortable(Promise.race([
         page.contents.debugger.sendCommand(method, params, sessionId) as Promise<Params>,
         new Promise<never>((_accept, reject) => { timer = setTimeout(() => reject(new Error('Browser inspection timed out. Content may not be loaded.')), timeoutMs) }),
       ]), signal)
-    } finally { if (timer) clearTimeout(timer) }
+      if (delivery) {
+        this.testDelivery = this.testInputUncertain ? 'uncertain' : 'partial'
+        if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = this.testDelivery
+      }
+      return result
+    } catch (error) { if (delivery) this.testInputUncertain = true; throw error }
+    finally { if (timer) clearTimeout(timer) }
   }
 
   private async enable(page: PageReader, sessionId?: string): Promise<void> {
@@ -188,6 +232,7 @@ export class BrowserReader {
 
   private async message(page: PageReader, method: string, params: Params, sessionId?: string): Promise<void> {
     if (this.disposed) return
+    await page.testNetwork?.message(method, params, sessionId)
     if (method === 'Target.attachedToTarget' && params.targetInfo?.type === 'iframe') {
       if (page.sessions.size >= MAX_FRAMES) { await this.command(page, 'Target.detachFromTarget', { sessionId: String(params.sessionId) }); return }
       page.sessions.set(String(params.targetInfo.targetId), String(params.sessionId))
@@ -349,36 +394,109 @@ export class BrowserReader {
   }
 
   private async testStep(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    this.testDelivery = 'not-attempted'; this.testInputUncertain = false; this.testDiagnostics = {}
     const rule: DialogRule = { ...(step.dialog ? { spec: step.dialog } : {}), handled: null }
     page.dialogRule = rule
+    const held: { key: string; code: number; bit: number }[] = []
+    const modifiers = { Alt: { key: 'Alt', code: 18, bit: 1 }, Control: { key: 'Control', code: 17, bit: 2 }, Meta: { key: 'Meta', code: 91, bit: 4 }, Shift: { key: 'Shift', code: 16, bit: 8 } }
     try {
+      if (step.modifiers?.length && (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')
+      for (const modifier of step.modifiers ?? []) {
+        const key = modifiers[modifier]; held.push(key)
+        await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: key.key, windowsVirtualKeyCode: key.code, modifiers: held.reduce((mask, key) => mask | key.bit, 0) }, undefined, 10000, signal)
+      }
       const result = await this.testStepAction(page, step, signal)
       if (step.dialog && !rule.handled && !this.testUnexpectedDialog) {
         // The dialog may open a moment after the action, from a timer or a promise.
         const end = Date.now() + 1500
         while (!rule.handled && !this.testUnexpectedDialog && Date.now() < end && !signal.aborted) await new Promise(resolve => setTimeout(resolve, 50))
       }
-      if (this.testUnexpectedDialog) return { passed: false, reason: this.testUnexpectedDialog }
-      if (step.dialog && !rule.handled) return { passed: false, reason: 'The step was expected to open a page dialog, but none opened within 1.5 seconds.' }
-      return rule.handled ? { ...result, detail: `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.` } : result
+      if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
+      if (step.dialog && !rule.handled) throw new Error('The step was expected to open a page dialog, but none opened within 1.5 seconds.')
+      const observation = ['assert', 'waitFor', 'discover', 'screenshot'].includes(step.action)
+      const output = { ...result, delivery: observation ? 'not-attempted' as const : result.passed ? 'delivered' as const : this.testDelivery,
+        data: { ...this.testDiagnostics, ...result.data } }
+      return rule.handled ? { ...output, detail: [result.detail, `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.`].filter(Boolean).join(' ') } : output
     } catch (error) {
-      if (this.testUnexpectedDialog) return { passed: false, reason: this.testUnexpectedDialog }
-      throw error
-    } finally { page.dialogRule = null }
+      throw Object.assign(new Error(this.testUnexpectedDialog ?? (error instanceof Error ? error.message : 'Test step failed.')), { delivery: this.testDelivery, data: this.testDiagnostics })
+    } finally {
+      let cleanupFailed = false
+      while (held.length) {
+        const key = held.pop()!
+        if (!page.contents.isDestroyed()) await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: key.key, windowsVirtualKeyCode: key.code, modifiers: held.reduce((mask, key) => mask | key.bit, 0) }, undefined, 1000).catch(() => { cleanupFailed = true })
+      }
+      page.dialogRule = null
+      if (cleanupFailed) throw Object.assign(new Error('Modifier release could not be confirmed; input delivery is uncertain. Inspect the journal before retrying.'), { delivery: 'uncertain', data: this.testDiagnostics })
+    }
   }
 
   private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    const modifiers = (step.modifiers ?? []).reduce((mask, key) => mask | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[key]), 0)
+    const button = step.button ?? 'left'
+    const buttons = { left: 1, middle: 4, right: 2 }[button]
     const check = (): void => {
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
-      if (step.action === 'drag' && (!this.options.visible(page.contents.id) || this.options.owner().isDestroyed()
+      if (!['assert', 'waitFor', 'discover'].includes(step.action) && (!this.options.visible(page.contents.id) || this.options.owner().isDestroyed()
         || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')
       if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
       this.checkTestOrigin(page.contents.getURL())
     }
     check()
+    if (['waitFor', 'assert'].includes(step.action) && step.all) {
+      const results: { passed: boolean; reason?: string }[] = []
+      for (const condition of step.all) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal))
+      return { passed: results.every(result => result.passed), reason: results.find(result => !result.passed)?.reason ?? 'Combined readiness conditions are not all satisfied.', data: { conditions: results.map(result => ({ passed: result.passed, reason: result.reason })) } }
+    }
+    if (['waitFor', 'assert'].includes(step.action) && step.condition === 'requestComplete') return {
+      passed: page.testNetwork?.completed(step.request!) ?? false, reason: 'No matching request from this run has completed with the expected state/status.' }
+    if (step.action === 'reload') {
+      Object.assign(this.testDiagnostics, { navigation: 'pending', loading: page.contents.isLoading(), testingEnabled: this.testState.enabled,
+        applicationReadiness: step.all ? 'waiting' : 'not requested' })
+      const before = await this.frames(page, signal)
+      for (const frame of before) {
+        try { await this.evaluate(page, frame.id, 'invalidate', {}, true, signal) }
+        catch (error) { if (signal.aborted || frame.id === before[0]?.id) throw error /* An unavailable child cannot retain usable references. */ }
+      }
+      let loaded = false; let failed = false
+      const complete = (): void => { loaded = true }
+      const failure = (_event: unknown, code: number, _description: string, _url: string, main: boolean): void => { if (main && code !== -3) failed = true }
+      page.contents.on('did-finish-load', complete)
+      page.contents.on('did-fail-load', failure)
+      const end = Date.now() + (step.timeoutMs ?? 30000)
+      try {
+        await this.command(page, 'Page.reload', {}, undefined, 10000, signal)
+        while (!loaded && !(page.dialogRule?.handled?.type === 'beforeunload' && !page.dialogRule.handled.accepted)) {
+          check()
+          if (failed) { this.testDiagnostics.navigation = 'failed'; throw new Error('Reload navigation failed.') }
+          if (Date.now() >= end) throw new Error('Reload navigation timed out.')
+          await abortable(new Promise<void>(resolve => setTimeout(resolve, 50)), signal)
+        }
+        const cancelled = !loaded
+        this.testDiagnostics.navigation = cancelled ? 'cancelled' : 'completed'
+        if (!cancelled && step.all) {
+          while (!(await this.testStepAction(page, { action: 'waitFor', label: 'Reload application readiness', all: step.all }, signal)).passed) {
+            check()
+            if (Date.now() >= end) { this.testDiagnostics.applicationReadiness = 'timed out'; throw new Error('Reload completed but application readiness timed out.') }
+            await abortable(new Promise<void>(resolve => setTimeout(resolve, 100)), signal)
+          }
+        }
+        check()
+        const frames = await this.frames(page, signal)
+        return { passed: true, data: { navigation: cancelled ? 'cancelled' : 'completed', loading: page.contents.isLoading(), testingEnabled: this.testState.enabled,
+          applicationReadiness: cancelled ? 'not checked; reload cancelled' : step.all ? 'satisfied' : 'not requested; navigation completion alone is not application readiness',
+          discovery: await this.discoverTargets(page, frames[0]!.id, signal) } }
+      } finally {
+        this.testDiagnostics.loading = !page.contents.isDestroyed() && page.contents.isLoading()
+        this.testDiagnostics.testingEnabled = this.testState.enabled
+        page.contents.removeListener('did-finish-load', complete)
+        page.contents.removeListener('did-fail-load', failure)
+      }
+    }
     if (step.action === 'navigate') {
       this.checkTestOrigin(step.url!)
+      this.testDelivery = 'uncertain'
+      if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = 'uncertain'
       await new Promise<void>((resolve, reject) => {
         const abort = (): void => { if (!page.contents.isDestroyed()) page.contents.stop(); reject(new Error('Test navigation stopped.')) }
         signal.addEventListener('abort', abort, { once: true })
@@ -386,7 +504,7 @@ export class BrowserReader {
         else void page.contents.loadURL(step.url!).then(resolve, () => reject(new Error('Test navigation failed.')))
           .finally(() => signal.removeEventListener('abort', abort))
       })
-      check(); return { passed: true }
+      check(); this.testDelivery = 'partial'; return { passed: true }
     }
     if (step.action === 'screenshot') {
       const image = await this.run('screenshot', [String(page.contents.id)], signal, true) as Params
@@ -398,6 +516,7 @@ export class BrowserReader {
     check()
     const frame = frames.find(frame => frame.id === (step.frame ?? frames[0]?.id))
     if (!frame) throw new Error('Frame is unavailable in the selected page.')
+    if (step.action === 'discover') return { passed: true, data: { discovery: await this.discoverTargets(page, frame.id, signal) } }
     const interaction = !['waitFor', 'assert'].includes(step.action)
     if (interaction && (frame.securityOrigin !== this.testOrigin || this.httpOrigin(frame.url) !== this.testOrigin)) throw new Error('Test input frame is outside the enabled origin.')
     let reference: string | undefined
@@ -416,8 +535,8 @@ export class BrowserReader {
     if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
-    const targetPoint = async (requireFocus = false, offset?: { x: number; y: number }, scroll = true, dragPoint?: string): Promise<Params> => {
-      const point = await evaluate('target', { selector: step.selector ?? 'html', requireReference: prepared, offset, scroll, dragPoint })
+    const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | undefined = step.point, scroll = true, dragPoint?: string): Promise<Params> => {
+      const point = await evaluate('target', { ...(step.targetRef ? {} : { selector: step.selector ?? 'html' }), requireReference: prepared, offset, scroll, dragPoint })
       prepared = true
       let current = frame
       // Check every embedding frame for overlays. Coordinates from each frame's
@@ -461,6 +580,7 @@ export class BrowserReader {
         current = parent
       }
       check()
+      this.testDiagnostics.pointer = { x: point.x, y: point.y, hit: point.hit, frame: frame.id, devicePixelRatio: point.devicePixelRatio, zoomFactor: page.contents.getZoomFactor(), coordinateSystem: 'CSS pixels relative to target; mapped to top viewport' }
       return point
     }
     if (step.action === 'drag') {
@@ -472,7 +592,7 @@ export class BrowserReader {
       const stableUntil = Date.now() + 2000
       while (true) {
         check()
-        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y }, undefined, 10000, signal)
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', modifiers, x: start.x, y: start.y }, undefined, 10000, signal)
         if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
         const fresh = await targetPoint(false, path[0], false, waypoint(0))
         if (Math.abs(fresh.x - start.x) < 0.5 && Math.abs(fresh.y - start.y) < 0.5) { start = fresh; break }
@@ -491,7 +611,7 @@ export class BrowserReader {
         const freshStart = await targetPoint(false, path[0], false, waypoint(0)); stable(freshStart)
         if (Math.abs(freshStart.x - start.x) >= 0.5 || Math.abs(freshStart.y - start.y) >= 0.5) throw new Error('Frame position changed before the drag.')
         pressed = true
-        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, x: start.x, y: start.y }, undefined, 10000, signal)
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button, buttons, modifiers, clickCount: 1, x: start.x, y: start.y }, undefined, 10000, signal)
         const segmentMs = (step.durationMs ?? 500) / (path.length - 1)
         const samples = Math.max(1, Math.ceil(segmentMs / 16))
         for (let segment = 1; segment < path.length; segment++) for (let sample = 1; sample <= samples; sample++) {
@@ -504,14 +624,14 @@ export class BrowserReader {
           if (Math.abs(point.x - (mapped[segment - 1]!.x + (mapped[segment]!.x - mapped[segment - 1]!.x) * fraction)) >= 0.5
             || Math.abs(point.y - (mapped[segment - 1]!.y + (mapped[segment]!.y - mapped[segment - 1]!.y) * fraction)) >= 0.5) throw new Error('Frame position changed during the drag.')
           check()
-          await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: point.x, y: point.y }, undefined, 10000, signal)
+          await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', button, buttons, modifiers, x: point.x, y: point.y }, undefined, 10000, signal)
           last = point
         }
-        check(); completed = true
+        check(); stable(await targetPoint(false, path.at(-1), false, waypoint(path.length - 1))); completed = true
       } finally {
         if (pressed && !page.contents.isDestroyed()) {
           const stopped = !completed || signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
-          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1,
+          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button, buttons: 0, modifiers, clickCount: 1,
             x: stopped ? -1 : last.x, y: stopped ? -1 : last.y }, undefined, 1000)
           if (stopped) await release.catch(() => {})
           else await release
@@ -521,14 +641,14 @@ export class BrowserReader {
     }
     let point = await targetPoint()
     if (step.action === 'scroll') return { passed: Boolean((await evaluate('scroll', { selector: step.selector ?? 'html' })).passed) }
-    if (step.action === 'select') return { passed: Boolean((await evaluate('select')).passed) }
+    if (step.action === 'select') { this.testDelivery = 'uncertain'; const result = await evaluate('select'); this.testDelivery = 'partial'; return { passed: Boolean(result.passed) } }
     if (step.action === 'fill' || step.action === 'press') {
       await evaluate(step.action)
-      const key = async (name: string, code: number, text = '', modifiers = 0): Promise<void> => {
+      const key = async (name: string, code: number, text = '', keyModifiers = modifiers): Promise<void> => {
         check()
         await targetPoint(true)
         await evaluate('focused')
-        try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text, modifiers }, undefined, 10000, signal) }
+        try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text, modifiers: keyModifiers }, undefined, 10000, signal) }
         finally {
           if (!page.contents.isDestroyed()) {
             const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code, modifiers }, undefined, 1000)
@@ -538,7 +658,7 @@ export class BrowserReader {
         }
       }
       if (step.action === 'fill') {
-        await key('a', 65, '', 2); await key('Backspace', 8)
+        await key('a', 65, '', process.platform === 'darwin' ? 4 : 2); await key('Backspace', 8)
         check(); await targetPoint(true); await evaluate('focused')
         if (step.value) await this.command(page, 'Input.insertText', { text: step.value }, undefined, 10000, signal)
       } else {
@@ -553,25 +673,32 @@ export class BrowserReader {
     const stableUntil = Date.now() + 2000
     while (true) {
       check()
-      await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y }, undefined, 10000, signal)
+      await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', modifiers, x: point.x, y: point.y }, undefined, 10000, signal)
       if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
-      const fresh = await targetPoint()
+      const fresh = await targetPoint(false, step.point, false)
       if (Math.abs(fresh.x - point.x) < 0.5 && Math.abs(fresh.y - point.y) < 0.5) { point = fresh; break }
       if (Date.now() >= stableUntil) throw new Error('Target did not stabilize after pointer movement.')
       point = fresh
     }
     if (step.action === 'hover') { check(); return { passed: true } }
+    const geometry = ['x', 'y', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight', 'inputLeft', 'inputTop', 'inputWidth', 'inputHeight']
+    const stable = (fresh: Params): void => {
+      if (geometry.some(key => Math.abs(Number(fresh[key]) - Number(point[key])) >= 0.5)) throw new Error('Target moved or geometry changed during the click/double-click.')
+    }
     for (let count = 1; count <= (step.action === 'doubleClick' ? 2 : 1); count++) {
       if (count === 2) {
-        const fresh = await targetPoint()
-        if (Math.abs(fresh.x - point.x) >= 0.5 || Math.abs(fresh.y - point.y) >= 0.5) throw new Error('Target moved during the double-click.')
+        stable(await targetPoint(false, step.point, false))
       }
       check()
-      try { await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: count, x: point.x, y: point.y }, undefined, 10000, signal) }
+      let releaseOnTarget = false
+      try {
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button, buttons, modifiers, clickCount: count, x: point.x, y: point.y }, undefined, 10000, signal)
+        stable(await targetPoint(false, step.point, false)); releaseOnTarget = true
+      }
       finally {
-        const stopped = signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
+        const stopped = !releaseOnTarget || signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
         if (!page.contents.isDestroyed()) {
-          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: count,
+          const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button, buttons: 0, modifiers, clickCount: count,
             x: stopped ? -1 : point.x, y: stopped ? -1 : point.y }, undefined, 1000)
           if (stopped) await release.catch(() => {})
           else await release
@@ -667,6 +794,13 @@ export class BrowserReader {
     finally { this.busy = false }
   }
 
+  private async discoverTargets(page: PageReader, frameId: string, signal?: AbortSignal): Promise<Params> {
+    const result = await this.evaluate(page, frameId, 'inspect', { generation: randomBytes(16).toString('hex') }, true, signal) as Params
+    if (result.error) throw new Error(String(result.error))
+    return { pageId: page.contents.id, frameId, zoomFactor: page.contents.getZoomFactor(), ...redactBrowserValue(result).value as Params,
+      targets: (redactBrowserValue(result.targets).value as Params[]).map(target => ({ ...target, pageId: page.contents.id, frameId })) }
+  }
+
   private async run(command: string, args: string[], signal?: AbortSignal, testScreenshot = false): Promise<unknown> {
     if (command === 'test-targets') {
       const page = this.page()
@@ -674,9 +808,7 @@ export class BrowserReader {
       const frames = await this.frames(page, signal)
       const frame = frames.find(frame => frame.id === (args[0] ?? frames[0]?.id))
       if (!frame) throw new Error('Test frame is unavailable.')
-      const result = await this.evaluate(page, frame.id, 'inspect', {}, true, signal) as Params
-      if (result.error) throw new Error(String(result.error))
-      return { pageId: page.contents.id, frameId: frame.id, ...redactBrowserValue(result).value as Params }
+      return this.discoverTargets(page, frame.id, signal)
     }
     if (command === 'tabs') return { tabs: this.options.pages().map(contents => ({ id: contents.id,
       url: readableUrl(contents.getURL()), active: contents.id === this.options.active(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
