@@ -85,7 +85,7 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 
 ### Joining
 
-- **Invite** (UI only) creates a guest seat: an id `guest:<8 hex>`, a 32-byte token, the role and name the person typed. A
+- **Invite** (UI only) creates a guest seat: an id `guest:<16 hex>`, a 32-byte token, the role and name the person typed. A
   seat that nobody uses within 15 minutes expires.
 - **The first `next` joins.** The hub's `join` runs with the seat as the party (tab id `guest:…`, title "Claude Code (guest)",
   folder null). Joining on invite would make a round wait for an agent that is not running yet.
@@ -133,7 +133,8 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 - **Reviewers do not act** is advice, not something the desktop can enforce on another harness. The invite dialog suggests
   running the outside agent in a mode that asks before edits.
 - **Guest replies are model text**, framed below the separator like any other reply, and bounded to 64 KB.
-- **Bounded:** 8 parties per meeting, one open `next` per seat, 15-minute expiry for unused seats, `show` pages of 20,000
+- **Bounded:** 8 reviewers per meeting plus the host (guests and invitations count), one waiting `next` per seat (a newer
+  call takes over, and a closed connection ends its wait), 15-minute expiry for unused seats, `show` pages of 20,000
   characters.
 
 ## Phases

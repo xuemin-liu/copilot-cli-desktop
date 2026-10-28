@@ -1957,11 +1957,11 @@ function writeGuestEndpoint(port: number): void {
 }
 
 const meetingControl = new MeetingControlServer(handleMeetingCommand, {
-  handle: async (token, command, fields) => {
+  handle: async (token, command, fields, signal) => {
     const seat = guestMailbox.seatOf(token)
     if (!seat) return null
     // Every request says the guest is still there, which the meeting bar shows.
-    try { return await handleGuestRequest(guestMailbox, guestDeps, seat, command, fields) } finally { broadcastState() }
+    try { return await handleGuestRequest(guestMailbox, guestDeps, seat, command, fields, signal) } finally { broadcastState() }
   },
   release: () => guestMailbox.release(),
 }, writeGuestEndpoint)

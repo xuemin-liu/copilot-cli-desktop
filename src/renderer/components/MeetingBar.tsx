@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import type { MeetingView } from '../../main/meeting.js'
 import type { DesktopSessionTab } from '../../main/types.js'
@@ -8,7 +8,7 @@ export interface MeetingBarProps {
   tabs: readonly DesktopSessionTab[]
   activeTabId: string | null
   onError(message: string): void
-  /** Now, for how long ago a guest last asked for a message; a prop so tests can fix it. */
+  /** Now, for how long ago a guest last asked for a message; tests fix it, otherwise the bar keeps its own clock. */
   now?: number
 }
 
@@ -21,6 +21,8 @@ const OUTCOME: Record<NonNullable<MeetingView['outcome']>, string> = {
 
 /** A guest polls about every 100 s; one quiet for longer than this has probably stopped. */
 export const GUEST_QUIET_MS = 3 * 60_000
+/** A guest that stops polling also stops the state updates that re-render the bar, so the bar ticks on its own. */
+const GUEST_CLOCK_MS = 30_000
 
 /** Where the meeting stands, in a few words. */
 export function meetingStageLabel(meeting: MeetingView, titleOf: (tabId: string) => string): string {
@@ -50,7 +52,16 @@ export function formatMeetingCost(cost: MeetingView['cost'], withGuests = false)
  * The meetings the active session hosts or takes part in, with the person's controls: add a session, invite an outside
  * agent, remove a guest, open the transcript, let a paused meeting go on, stop it.
  */
-export function MeetingBar({ meetings, tabs, activeTabId, onError, now = Date.now() }: MeetingBarProps): JSX.Element | null {
+export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow }: MeetingBarProps): JSX.Element | null {
+  const [clock, setClock] = useState(() => Date.now())
+  const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && meeting.participants.some((participant) => participant.guest))
+  useEffect(() => {
+    if (!ticking) return undefined
+    setClock(Date.now())
+    const timer = setInterval(() => setClock(Date.now()), GUEST_CLOCK_MS)
+    return () => clearInterval(timer)
+  }, [ticking])
+  const now = fixedNow ?? clock
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set())
   // The role the next added session reviews as, per meeting; cleared once it is used.
   const [roles, setRoles] = useState<Readonly<Record<string, string>>>({})

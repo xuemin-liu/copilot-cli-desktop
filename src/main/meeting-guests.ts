@@ -76,7 +76,8 @@ export function guestSeatFolder(root: string, seatId: string): string {
 export class GuestMailbox {
   private readonly seats = new Map<string, GuestSeat>()
   private readonly queues = new Map<string, Queue>()
-  private readonly waiters = new Map<string, Set<Waiter>>()
+  /** At most one waiting `next` per seat: a newer call takes over from an older one. */
+  private readonly waiters = new Map<string, Waiter>()
 
   constructor(private readonly timers: MeetingTimers, private readonly changed: () => void = () => {}) {}
 
@@ -152,19 +153,34 @@ export class GuestMailbox {
     return given
   }
 
-  /** Waits up to `ms` for a message (or the seat's end); true when something arrived. */
-  wait(seatId: string, ms: number): Promise<boolean> {
+  /**
+   * Waits up to `ms` for a message (or the seat's end); true when something arrived. One wait per seat: a newer call ends an
+   * older one (a harness that retried after its tool call timed out), and `signal` ends it when its client goes away. A
+   * message handed out meanwhile stays given, so whichever call comes next gets it.
+   */
+  wait(seatId: string, ms: number, signal?: AbortSignal): Promise<boolean> {
     if (this.take(seatId) || this.seats.get(seatId)?.closed !== null) return Promise.resolve(true)
+    this.waiters.get(seatId)?.cancel()
+    if (signal?.aborted) return Promise.resolve(false)
     return new Promise((resolveWait) => {
-      const set = this.waiters.get(seatId) ?? new Set<Waiter>()
-      this.waiters.set(seatId, set)
-      const waiter: Waiter = {
-        resolve: () => { cancelTimer(); set.delete(waiter); resolveWait(true) },
-        cancel: () => { cancelTimer(); set.delete(waiter); resolveWait(false) },
+      let cancelTimer = (): void => {}
+      const done = (arrived: boolean): void => {
+        cancelTimer()
+        signal?.removeEventListener('abort', onAbort)
+        if (this.waiters.get(seatId) === waiter) this.waiters.delete(seatId)
+        resolveWait(arrived)
       }
-      const cancelTimer = this.timers.set(() => waiter.cancel(), ms)
-      set.add(waiter)
+      const waiter: Waiter = { resolve: () => done(true), cancel: () => done(false) }
+      const onAbort = (): void => waiter.cancel()
+      signal?.addEventListener('abort', onAbort, { once: true })
+      cancelTimer = this.timers.set(() => waiter.cancel(), ms)
+      this.waiters.set(seatId, waiter)
     })
+  }
+
+  /** A `next` is waiting for this seat. */
+  waiting(seatId: string): boolean {
+    return this.waiters.has(seatId)
   }
 
   /** The seat is over: what it was given is dropped, and `next` answers `message` from now on. */
@@ -185,7 +201,7 @@ export class GuestMailbox {
 
   /** The desktop is quitting: every waiting `next` answers now, so the endpoint can close. Seats stay for the next start. */
   release(): void {
-    for (const set of this.waiters.values()) for (const waiter of [...set]) waiter.cancel()
+    for (const waiter of [...this.waiters.values()]) waiter.cancel()
   }
 
   /** Unused invitations expire; closed seats are forgotten after a while. Returns the seats removed. */
@@ -196,7 +212,7 @@ export class GuestMailbox {
       if (seat.closed === null && !seat.joined && now - seat.createdAt > GUEST_UNUSED_SEAT_MS) this.close(seat.id, 'The invitation expired. Ask the person for a new one.')
       if (seat.closedAt !== null && now - seat.closedAt > GUEST_CLOSED_SEAT_MS) removed.push(seat)
     }
-    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.delete(seat.id) }
+    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel() }
     if (removed.length) this.changed()
     return removed
   }
@@ -235,7 +251,7 @@ export class GuestMailbox {
   }
 
   private wake(seatId: string): void {
-    for (const waiter of [...this.waiters.get(seatId) ?? []]) waiter.resolve()
+    this.waiters.get(seatId)?.resolve()
   }
 }
 
@@ -254,8 +270,11 @@ export interface GuestDeps {
 
 export interface GuestResponse { ok: boolean; message: string }
 
-/** One guest request, from a known seat. `fields` are the request's form or JSON fields, all untrusted. */
-export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat, command: GuestCommand, fields: Record<string, unknown>): Promise<GuestResponse> {
+/**
+ * One guest request, from a known seat. `fields` are the request's form or JSON fields, all untrusted. `signal` ends a
+ * waiting `next` when the guest's connection goes away.
+ */
+export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat, command: GuestCommand, fields: Record<string, unknown>, signal?: AbortSignal): Promise<GuestResponse> {
   mailbox.seen(seat)
   if (seat.closed !== null) return { ok: true, message: seat.closed }
   if (!deps.ready()) return { ok: true, message: 'The desktop is starting. Run next again in a minute.' }
@@ -269,9 +288,11 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       }
       const wait = Math.round(Number(fields.wait ?? GUEST_DEFAULT_WAIT_SECONDS))
       if (!Number.isFinite(wait) || wait < 1 || wait > GUEST_MAX_WAIT_SECONDS) return { ok: false, message: `-Wait takes 1 to ${GUEST_MAX_WAIT_SECONDS} seconds.` }
-      await mailbox.wait(seat.id, wait * 1000)
+      await mailbox.wait(seat.id, wait * 1000, signal)
       mailbox.seen(seat)
       if (seat.closed !== null) return { ok: true, message: seat.closed }
+      // Nobody is listening: leave the next message for the call that is.
+      if (signal?.aborted) return { ok: true, message: NOTHING_YET }
       return { ok: true, message: mailbox.take(seat.id)?.text ?? NOTHING_YET }
     }
     case 'reply': {
@@ -458,7 +479,7 @@ work=$(mktemp -d) || fail 'Could not create a temporary folder.'
 trap 'rm -rf "$work"' EXIT
 timeout=30
 {
-  printf 'noproxy = "*"\nsilent\nmax-redirs = 0\n'
+  printf 'noproxy = "*"\nsilent\nshow-error\nmax-redirs = 0\n'
   printf 'header = "Authorization: Bearer %s"\n' "$token"
   printf 'url = "http://127.0.0.1:%s/guest/%s"\n' "$port" "$command"
   printf 'form-string = "helper=sh"\n'
@@ -479,11 +500,15 @@ case "$command" in
     case "$name" in post|changes|replies|transcript) ;; *) fail 'Usage: meeting-guest.sh show -Token <token> -Name post|changes|replies|transcript [-Round <n>] [-Offset <n>]' ;; esac
     printf 'form-string = "name=%s"\nform-string = "round=%s"\nform-string = "offset=%s"\n' "$name" "$round" "$offset" >> "$work/config" ;;
 esac
-printf 'max-time = %s\n' "$timeout" >> "$work/config"
+printf 'max-time = %s\nwrite-out = "\\n%%{http_code}"\n' "$timeout" >> "$work/config"
 response=$(curl -K - < "$work/config") || fail 'The desktop did not answer. Is Copilot CLI Desktop running? Run next again in a minute.'
-message=$(printf '%s' "$response" | sed -e 's/^.*"message":"//' -e 's/"}$//' -e 's/\\"/"/g')
+# curl adds the HTTP status as the last line. Anything but 200 (an unknown token) fails on stderr, as the Windows helper does.
+status=$(printf '%s' "$response" | tail -n 1)
+body=$(printf '%s' "$response" | sed '$d')
+message=$(printf '%s' "$body" | sed -e 's/^.*"message":"//' -e 's/"}$//' -e 's/\\"/"/g')
+[ "$status" = 200 ] || fail "$(printf '%b' "$message")"
 printf '%b\n' "$message"
-case "$response" in '{"ok":true'*) exit 0 ;; *) exit 1 ;; esac
+case "$body" in '{"ok":true'*) exit 0 ;; *) exit 1 ;; esac
 `
 
 /** How a guest runs the helper on this platform. */

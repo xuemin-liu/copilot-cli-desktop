@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
@@ -231,7 +231,8 @@ export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, req
  * cannot run a host command and a session token cannot act as a guest. `handle` answers null for a token it does not know.
  */
 export interface GuestEndpoint {
-  handle(token: string, command: GuestCommand, fields: Record<string, unknown>): Promise<MeetingResponse | null>
+  /** `signal` aborts when the guest's connection closes before it is answered. */
+  handle(token: string, command: GuestCommand, fields: Record<string, unknown>, signal: AbortSignal): Promise<MeetingResponse | null>
   /** The server is closing: every request still waiting answers now. */
   release(): void
 }
@@ -290,7 +291,7 @@ export class MeetingControlServer {
         const port = (server.address() as { port: number } | null)?.port
         // No CORS; reject browser-originated requests and DNS rebinding before authentication.
         if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { ok: false, message: 'Forbidden' }); return }
-        if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, send); return }
+        if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, response, send); return }
         const tabId = this.caller(request.headers.authorization ?? '')
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
         const command = (request.url ?? '').slice(1)
@@ -313,15 +314,18 @@ export class MeetingControlServer {
     }).catch((error) => { this.listening = null; throw error })
   }
 
-  private answerGuest(request: IncomingMessage, send: (status: number, body: MeetingResponse) => void): void {
+  private answerGuest(request: IncomingMessage, response: ServerResponse, send: (status: number, body: MeetingResponse) => void): void {
     const command = (request.url ?? '').slice('/guest/'.length)
     const guest = this.guest
     if (!guest || request.method !== 'POST' || !(GUEST_COMMANDS as readonly string[]).includes(command)) { send(404, { ok: false, message: 'Unknown meeting command' }); return }
     const authorization = request.headers.authorization ?? ''
     const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : ''
+    // A guest whose tool call timed out has gone: its waiting `next` must not stay behind it.
+    const gone = new AbortController()
+    response.once('close', () => { if (!response.writableFinished) gone.abort() })
     void readFields(request, MAX_GUEST_REQUEST_BYTES).then(async (body) => {
       if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
-      const answer = await guest.handle(token, command as GuestCommand, body)
+      const answer = await guest.handle(token, command as GuestCommand, body, gone.signal)
       if (!answer) { send(401, { ok: false, message: 'This invitation is not known to the desktop. Ask the person for a new one.' }); return }
       // The guest gave up waiting (its tool call timed out): what it was handed is handed out again on its next call.
       if (!request.socket.destroyed) send(200, answer)

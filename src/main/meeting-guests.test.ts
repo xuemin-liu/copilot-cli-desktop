@@ -308,12 +308,62 @@ function endpoint(mailbox: GuestMailbox, onListening?: (port: number) => void, r
     material: async (_id, name) => name === 'post' ? 'the post' : null,
   }
   return new MeetingControlServer(() => ({ ok: true, message: 'host command' }), {
-    handle: async (token, command, fields) => {
+    handle: async (token, command, fields, signal) => {
       const seat = mailbox.seatOf(token)
-      return seat ? handleGuestRequest(mailbox, deps, seat, command, fields) : null
+      return seat ? handleGuestRequest(mailbox, deps, seat, command, fields, signal) : null
     },
     release: () => mailbox.release(),
   }, onListening)
+}
+
+test('a seat has one waiting next: a newer call takes over, and a call whose client left stops waiting', async () => {
+  const timers = clock()
+  const mailbox = new GuestMailbox(timers)
+  const { seat } = mailbox.invite('K7QF', 'Claude Code', null)
+  const older = mailbox.wait(seat.id, 100_000)
+  const newer = mailbox.wait(seat.id, 100_000)
+  assert.equal(await older, false, 'the older call ends at once')
+  assert.equal(mailbox.waiting(seat.id), true)
+  mailbox.enqueue(seat.id, delivery(1))
+  assert.equal(await newer, true)
+  assert.equal(mailbox.waiting(seat.id), false)
+  assert.equal(mailbox.take(seat.id)?.round, 1)
+  mailbox.answer(seat.id)
+
+  const left = new AbortController()
+  const abandoned = mailbox.wait(seat.id, 100_000, left.signal)
+  left.abort()
+  assert.equal(await abandoned, false)
+  assert.equal(mailbox.waiting(seat.id), false, 'nothing is left waiting for a client that went away')
+  mailbox.enqueue(seat.id, delivery(2))
+  assert.equal(mailbox.take(seat.id)?.round, 2, 'the message stays for the next call')
+})
+
+test('the endpoint stops a guest\'s wait when its connection closes, however many times it retried', async () => {
+  const mailbox = new GuestMailbox({ now: () => Date.now(), set: (callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer) } })
+  const { seat, token } = mailbox.invite('K7QF', 'Claude Code', null)
+  const server = endpoint(mailbox)
+  try {
+    const port = await server.port()
+    const abandoned = Array.from({ length: 5 }, () => {
+      const outgoing = request({ host: '127.0.0.1', port, path: '/guest/next', method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } })
+      outgoing.on('error', () => {})
+      outgoing.end(JSON.stringify({ wait: 540 }))
+      return outgoing
+    })
+    await until(() => mailbox.waiting(seat.id), 'a next is waiting')
+    for (const outgoing of abandoned) outgoing.destroy()
+    await until(() => !mailbox.waiting(seat.id), 'the abandoned waits ended')
+    mailbox.enqueue(seat.id, delivery(1, 'round one'))
+    assert.deepEqual(JSON.parse((await post(port, '/guest/next', token, JSON.stringify({ wait: 5 }))).body), { ok: true, message: 'round one' }, 'the next call still gets the message')
+  } finally {
+    await server.close()
+  }
+})
+
+async function until(check: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) { if (check()) return; await new Promise((resolveSoon) => setTimeout(resolveSoon, 20)) }
+  throw new Error(`Timed out: ${label}`)
 }
 
 test('the endpoint keeps guest and session tokens apart, and a waiting next answers when a message arrives or the app quits', async () => {
