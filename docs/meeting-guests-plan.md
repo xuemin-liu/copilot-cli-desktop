@@ -374,8 +374,11 @@ post.
 - **Messages for a host** have the Copilot helper commands of digests and reminders replaced by the host's own
   (`meeting_round(…)`, or `round -File …` with the helper), and no reviewer footer.
 - **`meeting-folder-changes.ts`** makes the patch: tracked changes against HEAD, then up to 100 new files of at most 512 KB
-  while the patch is under 5 MB, the same limits as `-Changes`. Git runs with no external diff, no text conversion and
-  fsmonitor off, so a folder's configuration runs no program. The hub filters the patch like any other.
+  while the patch is under 5 MB, the same limits as `-Changes`. Git runs through the `GitRunner`, as in the Git panel
+  (resolved executable, hardened environment and `-c` settings, no repository hooks), and only after the panel's gate:
+  the `.git` entry must be safe to open, and a repository whose own config names a program (a clean filter runs even on
+  `diff`) must have been accepted in the Git panel, which shares its trust store with meetings. A Git command that fails
+  (a timeout, output over 16 MB) is an error for the host, never an empty patch. The hub filters the patch like any other.
 - **main**: **File → Host a Meeting from an Outside Agent…** (a question, then an optional folder picker, then the
   invitation on the clipboard), the `meetingHostInvite` IPC that the check uses, and `meetingStatus` shared with the
   Copilot host's `status`.

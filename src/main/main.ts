@@ -348,6 +348,24 @@ function sessionStateOf(tabId: string): SessionState {
   return tab.status === 'starting' || tab.status === 'approval-needed' || tab.activity === 'working' ? 'busy' : 'idle'
 }
 
+/** What the person accepted about repositories' Git settings, shared by the Git panel and meetings so one answer counts in both. */
+let sharedGitTrust: GitTrustStore | null = null
+function gitTrustStore(): GitTrustStore {
+  sharedGitTrust ??= new GitTrustStore(join(app.getPath('userData'), 'git-trust.json'))
+  return sharedGitTrust
+}
+
+/** A hardened Git runner, as the Git panel has, for the changes an outside host attaches; null without Git. */
+let meetingRunner: Promise<GitRunner | null> | null = null
+function meetingGitRunner(): Promise<GitRunner | null> {
+  meetingRunner ??= resolveGitExecutable().then((executable) => executable?.supported
+    ? new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') })
+    : null)
+  // Git installed later is found on the next try.
+  void meetingRunner.then((runner) => { if (!runner) meetingRunner = null })
+  return meetingRunner
+}
+
 function gitServiceInstance(): GitService | null {
   if (gitServiceStopped || shuttingDown()) return null
   gitService ??= new GitService({
@@ -355,7 +373,7 @@ function gitServiceInstance(): GitService | null {
       const executable = await resolveGitExecutable()
       return executable ? { executable, runner: new GitRunner({ gitPath: executable.path, hooksDirectory: join(app.getPath('userData'), 'git-no-hooks') }) } : null
     },
-    trustStore: new GitTrustStore(join(app.getPath('userData'), 'git-trust.json')),
+    trustStore: gitTrustStore(),
     resolveProject: (profileId) => desktopConfig.profiles.find((profile) => profile.id === profileId)?.path ?? null,
     onProgress: (subscriberId, profileId, event) => {
       const window = mainWindow
@@ -1968,7 +1986,11 @@ const guestDeps: GuestDeps = {
     catch (error) { if (error instanceof MeetingError) return { ok: false, message: error.message }; throw error }
   },
   status: (seat) => meetingStatus(seat.id),
-  changes: (seat) => folderChanges(seat.folder!),
+  changes: async (seat) => {
+    const runner = await meetingGitRunner()
+    if (!runner) throw new Error('Git is not available on this computer, so no changes can be attached.')
+    return folderChanges(seat.folder!, { runner, trust: gitTrustStore() })
+  },
 }
 
 /** The helper and the endpoint file, written each time the endpoint starts: its port changes with every app start. */
