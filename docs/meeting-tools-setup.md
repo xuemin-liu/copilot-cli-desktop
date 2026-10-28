@@ -85,7 +85,7 @@ A `copilot` started in a terminal, outside the desktop, can take part as an outs
 as tabs in the desktop do not need any of this: they join by typing "join meeting K7QF".)
 
 ```bash
-copilot mcp add --transport http copilot-meeting http://127.0.0.1:47391/mcp
+copilot mcp add --transport http --timeout 60000 copilot-meeting http://127.0.0.1:47391/mcp
 ```
 
 or, in `~/.copilot/mcp-config.json`:
@@ -93,10 +93,14 @@ or, in `~/.copilot/mcp-config.json`:
 ```json
 {
   "mcpServers": {
-    "copilot-meeting": { "type": "http", "url": "http://127.0.0.1:47391/mcp", "tools": ["*"] }
+    "copilot-meeting": { "type": "http", "url": "http://127.0.0.1:47391/mcp", "tools": ["*"], "timeout": 60000 }
   }
 }
 ```
+
+Keep the timeout: Copilot CLI's default for MCP tool calls is 30 seconds, and `meeting_next` waits up to 50 seconds for
+the next message. Without it, a quiet poll fails before the desktop can answer "Nothing yet". Any timeout above 50
+seconds works.
 
 ## Any other harness
 
