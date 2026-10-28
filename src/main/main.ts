@@ -123,7 +123,7 @@ import { MeetingTurnReader } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, roundPaths } from './meeting-messages.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
-  guestMessage, guestReplyPath, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
+  guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
 import { folderChanges } from './meeting-folder-changes.js'
@@ -1925,6 +1925,9 @@ const meetingHub = new MeetingHub(meetingRoot, {
     return tab?.lastSessionId ?? managedTabs.get(tabId)?.session.lastSessionId ?? null
   },
   folderExists: (id) => existsSync(join(meetingRoot(), id)),
+  // An outside agent that stopped polling would hold every round to its timeout; a Copilot tab is the person's to judge.
+  dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId),
+  dropped: (tabId, message) => guestMailbox.close(tabId, message),
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
 // Outside agents as reviewers (docs/meeting-guests-plan.md): seats, tokens and messages live in the mailbox; the hub sees
@@ -1939,20 +1942,13 @@ const guestMailbox = new GuestMailbox(realMeetingTimers, () => {
   guestSeatsWrite = guestSeatsWrite.then(() => writeFileAtomic(join(guestRoot(), GUEST_SEATS_FILE), text))
     .catch((error) => writeAppLog(`Could not save meeting guests: ${String(error)}`).catch(() => {}))
   broadcastState()
-})
+}, (seat, delivery) => guestDeliveryText(seat, delivery, meetingHub.folderOf(delivery.meetingId), guestRoot()))
 
 /** A meeting message for a guest: show commands in place of meeting files, and the file to write its reply to. */
 function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {
   if (delivery.kind === 'add-dir') return
-  const folder = meetingHub.folderOf(delivery.meetingId)
-  if (!folder) return
-  // Worded for the channel the guest uses now: the meeting tools take the reply as an argument, the helper a file. A host
-  // answers with its commands, which the message names.
-  const seat = guestMailbox.seat(seatId)
-  const via = seat?.via === 'mcp' ? 'mcp' as const : 'helper' as const
-  const reply = seat?.kind === 'host' ? { via, host: true as const }
-    : via === 'mcp' ? { via } : { via, path: guestReplyPath(guestRoot(), seatId, delivery) }
-  guestMailbox.enqueue(seatId, { ...delivery, text: guestMessage(delivery.text, folder, delivery.round, reply) })
+  // Kept as the hub wrote it; the mailbox words it for the guest's channel when `next` hands it out.
+  guestMailbox.enqueue(seatId, delivery)
 }
 
 const guestHostTitle = (seat: GuestSeat): string => `${seat.name} (guest)`

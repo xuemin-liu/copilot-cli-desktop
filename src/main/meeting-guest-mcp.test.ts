@@ -3,7 +3,7 @@ import { createServer, request } from 'node:http'
 import { join } from 'node:path'
 import test from 'node:test'
 import { MeetingHub, realMeetingTimers } from './meeting.js'
-import { GuestMailbox, GUEST_PAGE_CHARS, guestMessage, guestReplyPath, type GuestDeps } from './meeting-guests.js'
+import { GuestMailbox, GUEST_PAGE_CHARS, guestDeliveryText, type GuestDeps } from './meeting-guests.js'
 import { GUEST_MCP_TOOLS, GuestMcpServer, GuestMcpSessions, handleMcpMessage, type McpAnswer } from './meeting-guest-mcp.js'
 import { roundPaths } from './meeting-messages.js'
 
@@ -18,15 +18,12 @@ function meeting(): {
 } {
   const files = new Map<string, string>()
   const toHost: string[] = []
-  const mailbox = new GuestMailbox(realTimers)
+  const mailbox: GuestMailbox = new GuestMailbox(realTimers, () => {}, (seat, item) => guestDeliveryText(seat, item, hub.folderOf(item.meetingId), join('C:', 'guests')))
   const hub: MeetingHub = new MeetingHub(() => MEETINGS, {
     deliver: (tabId, item) => {
       if (tabId === 'tab-host') { if (item.kind !== 'add-dir') toHost.push(item.text); return }
       if (item.kind === 'add-dir') return
-      const seat = mailbox.seat(tabId)
-      const via = seat?.via === 'mcp' ? 'mcp' as const : 'helper' as const
-      const reply = seat?.kind === 'host' ? { via, host: true as const } : via === 'mcp' ? { via } : { via, path: guestReplyPath('C:\\guests', tabId, item) }
-      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, reply) })
+      mailbox.enqueue(tabId, item)
     },
     cancel: (meetingId, tabId) => mailbox.cancel(meetingId, tabId),
     write: (_meetingId, path, text) => files.set(path, text),

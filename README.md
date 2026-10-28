@@ -315,6 +315,10 @@ PowerShell tool refuses to start `powershell.exe -File`, which the helper needs,
 - An outside agent's usage is billed by its own provider; the meeting bar's cost counts Copilot sessions only. A guest that
   keeps one turn polling costs one small model call each time a wait ends with nothing (50 seconds with the tools, 100 with
   the helper), more as its conversation grows.
+- An outside agent that lets two rounds in a row pass without a reply (it stopped polling) is taken out of the meeting, so
+  the rounds stop waiting for it; the transcript says so. Copilot sessions are never taken out this way.
+- If an agent switches between the tools and the helper (for example when the tools' port is taken after a restart), the
+  message it has not answered yet is reworded for the way it now asks.
 
 ### An outside agent as host
 

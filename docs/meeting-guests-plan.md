@@ -393,7 +393,23 @@ post.
 - **The silent-host rule** counts a second `next` for the same replies as a passed turn. A host whose call timed out
   before it saw the replies may therefore get one reminder it did not need; the meeting pauses only at the second.
 
-## Open questions
+## Follow-ups after phase 3
 
-1. Should a guest that times out two rounds in a row be removed on its own, or left for the person?
-2. Should the invitation also be offered as a Claude Code skill file, so it does not need pasting each time?
+- **A guest's message is worded when it is read, not when it is queued** (a finding on #128). The wording followed the
+  channel the guest had when the message was queued. A guest that fell back from the tools to the helper (the tools' port
+  taken after a restart) read `meeting_show(…)` and "call meeting_reply", with no reply file. The mailbox now keeps the
+  hub's text and words it for the seat's current channel each time `next` hands it out; the material is unchanged, and the
+  unanswered message stays the same message. A host's agreed message is worded when the meeting closes.
+
+## Open questions, decided
+
+1. **A guest that lets two rounds in a row time out is taken out on its own.** Each silent round makes everyone wait for
+   the round timeout (10 minutes by default), and an outside agent that stopped polling will not come back by itself. The
+   hub counts, for each party it may drop (`dropsWhenSilent`: guests only), the rounds in a row it let time out; a reply
+   starts the count over, and the count is saved with the meeting. At the second, after the round has gone to the host as
+   usual, the guest is taken out: the transcript says so, and its next call answers "You were taken out of meeting K7QF: no
+   reply in 2 rounds in a row." A Copilot tab is never taken out this way: the person sees it, and **Remove** is theirs.
+2. **No Claude Code skill file for the invitation.** The invitation carries a token that works for one seat in one meeting,
+   so it has to be pasted each time anyway; a skill could only hold the generic instructions, which the meeting tools'
+   own MCP instructions and the invitation already give. Agents set the tools up once (`claude mcp add …`), which is the
+   part worth keeping.
