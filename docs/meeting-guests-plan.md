@@ -408,6 +408,11 @@ post.
   `.git` file pointing at a network share (an outbound SMB connection) before the check refused it. It now finds the
   root on the filesystem and inspects it first, as the Git panel's discovery does; the host invitation also refuses a
   folder that is not on this computer, before anything opens it.
+- **Never a repository around the home folder or a drive root** (a finding on #130). Walking up to the nearest `.git`
+  could pick a dotfiles repository in the home folder for a project folder that is not a repository yet, and attach its
+  diff and untracked files (an `.npmrc` with a token, say). `git-discovery.ts` now exports `enclosingRepository`, the
+  Git panel's own rule (canonical folder, filesystem only, `isAncestorTooBroad`), and the patch uses it: such a folder is
+  refused with a message, before any Git process starts.
 
 ## Open questions, decided
 

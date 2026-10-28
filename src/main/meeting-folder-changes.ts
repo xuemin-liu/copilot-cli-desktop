@@ -1,7 +1,7 @@
-import { lstat, stat } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { isLocalFilesystemPath } from './external-targets.js'
-import { inspectGitEntry } from './git-discovery.js'
+import { enclosingRepository, type EnclosingRepository } from './git-discovery.js'
 import { ceilingDirectories } from './git-env.js'
 import type { GitRunner, GitRunResult } from './git-runner.js'
 import { scanRepoConfig, type GitTrustStore } from './git-trust.js'
@@ -31,30 +31,28 @@ export interface FolderChangesDeps {
   trust: GitTrustStore
   /** Largest output one Git command may give; tests make it small. */
   maxOutputBytes?: number
+  /** The home folder, whose repository is never the one attached; tests name a stand-in. */
+  homeDirectory?: string
 }
 
 export class FolderChangesError extends Error {
   override name = 'FolderChangesError'
 }
 
-/**
- * The repository the folder belongs to, found on the filesystem as the Git panel's discovery does: the folder itself or its
- * nearest ancestor with a `.git` entry. Nothing here starts Git, so the entry is inspected before any program reads it.
- */
-async function repositoryRoot(folder: string): Promise<string | null> {
-  for (let current = resolve(folder); ; current = dirname(current)) {
-    if (await lstat(join(current, '.git')).then(() => true, () => false)) return current
-    if (dirname(current) === current) return null
-  }
-}
-
 export async function folderChanges(folder: string, deps: FolderChangesDeps): Promise<string> {
   if (!isLocalFilesystemPath(folder)) throw new FolderChangesError(`${folder} is not on this computer, so no changes can be attached.`)
-  const root = await repositoryRoot(folder)
-  if (!root) throw new FolderChangesError(`${folder} is not a Git repository, so there are no changes to attach.`)
-  const entry = await inspectGitEntry(root)
-  if (!entry) throw new FolderChangesError(`${root} has no .git entry the desktop can open.`)
-  if (entry.issue) throw new FolderChangesError(`The repository in ${root} is not opened: ${entry.issue}.`)
+  // Found on the filesystem as the Git panel's discovery finds it (nothing starts Git before the .git entry is inspected),
+  // and never a repository that encloses the home folder or a drive root: its "changes" would be everything under it.
+  let repository: EnclosingRepository
+  try { repository = await enclosingRepository(folder, deps.homeDirectory) } catch (error) {
+    throw new FolderChangesError(`${folder} cannot be read: ${error instanceof Error ? error.message : String(error)}.`)
+  }
+  if (repository.kind === 'none') throw new FolderChangesError(`${folder} is not a Git repository, so there are no changes to attach.`)
+  if (repository.kind === 'too-broad') {
+    throw new FolderChangesError(`${folder} is not a Git repository itself; the repository around it, at ${repository.root}, is a home folder or drive root, so its changes are not attached.`)
+  }
+  const root = repository.root
+  if (repository.issue) throw new FolderChangesError(`The repository in ${root} is not opened: ${repository.issue}.`)
 
   const maxOutputBytes = deps.maxOutputBytes ?? 16 * 1024 * 1024
   // From the root, and never above it: Git finds the repository that was inspected, not one further up.

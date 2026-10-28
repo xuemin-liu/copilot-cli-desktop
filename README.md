@@ -336,7 +336,8 @@ An outside agent can also host: Copilot sessions (and other agents) review its p
 - The changes come from the folder you picked: the desktop runs Git there as the Git panel does, with the same hardening
   and the same trust check. If the repository's own Git settings name a program (a filter, for example), accept them in
   the Git panel first; until then the agent is told the changes cannot be attached. The patch is filtered as for any
-  meeting. Without a folder, the agent describes its changes in its post.
+  meeting. Without a folder, the agent describes its changes in its post. A repository around your home folder or a
+  drive root (a dotfiles repository, say) is never used for a folder inside it: pick the project's own repository.
 - If the host asks for the same replies again without answering them, it is reminded once; the next time the meeting
   pauses, as for a Copilot host that lets a turn pass. **Stop** on the meeting bar ends it at any time.
 

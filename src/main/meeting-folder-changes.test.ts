@@ -109,6 +109,35 @@ test('the .git entry is inspected on the filesystem before any Git process start
   }
 })
 
+test('a repository that encloses the home folder is never the one attached: a dotfiles repository leaks nothing', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'meeting-folder-home-'))
+  const home = join(base, 'home')
+  const env = {
+    ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(base, 'gitconfig'),
+    GIT_AUTHOR_NAME: 'Check', GIT_AUTHOR_EMAIL: 'check@example.com', GIT_COMMITTER_NAME: 'Check', GIT_COMMITTER_EMAIL: 'check@example.com',
+  }
+  const calls: string[][] = []
+  const runner = { run: async (options: { args: readonly string[] }) => { calls.push([...options.args]); throw new Error('git must not run') } } as unknown as GitRunner
+  try {
+    await writeFile(join(base, 'gitconfig'), '[core]\n\tautocrlf = false\n')
+    execFileSync('git', ['init', '-q', home], { env })
+    await writeFile(join(home, '.bashrc'), 'export A=1\n')
+    execFileSync('git', ['add', '.bashrc'], { cwd: home, env })
+    execFileSync('git', ['commit', '-q', '-m', 'dotfiles'], { cwd: home, env })
+    await writeFile(join(home, '.npmrc'), '//registry.npmjs.org/:_authToken=SECRET-TOKEN-123\n')
+    await mkdir(join(home, 'projects', 'app'), { recursive: true })
+    await writeFile(join(home, 'projects', 'app', 'main.js'), 'run()\n')
+    const error = await folderChanges(join(home, 'projects', 'app'), { runner, trust: new GitTrustStore(join(base, 'trust.json')), homeDirectory: home })
+      .then(() => null, (reason: unknown) => reason as Error)
+    assert.ok(error, 'refused')
+    assert.match(error.message, /is not a Git repository itself; the repository around it, at .*home, is a home folder or drive root, so its changes are not attached\./)
+    assert.ok(!error.message.includes('SECRET-TOKEN-123'))
+    assert.deepEqual(calls, [], 'no Git process ran')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
 test('a picked subfolder attaches the changes of its whole repository, found from its root', async () => {
   const repo = await repository()
   try {
