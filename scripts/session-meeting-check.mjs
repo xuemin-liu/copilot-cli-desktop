@@ -174,9 +174,11 @@ export async function runMeetingCheck() {
     const toolsUrl = (await state()).meetingToolsUrl
     assert.match(toolsUrl ?? '', /^http:\/\/127\.0\.0\.1:\d+\/mcp$/, 'the meeting tools are served')
     const savedClipboard = await clipboard.readText()
-    const toolInvitation = await ui(`window.copilotDesktop.meetingInvite(${JSON.stringify(id)}, 'Tool agent', null)`)
+    // The short invitation: this agent has the tools, so it gets only the steps with them.
+    const toolInvitation = await ui(`window.copilotDesktop.meetingInvite(${JSON.stringify(id)}, 'Tool agent', null, true)`)
     clipboard.writeText(savedClipboard)
-    assert.match(toolInvitation, /If you have the copilot-meeting tools/, 'the invitation offers the tools first')
+    assert.match(toolInvitation, /^Review meeting [2-9A-HJ-NP-Z]{4} in Copilot CLI Desktop with the copilot-meeting tools/, 'the short invitation')
+    assert.ok(!toolInvitation.includes('meeting-guest'), 'no helper in the short invitation')
     const tools = mcpClient(toolsUrl)
     await tools.initialize()
     assert.match(await tools.call('meeting_join', { invitation: /meeting_join with invitation "([a-f0-9]{64})"/.exec(toolInvitation)[1] }), new RegExp(`^Joined meeting ${id}\\.`))
@@ -240,9 +242,9 @@ export async function runMeetingCheck() {
     // folder; the agent starts the meeting with the tools and that folder's changes; the person adds the Copilot reviewer.
     const hostFolder = (await state()).profiles.find(profile => profile.name === 'Meeting host').path
     const hostSavedClipboard = await clipboard.readText()
-    const hostInvitation = await ui(`window.copilotDesktop.meetingHostInvite(${JSON.stringify(hostFolder)})`)
+    const hostInvitation = await ui(`window.copilotDesktop.meetingHostInvite(${JSON.stringify(hostFolder)}, true)`)
     clipboard.writeText(hostSavedClipboard)
-    assert.match(hostInvitation, /You may host a review meeting in Copilot CLI Desktop/)
+    assert.match(hostInvitation, /^Host a review meeting in Copilot CLI Desktop with the copilot-meeting tools/, 'the short host invitation')
     assert.ok(hostInvitation.includes(hostFolder), 'the invitation names the folder the person picked')
     const outsideHost = mcpClient(toolsUrl)
     await outsideHost.initialize()

@@ -95,8 +95,9 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
   const act = (meeting: MeetingView, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): void => {
     void window.copilotDesktop.meetingAction(meeting.id, action, tabId, role).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error)))
   }
-  const invite = (meeting: MeetingView): void => {
-    void window.copilotDesktop.meetingInvite(meeting.id, guestName.trim(), guestRole.trim() || undefined).then(() => {
+  /** `short`: for an agent that already has the meeting tools; the invitation names only them. */
+  const invite = (meeting: MeetingView, short = false): void => {
+    void window.copilotDesktop.meetingInvite(meeting.id, guestName.trim(), guestRole.trim() || undefined, short).then(() => {
       setInvited(meeting.id)
       setGuestRole('')
     }, (error: unknown) => onError(error instanceof Error ? error.message : String(error)))
@@ -180,6 +181,10 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
                 <input className="meeting-bar-role" type="text" maxLength={60} placeholder="Role (optional)"
                   aria-label={`Role of the outside agent invited to meeting ${meeting.id}`} value={guestRole} onChange={(event) => setGuestRole(event.target.value)} />
                 <button type="button" className="meeting-bar-button" onClick={() => invite(meeting)}>Copy invitation</button>
+                {toolsUrl && (
+                  <button type="button" className="meeting-bar-button" title="For an agent that already has the copilot-meeting tools: only the steps with them"
+                    onClick={() => invite(meeting, true)}>Copy short invitation</button>
+                )}
                 <span className="meeting-bar-note">
                   {invited === meeting.id
                     ? 'Invitation copied. Paste it into the agent on this computer; unused, it expires in 15 minutes.'

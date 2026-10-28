@@ -282,7 +282,8 @@ An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI o
 runs on the same computer and has MCP or a shell tool.
 
 1. On the meeting bar, press **Invite outside agent…**, give the agent a name and, optionally, a role, and press **Copy
-   invitation**.
+   invitation**. If the agent already has the meeting tools (see below), **Copy short invitation** gives a few lines with
+   only those steps, without the helper.
 2. Paste the invitation into that agent. It reviews in a loop, with the meeting tools if it has them, otherwise with the
    guest helper:
    - **Meeting tools (MCP):** `meeting_join` with the invitation, then `meeting_next` (waits up to 50 seconds for its
@@ -325,7 +326,7 @@ PowerShell tool refuses to start `powershell.exe -File`, which the helper needs,
 An outside agent can also host: Copilot sessions (and other agents) review its plan or changes.
 
 1. Choose **File → Host a Meeting from an Outside Agent…**. To let the agent attach its uncommitted changes, pick its
-   project folder; the host invitation goes to the clipboard.
+   project folder; the host invitation goes to the clipboard. Tick **Short invitation** if the agent has the meeting tools.
 2. Paste it into the agent with what you want reviewed, for example "review your plan with Copilot, then implement it".
 3. The agent starts the meeting (`meeting_start`, or the helper's `start`). Its meeting bar appears above your tabs: add
    Copilot sessions with **Add session…**, or invite other agents.

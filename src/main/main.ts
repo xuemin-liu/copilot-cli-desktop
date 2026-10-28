@@ -3730,11 +3730,13 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
  * The person invites an outside agent (Claude Code, Codex CLI, …) to review: a seat with its own token, and the invitation
  * to paste into that agent, also put on the clipboard. Only the person can do this; no model can add a guest.
  */
-ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name: unknown, role: unknown): Promise<string> => {
+ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name: unknown, role: unknown, short: unknown): Promise<string> => {
   assertTrustedIpcSender(event)
   if (typeof meetingId !== 'string' || !MEETING_ID_PATTERN.test(meetingId)) throw new Error('Invalid meeting')
   if (typeof name !== 'string' || name.length > 200) throw new Error('Invalid name')
   if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
+  if (short !== undefined && typeof short !== 'boolean') throw new Error('Invalid invitation kind')
+  if (short && guestMcp.url() === null) throw new Error('The meeting tools are not served, so the agent needs the full invitation.')
   const meeting = meetingViews().find((candidate) => candidate.id === meetingId)
   if (!meeting || meeting.stage === 'closed') throw new Error(`There is no open meeting ${meetingId}.`)
   if (meeting.participants.length + (meeting.invited?.length ?? 0) >= MAX_MEETING_PARTICIPANTS) {
@@ -3746,7 +3748,7 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
   const { seat, token } = guestMailbox.invite(meetingId, name, typeof role === 'string' ? role : null)
   await mkdir(guestSeatFolder(guestRoot(), seat.id), { recursive: true })
   const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
-  const invitation = guestInvitation({ meetingId, role: seat.role, token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null })
+  const invitation = guestInvitation({ meetingId, role: seat.role, token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null, toolsOnly: short === true })
   clipboard.writeText(invitation)
   return invitation
 })
@@ -3754,27 +3756,29 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
 /**
  * A host invitation: a seat whose outside agent may start one meeting of its own. Only the person makes one (this IPC, or
  * File → Host a Meeting from an Outside Agent…). `folder` is the project the person picked, whose changes the desktop
- * may attach; null for none.
+ * may attach; null for none. `short`: the agent has the meeting tools, so the invitation names only them.
  */
-async function inviteHost(folder: string | null): Promise<string> {
+async function inviteHost(folder: string | null, short = false): Promise<string> {
   // Git will read this folder: only one on this computer, as for every other path the desktop opens.
   if (folder !== null && !isLocalFilesystemPath(folder)) throw new Error(`${folder} is not on this computer. Pick a local project folder.`)
+  if (short && guestMcp.url() === null) throw new Error('The meeting tools are not served, so the agent needs the full invitation.')
   await meetingControl.port()
   await guestEndpointWrite
   const { seat, token } = guestMailbox.invite('', 'Outside agent', null, { kind: 'host', folder })
   const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
-  const invitation = guestHostInvitation({ token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null, folder: seat.folder })
+  const invitation = guestHostInvitation({ token, helper: guestHelperCommand(helper), tools: guestMcp.url() !== null, toolsOnly: short, folder: seat.folder })
   clipboard.writeText(invitation)
   return invitation
 }
 
-ipcMain.handle('desktop:meeting-host-invite', async (event, folder: unknown): Promise<string> => {
+ipcMain.handle('desktop:meeting-host-invite', async (event, folder: unknown, short: unknown): Promise<string> => {
   assertTrustedIpcSender(event)
   if (folder !== null && (typeof folder !== 'string' || !isAbsolute(folder) || folder.length > 4096)) throw new Error('Invalid folder')
+  if (short !== undefined && typeof short !== 'boolean') throw new Error('Invalid invitation kind')
   // Checked before anything touches it: a network path would be opened by the stat below.
   if (folder !== null && !isLocalFilesystemPath(folder)) throw new Error(`${folder} is not on this computer. Pick a local project folder.`)
   if (folder !== null && !(await stat(folder).then((info) => info.isDirectory(), () => false))) throw new Error(`${folder} is not a folder`)
-  return inviteHost(folder)
+  return inviteHost(folder, short === true)
 })
 
 /** The menu's way to a host invitation: ask whether to attach a project's changes, then copy the invitation. */
@@ -3788,6 +3792,8 @@ async function inviteHostFromMenu(): Promise<void> {
     buttons: ['Pick a Project Folder…', 'No Changes', 'Cancel'],
     defaultId: 0,
     cancelId: 2,
+    // Offered only while the tools are served: an agent that has them needs only the short invitation.
+    ...(guestMcp.url() !== null ? { checkboxLabel: 'Short invitation: the agent has the copilot-meeting tools', checkboxChecked: false } : {}),
   }
   const choice = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options)
   if (choice.response === 2) return
@@ -3799,7 +3805,7 @@ async function inviteHostFromMenu(): Promise<void> {
     if (picked.canceled || !picked.filePaths[0]) return
     folder = picked.filePaths[0]
   }
-  await inviteHost(folder)
+  await inviteHost(folder, choice.checkboxChecked === true)
   const done = {
     type: 'info' as const,
     title: 'Host invitation copied',
