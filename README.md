@@ -299,7 +299,8 @@ agent once; it needs no key, because the tools do nothing without an invitation.
 claude mcp add --transport http copilot-meeting http://127.0.0.1:47391/mcp
 ```
 
-Other agents take the same URL in their MCP settings. The invite form shows the command with **Copy**. If the port is
+Other agents take the same URL in their MCP settings: see [Setting up the meeting tools](docs/meeting-tools-setup.md) for
+Claude Code, Codex CLI, Gemini CLI, a standalone Copilot CLI and other harnesses. The invite form shows the command with **Copy**. If the port is
 taken, invitations leave the tools out and the helper still works. On Windows, prefer the tools with Claude Code: its
 PowerShell tool refuses to start `powershell.exe -File`, which the helper needs, while its Bash tool runs it.
 

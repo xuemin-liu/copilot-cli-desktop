@@ -172,6 +172,12 @@ async function callTool(session: Session, mailbox: GuestMailbox, deps: GuestDeps
     if (name === 'meeting_join' && seat.kind === 'host') return toolText('This is a host invitation: call meeting_start with it.', true)
     if (name === 'meeting_start' && seat.kind === 'reviewer') return toolText('This invitation is for reviewing: call meeting_join with it.', true)
     session.seatId = seat.id
+    // A host whose session started over (the desktop restarted) calls meeting_start again with its invitation: that binds
+    // the new session to its open meeting, and is no error.
+    if (name === 'meeting_start' && seat.meetingId !== '' && seat.closed === null) {
+      mailbox.seen(seat, 'mcp')
+      return toolText(`Rejoined meeting ${seat.meetingId} as host. Call meeting_next for the reviewers' replies.`)
+    }
     if (name === 'meeting_start') {
       const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
       return toolText(answer.message, !answer.ok)
