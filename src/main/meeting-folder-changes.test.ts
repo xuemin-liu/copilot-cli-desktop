@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -84,6 +84,95 @@ test('GIT_DIR and GIT_WORK_TREE in the desktop\'s environment cannot point the p
   } finally {
     await repo.cleanup()
     await other.cleanup()
+  }
+})
+
+test('the .git entry is inspected on the filesystem before any Git process starts, and a network folder is refused', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'meeting-folder-pointer-'))
+  const calls: string[][] = []
+  // Records every Git call; none may happen before the refusal.
+  const runner = { run: async (options: { args: readonly string[] }) => { calls.push([...options.args]); throw new Error('git must not run') } } as unknown as GitRunner
+  const trust = new GitTrustStore(join(base, 'trust.json'))
+  try {
+    // A .git file that names no git directory, which inspectGitEntry refuses; a picked subfolder finds it by walking up.
+    await mkdir(join(base, 'repo', 'src'), { recursive: true })
+    await writeFile(join(base, 'repo', '.git'), 'not a pointer\n')
+    await assert.rejects(folderChanges(join(base, 'repo', 'src'), { runner, trust }), /The repository in .*repo is not opened: The \.git file does not name a git directory\./)
+    assert.deepEqual(calls, [], 'no Git process before the entry was inspected')
+    // A UNC share is the network path Windows would open (isLocalFilesystemPath has its own tests for other platforms).
+    if (process.platform === 'win32') {
+      await assert.rejects(folderChanges('\\\\server\\share\\project', { runner, trust }), /is not on this computer/)
+      assert.deepEqual(calls, [])
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a repository that encloses the home folder is never the one attached: a dotfiles repository leaks nothing', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'meeting-folder-home-'))
+  const home = join(base, 'home')
+  const env = {
+    ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: join(base, 'gitconfig'),
+    GIT_AUTHOR_NAME: 'Check', GIT_AUTHOR_EMAIL: 'check@example.com', GIT_COMMITTER_NAME: 'Check', GIT_COMMITTER_EMAIL: 'check@example.com',
+  }
+  const calls: string[][] = []
+  const runner = { run: async (options: { args: readonly string[] }) => { calls.push([...options.args]); throw new Error('git must not run') } } as unknown as GitRunner
+  try {
+    await writeFile(join(base, 'gitconfig'), '[core]\n\tautocrlf = false\n')
+    execFileSync('git', ['init', '-q', home], { env })
+    await writeFile(join(home, '.bashrc'), 'export A=1\n')
+    execFileSync('git', ['add', '.bashrc'], { cwd: home, env })
+    execFileSync('git', ['commit', '-q', '-m', 'dotfiles'], { cwd: home, env })
+    await writeFile(join(home, '.npmrc'), '//registry.npmjs.org/:_authToken=SECRET-TOKEN-123\n')
+    await mkdir(join(home, 'projects', 'app'), { recursive: true })
+    await writeFile(join(home, 'projects', 'app', 'main.js'), 'run()\n')
+    const error = await folderChanges(join(home, 'projects', 'app'), { runner, trust: new GitTrustStore(join(base, 'trust.json')), homeDirectory: home })
+      .then(() => null, (reason: unknown) => reason as Error)
+    assert.ok(error, 'refused')
+    assert.match(error.message, /is not a Git repository itself; the repository around it, at .*home, is a home folder or drive root, so its changes are not attached\./)
+    assert.ok(!error.message.includes('SECRET-TOKEN-123'))
+    assert.deepEqual(calls, [], 'no Git process ran')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a picked subfolder attaches only the changes inside it, tracked and new, found from its repository\'s root', async () => {
+  const repo = await repository()
+  try {
+    await mkdir(join(repo.folder, 'docs'))
+    await writeFile(join(repo.folder, 'docs', 'notes.md'), 'v1\n')
+    repo.git('add', 'docs/notes.md')
+    repo.git('commit', '-q', '-m', 'notes')
+    await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    await writeFile(join(repo.folder, 'outside.txt'), 'not picked\n')
+    await writeFile(join(repo.folder, 'docs', 'notes.md'), 'v2\n')
+    await writeFile(join(repo.folder, 'docs', 'plan.md'), '# Plan\n')
+    const patch = await folderChanges(join(repo.folder, 'docs'), repo)
+    assert.match(patch, /^\+v2$/m)
+    assert.match(patch, /^\+\+\+ b\/docs\/plan\.md$/m)
+    assert.ok(!patch.includes('retry = 3') && !patch.includes('outside.txt'), 'nothing from outside the picked folder')
+    assert.match(await folderChanges(repo.folder, repo), /outside\.txt/, 'the repository root attaches it all')
+  } finally {
+    await repo.cleanup()
+  }
+})
+
+test('an approval made under the canonical path counts for an alias of the folder (a junction or symlink)', async () => {
+  const repo = await repository()
+  const alias = `${repo.folder}-alias`
+  try {
+    repo.git('config', 'filter.probe.clean', 'cat')
+    await writeFile(join(repo.folder, '.gitattributes'), '* filter=probe\n')
+    await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    const root = resolve(repo.git('rev-parse', '--show-toplevel').trim())
+    await repo.trust.trust(root, (await scanRepoConfig(repo.runner, root)).hash)
+    await symlink(repo.folder, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    assert.match(await folderChanges(alias, repo), /^\+retry = 3$/m, 'the same repository, by another name')
+  } finally {
+    await rm(alias, { force: true, recursive: false }).catch(() => undefined)
+    await repo.cleanup()
   }
 })
 

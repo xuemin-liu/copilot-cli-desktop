@@ -8,7 +8,7 @@ import test from 'node:test'
 import { MeetingHub, type MeetingDelivery, type MeetingTimers } from './meeting.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_PAGE_CHARS, GUEST_UNUSED_SEAT_MS, GuestMailbox, guestHelperCommand,
-  guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestDeps, type GuestSeat,
+  guestDeliveryText, guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestChannel, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { MeetingControlServer } from './meeting-session.js'
 import { roundPaths } from './meeting-messages.js'
@@ -184,7 +184,7 @@ const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes'> 
 /** A hub with a host, and a mailbox whose guests take part through `handleGuestRequest`, wired as main wires them. */
 function meeting(): {
   hub: MeetingHub; mailbox: GuestMailbox; timers: ReturnType<typeof clock>; files: Map<string, string>; toHost: MeetingDelivery[]
-  call(seat: GuestSeat, command: Parameters<typeof handleGuestRequest>[3], fields?: Record<string, unknown>): Promise<string>
+  call(seat: GuestSeat, command: Parameters<typeof handleGuestRequest>[3], fields?: Record<string, unknown>, via?: GuestChannel): Promise<string>
 } {
   const timers = clock()
   const files = new Map<string, string>()
@@ -194,10 +194,7 @@ function meeting(): {
     deliver: (tabId, item) => {
       if (tabId === 'tab-host') { if (item.kind !== 'add-dir') toHost.push(item); return }
       if (item.kind === 'add-dir') return
-      const seat = mailbox.seat(tabId)
-      const via = seat?.via === 'mcp' ? 'mcp' as const : 'helper' as const
-      const reply = seat?.kind === 'host' ? { via, host: true as const } : via === 'mcp' ? { via } : { via, path: guestReplyPath(GUESTS, tabId, item) }
-      mailbox.enqueue(tabId, { ...item, text: guestMessage(item.text, hub.folderOf(item.meetingId)!, item.round, reply) })
+      mailbox.enqueue(tabId, item)
     },
     cancel: (meetingId, tabId) => mailbox.cancel(meetingId, tabId),
     write: (_meetingId, path, text) => files.set(path, text),
@@ -205,7 +202,7 @@ function meeting(): {
     notify: () => {},
     sessionIdOf: (tabId) => tabId === 'tab-host' ? HOST_SESSION : tabId,
   }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), timers, () => 'K7QF')
-  mailbox = new GuestMailbox(timers)
+  mailbox = new GuestMailbox(timers, () => {}, (seat, item) => guestDeliveryText(seat, item, hub.folderOf(item.meetingId), GUESTS))
   const deps: GuestDeps = {
     ready: () => true,
     isOpen: (id) => hub.isOpen(id),
@@ -220,10 +217,10 @@ function meeting(): {
   }
   return {
     hub, mailbox, timers, files, toHost,
-    call: async (seat, command, fields = {}) => {
+    call: async (seat, command, fields = {}, via = 'helper') => {
       // A next with nothing to hand out waits on the fake clock: move it on by the wait, and only then.
       let settled = false
-      const answer = handleGuestRequest(mailbox, deps, seat, command, fields).finally(() => { settled = true })
+      const answer = handleGuestRequest(mailbox, deps, seat, command, fields, undefined, via).finally(() => { settled = true })
       for (let tick = 0; tick < 20 && !settled; tick++) await Promise.resolve()
       if (!settled) timers.advance(Number(fields.wait ?? 100) * 1000)
       const result = await answer
@@ -533,4 +530,29 @@ test('a host seat is saved before and after its meeting starts, with its folder 
   assert.equal(back.kind, 'host')
   assert.equal(restored.closing(back), 'All agreed.')
   assert.equal(restored.closing(back), 'The meeting is closed.')
+})
+
+test('an unanswered message is worded for the channel that reads it, when a guest falls back from the tools to the helper', async () => {
+  const { hub, mailbox, call } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: 'diff --git a/x b/x\n+y\n' })
+  const { seat } = mailbox.invite('K7QF', 'Claude Code', null)
+  const withTools = await call(seat, 'next', { wait: 5 }, 'mcp')
+  assert.match(withTools, /the result of meeting_show\(name: "changes", round: 1\)/)
+  assert.ok(withTools.endsWith('To answer, call meeting_reply with your whole reply.'))
+  // The tools are gone (their port taken after a restart): the helper asks for the same, unanswered message.
+  const withHelper = await call(seat, 'next', { wait: 5 }, 'helper')
+  assert.match(withHelper, /the output of: show -Name changes -Round 1/)
+  assert.ok(withHelper.endsWith(`run the reply command from your invitation with -File "${guestReplyPath(GUESTS, seat.id, { meetingId: 'K7QF', round: 1, kind: 'post', text: '' })}".`), 'a reply file to answer with')
+  assert.equal(withHelper.split('\n-----\n')[1], withTools.split('\n-----\n')[1], 'the same material, unchanged')
+  assert.equal(await call(seat, 'reply', { text: 'Fine.' }), 'Reply sent. Run next for the next message.')
+})
+
+test('a host\'s agreed message is worded for its channel when the meeting closes', () => {
+  const mailbox = new GuestMailbox(clock(), () => {}, (seat, delivery) => `${seat.via}: ${delivery.text}`)
+  const { seat } = mailbox.invite('', 'Claude Code', null, { kind: 'host' })
+  mailbox.started(seat, 'K7QF')
+  mailbox.seen(seat, 'mcp')
+  mailbox.enqueue(seat.id, { meetingId: 'K7QF', round: 2, kind: 'agreed', text: 'All agreed.' })
+  mailbox.close(seat.id, 'The meeting is closed.')
+  assert.equal(mailbox.closing(seat), 'mcp: All agreed.')
 })

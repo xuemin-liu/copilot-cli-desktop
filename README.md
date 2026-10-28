@@ -315,6 +315,10 @@ PowerShell tool refuses to start `powershell.exe -File`, which the helper needs,
 - An outside agent's usage is billed by its own provider; the meeting bar's cost counts Copilot sessions only. A guest that
   keeps one turn polling costs one small model call each time a wait ends with nothing (50 seconds with the tools, 100 with
   the helper), more as its conversation grows.
+- An outside agent that lets two rounds in a row pass without a reply (it stopped polling) is taken out of the meeting, so
+  the rounds stop waiting for it; the transcript says so. Copilot sessions are never taken out this way.
+- If an agent switches between the tools and the helper (for example when the tools' port is taken after a restart), the
+  message it has not answered yet is reworded for the way it now asks.
 
 ### An outside agent as host
 
@@ -329,10 +333,12 @@ An outside agent can also host: Copilot sessions (and other agents) review its p
    with `meeting_propose_close`. When everyone agrees, it gets the agreed message and carries on.
 
 - Only you make host invitations. One starts a single meeting and expires after 15 minutes unused.
-- The changes come from the folder you picked: the desktop runs Git there as the Git panel does, with the same hardening
+- The changes come from the folder you picked, and only from inside it (a subfolder of a repository attaches just that
+  subfolder's changes): the desktop runs Git there as the Git panel does, with the same hardening
   and the same trust check. If the repository's own Git settings name a program (a filter, for example), accept them in
   the Git panel first; until then the agent is told the changes cannot be attached. The patch is filtered as for any
-  meeting. Without a folder, the agent describes its changes in its post.
+  meeting. Without a folder, the agent describes its changes in its post. A repository around your home folder or a
+  drive root (a dotfiles repository, say) is never used for a folder inside it: pick the project's own repository.
 - If the host asks for the same replies again without answering them, it is reminded once; the next time the meeting
   pauses, as for a Copilot host that lets a turn pass. **Stop** on the meeting bar ends it at any time.
 

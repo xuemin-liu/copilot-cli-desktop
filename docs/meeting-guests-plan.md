@@ -375,9 +375,12 @@ post.
   (`meeting_round(…)`, or `round -File …` with the helper), and no reviewer footer.
 - **`meeting-folder-changes.ts`** makes the patch: tracked changes against HEAD, then up to 100 new files of at most 512 KB
   while the patch is under 5 MB, the same limits as `-Changes`. Git runs through the `GitRunner`, as in the Git panel
-  (resolved executable, hardened environment and `-c` settings, no repository hooks), and only after the panel's gate:
-  the `.git` entry must be safe to open, and a repository whose own config names a program (a clean filter runs even on
-  `diff`) must have been accepted in the Git panel, which shares its trust store with meetings. A Git command that fails
+  (resolved executable, hardened environment and `-c` settings, no repository hooks), and only after the panel's gate,
+  in its order: the folder must be on this computer; the repository root is found on the filesystem (the folder or its
+  nearest ancestor with a `.git` entry) and its `.git` entry inspected before any Git process starts, since a `.git` file
+  can point at a network share; Git then runs from that root, never above it (`GIT_CEILING_DIRECTORIES`); and a repository
+  whose own config names a program (a clean filter runs even on `diff`) must have been accepted in the Git panel, which
+  shares its trust store with meetings. A Git command that fails
   (a timeout, output over 16 MB) is an error for the host, never an empty patch. The hub filters the patch like any other.
 - **main**: **File → Host a Meeting from an Outside Agent…** (a question, then an optional folder picker, then the
   invitation on the clipboard), the `meetingHostInvite` IPC that the check uses, and `meetingStatus` shared with the
@@ -393,7 +396,38 @@ post.
 - **The silent-host rule** counts a second `next` for the same replies as a passed turn. A host whose call timed out
   before it saw the replies may therefore get one reminder it did not need; the meeting pauses only at the second.
 
-## Open questions
+## Follow-ups after phase 3
 
-1. Should a guest that times out two rounds in a row be removed on its own, or left for the person?
-2. Should the invitation also be offered as a Claude Code skill file, so it does not need pasting each time?
+- **A guest's message is worded when it is read, not when it is queued** (a finding on #128). The wording followed the
+  channel the guest had when the message was queued. A guest that fell back from the tools to the helper (the tools' port
+  taken after a restart) read `meeting_show(…)` and "call meeting_reply", with no reply file. The mailbox now keeps the
+  hub's text and words it for the seat's current channel each time `next` hands it out; the material is unchanged, and the
+  unanswered message stays the same message. A host's agreed message is worded when the meeting closes.
+- **The `.git` entry is inspected before Git runs** (a finding on #129, which was merged before it arrived). The patch
+  code asked `git rev-parse` for the repository root and only then inspected its `.git` entry, so Git could follow a
+  `.git` file pointing at a network share (an outbound SMB connection) before the check refused it. It now finds the
+  root on the filesystem and inspects it first, as the Git panel's discovery does; the host invitation also refuses a
+  folder that is not on this computer, before anything opens it.
+- **Never a repository around the home folder or a drive root** (a finding on #130). Walking up to the nearest `.git`
+  could pick a dotfiles repository in the home folder for a project folder that is not a repository yet, and attach its
+  diff and untracked files (an `.npmrc` with a token, say). `git-discovery.ts` now exports `enclosingRepository`, the
+  Git panel's own rule (canonical folder, filesystem only, `isAncestorTooBroad`), and the patch uses it: such a folder is
+  refused with a message, before any Git process starts.
+- **Canonical paths, and only the picked folder** (findings on #130). The root is the canonical path that
+  `enclosingRepository` finds (8.3 names, junctions and `/var` → `/private/var` resolved), so an approval the person made in
+  the Git panel, stored under that path, counts when they pick the folder by another name. And the patch holds only what is
+  inside the picked folder: a subfolder of a repository attaches its own tracked and new files (`-- <folder>` pathspecs),
+  not the rest of the repository.
+
+## Open questions, decided
+
+1. **A guest that lets two rounds in a row time out is taken out on its own.** Each silent round makes everyone wait for
+   the round timeout (10 minutes by default), and an outside agent that stopped polling will not come back by itself. The
+   hub counts, for each party it may drop (`dropsWhenSilent`: guests only), the rounds in a row it let time out; a reply
+   starts the count over, a late one included (a slow guest is not a silent one), and the count is saved with the meeting. At the second, after the round has gone to the host as
+   usual, the guest is taken out: the transcript says so, and its next call answers "You were taken out of meeting K7QF: no
+   reply in 2 rounds in a row." A Copilot tab is never taken out this way: the person sees it, and **Remove** is theirs.
+2. **No Claude Code skill file for the invitation.** The invitation carries a token that works for one seat in one meeting,
+   so it has to be pasted each time anyway; a skill could only hold the generic instructions, which the meeting tools'
+   own MCP instructions and the invitation already give. Agents set the tools up once (`claude mcp add …`), which is the
+   part worth keeping.

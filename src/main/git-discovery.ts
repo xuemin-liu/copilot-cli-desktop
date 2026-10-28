@@ -176,6 +176,31 @@ function isAncestorTooBroad(candidate: string, homeDirectory: string): boolean {
   return resolved === hostPath.parse(resolved).root || sameFolder(resolved, homeDirectory)
 }
 
+export type EnclosingRepository =
+  | { kind: 'found'; root: string; issue: string | null; folder: string }
+  | { kind: 'too-broad'; root: string }
+  | { kind: 'none' }
+
+/**
+ * The repository a local folder is, or sits in, found as `discoverRepos` finds a project or parent repository: on the
+ * canonical folder, using only the filesystem (nothing here starts Git), and never one that encloses the home folder or a
+ * drive root, whose changes would be everything under it. Throws for a folder that is not local or cannot be read.
+ */
+export async function enclosingRepository(folderPath: string, homeDirectory?: string): Promise<EnclosingRepository> {
+  if (!isLocalFilesystemPath(folderPath)) throw new Error('Only local folders can be inspected for git repositories')
+  const folder = await realPathNative(folderPath)
+  if (!isLocalFilesystemPath(folder)) throw new Error('The folder resolves outside local storage')
+  const rawHome = homeDirectory ?? homedir()
+  const home = await realPathNative(rawHome).catch(() => rawHome)
+  for (let current = folder, previous = ''; current !== previous; previous = current, current = hostPath.dirname(current)) {
+    const entry = await inspectGitEntry(current)
+    if (!entry) continue
+    if (current !== folder && isAncestorTooBroad(current, home)) return { kind: 'too-broad', root: current }
+    return { kind: 'found', root: current, issue: entry.issue, folder }
+  }
+  return { kind: 'none' }
+}
+
 export async function discoverRepos(projectPath: string, options: DiscoveryOptions = {}): Promise<DiscoveryResult> {
   if (!isLocalFilesystemPath(projectPath)) throw new Error('Only local project folders can be inspected for git repositories')
   const project = await realPathNative(projectPath)

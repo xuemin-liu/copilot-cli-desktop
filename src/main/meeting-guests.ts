@@ -96,7 +96,16 @@ export class GuestMailbox {
   /** At most one waiting `next` per seat: a newer call takes over from an older one. */
   private readonly waiters = new Map<string, Waiter>()
 
-  constructor(private readonly timers: MeetingTimers, private readonly changed: () => void = () => {}) {}
+  /**
+   * `format` words a hub message for a seat as `next` hands it out, for the channel the seat uses then. Messages are kept as
+   * the hub wrote them, so a guest that falls back from the tools to the helper (the tools' port taken after a restart),
+   * or the other way, reads its unanswered message in the words of the channel it now has.
+   */
+  constructor(
+    private readonly timers: MeetingTimers,
+    private readonly changed: () => void = () => {},
+    private readonly format: (seat: GuestSeat, delivery: MeetingDelivery) => string = (_seat, delivery) => delivery.text,
+  ) {}
 
   /** A reviewer seat for a meeting, or (`kind: 'host'`, no meeting id) a seat whose agent may start one. */
   invite(meetingId: string, name: string, role: string | null, options: { kind?: GuestKind; folder?: string | null } = {}): { seat: GuestSeat; token: string } {
@@ -179,6 +188,13 @@ export class GuestMailbox {
     return queue.given
   }
 
+  /** What `next` hands out: the message to answer now, worded for the seat's channel at this moment. */
+  read(seatId: string): string | null {
+    const seat = this.seats.get(seatId)
+    const delivery = this.take(seatId)
+    return seat && delivery ? this.format(seat, delivery) : null
+  }
+
   /** The guest replied: the message it answered, or null if it had none. */
   answer(seatId: string): MeetingDelivery | null {
     const queue = this.queues.get(seatId)
@@ -226,7 +242,7 @@ export class GuestMailbox {
     if (!seat || seat.closed !== null) return
     const queue = this.queues.get(seatId)
     const agreed = [queue?.given, ...queue?.items ?? []].find((item) => item?.kind === 'agreed')
-    if (seat.kind === 'host' && agreed) seat.farewell = agreed.text
+    if (seat.kind === 'host' && agreed) seat.farewell = this.format(seat, agreed)
     seat.closed = message
     seat.closedAt = this.timers.now()
     this.queues.delete(seatId)
@@ -390,7 +406,7 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       if (seat.closed !== null) return { ok: true, message: mailbox.closing(seat) }
       // Nobody is listening: leave the next message for the call that is.
       if (signal?.aborted) return { ok: true, message: nothingYet }
-      return { ok: true, message: mailbox.take(seat.id)?.text ?? nothingYet }
+      return { ok: true, message: mailbox.read(seat.id) ?? nothingYet }
     }
     case 'reply': {
       const text = typeof fields.text === 'string' ? fields.text : ''
@@ -521,6 +537,19 @@ export function guestMessage(text: string, folder: string, round: number, reply:
 /** The file a guest writes its answer to: one per round and kind, in its seat's folder. */
 export function guestReplyPath(root: string, seatId: string, delivery: MeetingDelivery): string {
   return join(guestSeatFolder(root, seatId), `reply-${delivery.round}-${delivery.kind}.md`)
+}
+
+/**
+ * A hub message as a seat reads it now: worded for its current channel (the tools take the reply as an argument, the helper
+ * a file in `replyRoot`), and for a host with its own commands. `folder` is the meeting's folder; without one (the meeting
+ * is gone) the hub's text is given as it is.
+ */
+export function guestDeliveryText(seat: GuestSeat, delivery: MeetingDelivery, folder: string | null, replyRoot: string): string {
+  if (folder === null) return delivery.text
+  const via: GuestChannel = seat.via === 'mcp' ? 'mcp' : 'helper'
+  const reply: GuestReplyTarget = seat.kind === 'host' ? { via, host: true }
+    : via === 'mcp' ? { via } : { via, path: guestReplyPath(replyRoot, seat.id, delivery) }
+  return guestMessage(delivery.text, folder, delivery.round, reply)
 }
 
 export interface GuestInvitation {

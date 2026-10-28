@@ -113,7 +113,17 @@ export interface MeetingEffects {
   sessionIdOf(tabId: string): string | null
   /** A meeting folder by that id exists already (an older meeting's, kept for a week): its id is not reused. */
   folderExists?(id: string): boolean
+  /**
+   * A party the meeting takes out after it lets two rounds in a row time out (an outside agent that stopped polling). A
+   * Copilot tab is never taken out: the person sees it and decides.
+   */
+  dropsWhenSilent?(tabId: string): boolean
+  /** A party was taken out for its silence; it is told why. */
+  dropped?(tabId: string, message: string): void
 }
+
+/** Rounds in a row a party that `dropsWhenSilent` may let time out before it is taken out. */
+export const MAX_SILENT_ROUNDS = 2
 
 export interface MeetingTimers {
   now(): number
@@ -135,7 +145,8 @@ export class MeetingError extends Error {
 /** A session in the meeting; `counted` is its usage totals already added to the meeting's cost. */
 type Party = MeetingParty & { tabId: string; counted: MeetingUsage }
 
-interface Participant extends Party { joinedRound: number }
+/** `missed`: rounds in a row it was waited for and did not answer before the timeout. */
+interface Participant extends Party { joinedRound: number; missed: number }
 
 interface Reply { text: string | null; vote: MeetingVote | null }
 
@@ -187,7 +198,7 @@ interface SavedMeeting {
   id: string
   topic: string
   host: SavedParty
-  participants: Array<SavedParty & { joinedRound: number; reply: Reply | null; awaited: boolean }>
+  participants: Array<SavedParty & { joinedRound: number; reply: Reply | null; awaited: boolean; missed: number }>
   stage: MeetingStage
   round: number
   maxRounds: number
@@ -311,7 +322,7 @@ export class MeetingHub {
     if (meeting.participants.size >= MAX_MEETING_PARTICIPANTS) throw new MeetingError(`Meeting ${id} already has ${MAX_MEETING_PARTICIPANTS} participants.`)
     const joinedLate = meeting.round > 1 || meeting.stage !== 'waiting'
     const role = options.role ? cleanRole(options.role) || null : null
-    const joined: Participant = { tabId: participant.tabId, title: participant.title, folder: participant.folder, role, counted: options.usage ?? NO_USAGE, joinedRound: meeting.round }
+    const joined: Participant = { tabId: participant.tabId, title: participant.title, folder: participant.folder, role, counted: options.usage ?? NO_USAGE, joinedRound: meeting.round, missed: 0 }
     meeting.participants.set(participant.tabId, joined)
     this.appendTranscript(meeting, `Session ${partyLabel(joined)} joined`, `In round ${meeting.round}.`)
     this.send(meeting, participant.tabId, 'add-dir', meeting.folder)
@@ -405,6 +416,8 @@ export class MeetingHub {
     const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && kind === expected
     const heading = `Round ${delivery.round}${kind === 'discussion' ? ' discussion' : ''}: ${partyLabel(participant)}`
     this.appendTranscript(meeting, `${heading}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
+    // Any reply, late too, shows it is there: only rounds of true silence count toward being taken out.
+    participant.missed = 0
     if (!answersThisRound) {
       meeting.late.push({ title: participant.title, folder: participant.folder, role: participant.role ?? null, text })
       this.changed(meeting)
@@ -499,7 +512,7 @@ export class MeetingHub {
       const tab = entry.sessionId ? find(entry.sessionId) : null
       if (!tab || tab.tabId === host.tabId || meeting.participants.has(tab.tabId)) { missing.push(entry); continue }
       bySession.set(entry.sessionId!, tab.tabId)
-      meeting.participants.set(tab.tabId, { tabId: tab.tabId, title: tab.title, folder: tab.folder ?? entry.folder, role: entry.role, counted: entry.counted, joinedRound: entry.joinedRound })
+      meeting.participants.set(tab.tabId, { tabId: tab.tabId, title: tab.title, folder: tab.folder ?? entry.folder, role: entry.role, counted: entry.counted, joinedRound: entry.joinedRound, missed: entry.missed })
       if (entry.reply) meeting.replies.set(tab.tabId, entry.reply)
       if (entry.awaited && meeting.stage === 'reviewing') meeting.awaiting.add(tab.tabId)
     }
@@ -560,7 +573,7 @@ export class MeetingHub {
       topic: meeting.topic,
       host: saved(meeting.host),
       participants: [...meeting.participants.values()].map((participant) => ({
-        ...saved(participant), joinedRound: participant.joinedRound,
+        ...saved(participant), joinedRound: participant.joinedRound, missed: participant.missed,
         reply: meeting.replies.get(participant.tabId) ?? null, awaited: meeting.awaiting.has(participant.tabId),
       })),
       stage: meeting.stage,
@@ -647,7 +660,19 @@ export class MeetingHub {
     meeting.cancelTimer = null
     if (meeting.stage !== 'reviewing') return
     for (const tabId of meeting.awaiting) this.cancel(meeting, tabId)
+    // Those that may be taken out for silence count the round they let pass; the round ends as usual first.
+    const silent = [...meeting.awaiting].flatMap((tabId) => {
+      const participant = meeting.participants.get(tabId)
+      if (!participant || this.effects.dropsWhenSilent?.(tabId) !== true) return []
+      participant.missed++
+      return participant.missed >= MAX_SILENT_ROUNDS ? [participant] : []
+    })
     this.finishRound(meeting)
+    for (const participant of silent) {
+      if (!this.isOpen(meeting.id) || !meeting.participants.has(participant.tabId)) continue
+      this.removeParticipant(meeting, participant, `Session ${partyLabel(participant)} was taken out: no reply in ${MAX_SILENT_ROUNDS} rounds in a row`)
+      this.effects.dropped?.(participant.tabId, `You were taken out of meeting ${meeting.id}: no reply in ${MAX_SILENT_ROUNDS} rounds in a row.`)
+    }
   }
 
   /** Everything collected is in (or the round timed out): on to the discussion, the host, or the close. */
@@ -838,7 +863,8 @@ function readSavedMeeting(value: unknown): SavedMeeting | null {
   const participants = value.participants.slice(0, MAX_MEETING_PARTICIPANTS).flatMap((entry) => {
     const party = partyOf(entry)
     if (!party || !isRecord(entry)) return []
-    return [{ ...party, joinedRound: roundOf(entry.joinedRound) ?? 1, reply: replyOf(entry.reply), awaited: entry.awaited === true }]
+    const missed = typeof entry.missed === 'number' && Number.isInteger(entry.missed) && entry.missed >= 0 ? Math.min(entry.missed, MAX_SILENT_ROUNDS) : 0
+    return [{ ...party, joinedRound: roundOf(entry.joinedRound) ?? 1, reply: replyOf(entry.reply), awaited: entry.awaited === true, missed }]
   })
   const held = isRecord(value.held) && (value.held.kind === 'round' || value.held.kind === 'propose-close') && typeof value.held.text === 'string'
     ? { kind: value.held.kind, text: value.held.text.slice(0, MAX_MEETING_POST_CHARS), changes: typeof value.held.changes === 'string' ? sharedChanges(value.held.changes) : null } as HeldPost

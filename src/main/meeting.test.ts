@@ -554,3 +554,72 @@ test('after a restart a missing reviewer leaves the meeting and a missing host c
   assert.equal(closed.hub.restore(JSON.parse(before.files.get(at('K7QF', 'meeting.json'))!), '', () => ({ tabId: 'x', title: 't', folder: null })), null, 'a closed meeting stays closed')
   assert.equal(closed.hub.restore({ version: 1, id: '../x' }, '', () => null), null, 'a malformed file restores nothing')
 })
+
+/** A meeting K7QF with a host, a guest and a Copilot tab, whose hub takes out guests that stay silent. */
+function silentGuestMeeting(): {
+  hub: MeetingHub; guest: string; files: Map<string, string>; dropped: Array<{ tabId: string; message: string }>
+  advance(ms: number): void; last(tabId: string): MeetingDelivery
+} {
+  let now = 1_000
+  let timers: Array<{ at: number; callback: () => void; live: boolean }> = []
+  const advance = (ms: number): void => {
+    now += ms
+    const due = timers.filter((timer) => timer.live && timer.at <= now)
+    timers = timers.filter((timer) => !due.includes(timer))
+    for (const timer of due) { timer.live = false; timer.callback() }
+  }
+  const files = new Map<string, string>()
+  const dropped: Array<{ tabId: string; message: string }> = []
+  const delivered: Array<{ tabId: string } & MeetingDelivery> = []
+  const guest = 'guest:0123456789abcdef'
+  const clock: MeetingTimers = { now: () => now, set: (callback, ms) => { const timer = { at: now + ms, callback, live: true }; timers.push(timer); return () => { timer.live = false } } }
+  const hub = new MeetingHub(() => MEETINGS, {
+    deliver: (tabId, delivery) => { delivered.push({ tabId, ...delivery }) },
+    cancel: () => {},
+    write: (_meetingId, path, text) => { files.set(path, text) },
+    changed: () => {},
+    notify: () => {},
+    sessionIdOf: (tabId) => SESSIONS[tabId] ?? tabId,
+    dropsWhenSilent: (tabId) => tabId.startsWith('guest:'),
+    dropped: (tabId, message) => { dropped.push({ tabId, message }) },
+  }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), clock, () => 'K7QF')
+  hub.start(host, { topic: 'login', post: 'Plan v1', changes: null })
+  hub.join({ tabId: guest, title: 'Claude Code (guest)', folder: null }, 'K7QF')
+  hub.join(reviewerB, 'K7QF')
+  return { hub, guest, files, dropped, advance, last: (tabId) => delivered.filter((item) => item.tabId === tabId && item.kind !== 'add-dir').at(-1)! }
+}
+
+test('a guest that is slower than the round timeout but answers every round is never taken out', () => {
+  const { hub, guest, dropped, advance, last } = silentGuestMeeting()
+  // Round 1 times out while the guest is still writing; the host goes on to round 2.
+  const round1 = last(guest)
+  advance(10 * 60_000)
+  hub.post('tab-host', 'round', 'Plan v2', null)
+  advance(60_000)
+  // The guest answers round 1 late, then round 2 also outlasts its timeout.
+  hub.turnCompleted(guest, round1, 'Review of round 1, late.')
+  advance(10 * 60_000)
+  assert.deepEqual(dropped, [], 'it replied: it is not silent')
+  assert.ok(hub.views()[0]!.participants.some((participant) => participant.tabId === guest))
+})
+
+test('a guest that lets two rounds in a row time out is taken out and told why; a Copilot tab never is, and a reply starts the count over', () => {
+  const { hub, guest, files, dropped, advance, last } = silentGuestMeeting()
+  // Round 1: both silent. Round 2: the guest answers, the tab does not; the guest's count starts over.
+  advance(10 * 60_000)
+  hub.post('tab-host', 'round', 'Plan v2', null)
+  hub.turnCompleted(guest, last(guest), 'Review from the guest.')
+  advance(10 * 60_000)
+  assert.deepEqual(dropped, [], 'one silent round, then a reply: not taken out')
+  // Rounds 3 and 4: the guest is silent twice in a row; it is taken out after the second.
+  hub.post('tab-host', 'round', 'Plan v3', null)
+  advance(10 * 60_000)
+  const saved = JSON.parse(files.get(at('K7QF', 'meeting.json'))!)
+  assert.equal(saved.participants.find((entry: { sessionId: string }) => entry.sessionId === guest).missed, 1, 'the count is saved')
+  hub.post('tab-host', 'round', 'Plan v4', null)
+  advance(10 * 60_000)
+  assert.deepEqual(dropped, [{ tabId: guest, message: 'You were taken out of meeting K7QF: no reply in 2 rounds in a row.' }])
+  assert.deepEqual(hub.views()[0]!.participants.map((participant) => participant.tabId), ['tab-b'], 'the Copilot tab stays, though it missed all four')
+  assert.match(files.get(at('K7QF', 'transcript.md'))!, /"Claude Code \(guest\)" was taken out: no reply in 2 rounds in a row/)
+  assert.equal(hub.views()[0]!.stage, 'host', 'the round still went to the host')
+})
