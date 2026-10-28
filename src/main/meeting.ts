@@ -416,13 +416,14 @@ export class MeetingHub {
     const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && kind === expected
     const heading = `Round ${delivery.round}${kind === 'discussion' ? ' discussion' : ''}: ${partyLabel(participant)}`
     this.appendTranscript(meeting, `${heading}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
+    // Any reply, late too, shows it is there: only rounds of true silence count toward being taken out.
+    participant.missed = 0
     if (!answersThisRound) {
       meeting.late.push({ title: participant.title, folder: participant.folder, role: participant.role ?? null, text })
       this.changed(meeting)
       return
     }
     meeting.awaiting.delete(tabId)
-    participant.missed = 0
     meeting.replies.set(tabId, { text, vote: meeting.vote ? parseVote(text) : null })
     if (meeting.awaiting.size === 0) this.finishRound(meeting)
     else this.changed(meeting)

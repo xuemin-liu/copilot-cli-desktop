@@ -1,6 +1,8 @@
-import { stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { lstat, stat } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
+import { isLocalFilesystemPath } from './external-targets.js'
 import { inspectGitEntry } from './git-discovery.js'
+import { ceilingDirectories } from './git-env.js'
 import type { GitRunner, GitRunResult } from './git-runner.js'
 import { scanRepoConfig, type GitTrustStore } from './git-trust.js'
 
@@ -11,8 +13,9 @@ import { scanRepoConfig, type GitTrustStore } from './git-trust.js'
  *
  * The folder is the outside agent's project, which it can change, so Git runs as everywhere else in the desktop: through the
  * `GitRunner` (the resolved executable, the hardened environment and `-c` settings, no repository hooks), and only after
- * the Git panel's trust gate. A repository whose own config names a program (a clean filter runs even on `diff`) is
- * refused until the person has accepted that config in the Git panel.
+ * the Git panel's checks, in its order: the folder must be local, its `.git` entry is found and inspected on the filesystem
+ * before any Git process starts (a `.git` file can point at a network share), and a repository whose own config names a
+ * program (a clean filter runs even on `diff`) is refused until the person has accepted that config in the Git panel.
  */
 
 const MAX_NEW_FILES = 100
@@ -34,10 +37,32 @@ export class FolderChangesError extends Error {
   override name = 'FolderChangesError'
 }
 
+/**
+ * The repository the folder belongs to, found on the filesystem as the Git panel's discovery does: the folder itself or its
+ * nearest ancestor with a `.git` entry. Nothing here starts Git, so the entry is inspected before any program reads it.
+ */
+async function repositoryRoot(folder: string): Promise<string | null> {
+  for (let current = resolve(folder); ; current = dirname(current)) {
+    if (await lstat(join(current, '.git')).then(() => true, () => false)) return current
+    if (dirname(current) === current) return null
+  }
+}
+
 export async function folderChanges(folder: string, deps: FolderChangesDeps): Promise<string> {
+  if (!isLocalFilesystemPath(folder)) throw new FolderChangesError(`${folder} is not on this computer, so no changes can be attached.`)
+  const root = await repositoryRoot(folder)
+  if (!root) throw new FolderChangesError(`${folder} is not a Git repository, so there are no changes to attach.`)
+  const entry = await inspectGitEntry(root)
+  if (!entry) throw new FolderChangesError(`${root} has no .git entry the desktop can open.`)
+  if (entry.issue) throw new FolderChangesError(`The repository in ${root} is not opened: ${entry.issue}.`)
+
   const maxOutputBytes = deps.maxOutputBytes ?? 16 * 1024 * 1024
-  const git = (args: readonly string[], cwd = folder): Promise<GitRunResult> =>
-    deps.runner.run({ cwd, args, kind: 'read', timeoutMs: GIT_TIMEOUT_MS, maxStdoutBytes: maxOutputBytes })
+  // From the root, and never above it: Git finds the repository that was inspected, not one further up.
+  const ceiling = ceilingDirectories(root)
+  const git = (args: readonly string[]): Promise<GitRunResult> => deps.runner.run({
+    cwd: root, args, kind: 'read', timeoutMs: GIT_TIMEOUT_MS, maxStdoutBytes: maxOutputBytes,
+    environment: ceiling ? { extra: { GIT_CEILING_DIRECTORIES: ceiling } } : undefined,
+  })
   /** A command that must succeed: its output, or an error that says why it did not. */
   const output = async (args: readonly string[], what: string, okCodes: readonly number[] = [0]): Promise<string> => {
     const result = await git(args)
@@ -47,12 +72,6 @@ export async function folderChanges(folder: string, deps: FolderChangesDeps): Pr
     return result.stdout.toString('utf8')
   }
 
-  const top = await git(['rev-parse', '--show-toplevel'])
-  if (top.exitCode !== 0) throw new FolderChangesError(`${folder} is not a Git repository, so there are no changes to attach.`)
-  const root = resolve(top.stdout.toString('utf8').trim())
-  const entry = await inspectGitEntry(root)
-  if (!entry) throw new FolderChangesError(`${root} has no .git entry the desktop can open.`)
-  if (entry.issue) throw new FolderChangesError(`The repository in ${root} is not opened: ${entry.issue}.`)
   const scan = await scanRepoConfig(deps.runner, root)
   if (scan.items.length > 0 && !(await deps.trust.isTrusted(root, scan.hash))) {
     throw new FolderChangesError(`The Git settings of ${root} name programs Git could run (${scan.items.map((item) => item.key).join(', ')}). The person has to review them in the Git panel first; then the changes can be attached.`)
@@ -63,7 +82,7 @@ export async function folderChanges(folder: string, deps: FolderChangesDeps): Pr
   const untracked = (await output(['ls-files', '--others', '--exclude-standard', '-z'], 'new files')).split('\0').filter(Boolean)
   let included = 0
   for (const path of untracked) {
-    const size = await stat(join(folder, path)).then((info) => info.isFile() ? info.size : null, () => null)
+    const size = await stat(join(root, path)).then((info) => info.isFile() ? info.size : null, () => null)
     if (included >= MAX_NEW_FILES || size === null || size > MAX_NEW_FILE_BYTES || patch.length > MAX_PATCH_CHARS) {
       patch += `# New file not included: ${path}\n`
       continue

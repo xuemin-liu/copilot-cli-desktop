@@ -3757,6 +3757,8 @@ ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name:
  * may attach; null for none.
  */
 async function inviteHost(folder: string | null): Promise<string> {
+  // Git will read this folder: only one on this computer, as for every other path the desktop opens.
+  if (folder !== null && !isLocalFilesystemPath(folder)) throw new Error(`${folder} is not on this computer. Pick a local project folder.`)
   await meetingControl.port()
   await guestEndpointWrite
   const { seat, token } = guestMailbox.invite('', 'Outside agent', null, { kind: 'host', folder })
@@ -3769,6 +3771,8 @@ async function inviteHost(folder: string | null): Promise<string> {
 ipcMain.handle('desktop:meeting-host-invite', async (event, folder: unknown): Promise<string> => {
   assertTrustedIpcSender(event)
   if (folder !== null && (typeof folder !== 'string' || !isAbsolute(folder) || folder.length > 4096)) throw new Error('Invalid folder')
+  // Checked before anything touches it: a network path would be opened by the stat below.
+  if (folder !== null && !isLocalFilesystemPath(folder)) throw new Error(`${folder} is not on this computer. Pick a local project folder.`)
   if (folder !== null && !(await stat(folder).then((info) => info.isDirectory(), () => false))) throw new Error(`${folder} is not a folder`)
   return inviteHost(folder)
 })

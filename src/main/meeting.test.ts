@@ -555,7 +555,11 @@ test('after a restart a missing reviewer leaves the meeting and a missing host c
   assert.equal(closed.hub.restore({ version: 1, id: '../x' }, '', () => null), null, 'a malformed file restores nothing')
 })
 
-test('a guest that lets two rounds in a row time out is taken out and told why; a Copilot tab never is, and a reply starts the count over', () => {
+/** A meeting K7QF with a host, a guest and a Copilot tab, whose hub takes out guests that stay silent. */
+function silentGuestMeeting(): {
+  hub: MeetingHub; guest: string; files: Map<string, string>; dropped: Array<{ tabId: string; message: string }>
+  advance(ms: number): void; last(tabId: string): MeetingDelivery
+} {
   let now = 1_000
   let timers: Array<{ at: number; callback: () => void; live: boolean }> = []
   const advance = (ms: number): void => {
@@ -568,23 +572,39 @@ test('a guest that lets two rounds in a row time out is taken out and told why; 
   const dropped: Array<{ tabId: string; message: string }> = []
   const delivered: Array<{ tabId: string } & MeetingDelivery> = []
   const guest = 'guest:0123456789abcdef'
-  const effects = {
-    deliver: (tabId: string, delivery: MeetingDelivery) => { delivered.push({ tabId, ...delivery }) },
+  const clock: MeetingTimers = { now: () => now, set: (callback, ms) => { const timer = { at: now + ms, callback, live: true }; timers.push(timer); return () => { timer.live = false } } }
+  const hub = new MeetingHub(() => MEETINGS, {
+    deliver: (tabId, delivery) => { delivered.push({ tabId, ...delivery }) },
     cancel: () => {},
-    write: (_meetingId: string, path: string, text: string) => { files.set(path, text) },
+    write: (_meetingId, path, text) => { files.set(path, text) },
     changed: () => {},
     notify: () => {},
-    sessionIdOf: (tabId: string) => SESSIONS[tabId] ?? tabId,
-    dropsWhenSilent: (tabId: string) => tabId.startsWith('guest:'),
-    dropped: (tabId: string, message: string) => { dropped.push({ tabId, message }) },
-  }
-  const clock: MeetingTimers = { now: () => now, set: (callback, ms) => { const timer = { at: now + ms, callback, live: true }; timers.push(timer); return () => { timer.live = false } } }
-  const hub = new MeetingHub(() => MEETINGS, effects, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), clock, () => 'K7QF')
-  const last = (tabId: string): MeetingDelivery => delivered.filter((item) => item.tabId === tabId && item.kind !== 'add-dir').at(-1)!
+    sessionIdOf: (tabId) => SESSIONS[tabId] ?? tabId,
+    dropsWhenSilent: (tabId) => tabId.startsWith('guest:'),
+    dropped: (tabId, message) => { dropped.push({ tabId, message }) },
+  }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), clock, () => 'K7QF')
   hub.start(host, { topic: 'login', post: 'Plan v1', changes: null })
   hub.join({ tabId: guest, title: 'Claude Code (guest)', folder: null }, 'K7QF')
   hub.join(reviewerB, 'K7QF')
+  return { hub, guest, files, dropped, advance, last: (tabId) => delivered.filter((item) => item.tabId === tabId && item.kind !== 'add-dir').at(-1)! }
+}
 
+test('a guest that is slower than the round timeout but answers every round is never taken out', () => {
+  const { hub, guest, dropped, advance, last } = silentGuestMeeting()
+  // Round 1 times out while the guest is still writing; the host goes on to round 2.
+  const round1 = last(guest)
+  advance(10 * 60_000)
+  hub.post('tab-host', 'round', 'Plan v2', null)
+  advance(60_000)
+  // The guest answers round 1 late, then round 2 also outlasts its timeout.
+  hub.turnCompleted(guest, round1, 'Review of round 1, late.')
+  advance(10 * 60_000)
+  assert.deepEqual(dropped, [], 'it replied: it is not silent')
+  assert.ok(hub.views()[0]!.participants.some((participant) => participant.tabId === guest))
+})
+
+test('a guest that lets two rounds in a row time out is taken out and told why; a Copilot tab never is, and a reply starts the count over', () => {
+  const { hub, guest, files, dropped, advance, last } = silentGuestMeeting()
   // Round 1: both silent. Round 2: the guest answers, the tab does not; the guest's count starts over.
   advance(10 * 60_000)
   hub.post('tab-host', 'round', 'Plan v2', null)

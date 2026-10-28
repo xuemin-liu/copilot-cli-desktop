@@ -375,9 +375,12 @@ post.
   (`meeting_round(…)`, or `round -File …` with the helper), and no reviewer footer.
 - **`meeting-folder-changes.ts`** makes the patch: tracked changes against HEAD, then up to 100 new files of at most 512 KB
   while the patch is under 5 MB, the same limits as `-Changes`. Git runs through the `GitRunner`, as in the Git panel
-  (resolved executable, hardened environment and `-c` settings, no repository hooks), and only after the panel's gate:
-  the `.git` entry must be safe to open, and a repository whose own config names a program (a clean filter runs even on
-  `diff`) must have been accepted in the Git panel, which shares its trust store with meetings. A Git command that fails
+  (resolved executable, hardened environment and `-c` settings, no repository hooks), and only after the panel's gate,
+  in its order: the folder must be on this computer; the repository root is found on the filesystem (the folder or its
+  nearest ancestor with a `.git` entry) and its `.git` entry inspected before any Git process starts, since a `.git` file
+  can point at a network share; Git then runs from that root, never above it (`GIT_CEILING_DIRECTORIES`); and a repository
+  whose own config names a program (a clean filter runs even on `diff`) must have been accepted in the Git panel, which
+  shares its trust store with meetings. A Git command that fails
   (a timeout, output over 16 MB) is an error for the host, never an empty patch. The hub filters the patch like any other.
 - **main**: **File → Host a Meeting from an Outside Agent…** (a question, then an optional folder picker, then the
   invitation on the clipboard), the `meetingHostInvite` IPC that the check uses, and `meetingStatus` shared with the
@@ -400,13 +403,18 @@ post.
   taken after a restart) read `meeting_show(…)` and "call meeting_reply", with no reply file. The mailbox now keeps the
   hub's text and words it for the seat's current channel each time `next` hands it out; the material is unchanged, and the
   unanswered message stays the same message. A host's agreed message is worded when the meeting closes.
+- **The `.git` entry is inspected before Git runs** (a finding on #129, which was merged before it arrived). The patch
+  code asked `git rev-parse` for the repository root and only then inspected its `.git` entry, so Git could follow a
+  `.git` file pointing at a network share (an outbound SMB connection) before the check refused it. It now finds the
+  root on the filesystem and inspects it first, as the Git panel's discovery does; the host invitation also refuses a
+  folder that is not on this computer, before anything opens it.
 
 ## Open questions, decided
 
 1. **A guest that lets two rounds in a row time out is taken out on its own.** Each silent round makes everyone wait for
    the round timeout (10 minutes by default), and an outside agent that stopped polling will not come back by itself. The
    hub counts, for each party it may drop (`dropsWhenSilent`: guests only), the rounds in a row it let time out; a reply
-   starts the count over, and the count is saved with the meeting. At the second, after the round has gone to the host as
+   starts the count over, a late one included (a slow guest is not a silent one), and the count is saved with the meeting. At the second, after the round has gone to the host as
    usual, the guest is taken out: the transcript says so, and its next call answers "You were taken out of meeting K7QF: no
    reply in 2 rounds in a row." A Copilot tab is never taken out this way: the person sees it, and **Remove** is theirs.
 2. **No Claude Code skill file for the invitation.** The invitation carries a token that works for one seat in one meeting,

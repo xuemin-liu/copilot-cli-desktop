@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -84,6 +84,42 @@ test('GIT_DIR and GIT_WORK_TREE in the desktop\'s environment cannot point the p
   } finally {
     await repo.cleanup()
     await other.cleanup()
+  }
+})
+
+test('the .git entry is inspected on the filesystem before any Git process starts, and a network folder is refused', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'meeting-folder-pointer-'))
+  const calls: string[][] = []
+  // Records every Git call; none may happen before the refusal.
+  const runner = { run: async (options: { args: readonly string[] }) => { calls.push([...options.args]); throw new Error('git must not run') } } as unknown as GitRunner
+  const trust = new GitTrustStore(join(base, 'trust.json'))
+  try {
+    // A .git file that names no git directory, which inspectGitEntry refuses; a picked subfolder finds it by walking up.
+    await mkdir(join(base, 'repo', 'src'), { recursive: true })
+    await writeFile(join(base, 'repo', '.git'), 'not a pointer\n')
+    await assert.rejects(folderChanges(join(base, 'repo', 'src'), { runner, trust }), /The repository in .*repo is not opened: The \.git file does not name a git directory\./)
+    assert.deepEqual(calls, [], 'no Git process before the entry was inspected')
+    // A UNC share is the network path Windows would open (isLocalFilesystemPath has its own tests for other platforms).
+    if (process.platform === 'win32') {
+      await assert.rejects(folderChanges('\\\\server\\share\\project', { runner, trust }), /is not on this computer/)
+      assert.deepEqual(calls, [])
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a picked subfolder attaches the changes of its whole repository, found from its root', async () => {
+  const repo = await repository()
+  try {
+    await mkdir(join(repo.folder, 'docs'))
+    await writeFile(join(repo.folder, 'login.cfg'), 'retry = 3\n')
+    await writeFile(join(repo.folder, 'docs', 'plan.md'), '# Plan\n')
+    const patch = await folderChanges(join(repo.folder, 'docs'), repo)
+    assert.match(patch, /^\+retry = 3$/m)
+    assert.match(patch, /^\+\+\+ b\/docs\/plan\.md$/m)
+  } finally {
+    await repo.cleanup()
   }
 })
 
