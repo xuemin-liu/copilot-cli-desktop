@@ -67,7 +67,11 @@ const STAGES: readonly MeetingStage[] = ['waiting', 'reviewing', 'host', 'paused
 const OUTCOMES: readonly MeetingOutcome[] = ['agreed', 'ended', 'stopped', 'host-left']
 const DELIVERY_KINDS: readonly MeetingDeliveryKind[] = ['post', 'vote', 'discussion', 'digest', 'agreed', 'reminder']
 
-export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean }
+/** `guest`: an outside agent (meeting-guests.ts), whose `tabId` is its seat id; filled in by main, which knows the seats. */
+export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean; guest?: { lastSeenAt: number | null } }
+
+/** An outside agent invited to the meeting that has not asked for its first message yet. */
+export interface MeetingInviteView { id: string; name: string; role: string | null }
 
 /** What the meeting's sessions used since they joined it. */
 export interface MeetingCost { aiCredits: number; premiumRequests: number }
@@ -90,6 +94,8 @@ export interface MeetingView {
   outcome: MeetingOutcome | null
   folder: string
   cost: MeetingCost
+  /** Filled in by main. */
+  invited?: MeetingInviteView[]
 }
 
 /** `round` is the round the message belongs to: a reply counts only for that round, however late its turn ends. */
@@ -103,7 +109,7 @@ export interface MeetingEffects {
   write(meetingId: string, path: string, text: string): void
   changed(): void
   notify(meetingId: string, message: string): void
-  /** The Copilot session id of a tab now, which is what a saved meeting remembers it by. */
+  /** The Copilot session id of a tab now (an outside agent's seat id for a guest), which is what a saved meeting remembers it by. */
   sessionIdOf(tabId: string): string | null
   /** A meeting folder by that id exists already (an older meeting's, kept for a week): its id is not reused. */
   folderExists?(id: string): boolean
@@ -782,7 +788,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const text = (value: unknown, limit: number): string | null => typeof value === 'string' ? value.slice(0, limit) : null
 const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 const usageOf = (value: unknown): MeetingUsage => isRecord(value) ? { nanoAiu: count(value.nanoAiu), premiumRequests: count(value.premiumRequests) } : { ...NO_USAGE }
-const sessionIdOf = (value: unknown): string | null => typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value) ? value : null
+/** A Copilot session id, or an outside agent's seat id (meeting-guests.ts), which is what a saved meeting remembers it by. */
+const sessionIdOf = (value: unknown): string | null => typeof value === 'string' && /^(?:[0-9a-f-]{36}|guest:[0-9a-f]{16})$/i.test(value) ? value : null
 const roundOf = (value: unknown): number | null => typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1000 ? value : null
 
 function partyOf(value: unknown): SavedParty | null {

@@ -5,8 +5,9 @@ import { dirname, join, relative, resolve, isAbsolute } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS } from './meeting-messages.js'
+import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS } from './meeting-messages.js'
 import { MEETING_ID_PATTERN } from './meeting.js'
+import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
 
 /**
  * What a session needs to host a meeting: a PowerShell helper (no Node or desktop CLI needed, like `browser.ps1`), the
@@ -225,13 +226,31 @@ export interface MeetingRequest { topic: string; text: string; changes: string |
 export interface MeetingResponse { ok: boolean; message: string }
 export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest) => MeetingResponse
 
+/**
+ * Outside agents' requests (`/guest/<command>`, meeting-guests.ts). Their tokens are not session tokens: a guest token
+ * cannot run a host command and a session token cannot act as a guest. `handle` answers null for a token it does not know.
+ */
+export interface GuestEndpoint {
+  handle(token: string, command: GuestCommand, fields: Record<string, unknown>): Promise<MeetingResponse | null>
+  /** The server is closing: every request still waiting answers now. */
+  release(): void
+}
+
+/** A guest's reply and the request's other fields; far below a host's post and patch. */
+const MAX_GUEST_REQUEST_BYTES = MAX_MEETING_REPLY_CHARS * 3 + 64 * 1024
+
 /** One loopback server for every session; each session's token says which session is calling. */
 export class MeetingControlServer {
   private server: Server | null = null
   private listening: Promise<number> | null = null
   private readonly tokens = new Map<string, string>()
 
-  constructor(private readonly handle: MeetingRequestHandler) {}
+  constructor(private readonly handle: MeetingRequestHandler, private readonly guest?: GuestEndpoint, private readonly onListening?: (port: number) => void) {}
+
+  /** The port, starting the server if no session has yet; an invited guest needs it before its host restarts. */
+  port(): Promise<number> {
+    return this.listen()
+  }
 
   /** A fresh token for the session's next process; the previous one stops working. */
   async register(tabId: string): Promise<{ port: number; token: string }> {
@@ -250,6 +269,7 @@ export class MeetingControlServer {
     this.server = null
     this.listening = null
     this.tokens.clear()
+    this.guest?.release()
     if (server) await new Promise<void>((resolveClose) => server.close(() => resolveClose()))
   }
 
@@ -270,6 +290,7 @@ export class MeetingControlServer {
         const port = (server.address() as { port: number } | null)?.port
         // No CORS; reject browser-originated requests and DNS rebinding before authentication.
         if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { ok: false, message: 'Forbidden' }); return }
+        if ((request.url ?? '').startsWith('/guest/')) { this.answerGuest(request, send); return }
         const tabId = this.caller(request.headers.authorization ?? '')
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
         const command = (request.url ?? '').slice(1)
@@ -285,17 +306,34 @@ export class MeetingControlServer {
         // Sessions keep the app alive, not this server: an idle endpoint must not hold the process open.
         server.unref()
         this.server = server
-        resolveListen((server.address() as { port: number }).port)
+        const listeningPort = (server.address() as { port: number }).port
+        this.onListening?.(listeningPort)
+        resolveListen(listeningPort)
       })
     }).catch((error) => { this.listening = null; throw error })
+  }
+
+  private answerGuest(request: IncomingMessage, send: (status: number, body: MeetingResponse) => void): void {
+    const command = (request.url ?? '').slice('/guest/'.length)
+    const guest = this.guest
+    if (!guest || request.method !== 'POST' || !(GUEST_COMMANDS as readonly string[]).includes(command)) { send(404, { ok: false, message: 'Unknown meeting command' }); return }
+    const authorization = request.headers.authorization ?? ''
+    const token = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : ''
+    void readFields(request, MAX_GUEST_REQUEST_BYTES).then(async (body) => {
+      if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
+      const answer = await guest.handle(token, command as GuestCommand, body)
+      if (!answer) { send(401, { ok: false, message: 'This invitation is not known to the desktop. Ask the person for a new one.' }); return }
+      // The guest gave up waiting (its tool call timed out): what it was handed is handed out again on its next call.
+      if (!request.socket.destroyed) send(200, answer)
+    }).catch(() => { if (!request.socket.destroyed) send(500, { ok: false, message: 'The desktop could not handle the meeting command.' }) })
   }
 }
 
 /** The request's fields: JSON from the Windows helper, form data from the macOS and Linux one. */
-async function readFields(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+async function readFields(request: IncomingMessage, limit = MAX_REQUEST_BYTES): Promise<Record<string, unknown> | null> {
   const type = request.headers['content-type']
   if (!isJsonType(type) && !isFormType(type)) return null
-  const body = await readBody(request, MAX_REQUEST_BYTES)
+  const body = await readBody(request, limit)
   if (body === null) return null
   if (isFormType(type)) {
     const fields = await parseFormFields(body, type!)
