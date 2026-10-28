@@ -233,6 +233,14 @@ test('an outside host uses the tools: start with its invitation, answer the roun
   assert.match(started.text, /^Meeting K7QF is open\. .* Call meeting_next to wait for their replies/)
   assert.equal(hub.views()[0]!.hostTabId, host.seat.id)
 
+  // The host's MCP session starts over (the desktop restarted): meeting_start with the same invitation binds the new
+  // session to its open meeting, and says so, instead of an error the agent might stop at.
+  const again = (await rpc(undefined, 'initialize', {})).sessionId!
+  assert.deepEqual(await tool(again, 'meeting_start', { invitation: host.token, topic: 'again', post: 'again' }),
+    { text: 'Rejoined meeting K7QF as host. Call meeting_next for the reviewers\' replies.', isError: false })
+  assert.equal((await tool(again, 'meeting_status')).text, 'status of K7QF')
+  assert.equal(hub.views().length, 1, 'no second meeting')
+
   const other = (await rpc(undefined, 'initialize', {})).sessionId!
   await tool(other, 'meeting_join', { invitation: reviewer.token })
   assert.match((await tool(other, 'meeting_next', { wait_seconds: 5 })).text, /the result of meeting_show\(name: "changes", round: 1\)/)
@@ -251,4 +259,5 @@ test('an outside host uses the tools: start with its invitation, answer the roun
   assert.match((await tool(session, 'meeting_next', { wait_seconds: 5 })).text, /^\[meeting K7QF · closed · from the desktop\]/)
   assert.equal((await tool(session, 'meeting_next', { wait_seconds: 1 })).text, 'The meeting is closed.')
   assert.equal((await tool(session, 'meeting_status')).text, 'The meeting is closed.')
+  assert.equal((await tool(again, 'meeting_start', { invitation: host.token, topic: 'x', post: 'y' })).text, 'The meeting is closed.', 'no rejoining a closed meeting')
 })
