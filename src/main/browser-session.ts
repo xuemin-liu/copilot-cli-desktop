@@ -298,6 +298,11 @@ pageId/frameId, generation and coverage reasons. Hidden candidates are described
 without exporting hidden text. Nonstandard div/span icons are included when they
 have pointer cursors, handlers or control metadata. Coverage is sampled at the
 visible center; actual input points are always hit-tested independently.
+Discovery visits at most 30,000 elements once, with capped candidate storage.
+Explicit controls take priority over generic leaf div/span candidates; incomplete
+traversals cannot establish selector uniqueness. Opacity-zero controls remain
+addressable and are reported as transparent; native hit-testing still applies.
+Names and titles under data-private (including shadow hosts) are masked.
 Use exactly one selector or targetRef in a target action. References are valid
 only in their page/frame/document and latest discovery generation. Set frame to
 the returned frameId for a child. Re-discovery and reload invalidate old refs;
@@ -322,7 +327,11 @@ waitFor and assert accept all:[conditions] (1–10) instead of a single conditio
 Additional conditions: enabled; attribute with attribute data-test-*, aria-*,
 role, title or class and string expected; numericValue with number expected and
 optional nonnegative tolerance (default zero). Numeric values are checked without
-exporting the field value. requestComplete takes request:{urlPattern,method,
+exporting the field value.
+Content assertions (numericValue/value/text/attribute) refuse private regions,
+aggregates containing private content, password inputs, and autocomplete fields
+for passwords, one-time codes or payment details. Use public state indicators.
+requestComplete takes request:{urlPattern,method,
 state:"finished"|"failed",optional status} and no target; it observes only this run.
 Combine request completion with explicit DOM readiness for the current rendering
 revision. Changed labels, nonempty canvases and animation frames are insufficient

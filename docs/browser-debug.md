@@ -428,7 +428,15 @@ attributes are included. `unavailable` describes hidden candidates without hidde
 labels. `reason` explains disabled, offscreen and center-covered controls. Coverage
 is sampled at the visible center; coordinate input always checks its actual point.
 Results are bounded to 200 visible targets and 50 hidden candidates. Closed shadow
-roots and controls beyond the traversal limit remain unavailable.
+roots and controls beyond the traversal limit remain unavailable. Discovery makes
+one traversal of at most 30,000 elements, caps stored candidates, and reports
+`inspection.visited` and `inspection.complete`. Explicit controls take priority
+over generic leaf div/span candidates. Selector uniqueness is conservative: hidden
+duplicates count too, and an incomplete traversal cannot establish uniqueness.
+Opacity-zero controls remain available for native input and assertions (as used
+by styled checkboxes); discovery reports them as transparent. Native hit-testing
+still determines whether they can receive input. Private controls and controls
+under a `data-private` ancestor, including shadow hosts, mask both names and titles.
 
 When a selector is ambiguous, use `targetRef` from that frame's latest discovery:
 
@@ -486,7 +494,11 @@ sequential, not an atomic application snapshot. Additional conditions are `enabl
 `attribute` (public `data-test-*`, `aria-*`, `role`, `title`, `class`) and
 `numericValue` (`expected` number, optional nonnegative `tolerance`, default zero).
 Numeric checks read visible field values or numeric element text without exporting
-the value. A `requestComplete` condition takes
+the value. Content assertions (`numericValue`, `value`, `text`, `attribute`) refuse
+private regions, aggregates containing private content, password fields, and
+autocomplete fields for passwords, one-time codes or payment details. This also
+prevents repeated numeric-range assertions from disclosing protected values.
+Use a public application-state indicator for assertions instead. A `requestComplete` condition takes
 `request: {urlPattern,method,state:"finished"|"failed",optional status}` and no target.
 It matches requests observed during this run, never an earlier run.
 
@@ -553,6 +565,9 @@ references, drawing, handle movement, ineffective input, readiness, network-fail
 isolation/cleanup and recovery, at zoom factors 0.8, 1, 1.25, 1.5 with host display
 scaling and forced 1.25 scaling. Evidence is under `test-results/browser-unattended/`.
 This fixture uses synthetic data and does not contact shared application services.
+`npm run browser-discovery:check` additionally verifies large-page discovery,
+transparent input controls, private tooltips and sensitive-value assertion guards
+through the production helper, with evidence under `test-results/browser-discovery/`.
 
 1. Open the web app in the session browser and select the page to test.
 2. Enable **Testing mode** below the browser views.

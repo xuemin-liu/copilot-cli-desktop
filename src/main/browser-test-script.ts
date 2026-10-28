@@ -8,15 +8,29 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     for (let node = element; node; node = parent(node)) if (node === ancestor) return true
     return false
   }
+  const styles = new WeakMap<Element, CSSStyleDeclaration>()
+  const styleOf = (element: Element): CSSStyleDeclaration => {
+    let style = styles.get(element)
+    if (!style) { style = getComputedStyle(element); styles.set(element, style) }
+    return style
+  }
+  const privateRegion = (element: Element): boolean => {
+    for (let node: Element | null = element; node; node = parent(node)) if (node.hasAttribute('data-private')) return true
+    return false
+  }
+  const sensitiveField = (element: Element): boolean => element instanceof HTMLInputElement && element.type === 'password'
+    || (element.getAttribute('autocomplete') ?? '').split(/\s+/).some(token => /^(one-time-code|cc-.*|current-password|new-password)$/i.test(token))
   const visible = (element: Element): boolean => {
     for (let node: Element | null = element; node; node = node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null)) {
-      const style = getComputedStyle(node)
-      if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0 || node.hasAttribute('hidden') || node.getAttribute('aria-hidden') === 'true') return false
+      const style = styleOf(node)
+      // Opacity-zero inputs are commonly the actual interaction surface for
+      // styled checkboxes/radios. Keep rendered visibility separate from opacity.
+      if (style.display === 'none' || style.visibility === 'hidden' || node.hasAttribute('hidden') || node.getAttribute('aria-hidden') === 'true') return false
     }
     return element.getClientRects().length > 0
   }
   const name = (element: Element, depth = 0): string => {
-    for (let node: Element | null = element; node; node = parent(node)) if (node.hasAttribute('data-private')) return '[private]'
+    if (privateRegion(element)) return '[private]'
     const label = element.getAttribute('aria-label')
     if (label) return label.slice(0, 200)
     if (!depth && element.hasAttribute('aria-labelledby')) {
@@ -26,7 +40,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       if (labels.length) return labels.map(label => name(label, 1)).join(' ').slice(0, 200)
     }
     const labels = (element as HTMLInputElement).labels
-    if (labels?.length) return [...labels].map(label => label.innerText).join(' ').slice(0, 200)
+    if (labels?.length) return [...labels].map(label => name(label, 1)).join(' ').slice(0, 200)
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
     let text = ''; let visited = 0
     while (walker.nextNode() && text.length < 200 && ++visited < 1000) {
@@ -80,23 +94,45 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     })
     if (operation === 'viewport') return { width: innerWidth, height: innerHeight }
     if (operation === 'inspect') {
-      const all = find('*')
+      const primaryTargets: Element[] = [], fallbackTargets: Element[] = [], unavailable: Element[] = []
+      const counts = new Map<string, number>()
+      let visited = 0, capped = false
       const primary = (element: Element): boolean => element.matches('input,textarea,select,button,a,summary,[role],[tabindex],[title],[aria-label],[aria-labelledby],[aria-haspopup],[aria-controls],[onclick],[contenteditable="true"],tr,img,canvas,svg,[data-testid]')
-        || typeof (element as HTMLElement).onclick === 'function' || getComputedStyle(element).cursor === 'pointer'
-      // Delegated listeners cannot be inferred from DOM metadata. Include leaf
-      // div/span candidates too, after explicit controls, so they remain addressable
-      // by references without pretending they have a known click behavior.
-      const explicit = all.filter(primary)
-      const explicitSet = new Set(explicit)
-      const candidates = [...explicit, ...all.filter(element => !explicitSet.has(element) && element.matches('div,span') && !element.children.length)]
-      const matches = candidates.filter(visible).filter(element => {
-        if (element.localName !== 'svg') return true
-        // Decorative icons should not consume slots already used by their control.
-        for (let node = parent(element); node; node = parent(node)) {
-          if (node.matches('button,a,summary,[role="button"],[role="tab"],svg')) return false
+        || typeof (element as HTMLElement).onclick === 'function' || styleOf(element).cursor === 'pointer'
+      const addCount = (key: string): void => { counts.set(key, (counts.get(key) ?? 0) + 1) }
+      // Walk each element exactly once, including open shadow roots. Candidate
+      // storage is capped independently of the traversal: inert leaf divs must
+      // not crowd out a real control near the end of a large page. Four scalar
+      // counters per node establish uniqueness without another selector traversal.
+      const walkers = [document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT)]
+      while (walkers.length && visited < 30000 && Date.now() < args.deadline - 250) {
+        const element = walkers.at(-1)!.nextNode() as Element | null
+        if (!element) { walkers.pop(); continue }
+        visited++
+        const tag = element.localName
+        addCount(`tag\0${tag}`)
+        if (element.id) addCount(`id\0${element.id}`)
+        if (element.hasAttribute('data-testid')) addCount(`testid\0${element.getAttribute('data-testid')}`)
+        if (element.hasAttribute('name')) addCount(`name\0${tag}\0${element.getAttribute('name')}`)
+        if (element.shadowRoot) walkers.push(document.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT))
+        const explicit = primary(element)
+        if (!explicit && !(element.matches('div,span') && !element.children.length)) continue
+        const candidates = explicit ? primaryTargets : fallbackTargets
+        if (candidates.length >= 200) { capped = true; continue }
+        if (!visible(element)) {
+          if (unavailable.length < 50) unavailable.push(element)
+          else capped = true
+          continue
         }
-        return true
-      })
+        if (element.localName === 'svg') {
+          let decorative = false
+          for (let node = parent(element); node; node = parent(node)) if (node.matches('button,a,summary,[role="button"],[role="tab"],svg')) { decorative = true; break }
+          if (decorative) continue
+        }
+        candidates.push(element)
+      }
+      const complete = walkers.length === 0
+      const matches = [...primaryTargets, ...fallbackTargets]
       const generation = String(args.generation)
       const nodes = new Map<string, Element>()
       const targets = matches.slice(0, 200).map((element, index) => {
@@ -105,25 +141,29 @@ export function browserTestScript(operation: string, args: Record<string, any>):
         const x = Math.max(0, rect.left) + Math.min(rect.width, innerWidth - Math.max(0, rect.left)) / 2
         const y = Math.max(0, rect.top) + Math.min(rect.height, innerHeight - Math.max(0, rect.top)) / 2
         const hit = hitAt(x, y)
+        let transparent = false
+        for (let node: Element | null = element; node; node = parent(node)) if (Number(styleOf(node).opacity) === 0) { transparent = true; break }
         const reason = disabled(element) ? 'disabled' : rect.right <= 0 || rect.bottom <= 0 || rect.left >= innerWidth || rect.top >= innerHeight ? 'offscreen'
-          : !contains(element, hit) ? 'covered at inspected point' : null
-        const selector = element.id ? `#${CSS.escape(element.id)}` : element.hasAttribute('data-testid') ? `[data-testid=${JSON.stringify(element.getAttribute('data-testid'))}]`
-          : element.hasAttribute('name') ? `${element.tagName.toLowerCase()}[name=${JSON.stringify(element.getAttribute('name'))}]` : element.tagName.toLowerCase()
+          : !contains(element, hit) ? 'covered at inspected point' : transparent ? 'transparent; may still receive input' : null
+        const id = element.id, testid = element.getAttribute('data-testid'), fieldName = element.getAttribute('name'), tag = element.localName
+        const selector = id ? `#${CSS.escape(id)}` : testid !== null ? `[data-testid="${CSS.escape(testid)}"]`
+          : fieldName !== null ? `${tag}[name="${CSS.escape(fieldName)}"]` : tag
+        const key = id ? `id\0${id}` : testid !== null ? `testid\0${testid}` : fieldName !== null ? `name\0${tag}\0${fieldName}` : `tag\0${tag}`
+        const protectedContent = privateRegion(element)
         return {
-        ref, selectorUnique: find(selector, false).filter(visible).length === 1, reason, hit: metadata(hit),
-        selector: element.id ? `#${CSS.escape(element.id)}` : element.hasAttribute('data-testid') ? `[data-testid=${JSON.stringify(element.getAttribute('data-testid'))}]`
-          : element.hasAttribute('name') ? `${element.tagName.toLowerCase()}[name=${JSON.stringify(element.getAttribute('name'))}]` : element.tagName.toLowerCase(),
+        ref, selectorUnique: complete && counts.get(key) === 1, reason, hit: metadata(hit), selector,
         tag: element.tagName.toLowerCase(), type: element.getAttribute('type'),
         name: name(element),
-        title: element.getAttribute('title')?.slice(0, 200) ?? null, role: element.getAttribute('role')
+        title: protectedContent ? '[private]' : element.getAttribute('title')?.slice(0, 200) ?? null, role: protectedContent ? null : element.getAttribute('role')
           ?? ({ button: 'button', a: 'link', select: 'combobox', textarea: 'textbox', summary: 'button' } as Record<string, string>)[element.localName] ?? null,
-        expanded: element.getAttribute('aria-expanded'), selected: element.getAttribute('aria-selected'),
+        expanded: protectedContent ? null : element.getAttribute('aria-expanded'), selected: protectedContent ? null : element.getAttribute('aria-selected'),
         bounds: (() => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height } })(),
         disabled: disabled(element),
       } })
       scope.__desktopTestDiscovery = { generation, nodes }
-      return { generation, targets, unavailable: candidates.filter(element => !visible(element)).slice(0, 50).map(element => ({ ...metadata(element), reason: 'hidden by styles, an ancestor, aria-hidden, or no rendered box' })),
-        viewport: { width: innerWidth, height: innerHeight, devicePixelRatio }, timestamp: new Date().toISOString(), truncated: matches.length > 200,
+      return { generation, targets, unavailable: unavailable.map(element => ({ ...metadata(element), reason: 'hidden by styles, an ancestor, aria-hidden, or no rendered box' })),
+        inspection: { visited, complete },
+        viewport: { width: innerWidth, height: innerHeight, devicePixelRatio }, timestamp: new Date().toISOString(), truncated: !complete || capped || matches.length > 200,
         limitations: ['References are valid only in this page/frame/document and latest discovery generation. Coverage is sampled at the visible center; every input point is hit-tested again.'] }
     }
     if (operation === 'probe' && args.condition === 'url') return { passed: location.href.includes(args.expected) }
@@ -134,6 +174,10 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       if (args.condition === 'count') return { passed: matches.length === args.expected }
       if (matches.length !== 1) return { passed: false, reason: matches.length ? 'Selector matches multiple visible elements.' : 'Expected element is not visible.' }
       const target = matches[0]!
+      if (['text', 'value', 'numericValue', 'attribute'].includes(args.condition)
+        && (privateRegion(target) || sensitiveField(target) || target.querySelector('[data-private]'))) {
+        return { passed: false, reason: 'Content assertions are unavailable for private regions or sensitive password, one-time-code and payment fields. Select a public application-state indicator instead.' }
+      }
       switch (args.condition) {
         case 'visible': return { passed: true }
         case 'enabled': return { passed: !disabled(target), reason: disabled(target) ? 'Control is disabled or inert.' : undefined }

@@ -35,6 +35,7 @@
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
+    "browser-discovery:check": "npm run build && node scripts/browser-discovery-check.mjs",
     "browser-unattended:check": "npm run build && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25",
     "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
     "dist:win": "npm run build && electron-builder --win --publish never && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
@@ -44,7 +45,7 @@
     "migration:check": "npm run build && node scripts/migration-electron-check.mjs",
     "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity",
     "popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --popout",
-    "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs && node scripts/browser-devtools-share-check.mjs && node scripts/browser-overrides-status-check.mjs && node scripts/browser-popup-overrides-check.mjs && node scripts/browser-overrides-private-check.mjs && node scripts/browser-profile-share-check.mjs && node scripts/browser-reader-check.mjs && node scripts/browser-pick-check.mjs && node scripts/browser-basics-check.mjs && node scripts/browser-dialog-check.mjs && node scripts/browser-context-check.mjs && node scripts/browser-permissions-check.mjs && node scripts/browser-test-check.mjs && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25"
+    "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs && node scripts/browser-devtools-share-check.mjs && node scripts/browser-overrides-status-check.mjs && node scripts/browser-popup-overrides-check.mjs && node scripts/browser-overrides-private-check.mjs && node scripts/browser-profile-share-check.mjs && node scripts/browser-reader-check.mjs && node scripts/browser-pick-check.mjs && node scripts/browser-basics-check.mjs && node scripts/browser-dialog-check.mjs && node scripts/browser-context-check.mjs && node scripts/browser-permissions-check.mjs && node scripts/browser-test-check.mjs && node scripts/browser-discovery-check.mjs && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
