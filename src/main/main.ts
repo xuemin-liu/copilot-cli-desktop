@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir, readdir, readFile, stat } from 'node:fs/promises'
+import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -116,11 +116,15 @@ import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
 import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
-import { MeetingError, MeetingHub, joinRequest, MEETING_ID_PATTERN, MEETING_STATE_FILE } from './meeting.js'
+import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
 import { MeetingTurnReader } from './meeting-turns.js'
-import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
+import { MEETING_MARKER_PREFIX, roundPaths } from './meeting-messages.js'
+import {
+  GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestInvitation,
+  guestMessage, guestReplyPath, guestSeatFolder, handleGuestRequest, type GuestDeps,
+} from './meeting-guests.js'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
@@ -575,7 +579,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     tabs: state.tabs.map((tab) => ({ ...tab })),
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
-    meetings: meetingHub.views(),
+    meetings: meetingViews(),
   }
 }
 
@@ -1872,8 +1876,12 @@ const meetingOutbox = new MeetingOutbox({
 })
 
 const meetingHub = new MeetingHub(meetingRoot, {
-  deliver: (tabId, delivery) => { meetingOutbox.enqueue(tabId, delivery); scheduleMeetingPump(0) },
-  cancel: (meetingId, tabId) => meetingOutbox.cancel(meetingId, tabId),
+  deliver: (tabId, delivery) => {
+    if (GUEST_ID_PATTERN.test(tabId)) { deliverToGuest(tabId, delivery); return }
+    meetingOutbox.enqueue(tabId, delivery)
+    scheduleMeetingPump(0)
+  },
+  cancel: (meetingId, tabId) => { meetingOutbox.cancel(meetingId, tabId); guestMailbox.cancel(meetingId, tabId) },
   write: (meetingId, path, text) => {
     // One meeting's files are written in order, so the transcript on disk is always the latest one.
     const previous = meetingWrites.get(meetingId) ?? Promise.resolve()
@@ -1881,19 +1889,105 @@ const meetingHub = new MeetingHub(meetingRoot, {
       .catch((error) => writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {}))
     meetingWrites.set(meetingId, next)
   },
-  changed: () => broadcastState(),
+  changed: () => {
+    // Not while meetings are being restored one by one: a guest's meeting may simply not be back yet.
+    if (guestsReady) guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
+    broadcastState()
+  },
   notify: (_meetingId, message) => {
     void writeAppLog(message).catch(() => {})
     showNotification('Copilot CLI Desktop', message)
   },
   sessionIdOf: (tabId) => {
+    if (GUEST_ID_PATTERN.test(tabId)) return tabId
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     return tab?.lastSessionId ?? managedTabs.get(tabId)?.session.lastSessionId ?? null
   },
   folderExists: (id) => existsSync(join(meetingRoot(), id)),
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
-const meetingControl = new MeetingControlServer(handleMeetingCommand)
+// Outside agents as reviewers (docs/meeting-guests-plan.md): seats, tokens and messages live in the mailbox; the hub sees
+// each guest as a party with a `guest:` id. Their helper, the endpoint file and their reply folders are in `guestRoot()`.
+function guestRoot(): string { return join(app.getPath('userData'), 'meeting-guest') }
+/** Guests are answered once saved meetings are restored; before that a guest's meeting may only look closed. */
+let guestsReady = false
+let guestSeatsWrite: Promise<void> = Promise.resolve()
+let guestEndpointWrite: Promise<void> = Promise.resolve()
+const guestMailbox = new GuestMailbox(realMeetingTimers, () => {
+  const text = guestMailbox.serialize()
+  guestSeatsWrite = guestSeatsWrite.then(() => writeFileAtomic(join(guestRoot(), GUEST_SEATS_FILE), text))
+    .catch((error) => writeAppLog(`Could not save meeting guests: ${String(error)}`).catch(() => {}))
+  broadcastState()
+})
+
+/** A meeting message for a guest: show commands in place of meeting files, and the file to write its reply to. */
+function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {
+  if (delivery.kind === 'add-dir') return
+  const folder = meetingHub.folderOf(delivery.meetingId)
+  if (!folder) return
+  guestMailbox.enqueue(seatId, { ...delivery, text: guestMessage(delivery.text, folder, delivery.round, guestReplyPath(guestRoot(), seatId, delivery)) })
+}
+
+const guestDeps: GuestDeps = {
+  ready: () => guestsReady,
+  isOpen: (id) => meetingHub.isOpen(id),
+  join: (seat) => {
+    try { meetingHub.join({ tabId: seat.id, title: `${seat.name} (guest)`, folder: null }, seat.meetingId, { role: seat.role }); return null }
+    catch (error) { if (error instanceof MeetingError) return error.message; throw error }
+  },
+  leave: (seat) => meetingHub.leave(seat.id),
+  turnCompleted: (seat, delivery, reply) => meetingHub.turnCompleted(seat.id, delivery, reply),
+  material: async (id, name, round) => {
+    const folder = meetingHub.folderOf(id)
+    if (!folder) return null
+    await meetingWrites.get(id)
+    const paths = roundPaths(folder, round)
+    return readFile(name === 'transcript' ? paths.transcript : paths[name], 'utf8').catch(() => null)
+  },
+}
+
+/** The helper and the endpoint file, written each time the endpoint starts: its port changes with every app start. */
+function writeGuestEndpoint(port: number): void {
+  const windows = process.platform === 'win32'
+  guestEndpointWrite = guestEndpointWrite.then(async () => {
+    await mkdir(guestRoot(), { recursive: true })
+    await writeFileAtomic(join(guestRoot(), windows ? 'meeting-guest.ps1' : 'meeting-guest.sh'), windows ? GUEST_HELPER : GUEST_HELPER_SH)
+    await writeFileAtomic(join(guestRoot(), GUEST_ENDPOINT_FILE), JSON.stringify({ pid: process.pid, port }))
+  }).catch((error) => writeAppLog(`Could not write the meeting guest endpoint: ${String(error)}`).catch(() => {}))
+}
+
+const meetingControl = new MeetingControlServer(handleMeetingCommand, {
+  handle: async (token, command, fields, signal) => {
+    const seat = guestMailbox.seatOf(token)
+    if (!seat) return null
+    // Every request says the guest is still there, which the meeting bar shows.
+    try { return await handleGuestRequest(guestMailbox, guestDeps, seat, command, fields, signal) } finally { broadcastState() }
+  },
+  release: () => guestMailbox.release(),
+}, writeGuestEndpoint)
+
+/** The hub's views, with what only main knows: which parties are guests, and who is invited but not connected yet. */
+function meetingViews(): MeetingView[] {
+  const guests = guestMailbox.views()
+  return meetingHub.views().map((meeting) => ({
+    ...meeting,
+    participants: meeting.participants.map((participant) => {
+      const seat = guests.find((guest) => guest.id === participant.tabId)
+      return seat ? { ...participant, guest: { lastSeenAt: seat.lastSeenAt } } : participant
+    }),
+    invited: guests.filter((guest) => guest.meetingId === meeting.id && !guest.joined).map(({ id, name, role }) => ({ id, name, role })),
+  }))
+}
+
+/** Unused invitations expire; seats over for an hour are forgotten, with their reply folders. */
+const guestSweepTimer = setInterval(() => {
+  for (const seat of guestMailbox.sweep()) void rm(guestSeatFolder(guestRoot(), seat.id), { recursive: true, force: true }).catch(() => {})
+}, 60_000)
+guestSweepTimer.unref()
+
+async function restoreGuestSeats(): Promise<void> {
+  try { guestMailbox.restore(JSON.parse(await readFile(join(guestRoot(), GUEST_SEATS_FILE), 'utf8'))) } catch { /* None saved yet. */ }
+}
 
 function scheduleMeetingPump(delayMs = 1_000): void {
   if (meetingPumpTimer) {
@@ -1928,7 +2022,8 @@ function handleMeetingCommand(tabId: string, command: MeetingCommand, request: M
         const current = meetingHub.meetingOf(tabId)
         const view = current ? meetingHub.views().find((meeting) => meeting.id === current.id) : undefined
         if (!view) return { ok: true, message: 'This session is not in an open meeting.' }
-        const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title ?? id)
+        const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title
+          ?? view.participants.find((participant) => participant.tabId === id)?.title ?? id)
         return { ok: true, message: `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s)${waiting.length ? `; waiting for ${waiting.join(', ')}` : ''}.` }
       }
     }
@@ -2577,19 +2672,30 @@ async function restoreSavedWorkspaceTabs(): Promise<void> {
  * session id, and the tabs taking part are started, since a meeting cannot wait for each of them to be shown.
  */
 async function restoreMeetings(): Promise<void> {
-  let entries
-  try { entries = await readdir(meetingRoot(), { withFileTypes: true }) } catch { return }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink() || !MEETING_ID_PATTERN.test(entry.name)) continue
-    const folder = join(meetingRoot(), entry.name)
-    let saved: unknown
-    try { saved = JSON.parse(await readFile(join(folder, MEETING_STATE_FILE), 'utf8')) } catch { continue }
-    const transcript = await readFile(join(folder, 'transcript.md'), 'utf8').catch(() => '')
-    const tabs = meetingHub.restore(saved, transcript, (sessionId) => {
-      const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote && !candidate.unloaded)
-      return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
-    })
-    for (const tabId of tabs ?? []) observe(wakeDormantTab(tabId), 'Could not start a session of a restored meeting')
+  await restoreGuestSeats()
+  try {
+    let entries
+    try { entries = await readdir(meetingRoot(), { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !MEETING_ID_PATTERN.test(entry.name)) continue
+      const folder = join(meetingRoot(), entry.name)
+      let saved: unknown
+      try { saved = JSON.parse(await readFile(join(folder, MEETING_STATE_FILE), 'utf8')) } catch { continue }
+      const transcript = await readFile(join(folder, 'transcript.md'), 'utf8').catch(() => '')
+      const tabs = meetingHub.restore(saved, transcript, (sessionId) => {
+        // A guest comes back with its seat, if the seat is still open and belongs to this meeting.
+        if (GUEST_ID_PATTERN.test(sessionId)) {
+          const seat = guestMailbox.seat(sessionId)
+          return seat && seat.closed === null && seat.joined && seat.meetingId === entry.name ? { tabId: seat.id, title: `${seat.name} (guest)`, folder: null } : null
+        }
+        const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote && !candidate.unloaded)
+        return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
+      })
+      for (const tabId of tabs ?? []) if (!GUEST_ID_PATTERN.test(tabId)) observe(wakeDormantTab(tabId), 'Could not start a session of a restored meeting')
+    }
+  } finally {
+    guestsReady = true
+    guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
   }
 }
 
@@ -3531,7 +3637,13 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
   if (typeof meetingId !== 'string' || !MEETING_ID_PATTERN.test(meetingId)) throw new Error('Invalid meeting')
   if (action === 'stop') meetingHub.stop(meetingId)
   else if (action === 'resume') meetingHub.resume(meetingId)
-  else if (action === 'join') {
+  else if (action === 'remove') {
+    // An outside agent, joined or only invited: it leaves the round, and its token answers why from now on.
+    const seat = typeof tabId === 'string' ? guestMailbox.seat(tabId) : null
+    if (!seat || seat.meetingId !== meetingId) throw new Error('That guest is not in this meeting')
+    if (seat.joined) meetingHub.leave(seat.id)
+    guestMailbox.close(seat.id, 'The person removed you from the meeting.')
+  } else if (action === 'join') {
     if (!isSessionTabId(tabId)) throw new Error('Invalid session')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || tab.remote) throw new Error('Only a local session can join a meeting')
@@ -3548,6 +3660,31 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     const failure = await shell.openPath(join(folder, 'transcript.md'))
     if (failure) throw new Error(failure)
   } else throw new Error('Invalid meeting action')
+})
+
+/**
+ * The person invites an outside agent (Claude Code, Codex CLI, …) to review: a seat with its own token, and the invitation
+ * to paste into that agent, also put on the clipboard. Only the person can do this; no model can add a guest.
+ */
+ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name: unknown, role: unknown): Promise<string> => {
+  assertTrustedIpcSender(event)
+  if (typeof meetingId !== 'string' || !MEETING_ID_PATTERN.test(meetingId)) throw new Error('Invalid meeting')
+  if (typeof name !== 'string' || name.length > 200) throw new Error('Invalid name')
+  if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
+  const meeting = meetingViews().find((candidate) => candidate.id === meetingId)
+  if (!meeting || meeting.stage === 'closed') throw new Error(`There is no open meeting ${meetingId}.`)
+  if (meeting.participants.length + (meeting.invited?.length ?? 0) >= MAX_MEETING_PARTICIPANTS) {
+    throw new Error(`Meeting ${meetingId} already has ${MAX_MEETING_PARTICIPANTS} reviewers and invitations.`)
+  }
+  // The endpoint file must be there before the guest's first call, even if no session has started the server yet.
+  await meetingControl.port()
+  await guestEndpointWrite
+  const { seat, token } = guestMailbox.invite(meetingId, name, typeof role === 'string' ? role : null)
+  await mkdir(guestSeatFolder(guestRoot(), seat.id), { recursive: true })
+  const helper = join(guestRoot(), process.platform === 'win32' ? 'meeting-guest.ps1' : 'meeting-guest.sh')
+  const invitation = guestInvitation({ meetingId, role: seat.role, token, helper: guestHelperCommand(helper) })
+  clipboard.writeText(invitation)
+  return invitation
 })
 
 // Resolve with Copilot: the task goes to the session, and the repository is claimed for it in main, so the panel's writes
@@ -4297,7 +4434,7 @@ app.on('before-quit', (event) => {
       usageService = null
       meetingHub.dispose()
       // Open meetings are saved as they stand, for the next start to restore.
-      await Promise.allSettled([service?.stop(), meetingControl.close(), ...meetingWrites.values(), ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      await Promise.allSettled([service?.stop(), meetingControl.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)
         .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))

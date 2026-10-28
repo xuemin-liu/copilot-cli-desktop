@@ -42,7 +42,8 @@ handle, only input/output/resize events.
   including after restart, and can be closed without stopping the main session.
 - **Review meetings** let other sessions, in any project and with any model, review one session's plan or uncommitted
   changes. Say "start a meeting to review your plan" in one session and "join meeting <id>" in the others; the desktop
-  passes the rounds between them until every reviewer agrees. See [Review meetings](#review-meetings).
+  passes the rounds between them until every reviewer agrees. An agent outside the desktop, such as Claude Code or Codex CLI,
+  can review too: **Invite outside agent…** on the meeting bar. See [Review meetings](#review-meetings).
 - **Debug browser** opens your web app beside the terminal, with native Chromium
   DevTools and Local Overrides. Console and network activity are also available
   through `copilot-desktop browser` commands, without an MCP server. Testing mode
@@ -274,6 +275,30 @@ A meeting lets several sessions review one session's plan or local changes witho
   reviewer whose tab is gone leaves the meeting; if the host's tab is gone, the meeting closes.
 - The host needs a session started (or resumed once) by this version, so that it has the meeting helper. The helper runs in
   the host's own shell, so it asks for approval like any other command unless the session allows it.
+
+### Outside agents as reviewers
+
+An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI or Gemini CLI, can review in a meeting if it
+runs on the same computer and has a shell tool.
+
+1. On the meeting bar, press **Invite outside agent…**, give the agent a name and, optionally, a role, and press **Copy
+   invitation**.
+2. Paste the invitation into that agent. It tells the agent to run the guest helper in a loop: `next` waits up to 100 seconds
+   for its next message, `reply` sends its answer, and `show` prints material too long to include, in pages.
+3. The agent joins with its first `next` and then reviews and votes like any other reviewer. The meeting bar lists it as a
+   guest, with **Remove**, and says when it stopped polling.
+
+- Only you invite: an invitation is made only from the meeting bar. Its token works for that one agent in that one meeting
+  and stops working when the agent leaves, is removed or the meeting closes. An invitation nobody uses expires after 15
+  minutes. Tokens are saved only as hashes, outside the meeting folder.
+- The agent's own model provider sees the plan, the patch and the other reviews. Patches are filtered as for any reviewer.
+- The agent is told to review only, but the desktop cannot enforce that on another harness: run it in a mode that asks
+  before editing files. Allowing the helper's command once saves approving every poll.
+- The agent writes each reply to a file the desktop names in `%APPDATA%\Copilot CLI Desktop\meeting-guest\`, never into
+  its own project. The helper and `endpoint.json` (the desktop's port, no token) live there too, so a guest keeps working
+  after an app restart.
+- An outside agent's usage is billed by its own provider; the meeting bar's cost counts Copilot sessions only. A guest that
+  keeps one turn polling costs one small model call about every 100 seconds while it waits, more as its conversation grows.
 
 ## Permission presets
 

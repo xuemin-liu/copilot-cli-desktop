@@ -1,7 +1,7 @@
 # Plan: outside agents as meeting reviewers
 
-Status: draft, not started. Spike 1 passed for Claude Code (see [Spikes](#spikes-before-phase-1)). Builds on
-[review meetings](session-meeting-plan.md).
+Status: phase 1 built (see [Phase 1 as built](#phase-1-as-built)). Spike 1 passed for Claude Code (see
+[Spikes](#spikes-before-phase-1)). Builds on [review meetings](session-meeting-plan.md).
 
 ## The workflow this is for
 
@@ -85,7 +85,7 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 
 ### Joining
 
-- **Invite** (UI only) creates a guest seat: an id `guest:<8 hex>`, a 32-byte token, the role and name the person typed. A
+- **Invite** (UI only) creates a guest seat: an id `guest:<16 hex>`, a 32-byte token, the role and name the person typed. A
   seat that nobody uses within 15 minutes expires.
 - **The first `next` joins.** The hub's `join` runs with the seat as the party (tab id `guest:…`, title "Claude Code (guest)",
   folder null). Joining on invite would make a round wait for an agent that is not running yet.
@@ -109,8 +109,8 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
   Origin and Host checks. Guest tokens are a separate map: a guest token cannot call host commands and a session token
   cannot call guest ones. `next` is the only request that stays open; a server closing at quit ends it with "The desktop is
   closing; run next again in a minute."
-- **`meeting-messages.ts`: an audience.** The message builders get `audience: 'session' | 'guest'`. For a guest, `attach`
-  names a `show` command instead of a path, and the cap is 20,000 characters instead of the PTY's 11,000.
+- **Messages for guests.** A guest's message names a `show` command instead of a path (as built: a rewrite of the desktop's
+  header, see [Phase 1 as built](#phase-1-as-built)).
 - **`meeting.ts`: almost nothing.** Parties are already plain ids with a title. `MeetingView` participants get a
   `guest: boolean`, so the bar can label them and say their cost is not counted.
 - **Restarts.** `sessionIdOf('guest:…')` returns the guest id itself, and `restore`'s `find` maps it back to its seat, so a
@@ -133,7 +133,8 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 - **Reviewers do not act** is advice, not something the desktop can enforce on another harness. The invite dialog suggests
   running the outside agent in a mode that asks before edits.
 - **Guest replies are model text**, framed below the separator like any other reply, and bounded to 64 KB.
-- **Bounded:** 8 parties per meeting, one open `next` per seat, 15-minute expiry for unused seats, `show` pages of 20,000
+- **Bounded:** 8 reviewers per meeting plus the host (guests and invitations count), one waiting `next` per seat (a newer
+  call takes over, and a closed connection ends its wait), 15-minute expiry for unused seats, `show` pages of 20,000
   characters.
 
 ## Phases
@@ -183,9 +184,29 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 
 - **The desktop names the reply file.** Each message ends with "Write your whole answer to
   `‹userData›\meeting-guest\guest-ab12\reply-3.md`, then run `reply -Token … -File` with that path." The path is built by
-  the desktop, per seat and round; `reply` accepts only that path. Nothing is written into the guest's project.
+  the desktop, per seat and round. Nothing is written into the guest's project.
 - **The invitation suggests allowing the helper.** In Claude Code that is the command prefix
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "…\meeting-guest.ps1"`, so a meeting does not ask on every poll.
+
+## Phase 1 as built
+
+- **`meeting-guests.ts`**: `GuestMailbox` (seats, token hashes, one queue per seat, waiting `next` calls),
+  `handleGuestRequest` (the four commands, against `GuestDeps` that main fills in), `guestMessage`, `guestInvitation`, and the
+  two helpers. Unit tests run the mailbox on a fake clock, a whole meeting through a real `MeetingHub`, save and restore, the
+  endpoint over HTTP, and the helper end to end (Windows PowerShell on Windows, `sh` and `curl` elsewhere).
+- **Messages are rewritten, not rebuilt.** Instead of an audience for every message builder, `guestMessage` rewrites the
+  desktop's header: each meeting path it names (built by the desktop with `roundPaths`) becomes "the output of: show -Name …".
+  Material below the separator, which a model wrote, is never touched. Long material is still cut at the PTY's 11,000
+  characters and read with `show`, in 20,000-character pages; one builder for both kinds of reviewer was worth one more call.
+- **The reply path is advice, not a rule.** The helper reads whichever file the agent names, as the host's helper does; the
+  desktop only receives text. The message names a file in the seat's folder, so in practice nothing lands in the project.
+- **Startup.** Guests are answered once saved meetings are restored ("The desktop is starting" before that), and seats of
+  meetings that did not come back are closed then, not while meetings are restored one by one.
+- **`npm run meeting:check`** invites a guest in run 1 (the invitation on the clipboard, the seat saved without its token,
+  the endpoint file written). In run 2 the guest helper joins with its first `next` after the restart, reads `show` commands
+  instead of paths, pages the patch, replies to the file the desktop named, votes, and hears that the meeting closed.
+- Not covered by a check: an app restart while a guest is waiting inside `next` (the endpoint's `release` is unit tested),
+  and other harnesses than Claude Code.
 
 ## Open questions
 

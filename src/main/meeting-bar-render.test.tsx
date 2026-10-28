@@ -35,6 +35,27 @@ test('Add session lists only sessions whose CLI is running and that are in no me
   assert.match(html, /placeholder="Role \(optional\)"/)
 })
 
+test('outside agents are listed with Remove, a quiet one says since when, and invitations not yet used can be cancelled', () => {
+  const now = Date.UTC(2026, 9, 28, 12, 0)
+  const withGuests: MeetingView = {
+    ...meeting,
+    participants: [
+      ...meeting.participants,
+      { tabId: 'guest:0123456789abcdef', title: 'Claude Code (guest)', role: 'performance', replied: false, guest: { lastSeenAt: now - 30_000 } },
+      { tabId: 'guest:fedcba9876543210', title: 'Codex (guest)', role: null, replied: false, guest: { lastSeenAt: now - 10 * 60_000 } },
+    ],
+    waitingFor: ['tab-b', 'guest:0123456789abcdef'],
+    invited: [{ id: 'guest:1111111111111111', name: 'Gemini', role: 'security' }],
+  }
+  const html = renderToStaticMarkup(<MeetingBar meetings={[withGuests]} tabs={[tab('tab-host', 'host'), tab('tab-b', 'reviewer')]} activeTabId="tab-host" onError={() => undefined} now={now} />)
+  assert.match(html, /waiting for reviewer, Claude Code \(guest\) · reviewers: reviewer \(security reviewer\), Claude Code \(guest\) \(performance\), Codex \(guest\)/, 'a guest is named by its seat, not as a closed session')
+  assert.match(html, /AI credits used \(Copilot sessions only\)/)
+  assert.match(html, /<li>Claude Code \(guest\) \(performance\)<button[^>]*>Remove<\/button><\/li>/, 'a guest that polls is not flagged')
+  assert.match(html, /<li>Codex \(guest\)<span class="meeting-bar-quiet"> · not polling since [^<]+<\/span><button[^>]*>Remove<\/button><\/li>/)
+  assert.match(html, /Gemini \(security\) · invited, not connected yet<button[^>]*>Cancel<\/button>/)
+  assert.match(html, />Invite outside agent…<\/button>/)
+})
+
 test('the meeting cost reads as AI credits, with premium requests only when there are any', () => {
   assert.equal(formatMeetingCost({ aiCredits: 0, premiumRequests: 0 }), '0.00 AI credits used')
   assert.equal(formatMeetingCost({ aiCredits: 0.004, premiumRequests: 0 }), '<0.01 AI credits used')
