@@ -28,6 +28,7 @@ export const OVERRIDES_SCRIPT = `(async () => {
  * Its explicit pattern-refresh barrier also awaits Fetch.enable, including asynchronous .headers parsing; the pinned
  * Electron DevTools exposes that barrier as updateInterceptionPatternsForTests. Chromium populates large folders in
  * 1000-file chunks, about a second each, so each response waits only for the files it needs (popupOverrideResponseScript).
+ * Before that, DevTools lists the whole folder (about 7 s for 150,000 files on an SSD); it reports `listing` meanwhile.
  */
 export const POPUP_OVERRIDES_READY_SCRIPT = `(async () => {
   const Common = await import('devtools://devtools/bundled/core/common/common.js');
@@ -36,12 +37,13 @@ export const POPUP_OVERRIDES_READY_SCRIPT = `(async () => {
   if (!enabled) return { enabled: false, folders: [] };
   const Persistence = await import('devtools://devtools/bundled/models/persistence/persistence.js');
   const fileSystems = Persistence.IsolatedFileSystemManager.IsolatedFileSystemManager.instance();
-  await fileSystems.waitForFileSystems();
+  const listed = await Promise.race([fileSystems.waitForFileSystems().then(() => true), new Promise(accept => setTimeout(() => accept(false)))]);
+  if (!listed) return { listing: true };
   if (!fileSystems.fileSystems().some(fileSystem => fileSystem.type() === 'overrides')) return { enabled, folders: [] };
   let manager;
-  try { manager = Persistence.NetworkPersistenceManager.NetworkPersistenceManager.instance(); } catch { return null; }
+  try { manager = Persistence.NetworkPersistenceManager.NetworkPersistenceManager.instance(); } catch { return { activating: true }; }
   const project = manager.project();
-  if (!project || (enabled && !manager.active())) return null;
+  if (!project || (enabled && !manager.active())) return { activating: true };
   await manager.updateInterceptionPatternsForTests();
   return { enabled, folders: [project.fileSystem().path()] };
 })()`

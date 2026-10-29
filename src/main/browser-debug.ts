@@ -40,6 +40,9 @@ const MAX_PAGES = 32
 const POPUP_OVERRIDES_DRAIN_MS = 2000
 /** A popup response waiting on its override files fails only when the folder stops loading, however large it is. */
 const POPUP_OVERRIDES_STALL_MS = 15000
+const POPUP_OVERRIDES_ACTIVATION_MS = 15000
+/** DevTools reports no progress while it lists the folder, so this only stops a folder that never finishes listing. */
+const POPUP_OVERRIDES_LISTING_MS = 5 * 60_000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
 interface BrowserPage {
@@ -462,8 +465,14 @@ export class BrowserDebug {
     let stopped = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let closed: (() => void) | undefined
+    let timedOut: ((stage: string) => void) | undefined
     const checkOpen = (): void => {
       if (stopped || this.disposed || popup.contents.isDestroyed()) throw new Error('Popup closed or overrides activation timed out')
+    }
+    // Each step has its own limit: the time DevTools spends listing the folder grows with the folder, the others do not.
+    const startStage = (stage: string, ms = POPUP_OVERRIDES_ACTIVATION_MS): void => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => timedOut?.(stage), ms)
     }
     try {
       await Promise.race([
@@ -475,12 +484,17 @@ export class BrowserDebug {
           if (!setting?.enabled || !setting.folder) return
           const tools = this.ensureDevtools(popup)
           this.layout()
+          let stage = 'starting DevTools'
           for (;;) {
             checkOpen()
             if (!tools.isDestroyed() && !tools.isLoading() && tools.getURL().startsWith('devtools://devtools/')) {
-              const ready = overridesFromDevtools(await tools.executeJavaScript(POPUP_OVERRIDES_READY_SCRIPT))
+              const state = await tools.executeJavaScript(POPUP_OVERRIDES_READY_SCRIPT) as unknown
               checkOpen()
+              const ready = overridesFromDevtools(state)
               if (ready) { popup.overrides = ready; return }
+              const reported = typeof state === 'object' && state !== null
+              const next = reported && 'listing' in state ? 'listing the overrides folder' : reported ? 'turning on overrides' : stage
+              if (next !== stage) startStage(stage = next, next === 'listing the overrides folder' ? POPUP_OVERRIDES_LISTING_MS : undefined)
             }
             await new Promise(accept => setTimeout(accept, 25))
           }
@@ -488,7 +502,8 @@ export class BrowserDebug {
         new Promise<never>((_accept, reject) => {
           closed = () => { stopped = true; reject(new Error('Popup closed before overrides activated')) }
           popup.contents.once('destroyed', closed)
-          timer = setTimeout(() => { stopped = true; reject(new Error('Local Overrides activation timed out')) }, 15000)
+          timedOut = stage => { stopped = true; reject(new Error(`Local Overrides activation timed out while ${stage}`)) }
+          startStage('starting DevTools')
         }),
       ])
       return true
