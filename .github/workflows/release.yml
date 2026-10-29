@@ -51,7 +51,9 @@ jobs:
       - name: Install dependencies
         run: corepack pnpm install --frozen-lockfile
       - name: Verify source
+        # Without this, PowerShell continues after a failing command and the step reports only the last one.
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           corepack pnpm typecheck
           corepack pnpm test
           corepack pnpm smoke
