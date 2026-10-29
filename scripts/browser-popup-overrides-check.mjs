@@ -55,6 +55,16 @@ if (!process.versions.electron) {
       response.end('released')
       return
     }
+    if (request.url === '/late-target') {
+      response.setHeader('content-type', 'text/plain')
+      response.end('late network')
+      return
+    }
+    if (request.url === '/plain') {
+      response.setHeader('content-type', 'text/html')
+      response.end('<!doctype html><title>plain document</title>')
+      return
+    }
     if (request.url === '/post-load') {
       response.setHeader('content-type', 'text/plain')
       response.end('post-load fetch completed')
@@ -82,9 +92,16 @@ if (!process.versions.electron) {
   }
   await writeFile(join(sharedFolder, host, 'drain'), document('shared') +
     '<img src="/drain-image"><script>fetch("/header-stream").then(r=>r.text()).catch(()=>{});</script>')
-  // DevTools populates folders in 1000-file chunks; the first popup must wait for the final chunk too.
-  await mkdir(join(sharedFolder, 'unrelated'), { recursive: true })
-  await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(sharedFolder, 'unrelated', `${index}.txt`), 'fixture')))
+  // DevTools populates folders in 1000-file chunks, about a second each. Listed before the host folders, these files put
+  // their overrides in a later chunk: the first popup must wait for exactly those, not for the whole folder.
+  await mkdir(join(sharedFolder, '0-unrelated'), { recursive: true })
+  await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(sharedFolder, '0-unrelated', `${index}.txt`), 'fixture')))
+  // A localhost page has no .headers or document override, so it loads before its later-chunk file is fetched. DevTools
+  // lists a small folder early, so the files listed before the target are in the same folder.
+  const lateHost = `localhost%3A${site.address().port}`
+  await mkdir(join(sharedFolder, lateHost), { recursive: true })
+  await Promise.all(Array.from({ length: 2005 }, (_, index) => writeFile(join(sharedFolder, lateHost, `0-${index}.txt`), 'fixture')))
+  await writeFile(join(sharedFolder, lateHost, 'late-target'), 'late override')
   await writeFile(join(profile, 'Preferences'), JSON.stringify({ devtools: { file_system_paths: { [sharedFolder]: 'overrides' } } }))
   const cases = [
     { id: '11111111-1111-4111-8111-111111111111', enabled: true },
@@ -228,6 +245,17 @@ if (!process.versions.electron) {
           await loaded(stream, marker)
           assert.equal(await stream.executeJavaScript('document.title'), `${marker} document`, 'content override does not await the original streaming body')
           browser.action(`close-page:${stream.id}`)
+          browser.action(`select-page:${parent.id}`)
+          const lateOrigin = origin.replace('127.0.0.1', 'localhost')
+          await parent.executeJavaScript(`window.plain=window.open(${JSON.stringify(`${lateOrigin}/plain`)},"_blank");void 0`)
+          await until(() => browser.view.webContents.id !== parent.id, 'plain popup selected')
+          const plain = browser.view.webContents
+          await until(async () => !plain.isLoadingMainFrame() && await plain.executeJavaScript('document.readyState') === 'complete', 'plain popup loaded')
+          const pending = await plain.devToolsWebContents.executeJavaScript(`(async()=>{const P=await import("devtools://devtools/bundled/models/persistence/persistence.js");const m=P.NetworkPersistenceManager.NetworkPersistenceManager.instance();return !m.project().uiSourceCodeForURL(m.fileUrlFromNetworkUrl(${JSON.stringify(`${lateOrigin}/late-target`)}))})()`)
+          assert.ok(pending, 'the plain popup loads before its later-chunk override file does')
+          const late = await plain.executeJavaScript('fetch("/late-target").then(r=>r.text())')
+          assert.equal(late, 'late override', 'a request after load waits for its later-chunk override')
+          browser.action(`close-page:${plain.id}`)
         }
         browser.action(`select-page:${parent.id}`)
         await parent.executeJavaScript('window.blank=window.open("", "_blank"); blank.document.write(\'<script src="/shared.js"></script>\'); blank.document.close(); void 0')
