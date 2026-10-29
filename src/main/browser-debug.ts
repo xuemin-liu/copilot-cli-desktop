@@ -38,6 +38,8 @@ import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
 const POPUP_OVERRIDES_DRAIN_MS = 2000
+/** A popup response waiting on its override files fails only when the folder stops loading, however large it is. */
+const POPUP_OVERRIDES_STALL_MS = 15000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
 interface BrowserPage {
@@ -359,6 +361,16 @@ export class BrowserDebug {
           return
         }
         let action = await tools.executeJavaScript(popupOverrideResponseScript(params)) as { method: string; params: Record<string, unknown> }
+        let loaded = -1
+        let progressAt = Date.now()
+        while (action.method === 'wait') {
+          if (handingOff()) return
+          if (Number(action.params.loaded) > loaded) { loaded = Number(action.params.loaded); progressAt = Date.now() }
+          else if (Date.now() - progressAt > POPUP_OVERRIDES_STALL_MS) throw new Error('Local Overrides folder stopped loading')
+          await new Promise(accept => setTimeout(accept, 100))
+          if (handingOff()) return
+          action = await tools.executeJavaScript(popupOverrideResponseScript(params)) as typeof action
+        }
         if (handingOff()) return
         if (action.method === 'Fetch.getResponseBody') {
           const body = await debuggerClient.sendCommand(action.method, action.params).catch(error => ({ error: String(error) }))

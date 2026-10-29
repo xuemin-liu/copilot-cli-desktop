@@ -25,8 +25,9 @@ export const OVERRIDES_SCRIPT = `(async () => {
 
 /**
  * A popup's first response waits for the native override project and its Fetch patterns, not just a loaded DevTools UI.
- * Chromium populates large folders in chunks. Its explicit pattern-refresh barrier also awaits Fetch.enable, including
- * asynchronous .headers parsing; the pinned Electron DevTools exposes that barrier as updateInterceptionPatternsForTests.
+ * Its explicit pattern-refresh barrier also awaits Fetch.enable, including asynchronous .headers parsing; the pinned
+ * Electron DevTools exposes that barrier as updateInterceptionPatternsForTests. Chromium populates large folders in
+ * 1000-file chunks, about a second each, so each response waits only for the files it needs (popupOverrideResponseScript).
  */
 export const POPUP_OVERRIDES_READY_SCRIPT = `(async () => {
   const Common = await import('devtools://devtools/bundled/core/common/common.js');
@@ -41,12 +42,15 @@ export const POPUP_OVERRIDES_READY_SCRIPT = `(async () => {
   try { manager = Persistence.NetworkPersistenceManager.NetworkPersistenceManager.instance(); } catch { return null; }
   const project = manager.project();
   if (!project || (enabled && !manager.active())) return null;
-  if (Array.from(project.uiSourceCodes()).length < project.fileSystem().initialFilePaths().length) return null;
   await manager.updateInterceptionPatternsForTests();
   return { enabled, folders: [project.fileSystem().path()] };
 })()`
 
-/** Route an already-started popup response through Chromium's own URL mapping, header rules and response encoder. */
+/**
+ * Route an already-started popup response through Chromium's own URL mapping, header rules and response encoder.
+ * While the folder is still loading it answers `wait`, with the loaded file count, until this URL's override file and
+ * every .headers file above it are loaded; a URL with neither in the folder does not wait.
+ */
 export function popupOverrideResponseScript(event: unknown, body?: unknown): string {
   return `(async () => {
     const event = ${JSON.stringify(event)};
@@ -57,7 +61,23 @@ export function popupOverrideResponseScript(event: unknown, body?: unknown): str
     const persistence = Persistence.NetworkPersistenceManager.NetworkPersistenceManager.instance();
     const continued = { method: 'Fetch.continueRequest', params: { requestId: event.requestId } };
     if (!persistence.active() || event.request.method === 'OPTIONS') return continued;
-    const file = persistence.project()?.uiSourceCodeForURL(persistence.fileUrlFromNetworkUrl(event.request.url));
+    const project = persistence.project();
+    const fileUrl = persistence.fileUrlFromNetworkUrl(event.request.url);
+    const root = project?.fileSystem().path();
+    if (project && root && fileUrl.startsWith(root + '/')) {
+      const path = fileUrl.slice(root.length + 1);
+      const folders = path.split('/').slice(0, -1);
+      const initial = new Set(project.fileSystem().initialFilePaths());
+      const headerFiles = folders.map((_, index) => [...folders.slice(0, index), '.headers'].join('/'))
+        .concat([...folders, '.headers'].join('/')).filter(name => initial.has(name));
+      const needed = initial.has(path) ? [...headerFiles, path] : headerFiles;
+      if (needed.some(name => !project.uiSourceCodeForURL(root + '/' + name))) {
+        return { method: 'wait', params: { requestId: event.requestId, loaded: Array.from(project.uiSourceCodes()).length } };
+      }
+      // A .headers file loaded after the activation barrier must be parsed before its rules are read.
+      if (headerFiles.length && !body) await persistence.updateInterceptionPatternsForTests();
+    }
+    const file = project?.uiSourceCodeForURL(fileUrl);
     const headers = persistence.handleHeaderInterception(event);
     if (!file && headers === event.responseHeaders) return continued;
     const redirect = event.responseStatusCode >= 300 && event.responseStatusCode < 400;

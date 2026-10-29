@@ -82,9 +82,10 @@ if (!process.versions.electron) {
   }
   await writeFile(join(sharedFolder, host, 'drain'), document('shared') +
     '<img src="/drain-image"><script>fetch("/header-stream").then(r=>r.text()).catch(()=>{});</script>')
-  // DevTools populates folders in 1000-file chunks; the first popup must wait for the final chunk too.
-  await mkdir(join(sharedFolder, 'unrelated'), { recursive: true })
-  await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(sharedFolder, 'unrelated', `${index}.txt`), 'fixture')))
+  // DevTools populates folders in 1000-file chunks, about a second each. Listed before the host folder, these files put
+  // its overrides in a later chunk: the first popup must wait for exactly those, not for the whole folder.
+  await mkdir(join(sharedFolder, '0-unrelated'), { recursive: true })
+  await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(sharedFolder, '0-unrelated', `${index}.txt`), 'fixture')))
   await writeFile(join(profile, 'Preferences'), JSON.stringify({ devtools: { file_system_paths: { [sharedFolder]: 'overrides' } } }))
   const cases = [
     { id: '11111111-1111-4111-8111-111111111111', enabled: true },
