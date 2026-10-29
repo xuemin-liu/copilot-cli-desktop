@@ -33,7 +33,7 @@ import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePe
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
-import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, overridesFromPreferences, popupOverrideResponseScript, type OverridesSetting } from './browser-overrides.js'
+import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_LOADED_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, overridesFromPreferences, popupOverrideResponseScript, type OverridesSetting } from './browser-overrides.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -400,11 +400,19 @@ export class BrowserDebug {
       contents.off('destroyed', detached)
       contents.off('did-fail-load', failed)
     }
+    let settling = false
     const cleanup = (): void => {
-      if (phase !== 'active') return
-      phase = 'draining'
+      if (phase !== 'active' || settling) return
+      settling = true
       contents.off('did-finish-load', cleanup)
       contents.off('did-fail-load', failed)
+      // Requests made after load still go through the wait above until native DevTools has the whole folder.
+      void ready.then(applied => applied ? this.popupFolderLoaded(popup, () => phase !== 'active') : undefined)
+        .catch(() => {}).finally(drain)
+    }
+    const drain = (): void => {
+      if (phase !== 'active') return
+      phase = 'draining'
       const deadline = new Promise<void>(accept => {
         finishDrain = accept
         drainTimer = setTimeout(accept, POPUP_OVERRIDES_DRAIN_MS)
@@ -429,6 +437,24 @@ export class BrowserDebug {
       if (!contents.isDestroyed()) { popup.error = `Could not activate popup overrides: ${sanitizedText(String(error))}`; contents.stop() }
       cleanup()
     })
+  }
+
+  /** Resolves once the popup's DevTools intercepts every file in its overrides folder, or the folder stops loading. */
+  private async popupFolderLoaded(popup: BrowserPage, stopped: () => boolean): Promise<void> {
+    let loaded = -1
+    let progressAt = Date.now()
+    for (;;) {
+      const tools = popup.tools?.webContents
+      if (stopped() || this.disposed || !tools || tools.isDestroyed() || !popup.overrides?.enabled) return
+      const state = await tools.executeJavaScript(POPUP_OVERRIDES_LOADED_SCRIPT) as { done: boolean; loaded: number }
+      if (state.done) return
+      if (state.loaded > loaded) { loaded = state.loaded; progressAt = Date.now() }
+      else if (Date.now() - progressAt > POPUP_OVERRIDES_STALL_MS) {
+        if (!popup.contents.isDestroyed()) popup.error ??= 'Local Overrides folder stopped loading; later requests in this popup may not use their overrides.'
+        return
+      }
+      await new Promise(accept => setTimeout(accept, 100))
+    }
   }
 
   /** Electron's native auto-open-for-popups handler is a no-op. Keep its override engine alive without showing its UI. */

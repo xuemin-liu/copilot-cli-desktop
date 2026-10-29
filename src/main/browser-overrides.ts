@@ -47,6 +47,22 @@ export const POPUP_OVERRIDES_READY_SCRIPT = `(async () => {
 })()`
 
 /**
+ * Native DevTools intercepts only the override files it has loaded, so a popup keeps its own interception until this
+ * reports `done`: the whole folder is loaded and its Fetch patterns refreshed. Until then it reports the loaded count.
+ */
+export const POPUP_OVERRIDES_LOADED_SCRIPT = `(async () => {
+  const Persistence = await import('devtools://devtools/bundled/models/persistence/persistence.js');
+  let manager;
+  try { manager = Persistence.NetworkPersistenceManager.NetworkPersistenceManager.instance(); } catch { return { done: true, loaded: 0 }; }
+  const project = manager.project();
+  if (!project || !manager.active()) return { done: true, loaded: 0 };
+  const loaded = Array.from(project.uiSourceCodes()).length;
+  if (loaded < project.fileSystem().initialFilePaths().length) return { done: false, loaded };
+  await manager.updateInterceptionPatternsForTests();
+  return { done: true, loaded };
+})()`
+
+/**
  * Route an already-started popup response through Chromium's own URL mapping, header rules and response encoder.
  * While the folder is still loading it answers `wait`, with the loaded file count, until this URL's override file and
  * every .headers file above it are loaded; a URL with neither in the folder does not wait.
