@@ -48,9 +48,14 @@ test('release workflows build on GitHub, attest their files and leave publishing
   assert.match(workflow, /Get-AuthenticodeSignature/)
   assert.match(workflow, /'Valid' } else { 'NotSigned' }/)
   assert.match(workflow, /latest\.yml does not contain/)
-  // The build job cannot write to the repository; the publish job runs only for a tag.
+  // The build job cannot write to the repository. Only a pushed tag publishes or signs, never a manual run on a tag, and a
+  // published release is never changed in place.
   assert.match(workflow, /^permissions:\r?\n {2}contents: read\r?\n/m)
-  assert.match(workflow, /publish:\r?\n {4}needs: build\r?\n {4}if: github\.ref_type == 'tag'/)
+  assert.match(workflow, /publish:\r?\n {4}needs: build\r?\n {4}if: github\.event_name == 'push' && github\.ref_type == 'tag'\r?\n/)
+  assert.doesNotMatch(workflow, /github\.ref_type == 'tag' && secrets\./)
+  assert.match(workflow, /Refuse to change a published release/)
+  // A manual macOS/Linux run must start on the tag it builds, because its attestation records the run's own commit.
+  assert.match(unix, /"\$GITHUB_REF" != "refs\/tags\/\$RELEASE_TAG"/)
   // A failed command in a multi-line PowerShell step fails the step, not just the last command.
   assert.match(workflow, /\$PSNativeCommandUseErrorActionPreference = \$true\r?\n {10}corepack pnpm typecheck/)
   for (const file of [workflow, unix]) {
