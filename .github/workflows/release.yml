@@ -1,38 +1,33 @@
 name: Windows release
 
+# A version tag builds the Windows installer here and creates a draft release with it; a person publishes the draft.
+# Without WINDOWS_CSC_LINK the installer is unsigned. A pull request that changes this workflow, or a manual run, builds
+# and checks the installer without creating a release.
 on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: windows-latest
     timeout-minutes: 35
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
     steps:
-      - name: Check signing certificate
-        id: signing
-        env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-        run: |
-          if ($env:CSC_LINK) {
-            'configured=true' >> $env:GITHUB_OUTPUT
-          } else {
-            'configured=false' >> $env:GITHUB_OUTPUT
-            Write-Output '::notice title=Release skipped::WINDOWS_CSC_LINK is not set. Public unsigned releases are not permitted, so nothing was built or published. Publish unsigned builds manually if needed.'
-          }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: steps.signing.outputs.configured == 'true'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        if: steps.signing.outputs.configured == 'true'
         with:
           node-version: 24
       - name: Validate release tag
-        if: steps.signing.outputs.configured == 'true'
+        if: github.ref_type == 'tag'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
@@ -40,63 +35,107 @@ jobs:
           if ($env:RELEASE_TAG -ne "v$packageVersion") {
             throw "Release tag $env:RELEASE_TAG does not match package version $packageVersion"
           }
+      - name: Check signing certificate
+        id: signing
+        env:
+          CSC_LINK: ${{ github.ref_type == 'tag' && secrets.WINDOWS_CSC_LINK || '' }}
+        run: |
+          if ($env:CSC_LINK) {
+            'signed=true' >> $env:GITHUB_OUTPUT
+          } else {
+            'signed=false' >> $env:GITHUB_OUTPUT
+            Write-Output '::notice title=Unsigned Windows build::WINDOWS_CSC_LINK is not set (or this is not a tag build), so the installer is not signed. Windows SmartScreen warns before running it.'
+          }
       - name: Enable pinned pnpm
-        if: steps.signing.outputs.configured == 'true'
         run: corepack enable
       - name: Install dependencies
-        if: steps.signing.outputs.configured == 'true'
         run: corepack pnpm install --frozen-lockfile
       - name: Verify source
-        if: steps.signing.outputs.configured == 'true'
         run: |
           corepack pnpm typecheck
           corepack pnpm test
           corepack pnpm smoke
           corepack pnpm cli:smoke
       - name: Build Windows installer
-        if: steps.signing.outputs.configured == 'true'
         env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-        run: corepack pnpm dist:win
-      - name: Verify update metadata and optional signature
-        if: steps.signing.outputs.configured == 'true'
-        env:
-          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WINDOWS_CSC_LINK: ${{ github.ref_type == 'tag' && secrets.WINDOWS_CSC_LINK || '' }}
+          WINDOWS_CSC_KEY_PASSWORD: ${{ github.ref_type == 'tag' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+        # electron-builder treats a CSC_LINK that is set but empty as a certificate path (the project folder), so the signing
+        # variables are set only when the Windows secrets exist.
         run: |
-          if (-not (Test-Path release/latest.yml)) {
-            throw 'electron-builder did not generate release/latest.yml'
-          }
-          if (-not (Get-ChildItem release -Filter '*.blockmap')) {
-            throw 'electron-builder did not generate an installer blockmap'
-          }
-          if ($env:CSC_LINK) {
-            $installers = @(Get-ChildItem release -Filter '*.exe')
-            if ($installers.Count -eq 0) {
-              throw 'electron-builder did not generate a Windows installer'
-            }
-            foreach ($installer in $installers) {
-              $signature = Get-AuthenticodeSignature $installer.FullName
-              if ($signature.Status -ne 'Valid') {
-                throw "Installer $($installer.Name) signature is $($signature.Status), not Valid"
-              }
-            }
+          if ($env:WINDOWS_CSC_LINK) {
+            $env:CSC_LINK = $env:WINDOWS_CSC_LINK
+            $env:CSC_KEY_PASSWORD = $env:WINDOWS_CSC_KEY_PASSWORD
           } else {
-            throw 'WINDOWS_CSC_LINK is required; public unsigned releases are not permitted.'
+            $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
           }
-      - name: Publish GitHub release
-        if: steps.signing.outputs.configured == 'true'
+          corepack pnpm dist:win
+      - name: Verify installer, signature and update metadata
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $installer = Get-Item "release/Copilot-CLI-Desktop-Setup-$version.exe"
+          if (-not (Test-Path "$($installer.FullName).blockmap")) { throw 'electron-builder did not generate an installer blockmap' }
+          if (-not (Test-Path release/latest.yml)) { throw 'electron-builder did not generate release/latest.yml' }
+          $status = (Get-AuthenticodeSignature $installer.FullName).Status
+          $app = (Get-AuthenticodeSignature 'release/win-unpacked/Copilot CLI Desktop.exe').Status
+          $expected = if ($env:SIGNED -eq 'true') { 'Valid' } else { 'NotSigned' }
+          if ($status -ne $expected -or $app -ne $expected) { throw "Installer signature is $status and app signature is $app, expected $expected" }
+          $metadata = Get-Content release/latest.yml -Raw
+          $sha512 = [Convert]::ToBase64String([Security.Cryptography.SHA512]::Create().ComputeHash([IO.File]::ReadAllBytes($installer.FullName)))
+          foreach ($line in "version: $version", "path: $($installer.Name)", "sha512: $sha512", "size: $($installer.Length)") {
+            if (-not $metadata.Contains($line)) { throw "release/latest.yml does not contain '$line'" }
+          }
+          $sha256 = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLower()
+          "### Windows installer`n`n- $($installer.Name): $($installer.Length) bytes, signature $status`n- SHA256 ``$sha256``" >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-release
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  # Only this job can write to the repository, and it runs only for a version tag.
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: windows-release
+          path: release
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+      - name: Create draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
+          draft: true
+          name: Copilot CLI Desktop ${{ github.ref_name }}${{ needs.build.outputs.signed != 'true' && ' (unsigned)' || '' }}
           generate_release_notes: true
           files: |
             release/*.exe
             release/*.blockmap
             release/latest.yml
-      # A release published with GITHUB_TOKEN starts no `release` workflows, but a dispatch does.
+      # A release created with GITHUB_TOKEN starts no `release` workflows, but a dispatch does. The macOS and Linux builds
+      # land in the draft, so the person publishing it sees every platform first.
       - name: Add the macOS and Linux builds
-        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh workflow run release-unix.yml --repo "$env:GITHUB_REPOSITORY" --ref "$env:RELEASE_TAG" -f tag="$env:RELEASE_TAG"
+        run: gh workflow run release-unix.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG" -f tag="$RELEASE_TAG"
