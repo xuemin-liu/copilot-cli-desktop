@@ -54,6 +54,7 @@ test('release workflows build on GitHub, attest their files and leave publishing
   assert.match(workflow, /publish:\r?\n {4}needs: build\r?\n {4}if: github\.event_name == 'push' && github\.ref_type == 'tag'\r?\n/)
   assert.doesNotMatch(workflow, /github\.ref_type == 'tag' && secrets\./)
   assert.match(workflow, /Refuse to change a published release/)
+  assert.match(workflow, /Could not list releases to check/)
   // A manual macOS/Linux run must start on the tag it builds, because its attestation records the run's own commit.
   assert.match(unix, /"\$GITHUB_REF" != "refs\/tags\/\$RELEASE_TAG"/)
   // A failed command in a multi-line PowerShell step fails the step, not just the last command.

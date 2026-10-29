@@ -118,8 +118,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+        # Listing (not viewing by tag) also finds drafts; no release prints nothing. A failed lookup fails the step.
         run: |
-          if draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null) && [ "$draft" = false ]; then
+          for attempt in 1 2 3; do
+            if drafts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .draft"); then break; fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not list releases to check whether $RELEASE_TAG is already published."
+              exit 1
+            fi
+            sleep 10
+          done
+          if printf '%s\n' "$drafts" | grep -qx false; then
             echo "::error::Release $RELEASE_TAG is already published; its files are not replaced. Release a new version instead."
             exit 1
           fi
