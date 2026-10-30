@@ -1,6 +1,6 @@
 // The mock model's answers in the review-meeting check (session-meeting-check.mjs). Kept apart from it so the launcher,
 // which runs in plain Node, can load it without Electron.
-const HELPER = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_MEETING_HELPER"'
+const HELPER = '& "$env:COPILOT_DESKTOP_MEETING_HELPER"'
 export const MEETING_REVIEW_MARK = 'meeting-review-mark-7731'
 
 function text(content) {

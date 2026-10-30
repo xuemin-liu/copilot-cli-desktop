@@ -1788,9 +1788,9 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   if (!draft.empty) { session.write('\x03'); draft.note('\x03') }
   setTimeout(() => {
     if (managedTabs.get(tabId)?.session !== session) { release(); return }
-    session.write(command)
+    session.write(command, 'rename')
     setTimeout(() => {
-      if (managedTabs.get(tabId)?.session === session) session.write('\r')
+      if (managedTabs.get(tabId)?.session === session) session.write('\r', 'rename')
       release()
     }, 200)
   }, closing ? 300 : 0)
@@ -1852,9 +1852,9 @@ function sendSessionCommand(tabId: string, command: string): boolean {
   heldInput.set(tabId, [])
   const text = command.replace(/[\u0000-\u001f\u007f]/g, '')
   draft.note(text)
-  session.write(text)
+  session.write(text, 'add-dir')
   setTimeout(() => {
-    if (managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
+    if (managedTabs.get(tabId)?.session === session) { session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r') }
     const held = heldInput.get(tabId) ?? []
     heldInput.delete(tabId)
     for (const data of held) { promptDrafts.get(tabId)?.note(data); managedTabs.get(tabId)?.session.write(data) }

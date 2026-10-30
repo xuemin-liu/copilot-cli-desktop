@@ -10,7 +10,7 @@ export async function ownedProcessIds(rootPid: number): Promise<Set<number>> {
   try {
     const result = process.platform === 'win32'
       ? await promisify(execFile)(windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command',
-        "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.ParentProcessId }"], { windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024 })
+        "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.ParentProcessId }"], { windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024 })
       : await promisify(execFile)('/bin/ps', ['-axo', 'pid=,ppid='], { timeout: 5_000, maxBuffer: 1024 * 1024 })
     return processDescendants(result.stdout, rootPid)
   } catch { return new Set() }

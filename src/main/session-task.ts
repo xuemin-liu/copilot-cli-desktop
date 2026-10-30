@@ -35,6 +35,13 @@ export interface SessionTaskState {
 const MAX_TASK_CHARS = 12_000
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g
 
+// Terminal-generated attributes, status, cursor, focus and colour replies cannot type a prompt or choose a session.
+// Deliberately exclude mouse/navigation events, arbitrary OSC payloads, and any reply mixed with ordinary input.
+const TERMINAL_REPLIES = /\x1b\[(?:[?>]?[\d;]*c|\??\d+;\d+R|\??[\d;]*\$y|\??\d+n|[IO])|\x1b\](?:(?:10|11);|4;\d+;)rgb:[\da-fA-F]{1,4}\/[\da-fA-F]{1,4}\/[\da-fA-F]{1,4}(?:\x07|\x1b\\)/g
+export function isTerminalReply(data: string): boolean {
+  return data.length > 0 && data.replace(TERMINAL_REPLIES, '') === ''
+}
+
 /** Why the session can never take a task that edits files and runs Git, or null when it can. The renderer shows it on the
  * button; main checks it again before typing anything. A task that only asks for an answer (a meeting's review round) passes
  * `needsWrite: false`, so read-only sessions and side chats can take it. */

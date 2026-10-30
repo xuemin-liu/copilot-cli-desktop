@@ -25,6 +25,7 @@ export class SessionBindingReader {
   private ownerPid: number | null = null
   private failure: string | null = null
   private processSnapshot: { at: number; ids: Set<number> } | null = null
+  private initialProcessSnapshot: Set<number> | null = null
   private inventory: { at: number; modified: number; sessions: string[] } | null = null
   private readonly now: () => number
   private readonly list: (root: string) => Promise<Dirent[]>
@@ -64,6 +65,38 @@ export class SessionBindingReader {
     } catch { return false }
   }
 
+  /** Before its first prompt a deterministically launched CLI may own no lock. Only a successful fresh process/store
+   * snapshot proving absence of all owned locks can support the launch recipient; unavailable/ambiguous evidence cannot. */
+  async initialRecipientReady(sessionId: string): Promise<boolean> {
+    // Consume a snapshot taken by the immediately preceding fresh delivery read, avoiding a second startup CIM launch.
+    const snapshot = this.initialProcessSnapshot
+    this.initialProcessSnapshot = null
+    if (this.ownerPid !== null || this.failure !== 'cli-owner-not-found' || !isValidSessionId(sessionId)
+      || !this.isAlive(this.rootPid) || !await this.rootSession(sessionId)) return false
+    try {
+      const ids = snapshot ?? await this.processes(this.rootPid)
+      this.processSnapshot = { at: this.now(), ids }
+      if (!ids.has(this.rootPid)) { this.failure = 'process-tree-unavailable'; return false }
+      const modified = (await lstat(this.root)).mtimeMs
+      for (const entry of await this.list(this.root)) {
+        if (!isValidSessionId(entry.name)) continue
+        if (entry.isSymbolicLink()) return false
+        if (!entry.isDirectory()) continue
+        for (const pid of ids) {
+          try {
+            await lstat(join(this.root, entry.name, `inuse.${pid}.lock`))
+            return false
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        }
+      }
+      return this.ownerPid === null && this.isAlive(this.rootPid) && (await lstat(this.root)).mtimeMs === modified
+    } catch {
+      this.processSnapshot = { at: this.now(), ids: new Set() }
+      this.failure = 'initial-recipient-verification-failed'
+      return false
+    }
+  }
+
   /** Inventory is discovery, not authorization: every selected id and retained lock is checked afresh below.
    * Reuse it between commands; new directories invalidate it immediately, and old directories resumed by the CLI
    * are rediscovered on the slow sweep. Store size must never disable an otherwise verified session monitor. */
@@ -86,14 +119,17 @@ export class SessionBindingReader {
   /** Monitoring can reuse discovery; automatic PTY delivery must request a fresh inventory to establish uniqueness. */
   async read(currentSessionId: string | null, requestSessionId?: string, freshInventory = false): Promise<SessionBinding> {
     this.failure = null
+    this.initialProcessSnapshot = null
     if (requestSessionId !== undefined && !isValidSessionId(requestSessionId)) { this.failure = 'invalid-session-id'; return { kind: 'unknown' } }
     if (!this.isAlive(this.rootPid)) { this.failure = 'tab-process-not-running'; return { kind: this.ownerPid === null && requestSessionId === undefined ? 'unavailable' : 'unknown' } }
     if (this.ownerPid === null) {
+      let queried = false
       // Failed/ambiguous discovery must not spawn PowerShell again on every refresh or helper retry.
       if (!this.processSnapshot || this.now() - this.processSnapshot.at >= 30_000) {
         let ids: Set<number>
         try { ids = await this.processes(this.rootPid) } catch { ids = new Set() }
         this.processSnapshot = { at: this.now(), ids }
+        queried = true
       }
       const processes = this.processSnapshot.ids
       if (!processes.has(this.rootPid)) { this.failure = 'process-tree-unavailable'; return { kind: 'unavailable' } }
@@ -118,7 +154,11 @@ export class SessionBindingReader {
           }
         }
       }
-      if (candidates.length !== 1) { this.failure = 'cli-owner-not-unique'; return { kind: requestSessionId ? 'unknown' : 'unavailable' } }
+      if (candidates.length !== 1) {
+        this.failure = candidates.length ? 'cli-owner-not-unique' : 'cli-owner-not-found'
+        if (!candidates.length && queried && freshInventory && requestSessionId === undefined) this.initialProcessSnapshot = processes
+        return { kind: requestSessionId ? 'unknown' : 'unavailable' }
+      }
       this.ownerPid = candidates[0]!
     }
     const ownerPid = this.ownerPid

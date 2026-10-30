@@ -185,6 +185,63 @@ test('automatic delivery rechecks retained sessions without a helper hint and in
   } finally { await session.stop(); await rm(home, { recursive: true, force: true }) }
 })
 
+test('initial no-lock delivery requires a deterministic untouched launch and fresh unambiguous process/store evidence', async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-initial-recipient-'))
+  const root = join(home, 'session-state')
+  const a = '11111111-1111-4111-8111-111111111111', b = '22222222-2222-4222-8222-222222222222'
+  const sessions: PtySession[] = []
+  const queryCounts: number[] = []
+  const create = async (pids = [10, 11, 12], args = [`--resume=${a}`], unavailableStore = false) => {
+    const queryIndex = queryCounts.push(0) - 1
+    const pty = new FakePty(); pty.pid = 0
+    const session = new PtySession({ file: 'copilot', args, cwd: home, env: { COPILOT_HOME: home }, spawnPty: fakeSpawnPty(pty),
+      sessionId: a, monitorSessionPermissions: true,
+      sessionBindingReader: new SessionBindingReader(root, 10, async () => { queryCounts[queryIndex]!++; return new Set(pids) }, () => true,
+        unavailableStore ? { list: async () => { throw new Error('unavailable') } } : {}) })
+    sessions.push(session)
+    await session.start()
+    return session
+  }
+  try {
+    for (const id of [a, b]) {
+      await mkdir(join(root, id), { recursive: true })
+      await writeFile(join(root, id, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: id, startTime: '2026-10-29T00:00:00Z' } }) + '\n')
+    }
+    const initial = await create()
+    initial.write('\x1b[?1;2c\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[1;1R')
+    assert.equal((await initial.prepareMeetingDelivery(a))(), true, 'verified initial recipient can take its first command')
+    assert.equal(queryCounts[0], 1, 'the delivery read and initial verification share one fresh process query')
+    initial.write('/add-dir meeting-folder', 'add-dir')
+    initial.write('\r', 'add-dir')
+    initial.write('/rename restored-host', 'rename')
+    initial.write('\r', 'rename')
+    const firstPrompt = await initial.prepareMeetingDelivery(a)
+    assert.equal(firstPrompt(), true, 'the directory command must not block the meeting prompt that creates the lock')
+    assert.equal(queryCounts[0], 2, 'each later initial delivery obtains a new process snapshot')
+    initial.write('/resume another-session\r')
+    assert.equal(firstPrompt(), false)
+    assert.equal((await initial.prepareMeetingDelivery(a))(), false, 'ordinary input revokes the initial launch anchor')
+    const prompted = await create()
+    prompted.write('[meeting TEST · round 1 · from the desktop]\nReview the plan')
+    assert.equal((await prompted.prepareMeetingDelivery(a))(), false, 'the first meeting prompt also ends the startup exception')
+    const failed = await create([])
+    assert.equal((await failed.prepareMeetingDelivery(a))(), false, 'failed process query is not absence of owners')
+    assert.equal((await failed.prepareMeetingDelivery(a))(), false)
+    assert.equal(queryCounts.at(-1), 1, 'failed process discovery still backs off')
+    assert.equal((await (await create([10, 11], [])).prepareMeetingDelivery(a))(), false, 'a remembered id alone cannot establish the launch recipient')
+    assert.equal((await (await create([10, 11], [`--resume=${a}`], true)).prepareMeetingDelivery(a))(), false, 'failed store enumeration cannot establish uniqueness')
+    await writeFile(join(root, b, 'inuse.11.lock'), '')
+    assert.equal((await (await create()).prepareMeetingDelivery(a))(), false, 'an owned session other than the initial recipient is ambiguous')
+    await rm(join(root, b, 'inuse.11.lock'))
+    await writeFile(join(root, a, 'inuse.11.lock'), '')
+    await writeFile(join(root, a, 'inuse.12.lock'), '')
+    assert.equal((await (await create()).prepareMeetingDelivery(a))(), false, 'multiple owners of the initial session are not a startup fallback')
+  } finally { await Promise.all(sessions.map(session => session.stop())); await rm(home, { recursive: true, force: true }) }
+})
+
 test('closing a session aborts a pending worktree preparation before a PTY starts', async () => {
   let preparing!: () => void
   const begun = new Promise<void>(resolve => { preparing = resolve })

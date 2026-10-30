@@ -520,6 +520,30 @@ test('an overlapping stale control cannot close the meeting accepted by another 
   } finally { release() }
 }))
 
+for (const kind of ['post', 'add-dir'] as const) test(`restored meeting ${kind} reaches its initial recipient before the CLI creates an in-use lock`, async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.tabs = [{ title: 'Restored host', lastSessionId: SOURCE }]
+  const path = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify({ type: 'session.start', data: { sessionId: SOURCE, startTime: '2026-10-29T00:00:00Z' } }) + '\n')
+  await harness.restoreSaved()
+  const state = await harness.request('desktop:get-state')
+  const tab = state.tabs.find(candidate => candidate.id === state.activeTabId)!
+  const spawn = harness.spawns[0]!
+  assert.ok(spawn.args.includes(`--resume=${SOURCE}`))
+  harness.configureBinding(tab.id, 10, [10, 11])
+  await harness.refreshRecords(tab.id)
+  await harness.request('desktop:write-tab', tab.id, '\x1b[?1;2c\x1b]11;rgb:0000/0000/0000\x1b\\')
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1_600)
+  harness.queueMeetingDelivery(tab.id, kind)
+  await harness.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(text => text.includes('automatic meeting material')), 'initial no-owner recipient takes its first delivery')
+  await pause(350)
+  assert.equal(spawn.written.at(-1), '\r', 'delivery was submitted')
+  assert.equal((await harness.meetingCommand(tab.id, 'start')).ok, false, 'startup delivery cannot authorize creating a meeting')
+}))
+
 for (const kind of ['post', 'add-dir'] as const) test(`automatic meeting ${kind} verifies the recipient after a no-hint resume into an existing directory`, async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.defaultResumeMode = 'new'

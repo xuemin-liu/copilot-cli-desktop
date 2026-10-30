@@ -12,7 +12,7 @@ import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
-import { BracketedPasteTracker } from './session-task.js'
+import { BracketedPasteTracker, isTerminalReply } from './session-task.js'
 import { SessionBindingReader, sessionResumeOffset, type SessionBinding } from './session-binding.js'
 import { stat } from 'node:fs/promises'
 
@@ -41,7 +41,7 @@ export interface PtySessionOptions {
   discoverSessionIdFromStore?: StoreDiscoveryOptions
   monitorSessionPermissions?: boolean
   /** A backend may provide verified session ownership; the native backend defaults to CLI PID/registry evidence. */
-  sessionBindingReader?: Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic'>>
+  sessionBindingReader?: Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic' | 'initialRecipientReady'>>
 }
 
 export interface PtySessionExit {
@@ -73,12 +73,13 @@ export class PtySession extends EventEmitter {
   private lastKnownSessionId: string | null
   private permissionMonitor: SessionPermissionMonitor | null = null
   private monitoredSession: { sessionId: string; logPath: string; replayHistory: boolean | number } | null = null
-  private bindingReader: (Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic'>>) | null = null
+  private bindingReader: PtySessionOptions['sessionBindingReader'] | null = null
   private bindingState: SessionBinding = { kind: 'unavailable' }
   private bindingRefresh: Promise<void> | null = null
   private bindingTimer: NodeJS.Timeout | null = null
   private bindingStartedAt = 0
   private deliveryRevision = 0
+  private initialDeliverySessionId: string | null
   private pendingSessionId: string | null = null
   private readonly bindingPositions = new Map<string, { position: number; identity: string }>()
   private storeDiscovery: SessionStoreDiscovery | null = null
@@ -95,6 +96,9 @@ export class PtySession extends EventEmitter {
       forceKillTimeoutMs: options.forceKillTimeoutMs ?? 3_000,
     }
     this.lastKnownSessionId = options.sessionId ?? null
+    // Only Desktop's explicit launch target can anchor first delivery; persisted ids or output hints alone cannot.
+    this.initialDeliverySessionId = options.sessionId && options.args.some(arg => arg === `--resume=${options.sessionId}` || arg === `--session-id=${options.sessionId}`)
+      ? options.sessionId : null
   }
 
   get status(): SessionLifecycleStatus {
@@ -160,6 +164,10 @@ export class PtySession extends EventEmitter {
     if (!unchanged()) return () => false
     // This check changes delivery readiness only. Monitoring and user-turn authorization keep their own lifecycle.
     this.bindingState = verified
+    if (verified.kind === 'unavailable' && this.initialDeliverySessionId === sessionId && this.bindingReader.initialRecipientReady) {
+      const initialReady = await this.bindingReader.initialRecipientReady(sessionId)
+      return () => initialReady && unchanged() && this.initialDeliverySessionId === sessionId && this.bindingState.kind === 'unavailable'
+    }
     return () => unchanged() && this.sessionBindingReady && verified.kind === 'bound' && verified.sessionId === sessionId && verified.deliveryReady
   }
 
@@ -188,6 +196,7 @@ export class PtySession extends EventEmitter {
 
   private suspendSessionRecords(reason: string): void {
     this.deliveryRevision++
+    this.initialDeliverySessionId = null
     const monitor = this.permissionMonitor
     if (monitor?.checkpoint && this.monitoredSession) this.bindingPositions.set(this.monitoredSession.sessionId, monitor.checkpoint)
     this.permissionMonitor = null
@@ -481,10 +490,12 @@ export class PtySession extends EventEmitter {
     this.setStatus('running')
   }
 
-  /** Send raw input to the pty. Attachment shortcuts do not answer approvals. */
-  write(data: string): void {
+  /** Terminal replies and known non-switching commands preserve the initial recipient. Prompts and all other input revoke
+   * that anchor, including the first automatic meeting prompt. Attachment shortcuts do not answer approvals. */
+  write(data: string, source?: 'add-dir' | 'rename'): void {
     if (!this.pty || !data || data === '\u001b[200~\u001b[201~') return
     this.deliveryRevision++
+    if (source === undefined && !isTerminalReply(data)) this.initialDeliverySessionId = null
     if (data !== '\u001bv' && data !== '\u0016') {
       if (this.statusValue === 'approval-needed') this.setStatus('running')
       this.heuristicBuffer = ''
