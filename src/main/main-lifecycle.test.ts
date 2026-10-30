@@ -52,6 +52,8 @@ interface Harness {
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
+  queueMeetingDelivery(tabId: string, kind: 'post' | 'add-dir'): void
+  pumpMeetingDelivery(): Promise<void>
   /** One pass of the session-name poll, which the app runs every few seconds once ready. */
   refreshNames(): Promise<void>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
@@ -259,6 +261,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
           bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
+          queueMeetingDelivery: (tabId, kind) => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text: 'automatic meeting material' }); },
+          pumpMeetingDelivery: () => pumpMeetingOutbox(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForProfile,
@@ -514,6 +518,37 @@ test('an overlapping stale control cannot close the meeting accepted by another 
     assert.equal(open?.length, 1, 'B\'s accepted meeting must remain open')
     assert.match(started.message, new RegExp(`Meeting ${open![0]!.id} is open`))
   } finally { release() }
+}))
+
+for (const kind of ['post', 'add-dir'] as const) test(`automatic meeting ${kind} verifies the recipient after a no-hint resume into an existing directory`, async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const state = await harness.createMain()
+  const tab = state.tabs.find(candidate => candidate.id === state.activeTabId)!
+  const a = tab.lastSessionId!, b = FORK
+  for (const id of [a, b]) {
+    await mkdir(dirname(path(id)), { recursive: true })
+    await writeFile(path(id), line('session.start', { sessionId: id, startTime: new Date().toISOString() }))
+  }
+  await writeFile(join(dirname(path(a)), 'inuse.11.lock'), '')
+  harness.configureBinding(tab.id, 10, [10, 11])
+  await harness.refreshRecords(tab.id)
+  const spawn = harness.spawns[0]!
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1_600)
+  harness.queueMeetingDelivery(tab.id, kind)
+  await harness.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(text => text.includes('automatic meeting material')), 'unique recipient takes the delivery')
+  await pause(2_400) // Let Enter submit and the prompt draft become quiet again.
+  const before = spawn.written.length
+  await writeFile(join(dirname(path(b)), 'inuse.11.lock'), '')
+  await appendFile(path(b), line('session.resume', { resumeTime: new Date().toISOString() }))
+  harness.queueMeetingDelivery(tab.id, kind)
+  await harness.pumpMeetingDelivery()
+  assert.equal(spawn.written.length, before, 'retaining B blocks automatic terminal input before any helper hint or output')
+  assert.equal((await harness.request('desktop:get-state')).tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, a)
 }))
 
 test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {
@@ -1640,8 +1675,8 @@ test('default auto-resume mints an id when it actually starts a fresh session', 
     await mkdir(sessionDirectory, { recursive: true })
     await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"auto","allowAllPermissions":false}}\n')
     harness.spawns[0]!.emitData('\u001b[?25h')
-    await new Promise((resolve) => setTimeout(resolve, 150))
-    const changed = await harness.request('desktop:get-state')
+    const changed = await waitFor(() => harness.request('desktop:get-state'), state => state.tabs[0]?.sessionPermissionMode === 'assisted',
+      'the permission monitor reads the newly created session log')
     assert.equal(changed.tabs[0]?.sessionPermissionMode, 'assisted')
   })
 })

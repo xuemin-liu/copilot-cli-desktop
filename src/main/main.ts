@@ -1869,6 +1869,8 @@ const meetingReaders = new Map<string, MeetingTurnReader>()
 const meetingWrites = new Map<string, Promise<void>>()
 const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
+let meetingPumpRunning = false
+const meetingDeliveryChecks = new Map<string, () => boolean>()
 
 function meetingReader(tabId: string): MeetingTurnReader {
   let reader = meetingReaders.get(tabId)
@@ -1889,9 +1891,33 @@ function meetingParty(tabId: string): { tabId: string; title: string; folder: st
  */
 const MEETING_SETTLE_MS = 1_500
 const sessionLastOutputAt = new Map<string, number>()
-function meetingPromptShown(tabId: string): boolean {
+function meetingPromptSettled(tabId: string): boolean {
   const session = managedTabs.get(tabId)?.session
   return session !== undefined && session.sessionBindingReady && session.bracketedPaste && Date.now() - (sessionLastOutputAt.get(tabId) ?? 0) >= MEETING_SETTLE_MS
+}
+
+function meetingPromptShown(tabId: string): boolean {
+  return meetingPromptSettled(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
+}
+
+async function pumpMeetingOutbox(): Promise<void> {
+  if (meetingPumpRunning) return
+  meetingPumpRunning = true
+  try {
+    await Promise.all(meetingOutbox.readyTabs().map(async tabId => {
+      const session = managedTabs.get(tabId)?.session
+      const sessionId = tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId
+      if (!session || !sessionId || !meetingPromptSettled(tabId)) return
+      const ready = await session.prepareMeetingDelivery(sessionId)
+      meetingDeliveryChecks.set(tabId, () => managedTabs.get(tabId)?.session === session
+        && tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId === sessionId && ready())
+    }))
+    meetingOutbox.pump()
+  } finally {
+    meetingDeliveryChecks.clear()
+    meetingPumpRunning = false
+    if (meetingOutbox.hasWork()) scheduleMeetingPump()
+  }
 }
 
 const meetingOutbox = new MeetingOutbox({
@@ -2064,7 +2090,7 @@ function scheduleMeetingPump(delayMs = 1_000): void {
   }
   meetingPumpTimer = setTimeout(() => {
     meetingPumpTimer = null
-    if (meetingOutbox.pump()) scheduleMeetingPump()
+    void pumpMeetingOutbox().catch(error => { void writeAppLog(`Meeting delivery verification failed: ${String(error)}`).catch(() => {}) })
   }, delayMs)
   meetingPumpTimer.unref()
 }

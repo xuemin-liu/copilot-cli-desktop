@@ -78,6 +78,7 @@ export class PtySession extends EventEmitter {
   private bindingRefresh: Promise<void> | null = null
   private bindingTimer: NodeJS.Timeout | null = null
   private bindingStartedAt = 0
+  private deliveryRevision = 0
   private pendingSessionId: string | null = null
   private readonly bindingPositions = new Map<string, { position: number; identity: string }>()
   private storeDiscovery: SessionStoreDiscovery | null = null
@@ -144,6 +145,24 @@ export class PtySession extends EventEmitter {
   get sessionBindingPending(): boolean { return this.pendingSessionId !== null }
   get sessionBindingReady(): boolean { return this.pendingSessionId === null && (this.bindingState.kind === 'unavailable' || (this.bindingState.kind === 'bound' && this.bindingState.deliveryReady)) }
 
+  /** A cached monitoring inventory cannot prove the shared terminal's recipient. Verify immediately before each
+   * outbox pump, then invalidate the result if any input, output or binding change happens while other tabs await I/O. */
+  async prepareMeetingDelivery(sessionId: string): Promise<() => boolean> {
+    if (this.bindingRefresh) await this.bindingRefresh
+    const revision = this.deliveryRevision
+    const unchanged = (): boolean => !this.stopping && !this.exitHandled && this.lastKnownSessionId === sessionId
+      && this.pendingSessionId === null && this.deliveryRevision === revision && this.bindingRefresh === null
+    if (!unchanged() || !this.sessionBindingReady) return () => false
+    if (!this.bindingReader) return () => unchanged() && this.sessionBindingReady
+    let verified: SessionBinding
+    try { verified = await this.bindingReader.read(sessionId, undefined, true) }
+    catch { verified = { kind: 'deferred' } }
+    if (!unchanged()) return () => false
+    // This check changes delivery readiness only. Monitoring and user-turn authorization keep their own lifecycle.
+    this.bindingState = verified
+    return () => unchanged() && this.sessionBindingReady && verified.kind === 'bound' && verified.sessionId === sessionId && verified.deliveryReady
+  }
+
   /** Publish a caller-routed binding only after its user-turn authorization passed (or it matches the existing meeting). */
   commitSessionBinding(): void {
     if (this.pendingSessionId === null || this.pendingSessionId !== this.lastKnownSessionId) return
@@ -168,6 +187,7 @@ export class PtySession extends EventEmitter {
   }
 
   private suspendSessionRecords(reason: string): void {
+    this.deliveryRevision++
     const monitor = this.permissionMonitor
     if (monitor?.checkpoint && this.monitoredSession) this.bindingPositions.set(this.monitoredSession.sessionId, monitor.checkpoint)
     this.permissionMonitor = null
@@ -261,6 +281,7 @@ export class PtySession extends EventEmitter {
   }
 
   private recordOutput(text: string): void {
+    this.deliveryRevision++
     this.pendingLine += text
     const parts = this.pendingLine.split(/\r?\n/)
     this.pendingLine = parts.pop() ?? ''
@@ -463,6 +484,7 @@ export class PtySession extends EventEmitter {
   /** Send raw input to the pty. Attachment shortcuts do not answer approvals. */
   write(data: string): void {
     if (!this.pty || !data || data === '\u001b[200~\u001b[201~') return
+    this.deliveryRevision++
     if (data !== '\u001bv' && data !== '\u0016') {
       if (this.statusValue === 'approval-needed') this.setStatus('running')
       this.heuristicBuffer = ''

@@ -67,9 +67,9 @@ export class SessionBindingReader {
   /** Inventory is discovery, not authorization: every selected id and retained lock is checked afresh below.
    * Reuse it between commands; new directories invalidate it immediately, and old directories resumed by the CLI
    * are rediscovered on the slow sweep. Store size must never disable an otherwise verified session monitor. */
-  private async ownedSessions(ownerPid: number): Promise<string[]> {
+  private async ownedSessions(ownerPid: number, fresh: boolean): Promise<string[]> {
     const modified = (await lstat(this.root)).mtimeMs
-    if (this.inventory && this.inventory.modified === modified && this.now() - this.inventory.at < 30_000) return this.inventory.sessions
+    if (!fresh && this.inventory && this.inventory.modified === modified && this.now() - this.inventory.at < 30_000) return this.inventory.sessions
     const names = await this.list(this.root)
     const sessions: string[] = []
     for (let index = 0; index < names.length; index += 16) {
@@ -83,7 +83,8 @@ export class SessionBindingReader {
     return sessions
   }
 
-  async read(currentSessionId: string | null, requestSessionId?: string): Promise<SessionBinding> {
+  /** Monitoring can reuse discovery; automatic PTY delivery must request a fresh inventory to establish uniqueness. */
+  async read(currentSessionId: string | null, requestSessionId?: string, freshInventory = false): Promise<SessionBinding> {
     this.failure = null
     if (requestSessionId !== undefined && !isValidSessionId(requestSessionId)) { this.failure = 'invalid-session-id'; return { kind: 'unknown' } }
     if (!this.isAlive(this.rootPid)) { this.failure = 'tab-process-not-running'; return { kind: this.ownerPid === null && requestSessionId === undefined ? 'unavailable' : 'unknown' } }
@@ -127,7 +128,7 @@ export class SessionBindingReader {
     // Never guess among multiple sessions or another process's locks.
     let inventory: string[]
     let complete = true
-    try { inventory = await this.ownedSessions(ownerPid) }
+    try { inventory = await this.ownedSessions(ownerPid, freshInventory) }
     catch { inventory = []; complete = false; this.failure = 'session-inventory-unavailable' }
     // A caller can resume an old directory without changing the store directory. Check hints/current ids directly,
     // and revalidate cached locks so removed locks and changed root/child headers never inherit verification.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdir, mkdtemp, writeFile, rm, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm, readdir, stat, appendFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionBindingReader, sessionResumeOffset } from './session-binding.js'
@@ -140,5 +140,24 @@ test('an unavailable inventory keeps a verified known session observable with au
     assert.equal(reader.diagnostic.failure, 'session-inventory-unavailable')
     await rm(join(root, A, 'inuse.11.lock'))
     assert.deepEqual(await reader.read(A), { kind: 'deferred' }, 'a skipped scan does not report definite lost ownership')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('delivery verification discovers a resumed existing directory without a caller hint or a changed store mtime', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'session-binding-delivery-'))
+  const reader = new SessionBindingReader(root, 10, async () => new Set([10, 11]), () => true)
+  try {
+    for (const id of [A, B]) {
+      await mkdir(join(root, id))
+      await writeFile(join(root, id, 'events.jsonl'), line('session.start', { sessionId: id, startTime: new Date().toISOString() }))
+    }
+    await writeFile(join(root, A, 'inuse.11.lock'), '')
+    assert.deepEqual(await reader.read(A), { kind: 'bound', sessionId: A, ownerPid: 11, deliveryReady: true })
+    const modified = (await stat(root)).mtimeMs
+    await writeFile(join(root, B, 'inuse.11.lock'), '')
+    await appendFile(join(root, B, 'events.jsonl'), line('session.resume', { resumeTime: new Date().toISOString() }))
+    assert.equal((await stat(root)).mtimeMs, modified)
+    // Monitoring may reuse discovery, but that snapshot must not authorize terminal delivery.
+    assert.deepEqual(await reader.read(A, undefined, true), { kind: 'bound', sessionId: A, ownerPid: 11, deliveryReady: false })
   } finally { await rm(root, { recursive: true, force: true }) }
 })

@@ -149,6 +149,42 @@ test('ordinary terminal output does not trigger binding scans and the idle sweep
   } finally { await session.stop(); context.mock.timers.reset() }
 })
 
+test('automatic delivery rechecks retained sessions without a helper hint and invalidates a ready recipient on terminal activity', async () => {
+  const { mkdir, mkdtemp, rm, writeFile, appendFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-delivery-binding-'))
+  const root = join(home, 'session-state')
+  const a = '11111111-1111-4111-8111-111111111111', b = '22222222-2222-4222-8222-222222222222'
+  const pty = new FakePty(); pty.pid = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: home, env: { COPILOT_HOME: home }, spawnPty: fakeSpawnPty(pty),
+    sessionId: a, monitorSessionPermissions: true,
+    sessionBindingReader: new SessionBindingReader(root, 10, async () => new Set([10, 11]), () => true) })
+  try {
+    for (const id of [a, b]) {
+      await mkdir(join(root, id), { recursive: true })
+      await writeFile(join(root, id, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: id, startTime: new Date().toISOString() } }) + '\n')
+    }
+    await writeFile(join(root, a, 'inuse.11.lock'), '')
+    await session.start()
+    await session.refreshSessionRecords(a)
+    const first = await session.prepareMeetingDelivery(a)
+    assert.equal(first(), true, 'a unique recipient can receive input')
+    pty.emit('data', 'ordinary prompt redraw')
+    assert.equal(first(), false, 'output while another recipient awaits verification invalidates the check')
+    const second = await session.prepareMeetingDelivery(a)
+    assert.equal(second(), true)
+    session.write('/resume B\r')
+    assert.equal(second(), false, 'user input also invalidates the check')
+    await writeFile(join(root, b, 'inuse.11.lock'), '')
+    await appendFile(join(root, b, 'events.jsonl'), JSON.stringify({ type: 'session.resume', data: { resumeTime: new Date().toISOString() } }) + '\n')
+    assert.equal((await session.prepareMeetingDelivery(a))(), false, 'no helper hint or output is needed to detect the retained session')
+    assert.equal(session.sessionBindingReady, false)
+    assert.equal(session.monitorDiagnostic?.sessionId, a, 'delivery verification does not switch monitoring or publish a candidate')
+    assert.deepEqual(pty.written, ['/resume B\r'])
+  } finally { await session.stop(); await rm(home, { recursive: true, force: true }) }
+})
+
 test('closing a session aborts a pending worktree preparation before a PTY starts', async () => {
   let preparing!: () => void
   const begun = new Promise<void>(resolve => { preparing = resolve })
