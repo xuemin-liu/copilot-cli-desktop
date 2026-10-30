@@ -45,6 +45,8 @@ try {
     throw 'Meeting control state is invalid. Resume this session from the desktop.'
   }
   $meetingBody = @{}
+  # Nonsecret routing metadata supplied by the CLI to its shell tools. The desktop independently verifies ownership.
+  if ($env:COPILOT_AGENT_SESSION_ID) { $meetingBody.sessionId = $env:COPILOT_AGENT_SESSION_ID }
   if (@('start', 'round', 'propose-close') -contains $Command) {
     if (!$File) { throw ('Usage: meeting.ps1 ' + $Command + ' -File <path>' + $(if ($Command -eq 'start') { ' -Topic "<one line>" [-Changes]' } elseif ($Command -eq 'round') { ' [-Changes]' } else { '' })) }
     $meetingFile = Get-Item -LiteralPath $File
@@ -137,6 +139,7 @@ trap 'rm -rf "$work"' EXIT
   printf 'header = "Authorization: Bearer %s"\n' "$token"
   printf 'url = "http://127.0.0.1:%s/%s"\n' "$port" "$command"
   printf 'form-string = "helper=sh"\n'
+  if [ -n "$COPILOT_AGENT_SESSION_ID" ]; then printf 'form-string = "sessionId=%s"\n' "$(quote "$COPILOT_AGENT_SESSION_ID")"; fi
 } > "$work/config"
 chmod 600 "$work/config"
 if [ -n "$file" ]; then
@@ -222,9 +225,9 @@ export async function prepareMeetingSessionEnvironment(directory: string, contro
   }
 }
 
-export interface MeetingRequest { topic: string; text: string; changes: string | null }
+export interface MeetingRequest { topic: string; text: string; changes: string | null; sessionId?: string }
 export interface MeetingResponse { ok: boolean; message: string }
-export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest) => MeetingResponse
+export type MeetingRequestHandler = (tabId: string, command: MeetingCommand, request: MeetingRequest) => MeetingResponse | Promise<MeetingResponse>
 
 /**
  * Outside agents' requests (`/guest/<command>`, meeting-guests.ts). Their tokens are not session tokens: a guest token
@@ -296,10 +299,12 @@ export class MeetingControlServer {
         if (!tabId) { send(401, { ok: false, message: 'This session is not known to the desktop. Resume it from the desktop.' }); return }
         const command = (request.url ?? '').slice(1)
         if (request.method !== 'POST' || !(MEETING_COMMANDS as readonly string[]).includes(command)) { send(404, { ok: false, message: 'Unknown meeting command' }); return }
-        void readFields(request).then((body) => {
+        void readFields(request).then(async (body) => {
           if (body === null) { send(400, { ok: false, message: 'The request is too large or not readable.' }); return }
           const text = (key: string): string => typeof body[key] === 'string' ? body[key] as string : ''
-          send(200, this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null }))
+          const answer = await this.handle(tabId, command as MeetingCommand, { topic: text('topic'), text: text('text'), changes: typeof body.changes === 'string' ? body.changes : null,
+            ...(body.sessionId !== undefined ? { sessionId: text('sessionId') } : {}) })
+          send(200, answer)
         }).catch(() => { if (!response.headersSent) send(500, { ok: false, message: 'The desktop could not handle the meeting command.' }) })
       })
       server.once('error', reject)

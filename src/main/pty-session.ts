@@ -13,6 +13,8 @@ import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import { BracketedPasteTracker } from './session-task.js'
+import { SessionBindingReader, sessionResumeOffset, type SessionBinding } from './session-binding.js'
+import { stat } from 'node:fs/promises'
 
 const execFileAsync = promisify(execFile)
 const MAX_OUTPUT_LINES = 500
@@ -38,6 +40,8 @@ export interface PtySessionOptions {
   /** Watch the session store for the new session's directory (a worktree launch cannot be given an id). */
   discoverSessionIdFromStore?: StoreDiscoveryOptions
   monitorSessionPermissions?: boolean
+  /** A backend may provide verified session ownership; the native backend defaults to CLI PID/registry evidence. */
+  sessionBindingReader?: Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic'>>
 }
 
 export interface PtySessionExit {
@@ -68,6 +72,15 @@ export class PtySession extends EventEmitter {
   private readonly bracketedPasteTracker = new BracketedPasteTracker()
   private lastKnownSessionId: string | null
   private permissionMonitor: SessionPermissionMonitor | null = null
+  private monitoredSession: { sessionId: string; logPath: string; replayHistory: boolean | number } | null = null
+  private bindingReader: (Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic'>>) | null = null
+  private bindingState: SessionBinding = { kind: 'unavailable' }
+  private bindingRefresh: Promise<void> | null = null
+  private bindingTimer: NodeJS.Timeout | null = null
+  private bindingNotification: NodeJS.Timeout | null = null
+  private bindingStartedAt = 0
+  private pendingSessionId: string | null = null
+  private readonly bindingPositions = new Map<string, { position: number; identity: string }>()
   private storeDiscovery: SessionStoreDiscovery | null = null
   private exitHandled = false
   private exitCompletion: Promise<void> | null = null
@@ -123,6 +136,111 @@ export class PtySession extends EventEmitter {
     return this.lastKnownSessionId
   }
 
+  get monitorDiagnostic(): { sessionId: string; logPath: string; replayHistory: boolean | number } | null {
+    return this.monitoredSession
+  }
+
+  get bindingDiagnostic(): SessionBinding { return this.bindingState }
+  get bindingOwnershipDiagnostic(): SessionBindingReader['diagnostic'] | null { return this.bindingReader?.diagnostic ?? null }
+  get sessionBindingPending(): boolean { return this.pendingSessionId !== null }
+  get sessionBindingReady(): boolean { return this.pendingSessionId === null && (this.bindingState.kind === 'unavailable' || (this.bindingState.kind === 'bound' && this.bindingState.deliveryReady)) }
+
+  /** Publish a caller-routed binding only after its user-turn authorization passed (or it matches the existing meeting). */
+  commitSessionBinding(): void {
+    if (this.pendingSessionId === null || this.pendingSessionId !== this.lastKnownSessionId) return
+    this.pendingSessionId = null
+    this.emit('session-id', this.lastKnownSessionId)
+  }
+
+  /** A control command must see complete events already on disk, even before the next output/poll timer. */
+  async refreshSessionRecords(requestSessionId?: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.refreshSessionBinding(requestSessionId)
+      const monitor = this.permissionMonitor
+      if (!monitor) return
+      await monitor.start()
+      await monitor.poll()
+      // poll() may have joined a read with an older size snapshot. Take a fresh one too.
+      await monitor.poll()
+      await this.refreshSessionBinding(requestSessionId)
+      if (this.permissionMonitor === monitor) return
+    }
+    this.suspendSessionRecords('binding-kept-changing')
+  }
+
+  private suspendSessionRecords(reason: string): void {
+    const monitor = this.permissionMonitor
+    if (monitor?.checkpoint && this.monitoredSession) this.bindingPositions.set(this.monitoredSession.sessionId, monitor.checkpoint)
+    this.permissionMonitor = null
+    this.monitoredSession = null
+    monitor?.stop()
+    this.activityValue = null
+    this.activityDetailValue = null
+    this.sessionCwdValue = null
+    this.emit('session-record-reset', reason)
+    this.emit('activity', null)
+    this.emit('activity-detail', null)
+    this.emit('session-cwd', null)
+  }
+
+  private async refreshSessionBinding(requestSessionId?: string): Promise<void> {
+    if (!this.bindingReader || this.stopping || this.exitHandled) return Promise.resolve()
+    if (this.bindingRefresh) {
+      await this.bindingRefresh
+      if (requestSessionId === undefined) return
+    }
+    const work = (async () => {
+      let binding: SessionBinding
+      try { binding = await this.bindingReader!.read(this.lastKnownSessionId, requestSessionId) }
+      catch { binding = { kind: 'unknown' } }
+      if (this.stopping || this.exitHandled) return
+      this.bindingState = binding
+      if (binding.kind === 'unavailable') return
+      if (binding.kind === 'unknown') {
+        if (this.permissionMonitor) this.suspendSessionRecords('binding-unverified')
+        return
+      }
+      if (binding.sessionId === this.lastKnownSessionId && this.permissionMonitor) {
+        if (requestSessionId === undefined && binding.deliveryReady) this.commitSessionBinding()
+        return
+      }
+      this.suspendSessionRecords('session-binding-changed')
+      const environment = { ...process.env, ...this.options.env }
+      const path = join(copilotSessionRoot(environment), binding.sessionId, 'events.jsonl')
+      const info = await stat(path)
+      const previous = this.bindingPositions.get(binding.sessionId)
+      const position = previous
+        ? previous.identity === `${info.dev}:${info.ino}` && previous.position <= info.size ? previous.position : info.size
+        : await sessionResumeOffset(path, this.bindingStartedAt)
+      // Ownership may have changed while history was scanned. Never publish or consume an obsolete binding.
+      const confirmed = await this.bindingReader!.read(this.lastKnownSessionId, requestSessionId)
+      if (this.stopping || this.exitHandled) return
+      if (confirmed.kind !== 'bound' || confirmed.ownerPid !== binding.ownerPid || confirmed.sessionId !== binding.sessionId) {
+        this.bindingState = { kind: 'unknown' }
+        return
+      }
+      this.lastKnownSessionId = binding.sessionId
+      if (requestSessionId === undefined) { this.pendingSessionId = null; this.emit('session-id', binding.sessionId) }
+      else this.pendingSessionId = binding.sessionId
+      await this.attachPermissionMonitor(binding.sessionId, position)
+    })().catch(() => {
+      if (!this.stopping && !this.exitHandled) {
+        this.bindingState = { kind: 'unknown' }
+        this.suspendSessionRecords('binding-read-failed')
+        this.reportPermissionMonitorError('Session binding could not be verified')
+      }
+    })
+    this.bindingRefresh = work
+    try { await work } finally { if (this.bindingRefresh === work) this.bindingRefresh = null }
+  }
+
+  private stopBindingWatch(): void {
+    if (this.bindingTimer) clearInterval(this.bindingTimer)
+    if (this.bindingNotification) clearTimeout(this.bindingNotification)
+    this.bindingTimer = null
+    this.bindingNotification = null
+  }
+
   /** The size this session was last told to use — either its construction
    * default or the most recent `resize()` call. A caller that replaces this
    * session (e.g. restarting the underlying process) needs this to spawn the
@@ -159,19 +277,27 @@ export class PtySession extends EventEmitter {
     }
     this.emit('log', text)
     this.permissionMonitor?.notifyActivity()
+    if (this.bindingReader && !this.bindingNotification && !this.stopping && !this.exitHandled) {
+      this.bindingNotification = setTimeout(() => {
+        this.bindingNotification = null
+        void this.refreshSessionBinding()
+      }, 150)
+      this.bindingNotification.unref()
+    }
   }
 
   private reportPermissionMonitorError(error: unknown): void {
     this.emit('permission-monitor-error', String(error))
   }
 
-  private async attachPermissionMonitor(sessionId: string): Promise<void> {
+  private async attachPermissionMonitor(sessionId: string, replayHistory: boolean | number = true): Promise<void> {
     if (this.options.monitorSessionPermissions !== true) return
     this.permissionMonitor?.stop()
     const environment = { ...process.env, ...this.options.env }
+    const logPath = join(copilotSessionRoot(environment), sessionId, 'events.jsonl')
     const monitor = new SessionPermissionMonitor(
-      join(copilotSessionRoot(environment), sessionId, 'events.jsonl'),
-      (mode) => this.emit('permission-mode', mode),
+      logPath,
+      (mode) => { if (this.permissionMonitor === monitor && !this.stopping && !this.exitHandled) this.emit('permission-mode', mode) },
       5_000,
       (message) => this.emit('permission-monitor-error', message),
       (activity) => {
@@ -197,12 +323,18 @@ export class PtySession extends EventEmitter {
         if (this.permissionMonitor !== monitor || this.stopping || this.exitHandled) return
         this.emit('session-record', line, live)
       },
+      replayHistory,
+      (reason) => {
+        if (this.permissionMonitor === monitor && !this.stopping && !this.exitHandled) this.emit('session-record-reset', reason)
+      },
     )
     this.permissionMonitor = monitor
+    this.monitoredSession = { sessionId, logPath, replayHistory }
+    this.emit('session-record-reset', 'monitor-attached')
     try {
       await monitor.start()
     } catch (error) {
-      if (this.permissionMonitor === monitor) this.permissionMonitor = null
+      if (this.permissionMonitor === monitor) { this.permissionMonitor = null; this.monitoredSession = null }
       monitor.stop()
       this.reportPermissionMonitorError(error)
     }
@@ -212,6 +344,7 @@ export class PtySession extends EventEmitter {
     if (this.permissionDrain) return this.permissionDrain
     const monitor = this.permissionMonitor
     this.permissionMonitor = null
+    this.monitoredSession = null
     return this.permissionDrain = monitor
       ? monitor.finish().catch((error) => this.reportPermissionMonitorError(error))
       : Promise.resolve()
@@ -231,6 +364,7 @@ export class PtySession extends EventEmitter {
     const spawnRows = this.options.rows
     let pty: PtyLike
     try {
+      this.bindingStartedAt = Date.now()
       pty = await this.options.spawnPty(this.options.file, this.options.args, {
         cwd: this.options.cwd,
         env: { ...process.env, ...this.options.env },
@@ -250,13 +384,22 @@ export class PtySession extends EventEmitter {
       throw error
     }
     this.pty = pty
+    if (this.options.monitorSessionPermissions === true) {
+      this.bindingReader = this.options.sessionBindingReader ?? (pty.pid && pty.pid > 1
+        ? new SessionBindingReader(copilotSessionRoot({ ...process.env, ...this.options.env }), pty.pid) : null)
+      if (this.bindingReader) {
+        this.bindingTimer = setInterval(() => { void this.refreshSessionBinding() }, 2_000)
+        this.bindingTimer.unref()
+      }
+    }
     if (this.storeDiscovery) {
       const discovery = this.storeDiscovery
       void discovery.find().then((sessionId) => {
         if (sessionId === null || this.storeDiscovery !== discovery || this.lastKnownSessionId !== null || this.exitHandled) return
         this.lastKnownSessionId = sessionId
         this.emit('session-id', sessionId)
-        void this.attachPermissionMonitor(sessionId)
+        // Store discovery proves this directory did not exist before spawn and belongs to this launch's unique worktree.
+        void this.attachPermissionMonitor(sessionId, false)
       }).catch((error) => this.emit('permission-monitor-error', `Session store discovery failed: ${String(error)}`))
     }
     // A resize() that arrives while spawnPty() is still resolving updates
@@ -300,6 +443,7 @@ export class PtySession extends EventEmitter {
     pty.onExit(({ exitCode, signal }) => {
       if (this.exitHandled) return
       this.exitHandled = true
+      this.stopBindingWatch()
       this.pty = null
       this.storeDiscovery?.cancel()
       pty.dispose?.()
@@ -345,6 +489,7 @@ export class PtySession extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.stopBindingWatch()
     this.startupAbort.abort()
     this.storeDiscovery?.cancel()
     const pty = this.pty

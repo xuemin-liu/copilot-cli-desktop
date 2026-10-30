@@ -1342,6 +1342,11 @@ async function refreshWorktreeBranches(): Promise<void> {
  * Shared by session creation and restart, since a restarted tab keeps its
  * id but is backed by a brand-new `PtySession` instance. */
 function wireSessionEvents(id: string, session: PtySession): void {
+  meetingReader(id).reset('process-attached')
+  session.on('session-record-reset', (reason: string) => {
+    if (managedTabs.get(id)?.session !== session) return
+    meetingReader(id).reset(reason)
+  })
   session.on('activity', () => {
     if (managedTabs.get(id)?.session !== session) return
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activity: session.activity } : tab) }
@@ -1394,6 +1399,12 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('session-id', (sessionId: string) => {
     if (managedTabs.get(id)?.session !== session) return
+    const previous = tabsState.tabs.find(candidate => candidate.id === id)?.lastSessionId
+    if (previous && previous !== sessionId) {
+      sessionLastOutputAt.delete(id)
+      meetingHub.leave(id)
+      meetingOutbox.forget(id)
+    }
     tabsState = setTabSessionId(tabsState, id, sessionId)
     const tab = tabsState.tabs.find((candidate) => candidate.id === id)
     if (!tab?.remote) usageService?.associate(sessionId, tab?.sideChat === true)
@@ -1866,7 +1877,8 @@ function meetingReader(tabId: string): MeetingTurnReader {
 
 function meetingParty(tabId: string): { tabId: string; title: string; folder: string | null } {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  return { tabId, title: tab?.title ?? 'A session', folder: tab?.sessionCwd ?? managedTabs.get(tabId)?.session.sessionCwd ?? null }
+  const session = managedTabs.get(tabId)?.session
+  return { tabId, title: tab?.title ?? 'A session', folder: session ? session.sessionCwd : tab?.sessionCwd ?? null }
 }
 
 /**
@@ -1878,7 +1890,7 @@ const MEETING_SETTLE_MS = 1_500
 const sessionLastOutputAt = new Map<string, number>()
 function meetingPromptShown(tabId: string): boolean {
   const session = managedTabs.get(tabId)?.session
-  return session !== undefined && session.bracketedPaste && Date.now() - (sessionLastOutputAt.get(tabId) ?? 0) >= MEETING_SETTLE_MS
+  return session !== undefined && session.sessionBindingReady && session.bracketedPaste && Date.now() - (sessionLastOutputAt.get(tabId) ?? 0) >= MEETING_SETTLE_MS
 }
 
 const meetingOutbox = new MeetingOutbox({
@@ -2056,16 +2068,46 @@ function scheduleMeetingPump(delayMs = 1_000): void {
   meetingPumpTimer.unref()
 }
 
-function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): MeetingResponse {
+async function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): Promise<MeetingResponse> {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   if (!tab || tab.remote) return { ok: false, message: 'This session is not open in the desktop.' }
   try {
+    if (request.sessionId !== undefined && command !== 'start' && request.sessionId !== tab.lastSessionId) {
+      return { ok: command === 'status', message: 'This CLI session is not bound to an open meeting in this tab.' }
+    }
+    const callerSession = managedTabs.get(tabId)?.session
+    if (command === 'start' || request.sessionId !== undefined) await callerSession?.refreshSessionRecords(request.sessionId)
+    if (request.sessionId !== undefined) {
+      const session = callerSession
+      const binding = session?.bindingDiagnostic
+      if (!session || managedTabs.get(tabId)?.session !== session || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId) {
+        const diagnostic = JSON.stringify({ tabId, requestSessionId: isValidSessionId(request.sessionId) ? request.sessionId : '<invalid>',
+          binding: binding ?? null, ownership: session?.bindingOwnershipDiagnostic ?? null })
+        void writeAppLog(`Meeting request binding rejected: ${diagnostic}`).catch(() => {})
+        return { ok: false, message: `The meeting request could not be bound to this tab's CLI session. Ask again after the session has finished switching.\nDiagnostics: ${diagnostic}` }
+      }
+      if (command !== 'start') session.commitSessionBinding()
+    }
     switch (command) {
       case 'start': {
+        const session = callerSession
+        if (!session || managedTabs.get(tabId)?.session !== session || session.status !== 'running') return { ok: false, message: 'This session is not running. Resume it from the desktop.' }
+        if (request.sessionId === undefined && !session.sessionBindingReady) {
+          return { ok: false, message: 'This tab has several retained CLI sessions, but the helper did not identify its session. Update Copilot CLI or close the other sessions in this tab, then ask again.' }
+        }
         // Only the person starts a meeting: the prompt this session is answering must be theirs, not a meeting message.
-        if (!meetingReader(tabId).answeringPerson) return { ok: false, message: 'Start a meeting only when the person asks for one in their own message.' }
+        const reader = meetingReader(tabId)
+        const rejection = reader.startRejection
+        if (rejection) {
+          const diagnostic = JSON.stringify({ tabId, tabSessionId: tabsState.tabs.find(candidate => candidate.id === tabId)?.lastSessionId ?? null,
+            sessionId: session.lastSessionId, monitor: session.monitorDiagnostic, binding: session.bindingDiagnostic,
+            ownership: session.bindingOwnershipDiagnostic, ...reader.diagnostic })
+          void writeAppLog(`Meeting start rejected: ${diagnostic}`).catch(() => {})
+          return { ok: false, message: `${rejection}\nDiagnostics: ${diagnostic}` }
+        }
+        session.commitSessionBinding()
         const meeting = meetingHub.start(meetingParty(tabId), { topic: request.topic, post: request.text, changes: request.changes }, meetingReader(tabId).usage)
-        return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.` }
+        return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.${session.sessionBindingReady ? '' : ' Automatic meeting messages are paused: close the other retained CLI sessions in this tab to receive them safely.'}` }
       }
       case 'round':
       case 'propose-close':
@@ -2094,14 +2136,13 @@ function meetingStatus(partyId: string): string {
 
 /**
  * A record of a session's event log. Live ones may be a prompt the person typed asking to join a meeting, and usage totals
- * add to the session's meeting cost. From the history read when the session (re)starts only the usage so far matters, so
- * the rest of a long history is not parsed again.
+ * add to the session's meeting cost. History supplies usage and diagnostic metadata, never authorization or joins.
  */
 function onMeetingRecord(tabId: string, line: string, live: boolean): void {
-  if (!live && !line.includes('"session.usage_checkpoint"')) return
   const reader = meetingReader(tabId)
   const prompt = reader.consume(line, live)
   const usage = reader.takeUsageChange()
+  if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   const request = joinRequest(prompt.content)
@@ -2118,6 +2159,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
 /** The session went idle: a prompt the desktop typed (if that is what it answered) is done. */
 function onMeetingIdle(tabId: string): void {
   const turn = meetingReaders.get(tabId)?.finish() ?? null
+  if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
   if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
   scheduleMeetingPump(0)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -15,6 +15,7 @@ import { fileEntry } from './migration-inventory.js'
 import { MigrationImportFailure } from './migration-import.js'
 import { realPathNative } from './real-path.js'
 import { findGitForTests } from './fixtures/git-fixture.js'
+import type { MeetingCommand, MeetingResponse } from './meeting-session.js'
 
 /** Migration is Windows to Windows only; on other platforms the app does not offer it. */
 const migrationOnly = { skip: process.platform === 'win32' ? false : 'migration is Windows only' }
@@ -46,6 +47,9 @@ interface Harness {
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
+  meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string): Promise<MeetingResponse>
+  configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
+  refreshRecords(tabId: string): Promise<void>
   /** One pass of the session-name poll, which the app runs every few seconds once ready. */
   refreshNames(): Promise<void>
   createSide(profile: WorkspaceProfile, parentId: string): Promise<DesktopState>
@@ -220,6 +224,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
         import { browserStorageClears } from 'electron';
+        import { SessionBindingReader as BindingReaderForTest } from './session-binding.js';
         const diagnosticWrites = [];
         let settingsSenderDestroyed = false;
         const originalWriteAppLog = writeAppLog;
@@ -246,6 +251,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
+          meetingCommand: (tabId, command, sessionId) => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text: 'Test proposal body', changes: null,
+            ...(sessionId === undefined ? {} : { sessionId }) }),
+          configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
+            copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
+          refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
           restore: restoreTabsForProfile,
@@ -283,7 +293,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -323,6 +333,132 @@ test('worktree timeout settings validate and persist, and new sessions and resta
   assert.equal(harness.spawns[0]!.worktreeTimeoutMinutes, 10, 'an in-flight launch keeps its captured timeout')
   await harness.request('desktop:restart-tab', first.activeTabId)
   assert.equal(harness.spawns.at(-1)!.worktreeTimeoutMinutes, 25)
+}))
+
+test('meeting start reads pending explicit requests after resume and repeated requests in the same tab', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, line('session.start', {}) + line('user.message', { content: 'PRIVATE old meeting request', interactionId: 'old' }))
+  profile.tabs = [{ title: 'Resumed', lastSessionId: SOURCE }]
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const tabId = (await harness.request('desktop:get-state')).activeTabId!
+  const history = await harness.meetingCommand(tabId, 'start')
+  assert.equal(history.ok, false, 'historical requests never authorize starts')
+  assert.match(history.message, /no active user turn observed/)
+  const diagnostic = JSON.parse(history.message.split('\nDiagnostics: ')[1]!)
+  assert.equal(diagnostic.tabId, tabId)
+  assert.equal(diagnostic.monitor.sessionId, SOURCE)
+  assert.equal(diagnostic.monitor.logPath, path)
+  assert.equal(diagnostic.live, false)
+  assert.equal(diagnostic.currentInteractionId, null)
+  assert.doesNotMatch(history.message, /PRIVATE/)
+
+  for (const interactionId of ['first', 'again']) {
+    // No output notification or timer: the command itself must read the newly appended request.
+    await appendFile(path, line('user.message', { content: 'try to start the meeting again', interactionId })
+      + line('assistant.turn_start', { turnId: interactionId })
+      + line('assistant.message', { interactionId, content: '', toolRequests: [{ id: 'helper' }] })
+      + line('assistant.turn_end', { turnId: interactionId }))
+    const started = await harness.meetingCommand(tabId, 'start')
+    assert.equal(started.ok, true, started.message)
+    assert.match(started.message, /Meeting [A-Z0-9]+ is open/)
+    await harness.meetingCommand(tabId, 'end')
+    await appendFile(path, line('assistant.turn_start', { turnId: 'final' })
+      + line('assistant.message', { interactionId, content: 'Done', phase: 'final_answer', toolRequests: [] })
+      + line('assistant.turn_end', { turnId: 'final' }))
+    const idle = await harness.meetingCommand(tabId, 'start')
+    assert.equal(idle.ok, false, 'a completed person turn cannot authorize another meeting')
+    assert.match(idle.message, /lastClearedCurrent.*idle.*assistant.turn_end/)
+  }
+
+  await appendFile(path, line('user.message', { content: '[meeting K7QF · round 1 · from the desktop]\nPRIVATE prompt', interactionId: 'desktop' }))
+  const desktop = await harness.meetingCommand(tabId, 'start')
+  assert.equal(desktop.ok, false)
+  assert.match(desktop.message, /Desktop-generated turn/)
+  assert.doesNotMatch(desktop.message, /PRIVATE/)
+}))
+
+test('meeting authorization stays with each session through tab switching and process replacement', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  for (const id of [SOURCE, FORK]) {
+    await mkdir(join(directory, 'session-state', id), { recursive: true })
+    await writeFile(join(directory, 'session-state', id, 'events.jsonl'), line('session.start', {}))
+  }
+  profile.tabs = [{ title: 'First', lastSessionId: SOURCE }, { title: 'Second', lastSessionId: FORK }]
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const state = await harness.request('desktop:get-state')
+  const firstTab = state.tabs.find(tab => tab.id === state.activeTabId)!
+  const secondTab = state.tabs.find(tab => tab.id !== state.activeTabId)!
+  const first = firstTab.id, second = secondTab.id
+  await appendFile(join(directory, 'session-state', firstTab.lastSessionId!, 'events.jsonl'), line('user.message', { content: 'start a meeting', interactionId: 'source' }))
+  await harness.refreshRecords(first)
+  await harness.request('desktop:activate-tab', second)
+  await waitFor(() => harness.spawns.length, count => count === 2, 'the selected session resumes')
+  assert.equal((await harness.meetingCommand(second, 'start')).ok, false, 'the other tab cannot borrow authorization')
+  const targetPath = join(directory, 'session-state', secondTab.lastSessionId!, 'events.jsonl')
+  await appendFile(targetPath, line('user.message', { content: 'start a meeting', interactionId: 'target' }))
+  assert.equal((await harness.meetingCommand(second, 'start')).ok, true)
+  await harness.meetingCommand(second, 'end')
+  await harness.request('desktop:restart-tab', second)
+  assert.equal((await harness.meetingCommand(second, 'start')).ok, false, 'replacement process cannot inherit a live reader')
+  await appendFile(targetPath, line('user.message', { content: 'try to start the meeting again', interactionId: 'resumed' }))
+  assert.equal((await harness.meetingCommand(second, 'start')).ok, true)
+}))
+
+test('meeting start safely follows A to B to A within the same tab and PTY, including repeated explicit requests', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  await mkdir(dirname(path(FORK)), { recursive: true })
+  await writeFile(path(FORK), line('session.start', { sessionId: FORK, startTime: '2026-10-29T00:00:00Z' })
+    + line('user.message', { content: 'PRIVATE old start request', interactionId: 'history' }))
+  const state = await harness.createMain()
+  const tab = state.tabs.find(candidate => candidate.id === state.activeTabId)!
+  const a = tab.lastSessionId!, b = FORK
+  await mkdir(dirname(path(a)), { recursive: true })
+  await writeFile(path(a), line('session.start', { sessionId: a, startTime: new Date().toISOString() })
+    + line('user.message', { content: 'start a meeting in A', interactionId: 'a1' }))
+  await writeFile(join(dirname(path(a)), 'inuse.11.lock'), '')
+  harness.configureBinding(tab.id, 10, [10, 11])
+  assert.equal((await harness.meetingCommand(tab.id, 'start', a)).ok, true)
+
+  await writeFile(join(dirname(path(b)), 'inuse.11.lock'), '')
+  const historical = await harness.meetingCommand(tab.id, 'start', b)
+  assert.equal(historical.ok, false)
+  assert.match(historical.message, /no active user turn observed/)
+  assert.doesNotMatch(historical.message, /PRIVATE/)
+  assert.match((await harness.meetingCommand(tab.id, 'status', b)).message, /not bound to an open meeting/, 'A\'s meeting cannot follow the tab into B')
+  assert.equal((await harness.request('desktop:get-state')).tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, a, 'a rejected start cannot publish the candidate binding')
+  assert.match((await harness.meetingCommand(tab.id, 'status', a)).message, /you are the host/, 'a rejected start cannot close A\'s meeting')
+  await appendFile(path(b), line('session.resume', { resumeTime: new Date().toISOString() })
+    + line('user.message', { content: '[meeting K7QF · round 1 · from the desktop]\nStart another meeting', interactionId: 'candidate-desktop' })
+    + line('session.usage_checkpoint', { totalNanoAiu: 20e9, totalPremiumRequests: 10 }))
+  assert.match((await harness.meetingCommand(tab.id, 'start', b)).message, /Desktop-generated/)
+  const existing = (await harness.request('desktop:get-state')).meetings?.find(meeting => meeting.hostTabId === tab.id && meeting.stage !== 'closed')
+  assert.deepEqual(existing?.cost, { aiCredits: 0, premiumRequests: 0 }, 'candidate B cannot charge usage to A\'s meeting')
+  for (const interactionId of ['b1', 'b2']) {
+    await appendFile(path(b), line('session.resume', { resumeTime: new Date().toISOString() })
+      + line('user.message', { content: 'try to start the meeting again', interactionId }))
+    const started = await harness.meetingCommand(tab.id, 'start', b)
+    assert.equal(started.ok, true, started.message)
+    assert.match(started.message, /Automatic meeting messages are paused/, 'retained sessions cannot receive misdirected terminal input')
+    assert.equal((await harness.meetingCommand(tab.id, 'end', a)).ok, false, 'stale background controls cannot close B\'s meeting')
+    await harness.meetingCommand(tab.id, 'end', b)
+  }
+  await appendFile(path(b), line('user.message', { content: '[meeting K7QF · round 1 · from the desktop]\nReview', interactionId: 'desktop' }))
+  assert.match((await harness.meetingCommand(tab.id, 'start', b)).message, /Desktop-generated/)
+  assert.equal((await harness.meetingCommand(tab.id, 'start', a)).ok, false, 'returning to A does not reuse its old authorization')
+  await appendFile(path(a), line('user.message', { content: 'try again in A', interactionId: 'a2' }))
+  assert.equal((await harness.meetingCommand(tab.id, 'start', a)).ok, true)
+  assert.equal(harness.spawns.length, 1, 'every request used the same underlying PTY')
+  assert.equal((await harness.request('desktop:get-state')).tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, a)
+  assert.equal((await harness.meetingCommand(tab.id, 'start', '../foreign')).ok, false)
 }))
 
 test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {

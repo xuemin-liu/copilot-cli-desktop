@@ -259,6 +259,46 @@ the person approves).
   discussion with one review, on a vote or with the setting off, a timeout mid-discussion, a late joiner, and a restart
   mid-discussion. The message builder keeps other reviews below the separator.
 
+## Meeting start diagnostics
+
+`start` reads pending session records before checking the existing person-turn guard. Rejections distinguish an unobserved
+active user turn from a Desktop-generated turn. The helper response and app log include only the tab ID, the tab/process
+session IDs, the monitored session ID and log path, the history/live flag, the current interaction ID and Desktop flag,
+`expectingDesktop`, and metadata for the last observed event and the event that cleared the turn. Event metadata contains
+only bounded IDs and a known event type; prompts, replies, tool arguments and control-state contents are excluded.
+
+A resumed session's history never authorizes a start or triggers a join. A directory found by worktree store discovery is
+different: the pre-spawn snapshot, start time and unique worktree name prove it was created for this launch, so its first
+request is live even if discovery happens after that request was written. Replacing a process or monitor, truncating the
+log, or skipping an oversized event clears the reader's authorization and pending Desktop-prompt expectation.
+
+### Switching sessions inside one tab
+
+CLI 1.0.105 can retain both sessions' `inuse.<pid>.lock` files after `/resume`, so a lock alone cannot identify which
+session called the helper. Its shell tools receive the nonsecret `COPILOT_AGENT_SESSION_ID`; both helpers forward that
+as a routing hint. Desktop verifies a regular root-session log and an in-use lock belonging to a PID in the tab's OS
+process tree. It pins the CLI owner PID, excluding sibling processes and nested CLIs after ownership is established.
+The hint never authorizes a meeting: the selected log still has to show a live person turn. Terminal text, cwd, the newest
+log, registry credentials and endpoint control-state contents are not binding evidence.
+
+On a verified candidate change, Desktop stops the old monitor, clears turn state, and attaches the candidate log. The
+association is published and the previous session's meeting left only after the start guard passes. A rejected candidate
+cannot close or charge usage to the existing meeting, and stale controls from a different session cannot modify it.
+The first visit admits records only from a root start/resume
+epoch after process launch. Returning to a previously visited session uses the saved byte cursor and file identity instead
+of replaying its old request. Replaced/truncated files cannot inherit a saved cursor. Late callbacks and lookups from an
+exited process cannot revive authorization.
+
+Several retained sessions can share the same terminal. The helper can identify its caller, but terminal input cannot name
+its recipient. Automatic meeting deliveries therefore pause while more than one root session remains owned by that CLI;
+the successful start response tells the person to close the other retained sessions. A helper without routing metadata
+cannot start a meeting in this ambiguous state. Unknown ownership fails closed.
+
+Unit and production lifecycle regressions cover A → B → A in one PTY, repeated requests in B, historical and Desktop
+prompts, foreign/nested owners, and lookup completion after exit. `npm run meeting-binding:check` runs a real CLI with an
+isolated profile and loopback mock model, checking helper authorization through A → B → B → A without creating a live
+Desktop meeting. A persisted-tab mismatch alone remains a diagnostic clue, not proof of the original live binding.
+
 ## Open questions
 
 1. Should a meeting that ends by agreement tell the host to continue automatically ("now implement the plan"), or stop and wait

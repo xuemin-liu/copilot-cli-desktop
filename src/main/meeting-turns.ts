@@ -11,12 +11,14 @@ import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
  */
 
 interface TurnRecord {
+  id?: unknown
   type?: unknown
   agentId?: unknown
   data?: {
     parentToolCallId?: unknown
     content?: unknown
     interactionId?: unknown
+    turnId?: unknown
     messageId?: unknown
     phase?: unknown
     toolRequests?: unknown
@@ -47,11 +49,53 @@ interface Interaction extends PromptSeen {
 
 const MAX_CHUNKS = 64
 
+/** Metadata only: never retain prompt, reply, tool arguments, or arbitrary record fields here. */
+interface TurnEventDiagnostic { type: string; live: boolean; eventId: string | null; interactionId: string | null; turnId: string | null }
+
+export interface MeetingTurnDiagnostic {
+  live: boolean | null
+  currentInteractionId: string | null
+  currentDesktop: boolean | null
+  expectingDesktop: boolean
+  lastEvent: TurnEventDiagnostic | null
+  lastClearedCurrent: { reason: string; event: TurnEventDiagnostic | null } | null
+}
+
 export class MeetingTurnReader {
   private current: Interaction | null = null
   private expectingDesktop = false
   private usageValue: MeetingUsage | null = null
   private usageChanged = false
+  private lastEvent: TurnEventDiagnostic | null = null
+  private lastClearedCurrent: MeetingTurnDiagnostic['lastClearedCurrent'] = null
+
+  get diagnostic(): MeetingTurnDiagnostic {
+    return {
+      live: this.lastEvent?.live ?? null,
+      currentInteractionId: this.current?.id?.slice(0, 128) ?? null,
+      currentDesktop: this.current?.desktop ?? null,
+      expectingDesktop: this.expectingDesktop,
+      lastEvent: this.lastEvent,
+      lastClearedCurrent: this.lastClearedCurrent,
+    }
+  }
+
+  get startRejection(): string | null {
+    if (this.answeringPerson) return null
+    return this.current?.desktop
+      ? 'Cannot start a meeting while answering a Desktop-generated turn. Start a meeting only when the person asks for one in their own message.'
+      : 'Cannot start a meeting: no active user turn observed in the monitored session. Start a meeting only when the person asks for one in their own message.'
+  }
+
+  /** A new monitor/process, or a gap in the log, cannot inherit authorization or an expected Desktop prompt. */
+  reset(reason: string): void {
+    this.lastClearedCurrent = { reason, event: this.lastEvent }
+    this.lastEvent = null
+    this.current = null
+    this.expectingDesktop = false
+    this.usageValue = null
+    this.usageChanged = false
+  }
 
   /** The session's latest usage totals, from its history or since; null before any checkpoint. */
   get usage(): MeetingUsage | null { return this.usageValue }
@@ -82,6 +126,10 @@ export class MeetingTurnReader {
     try { record = JSON.parse(line) } catch { return null }
     if (!record || typeof record !== 'object' || record.agentId || record.data?.parentToolCallId) return null
     const data = record.data ?? {}
+    // Only known event names, and bounded identifiers, go into rejection diagnostics.
+    const type = typeof record.type === 'string' && /^(?:user\.message|assistant\.(?:message|turn_start|turn_end)|session\.(?:start|resume|usage_checkpoint)|tool\.execution_(?:start|complete)|abort)$/.test(record.type) ? record.type : 'other'
+    const identifier = (value: unknown): string | null => typeof value === 'string' ? value.slice(0, 128) : null
+    this.lastEvent = { type, live, eventId: identifier(record.id), interactionId: identifier(data.interactionId), turnId: identifier(data.turnId) }
     if (record.type === 'session.usage_checkpoint') {
       const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
       this.usageValue = { nanoAiu: count(data.totalNanoAiu), premiumRequests: count(data.totalPremiumRequests) }
@@ -107,10 +155,11 @@ export class MeetingTurnReader {
   }
 
   /** The session went idle: the prompt being answered is done. Null when there was none (or it was already reported). */
-  finish(): CompletedTurn | null {
+  finish(reason = 'idle'): CompletedTurn | null {
     const interaction = this.current
     this.current = null
     if (!interaction) return null
+    this.lastClearedCurrent = { reason, event: this.lastEvent }
     return { content: interaction.content, desktop: interaction.desktop, reply: interaction.final ?? interaction.last ?? '' }
   }
 

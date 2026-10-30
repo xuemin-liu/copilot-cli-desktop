@@ -39,6 +39,18 @@ test('the meeting endpoint knows each session by its own token and turns away ev
   } finally { await server.close() }
 })
 
+test('the meeting endpoint awaits the event-log refresh before answering a host command', async () => {
+  let release!: () => void
+  const refreshed = new Promise<void>(resolve => { release = resolve })
+  const server = new MeetingControlServer(async () => { await refreshed; return { ok: false, message: 'no active user turn observed' } })
+  try {
+    const session = await server.register('tab-a')
+    const answer = post(session.port, '/start', { authorization: `Bearer ${session.token}` }, '{}')
+    release()
+    assert.deepEqual(JSON.parse((await answer).body), { ok: false, message: 'no active user turn observed' })
+  } finally { release(); await server.close() }
+})
+
 test('meeting files stay inside their meeting folder and never under .github', async () => {
   const root = await mkdtemp(join(tmpdir(), 'meeting-files-'))
   try {
@@ -95,7 +107,7 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     await writeFile(join(repo, '.env'), 'PASSWORD=hunter2-very-secret\nDATABASE_CONNECTION_STRING=Server=db;opaque-untracked-value-93\n')
     await writeFile(join(repo, 'config.txt'), 'API_KEY=sk-live-0123456789abcdef0123456789\n')
     await writeFile(join(directory, 'plan.md'), '# Plan ✓\n\n1. lock\n')
-    const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab-host'), { ...gitEnv })
+    const env = await prepareMeetingSessionEnvironment(join(directory, 'helper'), await server.register('tab-host'), { ...gitEnv, COPILOT_AGENT_SESSION_ID: '11111111-1111-4111-8111-111111111111' })
     assert.match(env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS!, /helper/)
     assert.match(await readFile(join(directory, 'helper', '.github', 'instructions', 'meeting.instructions.md'), 'utf8'), /join meeting/)
     const run = (...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => new Promise((resolveRun) => {
@@ -112,6 +124,7 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     assert.equal(calls[0]!.tabId, 'tab-host')
     assert.equal(sent.topic, 'login plan')
     assert.equal(sent.text.replace(/\r\n/g, '\n'), '# Plan ✓\n\n1. lock\n')
+    assert.equal(sent.sessionId, env.COPILOT_AGENT_SESSION_ID, 'the helper carries CLI-provided routing metadata')
     assert.match(sent.changes!, /\+two ✓/, 'tracked changes, UTF-8 intact')
     assert.match(sent.changes!, /new file\.txt/)
     assert.match(sent.changes!, /\+brand new/, 'untracked files are included as new files')

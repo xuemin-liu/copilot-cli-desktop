@@ -1,9 +1,95 @@
 import assert from 'node:assert/strict'
-import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
+import { MeetingTurnReader } from './meeting-turns.js'
+
+test('a historical partial user record cannot become live merely because its newline arrives after attachment', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'meeting-partial-history-'))
+  const path = join(directory, 'events.jsonl')
+  const old = JSON.stringify({ type: 'user.message', data: { content: 'old request', interactionId: 'old' } }) + '\n'
+  const reader = new MeetingTurnReader()
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, () => {}, () => {}, () => {}, (record, live) => reader.consume(record, live))
+  try {
+    await writeFile(path, old.slice(0, -3))
+    await monitor.start()
+    await appendFile(path, old.slice(-3))
+    await monitor.poll()
+    assert.equal(reader.answeringPerson, false)
+    await appendFile(path, JSON.stringify({ type: 'user.message', data: { content: 'new request', interactionId: 'new' } }) + '\n')
+    await monitor.poll()
+    assert.equal(reader.diagnostic.currentInteractionId, 'new')
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('replacing a log clears authorization and treats the replacement contents as history', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'meeting-replaced-log-'))
+  const path = join(directory, 'events.jsonl')
+  const user = (id: string) => JSON.stringify({ type: 'user.message', data: { content: 'start a meeting', interactionId: id } }) + '\n'
+  const reader = new MeetingTurnReader()
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, () => {}, () => {}, () => {},
+    (record, live) => reader.consume(record, live), true, reason => reader.reset(reason))
+  try {
+    await monitor.start()
+    await writeFile(path, user('first'))
+    await monitor.poll()
+    assert.equal(reader.answeringPerson, true)
+    const identity = monitor.checkpoint?.identity
+    await writeFile(join(directory, 'replacement.jsonl'), user('replacement-history'))
+    await rename(join(directory, 'replacement.jsonl'), path)
+    await monitor.poll()
+    assert.notEqual(monitor.checkpoint?.identity, identity)
+    assert.equal(reader.answeringPerson, false)
+    assert.equal(reader.diagnostic.lastClearedCurrent?.reason, 'event-log-replaced')
+    await appendFile(path, user('new'))
+    await monitor.poll()
+    assert.equal(reader.diagnostic.currentInteractionId, 'new')
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a rebound monitor seeds history up to a saved byte boundary and consumes later records live without clearing their turn', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'meeting-rebinding-cutoff-'))
+  const path = join(directory, 'events.jsonl')
+  const reader = new MeetingTurnReader()
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const history = line('user.message', { content: 'old request 中文', interactionId: 'old' })
+    + line('assistant.turn_start', { turnId: 'old' }) + line('assistant.message', { content: 'Done' }) + line('assistant.turn_end', { turnId: 'old' })
+  const request = line('user.message', { content: 'try again', interactionId: 'new' })
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, activity => { if (activity === 'idle') reader.finish() }, () => {}, () => {},
+    (record, live) => reader.consume(record, live), Buffer.byteLength(history))
+  try {
+    await writeFile(path, history + request + line('assistant.turn_start', { turnId: 'new' }))
+    await monitor.start()
+    assert.equal(reader.answeringPerson, true)
+    assert.equal(reader.diagnostic.currentInteractionId, 'new')
+    assert.equal(monitor.position, Buffer.byteLength(history + request + line('assistant.turn_start', { turnId: 'new' })))
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})
+
+test('a truncated event log invalidates meeting authorization until another live user request', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'meeting-log-reset-'))
+  const path = join(directory, 'events.jsonl')
+  const reader = new MeetingTurnReader()
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const monitor = new SessionPermissionMonitor(path, () => {}, 60_000, () => {}, () => {}, () => {}, () => {},
+    (record, live) => reader.consume(record, live), true, reason => reader.reset(reason))
+  try {
+    await monitor.start()
+    await writeFile(path, line('user.message', { content: 'start a meeting', interactionId: 'first' }))
+    await monitor.poll()
+    assert.equal(reader.answeringPerson, true)
+    await writeFile(path, line('user.message', { content: 'old', interactionId: 'old' }))
+    await monitor.poll()
+    assert.equal(reader.answeringPerson, false)
+    assert.equal(reader.diagnostic.live, false, 'rewritten historical prompts cannot reauthorize the session')
+    assert.equal(reader.diagnostic.lastClearedCurrent?.reason, 'event-log-truncated')
+    await appendFile(path, line('user.message', { content: 'try to start the meeting again', interactionId: 'again' }))
+    await monitor.poll()
+    assert.equal(reader.answeringPerson, true)
+  } finally { monitor.stop(); await rm(directory, { recursive: true, force: true }) }
+})
 
 test('oversized partial events invalidate activity, report one diagnostic, and recover at later complete turns', async () => {
   for (const replay of [false, true]) {

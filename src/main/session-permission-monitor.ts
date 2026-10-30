@@ -23,6 +23,9 @@ export class SessionPermissionMonitor {
   private startPromise: Promise<void> | null = null
   private finishPromise: Promise<void> | null = null
   private seeding = true
+  private historyBoundary = 0
+  private fileIdentity: string | null = null
+  private replayingTruncation = false
   private seededMode: SessionPermissionMode | null = null
   private readonly activity = new SessionActivityTracker()
   private lastDetail: ActivityDetail | null = null
@@ -39,7 +42,16 @@ export class SessionPermissionMonitor {
     /** Each complete record, before activity sees it (meetings read the turns and usage). `live` is false while the history
      * the session already had is read, true for records appended since. */
     private readonly onRecord: (line: string, live: boolean) => void = () => {},
+    /** true: snapshot existing history; false: a new owned log is live; a byte offset: replay only bytes before it. */
+    private readonly replayHistory: boolean | number = true,
+    private readonly onReset: (reason: string) => void = () => {},
   ) {}
+
+  /** Bytes read, including a partial record. On rebinding, a record crossing this boundary remains historical. */
+  get position(): number { return this.offset }
+  get checkpoint(): { position: number; identity: string } | null {
+    return this.fileIdentity === null ? null : { position: this.offset, identity: this.fileIdentity }
+  }
 
   start(): Promise<void> {
     return this.startPromise ??= this.initialize()
@@ -47,11 +59,11 @@ export class SessionPermissionMonitor {
 
   private async initialize(): Promise<void> {
     if (this.stopped || this.timer) return
+    this.historyBoundary = typeof this.replayHistory === 'number' ? this.replayHistory
+      : this.replayHistory ? await stat(this.path).then(info => info.size, error => { if (isMissing(error)) return 0; throw error }) : 0
+    this.seeding = this.historyBoundary > 0
     await this.poll()
-    this.seeding = false
-    if (!this.stopped && this.seededMode) this.onMode(this.seededMode)
-    const activity = this.activity.finishReplay()
-    if (!this.stopped && activity) this.onActivity(activity)
+    this.finishSeeding()
     this.publishDetail()
     this.publishCwd()
     if (this.stopped) return
@@ -59,6 +71,16 @@ export class SessionPermissionMonitor {
       void this.poll().catch((error) => this.onDiagnostic(`Permission event poll failed: ${String(error)}`))
     }, this.pollIntervalMs)
     this.timer.unref()
+  }
+
+  private finishSeeding(): void {
+    if (!this.seeding) return
+    this.seeding = false
+    if (!this.stopped && this.seededMode) this.onMode(this.seededMode)
+    const activity = this.activity.finishReplay()
+    if (!this.stopped && activity) this.onActivity(activity)
+    this.publishDetail()
+    this.publishCwd()
   }
 
   notifyActivity(): void {
@@ -120,18 +142,27 @@ export class SessionPermissionMonitor {
 
   private async readAppendedEvents(): Promise<void> {
     let size: number
+    let identity: string
     try {
-      size = (await stat(this.path)).size
+      const info = await stat(this.path)
+      size = info.size
+      identity = `${info.dev}:${info.ino}`
     } catch (error) {
       if (isMissing(error)) return
       throw error
     }
-    if (size < this.offset) {
+    const replaced = this.fileIdentity !== null && this.fileIdentity !== identity
+    this.fileIdentity = identity
+    if (replaced || size < this.offset) {
       this.offset = 0
       this.pending = Buffer.alloc(0)
       this.discardPartialRecord = false
+      this.historyBoundary = size
+      this.replayingTruncation = !replaced
+      if (replaced) this.seeding = true
       this.activity.reset()
-      if (!this.seeding) this.onActivity(null)
+      this.onReset(replaced ? 'event-log-replaced' : 'event-log-truncated')
+      if (replaced || !this.seeding) this.onActivity(null)
       this.publishDetail()
       this.publishCwd()
     }
@@ -144,26 +175,33 @@ export class SessionPermissionMonitor {
         const chunk = Buffer.allocUnsafe(length)
         const { bytesRead } = await file.read(chunk, 0, length, this.offset)
         if (bytesRead === 0) break
+        const bufferStart = this.offset - this.pending.length
         this.offset += bytesRead
         const data = chunk.subarray(0, bytesRead)
-        this.consume(this.pending.length === 0 ? data : Buffer.concat([this.pending, data]))
+        this.consume(this.pending.length === 0 ? data : Buffer.concat([this.pending, data]), bufferStart)
       }
     } finally {
+      this.replayingTruncation = false
       await file.close()
     }
   }
 
-  private consume(buffer: Buffer): void {
+  private consume(buffer: Buffer, bufferStart: number): void {
     if (this.discardPartialRecord) {
       const newline = buffer.indexOf(10)
       if (newline === -1) return
+      bufferStart += newline + 1
       buffer = buffer.subarray(newline + 1)
       this.discardPartialRecord = false
     }
     let start = 0
     for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10, start)) {
       const line = buffer.subarray(start, end).toString('utf8').trim()
-      if (line) this.onRecord(line, !this.seeding)
+      const live = bufferStart + start >= this.historyBoundary
+      if (live) this.finishSeeding()
+      if (line) this.onRecord(line, live)
+      // A record that was partial at attachment is still history when its newline arrives later.
+      if (!live && !this.seeding && !this.replayingTruncation) { start = end + 1; continue }
       const activity = this.activity.consume(line)
       if (!this.seeding && activity !== undefined) this.onActivity(activity)
       this.publishDetail()
@@ -183,6 +221,7 @@ export class SessionPermissionMonitor {
       this.pending = Buffer.alloc(0)
       this.discardPartialRecord = true
       this.activity.reset()
+      this.onReset('oversized-event-gap')
       if (!this.seeding) this.onActivity(null)
       this.publishDetail()
       this.publishCwd()
