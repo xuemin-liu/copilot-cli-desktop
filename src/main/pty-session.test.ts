@@ -131,6 +131,24 @@ test('a binding lookup that finishes after process exit cannot attach a monitor 
   assert.equal(session.monitorDiagnostic, null)
 })
 
+test('ordinary terminal output does not trigger binding scans and the idle sweep runs only every 30 seconds', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  const pty = new FakePty(); pty.pid = 0
+  let reads = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: '.', spawnPty: fakeSpawnPty(pty), monitorSessionPermissions: true,
+    sessionBindingReader: { read: async () => { reads++; return { kind: 'unavailable' } } } })
+  try {
+    await session.start()
+    for (let index = 0; index < 50; index++) pty.emit('data', `ordinary output ${index}\n`)
+    context.mock.timers.tick(5_000)
+    assert.equal(reads, 0)
+    context.mock.timers.tick(25_000)
+    assert.equal(reads, 1)
+    await session.refreshSessionRecords('caller-session')
+    assert.equal(reads, 2, 'helper commands still refresh immediately')
+  } finally { await session.stop(); context.mock.timers.reset() }
+})
+
 test('closing a session aborts a pending worktree preparation before a PTY starts', async () => {
   let preparing!: () => void
   const begun = new Promise<void>(resolve => { preparing = resolve })

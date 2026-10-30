@@ -1867,6 +1867,7 @@ function sendSessionCommand(tabId: string, command: string): boolean {
 function meetingRoot(): string { return join(app.getPath('userData'), 'meetings') }
 const meetingReaders = new Map<string, MeetingTurnReader>()
 const meetingWrites = new Map<string, Promise<void>>()
+const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
 
 function meetingReader(tabId: string): MeetingTurnReader {
@@ -2068,15 +2069,35 @@ function scheduleMeetingPump(delayMs = 1_000): void {
   meetingPumpTimer.unref()
 }
 
-async function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): Promise<MeetingResponse> {
+function handleMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): Promise<MeetingResponse> {
+  // A refresh can stage a new binding. Keep its validation and publication atomic with respect to other helpers in this tab.
+  const previous = meetingCommands.get(tabId) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(() => runMeetingCommand(tabId, command, request))
+  meetingCommands.set(tabId, next)
+  const release = (): void => { if (meetingCommands.get(tabId) === next) meetingCommands.delete(tabId) }
+  void next.then(release, release)
+  return next
+}
+
+async function runMeetingCommand(tabId: string, command: MeetingCommand, request: MeetingRequest): Promise<MeetingResponse> {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   if (!tab || tab.remote) return { ok: false, message: 'This session is not open in the desktop.' }
+  const committedSessionId = tab.lastSessionId
   try {
     if (request.sessionId !== undefined && command !== 'start' && request.sessionId !== tab.lastSessionId) {
       return { ok: command === 'status', message: 'This CLI session is not bound to an open meeting in this tab.' }
     }
     const callerSession = managedTabs.get(tabId)?.session
     if (command === 'start' || request.sessionId !== undefined) await callerSession?.refreshSessionRecords(request.sessionId)
+    // Session events can change the committed binding while a refresh awaits I/O. A control must never publish an old candidate.
+    const currentTab = tabsState.tabs.find(candidate => candidate.id === tabId)
+    if (!currentTab || currentTab.remote || managedTabs.get(tabId)?.session !== callerSession) {
+      return { ok: false, message: 'This session is not open in the desktop.' }
+    }
+    if (command !== 'start' && (currentTab.lastSessionId !== committedSessionId ||
+      (request.sessionId !== undefined && request.sessionId !== currentTab.lastSessionId))) {
+      return { ok: command === 'status', message: 'This CLI session is not bound to an open meeting in this tab.' }
+    }
     if (request.sessionId !== undefined) {
       const session = callerSession
       const binding = session?.bindingDiagnostic

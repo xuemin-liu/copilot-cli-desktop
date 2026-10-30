@@ -77,7 +77,6 @@ export class PtySession extends EventEmitter {
   private bindingState: SessionBinding = { kind: 'unavailable' }
   private bindingRefresh: Promise<void> | null = null
   private bindingTimer: NodeJS.Timeout | null = null
-  private bindingNotification: NodeJS.Timeout | null = null
   private bindingStartedAt = 0
   private pendingSessionId: string | null = null
   private readonly bindingPositions = new Map<string, { position: number; identity: string }>()
@@ -195,7 +194,7 @@ export class PtySession extends EventEmitter {
       catch { binding = { kind: 'unknown' } }
       if (this.stopping || this.exitHandled) return
       this.bindingState = binding
-      if (binding.kind === 'unavailable') return
+      if (binding.kind === 'unavailable' || binding.kind === 'deferred') return
       if (binding.kind === 'unknown') {
         if (this.permissionMonitor) this.suspendSessionRecords('binding-unverified')
         return
@@ -236,9 +235,7 @@ export class PtySession extends EventEmitter {
 
   private stopBindingWatch(): void {
     if (this.bindingTimer) clearInterval(this.bindingTimer)
-    if (this.bindingNotification) clearTimeout(this.bindingNotification)
     this.bindingTimer = null
-    this.bindingNotification = null
   }
 
   /** The size this session was last told to use — either its construction
@@ -277,13 +274,6 @@ export class PtySession extends EventEmitter {
     }
     this.emit('log', text)
     this.permissionMonitor?.notifyActivity()
-    if (this.bindingReader && !this.bindingNotification && !this.stopping && !this.exitHandled) {
-      this.bindingNotification = setTimeout(() => {
-        this.bindingNotification = null
-        void this.refreshSessionBinding()
-      }, 150)
-      this.bindingNotification.unref()
-    }
   }
 
   private reportPermissionMonitorError(error: unknown): void {
@@ -388,7 +378,7 @@ export class PtySession extends EventEmitter {
       this.bindingReader = this.options.sessionBindingReader ?? (pty.pid && pty.pid > 1
         ? new SessionBindingReader(copilotSessionRoot({ ...process.env, ...this.options.env }), pty.pid) : null)
       if (this.bindingReader) {
-        this.bindingTimer = setInterval(() => { void this.refreshSessionBinding() }, 2_000)
+        this.bindingTimer = setInterval(() => { void this.refreshSessionBinding() }, 30_000)
         this.bindingTimer.unref()
       }
     }
@@ -400,6 +390,7 @@ export class PtySession extends EventEmitter {
         this.emit('session-id', sessionId)
         // Store discovery proves this directory did not exist before spawn and belongs to this launch's unique worktree.
         void this.attachPermissionMonitor(sessionId, false)
+        void this.refreshSessionBinding()
       }).catch((error) => this.emit('permission-monitor-error', `Session store discovery failed: ${String(error)}`))
     }
     // A resize() that arrives while spawnPty() is still resolving updates
@@ -425,6 +416,7 @@ export class PtySession extends EventEmitter {
           this.lastKnownSessionId = discoveredSessionId
           this.emit('session-id', discoveredSessionId)
           void this.attachPermissionMonitor(discoveredSessionId)
+          void this.refreshSessionBinding()
         }
       }
       if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {

@@ -16,6 +16,7 @@ import { MigrationImportFailure } from './migration-import.js'
 import { realPathNative } from './real-path.js'
 import { findGitForTests } from './fixtures/git-fixture.js'
 import type { MeetingCommand, MeetingResponse } from './meeting-session.js'
+import type { SessionBindingReader } from './session-binding.js'
 
 /** Migration is Windows to Windows only; on other platforms the app does not offer it. */
 const migrationOnly = { skip: process.platform === 'win32' ? false : 'migration is Windows only' }
@@ -49,6 +50,7 @@ interface Harness {
   createMain(): Promise<DesktopState>
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
+  bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
   /** One pass of the session-name poll, which the app runs every few seconds once ready. */
   refreshNames(): Promise<void>
@@ -255,6 +257,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             ...(sessionId === undefined ? {} : { sessionId }) }),
           configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
             copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
+          bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
@@ -459,6 +462,58 @@ test('meeting start safely follows A to B to A within the same tab and PTY, incl
   assert.equal(harness.spawns.length, 1, 'every request used the same underlying PTY')
   assert.equal((await harness.request('desktop:get-state')).tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, a)
   assert.equal((await harness.meetingCommand(tab.id, 'start', '../foreign')).ok, false)
+}))
+
+test('an overlapping stale control cannot close the meeting accepted by another retained session', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  await mkdir(dirname(path(FORK)), { recursive: true })
+  await writeFile(path(FORK), line('session.start', { sessionId: FORK, startTime: '2026-10-29T00:00:00Z' }))
+  const state = await harness.createMain()
+  const tab = state.tabs.find(candidate => candidate.id === state.activeTabId)!
+  const a = tab.lastSessionId!, b = FORK
+  await mkdir(dirname(path(a)), { recursive: true })
+  await writeFile(path(a), line('session.start', { sessionId: a, startTime: new Date().toISOString() })
+    + line('user.message', { content: 'start a meeting in A', interactionId: 'a1' }))
+  await writeFile(join(dirname(path(a)), 'inuse.11.lock'), '')
+  harness.configureBinding(tab.id, 10, [10, 11])
+  assert.equal((await harness.meetingCommand(tab.id, 'start', a)).ok, true)
+  await writeFile(join(dirname(path(b)), 'inuse.11.lock'), '')
+  await appendFile(path(b), line('session.resume', { resumeTime: new Date().toISOString() })
+    + line('user.message', { content: 'start a meeting in B', interactionId: 'b1' }))
+
+  let reached!: () => void, release!: () => void
+  const stableBindingRead = new Promise<void>(resolve => { reached = resolve })
+  const proceed = new Promise<void>(resolve => { release = resolve })
+  const reader = harness.bindingReader(tab.id)
+  const read = reader.read.bind(reader)
+  let held = false
+  reader.read = async (current, requested) => {
+    const result = await read(current, requested)
+    if (!held && current === b && requested === b) {
+      held = true
+      reached()
+      await proceed
+    }
+    return result
+  }
+  try {
+    const startingB = harness.meetingCommand(tab.id, 'start', b)
+    await stableBindingRead
+    // A is still the committed tab session. Queue its end while B's final ownership read is suspended.
+    const endingA = harness.meetingCommand(tab.id, 'end', a)
+    release()
+    const started = await startingB
+    assert.equal(started.ok, true, started.message)
+    assert.equal((await endingA).ok, false)
+    const after = await harness.request('desktop:get-state')
+    assert.equal(after.tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, b, 'the rejected control must not restore A')
+    const open = after.meetings?.filter(meeting => meeting.hostTabId === tab.id && meeting.stage !== 'closed')
+    assert.equal(open?.length, 1, 'B\'s accepted meeting must remain open')
+    assert.match(started.message, new RegExp(`Meeting ${open![0]!.id} is open`))
+  } finally { release() }
 }))
 
 test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {
