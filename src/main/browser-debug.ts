@@ -85,7 +85,8 @@ export class BrowserDebug {
   readonly devtoolsPartition: string | null
   private readonly tabId: string
   private readonly notifyShortcut: (name: 'find' | 'find-close') => void
-  private readonly appShortcut: ((name: 'git-toggle') => void) | undefined
+  /** Returns whether the app took the shortcut; one it leaves goes on to the window (its menu, if it has one). */
+  private readonly appShortcut: ((name: 'git-toggle' | 'close-window') => boolean) | undefined
   private readonly showMenu: (menu: Menu) => void
   private readonly history: BrowserHistory
   private findQuery = ''
@@ -102,7 +103,7 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle') => void; showMenu?: (menu: Menu) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu) => void } = {}) {
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
     this.zoom = options.zoom ?? new BrowserZoom()
@@ -261,6 +262,8 @@ export class BrowserDebug {
         if (key === 'escape' && this.findQuery) { this.stopFind(); this.notifyShortcut('find-close'); return true }
         // Ctrl+Shift+G belongs to the app (the Git panel). Find-next is Ctrl+G and F3; find-previous is Shift+F3.
         if (command && input.shift && key === 'g' && this.appShortcut) { this.appShortcut('git-toggle'); return true }
+        // In the browser's own window, Ctrl/Cmd+W returns the browser to its session, as from the window's header.
+        if (command && !input.shift && key === 'w' && this.appShortcut?.('close-window')) return true
         if (this.findQuery && (key === 'f3' || (command && !input.shift && key === 'g'))) { this.find(this.findQuery, !input.shift, true); return true }
         if (key === 'f12' || (command && input.shift && key === 'i')) { this.action('devtools'); return true }
         return false

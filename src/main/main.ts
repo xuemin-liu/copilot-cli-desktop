@@ -3675,7 +3675,12 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     catch (error) { logBrowserError(`Could not share DevTools settings: ${String(error)}`) }
     browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition, tabId,
       history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(),
-      onAppShortcut: () => toggleGitPanel(), reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
+      onAppShortcut: name => {
+        if (name === 'git-toggle') { toggleGitPanel(); return true }
+        if (!browserWindows.has(tabId)) return false
+        dockSessionBrowser(tabId)
+        return true
+      }, reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
     sessionBrowsers.set(tabId, browser)
   }
   browser.setOwner(owner)

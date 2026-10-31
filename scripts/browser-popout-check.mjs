@@ -98,7 +98,16 @@ export async function runBrowserPopoutCheck() {
     const fourth = await popOut('api')
     const modifier = process.platform === 'darwin' ? 'metaKey' : 'ctrlKey'
     await ui(fourth, `setTimeout(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', code: 'KeyW', ${modifier}: true, bubbles: true, cancelable: true })), 50); true`)
-    await returned(fourth, 'Ctrl+W')
+    await returned(fourth, 'Ctrl+W in the window header')
+
+    // The page fills the window and is its own WebContentsView: native key input there must return the browser too.
+    const pageFocused = await popOut('api')
+    const view = await until(() => pageFocused.contentView.children.find(child => child.webContents?.getURL() === pageUrl), 'page view in the browser window')
+    view.webContents.focus()
+    await until(() => view.webContents.isFocused(), 'page has focus')
+    view.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'W', modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] })
+    view.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'W', modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] })
+    await returned(pageFocused, 'native Ctrl+W in the focused page')
 
     // Popping out the whole session leaves a popped-out browser where it is; the browser then returns to the session window.
     const fifth = await popOut('api')
@@ -116,7 +125,7 @@ export async function runBrowserPopoutCheck() {
     await until(() => sessionWindow.isDestroyed(), 'session returned')
     await until(mainBrowserShown, 'browser beside the main terminal after the session returns')
 
-    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, checks: ['page view moves window', 'same page', 'single owner', 'full-width terminal', 'duplicate focuses', 'prompt insert relay', 'return button', 'bring-back button', 'native close', 'Ctrl+W', 'session pop-out keeps browser window'] }, null, 2))
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, checks: ['page view moves window', 'same page', 'single owner', 'full-width terminal', 'duplicate focuses', 'prompt insert relay', 'return button', 'bring-back button', 'native close', 'Ctrl+W in header', 'native Ctrl+W in focused page', 'session pop-out keeps browser window'] }, null, 2))
     console.log('[browser-popout] PASS: browser moves to its own window and back, same pages')
   } catch (error) {
     for (const [index, window] of BrowserWindow.getAllWindows().entries()) await screenshot(window, `failure-${index}`).catch(() => {})
