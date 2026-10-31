@@ -1,7 +1,36 @@
 import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { startPosixProcessWatchdog } from './posix-process-watchdog.js'
 import { windowsSystemExecutable } from './resolve-copilot.js'
 import { startWindowsProcessWatchdog, type ProcessWatchdogLease } from './windows-process-watchdog.js'
+
+/** Numeric process ancestry only. Never inspect command lines or process environments. */
+export async function ownedProcessIds(rootPid: number): Promise<Set<number>> {
+  if (!Number.isSafeInteger(rootPid) || rootPid <= 1) return new Set()
+  try {
+    const result = process.platform === 'win32'
+      ? await promisify(execFile)(windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.ParentProcessId }"], { windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024 })
+      : await promisify(execFile)('/bin/ps', ['-axo', 'pid=,ppid='], { timeout: 5_000, maxBuffer: 1024 * 1024 })
+    return processDescendants(result.stdout, rootPid)
+  } catch { return new Set() }
+}
+
+export function processDescendants(snapshot: string, rootPid: number): Set<number> {
+  const parents = new Map<number, number>()
+  for (const line of snapshot.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+    if (match) parents.set(Number(match[1]), Number(match[2]))
+  }
+  const owned = new Set<number>()
+  if (!parents.has(rootPid)) return owned
+  owned.add(rootPid)
+  for (let changed = true; changed;) {
+    changed = false
+    for (const [pid, parent] of parents) if (!owned.has(pid) && owned.has(parent)) { owned.add(pid); changed = true }
+  }
+  return owned
+}
 
 /**
  * A child process and everything it starts, on every platform. On Windows the tree is found by `taskkill /T`. Elsewhere a

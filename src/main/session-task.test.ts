@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { BracketedPasteTracker, sessionTaskDecision, taskPasteSequence } from './session-task.js'
+import { BracketedPasteTracker, isTerminalReply, sessionTaskDecision, taskPasteSequence } from './session-task.js'
 import type { SessionTaskState } from './session-task.js'
 
 const ready: SessionTaskState = {
   status: 'running', activity: 'idle', promptVisible: true, preset: 'default', sideChat: false, remote: false,
   draft: false, recentInput: false, picker: false, typing: false, bracketedPaste: true,
 }
+
+test('only complete terminal replies preserve an initial recipient; navigation and mixed input do not', () => {
+  for (const reply of ['\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[1;1R', '\x1b[?2004;1$y', '\x1b[0n', '\x1b[I\x1b[O',
+    '\x1b]11;rgb:0000/aaaa/FFFF\x1b\\', '\x1b]4;3;rgb:ff/ff/ff\x07']) assert.equal(isTerminalReply(reply), true)
+  for (const input of ['', '/resume other\r', '\x1b[A', '\x1b[<0;10;20M', '\x1b[?1;2c/resume other\r',
+    '\x1b]11;anything\r/resume other\x07', '\x1b[?1;2', '\x1b]11;rgb:0000/0000/0000']) assert.equal(isTerminalReply(input), false)
+})
 
 test('a task is sent only when the session is idle and its prompt box is untouched', () => {
   assert.deepEqual(sessionTaskDecision(ready), { result: 'sent' })

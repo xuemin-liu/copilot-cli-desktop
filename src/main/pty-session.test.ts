@@ -3,6 +3,8 @@ import { EventEmitter, once } from 'node:events'
 import test from 'node:test'
 import { PtySession } from './pty-session.js'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
+import { MeetingTurnReader } from './meeting-turns.js'
+import { SessionBindingReader } from './session-binding.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 
 class FakePty extends EventEmitter implements PtyLike {
@@ -42,6 +44,203 @@ class FakePty extends EventEmitter implements PtyLike {
 function fakeSpawnPty(pty: FakePty): SpawnPtyFn {
   return () => pty
 }
+
+test('one PTY rebinds A to B to A from verified caller IDs without borrowing history, Desktop turns or an old monitor', async () => {
+  const { appendFile, mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-in-process-switch-'))
+  const root = join(home, 'session-state')
+  const a = '11111111-1111-4111-8111-111111111111', b = '22222222-2222-4222-8222-222222222222'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = (id: string) => join(root, id, 'events.jsonl')
+  const pty = new FakePty(); pty.pid = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: home, env: { COPILOT_HOME: home }, spawnPty: fakeSpawnPty(pty),
+    sessionId: a, monitorSessionPermissions: true,
+    sessionBindingReader: new SessionBindingReader(root, 10, async () => new Set([10, 11]), () => true) })
+  const reader = new MeetingTurnReader()
+  session.on('session-record', (record, live) => reader.consume(record, live))
+  session.on('session-record-reset', reason => reader.reset(reason))
+  session.on('activity', activity => { if (activity === 'idle') reader.finish() })
+  const ids: string[] = []
+  session.on('session-id', id => ids.push(id))
+  try {
+    for (const id of [a, b]) {
+      await mkdir(join(root, id), { recursive: true })
+      await writeFile(path(id), line('session.start', { sessionId: id, startTime: '2026-10-29T00:00:00Z' })
+        + line('user.message', { content: 'historical meeting request', interactionId: 'history' }))
+    }
+    await writeFile(join(root, a, 'inuse.11.lock'), '')
+    await session.start()
+    await appendFile(path(a), line('user.message', { content: 'start a meeting', interactionId: 'a1' }))
+    await session.refreshSessionRecords(a)
+    assert.equal(reader.answeringPerson, true)
+    reader.expectDesktopPrompt()
+
+    // Like CLI 1.0.105, retain A's lock while resuming B. The helper's ID selects B among the owned sessions.
+    await writeFile(join(root, b, 'inuse.11.lock'), '')
+    await appendFile(path(b), line('session.resume', { resumeTime: new Date().toISOString() })
+      + line('user.message', { content: 'start a meeting in B', interactionId: 'b1' })
+      + line('assistant.turn_start', { turnId: 'b' }))
+    await session.refreshSessionRecords(b)
+    assert.equal(session.lastSessionId, b)
+    assert.equal(reader.answeringPerson, true, 'the new request is live even when it preceded monitor attachment')
+    assert.equal(reader.diagnostic.currentInteractionId, 'b1')
+    assert.equal(reader.diagnostic.expectingDesktop, false, 'A cannot classify B\'s request')
+    session.commitSessionBinding()
+    assert.equal(session.sessionBindingReady, false, 'automatic typing is paused with ambiguous retained sessions')
+    await appendFile(path(a), line('assistant.message', { content: 'old answer', interactionId: 'a1' }))
+    pty.emit('data', 'Session ID: forged-session\n')
+    await session.refreshSessionRecords(b)
+    assert.equal(reader.diagnostic.currentInteractionId, 'b1', 'the previous log and terminal text cannot rebind the reader')
+
+    await appendFile(path(b), line('user.message', { content: '[meeting K7QF · round 1 · from the desktop]\nReview', interactionId: 'desktop' }))
+    await session.refreshSessionRecords(b)
+    assert.equal(reader.answeringPerson, false)
+    assert.match(reader.startRejection!, /Desktop-generated/)
+    await appendFile(path(b), line('user.message', { content: 'try to start again', interactionId: 'b2' }))
+    await session.refreshSessionRecords(b)
+    assert.equal(reader.answeringPerson, true)
+    await session.refreshSessionRecords(a)
+    assert.equal(reader.answeringPerson, false, 'returning to A cannot replay its old request')
+    await appendFile(path(a), line('user.message', { content: 'try again in A', interactionId: 'a2' }))
+    await session.refreshSessionRecords(a)
+    assert.equal(reader.answeringPerson, true)
+    session.commitSessionBinding()
+    assert.deepEqual(ids, [b, a])
+    await session.refreshSessionRecords('../foreign')
+    assert.equal(reader.answeringPerson, false, 'an unverifiable hint clears authorization instead of using the previous session')
+    assert.equal(session.monitorDiagnostic, null)
+  } finally { await session.stop(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('a binding lookup that finishes after process exit cannot attach a monitor or emit a new session ID', async () => {
+  let release!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const pty = new FakePty(); pty.pid = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: '.', spawnPty: fakeSpawnPty(pty), monitorSessionPermissions: true,
+    sessionBindingReader: { read: async () => { await waiting; return { kind: 'bound', sessionId: 'new-session', ownerPid: 11, deliveryReady: true } } } })
+  const ids: string[] = []
+  session.on('session-id', id => ids.push(id))
+  await session.start()
+  const refreshing = session.refreshSessionRecords('new-session')
+  await session.stop()
+  release()
+  await refreshing
+  assert.deepEqual(ids, [])
+  assert.equal(session.monitorDiagnostic, null)
+})
+
+test('ordinary terminal output does not trigger binding scans and the idle sweep runs only every 30 seconds', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  const pty = new FakePty(); pty.pid = 0
+  let reads = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: '.', spawnPty: fakeSpawnPty(pty), monitorSessionPermissions: true,
+    sessionBindingReader: { read: async () => { reads++; return { kind: 'unavailable' } } } })
+  try {
+    await session.start()
+    for (let index = 0; index < 50; index++) pty.emit('data', `ordinary output ${index}\n`)
+    context.mock.timers.tick(5_000)
+    assert.equal(reads, 0)
+    context.mock.timers.tick(25_000)
+    assert.equal(reads, 1)
+    await session.refreshSessionRecords('caller-session')
+    assert.equal(reads, 2, 'helper commands still refresh immediately')
+  } finally { await session.stop(); context.mock.timers.reset() }
+})
+
+test('automatic delivery rechecks retained sessions without a helper hint and invalidates a ready recipient on terminal activity', async () => {
+  const { mkdir, mkdtemp, rm, writeFile, appendFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-delivery-binding-'))
+  const root = join(home, 'session-state')
+  const a = '11111111-1111-4111-8111-111111111111', b = '22222222-2222-4222-8222-222222222222'
+  const pty = new FakePty(); pty.pid = 0
+  const session = new PtySession({ file: 'copilot', args: [], cwd: home, env: { COPILOT_HOME: home }, spawnPty: fakeSpawnPty(pty),
+    sessionId: a, monitorSessionPermissions: true,
+    sessionBindingReader: new SessionBindingReader(root, 10, async () => new Set([10, 11]), () => true) })
+  try {
+    for (const id of [a, b]) {
+      await mkdir(join(root, id), { recursive: true })
+      await writeFile(join(root, id, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: id, startTime: new Date().toISOString() } }) + '\n')
+    }
+    await writeFile(join(root, a, 'inuse.11.lock'), '')
+    await session.start()
+    await session.refreshSessionRecords(a)
+    const first = await session.prepareMeetingDelivery(a)
+    assert.equal(first(), true, 'a unique recipient can receive input')
+    pty.emit('data', 'ordinary prompt redraw')
+    assert.equal(first(), false, 'output while another recipient awaits verification invalidates the check')
+    const second = await session.prepareMeetingDelivery(a)
+    assert.equal(second(), true)
+    session.write('/resume B\r')
+    assert.equal(second(), false, 'user input also invalidates the check')
+    await writeFile(join(root, b, 'inuse.11.lock'), '')
+    await appendFile(join(root, b, 'events.jsonl'), JSON.stringify({ type: 'session.resume', data: { resumeTime: new Date().toISOString() } }) + '\n')
+    assert.equal((await session.prepareMeetingDelivery(a))(), false, 'no helper hint or output is needed to detect the retained session')
+    assert.equal(session.sessionBindingReady, false)
+    assert.equal(session.monitorDiagnostic?.sessionId, a, 'delivery verification does not switch monitoring or publish a candidate')
+    assert.deepEqual(pty.written, ['/resume B\r'])
+  } finally { await session.stop(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('initial no-lock delivery requires a deterministic untouched launch and fresh unambiguous process/store evidence', async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'pty-initial-recipient-'))
+  const root = join(home, 'session-state')
+  const a = '11111111-1111-4111-8111-111111111111', b = '22222222-2222-4222-8222-222222222222'
+  const sessions: PtySession[] = []
+  const queryCounts: number[] = []
+  const create = async (pids = [10, 11, 12], args = [`--resume=${a}`], unavailableStore = false) => {
+    const queryIndex = queryCounts.push(0) - 1
+    const pty = new FakePty(); pty.pid = 0
+    const session = new PtySession({ file: 'copilot', args, cwd: home, env: { COPILOT_HOME: home }, spawnPty: fakeSpawnPty(pty),
+      sessionId: a, monitorSessionPermissions: true,
+      sessionBindingReader: new SessionBindingReader(root, 10, async () => { queryCounts[queryIndex]!++; return new Set(pids) }, () => true,
+        unavailableStore ? { list: async () => { throw new Error('unavailable') } } : {}) })
+    sessions.push(session)
+    await session.start()
+    return session
+  }
+  try {
+    for (const id of [a, b]) {
+      await mkdir(join(root, id), { recursive: true })
+      await writeFile(join(root, id, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: id, startTime: '2026-10-29T00:00:00Z' } }) + '\n')
+    }
+    const initial = await create()
+    initial.write('\x1b[?1;2c\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[1;1R')
+    assert.equal((await initial.prepareMeetingDelivery(a))(), true, 'verified initial recipient can take its first command')
+    assert.equal(queryCounts[0], 1, 'the delivery read and initial verification share one fresh process query')
+    initial.write('/add-dir meeting-folder', 'add-dir')
+    initial.write('\r', 'add-dir')
+    initial.write('/rename restored-host', 'rename')
+    initial.write('\r', 'rename')
+    const firstPrompt = await initial.prepareMeetingDelivery(a)
+    assert.equal(firstPrompt(), true, 'the directory command must not block the meeting prompt that creates the lock')
+    assert.equal(queryCounts[0], 2, 'each later initial delivery obtains a new process snapshot')
+    initial.write('/resume another-session\r')
+    assert.equal(firstPrompt(), false)
+    assert.equal((await initial.prepareMeetingDelivery(a))(), false, 'ordinary input revokes the initial launch anchor')
+    const prompted = await create()
+    prompted.write('[meeting TEST · round 1 · from the desktop]\nReview the plan')
+    assert.equal((await prompted.prepareMeetingDelivery(a))(), false, 'the first meeting prompt also ends the startup exception')
+    const failed = await create([])
+    assert.equal((await failed.prepareMeetingDelivery(a))(), false, 'failed process query is not absence of owners')
+    assert.equal((await failed.prepareMeetingDelivery(a))(), false)
+    assert.equal(queryCounts.at(-1), 1, 'failed process discovery still backs off')
+    assert.equal((await (await create([10, 11], [])).prepareMeetingDelivery(a))(), false, 'a remembered id alone cannot establish the launch recipient')
+    assert.equal((await (await create([10, 11], [`--resume=${a}`], true)).prepareMeetingDelivery(a))(), false, 'failed store enumeration cannot establish uniqueness')
+    await writeFile(join(root, b, 'inuse.11.lock'), '')
+    assert.equal((await (await create()).prepareMeetingDelivery(a))(), false, 'an owned session other than the initial recipient is ambiguous')
+    await rm(join(root, b, 'inuse.11.lock'))
+    await writeFile(join(root, a, 'inuse.11.lock'), '')
+    await writeFile(join(root, a, 'inuse.12.lock'), '')
+    assert.equal((await (await create()).prepareMeetingDelivery(a))(), false, 'multiple owners of the initial session are not a startup fallback')
+  } finally { await Promise.all(sessions.map(session => session.stop())); await rm(home, { recursive: true, force: true }) }
+})
 
 test('closing a session aborts a pending worktree preparation before a PTY starts', async () => {
   let preparing!: () => void
@@ -339,6 +538,10 @@ test('a session without an id adopts the new store directory, announces it, and 
       discoverSessionIdFromStore: { root, since: Date.now(), launchCwd, worktreeName: 'desktop-t-aaaaaa', pollMs: 20, timeoutMs: 5_000 },
       monitorSessionPermissions: true,
     })
+    const reader = new MeetingTurnReader()
+    session.on('session-record-reset', reason => reader.reset(reason))
+    session.on('session-record', (line, live) => reader.consume(line, live))
+    session.on('activity', activity => { if (activity === 'idle') reader.finish() })
     const announced = once(session, 'session-id')
     await session.start()
     assert.equal(session.lastSessionId, null)
@@ -346,11 +549,17 @@ test('a session without an id adopts the new store directory, announces it, and 
     await mkdir(join(root, id), { recursive: true })
     await writeFile(join(root, id, 'events.jsonl'),
       JSON.stringify({ type: 'session.start', data: { startTime: new Date().toISOString(), context: { cwd: join(root, 'project.worktrees', 'desktop-t-aaaaaa') } } }) + '\n'
-      + JSON.stringify({ type: 'session.permissions_changed', data: { allowAllPermissionMode: 'auto', allowAllPermissions: false } }) + '\n')
+      + JSON.stringify({ type: 'session.permissions_changed', data: { allowAllPermissionMode: 'auto', allowAllPermissions: false } }) + '\n'
+      + JSON.stringify({ type: 'user.message', data: { content: 'propose a fix and start a meeting to discuss it', interactionId: 'first-request' } }) + '\n'
+      + JSON.stringify({ type: 'assistant.turn_start', data: { turnId: 'first' } }) + '\n')
     assert.deepEqual(await announced, [id])
     assert.equal(session.lastSessionId, id)
     const mode = await once(session, 'permission-mode')
     assert.equal(mode[0], 'assisted', 'the monitor was attached to the discovered session')
+    await session.refreshSessionRecords()
+    assert.equal(reader.answeringPerson, true, 'the first request in this newly owned log is live, not historical')
+    assert.equal(session.activity, 'working', 'initial live records are not cleared as historical activity')
+    assert.deepEqual(session.monitorDiagnostic, { sessionId: id, logPath: join(root, id, 'events.jsonl'), replayHistory: false })
     await session.stop()
   } finally { await rm(home, { recursive: true, force: true }) }
 })

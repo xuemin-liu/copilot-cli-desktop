@@ -68,6 +68,12 @@ export class MeetingOutbox {
     return false
   }
 
+  /** Recipients that could receive an item on the next pump; no inventory work for running turns or settling commands. */
+  readyTabs(): string[] {
+    return [...this.queues].filter(([, queue]) => queue.items.length && !queue.inTurn && this.deps.now() >= queue.settleUntil)
+      .map(([tabId]) => tabId)
+  }
+
   /** Tries the next item of every session that is free; returns true when something is still waiting. */
   pump(): boolean {
     for (const [tabId, queue] of this.queues) {
