@@ -189,7 +189,8 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
       <span role="status" title={testingMessage}>{testingMessage}</span>
     </div>
     {state.dialog && <div className="browser-dialog" role="alertdialog" aria-label="Page dialog">
-      <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : 'This page says'}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
+      <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : state.dialog.pageId === state.activePageId ? 'This page says'
+        : `“${state.pages.find(page => page.id === state.dialog?.pageId)?.title ?? 'Another page'}” says`}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
       <div>
         <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
         {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}

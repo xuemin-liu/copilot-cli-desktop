@@ -33,14 +33,17 @@ if (!process.versions.electron) {
   async function run() {
     await app.whenReady()
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
-    const site = createServer((_request, response) => {
+    const site = createServer((request, response) => {
       response.setHeader('content-type', 'text/html')
+      if (request.url === '/load-alert') return response.end('<!doctype html><title>Load alert</title><script>alert("Welcome back")</script><p id="out">loaded</p>')
+      if (request.url === '/opened') return response.end('<!doctype html><title>Opened page</title><p id="out">opened</p>')
       response.end(`<!doctype html><title>Dialog fixture</title><style>button{display:block;margin:6px;padding:6px}</style>
         <button id="confirm" onclick="out.textContent = confirm('Delete item 42?') ? 'confirmed' : 'cancelled'">Delete</button>
         <button id="alert" onclick="alert('Saved 3 changes'); out.textContent = 'after alert'">Save</button>
         <button id="plain" onclick="out.textContent = 'plain click'">Plain</button>
         <button id="late" onclick="setTimeout(() => { alert('Surprise'); out.textContent = 'surprised' }, 300)">Late</button>
         <button id="credential" onclick="alert('token: private-dialog-token'); out.textContent = 'shown'">Credential</button>
+        <button id="open-then-alert" onclick="window.open('/opened'); alert('Opened a page'); out.textContent = 'opener resumed'">Open</button>
         <p id="out">idle</p>`)
     })
     await new Promise(resolve => site.listen(0, '127.0.0.1', resolve))
@@ -76,6 +79,26 @@ if (!process.versions.electron) {
       assert.ok(!secret.dialog.message.includes('private-dialog-token'), 'credentials in a dialog are filtered')
       await browser.answerDialog(true)
       await until(async () => await out() === 'shown', 'credential dialog answered')
+
+      // A page that opens another page and then a dialog: the dialog is shown on its own page, not left behind the new one.
+      void contents.executeJavaScript("document.getElementById('open-then-alert').click()")
+      const opener = await until(() => browser.snapshot.dialog && browser.snapshot, 'opener dialog')
+      assert.deepEqual([opener.dialog.message, opener.dialog.pageId, opener.activePageId, opener.pages.length], ['Opened a page', contents.id, contents.id, 2])
+      await browser.answerDialog(true)
+      await until(async () => await out() === 'opener resumed', 'opener resumed')
+      const opened = opener.pages.find(page => page.id !== contents.id).id
+      browser.action(`close-page:${opened}`)
+
+      // A page that opens a dialog while it first loads, in a page with no document yet, is held for the user, not hidden.
+      browser.action('new-page')
+      const fresh = browser.view.webContents
+      void browser.navigate(`http://127.0.0.1:${site.address().port}/load-alert`).catch(() => {})
+      const loading = await until(() => browser.snapshot.dialog && browser.snapshot, 'dialog while loading')
+      assert.deepEqual([loading.dialog.message, loading.dialog.pageId], ['Welcome back', fresh.id])
+      await browser.answerDialog(true)
+      await until(async () => !fresh.isLoading() && await fresh.executeJavaScript('document.getElementById("out")?.textContent') === 'loaded', 'page finished loading')
+      browser.action(`close-page:${fresh.id}`)
+      await until(() => browser.snapshot.pages.length === 1, 'extra pages closed')
 
       // Testing mode: a step that expects a dialog answers it; any other dialog is dismissed and reported.
       browser.action('testing:on')
