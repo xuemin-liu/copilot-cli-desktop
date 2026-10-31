@@ -164,7 +164,11 @@ export interface CopilotResolution {
 export interface DesktopState {
   /** Runtime window placement, never persisted as session configuration. */
   poppedOutTabIds?: string[]
+  /** Sessions whose browser alone is in its own window. */
+  browserPoppedOutTabIds?: string[]
   windowSessionId?: string
+  /** Set in a session's browser window: the session whose browser it shows. */
+  windowBrowserId?: string
   desktopVersion: string
   resolution: CopilotResolution | null
   profiles: WorkspaceProfile[]

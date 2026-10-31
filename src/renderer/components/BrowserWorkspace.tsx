@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { BrowserDebugState } from '../../main/browser-debug-types.js'
+import type { DesktopSessionTab } from '../../main/types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
 import { BrowserIcon, ConsoleErrorsIcon, PickElementIcon, ScreenshotIcon } from './Icons.js'
@@ -17,7 +18,7 @@ const EMPTY_BROWSER: BrowserDebugState = {
   devtools: false, error: null, console: [], network: [], sitePermissions: [], history: [],
 }
 
-function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: boolean; active: boolean }): JSX.Element {
+function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: string; obscured: boolean; active: boolean; detached?: boolean }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -83,37 +84,47 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   useEffect(() => window.copilotDesktop.onBrowserPicked((id, text) => {
     if (id === tabId) setSelection(list => list.length >= MAX_PICKED_ELEMENTS ? list : [...list, text])
   }), [tabId])
+  // In its own window the browser has no terminal beside it, so main pastes in the window that shows the session.
+  const toPrompt = (detail: { text: string } | { image: true }, done: string): void => {
+    if (!detached) {
+      if ('image' in detail) attachClipboardImage(tabId)
+      else insertIntoPrompt(tabId, detail.text)
+      setNotice(done)
+      return
+    }
+    void window.copilotDesktop.browserInsertPrompt(tabId, detail).then(delivered => {
+      if (delivered) setNotice(done)
+      else setError('The session’s prompt box could not be reached. Open the session or bring the browser back, then try again.')
+    }).catch(error => setError(errorMessage(error)))
+  }
   const selectElements = (): void => {
     setError(null); setNotice(null); setPicking(true); setSelecting(true)
     void window.copilotDesktop.browserPickMany(tabId).catch(error => setError(errorMessage(error))).finally(() => { setPicking(false); setSelecting(false) })
   }
   const addSelection = (): void => {
     void window.copilotDesktop.browserPickCancel(tabId).catch(() => {})
-    insertIntoPrompt(tabId, composeElementSelection(selection, note))
+    toPrompt({ text: composeElementSelection(selection, note) }, 'Elements added to the prompt box. Review them and press Enter to send.')
     setSelection([]); setNote('')
-    setNotice('Elements added to the prompt box. Review them and press Enter to send.')
   }
   const pickElement = (several = false): void => {
     if (picking) { void window.copilotDesktop.browserPickCancel(tabId).catch(() => {}); return }
     if (several) { selectElements(); return }
     setError(null); setNotice(null); setPicking(true)
     void window.copilotDesktop.browserPick(tabId).then(text => {
-      if (text) { insertIntoPrompt(tabId, text); setNotice('Element added to the prompt box. Review it and press Enter to send.') }
+      if (text) toPrompt({ text }, 'Element added to the prompt box. Review it and press Enter to send.')
     }).catch(error => setError(errorMessage(error))).finally(() => setPicking(false))
   }
   const addScreenshot = (): void => {
     setError(null); setNotice(null); setCapturing(true)
     void window.copilotDesktop.browserScreenshot(tabId).then(result => {
-      attachClipboardImage(tabId)
-      setNotice(`Screenshot placed on the clipboard and attached with Alt+V${result.redacted ? ' (form fields, credential-marked elements, frames and canvases are masked)' : ''}. Review the prompt, then press Enter.`)
+      toPrompt({ image: true }, `Screenshot placed on the clipboard and attached with Alt+V${result.redacted ? ' (form fields, credential-marked elements, frames and canvases are masked)' : ''}. Review the prompt, then press Enter.`)
     }).catch(error => setError(errorMessage(error))).finally(() => setCapturing(false))
   }
   const addConsole = (): void => {
     setError(null)
     const text = formatBrowserContext({ url: state.url, pageId: state.activePageId, console: state.console, network: state.network })
     if (!text) { setNotice('This page has no console messages or failed requests yet.'); return }
-    insertIntoPrompt(tabId, text)
-    setNotice('Console errors and failed requests added to the prompt box. Review them and press Enter to send.')
+    toPrompt({ text }, 'Console errors and failed requests added to the prompt box. Review them and press Enter to send.')
   }
   const openFind = (): void => {
     setFindOpen(true)
@@ -237,22 +248,42 @@ function BrowserPanel({ tabId, obscured, active }: { tabId: string; obscured: bo
   </aside>
 }
 
-export function BrowserWorkspace({ children, tabId, active = true, obscured = false, renderHeader }: {
+export function BrowserWorkspace({ children, tabId, active = true, obscured = false, poppedOut = false, renderHeader }: {
   children: ReactNode; tabId: string; active?: boolean; obscured?: boolean;
+  /** The browser is in its own window, so the terminal keeps the whole width here. */
+  poppedOut?: boolean;
   renderHeader?: (browserToggle: ReactNode) => ReactNode;
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [split, setSplit] = useState(50)
+  const [error, setError] = useState<string | null>(null)
   const root = useRef<HTMLDivElement>(null)
   const dragging = useRef<number | null>(null)
+  const wasPoppedOut = useRef(poppedOut)
+  // A browser that comes back from its own window opens beside the terminal again.
+  useEffect(() => {
+    if (wasPoppedOut.current && !poppedOut) setOpen(true)
+    wasPoppedOut.current = poppedOut
+  }, [poppedOut])
+  const request = (promise: Promise<unknown>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   const changeSplit = (value: number): void => setSplit(Math.min(75, Math.max(25, value)))
-  const toggleLabel = open ? 'Hide browser' : 'Open browser'
-  const toggle = <button type="button" className="icon-button session-browser-toggle" aria-expanded={open} aria-label={toggleLabel} title={toggleLabel} disabled={!active} onClick={() => setOpen(value => !value)}><BrowserIcon /></button>
+  const shown = open && !poppedOut
+  const toggleLabel = poppedOut ? 'Show browser window' : open ? 'Hide browser' : 'Open browser'
+  const toggle = <>
+    <button type="button" className="icon-button session-browser-toggle" aria-expanded={shown} aria-label={toggleLabel} title={toggleLabel} disabled={!active}
+      onClick={() => poppedOut ? request(window.copilotDesktop.popOutBrowser(tabId)) : setOpen(value => !value)}><BrowserIcon /></button>
+    {poppedOut
+      ? <button type="button" className="icon-button" aria-label="Bring browser back to this window" title="Bring browser back to this window" disabled={!active}
+        onClick={() => request(window.copilotDesktop.dockBrowser(tabId))}>↙</button>
+      : open && <button type="button" className="icon-button" aria-label="Open browser in new window" title="Open browser in new window" disabled={!active}
+        onClick={() => request(window.copilotDesktop.popOutBrowser(tabId))}>⧉</button>}
+    {error && <span className="browser-workspace-error" role="alert" title={error}>{error}</span>}
+  </>
   return <div className="browser-workspace">
     {renderHeader ? renderHeader(toggle) : <div className="browser-workspace-toolbar">{toggle}</div>}
-    <div ref={root} className="browser-workspace-content" style={{ gridTemplateColumns: open && active ? `minmax(0, ${split}fr) 6px minmax(0, ${100 - split}fr)` : 'minmax(0, 1fr)' }}>
+    <div ref={root} className="browser-workspace-content" style={{ gridTemplateColumns: shown && active ? `minmax(0, ${split}fr) 6px minmax(0, ${100 - split}fr)` : 'minmax(0, 1fr)' }}>
       <div className="browser-terminal-workspace">{children}</div>
-      {open && <><div className="side-chat-divider" style={{ display: active ? undefined : 'none' }} role="separator" tabIndex={0} aria-label="Resize browser" aria-orientation="vertical" aria-valuenow={split} aria-valuemin={25} aria-valuemax={75}
+      {shown && <><div className="side-chat-divider" style={{ display: active ? undefined : 'none' }} role="separator" tabIndex={0} aria-label="Resize browser" aria-orientation="vertical" aria-valuenow={split} aria-valuemin={25} aria-valuemax={75}
         onPointerDown={event => { event.preventDefault(); dragging.current = event.pointerId; event.currentTarget.setPointerCapture(event.pointerId) }}
         onPointerMove={event => { if (dragging.current !== event.pointerId) return; const b = root.current?.getBoundingClientRect(); if (b?.width) changeSplit((event.clientX - b.left) / b.width * 100) }}
         onPointerUp={event => { dragging.current = null; event.currentTarget.releasePointerCapture(event.pointerId) }}
@@ -261,4 +292,15 @@ export function BrowserWorkspace({ children, tabId, active = true, obscured = fa
         <BrowserPanel tabId={tabId} active={active} obscured={obscured} /></>}
     </div>
   </div>
+}
+
+/** A session's browser alone in its own window. Returning it (or closing the window) shows it beside the terminal again. */
+export function BrowserOnlyWindow({ tab, onReturn }: { tab: DesktopSessionTab; onReturn: () => void }): JSX.Element {
+  return <main className="browser-only-window" aria-label={`Browser window: ${tab.title}`}>
+    <header className="session-pane-header">
+      <span className="session-pane-title" title={tab.title}><BrowserIcon /> {tab.title}</span>
+      <button type="button" onClick={onReturn} title="Show the browser beside the session's terminal again (Ctrl+W)">Return browser to session</button>
+    </header>
+    <BrowserPanel tabId={tab.id} active={!tab.unloaded} obscured={false} detached />
+  </main>
 }

@@ -1,4 +1,4 @@
-import { insertIntoPrompt } from './prompt-insert.js'
+import { dispatchPromptInsert, insertIntoPrompt } from './prompt-insert.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
 import type { DesktopState, FanOutResult, SessionHistoryEntry, SessionWorktreeInfo } from '../main/types.js'
@@ -6,6 +6,7 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
+import { BrowserOnlyWindow } from './components/BrowserWorkspace.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { GitPanel } from './components/GitPanel.js'
 import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.js'
@@ -226,6 +227,9 @@ export function App(): JSX.Element {
     }
   }, [])
 
+  // A session's browser in its own window pastes into the prompt box here, where its terminal is.
+  useEffect(() => window.copilotDesktop.onInsertPromptRequest((detail) => dispatchPromptInsert(window, detail)), [])
+
   // Ctrl+Shift+G is handled in the main process, before the terminal sees it, and arrives here.
   useEffect(() => window.copilotDesktop.onGitToggle(() => { if (gitPanelAvailable.current) toggleGit() }), [toggleGit])
   // The File menu and the tray ask here, so their sessions are named in the same dialog.
@@ -249,6 +253,14 @@ export function App(): JSX.Element {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = isShortcutModifier(event)
       if (!modifier) return
+      if (state.windowBrowserId) {
+        if (event.key.toLowerCase() === 'w') {
+          event.preventDefault()
+          event.stopPropagation()
+          handleOperation(window.copilotDesktop.dockBrowser(state.windowBrowserId))
+        }
+        return
+      }
       if (state.windowSessionId) {
         if (event.key.toLowerCase() === 'w') {
           event.preventDefault()
@@ -270,14 +282,20 @@ export function App(): JSX.Element {
         void window.copilotDesktop.openSettings()
       }
     }
-    const capture = Boolean(state.windowSessionId)
+    const capture = Boolean(state.windowSessionId || state.windowBrowserId)
     window.addEventListener('keydown', handleKeyDown, capture)
     return () => window.removeEventListener('keydown', handleKeyDown, capture)
-  }, [canOpenTab, state.activeTabId, state.windowSessionId])
+  }, [canOpenTab, state.activeTabId, state.windowSessionId, state.windowBrowserId])
+
+  if (state.windowBrowserId) {
+    const tab = state.tabs.find(tab => tab.id === state.windowBrowserId)
+    return tab ? <BrowserOnlyWindow tab={tab} onReturn={() => handleOperation(window.copilotDesktop.dockBrowser(tab.id))} />
+      : <div className="loading-screen">Returning browser…</div>
+  }
 
   if (state.windowSessionId) {
     const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
-    return tab ? <SessionWindow tab={tab} error={operationError}
+    return tab ? <SessionWindow tab={tab} browserPoppedOut={(state.browserPoppedOutTabIds ?? []).includes(tab.id)} error={operationError}
       onDismissError={() => setOperationError(null)}
       onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
       onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
@@ -397,6 +415,7 @@ export function App(): JSX.Element {
             gitOpen={gitOpen} onToggleGit={toggleGit}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
+            browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}

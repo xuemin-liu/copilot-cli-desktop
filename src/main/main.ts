@@ -250,6 +250,10 @@ let browserZoom: BrowserZoom | null = null
 const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
 const closingBrowserTabs = new Set<string>()
 const sessionWindows = new Map<string, BrowserWindow>()
+// A session's browser alone, in its own window; its terminal stays where it was.
+const browserWindows = new Map<string, BrowserWindow>()
+const pendingPromptInserts = new Map<number, { sender: number; resolve: (delivered: boolean) => void }>()
+let promptInsertSequence = 0
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -590,11 +594,13 @@ function writeSessionLog(tabId: string, chunk: string): Promise<void> {
   return operation
 }
 
-function snapshot(windowSessionId?: string): DesktopState {
+function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopState {
   return {
     ...state,
     poppedOutTabIds: [...sessionWindows.keys()],
+    browserPoppedOutTabIds: [...browserWindows.keys()],
     ...(windowSessionId ? { windowSessionId } : {}),
+    ...(windowBrowserId ? { windowBrowserId } : {}),
     profiles: state.profiles.map((profile) => ({ ...profile, tabs: profile.tabs.map((tab) => ({ ...tab })) })),
     tabs: state.tabs.map((tab) => ({ ...tab })),
     recentLogs: [...state.recentLogs],
@@ -617,7 +623,7 @@ function syncTabState(): void {
 function broadcastState(): void {
   const visible = visibleSessionTabs(tabsState)
   for (const [tabId, browser] of sessionBrowsers) {
-    if (!sessionWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
+    if (!sessionWindows.has(tabId) && !browserWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
   }
   // A restored tab starts the first time it is on screen.
   for (const tabId of [visible.main?.id, visible.side?.id, ...sessionWindows.keys()]) if (tabId) void wakeDormantTab(tabId)
@@ -631,16 +637,48 @@ function broadcastState(): void {
       popout.webContents.send('desktop:state-changed', snapshot(tabId))
     }
   }
+  for (const [tabId, popout] of browserWindows) {
+    if (!popout.isDestroyed() && isLauncherShellUrl(popout.webContents.getURL(), shellUrl())) {
+      popout.setTitle(`${state.tabs.find(tab => tab.id === tabId)?.title ?? 'Session'} — Browser — Copilot CLI Desktop`)
+      popout.webContents.send('desktop:state-changed', snapshot(undefined, tabId))
+    }
+  }
 }
 
 function sessionWindowId(sender: IpcMainInvokeEvent['sender']): string | undefined {
   return [...sessionWindows].find(([, window]) => window.webContents === sender)?.[0]
 }
 
+function browserWindowId(sender: IpcMainInvokeEvent['sender']): string | undefined {
+  return [...browserWindows].find(([, window]) => window.webContents === sender)?.[0]
+}
+
 // Ownership changes synchronously, before either renderer processes its next
 // state update. Ignore stale input/resize messages from the previous terminal.
 function ownsSessionTerminal(event: IpcMainInvokeEvent, tabId: string): boolean {
   return (sessionWindows.get(tabId) ?? mainWindow)?.webContents === event.sender
+}
+
+/** The browser shows in its own window when it has one, else beside the session's terminal. */
+function browserOwnerWindow(tabId: string): BrowserWindow | null {
+  return browserWindows.get(tabId) ?? sessionWindows.get(tabId) ?? mainWindow
+}
+
+function ownsSessionBrowser(event: IpcMainInvokeEvent, tabId: string): boolean {
+  return browserOwnerWindow(tabId)?.webContents === event.sender
+}
+
+/** The shell's own pop-out windows load only its page and grant nothing. */
+function hardenPopoutWindow(window: BrowserWindow): void {
+  // Keep the session name authoritative even when the shared HTML loads or
+  // changes its document title while this session is idle.
+  window.on('page-title-updated', event => event.preventDefault())
+  window.on('focus', refreshMenus)
+  window.setMenu(null)
+  window.webContents.session.setPermissionCheckHandler(() => false)
+  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, url) => { if (url !== shellUrl()) event.preventDefault() })
 }
 
 function focusSessionWindow(window: BrowserWindow): void {
@@ -662,21 +700,14 @@ function popOutSessionTab(tabId: string): DesktopState {
     webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged },
   })
   sessionWindows.set(tabId, window)
-  sessionBrowsers.get(tabId)?.setOwner(window)
+  // A browser in its own window stays there; only the terminal moves.
+  if (!browserWindows.has(tabId)) sessionBrowsers.get(tabId)?.setOwner(window)
   window.on('close', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
+    if (mainWindow && !mainWindow.isDestroyed() && !browserWindows.has(tabId)) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
   })
-  // Keep the session name authoritative even when the shared HTML loads or
-  // changes its document title while this session is idle.
-  window.on('page-title-updated', event => event.preventDefault())
-  window.on('focus', refreshMenus)
-  window.setMenu(null)
-  window.webContents.session.setPermissionCheckHandler(() => false)
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  window.webContents.on('will-navigate', (event, url) => { if (url !== shellUrl()) event.preventDefault() })
+  hardenPopoutWindow(window)
   window.webContents.on('render-process-gone', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
+    if (mainWindow && !mainWindow.isDestroyed() && !browserWindows.has(tabId)) sessionBrowsers.get(tabId)?.setOwner(mainWindow)
     if (!window.isDestroyed()) window.destroy()
   })
   window.once('ready-to-show', () => { if (!window.isDestroyed()) focusSessionWindow(window) })
@@ -697,6 +728,74 @@ function popOutSessionTab(tabId: string): DesktopState {
 function dockSessionTab(tabId: string): DesktopState {
   sessionWindows.get(tabId)?.close()
   return snapshot()
+}
+
+/** Hand the browser back to the window that shows its terminal. Safe to call more than once for the same window. */
+function releaseBrowserWindow(tabId: string, window: BrowserWindow): void {
+  if (browserWindows.get(tabId) !== window) return
+  browserWindows.delete(tabId)
+  const owner = sessionWindows.get(tabId) ?? mainWindow
+  if (!shuttingDown() && owner && !owner.isDestroyed()) sessionBrowsers.get(tabId)?.setOwner(owner)
+  broadcastState()
+}
+
+function popOutSessionBrowser(tabId: string): DesktopState {
+  if (shuttingDown()) throw new Error('The application is shutting down')
+  const tab = tabsState.tabs.find(tab => tab.id === tabId)
+  if (!tab) throw new Error('Unknown session tab')
+  if (tab.unloaded) throw new Error('This session is unloaded; resume it to use its browser')
+  const existing = browserWindows.get(tabId)
+  if (existing) { focusSessionWindow(existing); return snapshot() }
+  const window = new BrowserWindow({
+    width: 1100, height: 800, minWidth: 420, minHeight: 320,
+    show: false, backgroundColor: '#0b1020', icon: iconPath(),
+    title: `${tab.title} — Browser — Copilot CLI Desktop`,
+    webPreferences: { preload: preloadPath(), contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: !app.isPackaged },
+  })
+  browserWindows.set(tabId, window)
+  sessionBrowsers.get(tabId)?.setOwner(window)
+  // Ownership returns as the window starts closing, so the session's own pane can show the browser again at once.
+  window.on('close', () => releaseBrowserWindow(tabId, window))
+  hardenPopoutWindow(window)
+  window.webContents.on('render-process-gone', () => {
+    releaseBrowserWindow(tabId, window)
+    if (!window.isDestroyed()) window.destroy()
+  })
+  window.once('ready-to-show', () => { if (!window.isDestroyed()) focusSessionWindow(window) })
+  window.on('closed', () => releaseBrowserWindow(tabId, window))
+  broadcastState()
+  observe(window.loadFile(rendererPath('index.html')).catch(error => {
+    if (!window.isDestroyed()) window.destroy()
+    throw error
+  }), 'Could not open browser window')
+  return snapshot()
+}
+
+function dockSessionBrowser(tabId: string): DesktopState {
+  const window = browserWindows.get(tabId)
+  if (window) {
+    releaseBrowserWindow(tabId, window)
+    window.close()
+    const terminal = sessionWindows.get(tabId)
+    if (terminal) focusSessionWindow(terminal)
+    else activateSessionTab(tabId)
+  }
+  return snapshot()
+}
+
+/** The browser window has no terminal: ask the window that shows the session's terminal to paste into its prompt box,
+ * and bring that session forward so its prompt can be reviewed and sent. Resolves whether a terminal pane took it. */
+function relayPromptInsert(tabId: string, detail: { text?: string; image?: true }): Promise<boolean> {
+  const target = sessionWindows.get(tabId) ?? mainWindow
+  if (!target || target.isDestroyed()) return Promise.resolve(false)
+  if (sessionWindows.has(tabId)) focusSessionWindow(target)
+  else activateSessionTab(tabId)
+  const id = ++promptInsertSequence
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { pendingPromptInserts.delete(id); resolve(false) }, 3000)
+    pendingPromptInserts.set(id, { sender: target.webContents.id, resolve: delivered => { clearTimeout(timer); resolve(delivered) } })
+    target.webContents.send('desktop:insert-prompt', id, { tabId, ...detail })
+  })
 }
 
 /**
@@ -2298,6 +2397,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
       : candidate) }
     closingBrowserTabs.delete(tabId)
     sessionWindows.get(tabId)?.close()
+    browserWindows.get(tabId)?.close()
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -2358,6 +2458,9 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     const popout = sessionWindows.get(tabId)
     sessionWindows.delete(tabId)
     popout?.destroy()
+    const browserPopout = browserWindows.get(tabId)
+    browserWindows.delete(tabId)
+    browserPopout?.destroy()
     persistProfileTabs()
     await sessionLogWriteQueues.get(tabId)
     sessionLogBytesWritten.delete(tabId)
@@ -3207,7 +3310,9 @@ function installApplicationMenu(): void {
           click: () => {
             const focused = BrowserWindow.getFocusedWindow()
             const poppedOut = focused ? sessionWindowId(focused.webContents) : undefined
-            if (poppedOut) dockSessionTab(poppedOut)
+            const browserOnly = focused ? browserWindowId(focused.webContents) : undefined
+            if (browserOnly) dockSessionBrowser(browserOnly)
+            else if (poppedOut) dockSessionTab(poppedOut)
             else if (tabsState.activeTabId) observe(closeSessionTab(tabsState.activeTabId), 'Could not close session tab')
           },
         },
@@ -3289,7 +3394,7 @@ function installApplicationMenu(): void {
   Menu.setApplicationMenu(menu)
   // On Windows/Linux this setter installs the menu on every existing window.
   // Remove it again from pop-outs, including its main-window accelerators.
-  for (const window of sessionWindows.values()) if (!window.isDestroyed()) window.setMenu(null)
+  for (const window of [...sessionWindows.values(), ...browserWindows.values()]) if (!window.isDestroyed()) window.setMenu(null)
 }
 
 function createWindow(
@@ -3544,8 +3649,8 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
   if (!isSessionTabId(tabId) || !tabsState.tabs.some(tab => tab.id === tabId)) {
     throw new Error('Unknown browser session')
   }
-  const owner = sessionWindows.get(tabId) ?? mainWindow
-  if (!owner || owner.isDestroyed() || !ownsSessionTerminal(event, tabId) || shuttingDown()) {
+  const owner = browserOwnerWindow(tabId)
+  if (!owner || owner.isDestroyed() || !ownsSessionBrowser(event, tabId) || shuttingDown()) {
     throw new Error('Browser controls are only available in the owning session window')
   }
   let browser = sessionBrowsers.get(tabId)
@@ -3570,7 +3675,12 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     catch (error) { logBrowserError(`Could not share DevTools settings: ${String(error)}`) }
     browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition, tabId,
       history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(),
-      onAppShortcut: () => toggleGitPanel(), reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
+      onAppShortcut: name => {
+        if (name === 'git-toggle') { toggleGitPanel(); return true }
+        if (!browserWindows.has(tabId)) return false
+        dockSessionBrowser(tabId)
+        return true
+      }, reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
     sessionBrowsers.set(tabId, browser)
   }
   browser.setOwner(owner)
@@ -3621,7 +3731,7 @@ ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unk
 ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown) => {
   assertTrustedIpcSender(event)
   // Ignore old renderer cleanup after a tab was closed or moved to another window.
-  if (bounds === null && isSessionTabId(tabId) && (!tabsState.tabs.some(tab => tab.id === tabId) || !ownsSessionTerminal(event, tabId))) return
+  if (bounds === null && isSessionTabId(tabId) && (!tabsState.tabs.some(tab => tab.id === tabId) || !ownsSessionBrowser(event, tabId))) return
   const browser = browserForSender(event, tabId)
   if (bounds !== null) {
     if (!bounds || typeof bounds !== 'object' || !['x', 'y', 'width', 'height'].every(key => {
@@ -3639,7 +3749,7 @@ ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown
 // by the renderer; only the current terminal owner may write or resize it.
 ipcMain.handle('desktop:get-state', (event) => {
   assertTrustedIpcSender(event)
-  return snapshot(sessionWindowId(event.sender))
+  return snapshot(sessionWindowId(event.sender), browserWindowId(event.sender))
 })
 registerGitIpc({
   ipcMain: ipcMain as unknown as Parameters<typeof registerGitIpc>[0]['ipcMain'],
@@ -3656,6 +3766,33 @@ ipcMain.handle('desktop:dock-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
   return dockSessionTab(tabId)
+})
+ipcMain.handle('desktop:pop-out-browser', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  return popOutSessionBrowser(tabId)
+})
+ipcMain.handle('desktop:dock-browser', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  return dockSessionBrowser(tabId)
+})
+// Only the session's own browser window may paste into its prompt box this way; other windows hold the terminal themselves.
+ipcMain.handle('desktop:browser-insert-prompt', (event, tabId: unknown, detail: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId) || browserWindows.get(tabId)?.webContents !== event.sender) return false
+  const { text, image } = (detail ?? {}) as { text?: unknown; image?: unknown }
+  if (image === true) return relayPromptInsert(tabId, { image: true })
+  if (typeof text !== 'string' || text.length > 100_000) throw new Error('Invalid prompt insert')
+  return relayPromptInsert(tabId, { text })
+})
+ipcMain.handle('desktop:insert-prompt-result', (event, id: unknown, delivered: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof id !== 'number') return
+  const pending = pendingPromptInserts.get(id)
+  if (!pending || pending.sender !== event.sender.id || typeof delivered !== 'boolean') return
+  pendingPromptInserts.delete(id)
+  pending.resolve(delivered)
 })
 ipcMain.handle('desktop:sidebar-view-changed', (event, view: unknown) => {
   assertTrustedIpcSender(event)

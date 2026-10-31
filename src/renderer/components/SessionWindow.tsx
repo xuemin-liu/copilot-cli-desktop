@@ -4,8 +4,9 @@ import { TerminalPane } from './TerminalPane.js'
 import { OperationError } from './OperationError.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
 
-export function SessionWindow({ tab, error, onReturn, onRestart, onDismissError }: {
+export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, onRestart, onDismissError }: {
   tab: DesktopSessionTab
+  browserPoppedOut?: boolean
   error: string | null
   onReturn: () => void
   onRestart: () => void
@@ -13,7 +14,7 @@ export function SessionWindow({ tab, error, onReturn, onRestart, onDismissError 
 }): JSX.Element {
   const status = tab.status === 'running' ? (tab.activity === 'working' ? 'Working' : tab.activity === 'idle' ? 'Idle' : 'Open') : tab.status
   return <main className="session-window" aria-label={`Session window: ${tab.title}`}>
-    <BrowserWorkspace tabId={tab.id} renderHeader={browserToggle => <header className="session-pane-header">
+    <BrowserWorkspace tabId={tab.id} poppedOut={browserPoppedOut} renderHeader={browserToggle => <header className="session-pane-header">
       <span className="session-pane-title" title={tab.title}>{tab.title}</span>
       {browserToggle}
       <span role="status">{status}</span>

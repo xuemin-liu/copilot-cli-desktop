@@ -17,6 +17,7 @@ interface SessionWorkspaceProps {
   onCreate: () => void
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
+  browserPoppedOutTabIds?: string[]
   obscured?: boolean
   /** Git panel toggle in the main session's header. Omitted where the panel is not available. */
   gitOpen?: boolean
@@ -30,7 +31,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, obscured = false, gitOpen = false, onToggleGit }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const areaRef = useRef<HTMLDivElement>(null)
@@ -62,7 +63,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
-            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && !tab.unloaded} obscured={obscured} renderHeader={browserToggle => <header className="session-pane-header">
+            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && !tab.unloaded} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>

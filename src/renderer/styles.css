@@ -1021,6 +1021,10 @@ button:disabled {
 .side-chat-badge { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: #91c8bc; font-size: 11px; white-space: nowrap; }
 .session-terminal { flex: 1; position: relative; min-height: 0; }
 .session-window { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
+.browser-only-window { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
+.browser-only-window > .browser-panel { flex: 1; }
+.browser-only-window .session-pane-title svg { vertical-align: -3px; margin-right: 4px; }
+.browser-workspace-error { min-width: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ffb3bb; font-size: 11px; }
 .side-chat-divider { grid-column: 2; grid-row: 1; background: #292d35; cursor: col-resize; touch-action: none; }
 .side-chat-divider:hover, .side-chat-divider:focus-visible { background: #4f88ff; outline: none; }
 .session-operation-error { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; color: #ffb3bb; background: #3a1c28; overflow-wrap: anywhere; }
