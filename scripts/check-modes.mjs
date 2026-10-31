@@ -1,6 +1,7 @@
 export const checkModes = [
   { flag: '--native-paste', env: 'DESKTOP_UI_PASTE_CHECK', module: './native-paste-check.mjs', run: 'runNativePasteCheck', artifacts: 'native-paste', label: 'native image/text paste' },
   { flag: '--popout', env: 'DESKTOP_UI_POPOUT_CHECK', module: './session-popout-check.mjs', run: 'runPopoutCheck', artifacts: 'session-popout', label: 'session pop-out' },
+  { flag: '--browser-popout', env: 'DESKTOP_UI_BROWSER_POPOUT_CHECK', module: './browser-popout-check.mjs', run: 'runBrowserPopoutCheck', artifacts: 'browser-popout', label: 'browser pop-out' },
   { flag: '--activity', env: 'DESKTOP_UI_ACTIVITY_CHECK', module: './session-activity-check.mjs', run: 'runActivityCheck', artifacts: 'session-activity', label: 'session activity' },
   { flag: '--permissions', env: 'DESKTOP_UI_PERMISSION_CHECK', module: './session-permission-check.mjs', run: 'runPermissionCheck', artifacts: 'permissions', label: 'session permission' },
   { flag: '--worktree', env: 'DESKTOP_UI_WORKTREE_CHECK', module: './session-worktree-check.mjs', run: 'runWorktreeCheck', artifacts: 'session-worktree', label: 'worktree session launch' },

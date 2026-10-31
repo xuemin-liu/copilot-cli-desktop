@@ -89,6 +89,12 @@ export interface CopilotDesktopBridge {
   activateTab(tabId: string): Promise<DesktopState>
   popOutTab(tabId: string): Promise<DesktopState>
   dockTab(tabId: string): Promise<DesktopState>
+  popOutBrowser(tabId: string): Promise<DesktopState>
+  dockBrowser(tabId: string): Promise<DesktopState>
+  /** From a session's browser window: paste into that session's prompt box in the window that shows its terminal. */
+  browserInsertPrompt(tabId: string, detail: { text: string } | { image: true }): Promise<boolean>
+  /** Answer whether a terminal pane in this window took the insert. */
+  onInsertPromptRequest(listener: (detail: { tabId: string; text?: string; image?: true }) => boolean): () => void
   renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
