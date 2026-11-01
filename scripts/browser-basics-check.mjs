@@ -1,4 +1,4 @@
-// Everyday browser behavior: zoom keys, find in page, F12, address suggestions and the right-click menu.
+// Everyday browser behavior: zoom keys, find in page, F12, address suggestions, the right-click menu and popup windows.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
@@ -25,7 +25,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow, clipboard } = await import('electron')
+  const { app, BaseWindow, BrowserWindow, clipboard, webContents } = await import('electron')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
   void run().catch(error => { console.error(error); app.exit(1) })
@@ -48,9 +48,10 @@ if (!process.versions.electron) {
     const endpoint = join(artifacts, 'control.json')
     const notices = []
     const menus = []
+    const menuWindows = []
     const appShortcuts = []
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint,
-      notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: menu => menus.push(menu) })
+      notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: (menu, owner) => { menus.push(menu); menuWindows.push(owner) } })
     try {
       browser.setBounds({ x: 0, y: 0, width: 800, height: 600 }); window.showInactive()
       await browser.open()
@@ -143,11 +144,11 @@ if (!process.versions.electron) {
       assert.ok(!('history' in status) && !('find' in status), 'the control server does not expose history or the search text')
 
       // Right-click menu: what it offers depends on what was clicked, and its entries work.
-      const rightClick = async (x, y) => {
-        menus.length = 0
-        contents.sendInputEvent({ type: 'mouseMove', x, y }); await delay(80)
-        contents.sendInputEvent({ type: 'mouseDown', x, y, button: 'right', clickCount: 1 })
-        contents.sendInputEvent({ type: 'mouseUp', x, y, button: 'right', clickCount: 1 })
+      const rightClick = async (x, y, target = contents) => {
+        menus.length = 0; menuWindows.length = 0
+        target.sendInputEvent({ type: 'mouseMove', x, y }); await delay(80)
+        target.sendInputEvent({ type: 'mouseDown', x, y, button: 'right', clickCount: 1 })
+        target.sendInputEvent({ type: 'mouseUp', x, y, button: 'right', clickCount: 1 })
         return until(() => menus[0], 'context menu')
       }
       const labels = menu => menu.items.filter(item => item.type !== 'separator').map(item => item.label)
@@ -188,6 +189,63 @@ if (!process.versions.electron) {
       menu = await rightClick(60, 100)
       choose(menu, 'Inspect element')
       await until(() => inspected.length === 3, 'Inspect element works while DevTools is already showing')
+      browser.action('view:page')
+
+      // A sized window.open opens a popup window, as in Chrome, while the browser keeps showing the page that opened it.
+      await browser.navigate(`${base}/opener`); await loaded()
+      const opener = browser.snapshot.activePageId
+      const popupWindows = () => BaseWindow.getAllWindows().filter(owner => owner !== window && !owner.isDestroyed())
+      const openPopup = async path => {
+        await contents.executeJavaScript(`window.popup = window.open(${JSON.stringify(path)}, 'popup', 'width=420,height=360'); void 0`)
+        const entry = await until(() => browser.snapshot.pages.find(page => page.window), 'popup window page')
+        const popup = webContents.fromId(entry.id)
+        await until(async () => !popup.isLoading() && await popup.executeJavaScript('document.readyState') === 'complete', 'popup loaded')
+        return { entry, popup, owner: await until(() => popupWindows()[0], 'popup window') }
+      }
+      let { entry, popup, owner } = await openPopup('/popup')
+      assert.equal(browser.snapshot.activePageId, opener, 'the browser keeps showing the opener')
+      assert.ok(contents.getURL().endsWith('/opener') && browser.view.getVisible(), 'the opener stays visible in the browser')
+      assert.equal(popup.getURL(), `${base}/popup`)
+      assert.equal(BrowserWindow.getAllWindows().includes(owner), false, 'a popup window is not an app window')
+      const [popupWidth, popupHeight] = owner.getContentSize()
+      const viewport = await popup.executeJavaScript("[innerWidth, innerHeight]")
+      assert.ok(Math.abs(viewport[0] - 420) <= 2 && Math.abs(viewport[1] - 360) <= 2, `popup viewport sized as asked: ${viewport} (window content ${popupWidth}x${popupHeight})`)
+      assert.ok(owner.contentView.children[0].getVisible())
+      await until(() => owner.getTitle() === '/popup', 'popup window follows its page title')
+      assert.equal(await contents.executeJavaScript('Boolean(window.popup && !window.popup.closed)'), true, 'the opener keeps its popup reference')
+      // The last tab stays even while a popup window is open.
+      browser.action(`close-page:${opener}`); await delay(200)
+      assert.equal(browser.snapshot.pages.length, 2)
+      // Selecting the popup shows its toolbar state and DevTools in the browser; the page itself stays in its window.
+      browser.action(`select-page:${entry.id}`)
+      assert.ok(browser.snapshot.url.endsWith('/popup'))
+      assert.equal(browser.pages.get(opener).view.getVisible(), false, 'the opener tab hides while the popup is selected')
+      assert.ok(owner.contentView.children[0].getVisible(), 'the popup page stays in its window')
+      browser.action('view:devtools')
+      await until(() => popup.devToolsWebContents, 'popup DevTools')
+      browser.action('view:page')
+      // The right-click menu shows in the popup window and acts on the popup even when the browser shows another page.
+      browser.action(`select-page:${opener}`)
+      menu = await rightClick(60, 100, popup)
+      assert.equal(menuWindows[0], owner, 'the menu opens in the popup window')
+      // Closing a selected popup selects its opener again.
+      browser.action(`select-page:${entry.id}`)
+      owner.close()
+      await until(() => popup.isDestroyed() && browser.snapshot.pages.length === 1, 'closing the window closes its page')
+      assert.equal(browser.snapshot.activePageId, opener)
+      // window.close() from the opener, and Ctrl+W in the popup, close the window.
+      ;({ popup, owner } = await openPopup('/scripted'))
+      await contents.executeJavaScript('window.popup.close()')
+      await until(() => owner.isDestroyed() && browser.snapshot.pages.length === 1, 'window.close closes the popup window')
+      ;({ popup, owner } = await openPopup('/keyed'))
+      popup.sendInputEvent({ type: 'keyDown', keyCode: 'w', modifiers: ['control'] })
+      await until(() => owner.isDestroyed() && browser.snapshot.pages.length === 1, 'Ctrl+W closes the popup window')
+      // Closing the browser closes its popup windows.
+      ;({ popup, owner } = await openPopup('/left-open'))
+      const popupStatus = await (await fetch(`http://127.0.0.1:${control.port}/status`, { headers: { authorization: `Bearer ${control.token}` } })).json()
+      assert.ok(popupStatus.pages.some(page => page.window), 'the CLI sees which page is in its own window')
+      await browser.dispose()
+      await until(() => owner.isDestroyed(), 'disposing the browser closes its popup windows')
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, history }, null, 2))
     } finally { await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
   }

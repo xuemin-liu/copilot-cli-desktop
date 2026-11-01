@@ -145,6 +145,7 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
   }
   const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   const overrides = overridesStatus(state.overrides)
+  const activePage = state.pages.find(page => page.id === state.activePageId)
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
@@ -168,9 +169,9 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     </form>
     <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
-        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.url}
-          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.title}</button>
-        <button type="button" aria-label={`Close browser page ${page.title}`} disabled={state.pages.length <= 1}
+        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.window ? `${page.url}\nOpen in its own window` : page.url}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
+        <button type="button" aria-label={`Close browser page ${page.title}`} disabled={!page.window && state.pages.filter(entry => !entry.window).length <= 1}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
       </div>)}
       <button type="button" className="browser-new-page" aria-label="New browser page" title="New page" disabled={state.pages.length >= 32}
@@ -222,7 +223,10 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     {!error && !state.error && (picking && !selecting ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
       : notice && <p className="browser-notice" role="status">{notice}</p>)}
     <div className="browser-viewport" ref={viewport}>
-      {state.view === 'page' && !state.url && <p className="browser-hint">Enter your web app URL above.</p>}
+      {state.view === 'page' && (activePage?.window
+        ? <p className="browser-hint">This page is open in its own window.{' '}
+            <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${activePage.id}`))}>Show window</button></p>
+        : !state.url && <p className="browser-hint">Enter your web app URL above.</p>)}
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
     <footer className="browser-footer">{state.loading ? 'Loading…' : 'This session’s browser activity is available to Copilot CLI.'}

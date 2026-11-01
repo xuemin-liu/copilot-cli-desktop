@@ -14,9 +14,15 @@ page has focus) for a hard reload that bypasses the cache and applies your lates
 same session, then enter its address. New pages share the session's login and
 storage, keep other pages open, and are selected automatically. Up to 32 pages
 can be open in one session. Links with `target="_blank"`, JavaScript `window.open()` and forms
-targeting a new page open browser page tabs inside the same terminal. They share
-that terminal's login/storage and console/network capture. Select or close pages
-using the page strip; navigation controls and DevTools apply to the selected page.
+targeting a new page open browser page tabs inside the same terminal. As in Chrome, a page that
+asks for a window of its own (`window.open()` with a features string such as `width=500,height=600`,
+or a **Shift+click** on a link) opens in a separate popup window sized as it asked, while the browser
+keeps showing the page that opened it. Popup windows count toward the 32 pages and appear in the page
+strip marked ⧉. **Ctrl+W** closes one, and so does the page calling `window.close()` or closing the
+browser. All pages share that terminal's login/storage and console/network capture. Select or close pages
+using the page strip; navigation controls and DevTools apply to the selected page. Selecting a popup
+window brings it forward, and shows its DevTools, Console and Network in the browser. **F12** in a popup
+window selects it and opens DevTools there.
 The address toolbar shows the selected page's actual browser zoom percentage.
 Zoom is remembered per site (host name, as in Chrome) for every session's browser and
 kept across restarts; returning a site to 100% forgets it.
@@ -596,7 +602,8 @@ inputs fail. Main-page navigation and redirects outside that origin are blocked
 during a run; embedded third-party frames may load and redirect for read-only
 inspection. To test another site, stop testing, open it yourself and enable
 Testing mode there. A manual navigation to another origin disables Testing mode.
-Popup activation changes the selected page and stops the old run.
+A popup that opens as a tab changes the selected page and stops the old run; a popup window
+leaves the selected page and the run alone.
 A run stops at its first failed step. Test actions may change the app's data; a
 failed or cancelled run does not undo completed steps. Keep the Page view visible
 for input and screenshots. A run acts only on its own session's pages.
