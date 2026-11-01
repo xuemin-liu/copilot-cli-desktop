@@ -100,6 +100,9 @@ export class BrowserDebug {
   private readonly showMenu: (menu: Menu, window: BaseWindow) => void
   /** Asks whether to leave a popup window whose page holds unsaved changes (its beforeunload guard). */
   private readonly confirmLeave: (window: BaseWindow) => Promise<boolean>
+  /** Whether a page asking for a window gets one: only while the browser is in its own window. Beside the terminal,
+   * popups stay tabs. */
+  private readonly popupWindows: () => boolean
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
@@ -115,7 +118,8 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean> } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean } = {}) {
+    this.popupWindows = options.popupWindows ?? (() => false)
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
     this.zoom = options.zoom ?? new BrowserZoom()
@@ -256,11 +260,11 @@ export class BrowserDebug {
             nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
             webviewTag: false, webSecurity: true, allowRunningInsecureContent: false, devTools: true,
           } })
-          // A sized window.open or a Shift+click asks for a window of its own, as in Chrome; other links open a tab.
-          // Like Chrome's popup blocker, only a click or key press in the page buys a window, one per input; a page opening
+          // In the browser's own window, a sized window.open or a Shift+click asks for a window of its own, as in Chrome;
+          // beside the terminal, and for other links, the page opens as a tab. Like Chrome's popup blocker, only a click or key press in the page buys a window, one per input; a page opening
           // windows on its own gets tabs instead. The browser keeps showing the page that opened a popup window.
           const activated = Date.now() - page.activatedAt < ACTIVATION_MS
-          const window = details.disposition === 'new-window' && activated ? this.popupWindow(options, page) : null
+          const window = details.disposition === 'new-window' && activated && this.popupWindows() ? this.popupWindow(options, page) : null
           if (window) page.activatedAt = 0
           const childPage = this.addPage(child, details.disposition !== 'background-tab' && !window, window, page.contents.id)
           this.startPopupOverrides(page, childPage)

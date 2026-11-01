@@ -53,10 +53,12 @@ if (!process.versions.electron) {
     const menuWindows = []
     const leaveAnswers = []
     const leaveWindows = []
+    // The browser is in its own window unless a step says otherwise; beside the terminal, popups open as tabs.
+    let ownWindow = true
     const appShortcuts = []
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint,
       notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: (menu, owner) => { menus.push(menu); menuWindows.push(owner) },
-      confirmLeave: async owner => { leaveWindows.push(owner); return leaveAnswers.shift() ?? false } })
+      confirmLeave: async owner => { leaveWindows.push(owner); return leaveAnswers.shift() ?? false }, popupWindows: () => ownWindow })
     try {
       browser.setBounds({ x: 0, y: 0, width: 800, height: 600 }); window.showInactive()
       await browser.open()
@@ -289,6 +291,17 @@ if (!process.versions.electron) {
       for (const page of browser.snapshot.pages.filter(page => page.id !== opener)) browser.action(`close-page:${page.id}`)
       await until(() => browser.snapshot.pages.length === 1 && popupWindows().length === 0, 'popups from one click closed')
       browser.action(`select-page:${opener}`)
+      // Beside the terminal, even a clicked, sized window.open opens as a tab: popup windows belong to the browser's own window.
+      ownWindow = false
+      await click()
+      await contents.executeJavaScript(`window.open('/docked', 'docked', 'width=300,height=200'); void 0`)
+      await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/docked'), 'docked popup opens as a tab')
+      assert.equal(browser.snapshot.pages.filter(page => page.window).length, 0, 'no popup window beside the terminal')
+      assert.equal(popupWindows().length, 0)
+      browser.action(`close-page:${browser.snapshot.activePageId}`)
+      await until(() => browser.snapshot.pages.length === 1, 'docked popup tab closed')
+      browser.action(`select-page:${opener}`)
+      ownWindow = true
       // A window asked for far off-screen stays whole in the work area of the opener's display.
       ;({ popup, owner } = await openPopup('/far', 'width=300,height=200,left=-20000,top=-20000'))
       const area = screen.getDisplayMatching(window.getBounds()).workArea
