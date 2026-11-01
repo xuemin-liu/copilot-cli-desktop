@@ -85,6 +85,9 @@ test('reviews and objections are asked for their evidence, in the desktop\'s hea
   const vote = voteMessage({ id: 'K7QF', round: 2, host, summary: '- lock around logout', folder: 'C:\\m\\K7QF', joinedLate: false })
   const [voteHeader] = vote.split('\n-----\n')
   assert.match(voteHeader!, /After OBJECT, name each open item and what supports it/)
+  const discussion = discussionMessage({ id: 'K7QF', round: 1, folder: 'C:\\m\\K7QF', role: null, others: [{ title: 'c', folder: null, text: 'fine' }] })
+  const [discussionHeader] = discussion.split('\n-----\n')
+  assert.match(discussionHeader!, /Back each disagreement or new point with what supports it: a check you ran, or the source that shows it/)
 })
 
 test('a role is one bounded line the person typed, without quotes or brackets', () => {
