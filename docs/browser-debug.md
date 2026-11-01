@@ -76,6 +76,8 @@ DevTools has not run yet. Popup tabs automatically use their opener's configured
 session's private folder. When overrides are enabled and a folder is selected, the popup starts native DevTools
 in the background and applies matching overrides to its first response without displaying a DevTools panel or
 reloading the page. POST submissions and opener callbacks are preserved. Disabled overrides remain disabled.
+Hidden DevTools stays unthrottled and checks override readiness in its committed frame without waiting for the
+entire frontend to finish loading, so a held popup document cannot block its own initialization.
 For the initial page or a page created with **+**, open **DevTools / Overrides** once; the warning has a button
 for it. Overrides apply while that page's DevTools runs, shown or hidden. Once DevTools runs the
 status comes from DevTools itself and follows changes within about a second; before that it comes from

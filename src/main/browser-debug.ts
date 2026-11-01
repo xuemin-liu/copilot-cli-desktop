@@ -622,8 +622,9 @@ export class BrowserDebug {
           let stage = 'starting DevTools'
           for (;;) {
             checkOpen()
-            if (!tools.isDestroyed() && !tools.isLoading() && tools.getURL().startsWith('devtools://devtools/')) {
-              const state = await tools.executeJavaScript(POPUP_OVERRIDES_READY_SCRIPT) as unknown
+            if (!tools.isDestroyed() && tools.getURL().startsWith('devtools://devtools/')) {
+              // Full frontend loading can wait on the held document; query the committed frame without that load barrier.
+              const state = await tools.mainFrame.executeJavaScript(POPUP_OVERRIDES_READY_SCRIPT) as unknown
               checkOpen()
               const ready = overridesFromDevtools(state)
               if (ready) { popup.overrides = ready; return }
@@ -994,7 +995,8 @@ export class BrowserDebug {
     if (!page.tools) {
       // DevTools keeps its added folders (the Local Overrides folder) in its own view's session: the default one, shared by
       // every session, or this session's own partition.
-      page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true,
+      // Hidden DevTools still has to initialize Local Overrides before a popup's held response can load.
+      page.tools = new WebContentsView({ webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false,
         ...(this.devtoolsPartition ? { partition: this.devtoolsPartition } : {}) } })
       page.tools.setVisible(false)
       if (page.attached) this.owner.contentView.addChildView(page.tools)
