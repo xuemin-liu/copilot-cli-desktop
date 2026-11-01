@@ -17,7 +17,10 @@ can be open in one session. Links with `target="_blank"`, JavaScript `window.ope
 targeting a new page open browser page tabs inside the same terminal. As in Chrome, a page that
 asks for a window of its own (`window.open()` with a features string such as `width=500,height=600`,
 or a **Shift+click** on a link) opens in a separate popup window sized as it asked, while the browser
-keeps showing the page that opened it. Popup windows count toward the 32 pages and appear in the page
+keeps showing the page that opened it. Like Chrome's popup blocker, a page gets a window only within a few
+seconds of a click or key press in it, one window per input. A page asking on its own, from a load script
+for example, gets tabs instead. A popup window always stays whole on the screen its opener is on,
+wherever the page asked to place it. Popup windows count toward the 32 pages and appear in the page
 strip marked ⧉. **Ctrl+W** closes one, and so does the page calling `window.close()` or closing the
 browser. Closing a popup window (its ✕ or Ctrl+W) asks the page first: a page with unsaved changes gets a
 **Leave site?** question on that window, and **Cancel** keeps it open. All pages share that terminal's login/storage and console/network capture. Select or close pages

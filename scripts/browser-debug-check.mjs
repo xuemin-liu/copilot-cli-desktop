@@ -403,7 +403,10 @@ if (!process.versions.electron) {
         assert.equal(window.isDestroyed(), false, 'closing a child leaves its terminal alive')
         await browser.navigate(url)
         await until(() => source.getVisible(), 'source restored in terminal')
-        // A feature string asks for a popup window, and cannot weaken that window's page.
+        // A feature string asks for a popup window (after a click in the page), and cannot weaken that window's page.
+        source.webContents.sendInputEvent({ type: 'mouseDown', x: 300, y: 300, button: 'left', clickCount: 1 })
+        source.webContents.sendInputEvent({ type: 'mouseUp', x: 300, y: 300, button: 'left', clickCount: 1 })
+        await delay(100)
         await source.webContents.executeJavaScript(`window.featureChild = window.open('/child-page', '_blank', 'nodeIntegration=yes,contextIsolation=no,sandbox=no'); void 0`)
         const featured = await until(() => browser.snapshot.pages.find(page => page.window), 'scripted popup window')
         assert.equal(browser.view, source, 'the browser keeps showing the opener of a popup window')

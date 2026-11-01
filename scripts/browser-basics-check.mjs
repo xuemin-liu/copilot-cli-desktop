@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url'
 
 const artifacts = resolve('test-results/browser-basics')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+// Longer than the 5 s a click lets a page open a popup window.
+const ACTIVATION_WAIT = 5200
 const until = async (read, name) => {
   const end = Date.now() + 15000
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(100) }
@@ -25,7 +27,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BaseWindow, BrowserWindow, clipboard, webContents } = await import('electron')
+  const { app, BaseWindow, BrowserWindow, clipboard, screen, webContents } = await import('electron')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
   void run().catch(error => { console.error(error); app.exit(1) })
@@ -198,8 +200,15 @@ if (!process.versions.electron) {
       await browser.navigate(`${base}/opener`); await loaded()
       const opener = browser.snapshot.activePageId
       const popupWindows = () => BaseWindow.getAllWindows().filter(owner => owner !== window && !owner.isDestroyed())
-      const openPopup = async path => {
-        await contents.executeJavaScript(`window.popup = window.open(${JSON.stringify(path)}, 'popup', 'width=420,height=360'); void 0`)
+      // A click on an empty part of the opener: only input in the page lets it open a popup window.
+      const click = async (target = contents) => {
+        target.sendInputEvent({ type: 'mouseDown', x: 500, y: 300, button: 'left', clickCount: 1 })
+        target.sendInputEvent({ type: 'mouseUp', x: 500, y: 300, button: 'left', clickCount: 1 })
+        await delay(100)
+      }
+      const openPopup = async (path, features = 'width=420,height=360') => {
+        await click()
+        await contents.executeJavaScript(`window.popup = window.open(${JSON.stringify(path)}, 'popup', ${JSON.stringify(features)}); void 0`)
         const entry = await until(() => browser.snapshot.pages.find(page => page.window), 'popup window page')
         const popup = webContents.fromId(entry.id)
         await until(async () => !popup.isLoading() && await popup.executeJavaScript('document.readyState') === 'complete', 'popup loaded')
@@ -263,6 +272,31 @@ if (!process.versions.electron) {
       leaveAnswers.push(true)
       owner.close()
       await until(() => owner.isDestroyed() && popup.isDestroyed() && browser.snapshot.pages.length === 1, 'Leave closes the popup window')
+      // Without a click or key press, a page asking for windows gets tabs, as Chrome's popup blocker would not open them.
+      await delay(ACTIVATION_WAIT)
+      await contents.executeJavaScript(`for (let i = 0; i < 3; i++) window.open('/unasked?' + i, 'unasked' + i, 'width=300,height=200'); void 0`)
+      await until(() => browser.snapshot.pages.length === 4, 'unasked popups open')
+      assert.equal(browser.snapshot.pages.filter(page => page.window).length, 0, 'no click, no popup window')
+      assert.equal(popupWindows().length, 0)
+      for (const page of browser.snapshot.pages.slice(1)) browser.action(`close-page:${page.id}`)
+      await until(() => browser.snapshot.pages.length === 1, 'unasked tabs closed')
+      browser.action(`select-page:${opener}`)
+      // One click buys one window.
+      await click()
+      await contents.executeJavaScript(`window.open('/first', 'first', 'width=300,height=200'); window.open('/second', 'second', 'width=300,height=200'); void 0`)
+      await until(() => browser.snapshot.pages.length === 3, 'two popups from one click')
+      assert.equal(browser.snapshot.pages.filter(page => page.window).length, 1, 'one click opens one popup window')
+      for (const page of browser.snapshot.pages.filter(page => page.id !== opener)) browser.action(`close-page:${page.id}`)
+      await until(() => browser.snapshot.pages.length === 1 && popupWindows().length === 0, 'popups from one click closed')
+      browser.action(`select-page:${opener}`)
+      // A window asked for far off-screen stays whole in the work area of the opener's display.
+      ;({ popup, owner } = await openPopup('/far', 'width=300,height=200,left=-20000,top=-20000'))
+      const area = screen.getDisplayMatching(window.getBounds()).workArea
+      const far = owner.getBounds()
+      assert.ok(far.x >= area.x && far.y >= area.y && far.x + far.width <= area.x + area.width && far.y + far.height <= area.y + area.height,
+        `off-screen request kept on screen: ${JSON.stringify(far)} in ${JSON.stringify(area)}`)
+      owner.close()
+      await until(() => owner.isDestroyed() && browser.snapshot.pages.length === 1, 'far popup closed')
       // Closing the browser closes its popup windows.
       ;({ popup, owner } = await openPopup('/left-open'))
       const popupStatus = await (await fetch(`http://127.0.0.1:${control.port}/status`, { headers: { authorization: `Bearer ${control.token}` } })).json()

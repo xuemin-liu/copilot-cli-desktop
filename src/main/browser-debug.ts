@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { open, readFile, rm } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { join } from 'node:path'
-import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, session as electronSession } from 'electron'
+import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, screen, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath, validateBrowserScreenshotPath } from '../cli/browser-control.js'
 import { executeBrowserTest, parseBrowserTest } from '../cli/browser-test-client.js'
@@ -61,7 +61,13 @@ interface BrowserPage {
   window: BaseWindow | null
   /** The page that opened it, selected again when a popup window closes. */
   opener: number | null
+  /** When someone last clicked, tapped or typed in the page (0 once a popup window used it). */
+  activatedAt: number
 }
+
+/** Input that lets a page open a popup window, and how long it lasts: Chromium's transient user activation. */
+const ACTIVATING_INPUT = new Set(['mouseDown', 'mouseUp', 'rawKeyDown', 'keyDown', 'char', 'touchEnd', 'gestureTap'])
+const ACTIVATION_MS = 5000
 
 /** Own browser session, with native Chromium DevTools, scoped reading and CLI telemetry.
  * Capture uses Electron events, so opening DevTools cannot detach a CDP collector. */
@@ -215,7 +221,7 @@ export class BrowserDebug {
   private addPage(view: WebContentsView, activate: boolean, window: BaseWindow | null = null, opener: number | null = null): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null, window, opener }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0 }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
@@ -251,8 +257,11 @@ export class BrowserDebug {
             webviewTag: false, webSecurity: true, allowRunningInsecureContent: false, devTools: true,
           } })
           // A sized window.open or a Shift+click asks for a window of its own, as in Chrome; other links open a tab.
-          // The browser keeps showing the page that opened a popup window, as Chrome's own window does.
-          const window = details.disposition === 'new-window' ? this.popupWindow(options) : null
+          // Like Chrome's popup blocker, only a click or key press in the page buys a window, one per input; a page opening
+          // windows on its own gets tabs instead. The browser keeps showing the page that opened a popup window.
+          const activated = Date.now() - page.activatedAt < ACTIVATION_MS
+          const window = details.disposition === 'new-window' && activated ? this.popupWindow(options, page) : null
+          if (window) page.activatedAt = 0
           const childPage = this.addPage(child, details.disposition !== 'background-tab' && !window, window, page.contents.id)
           this.startPopupOverrides(page, childPage)
           this.layout()
@@ -269,6 +278,7 @@ export class BrowserDebug {
         },
       }
     })
+    contents.on('input-event', (_event, input) => { if (ACTIVATING_INPUT.has(input.type)) page.activatedAt = Date.now() })
     // The page has no application menu, so give it Chrome's hard-reload shortcuts.
     contents.on('before-input-event', (event, input) => {
       // A popup window takes its own keys even while the browser shows another page.
@@ -353,16 +363,32 @@ export class BrowserDebug {
     return page
   }
 
-  /** The window for a page that asked for one, sized as it asked. */
-  private popupWindow(options: BrowserWindowConstructorOptions): BaseWindow {
-    const placed = typeof options.x === 'number' && typeof options.y === 'number'
+  /** The window for a page that asked for one: sized and placed as it asked, but kept on the screen its opener is on. */
+  private popupWindow(options: BrowserWindowConstructorOptions, opener: BrowserPage): BaseWindow {
     const width = options.width ?? 800
     const height = options.height ?? 600
-    const window = new BaseWindow({ width, height, useContentSize: true,
-      ...(placed ? { x: options.x, y: options.y } : {}), minWidth: 200, minHeight: 150, show: false, backgroundColor: '#ffffff' })
+    const window = new BaseWindow({ width, height, useContentSize: true, minWidth: 200, minHeight: 150, show: false, backgroundColor: '#ffffff' })
     window.setMenu(null)
     // The page's viewport is the size it asked for; removing the menu bar can leave the frame a few pixels off.
     window.setContentSize(width, height)
+    // As Chrome does, the whole frame stays in the work area of the opener's display, wherever the page asked for it;
+    // a window placed nowhere opens centred on its opener.
+    const near = (opener.window ?? this.owner).getBounds()
+    const area = screen.getDisplayMatching(near).workArea
+    const frame = window.getBounds()
+    const frameWidth = Math.min(frame.width, area.width)
+    const frameHeight = Math.min(frame.height, area.height)
+    const placed = typeof options.x === 'number' && typeof options.y === 'number'
+    const x = placed ? options.x! : near.x + Math.round((near.width - frameWidth) / 2)
+    const y = placed ? options.y! : near.y + Math.round((near.height - frameHeight) / 2)
+    const left = Math.min(Math.max(x, area.x), area.x + area.width - frameWidth)
+    const top = Math.min(Math.max(y, area.y), area.y + area.height - frameHeight)
+    if (frameWidth < frame.width || frameHeight < frame.height) window.setBounds({ x: left, y: top, width: frameWidth, height: frameHeight })
+    else {
+      // Moving re-rounds the frame on a scaled display, so give a window that fits its viewport size back.
+      window.setPosition(left, top)
+      window.setContentSize(width, height)
+    }
     return window
   }
 
