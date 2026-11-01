@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { open, readFile, rm } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { join } from 'node:path'
-import { BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, session as electronSession } from 'electron'
+import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, screen, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath, validateBrowserScreenshotPath } from '../cli/browser-control.js'
 import { executeBrowserTest, parseBrowserTest } from '../cli/browser-test-client.js'
@@ -57,7 +57,17 @@ interface BrowserPage {
   panel: 'console' | 'network' | 'sources' | null
   /** Local Overrides as this page's running DevTools last reported it. */
   overrides: OverridesSetting | null
+  /** The page's own window, when it opened as a popup window instead of a tab; its DevTools still shows in the browser. */
+  window: BaseWindow | null
+  /** The page that opened it, selected again when a popup window closes. */
+  opener: number | null
+  /** When someone last clicked, tapped or typed in the page (0 once a popup window used it). */
+  activatedAt: number
 }
+
+/** Input that lets a page open a popup window, and how long it lasts: Chromium's transient user activation. */
+const ACTIVATING_INPUT = new Set(['mouseDown', 'mouseUp', 'rawKeyDown', 'keyDown', 'char', 'touchEnd', 'gestureTap'])
+const ACTIVATION_MS = 5000
 
 /** Own browser session, with native Chromium DevTools, scoped reading and CLI telemetry.
  * Capture uses Electron events, so opening DevTools cannot detach a CDP collector. */
@@ -87,7 +97,9 @@ export class BrowserDebug {
   private readonly notifyShortcut: (name: 'find' | 'find-close') => void
   /** Returns whether the app took the shortcut; one it leaves goes on to the window (its menu, if it has one). */
   private readonly appShortcut: ((name: 'git-toggle' | 'close-window') => boolean) | undefined
-  private readonly showMenu: (menu: Menu) => void
+  private readonly showMenu: (menu: Menu, window: BaseWindow) => void
+  /** Asks whether to leave a popup window whose page holds unsaved changes (its beforeunload guard). */
+  private readonly confirmLeave: (window: BaseWindow) => Promise<boolean>
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
@@ -103,13 +115,19 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean> } = {}) {
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
     this.zoom = options.zoom ?? new BrowserZoom()
     this.partition = options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`
     this.devtoolsPartition = options.devtoolsPartition ?? null
-    this.showMenu = options.showMenu ?? (menu => { if (!this.owner.isDestroyed()) menu.popup({ window: this.owner }) })
+    this.showMenu = options.showMenu ?? ((menu, window) => { if (!window.isDestroyed()) menu.popup({ window }) })
+    this.confirmLeave = options.confirmLeave ?? (async window => {
+      if (window.isDestroyed()) return false
+      const { response } = await dialog.showMessageBox(window, { type: 'question', title: 'Leave site?', message: 'Leave site?',
+        detail: 'Changes you made may not be saved.', buttons: ['Leave', 'Cancel'], defaultId: 0, cancelId: 1, noLink: true })
+      return response === 0
+    })
     this.tabId = options.tabId ?? ''
     this.notifyShortcut = options.notify ?? (name => { if (!this.owner.isDestroyed() && this.tabId) this.owner.webContents.send('desktop:browser-shortcut', this.tabId, name) })
     this.endpointPath = options.endpointPath ?? browserControlPath()
@@ -129,7 +147,7 @@ export class BrowserDebug {
       return signal.aborted ? null : response === 1
     }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
-      active: () => this.activePageId, select: id => { this.action(`select-page:${id}`) }, owner: () => this.owner,
+      active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
       recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
       evidence: (pageId, startedAt) => ({ console: this.state.console.filter(entry => entry.pageId === pageId && entry.timestamp >= startedAt).slice(-100),
         capture: { recordingConsole: this.state.recordingConsole, recordingNetwork: this.state.recordingNetwork,
@@ -194,13 +212,20 @@ export class BrowserDebug {
 
   private get activePage(): BrowserPage { return this.pages.get(this.activePageId)! }
 
-  private addPage(view: WebContentsView, activate: boolean): BrowserPage {
+  /** The first page shown as a tab: the one whose address is restored next time. */
+  private get firstTab(): BrowserPage | undefined {
+    for (const page of this.pages.values()) if (!page.window) return page
+    return undefined
+  }
+
+  private addPage(view: WebContentsView, activate: boolean, window: BaseWindow | null = null, opener: number | null = null): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0 }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
+    if (window) this.showInWindow(page, window)
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
       try { if (details.url && details.url !== 'about:blank') parseSafeHttpUrl(details.url) }
@@ -231,7 +256,13 @@ export class BrowserDebug {
             nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
             webviewTag: false, webSecurity: true, allowRunningInsecureContent: false, devTools: true,
           } })
-          const childPage = this.addPage(child, details.disposition !== 'background-tab')
+          // A sized window.open or a Shift+click asks for a window of its own, as in Chrome; other links open a tab.
+          // Like Chrome's popup blocker, only a click or key press in the page buys a window, one per input; a page opening
+          // windows on its own gets tabs instead. The browser keeps showing the page that opened a popup window.
+          const activated = Date.now() - page.activatedAt < ACTIVATION_MS
+          const window = details.disposition === 'new-window' && activated ? this.popupWindow(options, page) : null
+          if (window) page.activatedAt = 0
+          const childPage = this.addPage(child, details.disposition !== 'background-tab' && !window, window, page.contents.id)
           this.startPopupOverrides(page, childPage)
           this.layout()
           // Electron supplies no guest for browser-initiated background links.
@@ -247,14 +278,23 @@ export class BrowserDebug {
         },
       }
     })
+    contents.on('input-event', (_event, input) => { if (ACTIVATING_INPUT.has(input.type)) page.activatedAt = Date.now() })
     // The page has no application menu, so give it Chrome's hard-reload shortcuts.
     contents.on('before-input-event', (event, input) => {
-      if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || this.activePageId !== contents.id) return
+      // A popup window takes its own keys even while the browser shows another page.
+      const selected = this.activePageId === contents.id
+      if (input.type !== 'keyDown' || input.isAutoRepeat || input.alt || (!selected && !page.window)) return
       const key = input.key.toLowerCase()
-      if (key === 'escape' && this.reader.picking) { event.preventDefault(); this.reader.cancelPick(); return }
+      if (selected && key === 'escape' && this.reader.picking) { event.preventDefault(); this.reader.cancelPick(); return }
       // The page has no application menu, so give it the browser shortcuts people expect.
       const command = input.control || input.meta
       const handled = ((): boolean => {
+        if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
+        // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
+        if (!selected) {
+          if (key === 'f12' || (command && input.shift && key === 'i')) { this.selectPage(contents.id); this.showView('devtools'); return true }
+          return false
+        }
         if (command && (key === '=' || key === '+')) { this.action('zoom-in'); return true }
         if (command && (key === '-' || key === '_')) { this.action('zoom-out'); return true }
         if (command && key === '0') { this.action('zoom-reset'); return true }
@@ -305,7 +345,7 @@ export class BrowserDebug {
     contents.on('found-in-page', (_event, result) => {
       if (this.activePageId === contents.id && this.findQuery && result.finalUpdate) this.findResult = { matches: result.matches, active: result.activeMatchOrdinal }
     })
-    contents.on('context-menu', (_event, params) => { if (this.activePageId === contents.id && !this.disposed) this.showContextMenu(page, params) })
+    contents.on('context-menu', (_event, params) => { if ((this.activePageId === contents.id || page.window) && !this.disposed) this.showContextMenu(page, params) })
     contents.on('console-message', details => {
       if (!this.state.recordingConsole) return
       this.state.console.push({ id: ++this.consoleSequence, pageId: contents.id, timestamp: new Date().toISOString(),
@@ -321,6 +361,94 @@ export class BrowserDebug {
     })
     contents.once('destroyed', () => this.removePage(id, storage))
     return page
+  }
+
+  /** The window for a page that asked for one: sized and placed as it asked, but kept on the screen its opener is on. */
+  private popupWindow(options: BrowserWindowConstructorOptions, opener: BrowserPage): BaseWindow {
+    const width = options.width ?? 800
+    const height = options.height ?? 600
+    const window = new BaseWindow({ width, height, useContentSize: true, minWidth: 200, minHeight: 150, show: false, backgroundColor: '#ffffff' })
+    window.setMenu(null)
+    // The page's viewport is the size it asked for; removing the menu bar can leave the frame a few pixels off.
+    window.setContentSize(width, height)
+    // As Chrome does, the whole frame stays in the work area of the opener's display, wherever the page asked for it;
+    // a window placed nowhere opens centred on its opener.
+    const near = (opener.window ?? this.owner).getBounds()
+    const area = screen.getDisplayMatching(near).workArea
+    const frame = window.getBounds()
+    const frameWidth = Math.min(frame.width, area.width)
+    const frameHeight = Math.min(frame.height, area.height)
+    const placed = typeof options.x === 'number' && typeof options.y === 'number'
+    const x = placed ? options.x! : near.x + Math.round((near.width - frameWidth) / 2)
+    const y = placed ? options.y! : near.y + Math.round((near.height - frameHeight) / 2)
+    const left = Math.min(Math.max(x, area.x), area.x + area.width - frameWidth)
+    const top = Math.min(Math.max(y, area.y), area.y + area.height - frameHeight)
+    if (frameWidth < frame.width || frameHeight < frame.height) window.setBounds({ x: left, y: top, width: frameWidth, height: frameHeight })
+    else {
+      // Moving re-rounds the frame on a scaled display, so give a window that fits its viewport size back.
+      window.setPosition(left, top)
+      window.setContentSize(width, height)
+    }
+    return window
+  }
+
+  /** The page fills its window, which follows its title and closes with it. */
+  private showInWindow(page: BrowserPage, window: BaseWindow): void {
+    const { contents, view } = page
+    const fit = (): void => {
+      if (window.isDestroyed()) return
+      const [width = 0, height = 0] = window.getContentSize()
+      view.setBounds({ x: 0, y: 0, width, height })
+    }
+    window.contentView.addChildView(view)
+    fit()
+    window.on('resize', fit)
+    // Closing the window asks the page first, so a beforeunload guard can keep unsaved edits; the window goes once the page
+    // has closed (removePage). Closing the browser closes its pages without asking.
+    let closing = false
+    let asking = false
+    window.on('close', event => {
+      if (contents.isDestroyed() || this.disposed) return
+      event.preventDefault()
+      if (asking) return
+      closing = true
+      contents.close({ waitForBeforeUnload: true })
+    })
+    // Electron keeps a guarded page open without telling anyone, so ask, as Chrome does, and close it on Leave.
+    contents.on('will-prevent-unload', () => {
+      if (!closing || asking) return
+      closing = false
+      asking = true
+      void this.confirmLeave(window).catch(() => false).then(leave => {
+        asking = false
+        if (leave && !contents.isDestroyed()) contents.close()
+      })
+    })
+    window.on('closed', () => { if (!contents.isDestroyed()) contents.close() })
+    contents.on('page-title-updated', (_event, title) => { if (!window.isDestroyed()) window.setTitle(title) })
+    window.show()
+  }
+
+  /** Select a page. Only someone choosing it brings its popup window forward; the assistant selecting it does not. */
+  private selectPage(id: number, focus = false): void {
+    const page = this.pages.get(id)
+    if (!page) throw new Error('Unknown browser page')
+    if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() }
+    this.activePageId = id
+    this.showView('page')
+    if (focus && page.window && !page.window.isDestroyed()) {
+      if (page.window.isMinimized()) page.window.restore()
+      page.window.focus()
+    }
+  }
+
+  /** Take a page's views out of the browser's window; a popup window keeps its page. */
+  private detach(page: BrowserPage): void {
+    if (page.attached && !this.owner.isDestroyed()) {
+      if (!page.window) this.owner.contentView.removeChildView(page.view)
+      if (page.tools) this.owner.contentView.removeChildView(page.tools)
+    }
+    page.attached = false
   }
 
   private requestStarted(details: OnBeforeRequestListenerDetails): void {
@@ -556,7 +684,7 @@ export class BrowserDebug {
     try { saved = restorableUrl(url) } catch { return }
     page.lastUrl = url
     // Restore the primary page, not a transient popup or authentication child.
-    if (page !== this.pages.values().next().value) return
+    if (page !== this.firstTab) return
     if (!saved) return
     this.settingsWrite = this.settingsWrite.catch(() => {}).then(() => writeFileAtomic(this.settingsPath, JSON.stringify({ url: saved })))
     void this.settingsWrite.catch(error => { page.error = `Could not save browser URL: ${String(error)}` })
@@ -577,6 +705,7 @@ export class BrowserDebug {
       this.state.pages = [...this.pages].map(([id, entry]) => ({ id,
         title: entry.view.webContents.getTitle().slice(0, 160) || 'New page',
         url: entry.view.webContents.getURL() || entry.lastUrl,
+        ...(entry.window ? { window: true } : {}),
       }))
       this.state.sitePermissions = this.sitePermissions.list()
       const dialog = this.reader.pendingDialog
@@ -732,18 +861,19 @@ export class BrowserDebug {
     const items = contextMenuItems(params, { canGoBack: contents.navigationHistory.canGoBack(), canGoForward: contents.navigationHistory.canGoForward() })
     const menu = Menu.buildFromTemplate(items.map(item => 'separator' in item ? { type: 'separator' as const }
       : { label: item.label, enabled: item.enabled, click: () => { this.runContextAction(page, item.id, params) } }))
-    this.showMenu(menu)
+    this.showMenu(menu, page.window ?? this.owner)
   }
 
   /** Runs one entry of the page's right-click menu. */
   private runContextAction(page: BrowserPage, id: ContextMenuId, params: ContextMenuInput & { x: number; y: number }): void {
     const contents = page.contents
     if (this.disposed || contents.isDestroyed()) return
+    // The menu acts on the page it was opened on, which may be a popup window the browser is not showing.
     switch (id) {
-      case 'back': this.action('back'); break
-      case 'forward': this.action('forward'); break
-      case 'reload': this.action('reload'); break
-      case 'hard-reload': this.action('hard-reload'); break
+      case 'back': if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack(); break
+      case 'forward': if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward(); break
+      case 'reload': page.error = null; contents.reload(); break
+      case 'hard-reload': page.error = null; contents.reloadIgnoringCache(); break
       case 'cut': contents.cut(); break
       case 'copy': contents.copy(); break
       case 'paste': contents.paste(); break
@@ -754,6 +884,7 @@ export class BrowserDebug {
       case 'inspect': {
         // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
         const reused = page.tools !== null
+        if (this.activePageId !== contents.id) this.selectPage(contents.id)
         this.showView('devtools')
         const tools = page.tools?.webContents
         const inspect = (): void => { if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y) }
@@ -816,8 +947,9 @@ export class BrowserDebug {
       const id = Number(pageAction[2])
       const page = this.pages.get(id)
       if (!page) throw new Error('Unknown browser page')
-      if (pageAction[1] === 'select-page') { if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() } this.activePageId = id; this.showView('page') }
-      else if (this.pages.size > 1) page.view.webContents.close()
+      if (pageAction[1] === 'select-page') this.selectPage(id, true)
+      // A popup window can always close; the last tab stays.
+      else if (page.window || [...this.pages.values()].filter(entry => !entry.window).length > 1) page.view.webContents.close()
       return this.snapshot
     }
     const contents = this.view.webContents
@@ -896,15 +1028,7 @@ export class BrowserDebug {
   setOwner(owner: BrowserWindow): void {
     if (this.owner === owner || this.disposed) return
     this.setBounds(null)
-    if (!this.owner.isDestroyed()) {
-      for (const page of this.pages.values()) {
-        if (page.attached) {
-          this.owner.contentView.removeChildView(page.view)
-          if (page.tools) this.owner.contentView.removeChildView(page.tools)
-        }
-        page.attached = false
-      }
-    }
+    for (const page of this.pages.values()) this.detach(page)
     this.owner = owner
   }
 
@@ -912,12 +1036,13 @@ export class BrowserDebug {
     if (this.disposed || this.owner.isDestroyed()) return
     const b = this.bounds
     for (const [id, page] of this.pages) {
+      // A popup window shows its page itself; only its DevTools shows in the browser.
       if (!page.attached && b) {
-        this.owner.contentView.addChildView(page.view)
+        if (!page.window) this.owner.contentView.addChildView(page.view)
         if (page.tools) this.owner.contentView.addChildView(page.tools)
         page.attached = true
       }
-      page.view.setVisible(Boolean(b && id === this.activePageId && this.state.view === 'page'))
+      if (!page.window) page.view.setVisible(Boolean(b && id === this.activePageId && this.state.view === 'page'))
       page.tools?.setVisible(Boolean(b && id === this.activePageId && page.devtools && ['console', 'network', 'devtools'].includes(this.state.view)))
     }
     if (!b) return
@@ -929,26 +1054,30 @@ export class BrowserDebug {
     const height = Math.max(0, Math.min(ownerHeight - y, Math.round(b.height * zoom)))
     // Inspection replaces the visible surface while preserving the page's full
     // viewport, so opening Console/Network/DevTools doesn't resize the web app.
-    this.view.setBounds({ x, y, width, height })
+    if (!this.activePage.window) this.view.setBounds({ x, y, width, height })
     this.activePage.tools?.setBounds({ x, y, width, height })
   }
 
   private removePage(id: number, storage: Session): void {
     const page = this.pages.get(id)
     if (!page) return
-    const primary = page === this.pages.values().next().value
-    if (page.attached && !this.owner.isDestroyed()) {
-      this.owner.contentView.removeChildView(page.view)
-      if (page.tools) this.owner.contentView.removeChildView(page.tools)
-    }
+    const primary = page === this.firstTab
+    this.detach(page)
     this.pages.delete(id)
+    if (page.window && !page.window.isDestroyed()) page.window.destroy()
     const tools = page.tools?.webContents
     if (this.disposed) { if (tools && !tools.isDestroyed()) tools.close(); return }
-    if (this.pages.size === 0) {
+    // The browser always keeps a tab, even while popup windows stay open.
+    const firstTab = this.firstTab
+    if (!firstTab) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
-        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
-    } else if (this.activePageId === id) { this.endFind(); this.reader.setTesting(false); this.activePageId = this.pages.keys().next().value!; this.showView('page') }
-    if (primary) this.rememberUrl(this.pages.values().next().value!, this.pages.values().next().value!.view.webContents.getURL())
+        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), this.activePageId === id)
+    } else if (this.activePageId === id) {
+      this.endFind(); this.reader.setTesting(false)
+      this.activePageId = page.window && page.opener !== null && this.pages.has(page.opener) ? page.opener : firstTab.contents.id
+      this.showView('page')
+    }
+    if (primary) this.rememberUrl(this.firstTab!, this.firstTab!.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()
   }
@@ -1042,7 +1171,7 @@ export class BrowserDebug {
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
-          pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url) })),
+          pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
           consoleCount: console.filter(entry => entry.pageId === this.activePageId).length,
           networkCount: network.filter(entry => entry.pageId === this.activePageId).length })
       } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === this.activePageId))
@@ -1064,15 +1193,7 @@ export class BrowserDebug {
     if (this.disposed) return
     const storage = this.activePage.contents.session
     this.setBounds(null)
-    if (!this.owner.isDestroyed()) {
-      for (const page of this.pages.values()) {
-        if (page.attached) {
-          this.owner.contentView.removeChildView(page.view)
-          if (page.tools) this.owner.contentView.removeChildView(page.tools)
-          page.attached = false
-        }
-      }
-    }
+    for (const page of this.pages.values()) this.detach(page)
     this.disposed = true
     // Site permissions and zoom belong to every session's browser; closing this one only stops following them.
     browsersBySession.get(storage)?.delete(this)

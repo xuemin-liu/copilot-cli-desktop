@@ -64,7 +64,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true, 'All browser checks must complete before Electron exits')
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow, ipcMain } = await import('electron')
+  const { app, BrowserWindow, ipcMain, webContents } = await import('electron')
   // Background test windows still need compositor surfaces for screenshot QA.
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
@@ -149,7 +149,7 @@ if (!process.versions.electron) {
     try {
       window.showInactive()
       await window.loadFile(join(artifacts, 'index.html'))
-      await until(() => ui('document.querySelector(".session-pane-visible .session-browser-toggle")'), 'session header open button')
+      await until(() => ui('document.querySelector(".session-pane-visible .session-browser-toggle") !== null'), 'session header open button')
       assert.equal(await ui('document.querySelectorAll(".session-pane-header .session-browser-toggle").length'), 2)
       assert.equal(await ui('document.querySelectorAll(".browser-workspace-toolbar").length'), 0, 'no window-wide browser toolbar')
       await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
@@ -403,14 +403,24 @@ if (!process.versions.electron) {
         assert.equal(window.isDestroyed(), false, 'closing a child leaves its terminal alive')
         await browser.navigate(url)
         await until(() => source.getVisible(), 'source restored in terminal')
-        // Parent close keeps its child tab and promotes it; terminal disposal closes every page.
+        // A feature string asks for a popup window (after a click in the page), and cannot weaken that window's page.
+        source.webContents.sendInputEvent({ type: 'mouseDown', x: 300, y: 300, button: 'left', clickCount: 1 })
+        source.webContents.sendInputEvent({ type: 'mouseUp', x: 300, y: 300, button: 'left', clickCount: 1 })
+        await delay(100)
         await source.webContents.executeJavaScript(`window.featureChild = window.open('/child-page', '_blank', 'nodeIntegration=yes,contextIsolation=no,sandbox=no'); void 0`)
-        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'scripted child')
-        const retained = browser.view.webContents
-        const preferences = retained.getLastWebPreferences()
+        const featured = await until(() => browser.snapshot.pages.find(page => page.window), 'scripted popup window')
+        assert.equal(browser.view, source, 'the browser keeps showing the opener of a popup window')
+        const popup = webContents.fromId(featured.id)
+        const preferences = popup.getLastWebPreferences()
         assert.equal(preferences.nodeIntegration, false)
         assert.equal(preferences.contextIsolation, true)
         assert.equal(preferences.sandbox, true)
+        browser.action(`close-page:${featured.id}`)
+        await until(() => popup.isDestroyed() && browser.snapshot.pages.length === 1, 'popup window closed')
+        // Parent close keeps its child tab and promotes it; terminal disposal closes every page.
+        await source.webContents.executeJavaScript(`window.open('/child-page', '_blank'); void 0`)
+        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'scripted child')
+        const retained = browser.view.webContents
         browser.action(`close-page:${sourceId}`)
         await until(() => browser.snapshot.pages.length === 1 && !retained.isDestroyed(), 'child survives source close')
         await browser.navigate(url)

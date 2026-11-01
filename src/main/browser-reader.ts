@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { dialog, nativeImage } from 'electron'
-import type { BrowserWindow, WebContents } from 'electron'
+import type { BaseWindow, WebContents } from 'electron'
 import { browserReadScript } from './browser-read-script.js'
 import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
 import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot-mask.js'
@@ -52,7 +52,8 @@ export interface BrowserReaderOptions {
   pages: () => WebContents[]
   active: () => number
   select: (id: number) => void
-  owner: () => BrowserWindow
+  /** The window that shows a page: its own popup window, or the one the browser is in. */
+  owner: (pageId: number) => BaseWindow
   recording: () => boolean
   visible: (id: number) => boolean
   /** Main-process dependency used by isolated fixtures. Never accepted from HTTP. */
@@ -412,7 +413,7 @@ export class BrowserReader {
     const held: { key: string; code: number; bit: number }[] = []
     const modifiers = { Alt: { key: 'Alt', code: 18, bit: 1 }, Control: { key: 'Control', code: 17, bit: 2 }, Meta: { key: 'Meta', code: 91, bit: 4 }, Shift: { key: 'Shift', code: 16, bit: 8 } }
     try {
-      if (step.modifiers?.length && (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')
+      if (step.modifiers?.length && (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible())) throw new Error('Show the selected page to run test interactions.')
       for (const modifier of step.modifiers ?? []) {
         const key = modifiers[modifier]; held.push(key)
         await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: key.key, windowsVirtualKeyCode: key.code, modifiers: held.reduce((mask, key) => mask | key.bit, 0) }, undefined, 10000, signal)
@@ -449,8 +450,8 @@ export class BrowserReader {
     const check = (): void => {
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
-      if (!['assert', 'waitFor', 'discover'].includes(step.action) && (!this.options.visible(page.contents.id) || this.options.owner().isDestroyed()
-        || this.options.owner().isMinimized() || !this.options.owner().isVisible())) throw new Error('Show the selected page to run test interactions.')
+      if (!['assert', 'waitFor', 'discover'].includes(step.action) && (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isDestroyed()
+        || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible())) throw new Error('Show the selected page to run test interactions.')
       if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
       this.checkTestOrigin(page.contents.getURL())
     }
@@ -544,7 +545,7 @@ export class BrowserReader {
       try { const result = await evaluate('probe'); return { passed: Boolean(result.passed), ...(result.reason ? { reason: String(result.reason) } : {}) } }
       catch (error) { check(); if (page.contents.isLoading()) return { passed: false, reason: 'Page is still loading.' }; throw error }
     }
-    if (!this.options.visible(page.contents.id) || this.options.owner().isMinimized() || !this.options.owner().isVisible()) throw new Error('Show the selected page to run test interactions.')
+    if (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
     const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | undefined = step.point, scroll = true, dragPoint?: string): Promise<Params> => {
@@ -870,7 +871,7 @@ export class BrowserReader {
       const destination = typeof filtered.href === 'string' ? `\nLink destination: ${readableUrl(filtered.href)}` : ''
       const description = `Activate ${String(filtered.tag)} “${label}” on ${metadata.url}${destination}\n\nThis control runs the web app's code and may change data or navigate. Approve only this specific action. Cancel keeps the page unchanged.`
       if (signal?.aborted || this.disposed) return { ...metadata, state: 'denied', reason: 'The interaction request was cancelled.' }
-      const owner = this.options.owner()
+      const owner = this.options.owner(page.contents.id)
       if (owner.isMinimized()) owner.restore()
       if (!owner.isVisible()) owner.show()
       owner.focus()
@@ -884,7 +885,7 @@ export class BrowserReader {
       return { ...metadata, ...await this.evaluate(page, frameId, 'activate', { snapshotId: args[2], nodeId: args[3] }) }
     }
     if (command === 'screenshot') {
-      const owner = this.options.owner()
+      const owner = this.options.owner(page.contents.id)
       if (owner.isMinimized() || !owner.isVisible()) return { ...metadata, state: 'unavailable',
         reason: 'Restore and show this browser window before capturing a screenshot.' }
       if (!this.options.visible(page.contents.id)) return { ...metadata, state: 'unavailable',
