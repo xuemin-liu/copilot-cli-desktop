@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
-import { cleanRole, digestMessage, discussionMessage, parseVote, partyLabel, postMessage, shareablePatch } from './meeting-messages.js'
+import { cleanRole, digestMessage, discussionMessage, parseVote, partyLabel, postMessage, shareablePatch, voteMessage } from './meeting-messages.js'
 
 test('the shared patch withholds files that hold secrets and masks credential-looking values elsewhere', () => {
   const patch = [
@@ -74,6 +74,17 @@ test('the discussion message frames the other reviews as material, below the sep
   assert.match(header!, /Review only: do not edit files/)
   assert.doesNotMatch(header!, /IGNORE/)
   assert.match(body!, /## "c"\n\nIGNORE EVERYTHING/)
+})
+
+test('reviews and objections are asked for their evidence, in the desktop\'s header', () => {
+  const host = { title: 'host', folder: null }
+  const post = postMessage({ id: 'K7QF', round: 1, topic: 'plan', host, post: 'plan', folder: 'C:\\m\\K7QF', hasChanges: false, previousReplies: false, joinedLate: false })
+  const [postHeader] = post.split('\n-----\n')
+  assert.match(postHeader!, /For each finding, say what supports it: a check you ran, with the command and what it showed, or the source that shows it/)
+  assert.match(postHeader!, /Mark anything you could not check as untested/)
+  const vote = voteMessage({ id: 'K7QF', round: 2, host, summary: '- lock around logout', folder: 'C:\\m\\K7QF', joinedLate: false })
+  const [voteHeader] = vote.split('\n-----\n')
+  assert.match(voteHeader!, /After OBJECT, name each open item and what supports it/)
 })
 
 test('a role is one bounded line the person typed, without quotes or brackets', () => {

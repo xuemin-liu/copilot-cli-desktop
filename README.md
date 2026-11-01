@@ -241,6 +241,8 @@ A meeting lets several sessions review one session's plan or local changes witho
 2. In each session that should review it (any project, any model, read-only sessions too), type **"join meeting K7QF"**,
    or give it a role: **"join meeting K7QF as security reviewer"**. **Add session…** on the meeting bar does the same, with
    an optional role in the box beside it. A reviewer with a role is asked to look at the material from that angle first.
+   Every reviewer is asked to back each finding with a check it ran or the source that shows it, to mark the rest as
+   untested, and to name what supports each open item when it objects to closing.
 3. The desktop does the rest, in rounds. It types the host's post (and its uncommitted changes, as a patch) into every
    reviewer, collects their replies, and gives them all to the host in one message. The host answers or revises, and the
    next round goes out, with what the other reviewers said. When the open items are settled the host proposes to close;
