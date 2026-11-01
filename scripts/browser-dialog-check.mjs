@@ -80,13 +80,23 @@ if (!process.versions.electron) {
       await browser.answerDialog(true)
       await until(async () => await out() === 'shown', 'credential dialog answered')
 
-      // A page that opens another page and then a dialog: the dialog is shown on its own page, not left behind the new one.
+      // A page that opens another page and then a dialog: the dialog is shown and answered over the new page, which stays selected.
       void contents.executeJavaScript("document.getElementById('open-then-alert').click()")
       const opener = await until(() => browser.snapshot.dialog && browser.snapshot, 'opener dialog')
-      assert.deepEqual([opener.dialog.message, opener.dialog.pageId, opener.activePageId, opener.pages.length], ['Opened a page', contents.id, contents.id, 2])
+      const opened = opener.pages.find(page => page.id !== contents.id).id
+      assert.deepEqual([opener.dialog.message, opener.dialog.pageId, opener.activePageId, opener.pages.length], ['Opened a page', contents.id, opened, 2])
       await browser.answerDialog(true)
       await until(async () => await out() === 'opener resumed', 'opener resumed')
-      const opened = opener.pages.find(page => page.id !== contents.id).id
+
+      // A background page's dialog neither takes the selection nor ends Testing mode on the page being worked in.
+      browser.action('testing:on')
+      void contents.executeJavaScript("document.getElementById('late').click()")
+      const background = await until(() => browser.snapshot.dialog && browser.snapshot, 'background dialog')
+      assert.deepEqual([background.dialog.message, background.dialog.pageId, background.activePageId, background.testing?.enabled], ['Surprise', contents.id, opened, true])
+      await browser.answerDialog(true)
+      await until(async () => await out() === 'surprised', 'background dialog answered')
+      assert.deepEqual([browser.snapshot.activePageId, browser.snapshot.testing?.enabled], [opened, true])
+      browser.action('testing:off')
       browser.action(`close-page:${opened}`)
 
       // A page that opens a dialog while it first loads, in a page with no document yet, is held for the user, not hidden.

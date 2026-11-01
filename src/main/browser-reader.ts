@@ -299,8 +299,6 @@ export class BrowserReader {
     const rule = page.dialogRule
     if (!testing && !rule) {
       page.dialog = { type, message, ...(sessionId ? { sessionId } : {}) }
-      // A page that opened another page and then a dialog is held behind it: show the page whose dialog is waiting.
-      if (this.options.active() !== page.contents.id && this.options.pages().includes(page.contents)) this.options.select(page.contents.id)
       return
     }
     const spec = rule?.spec
