@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 
 const artifacts = resolve('test-results/browser-popup-navigation')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
-const until = async (read, name) => {
-  const end = Date.now() + 15000
+const until = async (read, name, timeoutMs = 15000) => {
+  const end = Date.now() + timeoutMs
   while (Date.now() < end) { const value = await read(); if (value) return value; await delay(50) }
   throw new Error(`Timed out: ${name}`)
 }
@@ -59,6 +59,7 @@ if (!process.versions.electron) {
     const window = new BrowserWindow({ show: false, width: 900, height: 700 })
     await window.loadURL('data:text/html,<title>Popup navigation host</title>')
     let ownWindow = true
+    let passed = false
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), {
       endpointPath: join(artifacts, 'control.json'), popupWindows: () => ownWindow, partition: 'persist:browser-debug:popup-navigation',
     })
@@ -78,10 +79,12 @@ if (!process.versions.electron) {
         C.Settings.Settings.instance().moduleSetting('persistence-network-overrides-enabled').set(false);
       })()`)
       browser.action('view:page')
+      const overrideStartupFailure = process.argv.includes('--overrides-failure')
       const ensureDevtools = browser.ensureDevtools.bind(browser)
       browser.ensureDevtools = page => {
+        if (overrideStartupFailure && page.contents.id !== contents.id) throw new Error('Simulated popup DevTools startup failure')
         const tools = ensureDevtools(page)
-        if (page.contents.id !== contents.id) {
+        if (!overrideStartupFailure && page.contents.id !== contents.id) {
           // A committed DevTools frame can run while its overall frontend load is still pending.
           tools.isLoading = () => true
           assert.equal(tools.getBackgroundThrottling(), false)
@@ -102,14 +105,14 @@ if (!process.versions.electron) {
           })); void 0`)
         const entry = await until(() => browser.snapshot.pages.find(page => page.id !== contents.id), 'initializing popup created')
         const popup = webContents.fromId(entry.id)
-        await until(() => {
-          const error = browser.pages.get(entry.id).error
-          if (error) throw new Error(error)
-          return popup.getURL() === `${base}/viewer#study/89` && !popup.isLoading()
-        }, 'viewer loads without waiting for the full DevTools frontend load')
+        await until(() => popup.getURL() === `${base}/viewer#study/89` && !popup.isLoading(),
+          'viewer loads without waiting for the full DevTools frontend load', 30000)
         assert.equal(Boolean(entry.window), inWindow)
         assert.equal(browser.snapshot.pages.length, 2, 'popup navigation does not create an extra blank page')
-        const overrides = !process.argv.includes('--no-overrides')
+        const activationError = browser.pages.get(entry.id).error
+        if (overrideStartupFailure) assert.match(activationError, /Could not activate Local Overrides/)
+        else assert.equal(activationError, null, 'ordinary popup overrides activation must succeed')
+        const overrides = !process.argv.includes('--no-overrides') && !overrideStartupFailure
         assert.equal(await popup.executeJavaScript('document.title'), overrides ? 'overridden viewer' : '/viewer', 'first response uses the configured overrides')
         assert.equal(await popup.executeJavaScript('window.opener.location.pathname'), '/opener', 'opener is preserved')
         await contents.executeJavaScript(`window.reused = window.open('/reused', 'viewer'); void 0`)
@@ -143,7 +146,11 @@ if (!process.versions.electron) {
       assert.equal(posts.length, 2, 'each POST reaches the server exactly once')
       assert.ok(posts.every(request => request.method === 'POST' && request.body === 'fixture=kept' && request.referrer === `${base}/opener`))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true }))
+      passed = true
       console.log('PASS: popup initialization, first-response overrides, opener callbacks and named reuse in windows and tabs')
-    } finally { await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close(); app.quit() }
+    } finally {
+      await browser.dispose(); window.destroy(); site.closeAllConnections(); site.close()
+      if (passed) app.exit(0)
+    }
   }
 }

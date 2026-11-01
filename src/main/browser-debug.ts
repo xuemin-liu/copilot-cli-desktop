@@ -482,7 +482,10 @@ export class BrowserDebug {
     const intercepting = debuggerClient.sendCommand('Fetch.enable', { patterns: [
       { urlPattern: 'http://*/*', requestStage: 'Response' }, { urlPattern: 'https://*/*', requestStage: 'Response' },
     ] })
-    const ready = Promise.all([intercepting, this.inheritPopupOverrides(opener, popup)]).then(([, applied]) => applied)
+    const ready = Promise.all([intercepting, this.inheritPopupOverrides(opener, popup)]).then(([, applied]) => applied).catch(error => {
+      if (!this.disposed && !contents.isDestroyed()) popup.error ??= `Could not activate popup overrides: ${sanitizedText(String(error))}`
+      return false
+    })
     const paused = (_event: Electron.Event, method: string, params: Record<string, unknown>): void => {
       if (method !== 'Fetch.requestPaused') return
       if (phase !== 'active') {
@@ -491,7 +494,10 @@ export class BrowserDebug {
         return
       }
       const response = (async () => {
-        if (!await ready) throw new Error('Popup overrides did not activate')
+        if (!await ready) {
+          await debuggerClient.sendCommand('Fetch.continueRequest', { requestId: params.requestId })
+          return
+        }
         if (handingOff()) return
         const tools = popup.tools?.webContents
         if (!tools || !popup.overrides?.enabled) {
@@ -570,10 +576,7 @@ export class BrowserDebug {
     contents.once('destroyed', detached)
     contents.on('did-fail-load', failed)
     void ready.then(applied => {
-      if (!applied && !contents.isDestroyed()) { contents.stop(); cleanup() }
-    }).catch(error => {
-      if (!contents.isDestroyed()) { popup.error = `Could not activate popup overrides: ${sanitizedText(String(error))}`; contents.stop() }
-      cleanup()
+      if (!applied) cleanup()
     })
   }
 
@@ -645,7 +648,7 @@ export class BrowserDebug {
       return true
     } catch (error) {
       if (!this.disposed && !popup.contents.isDestroyed()) popup.error = `Could not activate Local Overrides for this popup: ${sanitizedText(String(error))}`
-      // Do not silently load an unmodified document or replay a POST after a failed activation.
+      // Report the failure; the temporary interceptor releases the original response without replaying the request.
       return false
     } finally {
       if (timer) clearTimeout(timer)
