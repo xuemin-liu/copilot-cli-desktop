@@ -14,10 +14,11 @@ page has focus) for a hard reload that bypasses the cache and applies your lates
 same session, then enter its address. New pages share the session's login and
 storage, keep other pages open, and are selected automatically. Up to 32 pages
 can be open in one session. Links with `target="_blank"`, JavaScript `window.open()` and forms
-targeting a new page open browser page tabs inside the same terminal. As in Chrome, a page that
-asks for a window of its own (`window.open()` with a features string such as `width=500,height=600`,
-or a **Shift+click** on a link) opens in a separate popup window sized as it asked, while the browser
-keeps showing the page that opened it. Like Chrome's popup blocker, a page gets a window only within a few
+targeting a new page open browser page tabs inside the same terminal. While the browser is popped out
+into its own window, a page that asks for a window of its own (`window.open()` with a features string
+such as `width=500,height=600`, or a **Shift+click** on a link) opens in a separate popup window sized as
+it asked, as in Chrome, while the browser keeps showing the page that opened it. Beside the terminal in
+the main window, those pages open as tabs too. Like Chrome's popup blocker, a page gets a window only within a few
 seconds of a click or key press in it, one window per input. A page asking on its own, from a load script
 for example, gets tabs instead. A popup window always stays whole on the screen its opener is on,
 wherever the page asked to place it. Popup windows count toward the 32 pages and appear in the page

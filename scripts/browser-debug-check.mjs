@@ -64,7 +64,7 @@ if (!process.versions.electron) {
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true, 'All browser checks must complete before Electron exits')
   } finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow, ipcMain, webContents } = await import('electron')
+  const { app, BaseWindow, BrowserWindow, ipcMain } = await import('electron')
   // Background test windows still need compositor surfaces for screenshot QA.
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.setPath('userData', join(artifacts, `profile-${Date.now()}`))
@@ -403,20 +403,22 @@ if (!process.versions.electron) {
         assert.equal(window.isDestroyed(), false, 'closing a child leaves its terminal alive')
         await browser.navigate(url)
         await until(() => source.getVisible(), 'source restored in terminal')
-        // A feature string asks for a popup window (after a click in the page), and cannot weaken that window's page.
+        // Beside the terminal, a clicked window.open with a feature string opens as a tab, and cannot weaken that page.
         source.webContents.sendInputEvent({ type: 'mouseDown', x: 300, y: 300, button: 'left', clickCount: 1 })
         source.webContents.sendInputEvent({ type: 'mouseUp', x: 300, y: 300, button: 'left', clickCount: 1 })
         await delay(100)
         await source.webContents.executeJavaScript(`window.featureChild = window.open('/child-page', '_blank', 'nodeIntegration=yes,contextIsolation=no,sandbox=no'); void 0`)
-        const featured = await until(() => browser.snapshot.pages.find(page => page.window), 'scripted popup window')
-        assert.equal(browser.view, source, 'the browser keeps showing the opener of a popup window')
-        const popup = webContents.fromId(featured.id)
-        const preferences = popup.getLastWebPreferences()
+        await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'feature-string child tab')
+        assert.equal(browser.snapshot.pages.some(page => page.window), false, 'no popup window beside the terminal')
+        assert.equal(BaseWindow.getAllWindows().filter(owner => !BrowserWindow.getAllWindows().includes(owner)).length, 0)
+        const featured = browser.view.webContents
+        const preferences = featured.getLastWebPreferences()
         assert.equal(preferences.nodeIntegration, false)
         assert.equal(preferences.contextIsolation, true)
         assert.equal(preferences.sandbox, true)
         browser.action(`close-page:${featured.id}`)
-        await until(() => popup.isDestroyed() && browser.snapshot.pages.length === 1, 'popup window closed')
+        await until(() => featured.isDestroyed() && browser.snapshot.pages.length === 1, 'feature-string child closed')
+        browser.action(`select-page:${sourceId}`)
         // Parent close keeps its child tab and promotes it; terminal disposal closes every page.
         await source.webContents.executeJavaScript(`window.open('/child-page', '_blank'); void 0`)
         await until(() => browser.snapshot.pages.length === 2 && browser.snapshot.url.endsWith('/child-page'), 'scripted child')
