@@ -19,7 +19,8 @@ asks for a window of its own (`window.open()` with a features string such as `wi
 or a **Shift+click** on a link) opens in a separate popup window sized as it asked, while the browser
 keeps showing the page that opened it. Popup windows count toward the 32 pages and appear in the page
 strip marked ⧉. **Ctrl+W** closes one, and so does the page calling `window.close()` or closing the
-browser. All pages share that terminal's login/storage and console/network capture. Select or close pages
+browser. Closing a popup window (its ✕ or Ctrl+W) asks the page first: a page with unsaved changes gets a
+**Leave site?** question on that window, and **Cancel** keeps it open. All pages share that terminal's login/storage and console/network capture. Select or close pages
 using the page strip; navigation controls and DevTools apply to the selected page. Selecting a popup
 window brings it forward, and shows its DevTools, Console and Network in the browser. **F12** in a popup
 window selects it and opens DevTools there.

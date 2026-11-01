@@ -92,6 +92,8 @@ export class BrowserDebug {
   /** Returns whether the app took the shortcut; one it leaves goes on to the window (its menu, if it has one). */
   private readonly appShortcut: ((name: 'git-toggle' | 'close-window') => boolean) | undefined
   private readonly showMenu: (menu: Menu, window: BaseWindow) => void
+  /** Asks whether to leave a popup window whose page holds unsaved changes (its beforeunload guard). */
+  private readonly confirmLeave: (window: BaseWindow) => Promise<boolean>
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
@@ -107,13 +109,19 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean> } = {}) {
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
     this.zoom = options.zoom ?? new BrowserZoom()
     this.partition = options.partition ?? `browser-debug:${randomBytes(16).toString('hex')}`
     this.devtoolsPartition = options.devtoolsPartition ?? null
     this.showMenu = options.showMenu ?? ((menu, window) => { if (!window.isDestroyed()) menu.popup({ window }) })
+    this.confirmLeave = options.confirmLeave ?? (async window => {
+      if (window.isDestroyed()) return false
+      const { response } = await dialog.showMessageBox(window, { type: 'question', title: 'Leave site?', message: 'Leave site?',
+        detail: 'Changes you made may not be saved.', buttons: ['Leave', 'Cancel'], defaultId: 0, cancelId: 1, noLink: true })
+      return response === 0
+    })
     this.tabId = options.tabId ?? ''
     this.notifyShortcut = options.notify ?? (name => { if (!this.owner.isDestroyed() && this.tabId) this.owner.webContents.send('desktop:browser-shortcut', this.tabId, name) })
     this.endpointPath = options.endpointPath ?? browserControlPath()
@@ -271,7 +279,7 @@ export class BrowserDebug {
       // The page has no application menu, so give it the browser shortcuts people expect.
       const command = input.control || input.meta
       const handled = ((): boolean => {
-        if (command && !input.shift && key === 'w' && page.window) { contents.close(); return true }
+        if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
         // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
         if (!selected) {
           if (key === 'f12' || (command && input.shift && key === 'i')) { this.selectPage(contents.id); this.showView('devtools'); return true }
@@ -369,6 +377,27 @@ export class BrowserDebug {
     window.contentView.addChildView(view)
     fit()
     window.on('resize', fit)
+    // Closing the window asks the page first, so a beforeunload guard can keep unsaved edits; the window goes once the page
+    // has closed (removePage). Closing the browser closes its pages without asking.
+    let closing = false
+    let asking = false
+    window.on('close', event => {
+      if (contents.isDestroyed() || this.disposed) return
+      event.preventDefault()
+      if (asking) return
+      closing = true
+      contents.close({ waitForBeforeUnload: true })
+    })
+    // Electron keeps a guarded page open without telling anyone, so ask, as Chrome does, and close it on Leave.
+    contents.on('will-prevent-unload', () => {
+      if (!closing || asking) return
+      closing = false
+      asking = true
+      void this.confirmLeave(window).catch(() => false).then(leave => {
+        asking = false
+        if (leave && !contents.isDestroyed()) contents.close()
+      })
+    })
     window.on('closed', () => { if (!contents.isDestroyed()) contents.close() })
     contents.on('page-title-updated', (_event, title) => { if (!window.isDestroyed()) window.setTitle(title) })
     window.show()

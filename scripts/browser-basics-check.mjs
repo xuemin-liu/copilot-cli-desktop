@@ -49,9 +49,12 @@ if (!process.versions.electron) {
     const notices = []
     const menus = []
     const menuWindows = []
+    const leaveAnswers = []
+    const leaveWindows = []
     const appShortcuts = []
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint,
-      notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: (menu, owner) => { menus.push(menu); menuWindows.push(owner) } })
+      notify: name => notices.push(name), onAppShortcut: name => appShortcuts.push(name), showMenu: (menu, owner) => { menus.push(menu); menuWindows.push(owner) },
+      confirmLeave: async owner => { leaveWindows.push(owner); return leaveAnswers.shift() ?? false } })
     try {
       browser.setBounds({ x: 0, y: 0, width: 800, height: 600 }); window.showInactive()
       await browser.open()
@@ -240,6 +243,26 @@ if (!process.versions.electron) {
       ;({ popup, owner } = await openPopup('/keyed'))
       popup.sendInputEvent({ type: 'keyDown', keyCode: 'w', modifiers: ['control'] })
       await until(() => owner.isDestroyed() && browser.snapshot.pages.length === 1, 'Ctrl+W closes the popup window')
+      // A popup with unsaved edits can keep its window: closing it asks the page first, and the answer decides.
+      ;({ popup, owner } = await openPopup('/guarded'))
+      popup.sendInputEvent({ type: 'mouseDown', x: 60, y: 155, button: 'left', clickCount: 1 })
+      popup.sendInputEvent({ type: 'mouseUp', x: 60, y: 155, button: 'left', clickCount: 1 })
+      popup.sendInputEvent({ type: 'char', keyCode: 'x' })
+      await popup.executeJavaScript(`window.unloads = 0; addEventListener('beforeunload', event => { window.unloads++; event.preventDefault(); event.returnValue = '' }); void 0`)
+      const guarded = async (close, name) => {
+        const asked = leaveWindows.length
+        close()
+        await until(() => leaveWindows.length === asked + 1, `${name} asks whether to leave`)
+        assert.equal(leaveWindows.at(-1), owner, `${name}: the question is asked on the popup window`)
+        await delay(300)
+        assert.ok(!owner.isDestroyed() && !popup.isDestroyed(), `${name}: Cancel keeps the popup window`)
+      }
+      await guarded(() => owner.close(), 'closing the window')
+      await guarded(() => popup.sendInputEvent({ type: 'keyDown', keyCode: 'w', modifiers: ['control'] }), 'Ctrl+W')
+      assert.equal(await popup.executeJavaScript('window.unloads'), 2, 'each close ran the page guard')
+      leaveAnswers.push(true)
+      owner.close()
+      await until(() => owner.isDestroyed() && popup.isDestroyed() && browser.snapshot.pages.length === 1, 'Leave closes the popup window')
       // Closing the browser closes its popup windows.
       ;({ popup, owner } = await openPopup('/left-open'))
       const popupStatus = await (await fetch(`http://127.0.0.1:${control.port}/status`, { headers: { authorization: `Bearer ${control.token}` } })).json()
