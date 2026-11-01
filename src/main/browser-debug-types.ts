@@ -37,8 +37,8 @@ export interface BrowserDebugState {
   preserveNetwork: boolean
   activePageId: number
   zoomFactor: number
-  /** `window` marks a page that opened in its own popup window instead of a tab. */
-  pages: { id: number; title: string; url: string; window?: boolean }[]
+  /** `window` marks a page that opened in its own popup window instead of a tab; `error` is that page's own error. */
+  pages: { id: number; title: string; url: string; window?: boolean; error?: string }[]
   url: string
   loading: boolean
   canGoBack: boolean

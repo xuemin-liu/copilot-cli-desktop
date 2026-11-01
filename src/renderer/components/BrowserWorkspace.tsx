@@ -169,8 +169,8 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     </form>
     <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
-        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.window ? `${page.url}\nOpen in its own window` : page.url}
-          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
+        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={[page.url, page.window && 'Open in its own window', page.error].filter(Boolean).join('\n')}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.error && <span className="browser-page-error" aria-label="Error">⚠ </span>}{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
         <button type="button" aria-label={`Close browser page ${page.title}`} disabled={!page.window && state.pages.filter(entry => !entry.window).length <= 1}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
       </div>)}
