@@ -211,11 +211,15 @@ export class BrowserReader {
     finally { if (timer) clearTimeout(timer) }
   }
 
+  // Sent together, in order: a page with no document yet answers none of them until its first load starts, and
+  // Page.enable must already be queued then, or a dialog that page opens while loading bypasses the pane and the page hangs.
   private async enable(page: PageReader, sessionId?: string): Promise<void> {
-    await this.command(page, 'Network.enable', { maxTotalBufferSize: MAX_BODY_CACHE, maxResourceBufferSize: MAX_RESPONSE_BYTES, maxPostDataSize: 0 }, sessionId)
-    await this.command(page, 'Page.enable', {}, sessionId)
-    await this.command(page, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
-      filter: [{ type: 'iframe', exclude: false }, { exclude: true }] }, sessionId)
+    await Promise.all([
+      this.command(page, 'Network.enable', { maxTotalBufferSize: MAX_BODY_CACHE, maxResourceBufferSize: MAX_RESPONSE_BYTES, maxPostDataSize: 0 }, sessionId),
+      this.command(page, 'Page.enable', {}, sessionId),
+      this.command(page, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
+        filter: [{ type: 'iframe', exclude: false }, { exclude: true }] }, sessionId),
+    ])
   }
 
   private async attach(page: PageReader): Promise<void> {
@@ -306,14 +310,22 @@ export class BrowserReader {
     await this.command(page, 'Page.handleJavaScriptDialog', { accept }, sessionId)
   }
 
-  /** The dialog holding the selected page, if any. */
-  get pendingDialog(): { type: string; message: string } | null {
-    const dialog = this.readers.get(this.options.active())?.dialog
-    return dialog ? { type: dialog.type, message: dialog.message } : null
+  /** The selected page when a dialog holds it, else another page a dialog holds: no waiting dialog stays out of sight. */
+  private dialogPage(): PageReader | undefined {
+    const active = this.readers.get(this.options.active())
+    if (active?.dialog) return active
+    const pages = this.options.pages()
+    return [...this.readers.values()].find(page => page.dialog && pages.includes(page.contents))
+  }
+
+  /** The dialog waiting for the user, and the page it holds. */
+  get pendingDialog(): { type: string; message: string; pageId: number } | null {
+    const page = this.dialogPage()
+    return page?.dialog ? { type: page.dialog.type, message: page.dialog.message, pageId: page.contents.id } : null
   }
 
   async answerDialog(accept: boolean): Promise<void> {
-    const page = this.page()
+    const page = this.dialogPage() ?? this.page()
     const dialog = page.dialog
     if (!dialog) throw new Error('No page dialog is waiting.')
     page.dialog = null
