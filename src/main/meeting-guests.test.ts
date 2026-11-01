@@ -11,7 +11,7 @@ import {
   guestDeliveryText, guestHostInvitation, guestInvitation, guestMessage, guestReplyPath, handleGuestRequest, type GuestChannel, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { MeetingControlServer } from './meeting-session.js'
-import { roundPaths } from './meeting-messages.js'
+import { postMessage, roundPaths, voteMessage } from './meeting-messages.js'
 
 const MEETINGS = join('C:', 'meetings')
 const GUESTS = join('C:', 'guests')
@@ -142,6 +142,15 @@ test('a guest message names show commands instead of meeting files, only in the 
   assert.ok(message.includes(`A post that mentions ${round2.post} itself.`), 'model-written material is never rewritten')
   assert.ok(!message.split('\n-----\n')[0]!.includes(folder), 'no meeting path left in the header')
   assert.ok(message.endsWith(`To answer, write your whole reply to ${replyPath} and run the reply command from your invitation with -File "${replyPath}".`))
+})
+
+test('a guest gets the same evidence rule as a desktop reviewer, for reviews and votes', () => {
+  const folder = join(MEETINGS, 'K7QF')
+  const host = { title: 'host', folder: null }
+  const post = postMessage({ id: 'K7QF', round: 1, topic: 'plan', host, post: 'plan', folder, hasChanges: false, previousReplies: false, joinedLate: false })
+  const vote = voteMessage({ id: 'K7QF', round: 2, host, summary: '- lock around logout', folder, joinedLate: false })
+  assert.match(guestMessage(post, folder, 1, { via: 'mcp' }), /For each finding, say what supports it/)
+  assert.match(guestMessage(vote, folder, 2, { via: 'mcp' }), /After OBJECT, name each open item and what supports it/)
 })
 
 test('the invitation tells the agent how to poll, read and reply, with its token and the helper', () => {
