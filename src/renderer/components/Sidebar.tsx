@@ -10,6 +10,8 @@ import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js
 import { RemoveIcon } from './Icons.js'
 import { workflowAttention } from '../../main/workflow-attention.js'
 import { NeedsYou } from './NeedsYou.js'
+import { WorkflowTasks } from './WorkflowTasks.js'
+import type { WorkflowTask } from '../../main/workflow-types.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   dormant: 'Not started',
@@ -38,6 +40,8 @@ function writeSidebarPreference(key: string, value: string): void {
 }
 
 export interface SidebarProps {
+  workflowTasks?: readonly WorkflowTask[]
+  workflowError?: string | null
   profiles: WorkspaceProfile[]
   tabs: DesktopSessionTab[]
   /** Open meetings show a chip on each session taking part. */
@@ -68,6 +72,7 @@ export interface SidebarProps {
 }
 
 export function Sidebar({
+  workflowTasks = [], workflowError,
   profiles,
   tabs,
   meetings = [],
@@ -393,7 +398,8 @@ export function Sidebar({
         </div>
       </div>
 
-      <NeedsYou items={workflowAttention(tabs, meetings)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
+      <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
+      {!collapsed && <WorkflowTasks tasks={workflowTasks} error={workflowError ?? null} />}
       {searchOpen && (
         <input
           className="sidebar-search"
