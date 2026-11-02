@@ -37,6 +37,7 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  blockSessionStop(tabId:string,work:Promise<void>,started:()=>void):void
   /** Like blockSpawnPlan, but only plans for a profile the predicate accepts wait; the others run at once. */
   blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
   /** Dormant tabs' reads of their saved session's folder wait for `work`. */
@@ -62,6 +63,7 @@ interface Harness {
   deferTaskEnter():void
   flushTaskEnter():void
   composedPaste(tabId:string):{result:string}
+  composedCommand(tabId:string):boolean
   makeBindingUnreadable(tabId:string):void
   corruptHandoff(tabId:string,corrupt?:boolean):void
   followupReadyFor(tabId:string):boolean
@@ -264,6 +266,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
+          blockSessionStop(tabId,work,started) { const session=managedTabs.get(tabId).session; const original=session.stop.bind(session);session.stop=async()=>{started();await work;return original()}; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
           blockDormantFolderReads(work) { const original = applyDormantSessionCwd; applyDormantSessionCwd = async (...args) => { await work; return original(...args); }; },
           blockWorktreeLookups,
@@ -301,6 +304,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           meetingWrite: async(id,path,text)=>{meetingHub.effects.write(id,path,text);await meetingWrites.get(id);return meetingWriteFailures.has(id)},
           composedPaste: tabId=>sendSessionTask(tabId,'Person-composed task'),
+          composedCommand: tabId=>sendSessionCommand(tabId,'/add-dir example'),
           makeBindingUnreadable: tabId=>{managedTabs.get(tabId).session.bindingReader.read=async()=>{throw new Error('Temporary inventory failure')}},
           corruptHandoff: (tabId,corrupt=true)=>{
             const sessionId=tabsState.tabs.find(t=>t.id===tabId).lastSessionId;
@@ -1969,6 +1973,104 @@ test('a process restart during a Git context paste cannot submit or replay input
   await pause(400)
   assert.equal(old.written.length, 2, 'the old process received only the draft and paste')
   assert.deepEqual(harness.spawns[1]?.written, [], 'no old Enter or queued keys reach the replacement')
+}))
+
+test('failed restart setup restores pending input only to the original live process',async()=>{
+  for(const kind of ['context','task','command','rename'])await fixture(async(h,directory)=>{
+    const {profile}=configure(h,directory);profile.defaultResumeMode='new'
+    const opened=await h.createMain(),id=opened.activeTabId!,old=h.spawns[0]!
+    old.emitData('\x1b[?2004h <- open sidebar\r\n')
+    await pause(1_650)
+    if(kind==='context'){
+      await h.request('desktop:write-tab',id,'person draft')
+      assert.deepEqual(await h.request('desktop:write-tab',id,'\r','Git cursor context'),{gitCursorContextAttached:true})
+    }else if(kind==='task')assert.equal(h.composedPaste(id).result,'sent')
+    else if(kind==='command')assert.equal(h.composedCommand(id),true)
+    else{
+      await writeSessionName(directory,opened.tabs[0]!.lastSessionId!,'Original name');await h.refreshNames()
+      await h.request('desktop:rename-tab',id,'Pending rename')
+      await waitFor(()=>old.written,w=>w.includes('/rename Pending rename'),'rename paste')
+    }
+    await h.request('desktop:write-tab',id,' held person keys')
+    const pasted=[...old.written]
+    let rejectSetup!:(error:Error)=>void
+    h.blockSpawnPlan(new Promise<void>((_,reject)=>{rejectSetup=reject}))
+    const restart=h.request('desktop:restart-tab',id)
+    const rejected=assert.rejects(restart,/setup failed/)
+    await pause(450)
+    assert.deepEqual(old.written,pasted,`${kind}: no Enter or held keys during setup`)
+    assert.equal(h.composedPaste(id).result,'busy','no new composed submission during transition')
+    assert.equal(h.composedCommand(id),false)
+    rejectSetup(new Error('setup failed'));await rejected
+    await waitFor(()=>old.written,w=>w.at(-1)===' held person keys',`${kind}: original input restored`)
+    assert.deepEqual(old.written,[...pasted,'\r',' held person keys'],`${kind}: exactly one original submission`)
+    assert.equal(h.spawns.length,1,'healthy process is retained')
+    await h.request('desktop:write-tab',id,' after recovery')
+    assert.equal(old.written.at(-1),' after recovery','new input is not held indefinitely')
+  })
+})
+
+test('slow unload and close cancel pending Enter before stopping the process',async()=>{
+  for(const action of ['unload','close'])await fixture(async(h,directory)=>{
+    const {profile}=configure(h,directory);profile.defaultResumeMode='new'
+    const opened=await h.createMain(),id=opened.activeTabId!,old=h.spawns[0]!
+    old.emitData('\x1b[?2004h <- open sidebar\r\n')
+    await h.request('desktop:write-tab',id,'original draft')
+    await h.request('desktop:write-tab',id,'\r','Git cursor context')
+    await h.request('desktop:write-tab',id,' held person keys')
+    let release!:()=>void,started!:()=>void
+    const stopping=new Promise<void>(resolve=>{started=resolve})
+    h.blockSessionStop(id,new Promise<void>(resolve=>{release=resolve}),started)
+    const transition=h.request(`desktop:${action}-tab`,id)
+    try{
+      await stopping;await pause(450)
+      assert.equal(old.written.length,2,`${action}: neither Enter nor held keys reach the stopping process`)
+    }finally{release();await transition}
+    assert.equal(old.written.length,2,`${action}: no replay after stop`)
+  })
+})
+
+test('close requested during failed restart setup wins over restoring pending input',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.defaultResumeMode='new'
+  const opened=await h.createMain(),id=opened.activeTabId!,old=h.spawns[0]!
+  old.emitData('\x1b[?2004h <- open sidebar\r\n')
+  await h.request('desktop:write-tab',id,'original draft')
+  await h.request('desktop:write-tab',id,'\r','Git cursor context')
+  await h.request('desktop:write-tab',id,'held keys')
+  let rejectSetup!:(error:Error)=>void
+  h.blockSpawnPlan(new Promise<void>((_,reject)=>{rejectSetup=reject}))
+  const rejected=assert.rejects(h.request('desktop:restart-tab',id),/setup failed/)
+  const close=h.request('desktop:close-tab',id)
+  await pause(400);rejectSetup(new Error('setup failed'));await rejected;await close;await pause(350)
+  assert.equal(old.written.length,2,'close never restores pending Enter or keys')
+  assert.equal(h.spawns.length,1)
+  assert.equal((await h.request('desktop:get-state')).tabs.length,0)
+}))
+
+test('failed restart setup never restores held input after a native conversation switch',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const path=(id:string)=>join(directory,'session-state',id,'events.jsonl'),line=(type:string,data:object)=>JSON.stringify({type,data})+'\n'
+  for(const id of [SOURCE,FORK]){await mkdir(dirname(path(id)),{recursive:true});await writeFile(path(id),line('session.start',{sessionId:id,startTime:new Date().toISOString()}))}
+  await h.restoreSaved();const id=(await h.request('desktop:get-state')).activeTabId!,old=h.spawns[0]!
+  h.configureBinding(id,7700,[7700]);await writeFile(join(dirname(path(SOURCE)),'inuse.7700.lock'),'');await h.refreshRecords(id)
+  old.emitData('\x1b[?2004h <- open sidebar\r\n');await pause(1650)
+  h.deferTaskEnter();h.queueMeetingDelivery(id,'post','Original A handoff');await h.pumpMeetingDelivery()
+  assert.ok(old.written.some(text=>text.includes('Original A handoff')))
+  await h.request('desktop:write-tab',id,'held A keys');const pasted=[...old.written]
+  let rejectSetup!:(error:Error)=>void
+  h.blockSpawnPlan(new Promise<void>((_,reject)=>{rejectSetup=reject}))
+  const rejected=assert.rejects(h.request('desktop:restart-tab',id),/setup failed/)
+  try{
+    await writeFile(join(dirname(path(FORK)),'inuse.7700.lock'),'')
+    await appendFile(path(FORK),line('session.resume',{resumeTime:new Date().toISOString()})+line('user.message',{content:'B person request',interactionId:'person-in-B'}))
+    const started=await h.meetingCommand(id,'start',FORK)
+    assert.equal(started.ok,true,started.message)
+    assert.equal((await h.request('desktop:get-state')).tabs.find(t=>t.id===id)?.lastSessionId,FORK)
+    await h.request('desktop:write-tab',id,'B draft')
+  }finally{rejectSetup(new Error('setup failed'));await rejected}
+  h.flushTaskEnter();await pause(400)
+  assert.deepEqual(old.written,[...pasted,'B draft'],'no old Enter, Ctrl+C or A keys reach B')
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.sessionId===SOURCE)?.state,'uncertain','cancelled callback reconciles the old handoff')
 }))
 
 test('an unnamed session starts without --name and its tab takes the name Copilot gives it', async () => {
