@@ -26,6 +26,7 @@ if (!process.versions.electron) {
     window.fixture = { calls: [], openChanges: [], errors: [], views: [] };
     // Stands in for the preload bridge: the View menu's sidebar choices arrive and are reported here.
     window.copilotDesktop = {
+      openSessionHistory: id => {window.fixture.calls.push('history:'+id);return window.fixture.failHistory?Promise.reject(new Error('Unavailable')):Promise.resolve();},
       createTask:(tabId,title,replace)=>{window.fixture.calls.push({kind:'createTask',tabId,title,replace});return Promise.resolve();},
       taskAction:(id,action)=>{window.fixture.calls.push({kind:'taskAction',id,action});return Promise.resolve();},
       reportSidebarView: view => { window.fixture.views.push(view); return Promise.resolve(); },
@@ -287,6 +288,13 @@ if (!process.versions.electron) {
       assert.equal(await ui(`document.querySelector('.workflow-tasks').textContent.includes('Which rounding policy?')`),true)
       await writeFile(join(artifacts,'task-details.png'),(await window.webContents.capturePage()).toPNG())
       checks.push('Task question, evidence and long resource links fit a narrow sidebar')
+      await click('.needs-you[aria-label="Needs you"] li:nth-child(2) button')
+      await until(`window.fixture.calls.at(-1)==='history:history-a'`,'closed task navigates through History')
+      await ui('window.fixture.failHistory=true')
+      await click('.needs-you[aria-label="Needs you"] li:nth-child(2) button')
+      await until(`document.querySelector('.needs-you[aria-label="Needs you"]').textContent.includes('The session is unavailable')`,'missing history retains a visible task and failure')
+      await writeFile(join(artifacts,'closed-task-attention.png'),(await window.webContents.capturePage()).toPNG())
+      checks.push('Closed-session task attention opens History and preserves missing-session recovery')
       await ui(`window.setTasks([]);window.setAttentionTabs([{id:'choice-a',title:'Session A',workspaceProfileId:'project-1',lastSessionId:'session-a',status:'running'},{id:'choice-b',title:'Session B',workspaceProfileId:'project-1',lastSessionId:'session-b',status:'running'}])`)
       await until(`document.querySelector('.workflow-tasks > form select')?.options.length===2`,'two known sessions offered')
       await ui(`document.querySelector('.workflow-tasks').open=true;const select=document.querySelector('.workflow-tasks > form select');select.value='choice-b';select.dispatchEvent(new Event('change',{bubbles:true}))`)

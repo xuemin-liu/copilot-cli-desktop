@@ -34,7 +34,8 @@ export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVe
         <p>{task.request || 'The original submitted request is not available for this manually tracked task.'}</p>
         <p>Origin: {task.origin ?? 'human'}{task.createdAt ? ` · Created ${new Date(task.createdAt).toLocaleString()}` : ''}</p>
         {task.repositoryPath && <p>Repository: {task.repositoryPath}</p>}
-        {task.worktreePath && <p>Worktree: {task.worktreePath}{task.branch ? ` · ${task.branch}` : ''}</p>}
+        {task.resources&&<p>Session: {task.resources.session} · Worktree: {task.resources.worktree}{task.resources.checkedAt?` (checked ${new Date(task.resources.checkedAt).toLocaleTimeString()})`:''}</p>}
+        {task.worktreePath && <p>Last recorded worktree: {task.worktreePath}{task.branch ? ` · ${task.branch}` : ''}</p>}
         {task.comparisonGroup && <p>Comparison group: {task.comparisonGroup}</p>}
         {task.meetingIds?.length ? <p>Review meetings: {task.meetingIds.join(', ')}</p> : null}
         {task.pullUrl && <button type="button" onClick={() => { void window.copilotDesktop.openExternalUrl(task.pullUrl!).catch(() => setFailure('The PR could not be opened.')) }}>Open PR</button>}

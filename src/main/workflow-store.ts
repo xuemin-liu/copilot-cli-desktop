@@ -70,6 +70,8 @@ export class WorkflowTaskLimitError extends Error {}
 /** Workflow-owned text is sanitized before it reaches SQLite. No caller-supplied paths or SQL. */
 export class WorkflowStore {
   private db: DatabaseSync
+  private cachedTasks:WorkflowTask[]|null=null
+  private cachedVersion=-1
   constructor(path: string) {
     this.db = new DatabaseSync(path)
     try {
@@ -84,7 +86,12 @@ export class WorkflowStore {
   }
   close(): void { this.db.close() }
   list(): WorkflowTask[] {
-    return (this.db.prepare('SELECT value FROM tasks ORDER BY rowid DESC LIMIT 1000').all() as {value: string}[]).map(row => decode(row.value))
+    const version=(this.db.prepare('PRAGMA data_version').get() as {data_version:number}).data_version
+    if(!this.cachedTasks||this.cachedVersion!==version){
+      const tasks=(this.db.prepare('SELECT value FROM tasks ORDER BY rowid DESC LIMIT 1000').all() as {value:string}[]).map(row=>decode(row.value))
+      this.cachedTasks=tasks;this.cachedVersion=version
+    }
+    return structuredClone(this.cachedTasks)
   }
   active(sessionId: string): WorkflowTask | null {
     const row = this.db.prepare('SELECT value FROM tasks WHERE session=? AND active=1').get(sessionId) as { value: string } | undefined
@@ -129,7 +136,7 @@ export class WorkflowStore {
   remove(id:string):void {
     const task=this.list().find(task=>task.id===id)
     if(!task||!['completed','cancelled'].includes(task.outcome))throw new Error('Only completed or ended task history can be deleted')
-    this.db.prepare('DELETE FROM tasks WHERE id=?').run(id)
+    this.db.prepare('DELETE FROM tasks WHERE id=?').run(id);this.cachedTasks=null
   }
   manualOutcome(id:string,outcome:import('./workflow-types.js').TaskOutcome):void {
     const task=this.list().find(task=>task.id===id)
@@ -176,5 +183,6 @@ export class WorkflowStore {
   private save(task: WorkflowTask): void {
     this.db.prepare('INSERT INTO tasks(id,session,active,value) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET active=excluded.active,value=excluded.value')
       .run(task.id, task.sessionId, Number(task.outcome !== 'completed' && task.outcome !== 'cancelled'), JSON.stringify(task))
+    this.cachedTasks=null
   }
 }

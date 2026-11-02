@@ -49,6 +49,10 @@ interface Harness {
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
   enableTasks(tabId: string,supported?:boolean): void
+  captureWorkflowNotifications():{title:string;body:string}[]
+  flushWorkflowNotifications():void
+  seedWorkflowHistory(count:number):void
+  workflowBroadcastReads(active:boolean):number
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
@@ -163,7 +167,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           close() { this.destroy(); }
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
-        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = { isSupported: () => false }, safeStorage = {}, Tray = {};
+        export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, safeStorage = {}, Tray = {};
+        export class Notification extends EventEmitter { static enabled=false;static shown=[];static isSupported(){return this.enabled} constructor(options){super();this.options=options}show(){Notification.shown.push(this.options)} }
         // Desktop control starts only on Windows and is exercised by its own tests and desktop-control-check.mjs.
         export const powerMonitor = { on() {} }, screen = { on() {}, off() {} }, desktopCapturer = {};
         export const browserStorageClears = [];
@@ -272,6 +277,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           enableTasks: (tabId,supported=true) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = supported?'1.0.105':null; workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite')); },
+          captureWorkflowNotifications:()=>{Notification.enabled=true;desktopConfig.notifications=true;workflowNotifications.prime(attentionItems());workflowAttentionReady=true;return Notification.shown},
+          flushWorkflowNotifications:()=>workflowNotifications.flush(),
+          seedWorkflowHistory:count=>{const store=workflows();for(let n=0;n<count;n++){const task=store.submitted('history-'+n,'project','R'.repeat(3800));store.report(task.sessionId,{taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'ready',summary:'S'.repeat(1000)});if(n<Math.floor(count*0.9))store.finish(task.id,'completed')}},
+          workflowBroadcastReads:active=>{workflowAttentionReady=active;const store=workflows(),original=store.list;let calls=0;store.list=function(){calls++;return original.call(this)};try{broadcastState()}finally{store.list=original}return calls},
           automaticPaste: (tabId,authorized) => sendSessionTask(tabId,'bounded automatic continuation',true,{
             beforePaste:authorized,beforeEnter:authorized,aborted:()=>meetingReader(tabId).cancelExpectedDesktopPrompt(),
           }),
@@ -349,7 +358,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -2927,6 +2936,29 @@ test('manual task controls adopt without input and replace only at an idle empty
 }))
 
 
+
+test('production task report notifications contain only a redacted title and app reason and baseline restored evidence',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'token=fixture-tab',lastSessionId:SOURCE}]
+  const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString(),context:{cwd:directory}}})+'\n')
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!
+  h.configureBinding(tab,7700,[7700]);await writeFile(join(dirname(log),'inuse.7700.lock'),'');await h.refreshRecords(tab);h.enableTasks(tab)
+  const notices=h.captureWorkflowNotifications()
+  await h.request('desktop:task-create',tab,'Tracked work',false)
+  await appendFile(log,JSON.stringify({type:'user.message',data:{content:'New verified work',interactionId:'new-work'}})+'\n'+JSON.stringify({type:'assistant.turn_start',data:{turnId:'new-work'}})+'\n');await h.refreshRecords(tab)
+  const binding=JSON.parse((await h.meetingCommand(tab,'task-status',SOURCE)).message)
+  const report=await h.meetingCommand(tab,'task-report',SOURCE,JSON.stringify({...binding,outcome:'needs-input',summary:'Private summary',question:'Private question token=fixture-question',artifacts:[{kind:'url',label:'Private artifact',value:'https://example.com/?token=fixture-url'}]}))
+  assert.equal(report.ok,true,report.message);h.flushWorkflowNotifications()
+  assert.equal(notices.length,1)
+  assert.match(notices[0]!.body,/token=\[REDACTED\].*Task needs input/)
+  assert.doesNotMatch(JSON.stringify(notices),/fixture-(tab|question|url)|Private|example.com/)
+  h.captureWorkflowNotifications()
+  const task=(await h.request('desktop:get-state')).workflowTasks![0]!
+  await h.request('desktop:task-action',task.id,'needs-input');h.flushWorkflowNotifications()
+  assert.equal(notices.length,1,'a restored outcome and an unchanged manual outcome do not replay notices')
+  await h.request('desktop:close-tab',tab)
+  assert.equal((await h.request('desktop:get-state')).workflowTasks![0]!.resources?.session,'closed')
+}))
+
 test('assignment replacement refuses an unverifiable old worker while normal manual input remains available',async()=>fixture(async(h,directory)=>{
   const {profile}=configure(h,directory);profile.tabs=[{title:'Existing',lastSessionId:SOURCE}]
   const line=(type:string,data:object)=>JSON.stringify({type,data})+'\n',log=join(directory,'session-state',SOURCE,'events.jsonl')
@@ -2940,4 +2972,14 @@ test('assignment replacement refuses an unverifiable old worker while normal man
   await assert.rejects(async()=>h.request('desktop:task-create',tab,'New task',true),/verified|idle/)
   assert.equal((await h.request('desktop:get-state')).workflowTasks![0]!.id,old.id)
   await h.request('desktop:write-tab',tab,'person draft');assert.equal(spawn.written.at(-1),'person draft')
+}))
+
+
+test('a production attention broadcast reads task history once even with notifications disabled',async()=>fixture(async(h,directory)=>{
+  const {profile,capabilities}=configure(h,directory);h.createTestWindow()
+  const tab=(await h.createMain()).activeTabId!;h.enableTasks(tab);h.seedWorkflowHistory(30)
+  h.captureWorkflowNotifications()
+  h.configure({...DEFAULT_DESKTOP_CONFIG,notifications:false,profiles:[profile],activeProfileId:profile.id},capabilities)
+  assert.equal(h.workflowBroadcastReads(false),1,'the ordinary snapshot is the baseline read')
+  assert.equal(h.workflowBroadcastReads(true),1,'attention shares that snapshot instead of decoding it again')
 }))
