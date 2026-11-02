@@ -740,7 +740,7 @@ async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,au
                 meetingReader(tabId).expectDesktopPrompt();return true
               },
               beforeEnter:()=>automaticTurns.get(tabId)?.authorized()===true&&!automaticTurns.get(tabId)?.stopping,
-              aborted:()=>endAutomatic(tabId,false),
+              aborted:()=>{if(automaticTurns.get(tabId)?.deliveryId===delivery.id)endAutomatic(tabId,false)},
             })
             if(result.result==='sent'&&taskId){journal.submitted(delivery.id);broadcastState();return {sessionId,taskId}}
           }catch{journal.uncertain(delivery.id);throw new Error('The new task needs reconciliation')}
@@ -825,7 +825,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
             return true
           },
           beforeEnter:()=>automaticTurns.get(tab.id)?.deliveryId===delivery.id&&controller.authorized(grant)&&managedTabs.get(tab.id)?.session===session&&!automaticTurns.get(tab.id)?.stopping,
-          aborted:()=>endAutomatic(tab.id,false),
+          aborted:()=>{if(automaticTurns.get(tab.id)?.deliveryId===delivery.id)endAutomatic(tab.id,false)},
         })
         return result.result==='sent'?'sent':'busy'
       },interrupt:interruptAutomatic,changed:()=>broadcastState(),
@@ -1769,6 +1769,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (managedTabs.get(id)?.session !== session) return
     const previous = tabsState.tabs.find(candidate => candidate.id === id)?.lastSessionId
     if (previous && previous !== sessionId) {
+      cancelHeldInput(id,true)
       endAutomatic(id,false);endMeetingJournal(id,false)
       sessionLastOutputAt.delete(id)
       meetingHub.leave(id)
@@ -2099,8 +2100,12 @@ const renamesSent = new Map<string, { title: string; at: number }>()
  */
 const heldInput = new Map<string, string[]>()
 
-/** A restart was asked for: whatever was waiting to press Enter in the old process is not sent. */
-function cancelHeldInput(tabId: string): void {
+/** A restart or native conversation switch invalidates the old typist. Its held keys never reach the new recipient. */
+function cancelHeldInput(tabId: string,conversationChanged=false): void {
+  if(conversationChanged&&heldInput.get(tabId)?.length){
+    workflowNotice='Input held during a conversation switch was not sent. Inspect the prompt before continuing.'
+    broadcastState()
+  }
   heldInput.delete(tabId)
 }
 
@@ -2186,6 +2191,11 @@ function sendSessionRename(tabId: string, closing = false): boolean {
  * typed in the prompt box and no key pressed just now. Keys pressed meanwhile are held back, then passed on in order. When
  * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
  */
+function scheduleTaskEnter(action:()=>void):void {setTimeout(action,300)}
+function sameSessionRecipient(tabId:string,session:PtySession,sessionId:string|null):boolean {
+  return managedTabs.get(tabId)?.session===session&&tabsState.tabs.find(tab=>tab.id===tabId)?.lastSessionId===sessionId
+    &&session.lastSessionId===sessionId&&!session.sessionBindingPending&&session.sessionBindingReady
+}
 function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void;maximumChars?:number}): SessionTaskSend {
   if(!hooks&&(automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)))return {result:'busy',message:'An automatic task turn is still running.'}
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
@@ -2193,6 +2203,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   const draft = promptDrafts.get(tabId)
   if (!tab || !managed || !draft) return { result: 'refused', message: 'This session is not running. Start or resume it first.' }
   const session = managed.session
+  const recipientId=tab.lastSessionId
   const decision = sessionTaskDecision({
     status: tab.status,
     activity: session.activity,
@@ -2214,6 +2225,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   const release = (): void => {
     if (!holding()) return
     heldInput.delete(tabId)
+    if(!sameSessionRecipient(tabId,session,recipientId))return
     const current = managedTabs.get(tabId)?.session
     for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
   }
@@ -2221,13 +2233,13 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   draft.note(paste)
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
-  setTimeout(() => {
-    if (holding() && managedTabs.get(tabId)?.session === session) {
+  scheduleTaskEnter(() => {
+    if (holding() && sameSessionRecipient(tabId,session,recipientId)) {
       if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r')}
       else {session.write('\x03');draft.note('\x03');hooks.aborted()}
-    } else hooks?.aborted()
+    } else {if(holding())cancelHeldInput(tabId,true);hooks?.aborted()}
     release()
-  }, 300)
+  })
   return decision
 }
 
@@ -2238,6 +2250,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
   const draft = promptDrafts.get(tabId)
   if (!tab || !managed || !draft || tab.status !== 'running' || tab.remote) return false
   const session = managed.session
+  const recipientId=tab.lastSessionId
   const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
   if (!ready || !draft.empty || !draft.quiet() || draft.beforeFirstEnter || heldInput.has(tabId)) return false
   const held: string[] = []
@@ -2247,6 +2260,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
   session.write(text, 'add-dir')
   setTimeout(() => {
     if (heldInput.get(tabId) !== held) return
+    if(!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
     heldInput.delete(tabId)
     if (managedTabs.get(tabId)?.session === session) {
       if(!authorize||authorize()){session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r')}
@@ -2367,7 +2381,7 @@ const meetingOutbox = new MeetingOutbox({
           meetingJournalTurns.set(tabId,{id:item.id,session,sessionId,meetingId:delivery.meetingId,stopping:false});return true
         },
         beforeEnter:()=>!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingJournalTurns.get(tabId)?.stopping===false&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId,
-        aborted:()=>{endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt()},
+        aborted:()=>{if(meetingJournalTurns.get(tabId)?.id===item.id){endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt()}},
       })
     }catch(error){endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();meetingDeliveryNotice(delivery,error);return {result:'busy',message:'This handoff is waiting; inspect Handoffs.'}}
   },

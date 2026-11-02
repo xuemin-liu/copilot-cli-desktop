@@ -55,6 +55,8 @@ interface Harness {
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   queueLegacyMeeting(tabId:string):void
   queueRejectedMeeting(tabId:string):void
+  deferTaskEnter():void
+  flushTaskEnter():void
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -231,7 +233,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     const testSource = source.replace('void withShutdownDeadline(stopAllSessions()', 'quitCleanupForTest = withShutdownDeadline(quitWorkForTest = stopAllSessions()')
     const bundle = await build({
       stdin: { contents: testSource + `
-        let quitCleanupForTest, quitWorkForTest;
+        let quitCleanupForTest, quitWorkForTest, deferredTaskEnter;
         import { spawns, setNextSpawn } from './node-pty-backend.js';
         import { maintenanceCalls } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
@@ -294,6 +296,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           queueMeetingDelivery: (tabId, kind,text='automatic meeting material') => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text }); },
           queueLegacyMeeting: tabId=>{meetingOutbox.enqueue(tabId,{meetingId:'K7QF',id:randomUUID(),recovered:true,round:1,kind:'post',text:'Legacy outstanding material'})},
           queueRejectedMeeting: tabId=>{meetingOutbox.enqueue(tabId,{meetingId:'K7QF',id:'invalid?delivery',round:1,kind:'post',text:'Invalid intake fixture'})},
+          deferTaskEnter:()=>{scheduleTaskEnter=action=>{deferredTaskEnter=action}},
+          flushTaskEnter:()=>{const action=deferredTaskEnter;deferredTaskEnter=null;action?.()},
           pumpMeetingDelivery: () => pumpMeetingOutbox(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
@@ -2713,6 +2717,28 @@ test('a successful write to another meeting file cannot clear a failed snapshot/
   await rm(blocked,{recursive:true})
   assert.equal(await h.meetingWrite('K7QF',blocked,'material'),false)
 }))
+test('a native conversation switch before delayed Enter sends neither Enter nor cancellation to its replacement',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const path=(id:string)=>join(directory,'session-state',id,'events.jsonl'),line=(type:string,data:object)=>JSON.stringify({type,data})+'\n'
+  for(const id of [SOURCE,FORK]){await mkdir(dirname(path(id)),{recursive:true});await writeFile(path(id),line('session.start',{sessionId:id,startTime:new Date().toISOString()}))}
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);await writeFile(join(dirname(path(SOURCE)),'inuse.7700.lock'),'');await h.refreshRecords(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  h.deferTaskEnter();h.queueMeetingDelivery(tab,'post','Automatic work intended for A');await h.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(text=>text.includes('Automatic work intended for A')))
+  const before=spawn.written.length
+  await h.request('desktop:write-tab',tab,'held draft for A')
+  await writeFile(join(dirname(path(FORK)),'inuse.7700.lock'),'')
+  await appendFile(path(FORK),line('session.resume',{resumeTime:new Date().toISOString()})+line('user.message',{content:'Start a review meeting in B',interactionId:'person-in-B'}))
+  const started=await h.meetingCommand(tab,'start',FORK)
+  assert.equal(started.ok,true,started.message)
+  assert.equal((await h.request('desktop:get-state')).tabs.find(t=>t.id===tab)?.lastSessionId,FORK)
+  await h.request('desktop:write-tab',tab,'new B draft')
+  h.flushTaskEnter()
+  assert.deepEqual(spawn.written.slice(before),['new B draft'],'neither Ctrl+C, Enter nor A’s held keys reach B; B’s own draft is untouched')
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.sessionId===SOURCE)?.state,'uncertain')
+}))
+
 test('long meeting code proposals reach the CLI unchanged while the journal stores only a summary',async()=>fixture(async(h,directory)=>{
   const {profile}=configure(h,directory);profile.tabs=[{title:'Restored',lastSessionId:SOURCE}]
   const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true})
