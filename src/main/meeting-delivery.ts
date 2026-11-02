@@ -51,6 +51,10 @@ export class MeetingOutbox {
   inTurn(tabId: string): MeetingDelivery | null {
     return this.queues.get(tabId)?.inTurn ?? null
   }
+  next(tabId:string):MeetingDelivery|null {return this.queues.get(tabId)?.items[0]??null}
+  hasMeetingWork(meetingId:string):boolean {
+    return [...this.queues.values()].some(queue=>queue.inTurn?.meetingId===meetingId||queue.items.some(item=>item.meetingId===meetingId))
+  }
 
   /** The session's prompt finished (it went idle). Returns the delivery that turn answered. */
   turnEnded(tabId: string): MeetingDelivery | null {

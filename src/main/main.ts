@@ -654,7 +654,7 @@ function interruptAutomaticProject(projectId?:string):void {
   for(const run of automaticTurns.values())if(!projectId||run.grant.projectId===projectId)interruptAutomatic(run.grant)
   for(const [tabId,run] of meetingJournalTurns)if(!projectId||tabsState.tabs.find(t=>t.id===tabId)?.workspaceProfileId===projectId){
     run.stopping=true;deliveryJournal?.uncertain(run.id)
-    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.sessionId&&!run.session.sessionBindingPending)run.session.write('\x03')
+    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.sessionId&&run.session.lastSessionId===run.sessionId&&run.session.bindingDiagnostic.kind==='bound'&&run.session.sessionBindingReady)run.session.write('\x03')
   }
 }
 function automationViews():{rules:AutomationRule[];previews:AutomationPreview[]} {
@@ -751,7 +751,7 @@ function interruptAutomatic(grant:FollowupGrant):void {
   for(const [tabId,run] of automaticTurns)if(run.grant.id===grant.id&&!run.stopping){
     run.stopping=true;clearTimeout(run.timer)
     deliveryJournal?.uncertain(run.deliveryId)
-    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===grant.sessionId&&run.session.lastSessionId===grant.sessionId&&!run.session.sessionBindingPending)run.session.write('\x03')
+    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===grant.sessionId&&run.session.lastSessionId===grant.sessionId&&run.session.bindingDiagnostic.kind==='bound'&&run.session.sessionBindingReady)run.session.write('\x03')
   }
 }
 function endAutomatic(tabId:string,answered:boolean):void {
@@ -2212,7 +2212,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
 }
 
 /** Types a one-line slash command (a meeting's `/add-dir`) at the same safe moment, holding back keys pressed meanwhile. */
-function sendSessionCommand(tabId: string, command: string): boolean {
+function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolean): boolean {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -2228,7 +2228,10 @@ function sendSessionCommand(tabId: string, command: string): boolean {
   setTimeout(() => {
     if (heldInput.get(tabId) !== held) return
     heldInput.delete(tabId)
-    if (managedTabs.get(tabId)?.session === session) { session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r') }
+    if (managedTabs.get(tabId)?.session === session) {
+      if(!authorize||authorize()){session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r')}
+      else {session.write('\x03','add-dir');draft.note('\x03')}
+    }
     for (const data of held) { promptDrafts.get(tabId)?.note(data); managedTabs.get(tabId)?.session.write(data) }
   }, 200)
   return true
@@ -2293,6 +2296,8 @@ async function pumpMeetingOutbox(): Promise<void> {
   meetingPumpRunning = true
   try {
     await Promise.all(meetingOutbox.readyTabs().map(async tabId => {
+      const next=meetingOutbox.next(tabId)
+      if(next){await meetingWrites.get(next.meetingId);if(meetingWriteFailures.has(next.meetingId))return}
       const session = managedTabs.get(tabId)?.session
       const sessionId = tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId
       if (!session || !sessionId || !meetingPromptSettled(tabId)) return
@@ -2301,6 +2306,10 @@ async function pumpMeetingOutbox(): Promise<void> {
         && tabsState.tabs.find(tab => tab.id === tabId)?.lastSessionId === sessionId && ready())
     }))
     meetingOutbox.pump()
+    for(const scope of new Set(deliveryViews().filter(d=>d.scope.startsWith('meeting/')).map(d=>d.scope))){
+      const id=scope.slice('meeting/'.length)
+      if(!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))deliveryJournal?.retireScope(scope)
+    }
   } finally {
     meetingDeliveryChecks.clear()
     meetingPumpRunning = false
@@ -2338,7 +2347,10 @@ const meetingOutbox = new MeetingOutbox({
       })
     }catch {endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.';return {result:'busy',message:'Handoff history is unavailable.'}}
   },
-  sendCommand: (tabId, command) => !automaticTurns.has(tabId) && !deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)) && meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
+  sendCommand: (tabId, command) => {
+    const allowed=():boolean=>!shuttingDown()&&!workflowsPaused(tabsState.tabs.find(t=>t.id===tabId)?.workspaceProfileId)
+    return allowed()&&!automaticTurns.has(tabId)&&!deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state))&&meetingPromptShown(tabId)&&sendSessionCommand(tabId,command,allowed)
+  },
   sent: (tabId) => {const run=meetingJournalTurns.get(tabId);if(run)deliveryJournal?.submitted(run.id);meetingReader(tabId).expectDesktopPrompt()},
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
@@ -3290,7 +3302,7 @@ async function restoreMeetings(): Promise<void> {
       const old=saved as {outstanding?:{delivery?:{id?:unknown}}[]}|null
       if(Array.isArray(old?.outstanding)&&old.outstanding.some(item=>!item?.delivery?.id)){
         const backup=join(folder,'meeting.pre-journal.json')
-        if(!existsSync(backup))await writeFileAtomic(backup,redactDiagnosticText(JSON.stringify(saved)))
+        if(!existsSync(backup))await writeFileAtomic(backup,JSON.stringify(saved,(_key,value:unknown)=>typeof value==='string'?redactDiagnosticText(value):value))
       }
       const transcript = await readFile(join(folder, 'transcript.md'), 'utf8').catch(() => '')
       const tabs = meetingHub.restore(saved, transcript, (sessionId) => {
