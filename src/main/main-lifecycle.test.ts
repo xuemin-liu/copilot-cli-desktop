@@ -53,6 +53,10 @@ interface Harness {
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   deferTaskEnter():void
   flushTaskEnter():void
+  composedPaste(tabId:string):{result:string}
+  makeBindingUnreadable(tabId:string):void
+  corruptHandoff(tabId:string,corrupt?:boolean):void
+  followupReadyFor(tabId:string):boolean
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -260,6 +264,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           flushConfig: () => configWriteQueue,
           maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
+            deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           enableTasks: (tabId) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = '1.0.105'; workflows(); },
@@ -273,6 +278,15 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           deferTaskEnter:()=>{scheduleTaskEnter=action=>{deferredTaskEnter=action}},
           flushTaskEnter:()=>{const action=deferredTaskEnter;deferredTaskEnter=null;action?.()},
+          composedPaste: tabId=>sendSessionTask(tabId,'Person-composed task'),
+          makeBindingUnreadable: tabId=>{managedTabs.get(tabId).session.bindingReader.read=async()=>{throw new Error('Temporary inventory failure')}},
+          corruptHandoff: (tabId,corrupt=true)=>{
+            const sessionId=tabsState.tabs.find(t=>t.id===tabId).lastSessionId;
+            const d=deliveryJournal.enqueue({sessionId,source:'fixture/read-failure',revision:'v1',scope:'fixture',text:'Safe body'});
+            deliveryJournal.begin(d.id,()=>true);deliveryJournal.submitted(d.id);
+            if(corrupt)deliveryJournal.db.prepare('UPDATE deliveries SET body=? WHERE id=?').run('token=fixture-secret',d.id);
+          },
+          followupReadyFor: tabId=>{app.isReady=()=>true;const tab=tabsState.tabs.find(t=>t.id===tabId),task=workflows().submitted(tab.lastSessionId,tab.workspaceProfileId,'Readiness fixture');return followupReady({taskId:task.id,sessionId:task.sessionId,projectId:task.projectId})},
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
           configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
@@ -2707,6 +2721,37 @@ test('desktop input keeps delayed cancellation with its original native conversa
   assert.equal((await h.request('desktop:get-state')).tabs.find(t=>t.id===tab)?.lastSessionId,FORK)
   authorized=false;await h.request('desktop:write-tab',tab,'new B draft');h.flushTaskEnter()
   assert.deepEqual(spawn.written.slice(before),['new B draft'],'old Enter, Ctrl+C and held keys never reach B')
+}))
+
+test('follow-up readiness checks actual drafts and unresolved receipts before source refresh',async()=>fixture(async(h,directory)=>{
+  configure(h,directory);const tab=(await h.createMain()).activeTabId!,spawn=h.spawns[0]!
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  assert.equal(h.followupReadyFor(tab),true)
+  await h.request('desktop:write-tab',tab,'draft');assert.equal(h.followupReadyFor(tab),false)
+  await h.request('desktop:write-tab',tab,'\x03');await pause(2100);assert.equal(h.followupReadyFor(tab),true)
+  h.corruptHandoff(tab,false);assert.equal(h.followupReadyFor(tab),false)
+}))
+
+test('unverifiable binding without an identity change preserves manual task submission and held keys',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);h.makeBindingUnreadable(tab);await h.refreshRecords(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  h.deferTaskEnter();assert.equal(h.composedPaste(tab).result,'sent');await h.request('desktop:write-tab',tab,'typed during the hold');h.flushTaskEnter()
+  assert.deepEqual(spawn.written.slice(-2),['\r','typed during the hold'])
+  assert.equal((await h.request('desktop:get-state')).workflowError,null)
+}))
+for(const kind of ['post','add-dir'] as const)test(`a journal decode failure blocks automatic meeting ${kind} without blocking manual input`,async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);await h.refreshRecords(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  h.corruptHandoff(tab);h.queueMeetingDelivery(tab,kind);await h.pumpMeetingDelivery();await pause(350)
+  assert.deepEqual(spawn.written,[],'an empty fallback is not proof of an empty journal')
+  assert.match((await h.request('desktop:get-state')).workflowDeliveryError!,/unavailable/)
+  await h.request('desktop:write-tab',tab,'manual input');assert.equal(spawn.written.at(-1),'manual input')
 }))
 
 test('task reports require the owned current assignment and cannot complete tasks', async () => fixture(async (harness, directory) => {

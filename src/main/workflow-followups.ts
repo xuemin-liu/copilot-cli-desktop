@@ -36,6 +36,8 @@ export class WorkflowFollowups {
   private readonly nextPoll=new Map<string,number>()
   private readonly retryAt=new Map<string,number>()
   private readonly failures=new Map<string,number>()
+  private readonly deliveryRetryAt=new Map<string,number>()
+  private readonly busyAttempts=new Map<string,number>()
   constructor(path:string,private readonly host:FollowupHost) {
     this.now=host.now??Date.now
     this.db=new DatabaseSync(path)
@@ -124,26 +126,36 @@ export class WorkflowFollowups {
         await this.poll(grant)
         if(this.stopped)return
       }
-      for(const delivery of this.host.journal.list().filter(d=>d.state==='queued')) {
+      const deliveries=this.host.journal.list()
+      const blocked=new Set(deliveries.filter(d=>['submitting','submitted','uncertain'].includes(d.state)).map(d=>d.sessionId))
+      const observations=new Map<string,GithubSnapshot|null>()
+      for(const delivery of deliveries.filter(d=>d.state==='queued')) {
         const grant=this.grant(delivery.scope)
         if(!grant?.enabled)continue
         if(!this.authorized(grant)||this.stopped)continue
-        if((this.retryAt.get(grant.id)??0)>this.now()||this.host.ready?.(grant)===false)continue
+        if(blocked.has(delivery.sessionId)||Math.max(this.retryAt.get(grant.id)??0,this.deliveryRetryAt.get(grant.id)??0)>this.now()||this.host.ready?.(grant)===false)continue
         // One refreshed, consistent observation immediately precedes every proposed submission.
-        let snapshot:GithubSnapshot
-        try{snapshot=await this.read(grant)}catch{this.health(grant,'source-unavailable');continue}
+        if(!observations.has(grant.id)){
+          try{observations.set(grant.id,await this.read(grant))}catch{observations.set(grant.id,null);this.health(grant,'source-unavailable')}
+        }
+        const snapshot=observations.get(grant.id)
+        if(!snapshot)continue
         if(this.stopped)return
         if(!snapshot.open){this.closeGrant(grant);continue}
-        if(!snapshot.feedback.some(event=>event.source===delivery.source&&delivery.revision===`${snapshot.head}/${event.version}`)){this.host.journal.discard(delivery.id);continue}
+        if(!snapshot.feedback.some(event=>event.source===delivery.source&&delivery.revision===`${snapshot.head}/${event.version}`)){this.host.journal.discard(delivery.id);this.host.changed();continue}
         const task=this.host.task(grant.taskId)
         if(!task)continue
-        try{await this.host.verifyRepository(task,snapshot)}catch{this.health(grant,'scope-changed');continue}
+        if(this.host.ready?.(grant)===false){this.deliveryBusy(grant);continue}
+        try{await this.host.verifyRepository(task,snapshot)}catch{this.health(grant,'scope-changed');this.deliveryRetryAt.set(grant.id,this.now()+120000);continue}
         if(this.stopped)return
         if(!this.authorized(grant))continue
         try {
           const sent=await this.host.send(delivery,grant)
-          if(sent==='sent'){this.host.journal.submitted(delivery.id);this.host.changed()}
-        } catch {if(!this.stopped){this.host.journal.uncertain(delivery.id);this.health(grant,'needs-person')}}
+          if(sent==='sent'){
+            this.host.journal.submitted(delivery.id);blocked.add(delivery.sessionId)
+            this.busyAttempts.delete(grant.id);this.deliveryRetryAt.delete(grant.id);this.host.changed()
+          }else this.deliveryBusy(grant)
+        } catch {if(!this.stopped){this.host.journal.uncertain(delivery.id);blocked.add(delivery.sessionId);this.health(grant,'needs-person')}}
       }
     } finally {this.busy=false}
   }
@@ -216,6 +228,7 @@ ${event.body.slice(0,6000)}`
   }
   private prune():void {
     const grants=this.list()
+    for(const grant of grants.filter(g=>!g.enabled))for(const cache of [this.nextPoll,this.retryAt,this.failures,this.deliveryRetryAt,this.busyAttempts])cache.delete(grant.id)
     const retired=grants.filter(grant=>!grant.enabled&&this.host.journal.retireScope(grant.id))
     if(grants.length>=900) {
       for(const grant of retired.slice(-100))this.db.prepare('DELETE FROM followups WHERE id=?').run(grant.id)
@@ -237,6 +250,10 @@ ${event.body.slice(0,6000)}`
     if(this.stopped)return
     const current=this.grant(grant.id)
     if(current?.enabled)this.save({...current,health})
+  }
+  private deliveryBusy(grant:FollowupGrant):void {
+    const attempts=(this.busyAttempts.get(grant.id)??0)+1;this.busyAttempts.set(grant.id,attempts)
+    this.deliveryRetryAt.set(grant.id,this.now()+Math.min(120000,10000*2**Math.min(attempts-1,4)))
   }
   private save(grant:FollowupGrant):void {
     const value=JSON.stringify(grant)
