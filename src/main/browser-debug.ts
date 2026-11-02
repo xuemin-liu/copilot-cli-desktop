@@ -707,7 +707,10 @@ export class BrowserDebug {
       this.state.url = contents.getURL() || page.lastUrl
       this.state.loading = page.loading
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
-      this.state.error = page.error ?? this.popupWindowError()
+      const failed = page.error ? undefined : this.failedPopupWindow()
+      this.state.error = page.error ?? failed?.error ?? null
+      if (failed) this.state.errorPageId = failed.contents.id
+      else delete this.state.errorPageId
       this.state.devtools = page.devtools
       this.state.activePageId = this.activePageId
       this.state.zoomFactor = contents.getZoomFactor()
@@ -762,10 +765,9 @@ export class BrowserDebug {
     this.savedOverridesAt = Date.now()
   }
 
-  /** The error of the most recently opened popup window that has one, named after its page. */
-  private popupWindowError(): string | null {
-    const failed = [...this.pages.values()].filter(page => page.window && page.error).at(-1)
-    return failed ? `⧉ ${failed.view.webContents.getTitle().slice(0, 160) || 'Popup window'}: ${failed.error}` : null
+  /** The most recently opened popup window that has an error. */
+  private failedPopupWindow(): BrowserPage | undefined {
+    return [...this.pages.values()].filter(page => page.window && page.error).at(-1)
   }
 
   get snapshot(): BrowserDebugState {

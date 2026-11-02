@@ -119,6 +119,17 @@ if (!process.versions.electron) {
           assert.equal(shown.activePageId, inWindow ? contents.id : entry.id, 'a popup window leaves its opener selected')
           assert.match(shown.error ?? '', /Could not activate Local Overrides/, 'the browser panel shows the popup error')
           assert.match(shown.pages.find(page => page.id === entry.id)?.error ?? '', /Could not activate Local Overrides/, 'the page strip marks the failed popup')
+          assert.equal(shown.errorPageId, inWindow ? entry.id : undefined, 'the desktop can name the popup window the error belongs to')
+          // Titles can carry credentials, so the CLI status names the failed popup by id only.
+          const secret = 'https://title.example.test/view?access_token=review-secret-title-token'
+          await popup.executeJavaScript(`document.title = ${JSON.stringify(secret)}`)
+          await until(() => popup.getTitle() === secret, 'secret-bearing popup title')
+          const control = JSON.parse(await readFile(join(artifacts, 'control.json'), 'utf8'))
+          const status = await (await fetch(`http://127.0.0.1:${control.port}/status`, { headers: { authorization: `Bearer ${control.token}` } })).json()
+          assert.equal(JSON.stringify(status).includes('review-secret-title-token'), false, 'no popup title in CLI status')
+          assert.match(status.error ?? '', /Could not activate Local Overrides/)
+          assert.equal(status.errorPageId, inWindow ? entry.id : undefined)
+          await popup.executeJavaScript(`document.title = '/viewer'`)
         }
         const overrides = !process.argv.includes('--no-overrides') && !overrideStartupFailure
         assert.equal(await popup.executeJavaScript('document.title'), overrides ? 'overridden viewer' : '/viewer', 'first response uses the configured overrides')

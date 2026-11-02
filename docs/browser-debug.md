@@ -81,7 +81,8 @@ entire frontend to finish loading, so a held popup document cannot block its own
 If popup DevTools cannot initialize, its held response is released unmodified and the browser reports the
 Local Overrides error instead of leaving the popup blank. A popup in its own window keeps its opener selected,
 so the browser shows that popup's error under the address bar, named after the popup with ⧉, and marks its
-page with ⚠; the error goes away when the popup closes.
+page with ⚠; the error goes away when the popup closes. The CLI's browser status reports that error with the
+popup's page id only, since page titles stay out of CLI metadata.
 For the initial page or a page created with **+**, open **DevTools / Overrides** once; the warning has a button
 for it. Overrides apply while that page's DevTools runs, shown or hidden. Once DevTools runs the
 status comes from DevTools itself and follows changes within about a second; before that it comes from
