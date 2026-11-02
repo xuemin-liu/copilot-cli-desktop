@@ -2902,6 +2902,7 @@ test('manual task controls adopt without input and replace only at an idle empty
   const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
   await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
   h.configureBinding(tab,7700,[7700]);await h.refreshRecords(tab)
+  await writeFile(join(dirname(log),'inuse.7700.lock'),'');await h.refreshRecords(tab)
   h.enableTasks(tab,false)
   await h.request('desktop:task-create',tab,'Existing work',false)
   let tasks=(await h.request('desktop:get-state')).workflowTasks!;const old=tasks[0]!
@@ -2912,6 +2913,7 @@ test('manual task controls adopt without input and replace only at an idle empty
   await assert.rejects(async()=>h.request('desktop:task-create',tab,'Another',true),/idle/)
   assert.equal((await h.request('desktop:get-state')).workflowTasks![0]!.id,old.id)
   await h.request('desktop:write-tab',tab,'\x03');await pause(2100)
+  await appendFile(log,JSON.stringify({type:'user.message',data:{content:'Old work',interactionId:'old'}})+'\n'+JSON.stringify({type:'assistant.turn_start',data:{turnId:'old'}})+'\n'+JSON.stringify({type:'assistant.message',data:{content:'Old work finished',toolRequests:[]}})+'\n'+JSON.stringify({type:'assistant.turn_end',data:{turnId:'old'}})+'\n');await h.refreshRecords(tab)
   const before=spawn.written.length
   await h.request('desktop:task-create',tab,'Another',true)
   tasks=(await h.request('desktop:get-state')).workflowTasks!;const next=tasks.find(task=>task.id!==old.id)!
@@ -2922,4 +2924,20 @@ test('manual task controls adopt without input and replace only at an idle empty
   await h.request('desktop:task-action',old.id,'delete')
   assert.equal((await h.request('desktop:get-state')).workflowTasks!.length,1)
   await assert.rejects(async()=>h.request('desktop:task-action',next.id,'delete'),/Only/)
+}))
+
+
+test('assignment replacement refuses an unverifiable old worker while normal manual input remains available',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'Existing',lastSessionId:SOURCE}]
+  const line=(type:string,data:object)=>JSON.stringify({type,data})+'\n',log=join(directory,'session-state',SOURCE,'events.jsonl')
+  await mkdir(dirname(log),{recursive:true});await writeFile(log,line('session.start',{sessionId:SOURCE,startTime:new Date().toISOString(),context:{cwd:directory}}))
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);await writeFile(join(dirname(log),'inuse.7700.lock'),'');await h.refreshRecords(tab);h.enableTasks(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await appendFile(log,line('user.message',{content:'Old work',interactionId:'old'})+line('assistant.turn_start',{turnId:'old'}));await h.refreshRecords(tab);await pause(1600)
+  const old=(await h.request('desktop:get-state')).workflowTasks![0]!
+  h.makeBindingUnreadable(tab);await h.refreshRecords(tab)
+  await assert.rejects(async()=>h.request('desktop:task-create',tab,'New task',true),/verified|idle/)
+  assert.equal((await h.request('desktop:get-state')).workflowTasks![0]!.id,old.id)
+  await h.request('desktop:write-tab',tab,'person draft');assert.equal(spawn.written.at(-1),'person draft')
 }))
