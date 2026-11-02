@@ -48,6 +48,8 @@ async function setup() {
   return {dir,tasks,task,journal,controller,host,injected,interrupts:()=>interrupts,
     advance:(milliseconds=120001)=>{now+=milliseconds},requests:()=>requests,closePull:()=>{open=false},mergePull:()=>{open=false;merged=true},completions:()=>completions,revoke:()=>{allowed=false},
     blockNext:(wait:()=>Promise<void>)=>{block=wait},
+    removeComment:(id:number)=>{const index=comments.findIndex(comment=>(comment as {id:number}).id===id);if(index>=0)comments.splice(index,1)},
+    editComment:(id:number,body:string)=>{const comment=comments.find(comment=>(comment as {id:number}).id===id) as Record<string,unknown>;comment.body=body;comment.updated_at=new Date(now+1).toISOString()},
     comment:(id:number,actor=7,commit=head)=>comments.push({id,user:{id:actor},body:`Feedback ${id}`,updated_at:new Date(now+1).toISOString(),commit_id:commit}),
   }
 }
@@ -67,7 +69,7 @@ test('enrollment baselines old feedback and only allowed new versions enter the 
 }))
 test('per-head limits bound work and an unresolved submission blocks another event for the session',async()=>fixture(async h=>{
   const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
-  h.advance();for(let id=1;id<=5;id++)h.comment(id)
+  h.advance();for(let id=1;id<=31;id++)h.comment(id)
   await h.controller.tick()
   assert.equal(h.journal.list().length,3)
   assert.equal(h.injected.length,1)
@@ -234,4 +236,65 @@ test('revoked permissions during merge observation cannot complete a task',async
   h.mergePull();h.advance();h.blockNext(async()=>{entered();await wait})
   const tick=h.controller.tick();await started;h.revoke();release();await tick
   assert.equal(h.completions(),0);assert.equal(h.tasks.active(h.task.sessionId)?.outcome,'working')
+}))
+
+test('related feedback shares one bounded continuation with durable source membership',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  for(let n=1;n<=7;n++)h.comment(n)
+  await h.controller.tick()
+  const receipt=h.journal.list()[0]!
+  assert.equal(h.journal.list().length,1);assert.equal(receipt.batch?.members.length,7)
+  assert.equal(h.injected.length,1);assert.equal(h.controller.grant(grant.id)?.total,1)
+  for(let n=1;n<=7;n++)assert.match(receipt.text,new RegExp(`Feedback ${n}`))
+  assert.ok(receipt.text.length<=12000)
+}))
+
+test('deleting one queued member retains and delivers the remaining current feedback',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  h.host.ready=()=>false;h.comment(1);h.comment(2);await h.controller.tick()
+  const old=h.journal.list()[0]!
+  h.removeComment(1);h.host.ready=()=>true;h.advance(10001);await h.controller.tick()
+  const queued=h.journal.list().filter(item=>item.state==='queued')
+  assert.equal(h.journal.get(old.id)?.state,'cancelled');assert.equal(queued.length,1)
+  assert.equal(queued[0]?.batch?.members.length,1);assert.match(queued[0]!.batch!.members[0]!.source,/\/2$/)
+  assert.equal(queued[0]?.batch?.reservation,old.batch?.reservation)
+  assert.equal(h.controller.grant(grant.id)?.total,1)
+  await h.controller.tick();assert.equal(h.injected.length,1)
+  assert.doesNotMatch(h.journal.get(h.injected[0]!)!.text,/Feedback 1/)
+}))
+
+test('edits already reserved in another batch never duplicate its feedback or lose unchanged members',async()=>fixture(async h=>{
+  await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  h.host.ready=()=>false;h.comment(1);h.comment(2);await h.controller.tick()
+  h.advance();h.editComment(1,'Updated feedback');await h.controller.tick()
+  h.host.ready=()=>true;await h.controller.tick()
+  assert.equal(h.injected.length,1);assert.match(h.journal.get(h.injected[0]!)!.text,/Updated feedback/)
+  h.journal.answered(h.injected[0]!);await h.controller.tick()
+  assert.equal(h.injected.length,2)
+  const members=h.injected.flatMap(id=>h.journal.get(id)!.batch!.members)
+  assert.equal(members.length,2);assert.equal(new Set(members.map(member=>member.source+' '+member.version)).size,2)
+  assert.ok(h.injected.some(id=>h.journal.get(id)!.text.includes('Feedback 2')))
+}))
+
+test('durable reservations recover deduplication and budgets when a grant write lagged the journal',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  h.host.ready=()=>false
+  for(let n=1;n<=4;n++){
+    const current=h.controller.grant(grant.id)!,writer=new DatabaseSync(join(h.dir,'followups.sqlite'))
+    try{writer.prepare('UPDATE followups SET value=? WHERE id=?').run(JSON.stringify({...current,seen:{},total:0,headCounts:{}}),grant.id)}finally{writer.close()}
+    h.advance();h.comment(n);await h.controller.tick()
+  }
+  const rows=h.journal.list()
+  assert.equal(rows.length,3);assert.equal(h.controller.grant(grant.id)?.total,3)
+  assert.equal(h.controller.grant(grant.id)?.headCounts[head],3)
+  const members=rows.flatMap(row=>row.batch!.members)
+  assert.equal(members.length,3);assert.equal(new Set(members.map(member=>member.source)).size,3)
+}))
+
+test('inconsistent duplicate source versions stop collection without partial batches',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  const original=h.host.api
+  h.host.api=async(path,paged)=>path==='repos/owner/repo/pulls/1/comments?per_page=100'?[[{id:1,user:{id:7},body:'Version A',updated_at:'2026-11-02T12:00:01Z'},{id:1,user:{id:7},body:'Version B',updated_at:'2026-11-02T12:00:01Z'}]]:original(path,paged)
+  h.advance();await h.controller.tick()
+  assert.equal(h.journal.list().length,0);assert.equal(h.controller.grant(grant.id)?.health,'source-unavailable');assert.equal(h.controller.failed,false)
 }))
