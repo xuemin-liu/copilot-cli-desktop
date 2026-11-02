@@ -11,6 +11,8 @@ import { RemoveIcon } from './Icons.js'
 import { workflowAttention } from '../../main/workflow-attention.js'
 import { NeedsYou } from './NeedsYou.js'
 import { WorkflowTasks } from './WorkflowTasks.js'
+import { DeliveryQueue } from './WorkflowDeliveries.js'
+import type { WorkflowDelivery } from '../../main/workflow-deliveries.js'
 import type { WorkflowTask } from '../../main/workflow-types.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
@@ -40,6 +42,8 @@ function writeSidebarPreference(key: string, value: string): void {
 }
 
 export interface SidebarProps {
+  workflowDeliveries?: readonly WorkflowDelivery[]
+  workflowDeliveryError?: string | null
   workflowTasks?: readonly WorkflowTask[]
   workflowError?: string | null
   profiles: WorkspaceProfile[]
@@ -72,6 +76,7 @@ export interface SidebarProps {
 }
 
 export function Sidebar({
+  workflowDeliveries = [], workflowDeliveryError,
   workflowTasks = [], workflowError,
   profiles,
   tabs,
@@ -400,6 +405,7 @@ export function Sidebar({
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
       {!collapsed && <WorkflowTasks tasks={workflowTasks} error={workflowError ?? null} />}
+      {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (
         <input
           className="sidebar-search"

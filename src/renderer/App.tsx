@@ -348,6 +348,8 @@ export function App(): JSX.Element {
         meetings={state.meetings ?? []}
         workflowTasks={state.workflowTasks ?? []}
         workflowError={state.workflowError ?? null}
+        workflowDeliveries={state.workflowDeliveries ?? []}
+        workflowDeliveryError={state.workflowDeliveryError ?? null}
         installedCliVersion={state.resolution?.version ?? null}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}
