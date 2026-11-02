@@ -111,6 +111,8 @@ export interface CopilotDesktopBridge {
   /** The person's controls for a review meeting between sessions. `join` adds the session `tabId` to it, reviewing as `role`;
    * `remove` takes out the outside agent whose seat id is `tabId`, joined or only invited. */
   taskAction(id: string, action: 'completed' | 'cancelled'): Promise<void>
+  enrollFollowup(taskId:string,url:string,reviewers:string[],failedChecks:boolean):Promise<void>
+  pauseFollowup(id:string):Promise<void>
   deliveryAction(id: string, action: 'retry' | 'discard'): Promise<void>
   meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): Promise<void>
   /** Invite an outside agent to review: returns the invitation to paste into it, also put on the clipboard. `short`: the

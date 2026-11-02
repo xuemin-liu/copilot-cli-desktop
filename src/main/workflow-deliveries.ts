@@ -73,6 +73,12 @@ export class WorkflowDeliveries {
   cancelScope(scope: string): void {
     this.db.prepare("UPDATE deliveries SET state='cancelled' WHERE scope=? AND state='queued'").run(scope)
   }
+  /** Host-only: the scope must be permanently disabled and must never be reused. Unresolved evidence is retained. */
+  retireScope(scope: string): boolean {
+    if(this.db.prepare("SELECT id FROM deliveries WHERE scope=? AND state NOT IN ('answered','cancelled')").get(scope))return false
+    this.db.prepare("DELETE FROM deliveries WHERE scope=? AND state IN ('answered','cancelled')").run(scope)
+    return true
+  }
   private transition(id: string, from: DeliveryState, to: DeliveryState): void {
     if (!this.db.prepare('UPDATE deliveries SET state=? WHERE id=? AND state=?').run(to,id,from).changes) throw new Error('Delivery state changed')
   }

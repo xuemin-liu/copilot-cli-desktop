@@ -42,6 +42,8 @@ function writeSidebarPreference(key: string, value: string): void {
 }
 
 export interface SidebarProps {
+  workflowFollowups?: readonly import('../../main/workflow-followups.js').FollowupGrant[]
+  workflowFollowupError?: string | null
   workflowDeliveries?: readonly WorkflowDelivery[]
   workflowDeliveryError?: string | null
   workflowTasks?: readonly WorkflowTask[]
@@ -76,6 +78,7 @@ export interface SidebarProps {
 }
 
 export function Sidebar({
+  workflowFollowups=[],workflowFollowupError,
   workflowDeliveries = [], workflowDeliveryError,
   workflowTasks = [], workflowError,
   profiles,
@@ -404,7 +407,7 @@ export function Sidebar({
       </div>
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
-      {!collapsed && <WorkflowTasks tasks={workflowTasks} error={workflowError ?? null} />}
+      {!collapsed && <WorkflowTasks tasks={workflowTasks} followups={workflowFollowups} error={workflowError ?? workflowFollowupError ?? null} />}
       {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (
         <input

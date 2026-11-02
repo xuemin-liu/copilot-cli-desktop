@@ -111,6 +111,8 @@ export class MeetingTurnReader {
   expectDesktopPrompt(): void {
     this.expectingDesktop = true
   }
+  /** A cancelled paste must not consume the next prompt the person sends. */
+  cancelExpectedDesktopPrompt():void { this.expectingDesktop=false }
 
   /** Whether the prompt being answered now came from the person. */
   get answeringPerson(): boolean {

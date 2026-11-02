@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktop', {
   taskAction: (id, action) => ipcRenderer.invoke('desktop:task-action', id, action),
+  enrollFollowup: (taskId, url, reviewers, checks) => ipcRenderer.invoke('desktop:followup-enroll', taskId, url, reviewers, checks),
+  pauseFollowup: (id) => ipcRenderer.invoke('desktop:followup-pause', id),
   deliveryAction: (id, action) => ipcRenderer.invoke('desktop:delivery-action', id, action),
   getState: () => ipcRenderer.invoke('desktop:get-state'),
   browserOpen: (tabId) => ipcRenderer.invoke('desktop:browser-open', tabId),

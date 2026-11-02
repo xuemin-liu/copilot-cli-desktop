@@ -347,6 +347,8 @@ export function App(): JSX.Element {
         tabs={state.tabs}
         meetings={state.meetings ?? []}
         workflowTasks={state.workflowTasks ?? []}
+        workflowFollowups={state.workflowFollowups ?? []}
+        workflowFollowupError={state.workflowFollowupError ?? null}
         workflowError={state.workflowError ?? null}
         workflowDeliveries={state.workflowDeliveries ?? []}
         workflowDeliveryError={state.workflowDeliveryError ?? null}
