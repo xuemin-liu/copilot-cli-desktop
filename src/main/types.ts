@@ -170,6 +170,8 @@ export interface DesktopControlTabView {
 }
 
 export interface DesktopState {
+  workflowDeliveries?: import('./workflow-deliveries.js').WorkflowDelivery[]
+  workflowDeliveryError?: string | null
   workflowTasks?: import('./workflow-types.js').WorkflowTask[]
   workflowError?: string | null
   /** Runtime window placement, never persisted as session configuration. */

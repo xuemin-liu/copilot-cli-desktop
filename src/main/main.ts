@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { WorkflowStore } from './workflow-store.js'
+import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
@@ -619,12 +620,19 @@ function writeSessionLog(tabId: string, chunk: string): Promise<void> {
   return operation
 }
 
+let deliveryJournal: WorkflowDeliveries | null = null
+let deliveryError: string | null = null
 let workflowStore: WorkflowStore | null = null
 let workflowError: string | null = null
 function workflows(): WorkflowStore | null {
   if (!app.isReady() || workflowError) return null
   try { return workflowStore ??= new WorkflowStore(join(app.getPath('userData'), 'workflows.sqlite')) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return null }
+}
+
+function deliveryViews(): import('./workflow-deliveries.js').WorkflowDelivery[] {
+  try { return deliveryJournal?.list() ?? [] }
+  catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.'; return [] }
 }
 
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
@@ -645,6 +653,8 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
     workflowTasks: workflowViews(),
+    workflowDeliveries: deliveryViews(),
+    workflowDeliveryError: deliveryError,
     workflowError,
     meetingToolsUrl: guestMcp.url(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
@@ -4115,6 +4125,14 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
   managedTabs.get(tabId)?.session.write(data)
   return { gitCursorContextAttached: false }
 })
+ipcMain.handle('desktop:delivery-action', (event, id: unknown, action: unknown): void => {
+  assertTrustedIpcSender(event)
+  if (typeof id !== 'string' || !isValidSessionId(id) || (action !== 'retry' && action !== 'discard')) throw new Error('Invalid handoff action')
+  if (!deliveryJournal || deliveryError) throw new Error('Handoff history is unavailable')
+  if (action === 'retry') deliveryJournal.retry(id)
+  else deliveryJournal.discard(id)
+  broadcastState()
+})
 ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): void => {
   assertTrustedIpcSender(event)
   if (typeof id !== 'string' || !isValidSessionId(id) || (action !== 'completed' && action !== 'cancelled')) throw new Error('Invalid task action')
@@ -4830,6 +4848,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     workflows()
+    try { deliveryJournal = new WorkflowDeliveries(join(app.getPath('userData'), 'workflow-deliveries.sqlite')) }
+    catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.' }
     // Opened from Finder or a launcher, the app lacks the PATH the person's shell sets up, where the Copilot CLI and Git live.
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
@@ -5035,4 +5055,4 @@ app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
 
-app.once('will-quit', () => { workflowStore?.close(); workflowStore = null })
+app.once('will-quit', () => { workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })
