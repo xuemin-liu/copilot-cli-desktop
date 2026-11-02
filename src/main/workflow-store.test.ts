@@ -4,6 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WorkflowStore } from './workflow-store.js'
+import { DatabaseSync } from 'node:sqlite'
 const session = '11111111-1111-4111-8111-111111111111'
 test('tasks persist, reports bind to assignment, and only manual completion ends a task', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-test-'))
@@ -25,12 +26,16 @@ test('tasks persist, reports bind to assignment, and only manual completion ends
     assert.equal(store.active(session)?.outcome, 'working')
     store.finish(task.id, 'completed')
     assert.equal(store.active(session), null)
-    assert.notEqual(store.submitted(session, 'project', 'Next task').id, task.id)
+    assert.notEqual(store.submitted(session, 'project', 'Next task'.repeat(20_000)).id, task.id)
     store.close()
     store = new WorkflowStore(path)
     assert.equal(store.list().length, 2)
     const bytes = await readFile(path)
     assert.equal(bytes.includes(Buffer.from('fixture-secret')), false)
     assert.equal(bytes.includes(Buffer.from('fixture-private')), false)
+    const writer = new DatabaseSync(path)
+    try { writer.prepare('UPDATE tasks SET value=? WHERE active=1').run('null') } finally { writer.close() }
+    assert.throws(() => store.list(), /Invalid stored/)
+    assert.throws(() => store.active(session), /Invalid stored/)
   } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
 })

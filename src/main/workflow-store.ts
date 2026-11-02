@@ -8,6 +8,20 @@ function text(value: unknown, limit: number): string {
   if (typeof value !== 'string' || value.length > 16_000) throw new Error('Invalid workflow text')
   return redactDiagnosticText(value.replace(/[\p{Cc}\p{Cf}]/gu, '')).slice(0, limit)
 }
+function decode(value: string): WorkflowTask {
+  const task = JSON.parse(value) as WorkflowTask | null
+  if (!task || typeof task !== 'object' || !isValidSessionId(task.id) || !isValidSessionId(task.sessionId)
+    || !isValidSessionId(task.assignmentId) || task.scopeRevision !== 1 || !Number.isFinite(task.updatedAt)
+    || !['unknown','working','needs-input','ready','blocked','failed','completed','cancelled'].includes(task.outcome)
+    || !Array.isArray(task.validation) || task.validation.length > 20) throw new Error('Invalid stored workflow task')
+  for (const check of task.validation) {
+    if (!check || !['passed','failed','not-run'].includes(check.status) || text(check.name, 120) !== check.name) throw new Error('Invalid stored validation')
+  }
+  for (const [key, limit] of [['title',120],['request',4000],['summary',4000],['projectId',128]] as const) {
+    if (text(task[key], limit) !== task[key]) throw new Error('Invalid stored workflow text')
+  }
+  return task
+}
 /** Workflow-owned text is sanitized before it reaches SQLite. No caller-supplied paths or SQL. */
 export class WorkflowStore {
   private db: DatabaseSync
@@ -24,18 +38,18 @@ export class WorkflowStore {
   }
   close(): void { this.db.close() }
   list(): WorkflowTask[] {
-    return (this.db.prepare('SELECT value FROM tasks ORDER BY rowid DESC LIMIT 1000').all() as {value: string}[]).map(row => JSON.parse(row.value) as WorkflowTask)
+    return (this.db.prepare('SELECT value FROM tasks ORDER BY rowid DESC LIMIT 1000').all() as {value: string}[]).map(row => decode(row.value))
   }
   active(sessionId: string): WorkflowTask | null {
     const row = this.db.prepare('SELECT value FROM tasks WHERE session=? AND active=1').get(sessionId) as { value: string } | undefined
-    return row ? JSON.parse(row.value) as WorkflowTask : null
+    return row ? decode(row.value) : null
   }
   submitted(sessionId: string, projectId: string, request: string): WorkflowTask {
     if (!isValidSessionId(sessionId)) throw new Error('Invalid session')
     const current = this.active(sessionId)
     if (current) { const next: WorkflowTask = { ...current, outcome: 'working', updatedAt: Date.now() }; this.save(next); return next }
     if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) throw new Error('Workflow task limit reached')
-    const clean = text(request, 4000)
+    const clean = text(request.slice(0, 16_000), 4000)
     const task: WorkflowTask = { id: randomUUID(), assignmentId: randomUUID(), sessionId, projectId: text(projectId, 128),
       title: clean.slice(0, 120) || 'Task', request: clean, scopeRevision: 1, outcome: 'working', summary: '', validation: [], updatedAt: Date.now() }
     this.save(task)
@@ -65,7 +79,7 @@ export class WorkflowStore {
   finish(id: string, outcome: 'completed' | 'cancelled'): void {
     const row = this.db.prepare('SELECT value FROM tasks WHERE id=?').get(id) as {value: string} | undefined
     if (!row) throw new Error('Unknown task')
-    const task = JSON.parse(row.value) as WorkflowTask
+    const task = decode(row.value)
     this.save({ ...task, outcome, updatedAt: Date.now() })
   }
   private save(task: WorkflowTask): void {
