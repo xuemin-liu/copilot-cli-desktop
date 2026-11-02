@@ -2880,13 +2880,17 @@ test('task reports require the owned current assignment and cannot complete task
   const status = await harness.meetingCommand(tabId, 'task-status', SOURCE)
   assert.equal(status.ok, true, status.message)
   const binding = JSON.parse(status.message)
-  const report = { ...binding, outcome: 'ready', summary: 'Ready', validation: [{name:'unit checks',status:'passed'}] }
+  const report = { ...binding, outcome: 'ready', summary: 'Ready', question:'Review the rounding policy',artifacts:[{kind:'url',label:'PR',value:'https://github.com/owner/repo/pull/1'}],validation: [{name:'unit checks',status:'passed',revision:'abc123'}] }
   assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify({...report,assignmentId:'foreign'}))).ok, false)
   assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify(report))).ok, true)
   const tasks = (await harness.request('desktop:get-state')).workflowTasks!
   assert.equal(tasks.length, 1)
   assert.equal(tasks[0]!.outcome, 'ready')
   assert.equal(tasks[0]!.request, 'Fix token=[REDACTED]')
+  assert.equal(tasks[0]!.repositoryPath,profile.path)
+  assert.equal(tasks[0]!.question,'Review the rounding policy')
+  assert.equal(tasks[0]!.artifacts?.[0]?.value,'https://github.com/owner/repo/pull/1')
+  assert.equal(tasks[0]!.reports?.[0]?.validation[0]?.revision,'abc123')
   assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify({...report,outcome:'completed'}))).ok, false)
   await harness.request('desktop:task-action', tasks[0]!.id, 'completed')
   assert.equal((await harness.request('desktop:get-state')).workflowTasks?.[0]?.outcome, 'completed')

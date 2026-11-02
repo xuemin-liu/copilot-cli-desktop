@@ -6,6 +6,54 @@ import { join } from 'node:path'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { DatabaseSync } from 'node:sqlite'
 const session = '11111111-1111-4111-8111-111111111111'
+
+test('structured reports retain a question, artifacts, revision evidence and earlier reports', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-details-'))
+  const store = new WorkflowStore(join(dir, 'tasks.sqlite'))
+  try {
+    const task = store.submitted(session, 'project', 'Implement the checkout change')
+    store.report(session, {taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'needs-input',
+      summary:'Choose a rounding rule',question:'Should token=fixture-question use bankers rounding?',
+      artifacts:[{label:'Review token=fixture-label',kind:'url',value:'https://github.com/owner/repo/pull/1?token=fixture-url'}],
+      validation:[{name:'unit tests',status:'passed',revision:'abc123'}]})
+    store.report(session, {taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'ready',summary:'Ready to review'})
+    const current = store.active(session) as unknown as {reports:{question:string;artifacts:{value:string}[];validation:{revision:string}[]}[]}
+    assert.equal(current.reports.length,2)
+    assert.equal(current.reports[0]?.question,'Should token=[REDACTED] use bankers rounding?')
+    assert.doesNotMatch(JSON.stringify(current),/fixture-(question|label|url)/)
+    assert.equal(current.reports[0]?.validation[0]?.revision,'abc123')
+    assert.throws(()=>store.report(session,{taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'ready',summary:'x',artifacts:[{kind:'url',label:'Bad',value:'javascript:alert(1)'}]}),/artifact/i)
+  } finally { store.close();await rm(dir,{recursive:true,force:true}) }
+})
+
+test('v1 tasks migrate with a readable backup and retain host links after resources disappear', async () => {
+  const dir=await mkdtemp(join(tmpdir(),'workflow-migration-')),path=join(dir,'tasks.sqlite')
+  let store=new WorkflowStore(path)
+  try {
+    const original=store.submitted(session,'project','Original request')
+    store.close()
+    const writer=new DatabaseSync(path)
+    writer.exec('PRAGMA user_version=1')
+    writer.prepare('UPDATE tasks SET value=?').run(JSON.stringify({id:original.id,assignmentId:original.assignmentId,sessionId:session,projectId:'project',title:'Original request',request:'Original request',scopeRevision:1,outcome:'working',summary:'',validation:[],updatedAt:123}))
+    writer.close()
+    store=new WorkflowStore(path)
+    assert.equal(store.active(session)?.createdAt,123)
+    const backup=new DatabaseSync(path+'.pre-v2.sqlite')
+    try { assert.equal((backup.prepare('PRAGMA user_version').get() as {user_version:number}).user_version,1);assert.ok(backup.prepare('SELECT value FROM tasks WHERE id=?').get(original.id)) } finally { backup.close() }
+    store.link(session,{repositoryPath:'/missing/repository',worktreePath:'/missing/worktree',branch:'feature',comparisonGroup:'group-a',meetingId:'meeting-a',pullUrl:'https://github.com/o/r/pull/1'})
+    store.link(session,{meetingId:'meeting-b'})
+    store.link(session,{meetingId:'meeting-a'})
+    store.submitted(session,'project','Continue')
+    store.close();store=new WorkflowStore(path)
+    const retained=store.active(session)!
+    assert.equal(retained.id,original.id)
+    assert.equal(retained.request,'Original request')
+    assert.equal(retained.worktreePath,'/missing/worktree')
+    assert.equal(retained.comparisonGroup,'group-a')
+    assert.deepEqual(retained.meetingIds,['meeting-a','meeting-b'])
+    assert.throws(()=>store.report(session,{taskId:original.id,assignmentId:original.assignmentId,scopeRevision:1,outcome:'ready',summary:'x',origin:'automation'}),/Unknown/)
+  } finally { store.close();await rm(dir,{recursive:true,force:true}) }
+})
 test('tasks persist, reports bind to assignment, and only manual completion ends a task', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-test-'))
   const path = join(dir, 'workflows.sqlite')

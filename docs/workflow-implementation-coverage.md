@@ -1,0 +1,23 @@
+# Workflow implementation coverage
+
+Audited against `task-workflows-plan.md` on 2026-11-02. An approved feature PR establishes only its stated scope;
+it does not establish every item in the broader plan. The feature branches are stacked and remain unmerged.
+
+| Plan area | Existing implementation | Remaining acceptance work |
+| --- | --- | --- |
+| Phase 0: integration evidence | PR155: disposable CLI probe, tested-version gate, binding/input fixtures | None identified in the capability policy; crash-time consumption is deliberately unsupported and stays uncertain |
+| Phase 1: attention | PR156: cross-project reasons, acknowledgement, notifications, navigation | Surface task attention when its tab is closed; order questions/failures ahead of review results |
+| Phase 2: task records | PR157: stable task/assignment, authenticated reports, manual completion, retained active tasks | Rich reports and host links are added in this PR; explicit adoption/new task, manual outcomes, unsupported-session recovery and history deletion remain |
+| Phase 3: recovery | PR158 and PR161: journal, original-recipient gates, local meeting migration, reconciliation | No additional automatic resend is planned: there is no proven crash-safe consumption receipt |
+| Phase 4: GitHub follow-ups | PR159: per-task enrollment, current-version polling, allowlists, limits, pause | Project default templates with explicit acceptance; optional verified PR-merge completion; batch related feedback |
+| Phase 5: rule preview | PR160: bounded templates, Preview/Automatic/Off, ownership, budgets, project/global pause | No new template identified as missing; rule-created investigations intentionally remain read/search only |
+
+The task-details change adds bounded, redacted questions, artifacts, tested revisions and the latest twenty report
+records. Host observations retain origin, creation time, repository/worktree/branch, comparison group, meeting IDs
+and the enrolled PR. Reports cannot rewrite those ownership/scope links. Schema v1 has a readable SQLite backup before
+v2 is enabled. Missing files are never recreated by reading task history. Paths are recorded references, not proof
+that a resource still exists; URL actions use the existing HTTP(S) navigation check.
+
+Follow-up PRs must close the remaining entries with code and validation evidence. Updating this table alone does not
+close an item. Build, typecheck, focused tests and current-head reviewer approval must be reported separately from
+merge/release status. No live paid model run or production automation enrollment is implied by fixture coverage.

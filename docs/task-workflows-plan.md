@@ -1,6 +1,7 @@
 # Plan: tasks, attention, and automatic follow-ups
 
-Status: proposed for review. This PR documents the design; no application behavior changes.
+Status: implementation in progress. The five main feature areas have implementation PRs, but that does not mean every
+acceptance detail is complete. See the [implementation coverage](workflow-implementation-coverage.md) for remaining work.
 
 Copilot CLI Desktop already runs multiple sessions, creates worktrees, shows live activity, and coordinates review
 meetings. The next step is to keep track of what those sessions are trying to deliver and bring the person back only

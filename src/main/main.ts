@@ -728,7 +728,7 @@ async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,au
             const result=sendSessionTask(tabId,delivery.text,false,{
               beforePaste:()=>{
                 if(!ready()||!authorized()||!journal.begin(delivery.id,authorized))return false
-                const task=store.submitted(sessionId,rule.projectId,text);taskId=task.id
+                const task=store.submitted(sessionId,rule.projectId,text,{...taskContext(tab),origin:'automation'});taskId=task.id
                 const grant:FollowupGrant={id:rule.revision,taskId:task.id,sessionId,projectId:rule.projectId,scopeRevision:task.scopeRevision,permissionKey:rule.scopeKey,
                   repository:rule.repository,number:1,reviewers:[],failedChecks:false,enabled:true,activatedAt:Date.now(),seen:{},head:event.head,headCounts:{},total:1,health:'watching',checks:'absent'}
                 const mode=tab.sessionPermissionMode
@@ -853,6 +853,16 @@ function deliveryViews(): import('./workflow-deliveries.js').WorkflowDelivery[] 
   catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.'; return [] }
 }
 
+function taskContext(tab:DesktopSessionTab):import('./workflow-types.js').TaskContext {
+  const profile=desktopConfig.profiles.find(profile=>profile.id===tab.workspaceProfileId)
+  return {...(profile?{repositoryPath:profile.path}:{}),...(tab.worktree?{worktreePath:tab.worktree.path,...(tab.worktree.branch?{branch:tab.worktree.branch}:{})}:{}),
+    ...(tab.fanOutGroupId?{comparisonGroup:tab.fanOutGroupId}:{})}
+}
+function linkTaskContext(tabId:string,extra:import('./workflow-types.js').TaskContext={}):void {
+  const tab=tabsState.tabs.find(tab=>tab.id===tabId)
+  if(!tab?.lastSessionId||!workflowStore)return
+  try{workflowStore.link(tab.lastSessionId,{...taskContext(tab),...extra})}catch{workflowError='Task context could not be saved. Your terminal session remains usable.'}
+}
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
   try { return workflowStore?.list() ?? [] }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
@@ -1617,6 +1627,7 @@ async function applySessionCwd(id: string, session: PtySession, cwd: string | nu
   if (gitDir) sessionWorktreeGitDirs.set(id, gitDir)
   else sessionWorktreeGitDirs.delete(id)
   tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: cwd, worktree } : candidate) }
+  linkTaskContext(id)
   syncTabState()
   broadcastState()
   if (profile) gitService?.requestRefresh(profile.id)
@@ -1643,6 +1654,7 @@ async function applyDormantSessionCwd(id: string, sessionId: string): Promise<vo
   // Woken meanwhile: the running session reports its own folder.
   if (tabsState.tabs.find((candidate) => candidate.id === id)?.status !== 'dormant') return
   tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === id ? { ...candidate, sessionCwd: start.cwd, worktree } : candidate) }
+  linkTaskContext(id)
   syncTabState()
   broadcastState()
 }
@@ -1666,6 +1678,7 @@ async function fanOutSessions(profile: WorkspaceProfile, label: string, count: n
   if (!copilotCapabilities.supportedOptions.includes('--worktree')) throw new Error('This Copilot CLI version does not support worktrees, which a fan-out needs; update it from Settings')
   fanOutRunning = true
   const tabIds: string[] = []
+  const comparisonGroup=randomUUID()
   let stopped: string | null = null
   try {
     for (let index = 1; index <= count; index += 1) {
@@ -1676,7 +1689,7 @@ async function fanOutSessions(profile: WorkspaceProfile, label: string, count: n
       const created = createdId === null ? undefined : tabsState.tabs.find((tab) => tab.id === createdId)
       if (!created) { stopped = 'The session tab could not be found after it started.'; break }
       tabIds.push(created.id)
-      tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === created.id ? { ...tab, fanOutLabel: label } : tab) }
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === created.id ? { ...tab, fanOutLabel: label,fanOutGroupId:comparisonGroup } : tab) }
       syncTabState()
       broadcastState()
       const deadline = Date.now() + FAN_OUT_WAIT_MS
@@ -2619,7 +2632,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         try {
           const task = command === 'task-report' ? store.report(request.sessionId, JSON.parse(request.text)) : store.active(request.sessionId)
           broadcastState()
-          return { ok: Boolean(task), message: task ? JSON.stringify({ taskId: task.id, assignmentId: task.assignmentId, scopeRevision: task.scopeRevision, outcome: task.outcome }) : 'No active task is tracked.' }
+          return { ok: Boolean(task), message: task ? JSON.stringify({ version:1,taskId: task.id, assignmentId: task.assignmentId, scopeRevision: task.scopeRevision, outcome: task.outcome }) : 'No active task is tracked.' }
         } catch { return { ok: false, message: 'Invalid, stale, or foreign task report.' } }
       }
       case 'start': {
@@ -2640,6 +2653,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         }
         session.commitSessionBinding()
         const meeting = meetingHub.start(meetingParty(tabId), { topic: request.topic, post: request.text, changes: request.changes }, meetingReader(tabId).usage)
+        linkTaskContext(tabId,{meetingId:meeting.id})
         return { ok: true, message: `Meeting ${meeting.id} is open. Tell the person to say "join meeting ${meeting.id}" in each session that should review it, then end your turn; the replies arrive as your next message.${session.sessionBindingReady ? '' : ' Automatic meeting messages are paused: close the other retained CLI sessions in this tab to receive them safely.'}` }
       }
       case 'round':
@@ -2683,7 +2697,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
   if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
-    try { workflows()?.submitted(tab.lastSessionId, tab.workspaceProfileId, prompt.content); workflowNotice = null; broadcastState() }
+    try { workflows()?.submitted(tab.lastSessionId, tab.workspaceProfileId, prompt.content,taskContext(tab)); workflowNotice = null; broadcastState() }
     catch (error) {
       if (error instanceof WorkflowTaskLimitError) workflowNotice = error.message
       else workflowError = 'Task tracking could not save this request. Your terminal session remains usable.'
@@ -2694,7 +2708,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (!request) return
   const { id } = request
   if (!meetingHub.isOpen(id)) { showNotification('Copilot CLI Desktop', `There is no open meeting ${id}.`); return }
-  try { meetingHub.join(meetingParty(tabId), id, { role: request.role, usage: reader.usage }) }
+  try { meetingHub.join(meetingParty(tabId), id, { role: request.role, usage: reader.usage });linkTaskContext(tabId,{meetingId:id}) }
   catch (error) {
     if (!(error instanceof MeetingError)) throw error
     showNotification('Copilot CLI Desktop', error.message)
@@ -4469,7 +4483,7 @@ ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown
   assertTrustedIpcSender(event)
   if(typeof taskId!=='string'||typeof url!=='string'||!Array.isArray(reviewers)||!reviewers.every(r=>typeof r==='string')||typeof checks!=='boolean')throw new Error('Invalid follow-up settings')
   const controller=await openFollowups()
-  await controller.enroll(taskId,url,reviewers,checks);broadcastState()
+  const grant=await controller.enroll(taskId,url,reviewers,checks);workflows()?.link(grant.sessionId,{pullUrl:`https://github.com/${grant.repository}/pull/${grant.number}`});broadcastState()
 })
 ipcMain.handle('desktop:followup-pause', (event,id:unknown):void=>{
   assertTrustedIpcSender(event)

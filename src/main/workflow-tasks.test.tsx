@@ -23,3 +23,13 @@ test('an older active task remains reachable after fifty newer tasks complete', 
     assert.equal((markup.match(/>End tracking</g) ?? []).length, 1)
   } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
 })
+
+test('task details expose questions, validation revisions, host links and report history',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'workflow-details-ui-')),store=new WorkflowStore(join(dir,'tasks.sqlite'))
+  try {
+    const task=store.submitted(randomUUID(),'project','Original request',{repositoryPath:'/repository',worktreePath:'/worktree',branch:'feature',comparisonGroup:'comparison-a',meetingId:'review-a'})
+    store.report(task.sessionId,{taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'needs-input',summary:'Choose behavior',question:'Which rounding policy?',artifacts:[{kind:'url',label:'Review PR',value:'https://github.com/o/r/pull/1'}],validation:[{name:'Tests',status:'not-run',revision:'abc123'}]})
+    const markup=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} />)
+    for(const label of ['Original request','Which rounding policy?','/worktree','feature','comparison-a','review-a','Review PR','abc123','Report history'])assert.ok(markup.includes(label),label)
+  } finally {store.close();await rm(dir,{recursive:true,force:true})}
+})
