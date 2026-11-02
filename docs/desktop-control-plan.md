@@ -26,7 +26,9 @@ Goals:
 - A session can take a screenshot, list windows, and click, type, scroll and press keys in apps the user allowed.
 - The user stays in charge. Desktop control is off until the user turns it on for a session. Every new app needs the
   user's approval. Control is always visible and can be stopped with one key.
-- The agent can't use desktop control to get past the app's or Copilot CLI's own approvals.
+- The agent can't use desktop control to get past the app's or Copilot CLI's own approvals through the surfaces the
+  app knows about: its own windows, terminals, and the Windows surfaces that start programs (rule 3). An app the user
+  approves that can itself start programs widens this, and the approval prompt says so (rule 2).
 
 Non-goals (for now):
 
@@ -63,17 +65,21 @@ screen.
 | `click <frameId> <x> <y> [left\|right\|middle] [double]` | Click at a point in that frame's pixels |
 | `move`, `drag`, `scroll` | As for click, with a frame and points |
 | `type <frameId> -File text.txt` | Types the file's text (UTF-8, at most 4 KiB) into the focused control. The text goes in a file so it is never on a command line |
-| `key <frameId> <chord>` | One key or chord, such as `enter` or `ctrl+s`, from a fixed list |
+| `key <frameId> <chord>` | One key or chord, such as `enter` or `ctrl+s`, from a fixed list. The list has no Win-key chords (`win+r`, `win+x`, `win+e`, …) and none of this app's own global shortcuts (`Ctrl+Alt+H`, the stop key), because `SendInput` reaches global shortcuts whatever window is in front |
 | `focus <window-id>` | Bring an allowed app's window to the front |
 
 Every input command names the screenshot it was planned from. Before acting, the app checks:
 
 - the frame is less than 30 seconds old
 - the window under the point is still the same app and window as in the frame
+- the pixels around the point still match the frame: the app re-captures a small patch (about 64×64 px, at the frame's
+  scale) and compares it with the same patch in the frame, within a small tolerance
 - the screen hasn't been locked or switched since
 
-If any check fails, the app refuses with "The screen changed; take a new screenshot". This stops an action from landing
-on a dialog that popped up after the screenshot was taken.
+If any check fails, the app refuses with "The screen changed; take a new screenshot". The window check catches a new
+top-level dialog; the patch check catches content that changed inside the same window, such as a web page's modal, a
+browser's permission bubble or an app's own confirm sheet. A change outside the patch can still go unnoticed (see
+[Risks](#risks)).
 
 Coordinates are in the screenshot's pixels. The app maps them to physical screen pixels using each display's scale
 factor, so mixed-DPI multi-monitor setups work. Screenshots are scaled down to at most 1568 px on the long side.
@@ -87,12 +93,23 @@ These are enforced in the main process, and each one gets unit tests.
    off when the session ends, after 30 minutes without an action, and when the user presses the stop key.
 2. **Apps need approval.** The first screenshot of a window or input to an app opens a prompt in the app:
    "Allow Copilot to control *Notepad* (`notepad.exe`) in this session?", with the choices **Once**, **For this
-   session** and **Deny**. Apps are matched by the full path of their program, not by window title. Capturing the
-   whole screen is a separate, explicit grant.
+   session** and **Deny**. Apps are matched by identity, never by window title:
+   - a desktop app by the full path of its program
+   - a packaged (UWP/MSIX) app by its AppUserModelID. Its top-level window belongs to `ApplicationFrameHost.exe`, so
+     the app reads the ID from the hosted `CoreWindow` child's process (`GetApplicationUserModelId`) or from the
+     window's `System.AppUserModel.ID` property, and the prompt shows the app's display name. A frame host window whose
+     app it can't identify is refused.
+
+   For an app on a built-in list of apps that can start programs or open files (browsers, Office, editors with a
+   command box or "Open with"), the prompt adds a warning: approving it lets Copilot start programs from it, outside
+   Copilot CLI's shell approvals. Capturing the whole screen is a separate, explicit grant.
 3. **Always blocked**, whatever the user approves:
    - This app's own windows, so it can never approve its own prompts or the Copilot CLI's tool approvals.
    - Terminals and shells (`cmd`, `powershell`, `pwsh`, Windows Terminal, `conhost`, Git Bash). Typing commands there
      would get past Copilot CLI's shell-tool approvals.
+   - Windows surfaces that start programs: File Explorer (`explorer.exe`, which also owns the **Run** dialog, the
+     taskbar, the desktop and the **Win+X** menu), Start (`StartMenuExperienceHost.exe`) and Search (`SearchHost.exe`).
+     Typing a program name or `cmd` into any of them starts it.
    - Credential and security UI: `CredentialUIBroker`, Windows Security, sign-in and password managers on a built-in
      list.
    - Task Manager and Registry Editor.
@@ -120,7 +137,8 @@ These are enforced in the main process, and each one gets unit tests.
 
 - **Windows 10/11:** first and fully covered. Capture uses Electron's `desktopCapturer`. Input, window listing,
   foreground checks and password-field checks go through `SendInput`, `EnumWindows`, `GetWindowThreadProcessId`,
-  `QueryFullProcessImageName` and UI Automation.
+  `QueryFullProcessImageName`, `GetApplicationUserModelId` (packaged apps) and UI Automation. Low-level mouse and
+  keyboard hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) tell the user's input from the app's own.
 - **macOS:** later. It needs the Accessibility and Screen Recording permissions, which macOS ties to the app's
   signature, so it waits for signed macOS builds (see `cross-platform-plan.md`).
 - **Linux:** X11 only, through XTest, and later. Wayland blocks synthetic input. The RemoteDesktop portal would need
@@ -137,7 +155,7 @@ These are enforced in the main process, and each one gets unit tests.
    too slow, and antivirus tools often flag it.
 2. **Default capture scope.** Suggested: windows of allowed apps only, with full-screen capture as an extra grant.
 3. **Blocked-app list.** Whether users can unblock entries (suggested: no for this app's own windows and credential
-   UI; terminals stay blocked in the first release).
+   UI; terminals, File Explorer, Start and Search stay blocked in the first release).
 4. **Stop key.** `Ctrl+Alt+Shift+X` is suggested, because few apps use it. It must not clash with the existing show/hide
    shortcut (`Ctrl+Alt+H`), or with Remote Desktop's `Ctrl+Alt+End` (its Ctrl+Alt+Del).
 
@@ -148,12 +166,14 @@ Each step is one PR. None of them changes what sessions can do until step 4 conn
 ### 1. Spike (Windows)
 
 - Try the native-layer options:
-  - `SendInput` click and type into Notepad and a UWP app
+  - `SendInput` click and type into Notepad and a UWP app, and identifying the UWP app by its AppUserModelID behind
+    `ApplicationFrameHost.exe`
   - coordinate mapping on a 150% display next to a 100% one
   - `desktopCapturer` window and screen capture
   - UIPI refusal for an elevated window
   - UI Automation's password-field check
-  - telling real input from injected input (the `LLMHF_INJECTED` flag)
+  - telling real input from injected input: the `LLMHF_INJECTED` flag in a `WH_MOUSE_LL` hook for the mouse, and
+    the `LLKHF_INJECTED` flag in a `WH_KEYBOARD_LL` hook for the keyboard
 - Check that a packaged build, with the `RunAsNode` fuse off, loads the chosen layer, and see whether Defender
   flags it.
 - Write `docs/desktop-control-spikes.md` with the results and the chosen layer.
@@ -164,9 +184,10 @@ Each step is one PR. None of them changes what sessions can do until step 4 conn
 - `desktop-capture.ts`: window list, window and screen capture, scaling, frames with ids and blanking of blocked
   windows.
 - `desktop-input.ts`: click, move, drag, scroll, type and key, through the chosen layer.
-- `desktop-rules.ts`: block list, app identity by program path, frame checks, password-field check, rate limits.
-- Unit tests for coordinate mapping, frame checks, block-list matching and request validation, using a fake native
-  layer.
+- `desktop-rules.ts`: block list, app identity (program path or AppUserModelID), the `key` chord list, frame checks,
+  password-field check, rate limits.
+- Unit tests for coordinate mapping, frame checks (including the patch comparison), block-list matching, refused key
+  chords and request validation, using a fake native layer.
 - Not reachable by any session yet.
 - Done when: the tests pass and a dev-only check script clicks and types in Notepad.
 
@@ -186,7 +207,8 @@ Each step is one PR. None of them changes what sessions can do until step 4 conn
   when it turns off.
 - Refuse sessions in read-only mode or without the shell tool.
 - `scripts/desktop-control-check.mjs`: a session opens Notepad, types text and saves it. The script also checks the
-  refusals: a terminal, the app's own window, a password field, a stale frame, and input after the stop key.
+  refusals: a terminal, the app's own window, a File Explorer address bar, the `win+r` and `Ctrl+Alt+H` chords, a
+  password field, a stale frame, a frame whose patch changed, and input after the stop key.
 - Done when: the check passes on a local Windows desktop. GitHub's Windows runners may not have an interactive
   desktop, so CI runs the unit tests and skips this check, with the reason.
 
@@ -207,6 +229,12 @@ Each step is one PR. None of them changes what sessions can do until step 4 conn
 - **Prompt injection from the screen**, such as a web page or document telling Copilot to do something. Approval of
   each app, the block list, the frame checks and the visible banner limit what it can do. The plan doesn't claim to
   remove the risk.
+- **Approved apps that start programs.** The guarantee against getting past Copilot CLI's approvals is only as strong
+  as the apps the user approves. A browser's downloads, Office, or any app with an "Open with" or command box can
+  start programs once approved, and so can the Open and Save dialogs inside any approved app (they run in its process,
+  not in `explorer.exe`). The block list covers Windows' own launch surfaces; the prompt warns about the rest.
+- **Changes outside the checked patch.** The frame checks compare the window and a small patch around the point. A
+  change elsewhere in the same window, such as a moved button the click still lands next to, isn't caught.
 - **Apps that ignore or detect injected input** (games, anti-cheat, some remote-desktop clients) won't work, and the
   log shows the action was sent but nothing changed.
 - **Remote desktop and locked screens.** Capture returns black or nothing. The app refuses, with "The desktop isn't
