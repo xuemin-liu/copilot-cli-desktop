@@ -1845,8 +1845,17 @@ const sessionNameRoots = new Map<string, string>()
 const promptDrafts = new Map<string, PromptDraft>()
 const copilotNames = new Map<string, { sessionId: string; mtimeMs: number; value: CopilotSessionName | null }>()
 const renamesSent = new Map<string, { title: string; at: number }>()
-/** Terminal input that arrived while the desktop was typing `/rename` into that tab's session, waiting for its Enter. */
+/**
+ * Terminal input that arrived while the desktop was typing into that tab's session (`/rename`, a task, a command or a Git
+ * context paste), waiting for its Enter. Each typist holds its own array and presses Enter only while it is still the one
+ * held: a restart drops the hold (cancelHeldInput), so neither that Enter nor the held keys reach the old process.
+ */
 const heldInput = new Map<string, string[]>()
+
+/** A restart was asked for: whatever was waiting to press Enter in the old process is not sent. */
+function cancelHeldInput(tabId: string): void {
+  heldInput.delete(tabId)
+}
 
 /** A new process for the tab: its prompt starts empty, or on the resume picker. */
 function trackSessionName(tabId: string, env: NodeJS.ProcessEnv, picker: boolean): void {
@@ -1904,19 +1913,21 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   renamesSent.set(tabId, { title: action.title, at: Date.now() })
   // From here until its Enter, keys the person presses are held back, then passed on in order: typed into the command
   // they would become part of the name (or of a prompt sent with it).
-  heldInput.set(tabId, [])
+  const held: string[] = []
+  heldInput.set(tabId, held)
+  const holding = (): boolean => heldInput.get(tabId) === held
   const release = (): void => {
-    const held = heldInput.get(tabId) ?? []
+    if (!holding()) return
     heldInput.delete(tabId)
     const current = managedTabs.get(tabId)?.session
     for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
   }
   if (!draft.empty) { session.write('\x03'); draft.note('\x03') }
   setTimeout(() => {
-    if (managedTabs.get(tabId)?.session !== session) { release(); return }
+    if (!holding() || managedTabs.get(tabId)?.session !== session) { release(); return }
     session.write(command, 'rename')
     setTimeout(() => {
-      if (managedTabs.get(tabId)?.session === session) session.write('\r', 'rename')
+      if (holding() && managedTabs.get(tabId)?.session === session) session.write('\r', 'rename')
       release()
     }, 200)
   }, closing ? 300 : 0)
@@ -1948,9 +1959,11 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true): Sessio
     bracketedPaste: session.bracketedPaste,
   }, needsWrite)
   if (decision.result !== 'sent') return decision
-  heldInput.set(tabId, [])
+  const held: string[] = []
+  heldInput.set(tabId, held)
+  const holding = (): boolean => heldInput.get(tabId) === held
   const release = (): void => {
-    const held = heldInput.get(tabId) ?? []
+    if (!holding()) return
     heldInput.delete(tabId)
     const current = managedTabs.get(tabId)?.session
     for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
@@ -1960,7 +1973,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true): Sessio
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
   setTimeout(() => {
-    if (managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
+    if (holding() && managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
     release()
   }, 300)
   return decision
@@ -1975,14 +1988,15 @@ function sendSessionCommand(tabId: string, command: string): boolean {
   const session = managed.session
   const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
   if (!ready || !draft.empty || !draft.quiet() || draft.beforeFirstEnter || heldInput.has(tabId)) return false
-  heldInput.set(tabId, [])
+  const held: string[] = []
+  heldInput.set(tabId, held)
   const text = command.replace(/[\u0000-\u001f\u007f]/g, '')
   draft.note(text)
   session.write(text, 'add-dir')
   setTimeout(() => {
-    if (managedTabs.get(tabId)?.session === session) { session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r') }
-    const held = heldInput.get(tabId) ?? []
+    if (heldInput.get(tabId) !== held) return
     heldInput.delete(tabId)
+    if (managedTabs.get(tabId)?.session === session) { session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r') }
     for (const data of held) { promptDrafts.get(tabId)?.note(data); managedTabs.get(tabId)?.session.write(data) }
   }, 200)
   return true
@@ -2579,6 +2593,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   // below, once this restart's turn actually comes up, in case a shutdown
   // starts while it was queued behind another transition on the same tab.
   if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
+  // The restart's setup can take longer than a pending paste's wait for its Enter, and the old process runs until the
+  // setup is done: drop that Enter and the keys held for it now, not when the old process stops.
+  cancelHeldInput(tabId)
   // Coalesce with any restart already running or queued for this tab —
   // every caller gets the one outcome instead of a second restart running
   // right after the first and stopping the replacement it just started.

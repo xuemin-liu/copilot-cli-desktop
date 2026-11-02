@@ -1900,7 +1900,13 @@ test('a process restart during a Git context paste cannot submit or replay input
   await harness.request('desktop:write-tab', id, 'why is this needed?')
   await harness.request('desktop:write-tab', id, '\r', 'Git panel cursor context')
   await harness.request('desktop:write-tab', id, 'queued input')
-  await harness.request('desktop:restart-tab', id)
+  // The restart's setup outlasts the paste's 300 ms wait for its Enter, as on a slow machine; the old process still runs.
+  let setUp!: () => void
+  harness.blockSpawnPlan(new Promise<void>(resolve => { setUp = resolve }))
+  const restarted = harness.request('desktop:restart-tab', id)
+  await pause(400)
+  setUp()
+  await restarted
   await pause(400)
   assert.equal(old.written.length, 2, 'the old process received only the draft and paste')
   assert.deepEqual(harness.spawns[1]?.written, [], 'no old Enter or queued keys reach the replacement')
