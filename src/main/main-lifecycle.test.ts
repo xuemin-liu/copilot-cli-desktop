@@ -52,6 +52,7 @@ interface Harness {
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
+  meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -281,6 +282,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             const timer=setTimeout(()=>{},100000);timer.unref();automaticTurns.set(tabId,{deliveryId:delivery.id,grant,session,timer,stopping:false,authorized:()=>false});
             interruptAutomatic(grant);endAutomatic(tabId,false);
           },
+          meetingWrite: async(id,path,text)=>{meetingHub.effects.write(id,path,text);await meetingWrites.get(id);return meetingWriteFailures.has(id)},
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
           configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
@@ -2690,6 +2692,16 @@ test('a rule investigation launches a restricted dedicated checkout and journals
     await pause(350);assert.equal(spawn.written.at(-1),'\r')
     assert.equal((await h.meetingCommand(tabId,'start',sessionId)).ok,false,'a rule turn is not person authorization')
   }finally{authorized=false;await launch.catch(()=>{})}
+}))
+
+test('a successful write to another meeting file cannot clear a failed snapshot/material write',async()=>fixture(async(h,directory)=>{
+  configure(h,directory)
+  const folder=join(directory,'meetings','K7QF'),blocked=join(folder,'post.md')
+  await mkdir(blocked,{recursive:true})
+  assert.equal(await h.meetingWrite('K7QF',blocked,'material'),true)
+  assert.equal(await h.meetingWrite('K7QF',join(folder,'meeting.json'),'{}'),true)
+  await rm(blocked,{recursive:true})
+  assert.equal(await h.meetingWrite('K7QF',blocked,'material'),false)
 }))
 
 for(const foreign of [false,true])test(`automatic interruption ${foreign?'does not type into a newly bound conversation':'stops the verified original recipient'}`,async()=>fixture(async(h,directory)=>{

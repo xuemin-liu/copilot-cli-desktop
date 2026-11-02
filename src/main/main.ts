@@ -2242,7 +2242,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
 function meetingRoot(): string { return join(app.getPath('userData'), 'meetings') }
 const meetingReaders = new Map<string, MeetingTurnReader>()
 const meetingWrites = new Map<string, Promise<void>>()
-const meetingWriteFailures=new Set<string>()
+const meetingWriteFailures=new Map<string,Set<string>>()
 const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
 let meetingPumpRunning = false
@@ -2372,8 +2372,13 @@ const meetingHub = new MeetingHub(meetingRoot, {
   write: (meetingId, path, text) => {
     // One meeting's files are written in order, so the transcript on disk is always the latest one.
     const previous = meetingWrites.get(meetingId) ?? Promise.resolve()
-    const next = previous.then(() => writeMeetingFile(meetingRoot(), meetingId, path, text)).then(()=>{meetingWriteFailures.delete(meetingId)})
-      .catch((error) => {meetingWriteFailures.add(meetingId);return writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {})})
+    const next = previous.then(() => writeMeetingFile(meetingRoot(), meetingId, path, text)).then(()=>{
+      const failed=meetingWriteFailures.get(meetingId);failed?.delete(path)
+      if(failed?.size===0)meetingWriteFailures.delete(meetingId)
+    }).catch((error) => {
+      const failed=meetingWriteFailures.get(meetingId)??new Set<string>();failed.add(path);meetingWriteFailures.set(meetingId,failed)
+      return writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {})
+    })
     meetingWrites.set(meetingId, next)
   },
   changed: () => {
