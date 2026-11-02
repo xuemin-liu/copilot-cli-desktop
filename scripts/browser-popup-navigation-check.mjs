@@ -112,6 +112,25 @@ if (!process.versions.electron) {
         const activationError = browser.pages.get(entry.id).error
         if (overrideStartupFailure) assert.match(activationError, /Could not activate Local Overrides/)
         else assert.equal(activationError, null, 'ordinary popup overrides activation must succeed')
+        if (overrideStartupFailure) {
+          // A popup window leaves its opener selected (selecting the popup would end the opener's Testing mode),
+          // so the browser panel and page strip must show the popup's error instead.
+          const shown = browser.snapshot
+          assert.equal(shown.activePageId, inWindow ? contents.id : entry.id, 'a popup window leaves its opener selected')
+          assert.match(shown.error ?? '', /Could not activate Local Overrides/, 'the browser panel shows the popup error')
+          assert.match(shown.pages.find(page => page.id === entry.id)?.error ?? '', /Could not activate Local Overrides/, 'the page strip marks the failed popup')
+          assert.equal(shown.errorPageId, inWindow ? entry.id : undefined, 'the desktop can name the popup window the error belongs to')
+          // Titles can carry credentials, so the CLI status names the failed popup by id only.
+          const secret = 'https://title.example.test/view?access_token=review-secret-title-token'
+          await popup.executeJavaScript(`document.title = ${JSON.stringify(secret)}`)
+          await until(() => popup.getTitle() === secret, 'secret-bearing popup title')
+          const control = JSON.parse(await readFile(join(artifacts, 'control.json'), 'utf8'))
+          const status = await (await fetch(`http://127.0.0.1:${control.port}/status`, { headers: { authorization: `Bearer ${control.token}` } })).json()
+          assert.equal(JSON.stringify(status).includes('review-secret-title-token'), false, 'no popup title in CLI status')
+          assert.match(status.error ?? '', /Could not activate Local Overrides/)
+          assert.equal(status.errorPageId, inWindow ? entry.id : undefined)
+          await popup.executeJavaScript(`document.title = '/viewer'`)
+        }
         const overrides = !process.argv.includes('--no-overrides') && !overrideStartupFailure
         assert.equal(await popup.executeJavaScript('document.title'), overrides ? 'overridden viewer' : '/viewer', 'first response uses the configured overrides')
         assert.equal(await popup.executeJavaScript('window.opener.location.pathname'), '/opener', 'opener is preserved')
@@ -139,6 +158,7 @@ if (!process.versions.electron) {
         await contents.executeJavaScript('window.popup.close()')
         await until(() => browser.snapshot.pages.length === 1 && popupWindows().length === 0, 'viewer popup closed')
         browser.action(`select-page:${contents.id}`)
+        assert.equal(browser.snapshot.error, null, 'a closed popup takes its error with it')
       }
       assert.equal(requests.filter(request => request.path === '/viewer').length, 2, 'each viewer document is requested once, without replay')
       assert.equal(requests.filter(request => request.path === '/reused').length, 2)

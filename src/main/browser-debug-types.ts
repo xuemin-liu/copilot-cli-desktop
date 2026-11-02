@@ -37,14 +37,17 @@ export interface BrowserDebugState {
   preserveNetwork: boolean
   activePageId: number
   zoomFactor: number
-  /** `window` marks a page that opened in its own popup window instead of a tab. */
-  pages: { id: number; title: string; url: string; window?: boolean }[]
+  /** `window` marks a page that opened in its own popup window instead of a tab; `error` is that page's own error. */
+  pages: { id: number; title: string; url: string; window?: boolean; error?: string }[]
   url: string
   loading: boolean
   canGoBack: boolean
   canGoForward: boolean
   devtools: boolean
   error: string | null
+  /** Set when `error` belongs to a page in its own popup window rather than to the selected page. Only the desktop
+   * names that page, from `pages`: titles stay out of CLI metadata. */
+  errorPageId?: number
   console: BrowserConsoleEntry[]
   network: BrowserNetworkEntry[]
   sitePermissions: BrowserSitePermission[]

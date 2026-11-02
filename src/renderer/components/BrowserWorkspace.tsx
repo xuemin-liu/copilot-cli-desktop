@@ -18,6 +18,12 @@ const EMPTY_BROWSER: BrowserDebugState = {
   devtools: false, error: null, console: [], network: [], sitePermissions: [], history: [],
 }
 
+/** A popup window's error, named after its page here: the main process keeps titles out of the error itself. */
+function shownError(state: BrowserDebugState): string | null {
+  const page = state.errorPageId === undefined ? undefined : state.pages.find(entry => entry.id === state.errorPageId)
+  return page ? `⧉ ${page.title}: ${state.error}` : state.error
+}
+
 function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: string; obscured: boolean; active: boolean; detached?: boolean }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
@@ -169,8 +175,8 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     </form>
     <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
-        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={page.window ? `${page.url}\nOpen in its own window` : page.url}
-          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
+        <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={[page.url, page.window && 'Open in its own window', page.error].filter(Boolean).join('\n')}
+          onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.error && <span className="browser-page-error" aria-label="Error">⚠ </span>}{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
         <button type="button" aria-label={`Close browser page ${page.title}`} disabled={!page.window && state.pages.filter(entry => !entry.window).length <= 1}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `close-page:${page.id}`))}>×</button>
       </div>)}
@@ -209,7 +215,7 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
       <button type="button" aria-label="Next match" disabled={!state.find?.matches} onClick={() => find(findText, true, true)}>↓</button>
       <button type="button" aria-label="Close find" onClick={closeFind}>×</button>
     </div>}
-    {(error || state.error) && <p className="browser-error" role="alert">{error || state.error}</p>}
+    {(error || state.error) && <p className="browser-error" role="alert">{error || shownError(state)}</p>}
     {(selecting || selection.length > 0) && <div className="browser-selection" role="group" aria-label="Selected elements">
       <p>{selecting ? `Click elements in the page (${selection.length} of ${MAX_PICKED_ELEMENTS}). Press Esc when you are done.` : `${selection.length} element${selection.length === 1 ? '' : 's'} selected.`}</p>
       {selection.length > 0 && <ul>{selection.map((block, index) => <li key={index}><span>{pickedElementLabel(block)}</span>
