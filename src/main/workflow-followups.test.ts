@@ -220,6 +220,27 @@ test('merge completion survives a paused resume baseline but waits for authoriza
   assert.equal(h.completions(),1)
 }))
 
+test('pause during a queued merge refresh preserves the opted-in completion condition',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false,true)
+  h.host.send=async()=> 'busy'
+  h.comment(1);await h.controller.tick()
+  assert.equal(h.journal.list()[0]?.state,'queued')
+  const permission=h.host.permissionKey;let paused=false
+  h.host.permissionKey=task=>paused?null:permission(task)
+  let entered!:()=>void,release!:()=>void
+  const started=new Promise<void>(resolve=>{entered=resolve}),waiting=new Promise<void>(resolve=>{release=resolve})
+  h.advance(10001);h.mergePull();h.blockNext(async()=>{entered();await waiting})
+  const tick=h.controller.tick();await started;paused=true;h.controller.hold('project');release();await tick
+  assert.equal(h.completions(),0)
+  assert.equal(h.journal.list()[0]?.state,'cancelled')
+  assert.equal(h.controller.grant(grant.id)?.enabled,true,'temporary pause keeps the merge condition')
+  assert.equal(h.controller.grant(grant.id)?.health,'needs-person')
+  await h.controller.rebaseline('project');paused=false;await h.controller.tick()
+  assert.equal(h.completions(),1,'completion recovers without re-enrolling the closed PR')
+  assert.equal(h.controller.grant(grant.id)?.enabled,false)
+  assert.deepEqual(h.injected,[])
+}))
+
 test('exhausted continuation budgets cannot prevent opted-in merge completion',async()=>fixture(async h=>{
   const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false,true)
   const writer=new DatabaseSync(join(h.dir,'followups.sqlite'))
