@@ -50,6 +50,7 @@ function decode(value: string): WorkflowTask {
   for (const [key, limit] of [['title',120],['request',4000],['summary',4000],['projectId',128]] as const) {
     if (text(task[key], limit) !== task[key]) throw new Error('Invalid stored workflow text')
   }
+  if(task.awaitingSubmission!==undefined&&typeof task.awaitingSubmission!=='boolean')throw new Error('Invalid task submission state')
   if(task.createdAt!==undefined&&!Number.isFinite(task.createdAt))throw new Error('Invalid task creation time')
   const extra=context(task)
   for(const [key,entry] of Object.entries(extra))if(JSON.stringify(task[key as keyof WorkflowTask])!==JSON.stringify(entry))throw new Error('Invalid stored task context')
@@ -92,9 +93,15 @@ export class WorkflowStore {
   submitted(sessionId: string, projectId: string, request: string, metadata:TaskContext = {}): WorkflowTask {
     if (!isValidSessionId(sessionId)) throw new Error('Invalid session')
     const current = this.active(sessionId)
-    if (current) { const next: WorkflowTask = { ...current, ...context(metadata), outcome: 'working', question:'', updatedAt: Date.now() }; this.save(next); return next }
+    if (current) { const next: WorkflowTask = { ...current, ...context(metadata), outcome: 'working', question:'',...(current.awaitingSubmission?{request:text(request.slice(0,16_000),4000),awaitingSubmission:false}:{}), updatedAt: Date.now() }; this.save(next); return next }
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      const task=this.create(sessionId,projectId,request,metadata)
+      this.db.exec('COMMIT')
+      return task
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+  private create(sessionId:string,projectId:string,request:string,metadata:TaskContext):WorkflowTask {
       if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) {
         this.db.exec('DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE active=0 ORDER BY rowid LIMIT 100)')
         if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) throw new WorkflowTaskLimitError('Finish or end an active task before starting another tracked task.')
@@ -103,9 +110,31 @@ export class WorkflowStore {
       const task: WorkflowTask = { id: randomUUID(), assignmentId: randomUUID(), sessionId, projectId: text(projectId, 128),
         title: clean.slice(0, 120) || 'Task', request: clean, scopeRevision: 1, outcome: 'working', summary: '', validation: [], updatedAt: Date.now(),createdAt:Date.now(),origin:'human',meetingIds:[],question:'',artifacts:[],reports:[],...context(metadata) }
       this.save(task)
-      this.db.exec('COMMIT')
-      return task
-    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return task
+  }
+  /** Explicit bookkeeping only: this never starts a turn, creates a checkout, or grants tools. */
+  manual(sessionId:string,projectId:string,title:string,replace:boolean,metadata:TaskContext={}):WorkflowTask {
+    if(!isValidSessionId(sessionId)||typeof replace!=='boolean'||!text(title,120).trim())throw new Error('Invalid task choice')
+    const previous=this.active(sessionId)
+    if(previous&&!replace)throw new Error('This session already has an active task')
+    if(!previous&&replace)throw new Error('The original task is no longer active')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if(previous)this.finish(previous.id,'cancelled')
+      const task=this.create(sessionId,projectId,'',{...metadata,origin:replace?'human':'adopted'})
+      const next:WorkflowTask={...task,title:text(title,120),outcome:'unknown',awaitingSubmission:true}
+      this.save(next);this.db.exec('COMMIT');return next
+    }catch(error){this.db.exec('ROLLBACK');throw error}
+  }
+  remove(id:string):void {
+    const task=this.list().find(task=>task.id===id)
+    if(!task||!['completed','cancelled'].includes(task.outcome))throw new Error('Only completed or ended task history can be deleted')
+    this.db.prepare('DELETE FROM tasks WHERE id=?').run(id)
+  }
+  manualOutcome(id:string,outcome:import('./workflow-types.js').TaskOutcome):void {
+    const task=this.list().find(task=>task.id===id)
+    if(!task||['completed','cancelled'].includes(task.outcome)||!['unknown','working','needs-input','ready','blocked','failed'].includes(outcome))throw new Error('Invalid manual outcome')
+    this.save({...task,outcome,updatedAt:Date.now()})
   }
   report(sessionId: string, value: unknown): WorkflowTask {
     const current = this.active(sessionId)

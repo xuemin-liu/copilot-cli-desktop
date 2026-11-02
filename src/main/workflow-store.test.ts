@@ -54,6 +54,31 @@ test('v1 tasks migrate with a readable backup and retain host links after resour
     assert.throws(()=>store.report(session,{taskId:original.id,assignmentId:original.assignmentId,scopeRevision:1,outcome:'ready',summary:'x',origin:'automation'}),/Unknown/)
   } finally { store.close();await rm(dir,{recursive:true,force:true}) }
 })
+
+test('manual adoption and replacement stay unknown until submission, rotate assignments and delete only terminal records',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'workflow-manual-')),store=new WorkflowStore(join(dir,'tasks.sqlite'))
+  try {
+    const adopted=store.manual(session,'project','Existing conversation',false,{worktreePath:join(dir,'worktree')})
+    assert.equal(adopted.origin,'adopted');assert.equal(adopted.outcome,'unknown');assert.equal(adopted.request,'')
+    assert.throws(()=>store.manual(session,'project','Duplicate',false),/already/)
+    assert.throws(()=>store.remove(adopted.id),/Only/)
+    assert.throws(()=>store.manual(session,'project','Bad replacement',true,{origin:'invalid' as 'human',branch:'x'.repeat(17_000)}),/Invalid/)
+    assert.equal(store.active(session)?.id,adopted.id,'a failed replacement rolls back the old terminal transition')
+    const next=store.manual(session,'project','New task',true)
+    assert.equal(store.list().find(task=>task.id===adopted.id)?.outcome,'cancelled')
+    assert.notEqual(next.assignmentId,adopted.assignmentId)
+    assert.throws(()=>store.report(session,{taskId:adopted.id,assignmentId:adopted.assignmentId,scopeRevision:1,outcome:'ready',summary:'Old worker'}),/Stale/)
+    store.submitted(session,'project','Actual submitted request')
+    assert.equal(store.active(session)?.request,'Actual submitted request')
+    assert.equal(store.active(session)?.title,'New task')
+    assert.equal(store.active(session)?.outcome,'working')
+    store.manualOutcome(next.id,'ready');assert.equal(store.active(session)?.outcome,'ready')
+    store.remove(adopted.id)
+    assert.equal(store.list().length,1)
+    assert.equal(store.active(session)?.id,next.id)
+    assert.throws(()=>store.manualOutcome(adopted.id,'working'),/Invalid/)
+  }finally{store.close();await rm(dir,{recursive:true,force:true})}
+})
 test('tasks persist, reports bind to assignment, and only manual completion ends a task', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-test-'))
   const path = join(dir, 'workflows.sqlite')
