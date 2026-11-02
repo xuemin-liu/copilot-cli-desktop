@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { WorkflowStore } from './workflow-store.js'
 import { WorkflowTasks } from '../renderer/components/WorkflowTasks.js'
+import {TaskFollowups} from '../renderer/components/WorkflowFollowups.js'
+import type {FollowupDefault} from './workflow-followups.js'
 
 test('an older active task remains reachable after fifty newer tasks complete', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-history-'))
@@ -51,4 +53,15 @@ test('unsupported existing conversations offer manual tracking and supported res
     assert.match(history,/Delete task history/)
     assert.match(history,/sessions, files, worktrees and handoff evidence are kept/)
   }finally{store.close();await rm(dir,{recursive:true,force:true})}
+})
+
+test('project defaults are offered only to newer tasks and still require explicit enrollment',()=>{
+  const defaults:FollowupDefault={revision:'default-revision',projectId:'project',repository:'owner/repo',reviewers:[{id:7,login:'reviewer'}],failedChecks:true,completeOnMerge:true,activatedAt:100}
+  const old=renderToStaticMarkup(<TaskFollowups taskId="old" projectId="project" createdAt={99} projectDefault={defaults} />)
+  const fresh=renderToStaticMarkup(<TaskFollowups taskId="new" projectId="project" createdAt={101} projectDefault={defaults} />)
+  assert.doesNotMatch(old,/Use project defaults for this task/)
+  assert.match(fresh,/Use project defaults for this task/)
+  assert.match(fresh,/Enable follow-ups for this task/)
+  assert.match(fresh,/verified merged/)
+  assert.doesNotMatch(fresh,/<input[^>]*checked=""/,'the template has not silently enabled any checkboxes')
 })

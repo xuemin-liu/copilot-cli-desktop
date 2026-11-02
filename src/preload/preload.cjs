@@ -3,7 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('copilotDesktop', {
   createTask: (tabId,title,replace) => ipcRenderer.invoke('desktop:task-create',tabId,title,replace),
   taskAction: (id, action) => ipcRenderer.invoke('desktop:task-action', id, action),
-  enrollFollowup: (taskId, url, reviewers, checks) => ipcRenderer.invoke('desktop:followup-enroll', taskId, url, reviewers, checks),
+  enrollFollowup: (taskId, url, reviewers, checks,completeOnMerge=false) => ipcRenderer.invoke('desktop:followup-enroll', taskId, url, reviewers, checks,completeOnMerge),
+  saveFollowupDefault:(projectId,url,reviewers,checks,complete)=>ipcRenderer.invoke('desktop:followup-default-save',projectId,url,reviewers,checks,complete),
+  removeFollowupDefault:projectId=>ipcRenderer.invoke('desktop:followup-default-remove',projectId),
   pauseFollowup: (id) => ipcRenderer.invoke('desktop:followup-pause', id),
   configureAutomation: (projectId, repository, template, actors, id) => ipcRenderer.invoke('desktop:automation-configure', projectId, repository, template, actors, id),
   automationAction: (id, action) => ipcRenderer.invoke('desktop:automation-action', id, action),

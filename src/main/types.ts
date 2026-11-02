@@ -174,6 +174,7 @@ export interface DesktopState {
   workflowDeliveries?: import('./workflow-deliveries.js').WorkflowDelivery[]
   workflowDeliveryError?: string | null
   workflowTasks?: import('./workflow-types.js').WorkflowTask[]
+  workflowFollowupDefaults?: import('./workflow-followups.js').FollowupDefault[]
   workflowFollowups?: import('./workflow-followups.js').FollowupGrant[]
   workflowFollowupError?: string | null
   workflowAutomation?: {rules:import('./workflow-automations.js').AutomationRule[];previews:import('./workflow-automations.js').AutomationPreview[]}

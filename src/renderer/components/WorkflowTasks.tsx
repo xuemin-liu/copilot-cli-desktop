@@ -3,10 +3,10 @@ import type { JSX } from 'react'
 import type { WorkflowTask, TaskAction } from '../../main/workflow-types.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { supportsTaskReporting } from '../../main/workflow-capabilities.js'
-import type { FollowupGrant } from '../../main/workflow-followups.js'
+import type { FollowupGrant,FollowupDefault } from '../../main/workflow-followups.js'
 import { TaskFollowups } from './WorkflowFollowups.js'
 
-export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVersion=null,onRestart }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[];tabs?:readonly DesktopSessionTab[];installedCliVersion?:string|null;onRestart?:(tabId:string)=>void }): JSX.Element | null {
+export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],installedCliVersion=null,onRestart }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[];defaults?:readonly FollowupDefault[];tabs?:readonly DesktopSessionTab[];installedCliVersion?:string|null;onRestart?:(tabId:string)=>void }): JSX.Element | null {
   const [failure, setFailure] = useState<string | null>(null)
   const [historyLimit, setHistoryLimit] = useState(50)
   const [sessionChoice,setSessionChoice]=useState(''),[title,setTitle]=useState(''),[pending,setPending]=useState(false)
@@ -29,6 +29,7 @@ export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVe
       <details><summary>Task details</summary>
         <p>{task.request || 'The original submitted request is not available for this manually tracked task.'}</p>
         <p>Origin: {task.origin ?? 'human'}{task.createdAt ? ` · Created ${new Date(task.createdAt).toLocaleString()}` : ''}</p>
+        {task.completion&&<p>{task.completion.kind==='person'?'Completed by the person':`Verified merged: ${task.completion.repository} #${task.completion.number} · Head ${task.completion.head}`} · {new Date(task.completion.at).toLocaleString()}</p>}
         {task.repositoryPath && <p>Repository: {task.repositoryPath}</p>}
         {task.resources&&<p>Session: {task.resources.session} · Worktree: {task.resources.worktree}{task.resources.checkedAt?` (checked ${new Date(task.resources.checkedAt).toLocaleTimeString()})`:''}</p>}
         {task.worktreePath && <p>Last recorded worktree: {task.worktreePath}{task.branch ? ` · ${task.branch}` : ''}</p>}
@@ -61,7 +62,7 @@ export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVe
         })()}
         <button type="button" onClick={() => finish(task.id, 'completed')}>Mark complete</button>
         <button type="button" title="End task tracking; the CLI session keeps running" onClick={() => finish(task.id, 'cancelled')}>End tracking</button>
-        <TaskFollowups taskId={task.id} grant={followups.find(g=>g.taskId===task.id)} />
+        <TaskFollowups taskId={task.id} projectId={task.projectId} createdAt={task.createdAt} projectDefault={defaults.find(value=>value.projectId===task.projectId)} grant={followups.find(g=>g.taskId===task.id)} />
       </>}
       {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>finish(task.id,'delete')}>Delete task history</button>}
     </li>)}</ul>

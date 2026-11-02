@@ -348,6 +348,7 @@ export function App(): JSX.Element {
         meetings={state.meetings ?? []}
         workflowTasks={state.workflowTasks ?? []}
         workflowFollowups={state.workflowFollowups ?? []}
+        workflowFollowupDefaults={state.workflowFollowupDefaults??[]}
         workflowFollowupError={state.workflowFollowupError ?? null}
         workflowAutomation={state.workflowAutomation??{rules:[],previews:[]}}
         workflowAutomaticPaused={state.workflowAutomaticPaused??false}

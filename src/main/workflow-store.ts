@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { isValidSessionId } from './session-id.js'
+import {validGithubRepository} from './workflow-github.js'
 import type { WorkflowTask, TaskContext, TaskArtifact, TaskValidation, TaskReport } from './workflow-types.js'
 
 function text(value: unknown, limit: number): string {
@@ -51,6 +52,12 @@ function decode(value: string): WorkflowTask {
     if (text(task[key], limit) !== task[key]) throw new Error('Invalid stored workflow text')
   }
   if(task.awaitingSubmission!==undefined&&typeof task.awaitingSubmission!=='boolean')throw new Error('Invalid task submission state')
+  if(task.completion!==undefined){
+    const proof=task.completion
+    if(!proof||!['person','pr-merge'].includes(proof.kind)||!Number.isFinite(proof.at))throw new Error('Invalid task completion evidence')
+    if(proof.kind==='pr-merge'&&(!validGithubRepository(proof.repository)||!Number.isSafeInteger(proof.number)||proof.number<1
+      ||!/^[a-f0-9]{40,64}$/.test(proof.head)||!/^[a-f0-9]{40,64}$/.test(proof.base)))throw new Error('Invalid merge completion evidence')
+  }
   if(task.createdAt!==undefined&&!Number.isFinite(task.createdAt))throw new Error('Invalid task creation time')
   const extra=context(task)
   for(const [key,entry] of Object.entries(extra))if(JSON.stringify(task[key as keyof WorkflowTask])!==JSON.stringify(entry))throw new Error('Invalid stored task context')
@@ -165,7 +172,16 @@ export class WorkflowStore {
     const row = this.db.prepare('SELECT value FROM tasks WHERE id=?').get(id) as {value: string} | undefined
     if (!row) throw new Error('Unknown task')
     const task = decode(row.value)
-    this.save({ ...task, outcome, updatedAt: Date.now() })
+    const next:WorkflowTask={...task,outcome,updatedAt:Date.now()}
+    if(outcome==='completed')next.completion={kind:'person',at:Date.now()};else delete next.completion
+    this.save(next)
+  }
+  /** Only the host's positively verified, previously enabled merge condition calls this. */
+  mergeCompleted(id:string,repository:string,number:number,head:string,base:string):void{
+    const task=this.list().find(task=>task.id===id)
+    if(!task||['completed','cancelled'].includes(task.outcome)||!validGithubRepository(repository)||!Number.isSafeInteger(number)||number<1
+      ||!/^[a-f0-9]{40,64}$/.test(head)||!/^[a-f0-9]{40,64}$/.test(base))throw new Error('Invalid verified merge completion')
+    this.save({...task,outcome:'completed',updatedAt:Date.now(),completion:{kind:'pr-merge',repository,number,head,base,at:Date.now()}})
   }
   /** An integration without a report helper can expose turn completion without claiming a successful outcome. */
   unreportedTurn(sessionId:string):void {
