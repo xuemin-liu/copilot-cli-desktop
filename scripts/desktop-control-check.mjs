@@ -153,6 +153,12 @@ function save() { var fso = new ActiveXObject("Scripting.FileSystemObject"); var
       shot = await ok('screenshot', window.id)
       ;[x, y] = find(shot.path, [0xc8, 0x64, 0x32])
       await ok('click', shot.frameId, String(x), String(y))
+      // Enter in a single-line field may move the focus later (a form's next page), so typing stops after it.
+      const lines = join(folder, 'lines.txt')
+      await writeFile(lines, 'ab\ncd')
+      await delay(300)
+      const partial = await ok('type', shot.frameId, '-File', lines)
+      assert.deepEqual([partial.done, partial.typed, partial.remaining], [false, 3, 2], 'typing stops after Enter in a single-line field')
       const tabbed = join(folder, 'tabbed.txt')
       await writeFile(tabbed, '\t\tsecret')
       await delay(300)

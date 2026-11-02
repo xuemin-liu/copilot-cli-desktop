@@ -12,7 +12,7 @@ import {
   type DesktopAppIdentity, type DesktopBlockReason, type DesktopRect,
 } from './desktop-control-rules.js'
 import type { DesktopInputMonitor, DesktopNativeLayer } from './desktop-native.js'
-import type { DesktopNativeWindow } from './desktop-native-types.js'
+import type { DesktopNativeFocus, DesktopNativeWindow } from './desktop-native-types.js'
 
 /** What the renderer shows for one session. */
 export interface DesktopControlTabView {
@@ -98,8 +98,12 @@ const RECENT_INPUT_MS = 1_500
 const MAX_FRAMES = 4
 const MAX_LOG = 200
 const TYPE_CHUNK = 32
-/** Time for the app to move its focus after a Tab or Enter, before the focus is checked again. */
-const FOCUS_SETTLE_MS = 100
+/** How long to wait for the app to show that it moved its focus after a Tab, and how often to look. */
+const FOCUS_MOVE_MS = 1_000
+const FOCUS_POLL_MS = 50
+/** UI Automation's Document control type, where Enter is a new line rather than a submit. */
+const UIA_DOCUMENT = 50030
+const UNKNOWN_FOCUS: DesktopNativeFocus = { pid: null, password: null, id: null, controlType: null }
 const MAX_BODY = 64 * 1024
 const COMMANDS = new Set(['status', 'windows', 'screenshot', 'click', 'move', 'drag', 'scroll', 'type', 'key', 'focus'])
 
@@ -553,6 +557,19 @@ export class DesktopControl {
     return resolved
   }
 
+  /** Whether the focus left the control `from` and then stayed on its new control: the app has processed the Tab. */
+  private async focusMoved(from: string | null): Promise<boolean> {
+    if (from === null) return false
+    let seen: string | null = null
+    for (const end = Date.now() + FOCUS_MOVE_MS; Date.now() < end;) {
+      await new Promise(resolve => setTimeout(resolve, FOCUS_POLL_MS))
+      const now = (await this.native.focused().catch(() => UNKNOWN_FOCUS)).id
+      if (now !== null && now !== from && now === seen) return true
+      seen = now
+    }
+    return false
+  }
+
   private userInputSince(count: number): boolean {
     return this.monitor.read().count !== count
   }
@@ -567,6 +584,8 @@ export class DesktopControl {
     let target: Target
     let perform: () => Promise<void>
     let summary: string
+    /** How much of a type request was sent when it stopped after a Tab or Enter. */
+    let stopped: { typed: number; total: number } | null = null
 
     if (command === 'type' || command === 'key') {
       const chord = command === 'key' ? checked(() => parseDesktopChord(String(body.chord ?? ''), this.host.reservedAccelerators())) : null
@@ -576,23 +595,32 @@ export class DesktopControl {
       target = resolved
       // Before every keystroke batch: still the same window, and not a password field. A Tab or Enter can move the
       // focus, and any key (a letter, or Ctrl+V of a clipboard Copilot set) can enter text, so `key` is checked too.
-      const ready = async (): Promise<void> => {
+      const ready = async (): Promise<DesktopNativeFocus> => {
         const now = this.keyboardTarget(tabId, command, frame, await this.native.windows(), await this.native.foreground(), resolved.window.id)
-        const focused = await this.native.focused().catch(() => ({ pid: null, password: null }))
+        const focused = await this.native.focused().catch(() => UNKNOWN_FOCUS)
         if (focused.pid !== now.window.pid) throw this.refuse(tabId, command, now.name, 'Desktop control could not tell which control has the keyboard focus, so it did not type.', 409)
         if (focused.password !== false) throw this.refuse(tabId, command, now.name, 'The focused control is a password field (or could not be checked), so desktop control did not type. Ask the user to enter it.', 403)
         this.alive(tabId, control)
+        return focused
       }
       summary = command === 'type' ? `Typed ${text.length} characters.` : `Pressed ${[...chord!.modifiers, chord!.key].join('+')}.`
       perform = command === 'type'
         ? async () => {
           const before = this.monitor.read().count
           const segments = typeSegments(text)
+          let sent = 0
           for (const [index, segment] of segments.entries()) {
-            if (index > 0 && /^[\t\n]$/.test(segments[index - 1]!)) await new Promise(resolve => setTimeout(resolve, FOCUS_SETTLE_MS))
-            await ready()
+            const focus = await ready()
             if (this.userInputSince(before)) throw new DesktopControlError('USER_INPUT')
             await this.native.type(segment)
+            sent += segment.length
+            if (index === segments.length - 1 || (segment !== '\t' && segment !== '\n')) continue
+            // SendInput only queues the key, so a check after a fixed wait may run before the app moves its focus.
+            // Go on only where Enter is a new line (a document), or once the app shows it moved the focus for the Tab;
+            // otherwise stop, and the rest is checked again in a new request.
+            if (segment === '\n' ? focus.controlType === UIA_DOCUMENT : await this.focusMoved(focus.id)) continue
+            stopped = { typed: sent, total: text.length }
+            return
           }
         }
         : async () => { await ready(); await this.native.key(chord!.vks) }
@@ -650,9 +678,18 @@ export class DesktopControl {
       throw error
     }
     if (this.userInputSince(before)) this.pause(tabId, 'Paused: the user used the mouse or keyboard during an action.')
+    const partial = stopped as { typed: number; total: number } | null
+    if (partial) summary = `Typed ${partial.typed} of ${partial.total} characters; stopped after a Tab or Enter.`
     this.record(tabId, { command, app: target.name, result: 'ok', message: summary })
     this.host.changed()
-    return { done: true, app: target.name, ...(this.tabs.get(tabId)?.paused ? { paused: true } : {}) }
+    const paused = this.tabs.get(tabId)?.paused ? { paused: true } : {}
+    if (partial) {
+      return {
+        done: false, app: target.name, typed: partial.typed, remaining: partial.total - partial.typed, ...paused,
+        hint: 'Typing stopped after a Tab or Enter, which can move the keyboard focus. Take a new screenshot, check where the focus is, then type the rest.',
+      }
+    }
+    return { done: true, app: target.name, ...paused }
   }
 
   // Loopback endpoint

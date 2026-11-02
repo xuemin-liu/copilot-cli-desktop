@@ -20,7 +20,7 @@ function window(id: string, programPath: string, bounds: DesktopRect, extra: Par
 class FakeNative implements DesktopNativeLayer {
   list: DesktopNativeWindow[] = []
   front: string | null = null
-  focus_: DesktopNativeFocus = { pid: null, password: false }
+  focus_: Pick<DesktopNativeFocus, 'pid' | 'password'> & Partial<DesktopNativeFocus> = { pid: null, password: false }
   actions: string[] = []
   onType: (() => void) | null = null
   async windows(): Promise<DesktopNativeWindow[]> { return this.list.map(entry => ({ ...entry })) }
@@ -33,7 +33,7 @@ class FakeNative implements DesktopNativeLayer {
   async scroll(x: number, y: number, dx: number, dy: number): Promise<void> { this.actions.push(`scroll ${x},${y} ${dx},${dy}`) }
   async key(vks: number[]): Promise<void> { this.actions.push(`key ${vks.join(',')}`) }
   async type(text: string): Promise<void> { this.actions.push(`type ${text}`); this.onType?.() }
-  async focused(): Promise<DesktopNativeFocus> { return this.focus_ }
+  async focused(): Promise<DesktopNativeFocus> { return { id: null, controlType: null, ...this.focus_ } }
   async desktopAvailable(): Promise<boolean> { return true }
   async dispose(): Promise<void> {}
 }
@@ -250,21 +250,59 @@ test('key chords that open launchers or press the app’s own shortcuts are refu
   assert.deepEqual(h.native.actions, ['key 17,83'])
 })
 
+const USER_FIELD = { pid: 11, password: false, id: '42.1', controlType: 50004 }
+const PASSWORD_FIELD = { pid: 11, password: true, id: '42.2', controlType: 50004 }
+
+/** After `type <separator>` is sent, the focus moves to `next` once `delay` ms have passed (the app was busy). */
+function focusMovesAfter(h: Harness, separator: string, next: typeof USER_FIELD, delay: number): void {
+  h.native.onType = () => {
+    if (h.native.actions.at(-1) !== `type ${separator}`) return
+    if (delay === 0) h.native.focus_ = next
+    else setTimeout(() => { h.native.focus_ = next }, delay).unref()
+  }
+}
+
 test('the focus is checked again after every Tab or Enter, and before every key, so nothing reaches a password field', async t => {
   const h = await harness(t)
   const frameId = await notepadReady(h)
-  // Tab (or Enter) moves the focus from the user name to the password field.
-  for (const separator of ['\t', '\n']) {
-    h.native.focus_ = { pid: 11, password: false }
-    h.native.onType = () => { if (h.native.actions.at(-1) === `type ${separator}`) h.native.focus_ = { pid: 11, password: true } }
-    await refused(h.control.handle('tab', 'type', { frameId, text: `alice${separator}hunter2` }), /password field/)
-    assert.deepEqual(h.native.actions, ['type alice', `type ${separator}`])
+  // Tab moves the focus from the user name to the password field, at once or after the app was busy for a while.
+  for (const delay of [0, 150, 600]) {
+    h.native.focus_ = USER_FIELD
+    focusMovesAfter(h, '\t', PASSWORD_FIELD, delay)
+    await refused(h.control.handle('tab', 'type', { frameId, text: 'alice\thunter2' }), /password field/)
+    assert.deepEqual(h.native.actions, ['type alice', 'type \t'])
     h.native.actions.length = 0
   }
+  // Enter in a document is a new line; there too the focus is checked before the next line.
+  h.native.focus_ = { ...USER_FIELD, controlType: 50030 }
+  focusMovesAfter(h, '\n', PASSWORD_FIELD, 0)
+  await refused(h.control.handle('tab', 'type', { frameId, text: 'alice\nhunter2' }), /password field/)
+  assert.deepEqual(h.native.actions, ['type alice', 'type \n'])
+  h.native.actions.length = 0
   h.native.onType = null
+  h.native.focus_ = PASSWORD_FIELD
   // Single keys, with or without Shift, and pasting are refused in a password field too.
   for (const chord of ['h', 'shift+u', '2', 'ctrl+v']) await refused(h.control.handle('tab', 'key', { frameId, chord }), /password field/)
   assert.deepEqual(h.native.actions, [])
+})
+
+test('typing stops after a Tab or Enter when the app does not show that it moved the focus', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  // Enter in a single-line field (a two-step sign-in's next page may focus a password field much later).
+  h.native.focus_ = USER_FIELD
+  focusMovesAfter(h, '\n', PASSWORD_FIELD, 3000)
+  const enter = await h.control.handle('tab', 'type', { frameId, text: 'alice@example.com\nhunter2' })
+  assert.deepEqual({ done: enter.done, typed: enter.typed, remaining: enter.remaining }, { done: false, typed: 18, remaining: 7 })
+  assert.deepEqual(h.native.actions, ['type alice@example.com', 'type \n'])
+  assert.match(h.control.view('tab').log.at(-1)!.message, /Typed 18 of 25 characters; stopped after a Tab or Enter/)
+  h.native.actions.length = 0
+  // A Tab that the app hasn't acted on within a second.
+  focusMovesAfter(h, '\t', PASSWORD_FIELD, 3000)
+  const tab = await h.control.handle('tab', 'type', { frameId, text: 'alice\thunter2' })
+  assert.equal(tab.done, false)
+  assert.deepEqual(h.native.actions, ['type alice', 'type \t'])
+  h.native.onType = null
 })
 
 test('keys go only to the window the frame showed, not to a new dialog of the same app', async t => {

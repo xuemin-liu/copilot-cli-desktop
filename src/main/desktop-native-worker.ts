@@ -12,6 +12,7 @@ const kernel32 = koffi.load('kernel32.dll')
 const advapi32 = koffi.load('advapi32.dll')
 const dwmapi = koffi.load('dwmapi.dll')
 const ole32 = koffi.load('ole32.dll')
+const oleaut32 = koffi.load('oleaut32.dll')
 
 const RECT = koffi.struct('DC_RECT', { left: 'int32', top: 'int32', right: 'int32', bottom: 'int32' })
 const POINT = koffi.struct('DC_POINT', { x: 'int32', y: 'int32' })
@@ -61,6 +62,12 @@ const CoCreateInstance = ole32.func('int32 __stdcall CoCreateInstance(DC_GUID *c
 
 const GetFocusedElement = koffi.proto('int32 __stdcall DC_GetFocusedElement(void *self, _Out_ void **element)')
 const GetIntProperty = koffi.proto('int32 __stdcall DC_GetIntProperty(void *self, _Out_ int *value)')
+const GetRuntimeId = koffi.proto('int32 __stdcall DC_GetRuntimeId(void *self, _Out_ void **array)')
+const SafeArrayGetLBound = oleaut32.func('int32 __stdcall SafeArrayGetLBound(void *array, uint32 dimension, _Out_ int32_t *bound)')
+const SafeArrayGetUBound = oleaut32.func('int32 __stdcall SafeArrayGetUBound(void *array, uint32 dimension, _Out_ int32_t *bound)')
+const SafeArrayAccessData = oleaut32.func('int32 __stdcall SafeArrayAccessData(void *array, _Out_ void **data)')
+const SafeArrayUnaccessData = oleaut32.func('int32 __stdcall SafeArrayUnaccessData(void *array)')
+const SafeArrayDestroy = oleaut32.func('int32 __stdcall SafeArrayDestroy(void *array)')
 const Release = koffi.proto('uint32 __stdcall DC_Release(void *self)')
 
 const GWL_EXSTYLE = -20
@@ -318,17 +325,37 @@ function method(object: unknown, index: number): unknown {
   return koffi.decode(koffi.decode(object, 'void *'), koffi.array('void *', index + 1))[index]
 }
 
-/** The focused control's process and whether it is a password field (IUIAutomationElement::get_CurrentIsPassword). */
+/** IUIAutomationElement::GetRuntimeId, an array of ints that identifies the element while it exists. */
+function runtimeId(element: unknown): string | null {
+  const array: unknown[] = [null]
+  if (koffi.call(method(element, 4), GetRuntimeId, element, array) !== 0 || !array[0]) return null
+  try {
+    const lower = [0]
+    const upper = [0]
+    const data: unknown[] = [null]
+    if (SafeArrayGetLBound(array[0], 1, lower) !== 0 || SafeArrayGetUBound(array[0], 1, upper) !== 0) return null
+    const length = upper[0]! - lower[0]! + 1
+    if (length <= 0 || SafeArrayAccessData(array[0], data) !== 0) return null
+    try { return (koffi.decode(data[0], koffi.array('int32', length)) as number[]).join('.') } finally { SafeArrayUnaccessData(array[0]) }
+  } finally { SafeArrayDestroy(array[0]) }
+}
+
+/**
+ * The focused control's process, whether it is a password field (get_CurrentIsPassword), its runtime id, and its
+ * control type (get_CurrentControlType).
+ */
 function focusedControl(): DesktopNativeFocus {
   const root = uiAutomation()
   const element: unknown[] = [null]
-  if (koffi.call(method(root, 8), GetFocusedElement, root, element) !== 0 || !element[0]) return { pid: null, password: null }
+  if (koffi.call(method(root, 8), GetFocusedElement, root, element) !== 0 || !element[0]) return { pid: null, password: null, id: null, controlType: null }
   try {
     const pid = [0]
     const password = [0]
+    const controlType = [0]
     const pidOk = koffi.call(method(element[0], 20), GetIntProperty, element[0], pid) === 0
     const passwordOk = koffi.call(method(element[0], 35), GetIntProperty, element[0], password) === 0
-    return { pid: pidOk ? pid[0]! : null, password: passwordOk ? password[0] !== 0 : null }
+    const typeOk = koffi.call(method(element[0], 21), GetIntProperty, element[0], controlType) === 0
+    return { pid: pidOk ? pid[0]! : null, password: passwordOk ? password[0] !== 0 : null, id: runtimeId(element[0]), controlType: typeOk ? controlType[0]! : null }
   } finally { koffi.call(method(element[0], 2), Release, element[0]) }
 }
 

@@ -19,7 +19,8 @@ export interface DesktopNativeWindow {
   elevated: boolean | null
 }
 
-export interface DesktopNativeFocus { pid: number | null; password: boolean | null }
+/** The focused control: its process, whether it is a password field, its UI Automation runtime id and control type. */
+export interface DesktopNativeFocus { pid: number | null; password: boolean | null; id: string | null; controlType: number | null }
 
 export type DesktopNativeRequest =
   | { op: 'windows' }
