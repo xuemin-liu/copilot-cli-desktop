@@ -222,6 +222,34 @@ test('a click goes only to the window the frame showed at that point, not to ano
   assert.deepEqual(h.native.actions, [])
 })
 
+test('a window that opens during the last checks is caught right before the click or drag is sent', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  const host = (h.control as unknown as { host: DesktopControlHost }).host
+  const capture = host.capture
+  const cover = window('12', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { className: 'Notepad', pid: 11 })
+  // It opens while the pixels around the point are being compared, and shows the same pixels.
+  host.capture = async (...args) => { h.native.list.unshift(cover); return capture(...args) }
+  await refused(h.control.handle('tab', 'click', { frameId, x: 380, y: 20 }), /^The screen changed; take a new screenshot\.$/)
+  host.capture = capture
+  h.native.list.shift()
+  // A window opens over only the drag's end during the capture.
+  host.capture = async (...args) => { h.native.list.unshift(window('13', NOTEPAD, { x: 400, y: 300, width: 100, height: 100 }, { className: 'Notepad', pid: 11 })); return capture(...args) }
+  await refused(h.control.handle('tab', 'drag', { frameId, x: 50, y: 50, toX: 350, toY: 250 }), /^The screen changed; take a new screenshot\.$/)
+  host.capture = capture
+  h.native.list.shift()
+  // In a full-screen frame the drag ends on Paint; while Paint's approval is asked, a window opens over the drag's end.
+  h.native.list.push(window('20', 'C:\\Program Files\\Paint\\paint.exe', { x: 600, y: 100, width: 300, height: 300 }))
+  h.control.setFullScreen('tab', true)
+  const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  host.approve = async () => {
+    h.native.list.unshift(window('14', NOTEPAD, { x: 600, y: 100, width: 300, height: 300 }, { className: 'Notepad', pid: 11 }))
+    return 'once'
+  }
+  await refused(h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 150, y: 150, toX: 650, toY: 150 }), /^The screen changed; take a new screenshot\.$/)
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
+})
+
 test('typing needs the frame’s app to have the keyboard focus and never goes into a password field', async t => {
   const h = await harness(t)
   const frameId = await notepadReady(h)

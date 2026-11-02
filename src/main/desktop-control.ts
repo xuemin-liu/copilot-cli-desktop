@@ -632,27 +632,36 @@ export class DesktopControl {
         if (!await this.patchUnchanged(frame, windows, body.x as number, body.y as number)) {
           throw this.refuse(tabId, command, target.name, 'The screen changed around that point; take a new screenshot.', 409)
         }
-        const hit = this.hitTest(windows, point)
-        const now = hit ? this.target(hit) : null
-        if (!now || 'blocked' in now || now.window.id !== target.window.id || !this.sameWindowAt(frame, now.window, point)) {
-          throw this.refuse(tabId, command, target.name, 'The screen changed; take a new screenshot.', 409)
-        }
       }
+      // The last check, with the windows as they are right before dispatch (a window may have opened during the
+      // capture or an approval): each point is still on the window the frame showed there.
+      const settled = async (points: Array<{ at: { x: number; y: number }; windowId: string }>): Promise<void> => {
+        const now = await this.native.windows()
+        for (const { at, windowId } of points) {
+          const hit = this.hitTest(now, at)
+          const current = hit ? this.target(hit) : null
+          if (!current || 'blocked' in current || current.window.id !== windowId || !this.sameWindowAt(frame, current.window, at)) {
+            throw this.refuse(tabId, command, target.name, 'The screen changed; take a new screenshot.', 409)
+          }
+        }
+        this.alive(tabId, control)
+      }
+      const start = [{ at: point, windowId: target.window.id }]
       if (command === 'click') {
         const button = body.button === undefined ? 'left' : body.button
         if (button !== 'left' && button !== 'right' && button !== 'middle') throw new DesktopControlError('The button is left, right or middle.')
         const count = body.double === true ? 2 : 1
         summary = `${count === 2 ? 'Double-clicked' : 'Clicked'} ${button} at ${body.x},${body.y}.`
-        perform = () => this.native.click(point.x, point.y, button, count)
+        perform = async () => { await settled(start); await this.native.click(point.x, point.y, button, count) }
       } else if (command === 'move') {
         summary = `Moved the pointer to ${body.x},${body.y}.`
-        perform = () => this.native.move(point.x, point.y)
+        perform = async () => { await settled(start); await this.native.move(point.x, point.y) }
       } else if (command === 'scroll') {
         const dx = Number(body.dx ?? 0)
         const dy = Number(body.dy ?? 0)
         if (![dx, dy].every(value => Number.isInteger(value) && Math.abs(value) <= 20) || (dx === 0 && dy === 0)) throw new DesktopControlError('Scroll by whole steps between -20 and 20 (dy down is positive).')
         summary = `Scrolled ${dx},${dy} at ${body.x},${body.y}.`
-        perform = () => this.native.scroll(point.x, point.y, dx, dy)
+        perform = async () => { await settled(start); await this.native.scroll(point.x, point.y, dx, dy) }
       } else {
         const to = checked(() => framePointToScreen(frame, body.toX, body.toY))
         const end = this.hitTest(windows, to)
@@ -661,7 +670,7 @@ export class DesktopControl {
         if (!this.sameWindowAt(frame, endTarget.window, to)) throw this.refuse(tabId, command, endTarget.name, 'A different window is where the drag ends now; take a new screenshot.', 409)
         await this.approveApp(tabId, control, command, endTarget)
         summary = `Dragged from ${body.x},${body.y} to ${body.toX},${body.toY}.`
-        perform = () => this.native.drag(point, to)
+        perform = async () => { await settled([...start, { at: to, windowId: endTarget.window.id }]); await this.native.drag(point, to) }
       }
     }
 
