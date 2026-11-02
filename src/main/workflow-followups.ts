@@ -187,6 +187,8 @@ export class WorkflowFollowups {
         const snapshot=observations.get(grant.id)
         if(!snapshot)continue
         if(this.stopped)return
+        const refreshed=this.grant(grant.id),refreshedTask=this.host.task(grant.taskId)
+        if(!refreshed?.enabled||!refreshedTask||!this.intakeAuthorized(refreshed,refreshedTask))continue
         if(!snapshot.open){this.settleClosed(grant,snapshot);continue}
         if(!this.authorized(grant))continue
         if(delivery.batch){if(!this.batchCurrent(delivery,snapshot,grant)){this.reconcileBatch(delivery,snapshot,grant);continue}}
