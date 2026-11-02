@@ -17,6 +17,12 @@ handle, only input/output/resize events.
 
 ## Features
 
+- **Task outcomes** (Copilot CLI 1.0.105) track submitted work locally and accept structured ready/blocked/question reports
+  through the session helper. The Tasks section shows recorded outcomes; Mark complete is a person action. End tracking
+  leaves the CLI running. Existing conversation history is not adopted automatically. Reporting is optional, is requested
+  once at the final handoff, and uses current shell permissions, so an approval may be needed. Report files stay in the
+  helper folder and are removed by the helper. Side chats, read-only/remote sessions, and unsupported CLI versions do
+  not receive reporting instructions or create tracked tasks.
 - **Needs you** collects approvals, crashed sessions, and paused review meetings across open projects. Open an item
   to reach its session; seeing it does not dismiss the underlying approval or question.
 - **Export and import your setup** from Settings → Migration: move CLI settings,

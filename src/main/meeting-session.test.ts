@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest } from './meeting-session.js'
 import { shareablePatch } from './meeting-messages.js'
+import { supportsTaskReporting } from './workflow-capabilities.js'
 
 function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
   return new Promise((resolvePost, reject) => {
@@ -19,6 +20,37 @@ function post(port: number, path: string, headers: Record<string, string>, body:
     outgoing.end(body)
   })
 }
+
+test('only supported local shell-capable sessions receive task reporting instructions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'task-instructions-'))
+  const server = new MeetingControlServer(() => ({ ok:true, message:'Reported' }))
+  try {
+    const control = await server.register('task-tab')
+    const cases = [
+      {version:'1.0.82',sideChat:false,preset:'default' as const},
+      {version:'1.0.105',sideChat:true,preset:'read-only' as const},
+      {version:'1.0.105',sideChat:false,preset:'read-only' as const},
+      {version:'1.0.105',sideChat:false,preset:'default' as const,remote:true},
+      {version:'1.0.105',sideChat:false,preset:'default' as const},
+    ]
+    for (const [index, capability] of cases.entries()) {
+      const dir = join(root,String(index))
+      const env = await prepareMeetingSessionEnvironment(dir,control,process.env,capability)
+      const instructions = await readFile(join(dir,'.github','instructions','meeting.instructions.md'),'utf8')
+      assert.equal(instructions.includes('Reporting is optional'),supportsTaskReporting(capability))
+      if (!supportsTaskReporting(capability)) continue
+      assert.match(instructions,/ONE shell invocation/)
+      assert.match(instructions,/can require the person's approval/)
+      const file = join(env.COPILOT_DESKTOP_TASK_REPORT_DIR!, 'report-11111111-1111-4111-8111-111111111111.json')
+      await writeFile(file,'{}')
+      const args = process.platform === 'win32'
+        ? ['-NoProfile','-ExecutionPolicy','Bypass','-File',env.COPILOT_DESKTOP_MEETING_HELPER!,'task-report','-File',file]
+        : [env.COPILOT_DESKTOP_MEETING_HELPER!,'task-report','-File',file]
+      await new Promise<void>((resolve,reject) => execFile(process.platform === 'win32' ? 'powershell.exe' : 'sh',args,{env,windowsHide:true},error => error ? reject(error) : resolve()))
+      await assert.rejects(stat(file),{code:'ENOENT'})
+    }
+  } finally { await server.close(); await rm(root,{recursive:true,force:true}) }
+})
 
 test('the meeting endpoint knows each session by its own token and turns away everything else', async () => {
   const calls: Array<{ tabId: string; command: MeetingCommand; request: MeetingRequest }> = []

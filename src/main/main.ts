@@ -1,4 +1,6 @@
+import { supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID } from 'node:crypto'
+import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
@@ -618,6 +620,20 @@ function writeSessionLog(tabId: string, chunk: string): Promise<void> {
   return operation
 }
 
+let workflowStore: WorkflowStore | null = null
+let workflowError: string | null = null
+let workflowNotice: string | null = null
+function workflows(): WorkflowStore | null {
+  if (!app.isReady() || workflowError) return null
+  try { return workflowStore ??= new WorkflowStore(join(app.getPath('userData'), 'workflows.sqlite')) }
+  catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return null }
+}
+
+function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
+  try { return workflowStore?.list() ?? [] }
+  catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
+}
+
 function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopState {
   return {
     ...state,
@@ -630,6 +646,8 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     recentLogs: [...state.recentLogs],
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
+    workflowTasks: workflowViews(),
+    workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
     desktopControlReadyTabIds: [...desktopControlTabs],
@@ -1652,7 +1670,7 @@ async function startSessionTab(
     if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
     plan.env = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
   }
   finally { pendingSessionCreations-- }
@@ -2277,6 +2295,20 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
       if (command !== 'start') session.commitSessionBinding()
     }
     switch (command) {
+      case 'task-status':
+      case 'task-report': {
+        if (!supportsTaskReporting({ version: currentTab.cliVersion, sideChat: Boolean(currentTab.sideChat), remote: currentTab.remote, preset: currentTab.sessionPermissionPreset })) return { ok: false, message: 'This session does not support task reporting.' }
+        const binding = callerSession?.bindingDiagnostic
+        if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
+          return { ok: false, message: 'Task reports require one verified foreground CLI session.' }
+        const store = workflows()
+        if (!store) return { ok: false, message: workflowError ?? 'Task tracking is unavailable.' }
+        try {
+          const task = command === 'task-report' ? store.report(request.sessionId, JSON.parse(request.text)) : store.active(request.sessionId)
+          broadcastState()
+          return { ok: Boolean(task), message: task ? JSON.stringify({ taskId: task.id, assignmentId: task.assignmentId, scopeRevision: task.scopeRevision, outcome: task.outcome }) : 'No active task is tracked.' }
+        } catch { return { ok: false, message: 'Invalid, stale, or foreign task report.' } }
+      }
       case 'start': {
         const session = callerSession
         if (!session || managedTabs.get(tabId)?.session !== session || session.status !== 'running') return { ok: false, message: 'This session is not running. Resume it from the desktop.' }
@@ -2333,6 +2365,16 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
+  const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
+  const session = managedTabs.get(tabId)?.session
+  if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
+    try { workflows()?.submitted(tab.lastSessionId, tab.workspaceProfileId, prompt.content); workflowNotice = null; broadcastState() }
+    catch (error) {
+      if (error instanceof WorkflowTaskLimitError) workflowNotice = error.message
+      else workflowError = 'Task tracking could not save this request. Your terminal session remains usable.'
+      broadcastState()
+    }
+  }
   const request = joinRequest(prompt.content)
   if (!request) return
   const { id } = request
@@ -2649,7 +2691,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset })
     // The restarted process starts with control off; the person turns it on again.
     await desktopControl?.disable(tabId, 'Turned off: the session restarted.')
     plan.env = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
@@ -4080,6 +4122,15 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
   managedTabs.get(tabId)?.session.write(data)
   return { gitCursorContextAttached: false }
 })
+ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): void => {
+  assertTrustedIpcSender(event)
+  if (typeof id !== 'string' || !isValidSessionId(id) || (action !== 'completed' && action !== 'cancelled')) throw new Error('Invalid task action')
+  const store = workflows()
+  if (!store) throw new Error('Task tracking is unavailable')
+  store.finish(id, action)
+  workflowNotice = null
+  broadcastState()
+})
 /** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
 ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown, role: unknown): Promise<void> => {
   assertTrustedIpcSender(event)
@@ -4786,6 +4837,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('activate', restoreMainWindow)
 
   app.whenReady().then(async () => {
+    workflows()
     // Opened from Finder or a launcher, the app lacks the PATH the person's shell sets up, where the Copilot CLI and Git live.
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
@@ -4990,3 +5042,5 @@ app.on('will-quit', () => {
 app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
+
+app.once('will-quit', () => { workflowStore?.close(); workflowStore = null })

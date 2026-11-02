@@ -346,6 +346,8 @@ export function App(): JSX.Element {
         profiles={state.profiles}
         tabs={state.tabs}
         meetings={state.meetings ?? []}
+        workflowTasks={state.workflowTasks ?? []}
+        workflowError={state.workflowError ?? null}
         installedCliVersion={state.resolution?.version ?? null}
         activeProfileId={state.activeProfileId}
         activeTabId={state.activeTabId}

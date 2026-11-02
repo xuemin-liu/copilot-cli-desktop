@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('copilotDesktop', {
+  taskAction: (id, action) => ipcRenderer.invoke('desktop:task-action', id, action),
   getState: () => ipcRenderer.invoke('desktop:get-state'),
   browserOpen: (tabId) => ipcRenderer.invoke('desktop:browser-open', tabId),
   browserState: (tabId) => ipcRenderer.invoke('desktop:browser-state', tabId),
