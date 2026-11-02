@@ -10,9 +10,9 @@ handoffs, and automation preview.
 
 ## What the person does
 
-The first three infrastructure/UI phases work without setting up a bot or writing automation rules. Automatic work
-from GitHub events requires an explicit opt-in. Nobody has to copy review messages between sessions or restart a
-workflow after every turn.
+Phases 1–3 (Needs you, task outcomes, and durable handoffs) work without setting up a bot or writing automation rules.
+Phase 0 verifies integration capabilities. Automatic work from GitHub events requires an explicit opt-in. Nobody has
+to copy review messages between sessions or restart a workflow after every turn.
 
 | Capability | Built-in behavior | Person's involvement |
 | --- | --- | --- |
@@ -108,6 +108,22 @@ Inject the reporting instructions when a task-capable session starts. Older sess
 reporting surface keep existing terminal behavior and show outcome Unknown; offer Resume with task support. Do not
 parse natural-language summaries as authoritative commands. Manual outcome changes remain available.
 
+### Workflow text and credentials
+
+Treat requests, task titles, report summaries, questions, validation labels, artifact URLs, and GitHub event/review/CI
+text as untrusted and potentially credential-bearing. Redact workflow-owned copies in main before persistence or
+display, including task records, event summaries, delivery text, previews, attention cards, IPC, diagnostics, and
+exports. Reuse `redactDiagnosticText` and the existing credential-masking conventions; bound and clean text as well.
+Persist command/check names as redacted labels, not full command lines with arguments. Do not capture raw CI logs,
+source payloads, or an unredacted backup alongside a sanitized record. Failure diagnostics must not log rejected raw
+input. This requirement applies to workflow-owned data; it does not rewrite the CLI's existing transcript.
+
+Use source IDs and revisions to retrieve additional context through existing permission checks when needed; a
+redacted display/audit summary is not an executable command. Masking is best effort, so minimize stored text and do
+not describe it as a guarantee that arbitrary secrets can be detected. OS notifications contain only a bounded,
+redacted task title (or a generic fallback) and an app-defined reason such as "Needs approval" or "Ready for review".
+Never include request, question, report, review, CI, or command text in a notification body or title.
+
 ### Attention
 
 Attention is a projection of existing approval state, task reports, meeting state, and delivery/source failures.
@@ -192,7 +208,8 @@ cannot be correlated safely, automatic delivery remains disabled for that path; 
 
 Exit: a failed session, pending approval, and waiting meeting each produce the correct single actionable entry;
 clearing the source state clears its reason; restart does not re-notify old evidence. Include renderer fixtures and
-an isolated real-Electron check with screenshots, including multiple projects and a popped-out session.
+an isolated real-Electron check with screenshots, including multiple projects and a popped-out session. Notification
+fixtures verify that only the redacted title and app-defined reason reach the OS notification API.
 
 ### Phase 2: task records and outcomes
 
@@ -205,6 +222,9 @@ an isolated real-Electron check with screenshots, including multiple projects an
 Exit: an ordinary new task is tracked without extra setup; a worker can report ready, blocked, or a question; forged,
 stale, oversized, and foreign-assignment reports are rejected; idle/exit/replay never imply success. Restart, session
 switch, worktree deletion, and tab closure keep stable identity and expose missing resources without recreating them.
+Use synthetic credential-bearing request/report/title/question/validation/URL fixtures to verify redaction before
+workflow persistence and presentation, including attention/IPC/diagnostics/exports and rejected-input errors. Inspect
+stored records and outward payloads, not only rendered text; notifications expose no report or question content.
 
 ### Phase 3: durable handoffs
 
@@ -243,6 +263,10 @@ Exit: one eligible review/check event wakes the intended worker once; busy promp
 network/restart races reconcile correctly. Bots, duplicate events, paused/completed tasks, unrelated PRs, and
 out-of-scope requests do not start work. After completion, new feedback requires explicit reopening/re-enrollment.
 Use mocked GitHub fixtures and the local model; any live GitHub smoke check uses an explicitly selected test PR.
+Feed synthetic credential-bearing review/CI/event text through ingestion, persistence, queued delivery, preview, and
+attention paths. Assert that secrets and raw payloads do not survive in workflow records, diagnostics, or outward UI
+payloads, and that notifications contain only the redacted title and app-defined reason. Phase 5 reuses these checks
+for rule-created tasks and previews.
 
 ### Phase 5: preview and rule-based task creation
 
@@ -268,7 +292,8 @@ overlap, duplicate events, pause/restart, exhausted limits, and already-owned wo
 Test state transitions and race boundaries, not labels alone. Required implementation coverage includes report
 authentication, native session rebinding, old-log replay, cancellation before/after queuing, draft preservation,
 duplicate delivery, crash recovery, source pagination/version changes, reviewer identity, rate limiting, and permission
-revocation while queued or active. Use explicit barriers for races and an isolated profile/loopback model for Electron
+revocation while queued or active, plus credential redaction before persistence and presentation. Use explicit barriers
+for races and an isolated profile/loopback model for Electron
 checks; avoid paid model requests in routine regression runs. Run typecheck, relevant unit tests, and existing meeting,
 binding, fan-out, and worktree checks when their paths change. Confirm the docs-only PR with diff/link checks.
 
