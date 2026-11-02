@@ -1,5 +1,8 @@
 import { supportsTaskReporting } from './workflow-capabilities.js'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
+import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
+import { githubCliApi } from './workflow-github.js'
+import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -626,6 +629,88 @@ let deliveryError: string | null = null
 let workflowStore: WorkflowStore | null = null
 let workflowError: string | null = null
 let workflowNotice: string | null = null
+let followups: WorkflowFollowups | null = null
+let followupError: string | null = null
+let followupOpening: Promise<WorkflowFollowups> | null = null
+const automaticTurns = new Map<string, { deliveryId:string; grant:FollowupGrant; session:PtySession; timer:NodeJS.Timeout; stopping:boolean }>()
+function followupTab(task: import('./workflow-types.js').WorkflowTask): DesktopSessionTab | null {
+  const matches=tabsState.tabs.filter(tab=>tab.lastSessionId===task.sessionId)
+  return matches.length===1&&matches[0]!.workspaceProfileId===task.projectId?matches[0]!:null
+}
+function followupPermission(task: import('./workflow-types.js').WorkflowTask):string|null {
+  if(shuttingDown()||workflowError||deliveryError)return null
+  const tab=followupTab(task),session=tab?managedTabs.get(tab.id)?.session:null
+  if(!tab||!session||!session.sessionCwd||!supportsTaskReporting({version:tab.cliVersion,sideChat:Boolean(tab.sideChat),remote:tab.remote,preset:tab.sessionPermissionPreset}))return null
+  // Unlike manual meeting delivery, unattended work requires positively established ownership.
+  const binding=session.bindingDiagnostic
+  if(binding.kind!=='bound'||binding.sessionId!==task.sessionId||!binding.deliveryReady)return null
+  return createHash('sha256').update(JSON.stringify([task.sessionId,task.projectId,session.sessionCwd,tab.cliVersion,tab.sessionPermissionPreset,tab.sessionPermissionMode])).digest('hex')
+}
+function interruptAutomatic(grant:FollowupGrant):void {
+  for(const [tabId,run] of automaticTurns)if(run.grant.id===grant.id&&!run.stopping){
+    run.stopping=true;clearTimeout(run.timer)
+    deliveryJournal?.uncertain(run.deliveryId)
+    if(managedTabs.get(tabId)?.session===run.session)run.session.write('\x03')
+  }
+}
+function endAutomatic(tabId:string,answered:boolean):void {
+  const run=automaticTurns.get(tabId)
+  if(!run)return
+  clearTimeout(run.timer);automaticTurns.delete(tabId)
+  meetingReaders.get(tabId)?.cancelExpectedDesktopPrompt()
+  const delivery=deliveryJournal?.get(run.deliveryId)
+  const bound=managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.grant.sessionId&&run.session.bindingDiagnostic.kind==='bound'
+  if(answered&&bound&&!run.stopping&&delivery?.state==='submitted')deliveryJournal?.answered(run.deliveryId)
+  else deliveryJournal?.uncertain(run.deliveryId)
+  broadcastState()
+}
+function followupViews(): FollowupGrant[] {
+  try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
+  catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
+}
+async function openFollowups():Promise<WorkflowFollowups> {
+  if(followups)return followups
+  if(followupOpening)return followupOpening
+  followupOpening=(async()=>{
+    if(!deliveryJournal||deliveryError||!workflows())throw new Error('Workflow storage is unavailable')
+    const api=await githubCliApi(app.getPath('userData'))
+    if(shuttingDown())throw new Error('Desktop is closing')
+    const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
+      api,journal:deliveryJournal,task:id=>workflowViews().find(task=>task.id===id)??null,permissionKey:followupPermission,
+      verifyRepository:async(task,pr)=>{
+        const tab=followupTab(task),folder=tab?managedTabs.get(tab.id)?.session.sessionCwd:null,runner=await meetingGitRunner()
+        if(!folder||!runner)throw new Error('Open the local task checkout first')
+        await verifyWorkflowCheckout(folder,pr,runner,gitTrustStore())
+      },
+      ready:grant=>{
+        const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null
+        return Boolean(tab&&!automaticTurns.has(tab.id)&&!meetingOutbox.inTurn(tab.id)&&!meetingOutbox.readyTabs().includes(tab.id)
+          &&[...automaticTurns.values()].filter(run=>run.grant.projectId===grant.projectId).length<2)
+      },
+      send:async(delivery,grant)=>{
+        const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null,session=tab?managedTabs.get(tab.id)?.session:null
+        if(!tab||!session||!meetingPromptSettled(tab.id))return 'busy'
+        const ready=await session.prepareMeetingDelivery(grant.sessionId)
+        if(!ready()||!controller.authorized(grant)||automaticTurns.has(tab.id)||meetingOutbox.inTurn(tab.id)||meetingOutbox.readyTabs().includes(tab.id)
+          ||[...automaticTurns.values()].filter(run=>run.grant.projectId===grant.projectId).length>=2)return 'busy'
+        const result=sendSessionTask(tab.id,delivery.text,true,{
+          beforePaste:()=>{
+            if(!ready()||!controller.authorized(grant)||!deliveryJournal?.begin(delivery.id,()=>controller.authorized(grant)))return false
+            const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},10*60_000);timer.unref()
+            automaticTurns.set(tab.id,{deliveryId:delivery.id,grant,session,timer,stopping:false})
+            meetingReader(tab.id).expectDesktopPrompt()
+            return true
+          },
+          beforeEnter:()=>controller.authorized(grant)&&managedTabs.get(tab.id)?.session===session&&!automaticTurns.get(tab.id)?.stopping,
+          aborted:()=>endAutomatic(tab.id,false),
+        })
+        return result.result==='sent'?'sent':'busy'
+      },interrupt:interruptAutomatic,changed:()=>broadcastState(),
+    })
+    followups=controller;followupError=null;controller.start();return controller
+  })()
+  try{return await followupOpening}finally{followupOpening=null}
+}
 function workflows(): WorkflowStore | null {
   if (!app.isReady() || workflowError) return null
   try { return workflowStore ??= new WorkflowStore(join(app.getPath('userData'), 'workflows.sqlite')) }
@@ -655,6 +740,8 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
     workflowTasks: workflowViews(),
+    workflowFollowups: followupViews(),
+    workflowFollowupError: followupError,
     workflowDeliveries: deliveryViews(),
     workflowDeliveryError: deliveryError,
     workflowError: workflowError ?? workflowNotice,
@@ -1968,7 +2055,8 @@ function sendSessionRename(tabId: string, closing = false): boolean {
  * typed in the prompt box and no key pressed just now. Keys pressed meanwhile are held back, then passed on in order. When
  * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
  */
-function sendSessionTask(tabId: string, text: string, needsWrite = true): SessionTaskSend {
+function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void}): SessionTaskSend {
+  if(!hooks&&automaticTurns.has(tabId))return {result:'busy',message:'An automatic task turn is still running.'}
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -1988,6 +2076,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true): Sessio
     bracketedPaste: session.bracketedPaste,
   }, needsWrite)
   if (decision.result !== 'sent') return decision
+  if(hooks&&!hooks.beforePaste())return {result:'busy',message:'Authorization changed.'}
   const held: string[] = []
   heldInput.set(tabId, held)
   const holding = (): boolean => heldInput.get(tabId) === held
@@ -2002,7 +2091,10 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true): Sessio
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
   setTimeout(() => {
-    if (holding() && managedTabs.get(tabId)?.session === session) { session.write('\r'); promptDrafts.get(tabId)?.note('\r') }
+    if (holding() && managedTabs.get(tabId)?.session === session) {
+      if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r')}
+      else {session.write('\x03');draft.note('\x03');hooks.aborted()}
+    } else hooks?.aborted()
     release()
   }, 300)
   return decision
@@ -2091,12 +2183,13 @@ async function pumpMeetingOutbox(): Promise<void> {
 
 const meetingOutbox = new MeetingOutbox({
   sendTask: (tabId, text) => {
+    if(automaticTurns.has(tabId)||deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
     // A session restored with its meeting is still starting: its messages wait instead of being dropped.
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (tab && !tab.unloaded && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
     return sendSessionTask(tabId, text, false)
   },
-  sendCommand: (tabId, command) => meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
+  sendCommand: (tabId, command) => !automaticTurns.has(tabId) && !deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)) && meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
   sent: (tabId) => meetingReader(tabId).expectDesktopPrompt(),
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
@@ -2375,6 +2468,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
+  endAutomatic(tabId,false)
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
   if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
@@ -2401,11 +2495,13 @@ function onMeetingIdle(tabId: string): void {
   const turn = meetingReaders.get(tabId)?.finish() ?? null
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
+  endAutomatic(tabId,Boolean(turn?.desktop))
   if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
   scheduleMeetingPump(0)
 }
 
 function forgetMeetingSession(tabId: string): void {
+  endAutomatic(tabId,false)
   sessionLastOutputAt.delete(tabId)
   meetingHub.leave(tabId)
   meetingOutbox.forget(tabId)
@@ -4146,8 +4242,20 @@ ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): voi
   const store = workflows()
   if (!store) throw new Error('Task tracking is unavailable')
   store.finish(id, action)
+  for(const grant of followupViews().filter(g=>g.taskId===id&&g.enabled))followups?.pause(grant.id)
   workflowNotice = null
   broadcastState()
+})
+ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown,reviewers:unknown,checks:unknown):Promise<void>=>{
+  assertTrustedIpcSender(event)
+  if(typeof taskId!=='string'||typeof url!=='string'||!Array.isArray(reviewers)||!reviewers.every(r=>typeof r==='string')||typeof checks!=='boolean')throw new Error('Invalid follow-up settings')
+  const controller=await openFollowups()
+  await controller.enroll(taskId,url,reviewers,checks);broadcastState()
+})
+ipcMain.handle('desktop:followup-pause', (event,id:unknown):void=>{
+  assertTrustedIpcSender(event)
+  if(typeof id!=='string'||!isValidSessionId(id)||!followups)throw new Error('Unknown enrollment')
+  followups.pause(id);broadcastState()
 })
 /** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
 ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, action: unknown, tabId: unknown, role: unknown): Promise<void> => {
@@ -4860,6 +4968,7 @@ if (!app.requestSingleInstanceLock()) {
     catch { deliveryError = 'Handoff history is unavailable; automatic delivery is disabled.' }
     // Opened from Finder or a launcher, the app lacks the PATH the person's shell sets up, where the Copilot CLI and Git live.
     if (process.platform !== 'win32') process.env.PATH = await desktopPosixPath()
+    if(existsSync(join(app.getPath('userData'),'workflow-followups.sqlite')))void openFollowups().catch(()=>{followupError='Follow-ups are unavailable. Check GitHub CLI access and restart Desktop.';broadcastState()})
     setInterval(() => observe(refreshWorktreeBranches(), 'Could not read a worktree branch'), WORKTREE_BRANCH_POLL_MS).unref()
     setInterval(() => observe(refreshSessionNames(), 'Could not read session names'), SESSION_NAME_POLL_MS).unref()
     app.setName('Copilot CLI Desktop')
@@ -5063,4 +5172,4 @@ app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
 
-app.once('will-quit', () => { workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })
+app.once('will-quit', () => { followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })

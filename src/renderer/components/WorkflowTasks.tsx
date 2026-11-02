@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
 import type { WorkflowTask } from '../../main/workflow-types.js'
+import type { FollowupGrant } from '../../main/workflow-followups.js'
+import { TaskFollowups } from './WorkflowFollowups.js'
 
-export function WorkflowTasks({ tasks, error }: { tasks: readonly WorkflowTask[]; error?: string | null }): JSX.Element | null {
+export function WorkflowTasks({ tasks, error,followups=[] }: { tasks: readonly WorkflowTask[]; error?: string | null;followups?:readonly FollowupGrant[] }): JSX.Element | null {
   const [failure, setFailure] = useState<string | null>(null)
   const [historyLimit, setHistoryLimit] = useState(50)
   if (!tasks.length && !error) return null
@@ -19,6 +21,7 @@ export function WorkflowTasks({ tasks, error }: { tasks: readonly WorkflowTask[]
       {task.outcome !== 'completed' && task.outcome !== 'cancelled' && <>
         <button type="button" onClick={() => finish(task.id, 'completed')}>Mark complete</button>
         <button type="button" title="End task tracking; the CLI session keeps running" onClick={() => finish(task.id, 'cancelled')}>End tracking</button>
+        <TaskFollowups taskId={task.id} grant={followups.find(g=>g.taskId===task.id)} />
       </>}
     </li>)}</ul>
   return <details className="needs-you"><summary>Tasks · {tasks.length}</summary>

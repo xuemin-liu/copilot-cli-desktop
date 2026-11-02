@@ -173,6 +173,8 @@ export interface DesktopState {
   workflowDeliveries?: import('./workflow-deliveries.js').WorkflowDelivery[]
   workflowDeliveryError?: string | null
   workflowTasks?: import('./workflow-types.js').WorkflowTask[]
+  workflowFollowups?: import('./workflow-followups.js').FollowupGrant[]
+  workflowFollowupError?: string | null
   workflowError?: string | null
   /** Runtime window placement, never persisted as session configuration. */
   poppedOutTabIds?: string[]

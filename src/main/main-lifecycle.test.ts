@@ -49,6 +49,7 @@ interface Harness {
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
   enableTasks(tabId: string): void
+  automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -259,6 +260,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           enableTasks: (tabId) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = '1.0.105'; workflows(); },
+          automaticPaste: (tabId,authorized) => sendSessionTask(tabId,'bounded automatic continuation',true,{
+            beforePaste:authorized,beforeEnter:authorized,aborted:()=>meetingReader(tabId).cancelExpectedDesktopPrompt(),
+          }),
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
           configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
@@ -2609,6 +2613,24 @@ test('a History session whose workspace is removed while its worktree is looked 
   })
 })
 
+
+test('automatic paste uses production draft gates and rechecks authorization before Enter without losing held person input',async()=>fixture(async(h,directory)=>{
+  configure(h,directory)
+  const tab=(await h.createMain()).activeTabId!,spawn=h.spawns[0]!
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await h.request('desktop:write-tab',tab,'draft')
+  assert.equal(h.automaticPaste(tab,()=>true).result,'busy')
+  assert.deepEqual(spawn.written,['draft'])
+  await h.request('desktop:write-tab',tab,'\x03')
+  await pause(2_100)
+  let authorized=true
+  assert.equal(h.automaticPaste(tab,()=>authorized).result,'sent')
+  await h.request('desktop:write-tab',tab,'next person draft')
+  authorized=false
+  await pause(350)
+  assert.deepEqual(spawn.written.slice(-3),['\x1b[200~bounded automatic continuation\x1b[201~','\x03','next person draft'])
+  assert.ok(!spawn.written.includes('\r'),'revocation prevents submission')
+}))
 
 test('task reports require the owned current assignment and cannot complete tasks', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
