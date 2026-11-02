@@ -48,7 +48,8 @@ interface Harness {
   checkMigrationIdle(): void
   configure(config: DesktopConfig, capabilities: CopilotCapabilities): void
   createMain(): Promise<DesktopState>
-  meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string): Promise<MeetingResponse>
+  enableTasks(tabId: string): void
+  meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
@@ -257,7 +258,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
-          meetingCommand: (tabId, command, sessionId) => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text: 'Test proposal body', changes: null,
+          enableTasks: (tabId) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = '1.0.105'; workflows(); },
+          meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
           configureBinding: (tabId, rootPid, pids) => { managedTabs.get(tabId).session.bindingReader = new BindingReaderForTest(
             copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
@@ -302,7 +304,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { clearTimeout(updateQuitTimer); await stopAllSessions(); clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowError = 'test cleanup'; workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions(); clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -2606,3 +2608,35 @@ test('a History session whose workspace is removed while its worktree is looked 
     assert.ok(state.tabs.every((tab) => tab.workspaceProfileId !== second.id && tab.lastSessionId !== sessionId))
   })
 })
+
+
+test('task reports require the owned current assignment and cannot complete tasks', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const path = join(directory, 'session-state', SOURCE, 'events.jsonl')
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, line('session.start', { sessionId: SOURCE, startTime: new Date().toISOString(), context: { cwd: directory } }))
+  profile.tabs = [{ title: 'Resumed', lastSessionId: SOURCE }]
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  await harness.restoreSaved()
+  const tabId = (await harness.request('desktop:get-state')).activeTabId!
+  harness.enableTasks(tabId)
+  harness.configureBinding(tabId, 7700, [7700])
+  await writeFile(join(dirname(path), 'inuse.7700.lock'), '')
+  await harness.meetingCommand(tabId, 'task-status', SOURCE)
+  assert.equal((await harness.request('desktop:get-state')).workflowTasks?.length, 0, 'history is not a new task')
+  await appendFile(path, line('user.message', { content: 'Fix token=fixture-secret', interactionId: 'work' }) + line('assistant.turn_start', { turnId: 'work' }))
+  const status = await harness.meetingCommand(tabId, 'task-status', SOURCE)
+  assert.equal(status.ok, true, status.message)
+  const binding = JSON.parse(status.message)
+  const report = { ...binding, outcome: 'ready', summary: 'Ready', validation: [{name:'unit checks',status:'passed'}] }
+  assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify({...report,assignmentId:'foreign'}))).ok, false)
+  assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify(report))).ok, true)
+  const tasks = (await harness.request('desktop:get-state')).workflowTasks!
+  assert.equal(tasks.length, 1)
+  assert.equal(tasks[0]!.outcome, 'ready')
+  assert.equal(tasks[0]!.request, 'Fix token=[REDACTED]')
+  assert.equal((await harness.meetingCommand(tabId, 'task-report', SOURCE, JSON.stringify({...report,outcome:'completed'}))).ok, false)
+  await harness.request('desktop:task-action', tasks[0]!.id, 'completed')
+  assert.equal((await harness.request('desktop:get-state')).workflowTasks?.[0]?.outcome, 'completed')
+}))

@@ -13,6 +13,7 @@ export function WorkflowTasks({ tasks, error }: { tasks: readonly WorkflowTask[]
     {(error || failure) && <p role="status">{error || failure}</p>}
     <ul>{tasks.slice(0, 50).map(task => <li key={task.id}>
       <strong>{task.title}</strong><span>{task.outcome}</span><p>{task.summary}</p>
+      <button type="button" onClick={() => { void window.copilotDesktop.openSessionHistory(task.sessionId).catch(() => setFailure('The linked session could not be opened.')) }}>Open session</button>
       {task.validation.map((check, index) => <span key={index}>{check.name}: {check.status}</span>)}
       {task.outcome !== 'completed' && task.outcome !== 'cancelled' && <>
         <button type="button" onClick={() => finish(task.id, 'completed')}>Mark complete</button>
