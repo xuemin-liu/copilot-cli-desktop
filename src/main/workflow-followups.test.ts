@@ -16,7 +16,7 @@ async function setup() {
   const tasks=new WorkflowStore(join(dir,'tasks.sqlite'))
   const task=tasks.submitted('session','project','Fix the existing checkout bug')
   const journal=new WorkflowDeliveries(join(dir,'deliveries.sqlite'))
-  let now=Date.parse('2026-11-02T12:00:00Z'),open=true,interrupts=0,allowed=true
+  let now=Date.parse('2026-11-02T12:00:00Z'),open=true,interrupts=0,allowed=true,requests=0
   const comments:object[]=[]
   const injected:string[]=[]
   let block:(()=>Promise<void>)|null=null
@@ -25,6 +25,7 @@ async function setup() {
     permissionKey:()=>allowed?'a'.repeat(64):null,verifyRepository:async()=>{},now:()=>now,changed:()=>{},
     interrupt:()=>{interrupts++},
     api:async path=>{
+      requests++
       if(path==='users/reviewer')return {id:7,login:'reviewer'}
       if(path==='repos/owner/repo/pulls/1'){
         if(block){const wait=block;block=null;await wait()}
@@ -42,7 +43,7 @@ async function setup() {
   }
   controller=new WorkflowFollowups(join(dir,'followups.sqlite'),host)
   return {dir,tasks,task,journal,controller,host,injected,interrupts:()=>interrupts,
-    advance:()=>{now+=120_001},closePull:()=>{open=false},revoke:()=>{allowed=false},
+    advance:(milliseconds=120001)=>{now+=milliseconds},requests:()=>requests,closePull:()=>{open=false},revoke:()=>{allowed=false},
     blockNext:(wait:()=>Promise<void>)=>{block=wait},
     comment:(id:number,actor=7,commit=head)=>comments.push({id,user:{id:actor},body:`Feedback ${id}`,updated_at:new Date(now+1).toISOString(),commit_id:commit}),
   }
@@ -146,4 +147,22 @@ test('project/global holds cancel pending work and resume baselines feedback col
   h.host.ready=()=>true;h.advance();await h.controller.tick()
   assert.equal(h.injected.length,0)
   h.comment(3);h.advance();await h.controller.tick();assert.equal(h.injected.length,1)
+}))
+test('busy follow-up attempts coalesce observations and back off without multiplying source reads',async()=>fixture(async h=>{
+  await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  let attempts=0;h.host.send=async()=>{attempts++;return 'busy'}
+  for(let id=1;id<=3;id++)h.comment(id)
+  const before=h.requests();await h.controller.tick()
+  assert.equal(h.requests()-before,14,'one intake and one fresh dispatch observation, shared across the queue')
+  assert.equal(attempts,1)
+  const after=h.requests();await h.controller.tick();assert.equal(h.requests(),after)
+  h.advance(10001);await h.controller.tick();assert.equal(h.requests()-after,7)
+  const next=h.requests();h.advance(10001);await h.controller.tick();assert.equal(h.requests(),next,'second busy attempt backs off for twenty seconds')
+}))
+test('an unresolved journal receipt blocks further refreshes for its destination',async()=>fixture(async h=>{
+  await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  for(let id=1;id<=3;id++)h.comment(id)
+  await h.controller.tick();const before=h.requests()
+  h.advance(10001);await h.controller.tick();h.advance(10001);await h.controller.tick()
+  assert.equal(h.requests(),before);assert.equal(h.injected.length,1)
 }))
