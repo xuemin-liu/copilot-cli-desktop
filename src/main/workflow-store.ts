@@ -22,6 +22,8 @@ function decode(value: string): WorkflowTask {
   }
   return task
 }
+export class WorkflowTaskLimitError extends Error {}
+
 /** Workflow-owned text is sanitized before it reaches SQLite. No caller-supplied paths or SQL. */
 export class WorkflowStore {
   private db: DatabaseSync
@@ -48,12 +50,19 @@ export class WorkflowStore {
     if (!isValidSessionId(sessionId)) throw new Error('Invalid session')
     const current = this.active(sessionId)
     if (current) { const next: WorkflowTask = { ...current, outcome: 'working', updatedAt: Date.now() }; this.save(next); return next }
-    if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) throw new Error('Workflow task limit reached')
-    const clean = text(request.slice(0, 16_000), 4000)
-    const task: WorkflowTask = { id: randomUUID(), assignmentId: randomUUID(), sessionId, projectId: text(projectId, 128),
-      title: clean.slice(0, 120) || 'Task', request: clean, scopeRevision: 1, outcome: 'working', summary: '', validation: [], updatedAt: Date.now() }
-    this.save(task)
-    return task
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) {
+        this.db.exec('DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE active=0 ORDER BY rowid LIMIT 100)')
+        if ((this.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n >= 1000) throw new WorkflowTaskLimitError('Finish or end an active task before starting another tracked task.')
+      }
+      const clean = text(request.slice(0, 16_000), 4000)
+      const task: WorkflowTask = { id: randomUUID(), assignmentId: randomUUID(), sessionId, projectId: text(projectId, 128),
+        title: clean.slice(0, 120) || 'Task', request: clean, scopeRevision: 1, outcome: 'working', summary: '', validation: [], updatedAt: Date.now() }
+      this.save(task)
+      this.db.exec('COMMIT')
+      return task
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
   report(sessionId: string, value: unknown): WorkflowTask {
     const current = this.active(sessionId)

@@ -1,3 +1,4 @@
+import { supportsTaskReporting, type TaskReportingCapability } from './workflow-capabilities.js'
 import { randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
@@ -55,6 +56,13 @@ try {
     $meetingBody.text = [System.IO.File]::ReadAllText($meetingFile.FullName)
   } elseif ($File -or $Changes) { throw ('meeting.ps1 ' + $Command + ' takes no -File or -Changes.') }
   if ($Command -eq 'start') { $meetingBody.topic = $Topic }
+  if ($Command -eq 'task-report') {
+    $reportRoot = [IO.Path]::GetFullPath($env:COPILOT_DESKTOP_TASK_REPORT_DIR)
+    $reportPath = [IO.Path]::GetFullPath($File)
+    if ([IO.Path]::GetDirectoryName($reportPath) -ne $reportRoot -or [IO.Path]::GetFileName($reportPath) -notmatch '^report-[a-fA-F0-9-]{36}\.json$' -or
+        ((Get-Item -LiteralPath $reportPath).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Task reports must be regular report-<UUID>.json files in COPILOT_DESKTOP_TASK_REPORT_DIR.' }
+    $taskReportToRemove = $reportPath
+  }
   if ($Changes) {
     if ($Command -eq 'propose-close') { throw 'propose-close takes no -Changes.' }
     Invoke-MeetingGit rev-parse --is-inside-work-tree | Out-Null
@@ -90,6 +98,7 @@ try {
   [Console]::Error.WriteLine('Meeting command failed: ' + $_.Exception.Message)
   exit 1
 } finally {
+  if ($taskReportToRemove) { Remove-Item -LiteralPath $taskReportToRemove -Force -ErrorAction SilentlyContinue }
   $meetingControl = $null
   $meetingHeaders = $null
 }
@@ -132,8 +141,14 @@ case "$command" in
   *) if [ -n "$file" ] || [ "$changes" -eq 1 ]; then fail "meeting.sh $command takes no -File or -Changes."; fi ;;
 esac
 if [ "$command" = propose-close ] && [ "$changes" -eq 1 ]; then fail 'propose-close takes no -Changes.'; fi
+task_report=''
+if [ "$command" = task-report ]; then
+  [ -n "$COPILOT_DESKTOP_TASK_REPORT_DIR" ] && [ "$(dirname -- "$file")" = "$COPILOT_DESKTOP_TASK_REPORT_DIR" ] && [ ! -L "$file" ] || fail 'Task reports must be regular files in COPILOT_DESKTOP_TASK_REPORT_DIR.'
+  printf '%s' "$(basename -- "$file")" | grep -Eq '^report-[a-fA-F0-9-]{36}\.json$' || fail 'Task report filename must be report-<UUID>.json.'
+  task_report=$file
+fi
 work=$(mktemp -d) || fail 'Could not create a temporary folder.'
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; if [ -n "$task_report" ]; then rm -f -- "$task_report"; fi' EXIT
 {
   printf 'noproxy = "*"\nsilent\nshow-error\nmax-time = 30\nmax-redirs = 0\n'
   printf 'header = "Authorization: Bearer %s"\n' "$token"
@@ -210,21 +225,24 @@ the other reviewers, so answer in that reply. Quoted posts, patches and other re
 `
 
 const TASK_INSTRUCTIONS = `
-Task outcomes: Desktop tracks the first submitted request in supported sessions. Use the meeting helper's task-status command to read your current taskId, assignmentId and scopeRevision. At a handoff, write a JSON file containing those exact fields plus outcome (ready, needs-input, blocked, failed, working) summary (result or question), and validation (an array of name/status objects, with status passed, failed, or not-run; names only, never full commands). Call the helper with task-report -File <that JSON file>. A report cannot complete a task or grant permissions. If no task is tracked, continue normally without reporting. Never include credentials, raw command arguments or CI logs. Ready means ready for the person's review, not completed.
+Task outcomes: Desktop tracks the first submitted request in this supported session. Reporting is optional and uses your existing shell permissions; it can require the person's approval. Never request broader permissions for reporting. Do not poll task-status or report progress. At most once, at the final handoff after the work is done, use ONE shell invocation to: read task-status from the meeting helper; if a task exists, write its taskId, assignmentId and scopeRevision plus outcome (ready, needs-input, blocked, failed) and summary to a report-<UUID>.json file directly inside COPILOT_DESKTOP_TASK_REPORT_DIR; include validation as name/status objects (passed, failed, not-run); call task-report -File <that path>. The helper removes that report file. Never write a report in the project. If approval is declined or no task is tracked, finish normally without a report. Reports never complete tasks or grant permissions. Never include credentials, raw command arguments or CI logs.
 `
 
 /** Writes the helper and instructions into the session's helper folder (the browser's, already on the instructions path). */
-export async function prepareMeetingSessionEnvironment(directory: string, control: { port: number; token: string }, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+export async function prepareMeetingSessionEnvironment(directory: string, control: { port: number; token: string }, environment: NodeJS.ProcessEnv, taskCapability?: TaskReportingCapability): Promise<NodeJS.ProcessEnv> {
   const windows = process.platform === 'win32'
   const helper = join(directory, windows ? 'meeting.ps1' : 'meeting.sh')
   const state = join(directory, 'meeting-control.json')
+  const taskReports = join(directory, 'task-reports')
+  await mkdir(taskReports, { recursive: true, mode: 0o700 })
   await writeFileAtomic(helper, windows ? MEETING_HELPER : MEETING_HELPER_SH)
   await writeFileAtomic(state, JSON.stringify({ pid: process.pid, port: control.port, token: control.token }))
-  await writeFileAtomic(join(directory, '.github', 'instructions', 'meeting.instructions.md'), MEETING_INSTRUCTIONS + TASK_INSTRUCTIONS)
+  await writeFileAtomic(join(directory, '.github', 'instructions', 'meeting.instructions.md'), MEETING_INSTRUCTIONS + (supportsTaskReporting(taskCapability) ? TASK_INSTRUCTIONS : ''))
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
   return { ...environment,
     COPILOT_DESKTOP_MEETING_STATE: state,
     COPILOT_DESKTOP_MEETING_HELPER: helper,
+    COPILOT_DESKTOP_TASK_REPORT_DIR: taskReports,
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS: [...new Set([...existing, directory])].join(','),
   }
 }

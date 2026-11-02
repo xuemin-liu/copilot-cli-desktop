@@ -1,5 +1,6 @@
+import { supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID } from 'node:crypto'
-import { WorkflowStore } from './workflow-store.js'
+import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
@@ -624,6 +625,7 @@ let deliveryJournal: WorkflowDeliveries | null = null
 let deliveryError: string | null = null
 let workflowStore: WorkflowStore | null = null
 let workflowError: string | null = null
+let workflowNotice: string | null = null
 function workflows(): WorkflowStore | null {
   if (!app.isReady() || workflowError) return null
   try { return workflowStore ??= new WorkflowStore(join(app.getPath('userData'), 'workflows.sqlite')) }
@@ -655,7 +657,7 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     workflowTasks: workflowViews(),
     workflowDeliveries: deliveryViews(),
     workflowDeliveryError: deliveryError,
-    workflowError,
+    workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
     desktopControlReadyTabIds: [...desktopControlTabs],
@@ -1678,7 +1680,7 @@ async function startSessionTab(
     if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
     plan.env = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
   }
   finally { pendingSessionCreations-- }
@@ -2305,6 +2307,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
     switch (command) {
       case 'task-status':
       case 'task-report': {
+        if (!supportsTaskReporting({ version: currentTab.cliVersion, sideChat: Boolean(currentTab.sideChat), remote: currentTab.remote, preset: currentTab.sessionPermissionPreset })) return { ok: false, message: 'This session does not support task reporting.' }
         const binding = callerSession?.bindingDiagnostic
         if (!request.sessionId || binding?.kind !== 'bound' || binding.sessionId !== request.sessionId || !callerSession?.sessionBindingReady)
           return { ok: false, message: 'Task reports require one verified foreground CLI session.' }
@@ -2374,9 +2377,13 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
-  if (tab && !tab.remote && tab.cliVersion === '1.0.105' && tab.lastSessionId && session?.sessionBindingReady) {
-    try { workflows()?.submitted(tab.lastSessionId, tab.workspaceProfileId, prompt.content); broadcastState() }
-    catch { workflowError = 'Task tracking could not save this request. Your terminal session remains usable.' }
+  if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
+    try { workflows()?.submitted(tab.lastSessionId, tab.workspaceProfileId, prompt.content); workflowNotice = null; broadcastState() }
+    catch (error) {
+      if (error instanceof WorkflowTaskLimitError) workflowNotice = error.message
+      else workflowError = 'Task tracking could not save this request. Your terminal session remains usable.'
+      broadcastState()
+    }
   }
   const request = joinRequest(prompt.content)
   if (!request) return
@@ -2694,7 +2701,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
-    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env)
+    plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset })
     // The restarted process starts with control off; the person turns it on again.
     await desktopControl?.disable(tabId, 'Turned off: the session restarted.')
     plan.env = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
@@ -4139,6 +4146,7 @@ ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): voi
   const store = workflows()
   if (!store) throw new Error('Task tracking is unavailable')
   store.finish(id, action)
+  workflowNotice = null
   broadcastState()
 })
 /** The person's controls for a meeting: stop it, let a paused one go on, add a session, open its transcript. */
