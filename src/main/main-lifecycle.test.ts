@@ -2656,7 +2656,7 @@ test('automatic paste uses production draft gates and rechecks authorization bef
   assert.ok(!spawn.written.includes('\r'),'revocation prevents submission')
 }))
 
-test('a rule investigation launches a restricted dedicated checkout through a filesystem alias and journals its task before automatic input',async t=>fixture(async(h,directory)=>{
+for(const unverifiedBeforeEnter of [false,true])test(`a rule investigation through a filesystem alias ${unverifiedBeforeEnter?'refuses Enter for an unverifiable recipient':'submits its verified recipient'}`,async t=>fixture(async(h,directory)=>{
   const git=await findGitForTests();if(!git){t.skip('Git unavailable');return}
   const {execFileSync}=await import('node:child_process')
   const repo=join(directory,'project');await mkdir(repo)
@@ -2671,6 +2671,7 @@ test('a rule investigation launches a restricted dedicated checkout through a fi
   assert.equal(h.spawns.length,0,'a checkout refusal is proven before session/worktree creation')
   await writeFile(join(repo,'a.txt'),'one')
   let authorized=true
+  if(unverifiedBeforeEnter)h.deferTaskEnter()
   const launch=h.launchInvestigation(profile.id,plain('rev-parse','HEAD').trim(),()=>authorized)
   void launch.catch(()=>{})
   // Ensure a failed fixture cannot leave its production wait loop running for 90 seconds.
@@ -2698,7 +2699,11 @@ test('a rule investigation launches a restricted dedicated checkout through a fi
     assert.equal(snapshot.workflowDeliveries?.[0]?.state,'submitted')
     assert.ok(!JSON.stringify(snapshot.workflowTasks).includes('fixture-secret'))
     assert.ok(!JSON.stringify(snapshot.workflowDeliveries).includes('fixture-secret'))
-    await pause(350);assert.equal(spawn.written.at(-1),'\r')
+    if(unverifiedBeforeEnter){
+      h.makeBindingUnreadable(tabId);await h.refreshRecords(tabId);h.flushTaskEnter()
+      assert.ok(!spawn.written.includes('\r'),'automatic Enter still requires a verified recipient')
+      assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'uncertain')
+    }else{await pause(350);assert.equal(spawn.written.at(-1),'\r')}
     assert.equal((await h.meetingCommand(tabId,'start',sessionId)).ok,false,'a rule turn is not person authorization')
   }finally{authorized=false;await launch.catch(()=>{})}
 }))

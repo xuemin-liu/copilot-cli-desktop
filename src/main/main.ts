@@ -715,7 +715,7 @@ async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,au
                 const grant:FollowupGrant={id:rule.revision,taskId:task.id,sessionId,projectId:rule.projectId,scopeRevision:task.scopeRevision,permissionKey:rule.scopeKey,
                   repository:rule.repository,number:1,reviewers:[],failedChecks:false,enabled:true,activatedAt:Date.now(),seen:{},head:event.head,headCounts:{},total:1,health:'watching',checks:'absent'}
                 const mode=tab.sessionPermissionMode
-                const stillAuthorized=():boolean=>authorized()&&managedTabs.get(tabId)?.session===session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId
+                const stillAuthorized=():boolean=>authorized()&&session.sessionBindingReady&&managedTabs.get(tabId)?.session===session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId
                   &&tabsState.tabs.find(t=>t.id===tabId)?.sessionPermissionPreset==='read-only'&&tabsState.tabs.find(t=>t.id===tabId)?.sessionPermissionMode===mode
                   &&store.active(sessionId)?.id===task.id
                 const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},10*60_000);timer.unref()
