@@ -128,7 +128,7 @@ export class WorkflowFollowups {
         if(!this.authorized(grant))continue
         try {
           const sent=await this.host.send(delivery,grant)
-          if(sent==='sent')this.host.journal.submitted(delivery.id)
+          if(sent==='sent'){this.host.journal.submitted(delivery.id);this.host.changed()}
         } catch {if(!this.stopped){this.host.journal.uncertain(delivery.id);this.health(grant,'needs-person')}}
       }
     } finally {this.busy=false}
