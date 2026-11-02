@@ -151,6 +151,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           destroy() { if (!this.destroyed) { this.destroyed = true; this.emit('closed'); } }
         };
         export const clipboard = {}, dialog = {}, globalShortcut = { isRegistered: () => false }, nativeImage = {}, Notification = { isSupported: () => false }, safeStorage = {}, Tray = {};
+        // Desktop control starts only on Windows and is exercised by its own tests and desktop-control-check.mjs.
+        export const powerMonitor = { on() {} }, screen = { on() {}, off() {} }, desktopCapturer = {};
         export const browserStorageClears = [];
         export const session = { fromPartition(partition) {
           return Object.fromEntries(['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'].map(operation =>

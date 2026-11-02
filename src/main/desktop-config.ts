@@ -36,12 +36,14 @@ export interface DesktopConfig {
   meetingRoundTimeoutMinutes: number
   /** After a meeting round's reviews are in, each reviewer reads the others' and answers them before the host sees all of it. */
   meetingDiscussion: boolean
+  /** Lets a session that starts while this is on use desktop control, which the person still turns on per session (Windows only). */
+  desktopControl: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl'
 >
 
 /**
@@ -115,6 +117,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   meetingMaxRounds: DEFAULT_MEETING_MAX_ROUNDS,
   meetingRoundTimeoutMinutes: DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES,
   meetingDiscussion: false,
+  desktopControl: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -343,6 +346,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     meetingMaxRounds: normalizeMeetingMaxRounds(value.meetingMaxRounds),
     meetingRoundTimeoutMinutes: normalizeMeetingRoundTimeoutMinutes(value.meetingRoundTimeoutMinutes),
     meetingDiscussion: value.meetingDiscussion === true,
+    desktopControl: value.desktopControl === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

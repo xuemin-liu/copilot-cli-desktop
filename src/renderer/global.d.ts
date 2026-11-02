@@ -91,6 +91,11 @@ export interface CopilotDesktopBridge {
   dockTab(tabId: string): Promise<DesktopState>
   popOutBrowser(tabId: string): Promise<DesktopState>
   dockBrowser(tabId: string): Promise<DesktopState>
+  /** Turn desktop control on or off for a session; only the person can, from this window. */
+  desktopControlSet(tabId: string, enabled: boolean): Promise<DesktopState>
+  desktopControlResume(tabId: string): Promise<DesktopState>
+  desktopControlRevoke(tabId: string, appKey: string): Promise<DesktopState>
+  desktopControlFullScreen(tabId: string, allowed: boolean): Promise<DesktopState>
   /** From a session's browser window: paste into that session's prompt box in the window that shows its terminal. */
   browserInsertPrompt(tabId: string, detail: { text: string } | { image: true }): Promise<boolean>
   /** Answer whether a terminal pane in this window took the insert. */

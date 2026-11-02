@@ -623,7 +623,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -825,6 +825,27 @@ export function SettingsApp(): JSX.Element | null {
           With two or more reviewers, each one reads the others' replies to a round and answers them in one more turn; the host
           then gets the reviews and that discussion together. It costs one more turn per reviewer per round. Votes are not
           discussed. Off by default.
+        </p>
+      </section>
+
+      <section>
+        <h2>Desktop control</h2>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.desktopControl}
+            disabled={!isWindows}
+            onChange={(event) => updatePreference({ desktopControl: event.target.checked })}
+          />
+          Let sessions use the mouse and keyboard in other apps when I turn it on for them
+        </label>
+        <p className="settings-disclaimer">
+          {isWindows ? '' : 'Desktop control is available on Windows only. '}
+          Sessions that start while this is on get a desktop control helper; it stays off in each session until you turn it on
+          from the session's toolbar. Copilot then sees and uses only apps you approve. It can never control this app, terminals,
+          File Explorer, Start, sign-in or password windows, or administrator windows, and it never types into password fields.
+          A banner shows while it is on, and Ctrl+Alt+Shift+X stops it anywhere. Turning this off turns desktop control off in
+          every session. Off by default.
         </p>
       </section>
 
