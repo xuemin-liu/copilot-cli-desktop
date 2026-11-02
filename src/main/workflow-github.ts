@@ -9,7 +9,7 @@ export interface GithubFeedback {
   source: string; version: string; actorId: number | null; kind: 'review' | 'ci'; body: string; head: string | null; at: number
 }
 export interface GithubSnapshot {
-  repository: string; headRepository: string; branch: string; head: string; base: string; open: boolean;
+  repository: string; headRepository: string; branch: string; head: string; base: string; open: boolean; merged?:boolean;
   checks: 'absent' | 'pending' | 'failed' | 'complete'; feedback: GithubFeedback[]
 }
 export function validGithubRepository(value: string): boolean {
@@ -65,7 +65,7 @@ export async function readGithubPull(api: GithubApi, repository: string, number:
   const headSha = string(head.sha), baseSha = string(base.sha)
   if (!/^[a-f0-9]{40,64}$/.test(headSha) || !/^[a-f0-9]{40,64}$/.test(baseSha)) throw new Error('Invalid GitHub revision')
   const result: GithubSnapshot = {repository, headRepository: head.repo ? string(record(head.repo).full_name) : '',
-    branch:string(head.ref),head:headSha,base:baseSha,open:pull.state==='open',checks:'absent',feedback:[]}
+    branch:string(head.ref),head:headSha,base:baseSha,open:pull.state==='open',merged:pull.merged===true,checks:'absent',feedback:[]}
   if (!result.open) return result
   const [inline, conversation, reviews, checks, statuses] = await Promise.all([
     rows(api,`${path}/comments?per_page=100`), rows(api,`${root}/issues/${number}/comments?per_page=100`),

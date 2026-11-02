@@ -26,6 +26,7 @@ if (!process.versions.electron) {
     window.fixture = { calls: [], openChanges: [], errors: [], views: [] };
     // Stands in for the preload bridge: the View menu's sidebar choices arrive and are reported here.
     window.copilotDesktop = {
+      enrollFollowup:(taskId,url,reviewers,checks,complete)=>{window.fixture.calls.push({kind:'followup',taskId,url,reviewers,checks,complete});return Promise.resolve();},
       openSessionHistory: id => {window.fixture.calls.push('history:'+id);return window.fixture.failHistory?Promise.reject(new Error('Unavailable')):Promise.resolve();},
       createTask:(tabId,title,replace)=>{window.fixture.calls.push({kind:'createTask',tabId,title,replace});return Promise.resolve();},
       taskAction:(id,action)=>{window.fixture.calls.push({kind:'taskAction',id,action});return Promise.resolve();},
@@ -52,9 +53,10 @@ if (!process.versions.electron) {
       const [attentionTabs, setAttentionTabs] = useState([]);
       window.setAttentionTabs = setAttentionTabs;
       const [tasks,setTasks]=useState([]);window.setTasks=setTasks;
+      const [defaults,setDefaults]=useState([]);window.setDefaults=setDefaults;
       window.setCollapsed = setCollapsed;
       return <>
-        <Sidebar profiles={profiles} tabs={attentionTabs} workflowTasks={tasks} activeProfileId="project-1" activeTabId={null}
+        <Sidebar profiles={profiles} tabs={attentionTabs} workflowTasks={tasks} workflowFollowupDefaults={defaults} activeProfileId="project-1" activeTabId={null}
           installedCliVersion={null} canOpenTab collapsed={collapsed}
           onProjectsOpenChange={recordOpen} onToggleCollapsed={() => setCollapsed(value => !value)}
           onSelectWorkspace={() => window.fixture.calls.push('add')}
@@ -295,6 +297,21 @@ if (!process.versions.electron) {
       await until(`document.querySelector('.needs-you[aria-label="Needs you"]').textContent.includes('The session is unavailable')`,'missing history retains a visible task and failure')
       await writeFile(join(artifacts,'closed-task-attention.png'),(await window.webContents.capturePage()).toPNG())
       checks.push('Closed-session task attention opens History and preserves missing-session recovery')
+      await ui(`window.setDefaults([{revision:'revision-a',projectId:'project-1',repository:'owner/repo',reviewers:[{id:7,login:'reviewer'}],failedChecks:true,completeOnMerge:true,activatedAt:100}]);window.setTasks(tasks=>tasks.map(task=>({...task,createdAt:101})))`)
+      await until(`document.querySelector('.workflow-followups').textContent.includes('Use project defaults')`,'new task is offered its project template')
+      await ui(`document.querySelector('.workflow-followups').open=true`)
+      assert.equal(await ui(`!![...document.querySelectorAll('.workflow-followups input[type=checkbox]')].find(input=>input.checked)`),false,'offered defaults remain unaccepted')
+      await click('.workflow-followups form button[type=button]')
+      await until(`[...document.querySelectorAll('.workflow-followups input[type=checkbox]')].every(input=>input.checked)`,'accepting the template copies its choices')
+      assert.equal(await ui(`window.fixture.calls.some(call=>call.kind==='followup')`),false,'acceptance alone launches nothing')
+      await click('.workflow-followups input[type=url]')
+      await window.webContents.insertText('https://github.com/owner/repo/pull/123')
+      await click('.workflow-followups button[type=submit]')
+      await until(`window.fixture.calls.at(-1)?.kind==='followup'`,'explicit enable reaches the bridge')
+      assert.deepEqual(await ui(`window.fixture.calls.at(-1)`),{kind:'followup',taskId:'task-a',url:'https://github.com/owner/repo/pull/123',reviewers:['reviewer'],checks:true,complete:true})
+      await writeFile(join(artifacts,'followup-defaults.png'),(await window.webContents.capturePage()).toPNG())
+      checks.push('Project defaults require acceptance and explicit enrollment with the selected merge condition')
+
       await ui(`window.setTasks([]);window.setAttentionTabs([{id:'choice-a',title:'Session A',workspaceProfileId:'project-1',lastSessionId:'session-a',status:'running'},{id:'choice-b',title:'Session B',workspaceProfileId:'project-1',lastSessionId:'session-b',status:'running'}])`)
       await until(`document.querySelector('.workflow-tasks > form select')?.options.length===2`,'two known sessions offered')
       await ui(`document.querySelector('.workflow-tasks').open=true;const select=document.querySelector('.workflow-tasks > form select');select.value='choice-b';select.dispatchEvent(new Event('change',{bubbles:true}))`)

@@ -1,7 +1,7 @@
 import { supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
-import { githubCliApi } from './workflow-github.js'
+import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
@@ -802,6 +802,9 @@ function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
 }
+function followupDefaultViews():import('./workflow-followups.js').FollowupDefault[]{
+  try{return followups?.defaults()??[]}catch{followupError='Project follow-up defaults are unavailable; automatic work is disabled.';followups?.stop();return []}
+}
 async function openFollowups():Promise<WorkflowFollowups> {
   if(followups)return followups
   if(followupOpening)return followupOpening
@@ -810,7 +813,12 @@ async function openFollowups():Promise<WorkflowFollowups> {
     const api=await githubCliApi(app.getPath('userData'))
     if(shuttingDown())throw new Error('Desktop is closing')
     const controller=new WorkflowFollowups(join(app.getPath('userData'),'workflow-followups.sqlite'),{
-      api,journal:deliveryJournal,task:id=>workflowViews().find(task=>task.id===id)??null,permissionKey:followupPermission,
+      api,journal:deliveryJournal,projectAvailable:id=>desktopConfig.profiles.some(profile=>profile.id===id),
+      complete:(task,snapshot,grant)=>{
+        const store=workflows(),current=store?.active(task.sessionId)
+        if(!store||snapshot.open||snapshot.merged!==true||current?.id!==task.id||current.assignmentId!==task.assignmentId||current.scopeRevision!==task.scopeRevision)throw new Error('Task changed before verified merge completion')
+        store.mergeCompleted(task.id,grant.repository,grant.number,snapshot.head,snapshot.base)
+      },task:id=>workflowViews().find(task=>task.id===id)??null,permissionKey:followupPermission,
       verifyRepository:async(task,pr)=>{
         const tab=followupTab(task),folder=tab?managedTabs.get(tab.id)?.session.sessionCwd:null,runner=await meetingGitRunner()
         if(!folder||!runner)throw new Error('Open the local task checkout first')
@@ -898,6 +906,7 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     meetings: meetingViews(),
     workflowTasks: workflowViews(),
     workflowFollowups: followupViews(),
+    workflowFollowupDefaults:followupDefaultViews(),
     workflowFollowupError: followupError,
     workflowAutomation: automationViews(),
     workflowAutomationError: automationError,
@@ -4522,11 +4531,23 @@ ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): voi
   workflowNotice = null
   broadcastState()
 })
-ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown,reviewers:unknown,checks:unknown):Promise<void>=>{
+ipcMain.handle('desktop:followup-enroll', async(event,taskId:unknown,url:unknown,reviewers:unknown,checks:unknown,completeOnMerge:unknown=false):Promise<void>=>{
   assertTrustedIpcSender(event)
-  if(typeof taskId!=='string'||typeof url!=='string'||!Array.isArray(reviewers)||!reviewers.every(r=>typeof r==='string')||typeof checks!=='boolean')throw new Error('Invalid follow-up settings')
+  if(typeof taskId!=='string'||typeof url!=='string'||!Array.isArray(reviewers)||!reviewers.every(r=>typeof r==='string')||typeof checks!=='boolean'||typeof completeOnMerge!=='boolean')throw new Error('Invalid follow-up settings')
   const controller=await openFollowups()
-  const grant=await controller.enroll(taskId,url,reviewers,checks);workflows()?.link(grant.sessionId,{pullUrl:`https://github.com/${grant.repository}/pull/${grant.number}`});broadcastState()
+  const grant=await controller.enroll(taskId,url,reviewers,checks,completeOnMerge);workflows()?.link(grant.sessionId,{pullUrl:`https://github.com/${grant.repository}/pull/${grant.number}`});broadcastState()
+})
+ipcMain.handle('desktop:followup-default-save',async(event,projectId:unknown,url:unknown,names:unknown,checks:unknown,complete:unknown):Promise<void>=>{
+  assertTrustedIpcSender(event)
+  if(typeof projectId!=='string'||!desktopConfig.profiles.some(profile=>profile.id===projectId)||typeof url!=='string'||url.length>300
+    ||!Array.isArray(names)||!names.every(name=>typeof name==='string')||typeof checks!=='boolean'||typeof complete!=='boolean')throw new Error('Invalid project defaults')
+  const repository=parseGithubPullUrl(url).repository,controller=await openFollowups()
+  await controller.saveDefault(projectId,repository,names,checks,complete);broadcastState()
+})
+ipcMain.handle('desktop:followup-default-remove',(event,projectId:unknown):void=>{
+  assertTrustedIpcSender(event)
+  if(typeof projectId!=='string'||!followups)throw new Error('Project defaults are unavailable')
+  followups.removeDefault(projectId);broadcastState()
 })
 ipcMain.handle('desktop:followup-pause', (event,id:unknown):void=>{
   assertTrustedIpcSender(event)

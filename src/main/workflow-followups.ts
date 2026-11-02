@@ -4,17 +4,23 @@ import { readGithubPull, parseGithubPullUrl, validGithubRepository, type GithubA
 import type { WorkflowTask } from './workflow-types.js'
 import type { WorkflowDeliveries, WorkflowDelivery } from './workflow-deliveries.js'
 
+export interface FollowupDefault {
+  revision:string;projectId:string;repository:string;reviewers:{id:number;login:string}[];
+  failedChecks:boolean;completeOnMerge:boolean;activatedAt:number
+}
 export interface FollowupGrant {
   id: string; taskId: string; sessionId: string; projectId: string; scopeRevision: number; permissionKey: string;
   repository: string; number: number; reviewers: {id:number;login:string}[]; failedChecks: boolean; enabled: boolean;
   activatedAt: number; seen: Record<string,string>; head: string; headCounts: Record<string,number>; total: number;
   health: 'watching'|'paused'|'closed'|'source-unavailable'|'needs-person'|'limit'|'scope-changed'|'source-too-large';
-  checks: GithubSnapshot['checks']
+  completeOnMerge?:boolean;checks: GithubSnapshot['checks']
 }
 export interface FollowupHost {
   api: GithubApi; journal: WorkflowDeliveries; task(id:string): WorkflowTask|null;
   permissionKey(task:WorkflowTask): string|null;
   ready?(grant:FollowupGrant): boolean;
+  projectAvailable?(projectId:string):boolean;
+  complete?(task:WorkflowTask,snapshot:GithubSnapshot,grant:FollowupGrant):void;
   verifyRepository(task:WorkflowTask,snapshot:GithubSnapshot): Promise<void>;
   send(delivery:WorkflowDelivery,grant:FollowupGrant): Promise<'sent'|'busy'>;
   interrupt(grant:FollowupGrant): void;
@@ -37,6 +43,7 @@ export class WorkflowFollowups {
   private readonly retryAt=new Map<string,number>()
   private readonly failures=new Map<string,number>()
   private readonly deliveryRetryAt=new Map<string,number>()
+  private readonly defaultWrites=new Map<string,string>()
   private readonly busyAttempts=new Map<string,number>()
   constructor(path:string,private readonly host:FollowupHost) {
     this.now=host.now??Date.now
@@ -46,6 +53,7 @@ export class WorkflowFollowups {
       if(version!==0&&version!==1)throw new Error('Unsupported follow-up schema')
       this.db.exec(`PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS followups(id TEXT PRIMARY KEY,task TEXT UNIQUE NOT NULL,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS followup_defaults(project TEXT PRIMARY KEY,value TEXT NOT NULL);
         PRAGMA user_version=1;`)
     } catch(error){this.db.close();throw error}
   }
@@ -56,8 +64,41 @@ export class WorkflowFollowups {
     const row=this.db.prepare('SELECT value FROM followups WHERE id=?').get(id) as {value:string}|undefined
     return row?this.decode(row.value):null
   }
-  async enroll(taskId:string,url:string,reviewerLogins:readonly string[],failedChecks:boolean):Promise<FollowupGrant> {
-    if(!uuid(taskId)||typeof url!=='string'||url.length>300||!Array.isArray(reviewerLogins)||reviewerLogins.length>10||typeof failedChecks!=='boolean')throw new Error('Invalid follow-up settings')
+  defaults():FollowupDefault[]{
+    return (this.db.prepare('SELECT value FROM followup_defaults LIMIT 100').all() as {value:string}[]).map(row=>{
+      const value=JSON.parse(row.value) as FollowupDefault
+      if(!value||!uuid(value.revision)||typeof value.projectId!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(value.projectId)
+        ||!validGithubRepository(value.repository)||!Number.isFinite(value.activatedAt)||typeof value.failedChecks!=='boolean'||typeof value.completeOnMerge!=='boolean'
+        ||!Array.isArray(value.reviewers)||value.reviewers.length>10||!value.reviewers.every(actor=>actor&&Number.isSafeInteger(actor.id)&&actor.id>0&&typeof actor.login==='string'&&/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(actor.login)&&actor.login.length<=100))throw new Error('Invalid project follow-up defaults')
+      return value
+    })
+  }
+  async saveDefault(projectId:string,repository:string,names:readonly string[],failedChecks:boolean,completeOnMerge:boolean):Promise<FollowupDefault>{
+    if(typeof projectId!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(projectId)||!validGithubRepository(repository)||!Array.isArray(names)||names.length>10
+      ||typeof failedChecks!=='boolean'||typeof completeOnMerge!=='boolean')throw new Error('Invalid project defaults')
+    const revision=randomUUID();this.defaultWrites.set(projectId,revision)
+    const repo=await this.host.api(`repos/${repository}`) as {full_name?:unknown}
+    if(!repo||typeof repo.full_name!=='string'||repo.full_name.toLowerCase()!==repository.toLowerCase())throw new Error('The default repository could not be verified')
+    const reviewers:FollowupDefault['reviewers']=[]
+    for(const login of new Set(names)){
+      if(typeof login!=='string'||!/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(login)||login.length>100)throw new Error('Use GitHub reviewer logins')
+      const actor=await this.host.api(`users/${encodeURIComponent(login)}`) as {id?:unknown;login?:unknown}
+      if(!actor||!Number.isSafeInteger(actor.id)||Number(actor.id)<=0||typeof actor.login!=='string'||actor.login.toLowerCase()!==login.toLowerCase())throw new Error('Reviewer identity could not be verified')
+      reviewers.push({id:actor.id as number,login:actor.login})
+    }
+    if(!reviewers.length&&!failedChecks)throw new Error('Choose reviewers or failed checks')
+    if(this.stopped||this.defaultWrites.get(projectId)!==revision||this.host.projectAvailable?.(projectId)===false)throw new Error('Project defaults changed while access was checked')
+    if(this.defaults().length>=100&&!this.defaults().some(value=>value.projectId===projectId))throw new Error('Project default limit reached')
+    const value:FollowupDefault={revision,projectId,repository,reviewers,failedChecks,completeOnMerge,activatedAt:this.now()}
+    this.db.prepare('INSERT INTO followup_defaults(project,value) VALUES(?,?) ON CONFLICT(project) DO UPDATE SET value=excluded.value').run(projectId,JSON.stringify(value));this.host.changed();return value
+  }
+  removeDefault(projectId:string):void{
+    if(typeof projectId!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(projectId))throw new Error('Invalid project')
+    this.defaultWrites.set(projectId,randomUUID());this.db.prepare('DELETE FROM followup_defaults WHERE project=?').run(projectId);this.host.changed()
+  }
+  async enroll(taskId:string,url:string,reviewerLogins:readonly string[],failedChecks:boolean,completeOnMerge=false):Promise<FollowupGrant> {
+    if(!uuid(taskId)||typeof url!=='string'||url.length>300||!Array.isArray(reviewerLogins)||reviewerLogins.length>10||typeof failedChecks!=='boolean'||typeof completeOnMerge!=='boolean')throw new Error('Invalid follow-up settings')
+    if(completeOnMerge&&!this.host.complete)throw new Error('Task completion is unavailable')
     const task=this.host.task(taskId),permissionKey=task?this.host.permissionKey(task):null
     if(!task||terminal(task)||!permissionKey)throw new Error('Open the supported local task session before enrolling it')
     const previous=this.list().find(g=>g.taskId===taskId)
@@ -84,7 +125,7 @@ export class WorkflowFollowups {
     if(snapshot.feedback.length>1000)throw new Error('The source exceeds the enrollment limit')
     if(!previous&&this.list().length>=1000)throw new Error('Follow-up enrollment limit reached')
     const grant:FollowupGrant={id:randomUUID(),taskId,sessionId:task.sessionId,projectId:task.projectId,scopeRevision:task.scopeRevision,
-      permissionKey,repository:pull.repository,number:pull.number,reviewers,failedChecks,enabled:true,activatedAt:this.now(),
+      permissionKey,repository:pull.repository,number:pull.number,reviewers,failedChecks,completeOnMerge,enabled:true,activatedAt:this.now(),
       seen:Object.fromEntries(snapshot.feedback.map(event=>[event.source,event.version])),head:snapshot.head,headCounts:{},total:0,health:'watching',checks:snapshot.checks}
     this.save(grant)
     return grant
@@ -106,7 +147,10 @@ export class WorkflowFollowups {
       const current=this.grant(grant.id)
       if(!current?.enabled)continue
       if(snapshot.feedback.length>1000)throw new Error('Follow-up source limit reached; remain paused')
-      if(!snapshot.open){this.closeGrant(current);continue}
+      if(!snapshot.open){
+        if(current.completeOnMerge&&snapshot.merged){this.save({...current,health:'needs-person'});this.nextPoll.delete(current.id);continue}
+        this.closeGrant(current);continue
+      }
       this.save({...current,seen:Object.fromEntries(snapshot.feedback.map(e=>[e.source,e.version])),head:snapshot.head,activatedAt:this.now(),checks:snapshot.checks,health:'watching'})
     }
   }
@@ -141,7 +185,9 @@ export class WorkflowFollowups {
         const snapshot=observations.get(grant.id)
         if(!snapshot)continue
         if(this.stopped)return
-        if(!snapshot.open){this.closeGrant(grant);continue}
+        const refreshed=this.grant(grant.id),refreshedTask=this.host.task(grant.taskId)
+        if(!refreshed?.enabled||!refreshedTask||!this.intakeAuthorized(refreshed,refreshedTask))continue
+        if(!snapshot.open){this.settleClosed(grant,snapshot);continue}
         if(!snapshot.feedback.some(event=>event.source===delivery.source&&delivery.revision===`${snapshot.head}/${event.version}`)){this.host.journal.discard(delivery.id);this.host.changed();continue}
         const task=this.host.task(grant.taskId)
         if(!task)continue
@@ -174,9 +220,9 @@ export class WorkflowFollowups {
   private async poll(grant:FollowupGrant):Promise<void> {
     const task=this.host.task(grant.taskId)
     if(!task||terminal(task)||task.scopeRevision!==grant.scopeRevision||task.sessionId!==grant.sessionId){this.closeGrant(grant);return}
-    if(!['working','ready'].includes(task.outcome)){this.health(grant,'needs-person');return}
+    if(!['working','ready'].includes(task.outcome)&&!grant.completeOnMerge){this.health(grant,'needs-person');return}
     if(!this.intakeAuthorized(grant,task))return
-    if(grant.total>=10){this.health(grant,'limit');return}
+    if(grant.total>=10&&!grant.completeOnMerge){this.health(grant,'limit');return}
     if(Math.max(this.nextPoll.get(grant.id)??0,this.retryAt.get(grant.id)??0)>this.now())return
     this.nextPoll.set(grant.id,this.now()+120_000)
     let snapshot:GithubSnapshot
@@ -186,9 +232,10 @@ export class WorkflowFollowups {
     if(!current?.enabled)return
     const latestTask=this.host.task(grant.taskId)
     if(!latestTask||terminal(latestTask)||latestTask.scopeRevision!==grant.scopeRevision){this.closeGrant(current);return}
-    if(!['working','ready'].includes(latestTask.outcome)){this.health(current,'needs-person');return}
     if(!this.intakeAuthorized(current,latestTask))return
-    if(!snapshot.open){this.closeGrant(current);return}
+    if(!snapshot.open){this.settleClosed(current,snapshot);return}
+    if(!['working','ready'].includes(latestTask.outcome)){this.health(current,'needs-person');return}
+    if(current.total>=10){this.health(current,'limit');return}
     if(snapshot.feedback.length>1000){this.health(current,'source-too-large');return}
     const next={...current,seen:{...current.seen},head:snapshot.head,headCounts:{...current.headCounts},checks:snapshot.checks,health:'watching' as FollowupGrant['health']}
     for(const event of snapshot.feedback) {
@@ -210,6 +257,14 @@ ${event.body.slice(0,6000)}`
       next.total++;next.headCounts[snapshot.head]=(next.headCounts[snapshot.head]??0)+1
     }
     this.save(next)
+  }
+  private settleClosed(grant:FollowupGrant,snapshot:GithubSnapshot):void{
+    if(this.stopped||this.failed||snapshot.open)return
+    const current=this.grant(grant.id),task=this.host.task(grant.taskId)
+    if(!current?.enabled)return
+    if(snapshot.merged===true&&current.completeOnMerge&&task&&!terminal(task)&&task.sessionId===current.sessionId
+      &&task.scopeRevision===current.scopeRevision&&this.host.permissionKey(task)===current.permissionKey)this.host.complete?.(task,snapshot,current)
+    this.closeGrant(current)
   }
   private closeGrant(grant:FollowupGrant):void {
     this.save({...grant,enabled:false,health:'closed'})
@@ -266,7 +321,7 @@ ${event.body.slice(0,6000)}`
     const grant=JSON.parse(value) as FollowupGrant
     if(!grant||!uuid(grant.id)||!uuid(grant.taskId)||typeof grant.sessionId!=='string'||typeof grant.projectId!=='string'
       ||!validGithubRepository(grant.repository)||!Number.isSafeInteger(grant.number)||grant.number<1||typeof grant.enabled!=='boolean'
-      ||typeof grant.failedChecks!=='boolean'||!Array.isArray(grant.reviewers)||grant.reviewers.length>10||!grant.reviewers.every(r=>r&&Number.isSafeInteger(r.id)&&r.id>0&&typeof r.login==='string')
+      ||(grant.completeOnMerge!==undefined&&typeof grant.completeOnMerge!=='boolean')||typeof grant.failedChecks!=='boolean'||!Array.isArray(grant.reviewers)||grant.reviewers.length>10||!grant.reviewers.every(r=>r&&Number.isSafeInteger(r.id)&&r.id>0&&typeof r.login==='string')
       ||!grant.seen||typeof grant.seen!=='object'||Array.isArray(grant.seen)||Object.keys(grant.seen).length>1000
       ||!Number.isInteger(grant.total)||grant.total<0||grant.total>10||!Number.isFinite(grant.activatedAt)||typeof grant.permissionKey!=='string'||!/^[a-f0-9]{64}$/.test(grant.permissionKey)
       ||typeof grant.head!=='string'||!/^[a-f0-9]{40,64}$/.test(grant.head)

@@ -47,6 +47,7 @@ export interface SidebarProps {
   workflowAutomaticPaused?:boolean
   workflowPausedProjects?:string[]
   workflowAutomationError?:string|null
+  workflowFollowupDefaults?: readonly import('../../main/workflow-followups.js').FollowupDefault[]
   workflowFollowups?: readonly import('../../main/workflow-followups.js').FollowupGrant[]
   workflowFollowupError?: string | null
   workflowDeliveries?: readonly WorkflowDelivery[]
@@ -84,7 +85,7 @@ export interface SidebarProps {
 
 export function Sidebar({
   workflowAutomation={rules:[],previews:[]},workflowAutomaticPaused=false,workflowPausedProjects=[],workflowAutomationError,
-  workflowFollowups=[],workflowFollowupError,
+  workflowFollowups=[],workflowFollowupDefaults=[],workflowFollowupError,
   workflowDeliveries = [], workflowDeliveryError,
   workflowTasks = [], workflowError,
   profiles,
@@ -413,7 +414,7 @@ export function Sidebar({
       </div>
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks,workflowFollowups,workflowDeliveries)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
-      {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} error={workflowError ?? workflowFollowupError ?? null} />}
+      {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} defaults={workflowFollowupDefaults} error={workflowError ?? workflowFollowupError ?? null} />}
       {!collapsed && <WorkflowAutomations profiles={profiles} rules={workflowAutomation.rules} previews={workflowAutomation.previews} paused={workflowAutomaticPaused} pausedProjects={workflowPausedProjects} error={workflowAutomationError??null} />}
       {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (
