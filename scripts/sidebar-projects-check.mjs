@@ -265,6 +265,8 @@ if (!process.versions.electron) {
       await until(`!!document.querySelector('.needs-you')`, 'compact attention expands sidebar')
       await ui(`window.setAttentionTabs([])`)
       await until(`!document.querySelector('.needs-you')`, 'attention disappears when underlying conditions clear')
+      await ui(`window.setAttentionTabs([{id:'crash',title:'Again',workspaceProfileId:'project-3',status:'crashed',lastSessionId:null,lastActivityAt:2}])`)
+      await until(`document.querySelector('.needs-you-heading')?.textContent.includes('1 new')`, 'a later episode in the same session becomes unread again')
       checks.push('Cross-project attention prioritizes failures, masks credentials, navigates, tracks seen, expands and clears')
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
