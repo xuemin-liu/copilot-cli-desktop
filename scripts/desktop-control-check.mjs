@@ -148,17 +148,32 @@ function save() { var fso = new ActiveXObject("Scripting.FileSystemObject"); var
         await until(async () => (await readOut().catch(() => '')).endsWith(`|${click}`), `click ${click} counted`)
       }
 
-      // A password field is never typed into.
+      // Tabs that move the focus into the password field stop the typing there (text field → button → password).
+      await delay(300)
+      shot = await ok('screenshot', window.id)
+      ;[x, y] = find(shot.path, [0xc8, 0x64, 0x32])
+      await ok('click', shot.frameId, String(x), String(y))
+      const tabbed = join(folder, 'tabbed.txt')
+      await writeFile(tabbed, '\t\tsecret')
+      await delay(300)
+      await refusedWith(/password field/, 'type', shot.frameId, '-File', tabbed)
+
+      // A password field is never typed into, by type or by single keys.
       await delay(300)
       shot = await ok('screenshot', window.id)
       ;[x, y] = find(shot.path, [0x32, 0x64, 0xc8])
       await ok('click', shot.frameId, String(x), String(y))
       await delay(300)
       await refusedWith(/password field|could not tell/, 'type', shot.frameId, '-File', text)
+      for (const chord of ['h', 'shift+u', 'ctrl+v']) await refusedWith(/password field/, 'key', shot.frameId, chord)
 
       // Win-key chords and the app's own shortcuts are refused; an allowed chord goes through.
       await refusedWith(/Win-key/, 'key', shot.frameId, 'win+r')
       await refusedWith(/own shortcuts/, 'key', shot.frameId, 'ctrl+alt+h')
+      shot = await ok('screenshot', window.id)
+      ;[x, y] = find(shot.path, [0xc8, 0x64, 0x32])
+      await ok('click', shot.frameId, String(x), String(y))
+      await delay(300)
       await ok('key', shot.frameId, 'tab')
 
       // Blocked windows: the taskbar (File Explorer) and this app's own window.

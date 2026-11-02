@@ -87,7 +87,8 @@ export class WindowsDesktopNative implements DesktopNativeLayer {
 
 /** Counts the user's own mouse and keyboard input while desktop control is on. */
 export interface DesktopInputMonitor {
-  start(): Promise<void>
+  /** `stopped` is called if the monitor stops by itself (its worker crashed) after it started. */
+  start(stopped: () => void): Promise<void>
   stop(): Promise<void>
   /** How many user inputs have been seen, and when the last one was (ms since the epoch, 0 when none). */
   read(): { count: number; lastAt: number }
@@ -97,15 +98,17 @@ export class WindowsDesktopInputMonitor implements DesktopInputMonitor {
   private worker: Worker | null = null
   private readonly shared = new Float64Array(new SharedArrayBuffer(16))
 
-  async start(): Promise<void> {
+  async start(stopped: () => void): Promise<void> {
     if (this.worker) return
     const worker = new Worker(new URL('./desktop-input-monitor-worker.js', import.meta.url), { workerData: { shared: this.shared.buffer } })
     worker.unref()
     this.worker = worker
-    worker.on('exit', () => { if (this.worker === worker) this.worker = null })
+    // stop() clears this.worker first, so only an exit nobody asked for reports a stop.
+    worker.on('exit', () => { if (this.worker === worker) { this.worker = null; stopped() } })
     const ready = await new Promise<boolean>(resolve => {
       worker.once('message', (message: { ready?: boolean }) => resolve(message.ready === true))
       worker.once('error', () => resolve(false))
+      worker.once('exit', () => resolve(false))
     })
     if (!ready) {
       await this.stop()

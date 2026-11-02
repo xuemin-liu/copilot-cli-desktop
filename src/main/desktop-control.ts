@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
-import { isAbsolute, join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { validateBrowserScreenshotPath } from '../cli/browser-control.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -96,6 +96,8 @@ const RECENT_INPUT_MS = 1_500
 const MAX_FRAMES = 4
 const MAX_LOG = 200
 const TYPE_CHUNK = 32
+/** Time for the app to move its focus after a Tab or Enter, before the focus is checked again. */
+const FOCUS_SETTLE_MS = 100
 const MAX_BODY = 64 * 1024
 const COMMANDS = new Set(['status', 'windows', 'screenshot', 'click', 'move', 'drag', 'scroll', 'type', 'key', 'focus'])
 
@@ -112,6 +114,8 @@ export class DesktopControl {
   private serverStart: Promise<number> | null = null
   private epoch = 0
   private monitorRunning = false
+  /** Turning control on or off, one at a time, so two sessions can't both become the owner. */
+  private transitions: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly host: DesktopControlHost, private readonly native: DesktopNativeLayer, private readonly monitor: DesktopInputMonitor) {}
 
@@ -133,14 +137,31 @@ export class DesktopControl {
   /** The screen locked, unlocked or changed: frames taken before can't be trusted. */
   invalidateFrames(): void { this.epoch++ }
 
-  async enable(tabId: string): Promise<void> {
+  private serial<T>(change: () => Promise<T>): Promise<T> {
+    const run = this.transitions.then(change, change)
+    this.transitions = run.catch(() => {})
+    return run
+  }
+
+  enable(tabId: string): Promise<void> { return this.serial(() => this.enableNow(tabId)) }
+
+  disable(tabId: string, message = 'Desktop control turned off.'): Promise<void> { return this.serial(() => this.disableNow(tabId, message)) }
+
+  disableAll(message: string): Promise<void> {
+    return this.serial(async () => { for (const tabId of [...this.tabs.keys()]) await this.disableNow(tabId, message) })
+  }
+
+  private async enableNow(tabId: string): Promise<void> {
     if (this.tabs.has(tabId)) return
     const refusal = this.host.sessionRefusal(tabId)
     if (refusal) throw new DesktopControlError(refusal)
     // Only one session controls the desktop at a time; turning it on here turns it off elsewhere.
-    for (const other of [...this.tabs.keys()]) await this.disable(other, 'Turned off: desktop control was turned on in another session.')
+    for (const other of [...this.tabs.keys()]) await this.disableNow(other, 'Turned off: desktop control was turned on in another session.')
     if (!this.monitorRunning) {
-      await this.monitor.start()
+      // Without the monitor, the person's own input would no longer pause control: fail closed.
+      await this.monitor.start(() => {
+        if (this.monitorRunning) void this.disableAll('Turned off: desktop control could not keep watching your own mouse and keyboard input.')
+      })
       this.monitorRunning = true
     }
     const port = await this.startServer()
@@ -152,7 +173,7 @@ export class DesktopControl {
     await writeFileAtomic(desktopControlStatePath(folder), JSON.stringify({ pid: process.pid, port, token: control.token }))
     this.tabs.set(tabId, control)
     if (!this.host.stopKey(true, () => { void this.disableAll('Stopped with the stop key.') })) {
-      await this.disable(tabId, 'Turned off: the stop key could not be registered.')
+      await this.disableNow(tabId, 'Turned off: the stop key could not be registered.')
       throw new DesktopControlError(`The stop key (${this.host.stopKeyLabel}) is in use by another app, so desktop control stays off.`)
     }
     this.touch(tabId)
@@ -161,7 +182,7 @@ export class DesktopControl {
     this.host.changed()
   }
 
-  async disable(tabId: string, message = 'Desktop control turned off.'): Promise<void> {
+  private async disableNow(tabId: string, message: string): Promise<void> {
     const control = this.tabs.get(tabId)
     if (!control) return
     this.tabs.delete(tabId)
@@ -179,10 +200,6 @@ export class DesktopControl {
     }
     this.refreshOverlay()
     this.host.changed()
-  }
-
-  async disableAll(message: string): Promise<void> {
-    for (const tabId of [...this.tabs.keys()]) await this.disable(tabId, message)
   }
 
   resume(tabId: string): void {
@@ -281,6 +298,11 @@ export class DesktopControl {
     }
   }
 
+  /** Checked right before anything is sent to the desktop: control may have been turned off (or off and on) meanwhile. */
+  private alive(tabId: string, control: TabControl): void {
+    if (this.tabs.get(tabId) !== control) throw new DesktopControlError('Desktop control was turned off.', 409)
+  }
+
   private refuse(tabId: string, command: string, app: string | undefined, message: string, status = 400): DesktopControlError {
     this.record(tabId, { command, ...(app ? { app } : {}), result: 'refused', message })
     this.host.changed()
@@ -303,7 +325,8 @@ export class DesktopControl {
 
   private identityOf(window: DesktopNativeWindow): DesktopAppIdentity | null {
     if (window.aumid) return { kind: 'package', aumid: window.aumid }
-    if (window.programPath && isAbsolute(window.programPath)) return { kind: 'program', path: window.programPath }
+    // Paths from the Windows layer; Windows semantics also on the macOS and Linux test runs.
+    if (window.programPath && win32.isAbsolute(window.programPath)) return { kind: 'program', path: window.programPath }
     return null
   }
 
@@ -328,7 +351,7 @@ export class DesktopControl {
     const front = await this.native.foreground().catch(() => null)
     try {
       const answer = await this.host.approve({ tabId, ...request }, abort.signal)
-      if (!this.tabs.has(tabId)) throw new DesktopControlError('Desktop control was turned off.', 409)
+      this.alive(tabId, control)
       if (answer !== 'deny' && front) {
         await this.native.focus(front).catch(() => false)
         await new Promise(resolve => setTimeout(resolve, 150))
@@ -386,23 +409,30 @@ export class DesktopControl {
 
   private async screenshot(tabId: string, control: TabControl, body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const requested = body.target
-    const windows = await this.native.windows()
     let frame: Omit<Frame, 'bitmap' | 'id' | 'createdAt' | 'epoch'>
     let app: string | undefined
     if (typeof requested === 'string' && /^screen(:\d)?$/.test(requested)) {
-      const displays = this.host.displays()
-      const index = requested === 'screen' ? Math.max(0, displays.findIndex(display => display.primary)) : Number(requested.slice(7))
-      const display = displays[index]
-      if (!display) throw new DesktopControlError(`There is no display ${index}; run status to list them.`)
+      const displayAt = (): { index: number; display: DesktopDisplay } => {
+        const displays = this.host.displays()
+        const index = requested === 'screen' ? Math.max(0, displays.findIndex(display => display.primary)) : Number(requested.slice(7))
+        const display = displays[index]
+        if (!display) throw new DesktopControlError(`There is no display ${index}; run status to list them.`)
+        return { index, display }
+      }
+      const asked = displayAt()
       if (!control.fullScreen) {
-        const answer = await this.ask(tabId, control, { app: 'your whole screen', detail: `Display ${index} (${display.bounds.width}×${display.bounds.height})`, warning: 'A full-screen capture shows every app on that display except blocked ones, which are painted over.', screen: true })
+        const answer = await this.ask(tabId, control, { app: 'your whole screen', detail: `Display ${asked.index} (${asked.display.bounds.width}×${asked.display.bounds.height})`, warning: 'A full-screen capture shows every app on that display except blocked ones, which are painted over.', screen: true })
         if (answer === 'deny') throw this.refuse(tabId, 'screenshot', 'screen', 'The user did not allow a full-screen capture.', 403)
         if (answer === 'session') { control.fullScreen = true; this.host.changed() }
       }
+      // Windows may have opened or moved while the person answered: paint over what is on the screen now.
+      const { display } = displayAt()
+      const current = await this.native.windows()
       const size = desktopFrameSize(display.bounds)
-      frame = { tabId, kind: 'screen', windowId: null, identity: null, bounds: display.bounds, ...size, blank: this.blankFor('screen', windows, null, null) }
+      frame = { tabId, kind: 'screen', windowId: null, identity: null, bounds: display.bounds, ...size, blank: this.blankFor('screen', current, null, null) }
       app = 'screen'
     } else {
+      const windows = await this.native.windows()
       const id = requested === undefined || requested === null || requested === '' ? await this.native.foreground() : requested
       if (!isWindowId(id)) throw new DesktopControlError('Give a window id from the windows command, or screen for a full-screen capture.')
       const window = windows.find(entry => entry.id === id)
@@ -420,6 +450,7 @@ export class DesktopControl {
       app = target.name
     }
     const bitmap = await this.host.capture(frame.bounds, { width: frame.width, height: frame.height }, frame.blank)
+    this.alive(tabId, control)
     const stored: Frame = { ...frame, bitmap, id: `f${randomBytes(6).toString('hex')}`, createdAt: Date.now(), epoch: this.epoch }
     control.frames.push(stored)
     if (control.frames.length > MAX_FRAMES) control.frames.splice(0, control.frames.length - MAX_FRAMES)
@@ -442,6 +473,7 @@ export class DesktopControl {
     if ('blocked' in target) throw this.refuse(tabId, 'focus', undefined, DESKTOP_BLOCK_MESSAGES[target.blocked], 403)
     if (!control.limiter.take()) throw new DesktopControlError('Too many desktop actions; at most 10 a second.', 429)
     await this.approveApp(tabId, control, 'focus', target)
+    this.alive(tabId, control)
     const front = await this.native.focus(window.id)
     this.record(tabId, { command: 'focus', app: target.name, result: front ? 'ok' : 'failed', message: front ? 'Brought to the front.' : 'Windows did not bring it to the front.' })
     this.host.changed()
@@ -487,6 +519,24 @@ export class DesktopControl {
     return patchesMatch(frame.bitmap, now, frame, patchRect(frame, x, y))
   }
 
+  /**
+   * The window with the keyboard focus, which must be the frame's window (unmoved) for a window frame, so a new
+   * dialog of the same app doesn't take keys planned on another window; and `windowId` once the action has started.
+   */
+  private keyboardTarget(tabId: string, command: string, frame: Frame, windows: DesktopNativeWindow[], foregroundId: string | null, windowId: string | null): Target {
+    const foreground = windows.find(window => window.id === foregroundId)
+    if (!foreground) throw this.refuse(tabId, command, undefined, 'No window has the keyboard focus.', 409)
+    const resolved = this.target(foreground)
+    if ('blocked' in resolved) throw this.refuse(tabId, command, undefined, `The window with the keyboard focus is blocked. ${DESKTOP_BLOCK_MESSAGES[resolved.blocked]}`, 403)
+    if (frame.kind === 'window' && resolved.key !== frame.identity) {
+      throw this.refuse(tabId, command, resolved.name, `The keyboard focus is in another app (${resolved.name}); focus the window from the screenshot first.`, 409)
+    }
+    if ((frame.kind === 'window' && (foreground.id !== frame.windowId || !sameRect(foreground.bounds, frame.bounds))) || (windowId !== null && foreground.id !== windowId)) {
+      throw this.refuse(tabId, command, resolved.name, 'The keyboard focus moved to another window, or the window moved; take a new screenshot.', 409)
+    }
+    return resolved
+  }
+
   private userInputSince(count: number): boolean {
     return this.monitor.read().count !== count
   }
@@ -505,32 +555,31 @@ export class DesktopControl {
     if (command === 'type' || command === 'key') {
       const chord = command === 'key' ? checked(() => parseDesktopChord(String(body.chord ?? ''), this.host.reservedAccelerators())) : null
       const text = command === 'type' ? checked(() => validateDesktopText(body.text)) : ''
-      const foregroundId = await this.native.foreground()
-      const foreground = windows.find(window => window.id === foregroundId)
-      if (!foreground) throw this.refuse(tabId, command, undefined, 'No window has the keyboard focus.', 409)
-      const resolved = this.target(foreground)
-      if ('blocked' in resolved) throw this.refuse(tabId, command, undefined, `The window with the keyboard focus is blocked. ${DESKTOP_BLOCK_MESSAGES[resolved.blocked]}`, 403)
-      if (frame.kind === 'window' && resolved.key !== frame.identity) {
-        throw this.refuse(tabId, command, resolved.name, `The keyboard focus is in another app (${resolved.name}); focus the window from the screenshot first.`, 409)
-      }
+      const resolved = this.keyboardTarget(tabId, command, frame, windows, await this.native.foreground(), null)
       await this.approveApp(tabId, control, command, resolved)
       target = resolved
-      if (command === 'type') {
+      // Before every keystroke batch: still the same window, and not a password field. A Tab or Enter can move the
+      // focus, and any key (a letter, or Ctrl+V of a clipboard Copilot set) can enter text, so `key` is checked too.
+      const ready = async (): Promise<void> => {
+        const now = this.keyboardTarget(tabId, command, frame, await this.native.windows(), await this.native.foreground(), resolved.window.id)
         const focused = await this.native.focused().catch(() => ({ pid: null, password: null }))
-        if (focused.pid !== target.window.pid) throw this.refuse(tabId, command, target.name, 'Desktop control could not tell which control has the keyboard focus, so it did not type.', 409)
-        if (focused.password !== false) throw this.refuse(tabId, command, target.name, 'The focused control is a password field (or could not be checked), so desktop control did not type. Ask the user to enter it.', 403)
+        if (focused.pid !== now.window.pid) throw this.refuse(tabId, command, now.name, 'Desktop control could not tell which control has the keyboard focus, so it did not type.', 409)
+        if (focused.password !== false) throw this.refuse(tabId, command, now.name, 'The focused control is a password field (or could not be checked), so desktop control did not type. Ask the user to enter it.', 403)
+        this.alive(tabId, control)
       }
       summary = command === 'type' ? `Typed ${text.length} characters.` : `Pressed ${[...chord!.modifiers, chord!.key].join('+')}.`
       perform = command === 'type'
         ? async () => {
           const before = this.monitor.read().count
-          for (let index = 0; index < text.length; index += TYPE_CHUNK) {
-            if (!this.tabs.has(tabId)) throw new DesktopControlError('Desktop control was turned off.', 409)
+          const segments = typeSegments(text)
+          for (const [index, segment] of segments.entries()) {
+            if (index > 0 && /^[\t\n]$/.test(segments[index - 1]!)) await new Promise(resolve => setTimeout(resolve, FOCUS_SETTLE_MS))
+            await ready()
             if (this.userInputSince(before)) throw new DesktopControlError('USER_INPUT')
-            await this.native.type(text.slice(index, index + TYPE_CHUNK))
+            await this.native.type(segment)
           }
         }
-        : () => this.native.key(chord!.vks)
+        : async () => { await ready(); await this.native.key(chord!.vks) }
     } else {
       const point = checked(() => framePointToScreen(frame, body.x, body.y))
       target = await this.pointTarget(tabId, control, command, frame, windows, point)
@@ -574,6 +623,7 @@ export class DesktopControl {
     // The user may have clicked an approval prompt: their input from before the action does not count.
     const before = this.monitor.read().count
     try {
+      this.alive(tabId, control)
       await perform()
     } catch (error) {
       if (error instanceof DesktopControlError && error.message === 'USER_INPUT') {
@@ -652,6 +702,15 @@ async function removeStateFile(path: string, token: string): Promise<void> {
     const saved = JSON.parse(await readFile(path, 'utf8')) as { token?: string }
     if (saved.token === token) await rm(path, { force: true })
   } catch { /* Already removed. */ }
+}
+
+/** Text in chunks, with each Tab and newline on its own so the focus is checked again after it. */
+function typeSegments(text: string): string[] {
+  const segments: string[] = []
+  for (const part of text.split(/([\t\n])/)) {
+    for (let index = 0; index < part.length; index += TYPE_CHUNK) segments.push(part.slice(index, index + TYPE_CHUNK))
+  }
+  return segments
 }
 
 /** A request that fails the rules' validation is a refusal (400), not a failure. */

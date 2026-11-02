@@ -42,8 +42,11 @@ class FakeMonitor implements DesktopInputMonitor {
   count = 0
   lastAt = 0
   running = false
-  async start(): Promise<void> { this.running = true }
-  async stop(): Promise<void> { this.running = false }
+  stopped: (() => void) | null = null
+  async start(stopped: () => void): Promise<void> { this.running = true; this.stopped = stopped }
+  async stop(): Promise<void> { this.running = false; this.stopped = null }
+  /** The hook worker died by itself. */
+  crash(): void { const stopped = this.stopped; this.running = false; this.stopped = null; stopped?.() }
   read(): { count: number; lastAt: number } { return { count: this.count, lastAt: this.lastAt } }
   userInput(at = Date.now()): void { this.count++; this.lastAt = at }
 }
@@ -237,6 +240,66 @@ test('key chords that open launchers or press the app’s own shortcuts are refu
   assert.deepEqual(h.native.actions, ['key 17,83'])
 })
 
+test('the focus is checked again after every Tab or Enter, and before every key, so nothing reaches a password field', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  // Tab (or Enter) moves the focus from the user name to the password field.
+  for (const separator of ['\t', '\n']) {
+    h.native.focus_ = { pid: 11, password: false }
+    h.native.onType = () => { if (h.native.actions.at(-1) === `type ${separator}`) h.native.focus_ = { pid: 11, password: true } }
+    await refused(h.control.handle('tab', 'type', { frameId, text: `alice${separator}hunter2` }), /password field/)
+    assert.deepEqual(h.native.actions, ['type alice', `type ${separator}`])
+    h.native.actions.length = 0
+  }
+  h.native.onType = null
+  // Single keys, with or without Shift, and pasting are refused in a password field too.
+  for (const chord of ['h', 'shift+u', '2', 'ctrl+v']) await refused(h.control.handle('tab', 'key', { frameId, chord }), /password field/)
+  assert.deepEqual(h.native.actions, [])
+})
+
+test('keys go only to the window the frame showed, not to a new dialog of the same app', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  h.native.list.unshift(window('12', NOTEPAD, { x: 200, y: 200, width: 200, height: 100 }, { className: '#32770', title: 'Save changes?' }))
+  h.native.front = '12'
+  h.native.focus_ = { pid: 12, password: false }
+  await refused(h.control.handle('tab', 'key', { frameId, chord: 'enter' }), /focus moved/)
+  await refused(h.control.handle('tab', 'type', { frameId, text: 'x' }), /focus moved/)
+  assert.deepEqual(h.native.actions, [])
+})
+
+test('turning control off cancels an action that is still being checked', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  const host = (h.control as unknown as { host: DesktopControlHost }).host
+  const capture = host.capture
+  let release!: () => void
+  let capturing!: () => void
+  const started = new Promise<void>(resolve => { capturing = resolve })
+  host.capture = (...args) => { capturing(); return new Promise(resolve => { release = () => resolve(capture(...args)) }) }
+  const click = h.control.handle('tab', 'click', { frameId, x: 10, y: 20 })
+  await started
+  await h.control.disableAll('Stopped with the stop key.')
+  release()
+  await refused(click, /turned off/)
+  assert.deepEqual(h.native.actions, [])
+})
+
+test('two sessions turning control on at once leave one owner', async t => {
+  const h = await harness(t)
+  await Promise.all([h.control.enable('a'), h.control.enable('b')])
+  assert.deepEqual(h.control.enabledTabs(), ['b'])
+})
+
+test('control turns off if the input monitor stops by itself', async t => {
+  const h = await harness(t)
+  await h.control.enable('tab')
+  h.monitor.crash()
+  for (let attempt = 0; attempt < 100 && h.control.enabledTabs().length > 0; attempt++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(h.control.enabledTabs(), [])
+  assert.match(h.control.view('tab').log.at(-1)!.message, /could not keep watching/)
+})
+
 test('the person’s own input pauses control, and recent input defers an action', async t => {
   const h = await harness(t)
   const frameId = await notepadReady(h)
@@ -270,6 +333,21 @@ test('a full-screen capture needs its own grant and paints over blocked windows'
   assert.deepEqual(blanked, [{ x: 10, y: 10, width: 300, height: 200 }])
   assert.equal(h.control.view('tab').fullScreen, true)
   await refused(h.control.handle('tab', 'screenshot', { target: 'screen:4' }), /no display 4/)
+})
+
+test('a full-screen capture paints over blocked windows that opened while the person answered', async t => {
+  const h = await harness(t)
+  let blanked: DesktopRect[] = []
+  const host = (h.control as unknown as { host: DesktopControlHost }).host
+  host.capture = async (_bounds, size, blank) => { blanked = blank; return Buffer.alloc(size.width * size.height * 4) }
+  host.approve = async () => {
+    h.native.list.unshift(window('5', 'C:\\Windows\\System32\\CredentialUIBroker.exe', { x: 50, y: 50, width: 200, height: 150 }))
+    return 'once'
+  }
+  h.native.list = [window('4', NOTEPAD, { x: 0, y: 0, width: 500, height: 500 })]
+  await h.control.enable('tab')
+  await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  assert.deepEqual(blanked, [{ x: 50, y: 50, width: 200, height: 150 }])
 })
 
 function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {

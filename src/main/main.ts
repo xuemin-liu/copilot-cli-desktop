@@ -4890,7 +4890,7 @@ if (!app.requestSingleInstanceLock()) {
               const native = new WindowsDesktopNative()
               try { await native.windows() } finally { await native.dispose() }
               const monitor = new WindowsDesktopInputMonitor()
-              await monitor.start()
+              await monitor.start(() => {})
               await monitor.stop()
             }
             process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
