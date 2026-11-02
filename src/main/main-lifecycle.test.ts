@@ -319,7 +319,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await harness?.cleanup()
     if (previousCopilotHome === undefined) delete process.env.COPILOT_HOME
     else process.env.COPILOT_HOME = previousCopilotHome
-    await rm(directory, { recursive: true, force: true })
+    // A session log or config write can still land while the folder is removed (ENOTEMPTY on a slow runner): retry.
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
 
@@ -1764,9 +1765,10 @@ test('side-chat runtime mode is displayed but never persisted or replayed as a l
     await mkdir(sessionDirectory, { recursive: true })
     await writeFile(join(sessionDirectory, 'events.jsonl'), '{"type":"session.permissions_changed","data":{"allowAllPermissionMode":"on","allowAllPermissions":true}}\n')
     harness.spawns[1]!.emitData('\u001b[?25h')
-    await new Promise((resolve) => setTimeout(resolve, 150))
-
-    const changed = await harness.request('desktop:get-state')
+    // The permission monitor attaches and reads the log asynchronously (output starts a read; it also polls): wait for
+    // the mode rather than for a fixed time a slow runner can miss.
+    const changed = await waitFor(() => harness.request('desktop:get-state'),
+      (state) => state.tabs.find((tab) => tab.id === sideId)?.sessionPermissionMode === 'allow-all', 'side chat shows allow-all')
     assert.equal(changed.tabs.find((tab) => tab.id === sideId)?.sessionPermissionMode, 'allow-all')
     assert.equal(profile.tabs.find((tab) => tab.sideChat)?.sessionPermissionMode, undefined)
 
