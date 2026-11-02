@@ -878,7 +878,7 @@ const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
   else if(item&&tabsState.tabs.some(tab=>tab.id===item.tabId))activateSessionTab(item.tabId)
   else restoreMainWindow()
 }))
-function attentionItems():AttentionItem[]{return workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews())}
+function attentionItems(view?:DesktopState):AttentionItem[]{return view?workflowAttention(view.tabs,view.meetings??[],view.workflowTasks??[],view.workflowFollowups??[],view.workflowDeliveries??[]):workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews())}
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
   try { return workflowResources.views(workflowStore?.list()??[],new Set(tabsState.tabs.map(tab=>tab.lastSessionId).filter((id):id is string=>id!==null))) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
@@ -924,27 +924,28 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
-  if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   const visible = visibleSessionTabs(tabsState)
   for (const [tabId, browser] of sessionBrowsers) {
     if (!sessionWindows.has(tabId) && !browserWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
   }
   // A restored tab starts the first time it is on screen.
   for (const tabId of [visible.main?.id, visible.side?.id, ...sessionWindows.keys()]) if (tabId) void wakeDormantTab(tabId)
+  const shared=snapshot()
+  if(workflowAttentionReady)workflowNotifications.update(attentionItems(shared),desktopConfig.notifications)
   const window = mainWindow
   if (window && !window.isDestroyed() && isLauncherShellUrl(window.webContents.getURL(), shellUrl())) {
-    window.webContents.send('desktop:state-changed', snapshot())
+    window.webContents.send('desktop:state-changed', shared)
   }
   for (const [tabId, popout] of sessionWindows) {
     if (!popout.isDestroyed() && isLauncherShellUrl(popout.webContents.getURL(), shellUrl())) {
       popout.setTitle(`${state.tabs.find(tab => tab.id === tabId)?.title ?? 'Session'} — Copilot CLI Desktop`)
-      popout.webContents.send('desktop:state-changed', snapshot(tabId))
+      popout.webContents.send('desktop:state-changed', {...shared,windowSessionId:tabId})
     }
   }
   for (const [tabId, popout] of browserWindows) {
     if (!popout.isDestroyed() && isLauncherShellUrl(popout.webContents.getURL(), shellUrl())) {
       popout.setTitle(`${state.tabs.find(tab => tab.id === tabId)?.title ?? 'Session'} — Browser — Copilot CLI Desktop`)
-      popout.webContents.send('desktop:state-changed', snapshot(undefined, tabId))
+      popout.webContents.send('desktop:state-changed', {...shared,windowBrowserId:tabId})
     }
   }
 }

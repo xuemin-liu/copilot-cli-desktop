@@ -51,6 +51,8 @@ interface Harness {
   enableTasks(tabId: string,supported?:boolean): void
   captureWorkflowNotifications():{title:string;body:string}[]
   flushWorkflowNotifications():void
+  seedWorkflowHistory(count:number):void
+  workflowBroadcastReads(active:boolean):number
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
@@ -277,6 +279,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           enableTasks: (tabId,supported=true) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = supported?'1.0.105':null; workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite')); },
           captureWorkflowNotifications:()=>{Notification.enabled=true;desktopConfig.notifications=true;workflowNotifications.prime(attentionItems());workflowAttentionReady=true;return Notification.shown},
           flushWorkflowNotifications:()=>workflowNotifications.flush(),
+          seedWorkflowHistory:count=>{const store=workflows();for(let n=0;n<count;n++){const task=store.submitted('history-'+n,'project','R'.repeat(3800));store.report(task.sessionId,{taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1,outcome:'ready',summary:'S'.repeat(1000)});if(n<Math.floor(count*0.9))store.finish(task.id,'completed')}},
+          workflowBroadcastReads:active=>{workflowAttentionReady=active;const store=workflows(),original=store.list;let calls=0;store.list=function(){calls++;return original.call(this)};try{broadcastState()}finally{store.list=original}return calls},
           automaticPaste: (tabId,authorized) => sendSessionTask(tabId,'bounded automatic continuation',true,{
             beforePaste:authorized,beforeEnter:authorized,aborted:()=>meetingReader(tabId).cancelExpectedDesktopPrompt(),
           }),
@@ -2968,4 +2972,14 @@ test('assignment replacement refuses an unverifiable old worker while normal man
   await assert.rejects(async()=>h.request('desktop:task-create',tab,'New task',true),/verified|idle/)
   assert.equal((await h.request('desktop:get-state')).workflowTasks![0]!.id,old.id)
   await h.request('desktop:write-tab',tab,'person draft');assert.equal(spawn.written.at(-1),'person draft')
+}))
+
+
+test('a production attention broadcast reads task history once even with notifications disabled',async()=>fixture(async(h,directory)=>{
+  const {profile,capabilities}=configure(h,directory);h.createTestWindow()
+  const tab=(await h.createMain()).activeTabId!;h.enableTasks(tab);h.seedWorkflowHistory(30)
+  h.captureWorkflowNotifications()
+  h.configure({...DEFAULT_DESKTOP_CONFIG,notifications:false,profiles:[profile],activeProfileId:profile.id},capabilities)
+  assert.equal(h.workflowBroadcastReads(false),1,'the ordinary snapshot is the baseline read')
+  assert.equal(h.workflowBroadcastReads(true),1,'attention shares that snapshot instead of decoding it again')
 }))

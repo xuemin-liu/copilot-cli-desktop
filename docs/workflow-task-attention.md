@@ -21,3 +21,5 @@ not notify an old task result again. A new report or a cleared-and-returning rea
 Validation includes filesystem deletion and deferred-read barriers, coalescing/restart/foreground fixtures, the actual
 Notification-constructor payload from the production report path, and an isolated Electron History-navigation/error
 check. It uses disposable data and an inert PTY; no paid model or production workflow is involved.
+
+Each broadcast computes one shared task/meeting/delivery snapshot for notifications and all windows. Validated task records are cached and invalidated after local writes or an external SQLite data-version change; returned copies cannot mutate the cache.
