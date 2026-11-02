@@ -13,6 +13,7 @@ export interface TaskContext {
   repositoryPath?: string; worktreePath?: string; branch?: string; meetingId?: string; pullUrl?: string
 }
 export interface WorkflowTask {
+  resources?: import('./workflow-resources.js').TaskResources;
   id: string; sessionId: string; projectId: string; title: string; request: string; assignmentId: string;
   scopeRevision: number; outcome: TaskOutcome; summary: string; updatedAt: number;
   validation: TaskValidation[]

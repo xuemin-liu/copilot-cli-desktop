@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { AttentionItem } from '../../main/workflow-attention.js'
 
-export function NeedsYou({ items, compact, onExpand, onActivate }: {
-  items: readonly AttentionItem[]; compact: boolean; onExpand(): void; onActivate(tabId: string): void
+export function NeedsYou({ items, compact, onExpand, onActivate, onOpenSession }: {
+  items: readonly AttentionItem[]; compact: boolean; onExpand(): void; onActivate(tabId: string): void;onOpenSession?:(sessionId:string)=>Promise<unknown>
 }): JSX.Element | null {
   const [open, setOpen] = useState(true)
+  const [failure,setFailure]=useState<string|null>(null)
   const [seen, setSeen] = useState<Set<string>>(() => {
     try {
       const value: unknown = JSON.parse(localStorage.getItem('workflow-attention-seen') ?? '[]')
@@ -31,11 +32,14 @@ export function NeedsYou({ items, compact, onExpand, onActivate }: {
     const next = new Set([...seen, item.key].slice(-200))
     setSeen(next)
     try { localStorage.setItem('workflow-attention-seen', JSON.stringify([...next])) } catch { /* keep the in-memory acknowledgment */ }
-    onActivate(item.tabId)
+    setFailure(null)
+    if(item.sessionId)void (onOpenSession?onOpenSession(item.sessionId):window.copilotDesktop.openSessionHistory(item.sessionId)).catch(()=>setFailure('The session is unavailable. Its task remains in Tasks; no replacement session was created.'))
+    else onActivate(item.tabId)
   }
   if (compact) return <button type="button" className="icon-button" title={`Needs you: ${items.length}`} aria-label={`Needs you: ${items.length}`} onClick={() => { setOpen(true); onExpand() }}>!</button>
   return <section className="needs-you" aria-label="Needs you">
     <button type="button" className="needs-you-heading" aria-expanded={open} onClick={() => setOpen(!open)}>Needs you · {items.length}{unread ? ` · ${unread} new` : ''}</button>
+    {failure&&<p role="status">{failure}</p>}
     {open && <ul>{items.map(item => <li key={item.key}><button type="button" onClick={() => activate(item)}><strong>{item.title}</strong><span>{item.reasons.join(' · ')}</span></button></li>)}</ul>}
   </section>
 }

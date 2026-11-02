@@ -61,7 +61,9 @@ import {
   type RemovedWorkspaceProfile,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics, redactDiagnosticText } from './desktop-diagnostics.js'
-import { attentionTitle } from './workflow-attention.js'
+import { attentionTitle,workflowAttention,type AttentionItem } from './workflow-attention.js'
+import { WorkflowResources } from './workflow-resources.js'
+import { WorkflowNotifications } from './workflow-notifications.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import {
   inspectDesktopWorktree,
@@ -863,8 +865,22 @@ function linkTaskContext(tabId:string,extra:import('./workflow-types.js').TaskCo
   if(!tab?.lastSessionId||!workflowStore)return
   try{workflowStore.link(tab.lastSessionId,{...taskContext(tab),...extra})}catch{workflowError='Task context could not be saved. Your terminal session remains usable.'}
 }
+const workflowResources=new WorkflowResources(async path=>{
+  try{return (await stat(path)).isDirectory()}catch(error){return ['ENOENT','ENOTDIR'].includes((error as NodeJS.ErrnoException).code??'')?false:null}
+},()=>broadcastState())
+let workflowAttentionReady=false
+const workflowNotifications=new WorkflowNotifications((item:AttentionItem)=>{
+  const popout=sessionWindows.get(item.tabId),window=popout??mainWindow
+  return !window?.isFocused()||(!popout&&tabsState.activeTabId!==item.tabId)
+},notice=>showNotification(notice.title,notice.body,()=>{
+  const item=notice.items.length===1?notice.items[0]:undefined
+  if(item?.sessionId){restoreMainWindow();void openSessionFromHistory(item.sessionId).catch(()=>{workflowNotice='The task session could not be opened. Its task record is retained.';broadcastState()})}
+  else if(item&&tabsState.tabs.some(tab=>tab.id===item.tabId))activateSessionTab(item.tabId)
+  else restoreMainWindow()
+}))
+function attentionItems():AttentionItem[]{return workflowAttention(tabsState.tabs,meetingViews(),workflowViews(),followupViews(),deliveryViews())}
 function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
-  try { return workflowStore?.list() ?? [] }
+  try { return workflowResources.views(workflowStore?.list()??[],new Set(tabsState.tabs.map(tab=>tab.lastSessionId).filter((id):id is string=>id!==null))) }
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
 }
 
@@ -908,6 +924,7 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
+  if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   const visible = visibleSessionTabs(tabsState)
   for (const [tabId, browser] of sessionBrowsers) {
     if (!sessionWindows.has(tabId) && !browserWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
@@ -1437,11 +1454,11 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
     }
   }
   if (event.type === 'approval-needed') {
-    showNotification('Copilot needs approval', `"${title}" is waiting for your approval.`, openTab)
+    if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   } else if (event.type === 'session-completed') {
     showNotification('Copilot session finished', `"${title}" finished.`, openTab)
   } else if (event.type === 'session-crashed') {
-    showNotification('Copilot session stopped', `"${title}" stopped unexpectedly.`, openTab)
+    if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   }
 }
 
@@ -2439,9 +2456,10 @@ const meetingHub = new MeetingHub(meetingRoot, {
     if (guestsReady) guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
     broadcastState()
   },
-  notify: (_meetingId, message) => {
+  notify: (meetingId, message) => {
     void writeAppLog(message).catch(() => {})
-    showNotification('Copilot CLI Desktop', message)
+    if(meetingHub.views().find(meeting=>meeting.id===meetingId)?.stage==='paused'){if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)}
+    else showNotification('Copilot CLI Desktop', 'A review meeting finished. Open Desktop to review its result.')
   },
   sessionIdOf: (tabId) => {
     if (GUEST_ID_PATTERN.test(tabId)) return tabId
@@ -5390,6 +5408,7 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)
+    workflowNotifications.prime(attentionItems());workflowAttentionReady=true
     scheduleAutomaticUpdateCheck()
   }).catch((error) => {
     dialog.showErrorBox('Copilot CLI Desktop failed to start', String(error))
@@ -5451,4 +5470,4 @@ app.on('window-all-closed', () => {
   if (explicitQuitRequested || desktopConfig.closeBehavior !== 'tray' || !tray) app.quit()
 })
 
-app.once('will-quit', () => { automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })
+app.once('will-quit', () => { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();automations?.close();automations=null;followups?.stop(); for(const run of automaticTurns.values())clearTimeout(run.timer); followups?.close(); followups=null;workflowStore?.close(); workflowStore = null; deliveryJournal?.close(); deliveryJournal = null })

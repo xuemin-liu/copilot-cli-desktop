@@ -6,8 +6,8 @@ it does not establish every item in the broader plan. The feature branches are s
 | Plan area | Existing implementation | Remaining acceptance work |
 | --- | --- | --- |
 | Phase 0: integration evidence | PR155: disposable CLI probe, tested-version gate, binding/input fixtures | None identified in the capability policy; crash-time consumption is deliberately unsupported and stays uncertain |
-| Phase 1: attention | PR156: cross-project reasons, acknowledgement, notifications, navigation | Surface task attention when its tab is closed; order questions/failures ahead of review results; notify new task outcomes and coalesce bursts |
-| Phase 2: task records | PR157 and PR162: stable task/assignment, rich reports, host links and retained active tasks; this PR adds explicit adoption/new task, manual outcomes, supported resumption and history deletion | Show current linked-resource availability without recreating missing resources |
+| Phase 1: attention | PR156 and this PR: cross-project reasons, closed-task navigation, acknowledgement, outcome notifications, coalescing and priority | None identified in the current acceptance audit |
+| Phase 2: task records | PR157, PR162 and PR163: stable task/assignment, rich reports, host links, adoption/new task, manual outcomes, supported resumption and history deletion; this PR adds read-only linked-resource observations | None identified in the current acceptance audit |
 | Phase 3: recovery | PR158 and PR161: journal, original-recipient gates, local meeting migration, reconciliation | No additional automatic resend is planned: there is no proven crash-safe consumption receipt |
 | Phase 4: GitHub follow-ups | PR159: per-task enrollment, current-version polling, allowlists, limits, pause | Project default templates with explicit acceptance; optional verified PR-merge completion; batch related feedback |
 | Phase 5: rule preview | PR160: bounded templates, Preview/Automatic/Off, ownership, budgets, project/global pause | No new template identified as missing; rule-created investigations intentionally remain read/search only |

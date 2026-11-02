@@ -26,6 +26,7 @@ if (!process.versions.electron) {
     window.fixture = { calls: [], openChanges: [], errors: [], views: [] };
     // Stands in for the preload bridge: the View menu's sidebar choices arrive and are reported here.
     window.copilotDesktop = {
+      openSessionHistory: id => {window.fixture.calls.push('history:'+id);return window.fixture.failHistory?Promise.reject(new Error('Unavailable')):Promise.resolve();},
       reportSidebarView: view => { window.fixture.views.push(view); return Promise.resolve(); },
       onSidebarViewRequest: listener => { window.fixture.requestView = listener; return () => { window.fixture.requestView = null; }; },
     };
@@ -285,6 +286,14 @@ if (!process.versions.electron) {
       assert.equal(await ui(`document.querySelector('.workflow-tasks').textContent.includes('Which rounding policy?')`),true)
       await writeFile(join(artifacts,'task-details.png'),(await window.webContents.capturePage()).toPNG())
       checks.push('Task question, evidence and long resource links fit a narrow sidebar')
+      await click('.needs-you[aria-label="Needs you"] li:nth-child(2) button')
+      await until(`window.fixture.calls.at(-1)==='history:history-a'`,'closed task navigates through History')
+      await ui('window.fixture.failHistory=true')
+      await click('.needs-you[aria-label="Needs you"] li:nth-child(2) button')
+      await until(`document.querySelector('.needs-you[aria-label="Needs you"]').textContent.includes('The session is unavailable')`,'missing history retains a visible task and failure')
+      await writeFile(join(artifacts,'closed-task-attention.png'),(await window.webContents.capturePage()).toPNG())
+      checks.push('Closed-session task attention opens History and preserves missing-session recovery')
+
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)

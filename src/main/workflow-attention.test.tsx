@@ -5,10 +5,21 @@ import { workflowAttention, attentionTitle } from './workflow-attention.js'
 import type { DesktopSessionTab } from './types.js'
 import type { MeetingView } from './meeting.js'
 import { NeedsYou } from '../renderer/components/NeedsYou.js'
+import type {WorkflowTask} from './workflow-types.js'
 
 const tab: DesktopSessionTab = { id: 'a', title: 'Task', workspaceProfileId: 'other', lastSessionId: null,
   status: 'running', processId: 1, cliVersion: '1.0.105', sessionPermissionPreset: 'default', sessionPermissionMode: null,
   permissionWarning: null, remote: false, lastActivityAt: 1 }
+test('closed tasks remain actionable and failures and questions sort ahead of review results',()=>{
+  const task=(id:string,outcome:WorkflowTask['outcome']):WorkflowTask=>({id,sessionId:id,projectId:'other',title:`Task ${id}`,request:'',assignmentId:id,scopeRevision:1,outcome,summary:'',validation:[],updatedAt:1,createdAt:1})
+  const tasks=[task('ready','ready'),task('question','needs-input'),task('failure','blocked')]
+  const items=workflowAttention([],[],tasks)
+  assert.deepEqual(items.map(item=>item.sessionId),['failure','question','ready'])
+  assert.equal(items[0]?.tabId,'task:failure')
+  const changed=workflowAttention([],[],tasks.map(task=>({...task,updatedAt:99,worktreePath:'/new-observation'})))
+  assert.deepEqual(changed.map(item=>item.key),items.map(item=>item.key),'a resource refresh is not new outcome evidence')
+  assert.equal(workflowAttention([{...tab,lastSessionId:'failure'}],[],tasks).filter(item=>item.reasons.includes('Task blocked or failed')).length,1)
+})
 test('attention spans projects, prioritizes failures, and never infers success from idle or exit', () => {
   const tabs = [tab, { ...tab, id: 'approval', status: 'approval-needed' as const },
     { ...tab, id: 'crash', status: 'crashed' as const }, { ...tab, id: 'done', status: 'completed' as const },
