@@ -489,6 +489,9 @@ macOS asks you to confirm the first time you open the app (System Settings → P
 
 ## Development
 
+The proposed [task and automation workflow plan](docs/task-workflows-plan.md) covers attention, task outcomes,
+durable handoffs, and opt-in GitHub follow-ups. It describes future work, not currently available features.
+
 ```powershell
 corepack enable
 corepack pnpm install
