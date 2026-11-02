@@ -11,6 +11,8 @@ export function TaskFollowups({taskId,grant}:{taskId:string;grant?:FollowupGrant
   return <details><summary>GitHub follow-ups{grant?` · ${grant.health}`:''}</summary>
     {grant&&<p>{grant.repository} #{grant.number} · Checks: {grant.checks} · {grant.total}/10 continuations
       {grant.reviewers.length?` · Reviewers: ${grant.reviewers.map(r=>r.login).join(', ')}`:''}</p>}
+    {grant?.health==='scope-changed'&&<p>Session permissions or scope changed. Reconcile the checkout and re-enroll to continue.</p>}
+    {grant?.health==='needs-person'&&<p>Open the linked session and resolve its input, binding or permission state before continuing.</p>}
     {grant?.enabled?<button disabled={pending} type="button" onClick={()=>run(()=>window.copilotDesktop.pauseFollowup(grant.id))}>Pause follow-ups</button>:<form onSubmit={event=>{
       event.preventDefault();run(()=>window.copilotDesktop.enrollFollowup(taskId,url,reviewers.split(/[\s,]+/).filter(Boolean),checks))
     }}>

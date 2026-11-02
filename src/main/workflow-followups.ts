@@ -149,6 +149,7 @@ export class WorkflowFollowups {
     const task=this.host.task(grant.taskId)
     if(!task||terminal(task)||task.scopeRevision!==grant.scopeRevision||task.sessionId!==grant.sessionId){this.closeGrant(grant);return}
     if(!['working','ready'].includes(task.outcome)){this.health(grant,'needs-person');return}
+    if(!this.intakeAuthorized(grant,task))return
     if(grant.total>=10){this.health(grant,'limit');return}
     if(Math.max(this.nextPoll.get(grant.id)??0,this.retryAt.get(grant.id)??0)>this.now())return
     this.nextPoll.set(grant.id,this.now()+120_000)
@@ -160,6 +161,7 @@ export class WorkflowFollowups {
     const latestTask=this.host.task(grant.taskId)
     if(!latestTask||terminal(latestTask)||latestTask.scopeRevision!==grant.scopeRevision){this.closeGrant(current);return}
     if(!['working','ready'].includes(latestTask.outcome)){this.health(current,'needs-person');return}
+    if(!this.intakeAuthorized(current,latestTask))return
     if(!snapshot.open){this.closeGrant(current);return}
     if(snapshot.feedback.length>1000){this.health(current,'source-too-large');return}
     const next={...current,seen:{...current.seen},head:snapshot.head,headCounts:{...current.headCounts},checks:snapshot.checks,health:'watching' as FollowupGrant['health']}
@@ -187,6 +189,16 @@ ${event.body.slice(0,6000)}`
     this.save({...grant,enabled:false,health:'closed'})
     this.host.journal.cancelScope(grant.id)
     this.host.interrupt(grant)
+  }
+  private intakeAuthorized(grant:FollowupGrant,task:WorkflowTask):boolean {
+    const key=this.host.permissionKey(task)
+    if(key===grant.permissionKey)return true
+    // A missing live recipient may be temporary. A different, positively verified fingerprint revokes the grant.
+    if(key!==null){
+      this.save({...grant,enabled:false,health:'scope-changed'})
+      this.host.journal.cancelScope(grant.id);this.host.interrupt(grant)
+    }else this.health(grant,'needs-person')
+    return false
   }
   private prune():void {
     const grants=this.list()

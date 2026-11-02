@@ -128,3 +128,13 @@ test('shutdown during an awaited source read cannot send or touch a closed datab
   const tick=h.controller.tick();await entered;h.controller.stop();release();await tick
   assert.equal(h.injected.length,0)
 }))
+test('a changed permission fingerprint revokes enrollment without consuming intake budgets',async()=>fixture(async h=>{
+  const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  h.host.permissionKey=()=> 'b'.repeat(64)
+  h.advance();for(let id=1;id<=5;id++)h.comment(id)
+  await h.controller.tick();h.advance();await h.controller.tick()
+  assert.equal(h.journal.list().length,0)
+  assert.equal(h.controller.grant(grant.id)?.total,0)
+  assert.equal(h.controller.grant(grant.id)?.health,'scope-changed')
+  assert.equal(h.controller.grant(grant.id)?.enabled,false)
+}))
