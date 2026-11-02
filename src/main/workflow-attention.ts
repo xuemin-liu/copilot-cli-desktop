@@ -5,7 +5,7 @@ import { redactDiagnosticText } from './desktop-diagnostics.js'
 export type AttentionReason = 'Session stopped unexpectedly' | 'Needs approval' | 'Review meeting paused'
 export interface AttentionItem { tabId: string; title: string; reasons: AttentionReason[]; key: string }
 export function attentionTitle(value: string): string {
-  return redactDiagnosticText(value).replace(/[\p{Cc}\p{Cf}]/gu, '').slice(0, 120).trim() || 'Copilot session'
+  return redactDiagnosticText(value.replace(/[\p{Cc}\p{Cf}]/gu, '')).slice(0, 120).trim() || 'Copilot session'
 }
 /** Activity is not an outcome: idle/completed/dormant processes never imply a reviewable result. */
 export function workflowAttention(tabs: readonly DesktopSessionTab[], meetings: readonly MeetingView[]): AttentionItem[] {

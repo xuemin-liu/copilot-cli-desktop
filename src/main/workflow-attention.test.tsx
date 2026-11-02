@@ -25,6 +25,7 @@ test('paused meetings add one reason to their host and clear on resume', () => {
   assert.notEqual(items[0]!.key, workflowAttention([{ ...tab, status: 'approval-needed' }], [{ ...meeting, round: 3 }])[0]!.key)
 })
 test('attention titles mask credentials and controls before presentation', () => {
+  assert.equal(attentionTitle('to\u200bken=synthetic-private-value'), 'token=[REDACTED]')
   assert.equal(attentionTitle('token=fixture-secret\u202e\u0000'), 'token=[REDACTED]')
   assert.equal(attentionTitle(''), 'Copilot session')
   const items = workflowAttention([{ ...tab, title: 'token=fixture-secret', status: 'crashed' }], [])
