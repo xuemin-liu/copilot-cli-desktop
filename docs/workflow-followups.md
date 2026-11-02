@@ -48,6 +48,6 @@ limits, pause and shutdown races, retirement, deduplication and uncertain recove
 origin/branch/head/dirty/trust checks. Production main lifecycle fixtures exercise draft preservation and revocation
 between paste and Enter alongside existing meeting binding paths. No live PR is enrolled by these tests.
 
-This supplies Phase 4 of the [plan](task-workflows-plan.md). Existing meeting files remain the meeting recovery format;
-the shared prompt gate serializes their input with workflow deliveries. Migrating that meeting format into the journal
-remains separate from this PR.
+This supplies Phase 4 of the [plan](task-workflows-plan.md). The subsequent
+[meeting migration](workflow-meeting-recovery.md) retains meeting files for round state and uses the same journal
+for local prompt identities and submission recovery.

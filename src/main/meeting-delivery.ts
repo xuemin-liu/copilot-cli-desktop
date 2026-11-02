@@ -8,7 +8,9 @@ import type { MeetingDelivery } from './meeting.js'
  */
 
 export interface MeetingOutboxDeps {
-  sendTask(tabId: string, text: string): SessionTaskSend
+  sendTask(tabId: string, text: string,delivery:MeetingDelivery): SessionTaskSend
+  /** A person discarded it or its durable receipt is already settled. Never type that item again. */
+  settled?(tabId:string,delivery:MeetingDelivery):boolean
   /** Types a one-line slash command; false when the session cannot take it now. */
   sendCommand(tabId: string, command: string): boolean
   /** A prompt was typed; its turn's answer belongs to this delivery. */
@@ -49,6 +51,10 @@ export class MeetingOutbox {
   inTurn(tabId: string): MeetingDelivery | null {
     return this.queues.get(tabId)?.inTurn ?? null
   }
+  next(tabId:string):MeetingDelivery|null {return this.queues.get(tabId)?.items[0]??null}
+  hasMeetingWork(meetingId:string):boolean {
+    return [...this.queues.values()].some(queue=>queue.inTurn?.meetingId===meetingId||queue.items.some(item=>item.meetingId===meetingId))
+  }
 
   /** The session's prompt finished (it went idle). Returns the delivery that turn answered. */
   turnEnded(tabId: string): MeetingDelivery | null {
@@ -79,13 +85,14 @@ export class MeetingOutbox {
     for (const [tabId, queue] of this.queues) {
       while (queue.items.length && !queue.inTurn && this.deps.now() >= queue.settleUntil) {
         const delivery = queue.items[0]!
+        if(this.deps.settled?.(tabId,delivery)){queue.items.shift();continue}
         if (delivery.kind === 'add-dir') {
           if (!this.deps.sendCommand(tabId, `/add-dir ${delivery.text}`)) break
           queue.items.shift()
           queue.settleUntil = this.deps.now() + COMMAND_SETTLE_MS
           break
         }
-        const result = this.deps.sendTask(tabId, delivery.text)
+        const result = this.deps.sendTask(tabId, delivery.text,delivery)
         if (result.result === 'busy') break
         queue.items.shift()
         if (result.result === 'refused') { this.deps.refused(tabId, delivery, result.message); continue }

@@ -1,4 +1,4 @@
-import { randomInt } from 'node:crypto'
+import { randomInt, randomUUID, createHash } from 'node:crypto'
 import { join } from 'node:path'
 import {
   MAX_MEETING_PATCH_CHARS,
@@ -99,7 +99,7 @@ export interface MeetingView {
 }
 
 /** `round` is the round the message belongs to: a reply counts only for that round, however late its turn ends. */
-export interface MeetingDelivery { meetingId: string; round: number; kind: MeetingDeliveryKind; text: string }
+export interface MeetingDelivery { meetingId: string; round: number; kind: MeetingDeliveryKind; text: string; id?:string; recovered?:true }
 
 export interface MeetingEffects {
   /** Queue a message (or, for `add-dir`, a command) for the session; it is typed when the session can take it. */
@@ -520,7 +520,12 @@ export class MeetingHub {
     for (const tabId of [host.tabId, ...meeting.participants.keys()]) this.send(meeting, tabId, 'add-dir', meeting.folder)
     for (const { sessionId, delivery } of state.outstanding) {
       const tabId = bySession.get(sessionId)
-      if (tabId) this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round)
+      if (tabId) {
+        // Stable across repeated upgrades/restarts even when the old file has no delivery identity.
+        const legacy=createHash('sha256').update(JSON.stringify([meeting.id,sessionId,delivery.round,delivery.kind,delivery.text])).digest('hex')
+        const id=delivery.id??`${legacy.slice(0,8)}-${legacy.slice(8,12)}-${legacy.slice(12,16)}-${legacy.slice(16,20)}-${legacy.slice(20,32)}`
+        this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round,id,!delivery.id||delivery.recovered===true)
+      }
     }
     if (meeting.stage === 'reviewing') {
       if (meeting.participants.size === 0) this.backToWaiting(meeting)
@@ -548,8 +553,8 @@ export class MeetingHub {
   }
 
   /** Every message goes through here, so what a session has not finished answering is known (and saved). */
-  private send(meeting: Meeting, tabId: string, kind: MeetingDeliveryKind, text: string, round = meeting.round): void {
-    const delivery: MeetingDelivery = { meetingId: meeting.id, round, kind, text }
+  private send(meeting: Meeting, tabId: string, kind: MeetingDeliveryKind, text: string, round = meeting.round,id:string=randomUUID(),recovered=false): void {
+    const delivery: MeetingDelivery = { meetingId: meeting.id, round, kind, text,...(kind!=='add-dir'?{id}:{}),...(recovered?{recovered:true as const}:{}) }
     if (kind !== 'add-dir') meeting.outstanding.set(tabId, delivery)
     this.effects.deliver(tabId, delivery)
   }
@@ -847,7 +852,8 @@ function deliveryOf(value: unknown, meetingId: string): MeetingDelivery | null {
   const round = roundOf(value.round)
   const kind = DELIVERY_KINDS.find((candidate) => candidate === value.kind)
   const body = text(value.text, MAX_MEETING_POST_CHARS + MAX_MEETING_REPLY_CHARS * MAX_MEETING_PARTICIPANTS)
-  return round && kind && body !== null ? { meetingId, round, kind, text: body } : null
+  if(value.id!==undefined&&(typeof value.id!=='string'||!/^[a-f0-9-]{36}$/.test(value.id)))return null
+  return round && kind && body !== null ? { meetingId, round, kind, text: body,...(typeof value.id==='string'?{id:value.id}:{}),...(value.recovered===true?{recovered:true as const}:{}) } : null
 }
 
 /** A saved meeting as written by `snapshot`; anything malformed is not restored. The file is the desktop's own, but on disk. */

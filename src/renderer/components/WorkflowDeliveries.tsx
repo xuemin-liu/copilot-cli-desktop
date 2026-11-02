@@ -13,12 +13,13 @@ export function DeliveryQueue({ deliveries, error }: { deliveries: readonly Work
   return <details className="needs-you" open><summary>Handoffs · {pending.length}</summary>
     {(error || failure) && <p role="status">{error || failure}</p>}
     <ul>{pending.map(d => <li key={d.id}><strong>{d.source}</strong><span>{d.state}</span>
+      <button type="button" onClick={() => { void window.copilotDesktop.openSessionHistory(d.sessionId).catch(() => setFailure('The linked session could not be opened.')) }}>Open session</button>
       {d.state === 'uncertain' && <>
         <p>This input may have already run. Inspect the linked session before choosing to send it again.</p>
-        <button type="button" onClick={() => { void window.copilotDesktop.openSessionHistory(d.sessionId).catch(() => setFailure('The linked session could not be opened.')) }}>Open session</button>
         <button type="button" onClick={() => act(d.id, 'retry')}>Send again</button>
         <button type="button" onClick={() => act(d.id, 'discard')}>Discard handoff</button>
       </>}
+      {d.state==='queued'&&<button type="button" onClick={()=>act(d.id,'discard')}>Discard queued handoff</button>}
     </li>)}</ul>
   </details>
 }

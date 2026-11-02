@@ -64,3 +64,10 @@ test('the meeting folder is added with a slash command, and the material follows
   o.box.pump()
   assert.deepEqual(o.typed.at(-1), 'tab-1: material')
 })
+test('settled journal deliveries leave the outbox without starting a duplicate turn',()=>{
+  let sent=0
+  const box=new MeetingOutbox({sendTask:()=>{sent++;return {result:'sent'}},sendCommand:()=>true,sent:()=>{},refused:()=>{},now:()=>0,settled:()=>true})
+  box.enqueue('tab-1',{meetingId:'K7QF',round:1,kind:'post',text:'already answered',id:'stable'})
+  assert.equal(box.hasMeetingWork('K7QF'),true);box.pump()
+  assert.equal(sent,0);assert.equal(box.inTurn('tab-1'),null);assert.equal(box.hasMeetingWork('K7QF'),false)
+})
