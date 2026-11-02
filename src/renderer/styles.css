@@ -1492,7 +1492,12 @@ button:disabled {
 .desktop-control-log-refused { color: #f2c25b; }
 .desktop-control-log-failed { color: #ffb3bb; }
 .desktop-control-panel .danger-button { background: #5a1f22; border-color: #7d2c30; color: #ffd0cc; }
-.needs-you { flex: 0 0 auto; max-height: 30vh; overflow: auto; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.needs-you, .workflow-automations { flex: 0 0 auto; max-height: 30vh; overflow: auto; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.workflow-automations ul { list-style: none; margin: 4px 0; padding: 0; }
+.workflow-automations li { margin: 8px 0; overflow-wrap: anywhere; }
+.workflow-automations label, .workflow-followups label { display: block; margin: 6px 0; }
+.workflow-automations input, .workflow-automations select, .workflow-followups input:not([type=checkbox]) { display: block; width: 100%; min-width: 0; box-sizing: border-box; }
+.workflow-automations button, .workflow-followups button { white-space: normal; overflow-wrap: anywhere; }
 .needs-you-heading { width: 100%; text-align: left; font-weight: 600; }
 .needs-you ul { list-style: none; margin: 4px 0; padding: 0; }
 .needs-you li button { width: 100%; text-align: left; padding: 6px; border-radius: 4px; }

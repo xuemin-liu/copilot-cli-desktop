@@ -8,7 +8,7 @@ export function TaskFollowups({taskId,grant}:{taskId:string;grant?:FollowupGrant
     setPending(true);setError(null)
     void action().catch(error=>setError(error instanceof Error?error.message:'Follow-up settings could not be saved')).finally(()=>setPending(false))
   }
-  return <details><summary>GitHub follow-ups{grant?` · ${grant.health}`:''}</summary>
+  return <details className="workflow-followups"><summary>GitHub follow-ups{grant?` · ${grant.health}`:''}</summary>
     {grant&&<p>{grant.repository} #{grant.number} · Checks: {grant.checks} · {grant.total}/10 continuations
       {grant.reviewers.length?` · Reviewers: ${grant.reviewers.map(r=>r.login).join(', ')}`:''}</p>}
     {grant?.health==='scope-changed'&&<p>Session permissions or scope changed. Reconcile the checkout and re-enroll to continue.</p>}

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -50,6 +50,7 @@ interface Harness {
   createMain(): Promise<DesktopState>
   enableTasks(tabId: string): void
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
+  launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   deferTaskEnter():void
   flushTaskEnter():void
   composedPaste(tabId:string):{result:string}
@@ -270,6 +271,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           automaticPaste: (tabId,authorized) => sendSessionTask(tabId,'bounded automatic continuation',true,{
             beforePaste:authorized,beforeEnter:authorized,aborted:()=>meetingReader(tabId).cancelExpectedDesktopPrompt(),
           }),
+          launchInvestigation: (projectId,head,authorized) => {
+            app.isReady=()=>true;state.resolution.version='1.0.105';refreshCopilotResolutionIfChanged=async()=>{};workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
+            const rule={id:randomUUID(),revision:randomUUID(),projectId,repository:'owner/repo',scopeKey:automationScope(projectId)};
+            return launchAutomationTask(rule,{key:'github/owner/repo/issue/1',version:'a'.repeat(64),actorId:7,at:Date.now(),title:'Investigate issue',body:'Investigate token=fixture-secret',head,branch:'main'},authorized);
+          },
           deferTaskEnter:()=>{scheduleTaskEnter=action=>{deferredTaskEnter=action}},
           flushTaskEnter:()=>{const action=deferredTaskEnter;deferredTaskEnter=null;action?.()},
           composedPaste: tabId=>sendSessionTask(tabId,'Person-composed task'),
@@ -326,7 +332,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowError = 'test cleanup'; workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -2648,6 +2654,58 @@ test('automatic paste uses production draft gates and rechecks authorization bef
   await pause(350)
   assert.deepEqual(spawn.written.slice(-3),['\x1b[200~bounded automatic continuation\x1b[201~','\x03','next person draft'])
   assert.ok(!spawn.written.includes('\r'),'revocation prevents submission')
+}))
+
+for(const unverifiedBeforeEnter of [false,true])test(`a rule investigation through a filesystem alias ${unverifiedBeforeEnter?'refuses Enter for an unverifiable recipient':'submits its verified recipient'}`,async t=>fixture(async(h,directory)=>{
+  const git=await findGitForTests();if(!git){t.skip('Git unavailable');return}
+  const {execFileSync}=await import('node:child_process')
+  const repo=join(directory,'project');await mkdir(repo)
+  const env={...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:join(directory,'gitconfig'),GIT_AUTHOR_NAME:'Test',GIT_AUTHOR_EMAIL:'test@example.com',GIT_COMMITTER_NAME:'Test',GIT_COMMITTER_EMAIL:'test@example.com'}
+  await writeFile(join(directory,'gitconfig'),'[init]\n defaultBranch = main\n')
+  const plain=(...args:string[]):string=>execFileSync(git.path,args,{cwd:repo,env,encoding:'utf8',stdio:['ignore','pipe','ignore']})
+  plain('init','-q');await writeFile(join(repo,'a.txt'),'one');plain('add','.');plain('commit','-qm','init');plain('remote','add','origin','https://github.com/owner/repo.git')
+  const {capabilities}=configure(h,directory),profile=createWorkspaceProfile(repo,'default')
+  h.configure({...DEFAULT_DESKTOP_CONFIG,profiles:[profile],activeProfileId:profile.id},capabilities)
+  await writeFile(join(repo,'a.txt'),'dirty')
+  await assert.rejects(h.launchInvestigation(profile.id,plain('rev-parse','HEAD').trim(),()=>true),error=>error instanceof Error&&error.constructor.name==='AutomationLaunchRefused')
+  assert.equal(h.spawns.length,0,'a checkout refusal is proven before session/worktree creation')
+  await writeFile(join(repo,'a.txt'),'one')
+  let authorized=true
+  if(unverifiedBeforeEnter)h.deferTaskEnter()
+  const launch=h.launchInvestigation(profile.id,plain('rev-parse','HEAD').trim(),()=>authorized)
+  void launch.catch(()=>{})
+  // Ensure a failed fixture cannot leave its production wait loop running for 90 seconds.
+  try {
+    await waitFor(async()=>h.spawns.length,n=>n===1,'the investigation starts one CLI')
+    const spawn=h.spawns[0]!,tabId=(await h.request('desktop:get-state')).activeTabId!
+    assert.ok(spawn.args.includes('--available-tools=view,glob,grep,ask_user'))
+    const name=spawn.args.find(a=>a.startsWith('--worktree='))!.slice('--worktree='.length),worktree=join(`${repo}.worktrees`,name)
+    plain('worktree','add','-q','-b',name,worktree,'HEAD')
+    const alias=join(directory,'worktrees-alias')
+    await symlink(dirname(worktree),alias,process.platform==='win32'?'junction':'dir')
+    const reportedCwd=join(alias,name)
+    assert.equal(await realPathNative(reportedCwd),await realPathNative(worktree))
+    const sessionId=SOURCE,log=join(directory,'session-state',sessionId,'events.jsonl')
+    await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId,startTime:new Date().toISOString(),context:{cwd:reportedCwd}}})+'\n')
+    await writeFile(join(dirname(log),'inuse.7700.lock'),'')
+    h.configureBinding(tabId,7700,[7700]);spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+    let launchTimeout:NodeJS.Timeout|undefined
+    const receipt=await Promise.race([launch,new Promise<never>((_resolve,reject)=>{launchTimeout=setTimeout(()=>reject(new Error('The verified alias did not receive the investigation')),15000);launchTimeout.unref()})]).finally(()=>clearTimeout(launchTimeout))
+    assert.equal(receipt.sessionId,sessionId)
+    const snapshot=await h.request('desktop:get-state')
+    assert.notEqual(snapshot.tabs[0]?.sessionCwd,snapshot.tabs[0]?.worktree?.path,'fixture exercises distinct raw and canonical spellings')
+    assert.equal(snapshot.tabs[0]?.sessionPermissionPreset,'read-only')
+    assert.equal(snapshot.workflowTasks?.[0]?.id,receipt.taskId)
+    assert.equal(snapshot.workflowDeliveries?.[0]?.state,'submitted')
+    assert.ok(!JSON.stringify(snapshot.workflowTasks).includes('fixture-secret'))
+    assert.ok(!JSON.stringify(snapshot.workflowDeliveries).includes('fixture-secret'))
+    if(unverifiedBeforeEnter){
+      h.makeBindingUnreadable(tabId);await h.refreshRecords(tabId);h.flushTaskEnter()
+      assert.ok(!spawn.written.includes('\r'),'automatic Enter still requires a verified recipient')
+      assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'uncertain')
+    }else{await pause(350);assert.equal(spawn.written.at(-1),'\r')}
+    assert.equal((await h.meetingCommand(tabId,'start',sessionId)).ok,false,'a rule turn is not person authorization')
+  }finally{authorized=false;await launch.catch(()=>{})}
 }))
 
 test('desktop input keeps delayed cancellation with its original native conversation',async()=>fixture(async(h,directory)=>{
