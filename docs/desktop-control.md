@@ -76,9 +76,8 @@ this app's own global shortcuts (`Ctrl+Alt+H` and the stop key).
 
 - **No typing into password fields.** Before every `type` chunk and every `key`, the app asks Windows UI Automation
   whether the focused control is a password field, and refuses if it is or if it can't tell. A Tab or Enter can move
-  the focus, so `type` goes on after one only when Windows shows the focus has moved for a Tab, or after an Enter in a
-  document, where Enter starts a new line. Otherwise it stops, and Copilot types the rest in a new request after a new
-  screenshot.
+  the focus, so `type` always stops after an Enter, and after a Tab unless Windows shows the focus has moved. Copilot
+  then types the rest in a new request after a new screenshot, so multi-line text takes one request per line.
 - **Your input comes first.** If you use the mouse or keyboard during an action, the action stops and control pauses
   until you click **Resume** in the panel. An action right after your own input is deferred.
 - **Limits.** At most 10 actions a second, one at a time, and 4 KiB per `type`.

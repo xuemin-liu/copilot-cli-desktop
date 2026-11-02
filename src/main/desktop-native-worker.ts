@@ -340,22 +340,17 @@ function runtimeId(element: unknown): string | null {
   } finally { SafeArrayDestroy(array[0]) }
 }
 
-/**
- * The focused control's process, whether it is a password field (get_CurrentIsPassword), its runtime id, and its
- * control type (get_CurrentControlType).
- */
+/** The focused control's process, whether it is a password field (get_CurrentIsPassword), and its runtime id. */
 function focusedControl(): DesktopNativeFocus {
   const root = uiAutomation()
   const element: unknown[] = [null]
-  if (koffi.call(method(root, 8), GetFocusedElement, root, element) !== 0 || !element[0]) return { pid: null, password: null, id: null, controlType: null }
+  if (koffi.call(method(root, 8), GetFocusedElement, root, element) !== 0 || !element[0]) return { pid: null, password: null, id: null }
   try {
     const pid = [0]
     const password = [0]
-    const controlType = [0]
     const pidOk = koffi.call(method(element[0], 20), GetIntProperty, element[0], pid) === 0
     const passwordOk = koffi.call(method(element[0], 35), GetIntProperty, element[0], password) === 0
-    const typeOk = koffi.call(method(element[0], 21), GetIntProperty, element[0], controlType) === 0
-    return { pid: pidOk ? pid[0]! : null, password: passwordOk ? password[0] !== 0 : null, id: runtimeId(element[0]), controlType: typeOk ? controlType[0]! : null }
+    return { pid: pidOk ? pid[0]! : null, password: passwordOk ? password[0] !== 0 : null, id: runtimeId(element[0]) }
   } finally { koffi.call(method(element[0], 2), Release, element[0]) }
 }
 

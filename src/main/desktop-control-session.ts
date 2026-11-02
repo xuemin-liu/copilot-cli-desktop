@@ -151,8 +151,8 @@ How it works:
   screenshot and plan again; never retry the same coordinates blindly.
 - type reads the text from a UTF-8 file you write first (at most 4 KiB), so the text is never on a command line.
   It types into the control that has the keyboard focus. Tabs are typed as Tab and new lines as Enter. Because those
-  can move the focus, typing may stop after one (done is false, with typed and remaining counts): take a new
-  screenshot, check where the focus is, and type the rest in a new request.
+  can move the focus, typing stops after an Enter, and after a Tab unless the focus visibly moved (done is false, with
+  typed and remaining counts): take a new screenshot, check where the focus is, and type the rest in a new request.
 - key takes one key or chord: letters, digits, punctuation, enter, tab, escape, backspace, delete, arrows, home, end,
   pageup, pagedown, space, f1-f12, with ctrl, alt and shift. Win-key chords and system chords are refused.
 - scroll takes whole steps; a positive dy scrolls down.

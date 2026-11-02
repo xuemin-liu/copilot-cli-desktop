@@ -101,9 +101,7 @@ const TYPE_CHUNK = 32
 /** How long to wait for the app to show that it moved its focus after a Tab, and how often to look. */
 const FOCUS_MOVE_MS = 1_000
 const FOCUS_POLL_MS = 50
-/** UI Automation's Document control type, where Enter is a new line rather than a submit. */
-const UIA_DOCUMENT = 50030
-const UNKNOWN_FOCUS: DesktopNativeFocus = { pid: null, password: null, id: null, controlType: null }
+const UNKNOWN_FOCUS: DesktopNativeFocus = { pid: null, password: null, id: null }
 const MAX_BODY = 64 * 1024
 const COMMANDS = new Set(['status', 'windows', 'screenshot', 'click', 'move', 'drag', 'scroll', 'type', 'key', 'focus'])
 
@@ -616,9 +614,9 @@ export class DesktopControl {
             sent += segment.length
             if (index === segments.length - 1 || (segment !== '\t' && segment !== '\n')) continue
             // SendInput only queues the key, so a check after a fixed wait may run before the app moves its focus.
-            // Go on only where Enter is a new line (a document), or once the app shows it moved the focus for the Tab;
-            // otherwise stop, and the rest is checked again in a new request.
-            if (segment === '\n' ? focus.controlType === UIA_DOCUMENT : await this.focusMoved(focus.id)) continue
+            // Go on after a Tab only once the app shows it moved the focus. Enter can submit, or run a page's own
+            // handler, whatever the control is, so always stop after it; the rest is checked again in a new request.
+            if (segment === '\t' && await this.focusMoved(focus.id)) continue
             stopped = { typed: sent, total: text.length }
             return
           }
