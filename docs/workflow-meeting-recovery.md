@@ -3,7 +3,9 @@
 Local meeting prompts now share the workflow journal and destination arbiter with GitHub task follow-ups and
 rule-created tasks. Each new meeting prompt has a stable UUID stored in its existing version-1 meeting snapshot.
 The outbox waits for that snapshot to be written, verifies the current CLI recipient, and commits journal intent
-before pasting. It checks authorization again before delayed Enter. Drafts, pickers and held person input retain
+before pasting. The journal holds an app-defined summary, never an executable copy of the proposal. The meeting's
+original text is delivered unchanged within its existing meeting-size caps; credential-like code identifiers are
+not rewritten by audit redaction. It checks authorization again before delayed Enter. Drafts, pickers and held person input retain
 the same protection as other desktop-composed tasks. Idempotent `/add-dir` setup retains the existing command path;
 an unresolved workflow submission blocks that path too.
 
@@ -28,6 +30,8 @@ switch invalidates the old delivery; it does not authorize Ctrl+C against the ne
 Queued handoffs can be inspected and discarded, including when a crash left a queue entry without a restored meeting.
 Closed meeting scopes are retired only when the in-memory outbox has no work and every journal entry is terminal.
 Unresolved evidence is retained. Storage failure disables automatic meeting input while ordinary terminals remain usable.
+An individual intake rejection is shown as a waiting handoff and leaves other destinations and recovery actions usable;
+it is distinct from an unavailable/corrupt journal.
 
 Validation uses real SQLite reopen/retry/discard tests, legacy identity fixtures, existing meeting/guest round tests,
 and production lifecycle fixtures for recipient switching, no-lock initial delivery and draft/Enter protection.

@@ -7,7 +7,7 @@ import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type
 import type { AutomationEvent } from './workflow-automation-source.js'
 import { journalMeetingDelivery } from './workflow-meeting-journal.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
-import { WorkflowDeliveries } from './workflow-deliveries.js'
+import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
@@ -132,7 +132,7 @@ import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETIN
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
 import { MeetingTurnReader } from './meeting-turns.js'
-import { MEETING_MARKER_PREFIX, roundPaths } from './meeting-messages.js'
+import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
   guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
@@ -629,6 +629,18 @@ function writeSessionLog(tabId: string, chunk: string): Promise<void> {
 
 let deliveryJournal: WorkflowDeliveries | null = null
 let deliveryError: string | null = null
+const meetingDeliveryNotices=new Map<string,string>()
+function meetingDeliveryNotice(delivery:MeetingDelivery,error:unknown):void {
+  if(error instanceof WorkflowDeliveryRejected){
+    const key=delivery.id??delivery.meetingId
+    if(meetingDeliveryNotices.get(key)===error.message)return
+    meetingDeliveryNotices.set(key,error.message)
+  }else {
+    if(deliveryError)return
+    deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.'
+  }
+  broadcastState()
+}
 let workflowStore: WorkflowStore | null = null
 let workflowError: string | null = null
 let workflowNotice: string | null = null
@@ -858,7 +870,7 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     workflowAutomaticPaused: workflowsPaused(),
     workflowPausedProjects: state.profiles.filter(p=>automations?.projectPaused(p.id)).map(p=>p.id),
     workflowDeliveries: deliveryViews(),
-    workflowDeliveryError: deliveryError,
+    workflowDeliveryError: deliveryError??(meetingDeliveryNotices.size?`${meetingDeliveryNotices.size} meeting handoff(s) are waiting: ${[...meetingDeliveryNotices.values()][0]}. Other handoffs and recovery controls remain available.`:null),
     workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
@@ -2174,7 +2186,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
  * typed in the prompt box and no key pressed just now. Keys pressed meanwhile are held back, then passed on in order. When
  * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
  */
-function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void}): SessionTaskSend {
+function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void;maximumChars?:number}): SessionTaskSend {
   if(!hooks&&(automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)))return {result:'busy',message:'An automatic task turn is still running.'}
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
@@ -2205,7 +2217,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
     const current = managedTabs.get(tabId)?.session
     for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
   }
-  const paste = taskPasteSequence(text)
+  const paste = taskPasteSequence(text,hooks?.maximumChars)
   draft.note(paste)
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
@@ -2330,8 +2342,11 @@ const meetingOutbox = new MeetingOutbox({
     if(delivery.kind==='add-dir'||!deliveryJournal||deliveryError)return false
     const sessionId=tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId
     if(!sessionId)return false
-    try{const item=journalMeetingDelivery(deliveryJournal,sessionId,delivery,broadcastState);return item!==null&&['answered','cancelled'].includes(item.state)}
-    catch {deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.';broadcastState();return false}
+    try{
+      const item=journalMeetingDelivery(deliveryJournal,sessionId,delivery,broadcastState)
+      if(meetingDeliveryNotices.delete(delivery.id??delivery.meetingId))broadcastState()
+      return item!==null&&['answered','cancelled'].includes(item.state)
+    }catch(error){meetingDeliveryNotice(delivery,error);return false}
   },
   sendTask: (tabId, text,delivery) => {
     if(automaticTurns.has(tabId)||deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
@@ -2345,7 +2360,8 @@ const meetingOutbox = new MeetingOutbox({
     try{
       const item=journalMeetingDelivery(journal,sessionId,delivery,broadcastState)
       if(!item||item.state!=='queued')return {result:'busy',message:'Inspect the meeting handoff in Handoffs.'}
-      return sendSessionTask(tabId,item.text,false,{
+      return sendSessionTask(tabId,delivery.text,false,{
+        maximumChars:MAX_MEETING_POST_CHARS+MAX_MEETING_REPLY_CHARS*MAX_MEETING_PARTICIPANTS,
         beforePaste:()=>{
           if(!meetingPromptShown(tabId)||!journal.begin(item.id,()=>!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingPromptShown(tabId)))return false
           meetingJournalTurns.set(tabId,{id:item.id,session,sessionId,meetingId:delivery.meetingId,stopping:false});return true
@@ -2353,7 +2369,7 @@ const meetingOutbox = new MeetingOutbox({
         beforeEnter:()=>!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingJournalTurns.get(tabId)?.stopping===false&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId,
         aborted:()=>{endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt()},
       })
-    }catch {endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.';return {result:'busy',message:'Handoff history is unavailable.'}}
+    }catch(error){endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();meetingDeliveryNotice(delivery,error);return {result:'busy',message:'This handoff is waiting; inspect Handoffs.'}}
   },
   sendCommand: (tabId, command) => {
     const allowed=():boolean=>!shuttingDown()&&!workflowsPaused(tabsState.tabs.find(t=>t.id===tabId)?.workspaceProfileId)

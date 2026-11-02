@@ -64,8 +64,9 @@ export function sessionTaskDecision(state: SessionTaskState, needsWrite = true):
 }
 
 /** The task as one bracketed paste: bounded, with control characters (and so any paste-end marker) removed. Enter follows separately. */
-export function taskPasteSequence(text: string): string {
-  const bounded = text.slice(0, MAX_TASK_CHARS).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, '')
+export function taskPasteSequence(text: string,maximumChars=MAX_TASK_CHARS): string {
+  // Only main chooses a larger cap for already bounded meeting material. Ordinary composed tasks retain 12,000.
+  const bounded = text.slice(0, Math.min(1_000_000,maximumChars)).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, '')
   return `\u001b[200~${bounded}\u001b[201~`
 }
 

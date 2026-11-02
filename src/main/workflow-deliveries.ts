@@ -7,6 +7,8 @@ export interface WorkflowDelivery {
   id: string; sessionId: string; source: string; revision: string; scope: string; text: string; state: DeliveryState
 }
 const identifier = (value: string): boolean => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value)
+/** Rejected intake is not a corrupt/unavailable database. Existing recovery controls remain usable. */
+export class WorkflowDeliveryRejected extends Error {}
 
 /** Host-owned durable outbox. Callers must verify authorization and the live recipient again at submission. */
 export class WorkflowDeliveries {
@@ -30,13 +32,13 @@ export class WorkflowDeliveries {
   close(): void { this.db.close() }
   enqueue(input: Omit<WorkflowDelivery, 'id' | 'state'>): WorkflowDelivery {
     if (![input.sessionId,input.source,input.revision,input.scope].every(identifier) || typeof input.text !== 'string' || input.text.length > 12_000)
-      throw new Error('Invalid delivery')
+      throw new WorkflowDeliveryRejected('Invalid delivery')
     const body = redactDiagnosticText(input.text.replace(/[\p{Cf}\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, ''))
-    if (body.length > 12_000) throw new Error('Redacted delivery body exceeds the stored limit')
+    if (body.length > 12_000) throw new WorkflowDeliveryRejected('Redacted delivery body exceeds the stored limit')
     const existing = this.db.prepare('SELECT id FROM deliveries WHERE session=? AND source=? AND revision=? AND scope=?')
       .get(input.sessionId,input.source,input.revision,input.scope) as {id: string} | undefined
     if (existing) return this.get(existing.id)!
-    if ((this.db.prepare('SELECT COUNT(*) AS n FROM deliveries').get() as {n: number}).n >= 1000) throw new Error('Delivery history limit reached')
+    if ((this.db.prepare('SELECT COUNT(*) AS n FROM deliveries').get() as {n: number}).n >= 1000) throw new WorkflowDeliveryRejected('Delivery history limit reached')
     const id = randomUUID()
     this.db.prepare('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?)').run(id,input.sessionId,input.source,input.revision,input.scope,body,'queued')
     return this.get(id)!

@@ -14,7 +14,7 @@ test('meeting identity survives restart and never resends an ambiguous turn with
   const delivery:MeetingDelivery={id:randomUUID(),meetingId:'K7QF',round:1,kind:'post',text:'Review token=fixture-secret'}
   try{
     const item=journalMeetingDelivery(journal,'session',delivery)!
-    assert.equal(item.state,'queued');assert.equal(item.text,'Review token=[REDACTED]')
+    assert.equal(item.state,'queued');assert.ok(!item.text.includes('fixture-secret'));assert.ok(!item.text.includes('Review token='))
     journal.begin(item.id,()=>true);journal.submitted(item.id);journal.close();journal=new WorkflowDeliveries(path)
     const recovered=journalMeetingDelivery(journal,'session',{...delivery})!
     assert.equal(recovered.id,item.id);assert.equal(recovered.state,'uncertain')

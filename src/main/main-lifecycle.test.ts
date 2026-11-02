@@ -54,11 +54,12 @@ interface Harness {
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
   queueLegacyMeeting(tabId:string):void
+  queueRejectedMeeting(tabId:string):void
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
   refreshRecords(tabId: string): Promise<void>
-  queueMeetingDelivery(tabId: string, kind: 'post' | 'add-dir'): void
+  queueMeetingDelivery(tabId: string, kind: 'post' | 'add-dir',text?:string): void
   pumpMeetingDelivery(): Promise<void>
   /** One pass of the session-name poll, which the app runs every few seconds once ready. */
   refreshNames(): Promise<void>
@@ -290,8 +291,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             copilotSessionRoot(process.env), rootPid, async () => new Set(pids), () => true); },
           bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
-          queueMeetingDelivery: (tabId, kind) => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text: 'automatic meeting material' }); },
+          queueMeetingDelivery: (tabId, kind,text='automatic meeting material') => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text }); },
           queueLegacyMeeting: tabId=>{meetingOutbox.enqueue(tabId,{meetingId:'K7QF',id:randomUUID(),recovered:true,round:1,kind:'post',text:'Legacy outstanding material'})},
+          queueRejectedMeeting: tabId=>{meetingOutbox.enqueue(tabId,{meetingId:'K7QF',id:'invalid?delivery',round:1,kind:'post',text:'Invalid intake fixture'})},
           pumpMeetingDelivery: () => pumpMeetingOutbox(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
@@ -2711,6 +2713,23 @@ test('a successful write to another meeting file cannot clear a failed snapshot/
   await rm(blocked,{recursive:true})
   assert.equal(await h.meetingWrite('K7QF',blocked,'material'),false)
 }))
+test('long meeting code proposals reach the CLI unchanged while the journal stores only a summary',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'Restored',lastSessionId:SOURCE}]
+  const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true})
+  await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);await h.refreshRecords(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  const code='interface Login { user: string; password: string }\nconst API_KEY = process.env.SERVICE_KEY\nconst url = `${base}?token=${token}`\n'+'// ordinary review material\n'.repeat(500)
+  assert.ok(code.length>12000)
+  h.queueMeetingDelivery(tab,'post',code);await h.pumpMeetingDelivery()
+  assert.ok(spawn.written.includes('\x1b[200~'+code+'\x1b[201~'),'review material is neither redacted nor truncated')
+  const state=await h.request('desktop:get-state')
+  assert.equal(state.workflowDeliveryError,null)
+  assert.equal(state.workflowDeliveries?.[0]?.state,'submitted')
+  assert.ok(!JSON.stringify(state.workflowDeliveries).includes('interface Login'),'the journal does not duplicate executable material')
+}))
+
 test('legacy handoff reconciliation reaches the renderer while the CLI stays silent',async()=>fixture(async(h,directory)=>{
   configure(h,directory);h.createTestWindow();const tab=(await h.createMain()).activeTabId!,spawn=h.spawns[0]!
   const before=h.windowFor().messages.length
@@ -2718,6 +2737,20 @@ test('legacy handoff reconciliation reaches the renderer while the CLI stays sil
   const updates=h.windowFor().messages.slice(before).filter(m=>m.channel==='desktop:state-changed')
   assert.ok(updates.some(m=>m.payload.workflowDeliveries?.some((d:{state:string})=>d.state==='uncertain')),'recovery is visible without a PTY activity event or reload')
   assert.deepEqual(spawn.written,[],'legacy prompts wait for a person')
+}))
+test('a rejected meeting intake leaves other destinations and person recovery controls available',async()=>fixture(async(h,directory)=>{
+  configure(h,directory);h.createTestWindow()
+  const first=(await h.createMain()).activeTabId!,second=(await h.createMain()).activeTabId!,spawn=h.spawns[1]!
+  h.queueRejectedMeeting(first);await h.pumpMeetingDelivery()
+  assert.match((await h.request('desktop:get-state')).workflowDeliveryError!,/1 meeting handoff/)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  h.queueMeetingDelivery(second,'post','Valid other destination');await h.pumpMeetingDelivery()
+  assert.ok(spawn.written.some(text=>text.includes('Valid other destination')))
+  h.interruptOwnedTurn(first,true)
+  const item=(await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.source==='github/interrupt')
+  assert.equal(item?.state,'uncertain')
+  await h.request('desktop:delivery-action',item!.id,'discard')
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.id===item!.id)?.state,'cancelled')
 }))
 
 for(const foreign of [false,true])test(`automatic interruption ${foreign?'does not type into a newly bound conversation':'stops the verified original recipient'}`,async()=>fixture(async(h,directory)=>{
