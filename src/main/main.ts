@@ -52,6 +52,7 @@ import {
   type RemovedWorkspaceProfile,
 } from './desktop-config.js'
 import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
+import { attentionTitle } from './workflow-attention.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import {
   inspectDesktopWorktree,
@@ -1163,7 +1164,7 @@ function copyDiagnosticsToClipboard(): void {
 
 function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  const title = tab?.title ?? 'Copilot session'
+  const title = attentionTitle(tab?.title ?? 'Copilot session')
   const popout = sessionWindows.get(tabId)
   const window = popout ?? mainWindow
   const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || tabsState.activeTabId === tabId)

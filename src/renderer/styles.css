@@ -1492,3 +1492,9 @@ button:disabled {
 .desktop-control-log-refused { color: #f2c25b; }
 .desktop-control-log-failed { color: #ffb3bb; }
 .desktop-control-panel .danger-button { background: #5a1f22; border-color: #7d2c30; color: #ffd0cc; }
+.needs-you { flex: 0 0 auto; max-height: 30vh; overflow: auto; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.needs-you-heading { width: 100%; text-align: left; font-weight: 600; }
+.needs-you ul { list-style: none; margin: 4px 0; padding: 0; }
+.needs-you li button { width: 100%; text-align: left; padding: 6px; border-radius: 4px; }
+.needs-you strong, .needs-you span { display: block; overflow-wrap: anywhere; }
+.needs-you span { font-size: 11px; opacity: .8; }

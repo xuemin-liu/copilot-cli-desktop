@@ -46,16 +46,18 @@ if (!process.versions.electron) {
     const recordOpen = open => window.fixture.openChanges.push(open);
     function Fixture() {
       const [collapsed, setCollapsed] = useState(true);
+      const [attentionTabs, setAttentionTabs] = useState([]);
+      window.setAttentionTabs = setAttentionTabs;
       window.setCollapsed = setCollapsed;
       return <>
-        <Sidebar profiles={profiles} tabs={[]} activeProfileId="project-1" activeTabId={null}
+        <Sidebar profiles={profiles} tabs={attentionTabs} activeProfileId="project-1" activeTabId={null}
           installedCliVersion={null} canOpenTab collapsed={collapsed}
           onProjectsOpenChange={recordOpen} onToggleCollapsed={() => setCollapsed(value => !value)}
           onSelectWorkspace={() => window.fixture.calls.push('add')}
           onActivateProfile={id => window.fixture.calls.push('activate:' + id)}
           onRemoveProfile={profile => window.fixture.calls.push('remove:' + profile.id)}
           onCreateTab={id => window.fixture.calls.push('create:' + id)}
-          onActivateTab={noop} onPopOutTab={noop} onRenameTab={noop} onCloseTab={noop}
+          onActivateTab={id => window.fixture.calls.push('tab:' + id)} onPopOutTab={noop} onRenameTab={noop} onCloseTab={noop}
           onRestartTab={noop} onUnloadTab={noop} onOpenHistory={noop} onCreateTabWithAttachments={noop} onResumePicker={noop}
           onConnectRemote={noop} onOpenSettings={noop} />
         <button id="outside" style={{position:'fixed',left:500,top:20}}>Outside</button>
@@ -247,6 +249,25 @@ if (!process.versions.electron) {
       await ui(`window.fixture.requestView({ order: 'last-updated' })`)
       await until(`localStorage.getItem('sidebar-order-mode') === 'last-updated' && JSON.stringify(window.fixture.views.at(-1)) === '{"group":"list","order":"last-updated"}'`, 'menu orders sessions by last update')
       checks.push('View menu requests regroup, reorder, save and report the sidebar view')
+      await ui(`window.setAttentionTabs([
+        {id:'approval',title:'Approval',workspaceProfileId:'project-2',status:'approval-needed',lastSessionId:null,lastActivityAt:1},
+        {id:'crash',title:'token=fixture-sensitive-value',workspaceProfileId:'project-3',status:'crashed',lastSessionId:null,lastActivityAt:1}
+      ])`)
+      await until(`document.querySelector('.needs-you-heading')?.textContent.includes('2 new')`, 'cross-project attention shown')
+      assert.equal(await ui(`document.querySelector('.needs-you').textContent.includes('fixture-sensitive-value')`), false)
+      assert.equal(await ui(`document.querySelector('.needs-you li strong').textContent`), 'token=[REDACTED]')
+      await click('.needs-you li button')
+      await until(`window.fixture.calls.at(-1) === 'tab:crash' && document.querySelector('.needs-you-heading').textContent.includes('1 new')`, 'opening attention navigates and marks seen without dismissing the reason')
+      await writeFile(join(artifacts, 'needs-you.png'), (await window.webContents.capturePage()).toPNG())
+      await ui(`window.setCollapsed(true)`)
+      await until(`!!document.querySelector('[aria-label="Needs you: 2"]')`, 'compact attention available')
+      await click('[aria-label="Needs you: 2"]')
+      await until(`!!document.querySelector('.needs-you')`, 'compact attention expands sidebar')
+      await ui(`window.setAttentionTabs([])`)
+      await until(`!document.querySelector('.needs-you')`, 'attention disappears when underlying conditions clear')
+      await ui(`window.setAttentionTabs([{id:'crash',title:'Again',workspaceProfileId:'project-3',status:'crashed',lastSessionId:null,lastActivityAt:2}])`)
+      await until(`document.querySelector('.needs-you-heading')?.textContent.includes('1 new')`, 'a later episode in the same session becomes unread again')
+      checks.push('Cross-project attention prioritizes failures, masks credentials, navigates, tracks seen, expands and clears')
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)

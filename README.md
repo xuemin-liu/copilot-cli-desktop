@@ -17,6 +17,8 @@ handle, only input/output/resize events.
 
 ## Features
 
+- **Needs you** collects approvals, crashed sessions, and paused review meetings across open projects. Open an item
+  to reach its session; seeing it does not dismiss the underlying approval or question.
 - **Export and import your setup** from Settings → Migration: move CLI settings,
   instructions, skills, Desktop profiles, and optional project files and usage in
   one ZIP, with conflict previews, workspace mapping, and recovery backups.
