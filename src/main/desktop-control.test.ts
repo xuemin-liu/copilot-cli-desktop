@@ -362,6 +362,23 @@ test('turning control off cancels an action that is still being checked', async 
   assert.deepEqual(h.native.actions, [])
 })
 
+test('a stop while typing waits for the focus to move after a Tab ends the request at once', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  // The app never acts on the Tab, so typing would wait up to a second for the focus to move.
+  h.native.focus_ = USER_FIELD
+  let tabSent!: () => void
+  const waiting = new Promise<void>(resolve => { tabSent = resolve })
+  h.native.onType = () => { if (h.native.actions.at(-1) === 'type \t') tabSent() }
+  const typing = h.control.handle('tab', 'type', { frameId, text: 'alice\thunter2' })
+  await waiting
+  const stoppedAt = Date.now()
+  await h.control.disableAll('Stopped with the stop key.')
+  await refused(typing, /turned off/)
+  assert.ok(Date.now() - stoppedAt < 500, 'the request ends within a poll or two, not after the whole wait')
+  assert.deepEqual(h.native.actions, ['type alice', 'type \t'])
+})
+
 test('two sessions turning control on at once leave one owner', async t => {
   const h = await harness(t)
   await Promise.all([h.control.enable('a'), h.control.enable('b')])

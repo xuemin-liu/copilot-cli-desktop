@@ -555,12 +555,16 @@ export class DesktopControl {
     return resolved
   }
 
-  /** Whether the focus left the control `from` and then stayed on its new control: the app has processed the Tab. */
-  private async focusMoved(from: string | null): Promise<boolean> {
+  /**
+   * Whether the focus left the control `from` and then stayed on its new control: the app has processed the Tab.
+   * A stop or turn-off while it waits ends the request at the next look.
+   */
+  private async focusMoved(tabId: string, control: TabControl, from: string | null): Promise<boolean> {
     if (from === null) return false
     let seen: string | null = null
     for (const end = Date.now() + FOCUS_MOVE_MS; Date.now() < end;) {
       await new Promise(resolve => setTimeout(resolve, FOCUS_POLL_MS))
+      this.alive(tabId, control)
       const now = (await this.native.focused().catch(() => UNKNOWN_FOCUS)).id
       if (now !== null && now !== from && now === seen) return true
       seen = now
@@ -616,7 +620,7 @@ export class DesktopControl {
             // SendInput only queues the key, so a check after a fixed wait may run before the app moves its focus.
             // Go on after a Tab only once the app shows it moved the focus. Enter can submit, or run a page's own
             // handler, whatever the control is, so always stop after it; the rest is checked again in a new request.
-            if (segment === '\t' && await this.focusMoved(focus.id)) continue
+            if (segment === '\t' && await this.focusMoved(tabId, control, focus.id)) continue
             stopped = { typed: sent, total: text.length }
             return
           }
