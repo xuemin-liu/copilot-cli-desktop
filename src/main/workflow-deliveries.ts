@@ -32,6 +32,7 @@ export class WorkflowDeliveries {
     if (![input.sessionId,input.source,input.revision,input.scope].every(identifier) || typeof input.text !== 'string' || input.text.length > 12_000)
       throw new Error('Invalid delivery')
     const body = redactDiagnosticText(input.text.replace(/[\p{Cf}\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, ''))
+    if (body.length > 12_000) throw new Error('Redacted delivery body exceeds the stored limit')
     const existing = this.db.prepare('SELECT id FROM deliveries WHERE session=? AND source=? AND revision=? AND scope=?')
       .get(input.sessionId,input.source,input.revision,input.scope) as {id: string} | undefined
     if (existing) return this.get(existing.id)!

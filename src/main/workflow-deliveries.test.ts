@@ -66,3 +66,22 @@ test('abrupt exit after committing intent never permits an automatic second subm
     } finally { restored.close() }
   } finally { await rm(dir,{recursive:true,force:true}) }
 })
+
+test('redaction expansion is rejected without poisoning existing records or restart recovery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-expanded-'))
+  const path = join(dir,'deliveries.sqlite')
+  let store = new WorkflowDeliveries(path)
+  try {
+    const input = {sessionId:'session',source:'github/1',revision:'r1',scope:'grant',text:'Ordinary feedback'}
+    const item = store.enqueue(input)
+    assert.throws(() => store.enqueue({...input,revision:'expanded',text:'token=x '.repeat(1000)}))
+    assert.equal(store.list().length,1)
+    store.begin(item.id,() => true)
+    store.close()
+    store = new WorkflowDeliveries(path)
+    assert.equal(store.list().length,1)
+    assert.equal(store.get(item.id)?.state,'uncertain')
+    store.discard(item.id)
+    assert.equal(store.enqueue({...input,revision:'r2'}).state,'queued')
+  } finally {store.close();await rm(dir,{recursive:true,force:true})}
+})
