@@ -8,6 +8,8 @@ import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../m
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
 import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
 import { RemoveIcon } from './Icons.js'
+import { workflowAttention } from '../../main/workflow-attention.js'
+import { NeedsYou } from './NeedsYou.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
   dormant: 'Not started',
@@ -391,6 +393,7 @@ export function Sidebar({
         </div>
       </div>
 
+      <NeedsYou items={workflowAttention(tabs, meetings)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
       {searchOpen && (
         <input
           className="sidebar-search"
