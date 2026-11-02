@@ -212,6 +212,16 @@ test('a point covered by another app or a blocked window is refused', async t =>
   assert.deepEqual(h.native.actions, ['click 110,110 left 1'])
 })
 
+test('a click goes only to the window the frame showed at that point, not to another window of the same app', async t => {
+  const h = await harness(t)
+  const frameId = await notepadReady(h)
+  // Another Notepad document at the same bounds, in front, with identical pixels (its title bar and Close button).
+  h.native.list.unshift(window('12', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { className: 'Notepad', pid: 11 }))
+  await refused(h.control.handle('tab', 'click', { frameId, x: 380, y: 20 }), /different window/)
+  await refused(h.control.handle('tab', 'drag', { frameId, x: 380, y: 20, toX: 10, toY: 10 }), /different window/)
+  assert.deepEqual(h.native.actions, [])
+})
+
 test('typing needs the frame’s app to have the keyboard focus and never goes into a password field', async t => {
   const h = await harness(t)
   const frameId = await notepadReady(h)
@@ -295,7 +305,8 @@ test('control turns off if the input monitor stops by itself', async t => {
   const h = await harness(t)
   await h.control.enable('tab')
   h.monitor.crash()
-  for (let attempt = 0; attempt < 100 && h.control.enabledTabs().length > 0; attempt++) await new Promise(resolve => setTimeout(resolve, 10))
+  // The crash queued the turn-off; on/off changes run in order, so this waits for it to finish (and finds nothing left).
+  await h.control.disableAll('Not reached.')
   assert.deepEqual(h.control.enabledTabs(), [])
   assert.match(h.control.view('tab').log.at(-1)!.message, /could not keep watching/)
 })

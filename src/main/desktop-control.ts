@@ -71,6 +71,8 @@ interface Frame {
   height: number
   bitmap: Buffer
   blank: DesktopRect[]
+  /** The windows that could be under a point when the frame was taken, front to back. */
+  layout: Array<{ id: string; bounds: DesktopRect }>
   createdAt: number
   epoch: number
 }
@@ -429,7 +431,7 @@ export class DesktopControl {
       const { display } = displayAt()
       const current = await this.native.windows()
       const size = desktopFrameSize(display.bounds)
-      frame = { tabId, kind: 'screen', windowId: null, identity: null, bounds: display.bounds, ...size, blank: this.blankFor('screen', current, null, null) }
+      frame = { tabId, kind: 'screen', windowId: null, identity: null, bounds: display.bounds, ...size, blank: this.blankFor('screen', current, null, null), layout: this.layout(current) }
       app = 'screen'
     } else {
       const windows = await this.native.windows()
@@ -446,7 +448,7 @@ export class DesktopControl {
       const shown = current.find(entry => entry.id === window.id)
       if (!shown) throw new DesktopControlError('That window closed; run windows again.')
       const size = desktopFrameSize(shown.bounds)
-      frame = { tabId, kind: 'window', windowId: shown.id, identity: target.key, bounds: shown.bounds, ...size, blank: this.blankFor('window', current, shown, target.key) }
+      frame = { tabId, kind: 'window', windowId: shown.id, identity: target.key, bounds: shown.bounds, ...size, blank: this.blankFor('window', current, shown, target.key), layout: this.layout(current) }
       app = target.name
     }
     const bitmap = await this.host.capture(frame.bounds, { width: frame.width, height: frame.height }, frame.blank)
@@ -494,6 +496,19 @@ export class DesktopControl {
     return windows.find(window => !window.clickThrough && !window.minimized && rectContains(window.bounds, point)) ?? null
   }
 
+  private layout(windows: DesktopNativeWindow[]): Frame['layout'] {
+    return windows.filter(window => !window.clickThrough && !window.minimized).map(window => ({ id: window.id, bounds: window.bounds }))
+  }
+
+  /**
+   * The window under the point must be the one the frame showed there, unmoved: pixels alone can't tell two windows of
+   * the same app apart (two documents' identical title bars), so a window that now covers the point needs a new screenshot.
+   */
+  private sameWindowAt(frame: Frame, hit: DesktopNativeWindow, point: { x: number; y: number }): boolean {
+    const shown = frame.layout.find(window => rectContains(window.bounds, point))
+    return shown !== undefined && shown.id === hit.id && sameRect(shown.bounds, hit.bounds)
+  }
+
   /** The window under a point must be an approved app that the frame showed; returns it, approving it if needed. */
   private async pointTarget(tabId: string, control: TabControl, command: string, frame: Frame, windows: DesktopNativeWindow[], point: { x: number; y: number }): Promise<Target> {
     if (frame.kind === 'window') {
@@ -507,6 +522,7 @@ export class DesktopControl {
     if (frame.kind === 'window' && target.key !== frame.identity) {
       throw this.refuse(tabId, command, target.name, `The point is on another app’s window (${target.name}); take a screenshot of that window first.`, 409)
     }
+    if (!this.sameWindowAt(frame, hit, point)) throw this.refuse(tabId, command, target.name, 'A different window is at that point now; take a new screenshot.', 409)
     await this.approveApp(tabId, control, command, target)
     return target
   }
@@ -590,7 +606,7 @@ export class DesktopControl {
         }
         const hit = this.hitTest(windows, point)
         const now = hit ? this.target(hit) : null
-        if (!now || 'blocked' in now || now.key !== target.key) {
+        if (!now || 'blocked' in now || now.window.id !== target.window.id || !this.sameWindowAt(frame, now.window, point)) {
           throw this.refuse(tabId, command, target.name, 'The screen changed; take a new screenshot.', 409)
         }
       }
@@ -614,6 +630,7 @@ export class DesktopControl {
         const end = this.hitTest(windows, to)
         const endTarget = end ? this.target(end) : null
         if (!endTarget || 'blocked' in endTarget) throw this.refuse(tabId, command, target.name, 'The drag would end on a blocked window or on no window.', 403)
+        if (!this.sameWindowAt(frame, endTarget.window, to)) throw this.refuse(tabId, command, endTarget.name, 'A different window is where the drag ends now; take a new screenshot.', 409)
         await this.approveApp(tabId, control, command, endTarget)
         summary = `Dragged from ${body.x},${body.y} to ${body.toX},${body.toY}.`
         perform = () => this.native.drag(point, to)
