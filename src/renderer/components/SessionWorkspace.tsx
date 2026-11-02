@@ -5,6 +5,8 @@ import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { TerminalPane } from './TerminalPane.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
 import { GitBranchIcon, SideChatIcon } from './Icons.js'
+import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
+import type { DesktopControlTabView } from '../../main/types.js'
 
 interface SessionWorkspaceProps {
   tabs: DesktopSessionTab[]
@@ -22,6 +24,10 @@ interface SessionWorkspaceProps {
   /** Git panel toggle in the main session's header. Omitted where the panel is not available. */
   gitOpen?: boolean
   onToggleGit?: () => void
+  /** Desktop control: allowed in Settings, which sessions started with its helper, and each session's state. */
+  desktopControlAllowed?: boolean
+  desktopControlReadyTabIds?: string[]
+  desktopControl?: Record<string, DesktopControlTabView>
 }
 
 function savedSplit(): number {
@@ -31,9 +37,15 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
+  const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
+  const toggleDesktopPanel = (tabId: string): void => setDesktopPanels(open => {
+    const next = new Set(open)
+    if (!next.delete(tabId)) next.add(tabId)
+    return next
+  })
   const areaRef = useRef<HTMLDivElement>(null)
   const dragging = useRef<number | null>(null)
   const updateSplit = (value: number): void => {
@@ -63,7 +75,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
-            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && !tab.unloaded} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <header className="session-pane-header">
+            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && !tab.unloaded} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <><header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
@@ -72,6 +84,9 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
               {browserToggle}
+              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && (
+                <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
+              )}
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
@@ -88,7 +103,10 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               <button type="button" className="icon-button session-close" onClick={() => onClose(tab.id)}
                 aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
-            </header>}>
+            </header>
+            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
+              <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
+            )}</>}>
             <div className="session-terminal">
               {poppedOutTabIds.includes(tab.id) ? (
                 <div className="empty-state"><p>This session is open in another window.</p>

@@ -35,6 +35,7 @@ for supported categories and the separate history compatibility gate.
 | Session history/resume | Deterministic UUIDs, Copilot names, auto-resume, continue, interactive picker, and remote connect | Equivalent |
 | Forked side discussion | Independent, resizable right-hand PTY with read/search-only tools; original keeps running | Implemented via isolated snapshot + Copilot fork RPC (CLI 1.0.82+); confirm source UUID after native session switches; not an OS sandbox |
 | Token/tool metrics | Copilot CLI status/usage rendering and upstream OpenTelemetry export | Equivalent upstream; a native metrics dashboard is optional rather than required for parity |
+| Computer use (screen, mouse and keyboard in other apps) | Per-session desktop control helper over a token-protected loopback endpoint; per-app approval, a fixed block list, frame and pixel checks, a banner and a stop key ([docs/desktop-control.md](desktop-control.md)) | Windows only, off by default; macOS and Linux not yet |
 
 ## Workspaces, permissions, and process access
 

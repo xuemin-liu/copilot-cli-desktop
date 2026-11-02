@@ -49,6 +49,11 @@ if (nativeAddons.length === 0) {
 if (!nativeAddons.some((path) => /node-pty/i.test(path))) {
   throw new Error('The packaged native addons do not include node-pty')
 }
+// Desktop control's workers load koffi, whose addon for this platform comes from its @koromix package.
+const koffiAddon = `koffi-${process.platform}-${process.arch}`
+if (!nativeAddons.some((path) => path.replaceAll('\\', '/').includes(`@koromix/${koffiAddon}/`))) {
+  throw new Error(`The packaged native addons do not include koffi (${koffiAddon})`)
+}
 
 /** The Electron binary: the `.exe` on Windows, `Contents/MacOS/<name>` on macOS, the executable file named for the app on Linux. */
 function applicationExecutables(): string[] {

@@ -36,6 +36,7 @@
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",
     "cli:smoke": "npm run build && node dist/scripts/cli-smoke.js",
+    "desktop-control:check": "npm run build && node scripts/desktop-control-check.mjs",
     "browser-discovery:check": "npm run build && node scripts/browser-discovery-check.mjs",
     "browser-unattended:check": "npm run build && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25",
     "pack:win": "npm run build && electron-builder --dir && node dist/scripts/audit-package.js && node dist/scripts/package-smoke.js",
@@ -54,6 +55,7 @@
     "@xterm/addon-serialize": "0.14.0",
     "electron-updater": "6.8.11",
     "jsonc-parser": "3.3.1",
+    "koffi": "3.3.4",
     "node-pty": "1.1.0",
     "proper-lockfile": "4.1.2",
     "react": "19.3.1",
@@ -123,7 +125,9 @@
       "LICENSE"
     ],
     "asarUnpack": [
-      "**/node-pty/**/*"
+      "**/node-pty/**/*",
+      "**/node_modules/koffi/**/*",
+      "**/node_modules/@koromix/**/*"
     ],
     "win": {
       "icon": "build/icon.png",

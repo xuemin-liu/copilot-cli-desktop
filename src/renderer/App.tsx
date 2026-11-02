@@ -296,6 +296,7 @@ export function App(): JSX.Element {
   if (state.windowSessionId) {
     const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
     return tab ? <SessionWindow tab={tab} browserPoppedOut={(state.browserPoppedOutTabIds ?? []).includes(tab.id)} error={operationError}
+      desktopControl={{ allowed: state.desktopControlAllowed === true, ready: (state.desktopControlReadyTabIds ?? []).includes(tab.id), view: state.desktopControl?.[tab.id] }}
       onDismissError={() => setOperationError(null)}
       onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
       onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
@@ -416,6 +417,9 @@ export function App(): JSX.Element {
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
+            desktopControlAllowed={state.desktopControlAllowed === true}
+            desktopControlReadyTabIds={state.desktopControlReadyTabIds ?? []}
+            desktopControl={state.desktopControl ?? {}}
             onPopOut={(tabId) => handleOperation(window.copilotDesktop.popOutTab(tabId))}
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}

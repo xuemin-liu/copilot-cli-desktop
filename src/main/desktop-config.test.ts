@@ -312,6 +312,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     meetingMaxRounds: config.meetingMaxRounds,
     meetingRoundTimeoutMinutes: config.meetingRoundTimeoutMinutes,
     meetingDiscussion: config.meetingDiscussion,
+    desktopControl: config.desktopControl,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
   // Turning the tray off also moved close behavior back to asking.

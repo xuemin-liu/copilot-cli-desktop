@@ -63,3 +63,12 @@ export function RemoveIcon(): JSX.Element {
     <path d="M3.75 4l.75 9.5h7l.75-9.5M6.5 6.5v4.5M9.5 6.5v4.5" />
   </Icon>
 }
+
+/** A monitor with a pointer on it: let Copilot use the mouse and keyboard in other apps. */
+export function DesktopControlIcon(): JSX.Element {
+  return <Icon>
+    <path d="M1.5 2.5h13v8.5h-13z" />
+    <path d="M5.5 14h5M8 11v3" />
+    <path d="M6.5 4.5l3.8 2.1-1.7.5-.6 1.6z" />
+  </Icon>
+}
