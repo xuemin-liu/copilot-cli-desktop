@@ -52,3 +52,18 @@ test('unsupported existing conversations offer manual tracking and supported res
     assert.match(history,/sessions, files, worktrees and handoff evidence are kept/)
   }finally{store.close();await rm(dir,{recursive:true,force:true})}
 })
+
+test('untrusted artifact destinations and earlier report references remain visible before navigation',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'workflow-artifacts-ui-')),store=new WorkflowStore(join(dir,'tasks.sqlite'))
+  try{
+    const task=store.submitted(randomUUID(),'project','Review evidence')
+    const binding={taskId:task.id,assignmentId:task.assignmentId,scopeRevision:1}
+    store.report(task.sessionId,{...binding,outcome:'needs-input',summary:'Baseline',artifacts:[{kind:'path',label:'Baseline evidence report',value:'/reports/baseline.txt'}]})
+    store.report(task.sessionId,{...binding,outcome:'ready',summary:'Ready',artifacts:[{kind:'url',label:'Open the PR on GitHub',value:'https://github-login.example.net/session'}]})
+    const markup=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} />)
+    assert.match(markup,/github-login\.example\.net/)
+    assert.match(markup,/Baseline evidence report/)
+    assert.match(markup,/\/reports\/baseline\.txt/)
+    assert.match(markup,/>Open the PR on GitHub[^<]*github-login\.example\.net/,'the actual destination is visible in the action text')
+  }finally{store.close();await rm(dir,{recursive:true,force:true})}
+})

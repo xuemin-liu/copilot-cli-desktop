@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
-import type { WorkflowTask, TaskAction } from '../../main/workflow-types.js'
+import type { WorkflowTask, TaskAction, TaskArtifact } from '../../main/workflow-types.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { supportsTaskReporting } from '../../main/workflow-capabilities.js'
 import type { FollowupGrant } from '../../main/workflow-followups.js'
@@ -23,6 +23,9 @@ export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVe
   }
   const active = tasks.filter(task => task.outcome !== 'completed' && task.outcome !== 'cancelled')
   const history = tasks.filter(task => task.outcome === 'completed' || task.outcome === 'cancelled')
+  const renderArtifacts=(artifacts:readonly TaskArtifact[]=[]):JSX.Element[]=>artifacts.map((artifact,index)=><p key={index}>{artifact.kind==='url'
+    ?<button type="button" title={artifact.value} onClick={()=>{void window.copilotDesktop.openExternalUrl(artifact.value).catch(()=>setFailure('The artifact could not be opened.'))}}>{artifact.label} · {artifact.value}</button>
+    :<span>{artifact.label}: {artifact.value}</span>}</p>)
   const renderTasks = (items: readonly WorkflowTask[]): JSX.Element => <ul>{items.map(task => <li key={task.id}>
       <strong>{task.title}</strong><span>{task.outcome}{task.awaitingSubmission ? ' · Awaiting submitted work' : ''}</span><p>{task.summary}</p>
       {task.question && <p><strong>Question:</strong> {task.question}</p>}
@@ -34,11 +37,10 @@ export function WorkflowTasks({ tasks, error,followups=[],tabs=[],installedCliVe
         {task.comparisonGroup && <p>Comparison group: {task.comparisonGroup}</p>}
         {task.meetingIds?.length ? <p>Review meetings: {task.meetingIds.join(', ')}</p> : null}
         {task.pullUrl && <button type="button" onClick={() => { void window.copilotDesktop.openExternalUrl(task.pullUrl!).catch(() => setFailure('The PR could not be opened.')) }}>Open PR</button>}
-        {task.artifacts?.map((artifact,index) => <p key={index}>{artifact.kind === 'url'
-          ? <button type="button" onClick={() => { void window.copilotDesktop.openExternalUrl(artifact.value).catch(() => setFailure('The artifact could not be opened.')) }}>{artifact.label}</button>
-          : <span>{artifact.label}: {artifact.value}</span>}</p>)}
+        {renderArtifacts(task.artifacts)}
         {(task.reports?.length ?? 0) > 0 && <details><summary>Report history · {task.reports!.length}</summary>
           {task.reports!.map((report,index)=><div key={index}><strong>{report.outcome}</strong><p>{report.summary}</p>{report.question&&<p>{report.question}</p>}
+            {renderArtifacts(report.artifacts)}
             {report.validation.map((check,n)=><p key={n}>{check.name}: {check.status}{check.revision ? ` · ${check.revision}` : ''}</p>)}
           </div>)}
         </details>}
