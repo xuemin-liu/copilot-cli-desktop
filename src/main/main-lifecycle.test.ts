@@ -51,6 +51,7 @@ interface Harness {
   enableTasks(tabId: string): void
   automaticPaste(tabId:string,authorized:()=>boolean): {result:string}
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
+  interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -269,6 +270,16 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
             app.isReady=()=>true;state.resolution.version='1.0.105';refreshCopilotResolutionIfChanged=async()=>{};workflows();deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
             const rule={id:randomUUID(),revision:randomUUID(),projectId,repository:'owner/repo',scopeKey:automationScope(projectId)};
             return launchAutomationTask(rule,{key:'github/owner/repo/issue/1',version:'a'.repeat(64),actorId:7,at:Date.now(),title:'Investigate issue',body:'Investigate token=fixture-secret',head,branch:'main'},authorized);
+          },
+          interruptOwnedTurn: (tabId,foreign) => {
+            const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId).session;
+            const grant={id:randomUUID(),sessionId:tab.lastSessionId,projectId:tab.workspaceProfileId};
+            const delivery=deliveryJournal.enqueue({sessionId:grant.sessionId,source:'github/interrupt',revision:'v1',scope:grant.id,text:'Automatic work'});
+            deliveryJournal.begin(delivery.id,()=>true);deliveryJournal.submitted(delivery.id);
+            const current=foreign?'${FORK}':grant.sessionId;
+            tabsState=setTabSessionId(tabsState,tabId,current);session.lastKnownSessionId=current;session.bindingState={kind:'bound',sessionId:current,deliveryReady:true};
+            const timer=setTimeout(()=>{},100000);timer.unref();automaticTurns.set(tabId,{deliveryId:delivery.id,grant,session,timer,stopping:false,authorized:()=>false});
+            interruptAutomatic(grant);endAutomatic(tabId,false);
           },
           meetingCommand: (tabId, command, sessionId, text = 'Test proposal body') => handleMeetingCommand(tabId, command, { topic: 'Test proposal', text, changes: null,
             ...(sessionId === undefined ? {} : { sessionId }) }),
@@ -2679,6 +2690,13 @@ test('a rule investigation launches a restricted dedicated checkout and journals
     await pause(350);assert.equal(spawn.written.at(-1),'\r')
     assert.equal((await h.meetingCommand(tabId,'start',sessionId)).ok,false,'a rule turn is not person authorization')
   }finally{authorized=false;await launch.catch(()=>{})}
+}))
+
+for(const foreign of [false,true])test(`automatic interruption ${foreign?'does not type into a newly bound conversation':'stops the verified original recipient'}`,async()=>fixture(async(h,directory)=>{
+  configure(h,directory);const tab=(await h.createMain()).activeTabId!,spawn=h.spawns[0]!
+  h.interruptOwnedTurn(tab,foreign)
+  assert.deepEqual(spawn.written,foreign?[]:['\x03'])
+  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'uncertain')
 }))
 
 test('task reports require the owned current assignment and cannot complete tasks', async () => fixture(async (harness, directory) => {
