@@ -31,7 +31,7 @@ async function setup(){
   }
   let store=new WorkflowAutomations(path,host)
   return {dir,path,host,get store(){return store},close:()=>store.close(),reopen:()=>{store.close();store=new WorkflowAutomations(path,host)},
-    advance:()=>{now+=120001},launches:()=>launches,interrupts:()=>interrupts,reads:()=>reads,revoke:()=>{scope='b'.repeat(64)},
+    advance:(milliseconds=120001)=>{now+=milliseconds},launches:()=>launches,interrupts:()=>interrupts,reads:()=>reads,revoke:()=>{scope='b'.repeat(64)},
     block:(fn:()=>Promise<void>)=>{wait=fn},
     fail:(id:number,actor=9)=>{checks.push({id,name:`unit-${id} token=fixture-secret`,app:{id:actor},status:'completed',conclusion:'failure',completed_at:new Date(now+1).toISOString()})},
     assign:()=>{assignments.push({id:1,event:'assigned',actor:{id:7},assignee:{id:8},issue:{number:1},created_at:new Date(now+1).toISOString()})},
@@ -142,4 +142,25 @@ test('a proven pre-creation refusal releases source ownership and budgets for an
   h.host.launch=async()=>({sessionId:'session',taskId:'task'})
   await h.store.startPreview(preview.id)
   assert.equal(h.store.previews()[0]?.state,'started');assert.equal(h.store.rules()[0]?.launches,1)
+}))
+for(const phase of ['intake','dispatch'] as const)test(`failed ${phase} read cannot restore a rule after the person selects Off`,async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions']);const id=h.store.rules()[0]!.id;await h.store.setMode(id,'automatic')
+  h.host.ready=()=>false;h.fail(1);h.advance();await h.store.tick();h.host.ready=()=>true
+  if(phase==='intake')h.advance()
+  let entered!:()=>void,release!:()=>void
+  const enter=new Promise<void>(r=>entered=r),wait=new Promise<void>(r=>release=r)
+  h.block(async()=>{entered();await wait;throw new Error('GitHub unavailable')})
+  const tick=h.store.tick();await enter;await h.store.setMode(id,'off');const revision=h.store.rules()[0]!.revision;release();await tick
+  assert.equal(h.store.rules()[0]!.mode,'off');assert.equal(h.store.rules()[0]!.revision,revision)
+  await h.store.tick();assert.equal(h.launches(),0)
+}))
+test('queued previews share source-failure backoff instead of one request per preview every tick',async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions']);await h.store.setMode(h.store.rules()[0]!.id,'automatic')
+  h.host.ready=()=>false;for(let id=1;id<=3;id++)h.fail(id);h.advance();await h.store.tick();assert.equal(h.store.previews().length,3)
+  h.host.ready=()=>true;let failed=0
+  h.host.api=async()=>{failed++;throw new Error('Rate limited')}
+  for(let i=0;i<4;i++){await h.store.tick();h.advance(10000)}
+  assert.equal(failed,1);assert.equal(h.launches(),0)
+  h.advance(120001);await h.store.tick();assert.equal(failed,2)
+  h.advance(120001);await h.store.tick();assert.equal(failed,2,'second failure uses exponential shared backoff')
 }))
