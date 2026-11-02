@@ -79,6 +79,19 @@ test('manual adoption and replacement stay unknown until submission, rotate assi
     assert.throws(()=>store.manualOutcome(adopted.id,'working'),/Invalid/)
   }finally{store.close();await rm(dir,{recursive:true,force:true})}
 })
+
+test('a replaced worker cannot obtain fresh task IDs and report before a verified new submission',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'workflow-unsubmitted-')),store=new WorkflowStore(join(directory,'tasks.sqlite'))
+  try{
+    store.submitted(session,'project','Old work')
+    const next=store.manual(session,'project','New work',true)
+    const report={taskId:next.id,assignmentId:next.assignmentId,scopeRevision:1,outcome:'ready',summary:'Old worker result'}
+    assert.throws(()=>store.report(session,report),/submitted/)
+    assert.equal(store.active(session)?.outcome,'unknown')
+    store.submitted(session,'project','Verified new request')
+    assert.equal(store.report(session,report).outcome,'ready')
+  }finally{store.close();await rm(directory,{recursive:true,force:true})}
+})
 test('tasks persist, reports bind to assignment, and only manual completion ends a task', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-test-'))
   const path = join(dir, 'workflows.sqlite')

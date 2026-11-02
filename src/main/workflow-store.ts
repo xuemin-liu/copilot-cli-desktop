@@ -143,6 +143,7 @@ export class WorkflowStore {
     if(report.version!==undefined&&report.version!==1)throw new Error('Unsupported task report version')
     if (report.taskId !== current.id || report.assignmentId !== current.assignmentId || report.scopeRevision !== current.scopeRevision)
       throw new Error('Stale or foreign task report')
+    if(current.awaitingSubmission)throw new Error('No verified request has been submitted for this assignment')
     const allowed = ['needs-input', 'ready', 'blocked', 'failed', 'working'] as const
     const outcome = allowed.find(kind => kind === report.outcome)
     if (!outcome) throw new Error('Invalid task outcome')

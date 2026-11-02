@@ -4491,9 +4491,11 @@ ipcMain.handle('desktop:task-create', (event,tabId:unknown,title:unknown,replace
   if(typeof tabId!=='string'||typeof title!=='string'||title.length>120||typeof replace!=='boolean')throw new Error('Invalid task choice')
   const tab=tabsState.tabs.find(tab=>tab.id===tabId),store=workflows()
   if(!tab?.lastSessionId||!store)throw new Error('Open a known session before tracking it')
+  const recipient=managedTabs.get(tabId)?.session
+  const verifiedIdle=recipient?.sessionBindingReady&&recipient.bindingDiagnostic.kind==='bound'&&recipient.bindingDiagnostic.sessionId===tab.lastSessionId&&recipient.lastSessionId===tab.lastSessionId&&recipient.activity==='idle'
   // Adoption is bookkeeping. Replacement additionally requires proof that no old worker/input is in flight.
-  if(replace&&(meetingHub.meetingOf(tabId)||automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)||(meetingOutbox.inTurn(tabId)||meetingOutbox.next(tabId))||workflowDestinationBlocked(tab.lastSessionId)
-    ||sessionTaskAvailability(tabId,false).result!=='sent'||managedTabs.get(tabId)?.session.sessionBindingPending))throw new Error('Finish the meeting, wait for an idle, empty prompt and reconcile handoffs before starting another task')
+  if(replace&&(!verifiedIdle||meetingHub.meetingOf(tabId)||automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)||(meetingOutbox.inTurn(tabId)||meetingOutbox.next(tabId))||workflowDestinationBlocked(tab.lastSessionId)
+    ||sessionTaskAvailability(tabId,false).result!=='sent'||managedTabs.get(tabId)?.session.sessionBindingPending))throw new Error('Finish the meeting, wait for a verified idle, empty prompt and reconcile handoffs before starting another task')
   const previous=store.active(tab.lastSessionId)
   if(Boolean(previous)!==replace)throw new Error('Task state changed; refresh the task list')
   store.manual(tab.lastSessionId,tab.workspaceProfileId,title,replace,taskContext(tab))
