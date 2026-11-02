@@ -79,6 +79,40 @@ test('manual adoption and replacement stay unknown until submission, rotate assi
     assert.throws(()=>store.manualOutcome(adopted.id,'working'),/Invalid/)
   }finally{store.close();await rm(dir,{recursive:true,force:true})}
 })
+
+test('a replaced worker cannot obtain fresh task IDs and report before a verified new submission',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'workflow-unsubmitted-')),store=new WorkflowStore(join(directory,'tasks.sqlite'))
+  try{
+    store.submitted(session,'project','Old work')
+    const next=store.manual(session,'project','New work',true)
+    const report={taskId:next.id,assignmentId:next.assignmentId,scopeRevision:1,outcome:'ready',summary:'Old worker result'}
+    assert.throws(()=>store.report(session,report),/submitted/)
+    assert.equal(store.active(session)?.outcome,'unknown')
+    store.submitted(session,'project','Verified new request')
+    assert.equal(store.report(session,report).outcome,'ready')
+  }finally{store.close();await rm(directory,{recursive:true,force:true})}
+})
+
+test('cached task views isolate callers and observe local writes and external SQLite commits',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'workflow-cache-')),path=join(directory,'tasks.sqlite'),store=new WorkflowStore(path)
+  try{
+    const task=store.submitted(session,'project','Original request')
+    const first=store.list();first[0]!.title='Unpersisted mutation';first[0]!.validation.push({name:'Forged',status:'passed'})
+    assert.notEqual(store.list()[0]?.title,'Unpersisted mutation');assert.equal(store.list()[0]?.validation.length,0)
+    const writer=new DatabaseSync(path)
+    try{
+      writer.prepare('UPDATE tasks SET value=? WHERE id=?').run(JSON.stringify({...task,title:'Externally updated'}),task.id)
+      assert.equal(store.list()[0]?.title,'Externally updated')
+      writer.prepare('UPDATE tasks SET value=? WHERE id=?').run('null',task.id)
+      assert.throws(()=>store.list(),/Invalid/)
+      writer.prepare('UPDATE tasks SET value=? WHERE id=?').run(JSON.stringify(task),task.id)
+      assert.equal(store.list()[0]?.title,task.title)
+    }finally{writer.close()}
+    store.manualOutcome(task.id,'blocked');assert.equal(store.list()[0]?.outcome,'blocked')
+    store.finish(task.id,'completed');assert.equal(store.list()[0]?.outcome,'completed')
+    store.remove(task.id);assert.deepEqual(store.list(),[])
+  }finally{store.close();await rm(directory,{recursive:true,force:true})}
+})
 test('tasks persist, reports bind to assignment, and only manual completion ends a task', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-test-'))
   const path = join(dir, 'workflows.sqlite')

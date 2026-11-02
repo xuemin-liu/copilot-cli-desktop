@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
-import type { WorkflowTask, TaskAction } from '../../main/workflow-types.js'
+import type { WorkflowTask, TaskAction, TaskArtifact } from '../../main/workflow-types.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { supportsTaskReporting } from '../../main/workflow-capabilities.js'
 import type { FollowupGrant,FollowupDefault } from '../../main/workflow-followups.js'
@@ -11,6 +11,7 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
   const [historyLimit, setHistoryLimit] = useState(50)
   const [sessionChoice,setSessionChoice]=useState(''),[title,setTitle]=useState(''),[pending,setPending]=useState(false)
   const known=tabs.filter(tab=>tab.lastSessionId)
+  const selected=known.find(tab=>tab.id===sessionChoice)??known[0]
   if (!tasks.length && !error && !known.length) return null
   const finish = (id: string, action: TaskAction): void => {
     setFailure(null)
@@ -23,6 +24,9 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
   }
   const active = tasks.filter(task => task.outcome !== 'completed' && task.outcome !== 'cancelled')
   const history = tasks.filter(task => task.outcome === 'completed' || task.outcome === 'cancelled')
+  const renderArtifacts=(artifacts:readonly TaskArtifact[]=[]):JSX.Element[]=>artifacts.map((artifact,index)=><p key={index}>{artifact.kind==='url'
+    ?<button type="button" title={artifact.value} onClick={()=>{void window.copilotDesktop.openExternalUrl(artifact.value).catch(()=>setFailure('The artifact could not be opened.'))}}>{artifact.label} · {artifact.value}</button>
+    :<span>{artifact.label}: {artifact.value}</span>}</p>)
   const renderTasks = (items: readonly WorkflowTask[]): JSX.Element => <ul>{items.map(task => <li key={task.id}>
       <strong>{task.title}</strong><span>{task.outcome}{task.awaitingSubmission ? ' · Awaiting submitted work' : ''}</span><p>{task.summary}</p>
       {task.question && <p><strong>Question:</strong> {task.question}</p>}
@@ -36,11 +40,10 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
         {task.comparisonGroup && <p>Comparison group: {task.comparisonGroup}</p>}
         {task.meetingIds?.length ? <p>Review meetings: {task.meetingIds.join(', ')}</p> : null}
         {task.pullUrl && <button type="button" onClick={() => { void window.copilotDesktop.openExternalUrl(task.pullUrl!).catch(() => setFailure('The PR could not be opened.')) }}>Open PR</button>}
-        {task.artifacts?.map((artifact,index) => <p key={index}>{artifact.kind === 'url'
-          ? <button type="button" onClick={() => { void window.copilotDesktop.openExternalUrl(artifact.value).catch(() => setFailure('The artifact could not be opened.')) }}>{artifact.label}</button>
-          : <span>{artifact.label}: {artifact.value}</span>}</p>)}
+        {renderArtifacts(task.artifacts)}
         {(task.reports?.length ?? 0) > 0 && <details><summary>Report history · {task.reports!.length}</summary>
           {task.reports!.map((report,index)=><div key={index}><strong>{report.outcome}</strong><p>{report.summary}</p>{report.question&&<p>{report.question}</p>}
+            {renderArtifacts(report.artifacts)}
             {report.validation.map((check,n)=><p key={n}>{check.name}: {check.status}{check.revision ? ` · ${check.revision}` : ''}</p>)}
           </div>)}
         </details>}
@@ -64,17 +67,17 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
         <button type="button" title="End task tracking; the CLI session keeps running" onClick={() => finish(task.id, 'cancelled')}>End tracking</button>
         <TaskFollowups taskId={task.id} projectId={task.projectId} createdAt={task.createdAt} projectDefault={defaults.find(value=>value.projectId===task.projectId)} grant={followups.find(g=>g.taskId===task.id)} />
       </>}
-      {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>finish(task.id,'delete')}>Delete task history</button>}
+      {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>{if(window.confirm(`Delete local task history for "${task.title}"? Its request copy and report history will be removed. Sessions, files, worktrees and handoff evidence are kept.`))finish(task.id,'delete')}}>Delete task history</button>}
     </li>)}</ul>
   return <details className="needs-you workflow-tasks"><summary>Tasks · {tasks.length}</summary>
     {(error || failure) && <p role="status">{error || failure}</p>}
     {known.length>0&&<form onSubmit={event=>{
-      event.preventDefault();const tab=known.find(tab=>tab.id===(sessionChoice||known[0]?.id));if(tab)chooseTask(tab.id,tasks.some(task=>task.sessionId===tab.lastSessionId&&!['completed','cancelled'].includes(task.outcome)))
+      event.preventDefault();const tab=selected;if(tab)chooseTask(tab.id,tasks.some(task=>task.sessionId===tab.lastSessionId&&!['completed','cancelled'].includes(task.outcome)))
     }}>
-      <label>Session<select value={sessionChoice||known[0]?.id} onChange={event=>setSessionChoice(event.target.value)}>{known.map(tab=><option key={tab.id} value={tab.id}>{tab.title}</option>)}</select></label>
+      <label>Session<select value={selected?.id} onChange={event=>setSessionChoice(event.target.value)}>{known.map(tab=><option key={tab.id} value={tab.id}>{tab.title}</option>)}</select></label>
       <label>Task title<input required maxLength={120} value={title} onChange={event=>setTitle(event.target.value)} /></label>
-      <p>Track an existing conversation, or end its current task and start another at an idle, empty prompt. This records an Unknown outcome; it sends no input and grants no tools.</p>
-      <button disabled={pending||!title.trim()} type="submit">{tasks.some(task=>task.sessionId===known.find(tab=>tab.id===(sessionChoice||known[0]?.id))?.lastSessionId&&!['completed','cancelled'].includes(task.outcome))?'End current task and track another':'Track this conversation'}</button>
+      <p>Track an existing conversation, or end its current task and start another at a verified idle, empty prompt. This records an Unknown outcome; it sends no input and grants no tools.</p>
+      <button disabled={pending||!title.trim()} type="submit">{tasks.some(task=>task.sessionId===selected?.lastSessionId&&!['completed','cancelled'].includes(task.outcome))?'End current task and track another':'Track this conversation'}</button>
     </form>}
     {active.length > 0 && <><h3>Active · {active.length}</h3>{renderTasks(active)}</>}
     {history.length > 0 && <><h3>History · {history.length}</h3>{renderTasks(history.slice(0, historyLimit))}

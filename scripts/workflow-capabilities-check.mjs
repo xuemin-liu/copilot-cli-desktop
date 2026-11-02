@@ -16,7 +16,7 @@ const result = {
 }
 const save = () => writeFile(resolve(directory, 'result.json'), JSON.stringify(result, null, 2) + '\n')
 await save()
-async function check(name, args) {
+async function check(name, args, expectedTest) {
   const child = spawn(process.execPath, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   let output = ''
   const collect = chunk => { output = (output + chunk.toString()).slice(-128_000) }
@@ -24,10 +24,12 @@ async function check(name, args) {
   child.stderr.on('data', collect)
   // Child checks own their cleanup; no arbitrary watchdog kills or shared profile writes.
   const code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done) })
-  result.checks.push({ name, passed: code === 0, exitCode: code })
+  const selected = !expectedTest || output.split(/\r?\n/).some(line => /^ok \d+ - /.test(line) && line.endsWith(` - ${expectedTest}`))
+  const passed = code === 0 && selected
+  result.checks.push({ name, passed, exitCode: code, ...(expectedTest ? { expectedTest, selected } : {}) })
   await save()
-  console.log(`${code === 0 ? 'PASS' : 'FAIL'}: ${name}`)
-  if (code !== 0) {
+  console.log(`${passed ? 'PASS' : 'FAIL'}: ${name}`)
+  if (!passed) {
     // Existing diagnostics sanitizer also masks CLI/environment credentials in failures.
     const { redactDiagnosticText } = await import('../dist/src/main/desktop-diagnostics.js')
     await writeFile(resolve(directory, 'failure.txt'), redactDiagnosticText(output))
@@ -40,6 +42,9 @@ try {
     'dist/src/main/session-binding.test.js', 'dist/src/main/meeting-turns.test.js',
     'dist/src/main/session-task.test.js', 'dist/src/main/pty-session.test.js',
     'dist/src/main/session-permission-monitor.test.js'])
+  const restartTest = 'a process restart during a Git context paste cannot submit or replay input into the replacement process'
+  await check('successful restart invalidates pending Enter and held input', ['--test', '--test-reporter=tap',
+    '--test-name-pattern=^a process restart during a Git context paste', 'dist/src/main/main-lifecycle.test.js'], restartTest)
   await check('real CLI helper and A/B/B/A session switching in one PTY', ['scripts/session-meeting-binding-check.mjs'])
   result.completedAt = new Date().toISOString()
   await save()
