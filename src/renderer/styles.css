@@ -1468,3 +1468,27 @@ button:disabled {
 .meeting-bar-note { flex: 1 1 240px; color: #a9b2c0; }
 .meeting-bar-tools { flex-basis: 100%; }
 .meeting-bar-tools code { padding: 0 4px; border-radius: 3px; background: #0b121c; overflow-wrap: anywhere; }
+
+.session-desktop-on { background: #4a1d1f; color: #ff9b95; }
+.session-desktop-paused { background: #3d2e0a; color: #f2c25b; }
+.desktop-control-panel { display: grid; gap: 6px; padding: 8px 12px; background: #12161f; border-bottom: 1px solid #303640; font-size: 12px; }
+.desktop-control-row { display: flex; align-items: center; gap: 8px; }
+.desktop-control-row button { padding: 4px 10px; font-size: 12px; }
+.desktop-control-spacer { flex: 1; }
+.desktop-control-state { padding: 1px 7px; border-radius: 9px; font-size: 11px; }
+.desktop-control-state-off { background: #262b35; color: #9ca4b3; }
+.desktop-control-state-on { background: #4a1d1f; color: #ff9b95; }
+.desktop-control-state-paused { background: #3d2e0a; color: #f2c25b; }
+.desktop-control-note { margin: 0; color: #9ca4b3; line-height: 1.45; }
+.desktop-control-note kbd { padding: 0 4px; border: 1px solid #3a404c; border-radius: 3px; font: inherit; color: #d6dbe4; }
+.desktop-control-error { margin: 0; color: #ffb3bb; }
+.desktop-control-check { display: flex; align-items: center; gap: 6px; color: #c9d0db; }
+.desktop-control-apps { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: #c9d0db; }
+.desktop-control-app { display: inline-flex; align-items: center; gap: 2px; padding: 0 0 0 7px; border: 1px solid #373b45; border-radius: 10px; }
+.desktop-control-app .icon-button { width: 20px; height: 20px; padding: 0; border: 0; background: transparent; font-size: 13px; }
+.desktop-control-muted { color: #8a93a3; }
+.desktop-control-log { max-height: 140px; margin: 0; padding: 0; overflow-y: auto; list-style: none; scrollbar-width: thin; }
+.desktop-control-log li { padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-control-log-refused { color: #f2c25b; }
+.desktop-control-log-failed { color: #ffb3bb; }
+.desktop-control-panel .danger-button { background: #5a1f22; border-color: #7d2c30; color: #ffd0cc; }

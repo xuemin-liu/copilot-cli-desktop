@@ -49,6 +49,12 @@ handle, only input/output/resize events.
   through `copilot-desktop browser` commands, without an MCP server. Testing mode
   lets the assistant run user-described web-app workflows and check expected results,
   with step reports and screenshots.
+- **Desktop control** (Windows, off by default) lets a session see the screen and use the mouse
+  and keyboard in other apps, for tasks files, shell commands and the browser can't do. You turn
+  it on per session and approve each app. It can never control this app, terminals, File Explorer,
+  Start, sign-in or password windows, or administrator windows, and it never types into password
+  fields. A banner shows while it is on, and Ctrl+Alt+Shift+X stops it anywhere. See
+  [Desktop control](docs/desktop-control.md).
 - **Git panel** (Ctrl+Shift+G) shows the repositories in your project folder beside the
   session: branch, changed files, diffs and history, updated as Copilot works. It can
   add a diff, comments on its lines, or a request for a commit message, to the prompt box. It can stage and

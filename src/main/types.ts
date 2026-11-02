@@ -161,6 +161,14 @@ export interface CopilotResolution {
   pathAdditions?: string[]
 }
 
+export interface DesktopControlTabView {
+  enabled: boolean
+  paused: boolean
+  approvedApps: Array<{ key: string; name: string }>
+  fullScreen: boolean
+  log: Array<{ at: string; command: string; app?: string; result: 'ok' | 'refused' | 'failed'; message: string }>
+}
+
 export interface DesktopState {
   /** Runtime window placement, never persisted as session configuration. */
   poppedOutTabIds?: string[]
@@ -184,6 +192,12 @@ export interface DesktopState {
   meetings?: MeetingView[]
   /** Where outside agents reach the meeting tools over MCP; null when the port was taken. Runtime-only. */
   meetingToolsUrl?: string | null
+  /** Desktop control is allowed in Settings on this platform. Runtime-only. */
+  desktopControlAllowed?: boolean
+  /** Sessions that started with desktop control's helper, so the person can turn it on for them. Runtime-only. */
+  desktopControlReadyTabIds?: string[]
+  /** Per session: whether desktop control is on, its approved apps and its recent actions. Runtime-only. */
+  desktopControl?: Record<string, DesktopControlTabView>
 }
 
 /** Desktop event surfaced to the renderer/tray/notifications layer. */

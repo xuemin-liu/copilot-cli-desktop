@@ -4,4 +4,5 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  koffi: false
   node-pty: true

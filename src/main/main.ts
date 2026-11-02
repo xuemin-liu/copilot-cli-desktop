@@ -15,7 +15,9 @@ import {
   Menu,
   nativeImage,
   Notification,
+  powerMonitor,
   safeStorage,
+  screen,
   session as electronSession,
   shell,
   Tray,
@@ -176,6 +178,8 @@ import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 import { BrowserDebug } from './browser-debug.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
+import { DesktopControl, DesktopControlError } from './desktop-control.js'
+import { prepareDesktopControlSessionEnvironment } from './desktop-control-session.js'
 import { SHARED_BROWSER_PROFILE_ID, browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
 import { browserProfileHasPartition, clearBrowserStorage, pruneBrowserProfiles, pruneBrowserLaunches, removeBrowserProfileSettings, removeBrowserLaunch } from './browser-cleanup.js'
 import { shareDevtoolsSettings } from './browser-devtools-settings.js'
@@ -232,6 +236,9 @@ if (app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1') {
 }
 const GLOBAL_TOGGLE_SHORTCUT = 'CommandOrControl+Alt+H'
 const GLOBAL_TOGGLE_SHORTCUT_LABEL = process.platform === 'darwin' ? 'Command+Alt+H' : 'Ctrl+Alt+H'
+// Turns desktop control off everywhere; registered only while it is on in a session.
+const DESKTOP_STOP_SHORTCUT = 'Control+Alt+Shift+X'
+const DESKTOP_STOP_SHORTCUT_LABEL = 'Ctrl+Alt+Shift+X'
 const RELEASES_URL = 'https://github.com/xuemin-liu/copilot-cli-desktop/releases'
 const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
@@ -259,6 +266,11 @@ let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let credentialStore: SecureCredentialStore | null = null
 let updateController: DesktopUpdateController | null = null
+let desktopControl: DesktopControl | null = null
+let desktopOverlay: import('./desktop-capture.js').DesktopOverlay | null = null
+let desktopScreenLocked = false
+/** Sessions started with desktop control's helper and instructions; only these can turn it on. */
+const desktopControlTabs = new Set<string>()
 let updateCheckTimer: NodeJS.Timeout | null = null
 let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
 let copilotResolutionProbePromise: Promise<{ resolution: CopilotResolution; sequence: number }> | null = null
@@ -543,6 +555,17 @@ function protectedCredentialPath(): string {
 const launchId = randomUUID()
 function browserSessionRoot(): string { return join(app.getPath('userData'), 'browser-sessions', launchId) }
 
+/** A session gets desktop control's helper when Settings allows it and the session can run shell commands on this computer. */
+async function prepareDesktopControlEnvironment(tabId: string, preset: string | null, sideChat: boolean, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+  if (process.platform !== 'win32' || !desktopConfig.desktopControl || sideChat || preset === null || preset === 'read-only') {
+    desktopControlTabs.delete(tabId)
+    return environment
+  }
+  const next = await prepareDesktopControlSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, DESKTOP_STOP_SHORTCUT_LABEL, environment)
+  desktopControlTabs.add(tabId)
+  return next
+}
+
 function sessionLogPath(tabId: string): string {
   if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
   return join(app.getPath('userData'), 'logs', 'sessions', launchId, `${tabId}.log`)
@@ -607,6 +630,9 @@ function snapshot(windowSessionId?: string, windowBrowserId?: string): DesktopSt
     newSessionPrivateOverrides: desktopConfig.browserOverrides === 'private',
     meetings: meetingViews(),
     meetingToolsUrl: guestMcp.url(),
+    desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
+    desktopControlReadyTabIds: [...desktopControlTabs],
+    ...(desktopControl ? { desktopControl: Object.fromEntries(state.tabs.map(tab => [tab.id, desktopControl!.view(tab.id)])) } : {}),
   }
 }
 
@@ -1626,6 +1652,7 @@ async function startSessionTab(
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env)
+    plan.env = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
   }
   finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
@@ -2449,6 +2476,9 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
         await removeBrowserProfileSettings(app.getPath('userData'), profileId)
       }
     } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
+    try { await desktopControl?.forget(tabId) }
+    catch (error) { reportBrowserError(`Failed to turn off desktop control for ${tabId}: ${String(error)}`) }
+    desktopControlTabs.delete(tabId)
     try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
     catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
     finally { sessionBrowsers.delete(tabId); closingBrowserTabs.delete(tabId) }
@@ -2602,6 +2632,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env)
+    // The restarted process starts with control off; the person turns it on again.
+    await desktopControl?.disable(tabId, 'Turned off: the session restarted.')
+    plan.env = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
 
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
@@ -3548,6 +3581,7 @@ function settingsPreferences(): DesktopPreferences {
     meetingMaxRounds: desktopConfig.meetingMaxRounds,
     meetingRoundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes,
     meetingDiscussion: desktopConfig.meetingDiscussion,
+    desktopControl: desktopConfig.desktopControl,
   }
 }
 
@@ -3768,6 +3802,111 @@ ipcMain.handle('desktop:dock-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
   return dockSessionTab(tabId)
+})
+/** Ask the person whether Copilot may control an app (or capture a whole display) in a session. */
+async function askDesktopApproval(request: { tabId: string; app: string; detail: string; warning: string | null; screen: boolean }, signal: AbortSignal): Promise<'deny' | 'once' | 'session'> {
+  const owner = sessionWindows.get(request.tabId) ?? mainWindow
+  if (!owner || owner.isDestroyed()) return 'deny'
+  if (owner.isMinimized()) owner.restore()
+  if (!owner.isVisible()) owner.show()
+  owner.focus()
+  if (!owner.isFocused()) owner.flashFrame(true)
+  const title = tabsState.tabs.find(tab => tab.id === request.tabId)?.title ?? 'this session'
+  const { response } = await dialog.showMessageBox(owner, {
+    type: request.warning ? 'warning' : 'question',
+    title: 'Desktop control',
+    message: request.screen ? `Allow Copilot to capture ${request.app} in “${title}”?` : `Allow Copilot to control ${request.app} in “${title}”?`,
+    detail: [request.detail, request.warning].filter(Boolean).join('\n\n'),
+    buttons: ['Deny', 'Allow once', 'Allow for this session'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    signal,
+  })
+  return response === 2 ? 'session' : response === 1 ? 'once' : 'deny'
+}
+
+async function startDesktopControl(): Promise<void> {
+  const [{ DesktopOverlay, captureDesktopArea, desktopDisplays, encodeDesktopPng }, { WindowsDesktopInputMonitor, WindowsDesktopNative }] = await Promise.all([
+    import('./desktop-capture.js'),
+    import('./desktop-native.js'),
+  ])
+  const overlay = new DesktopOverlay(DESKTOP_STOP_SHORTCUT_LABEL)
+  desktopOverlay = overlay
+  desktopControl = new DesktopControl({
+    ownProgramPath: process.execPath,
+    reservedAccelerators: () => [GLOBAL_TOGGLE_SHORTCUT, DESKTOP_STOP_SHORTCUT],
+    stopKeyLabel: DESKTOP_STOP_SHORTCUT_LABEL,
+    sessionFolder: tabId => browserSessionPaths(browserSessionRoot(), tabId).directory,
+    sessionRefusal: tabId => {
+      const tab = tabsState.tabs.find(entry => entry.id === tabId)
+      if (!tab) return 'This session is not open.'
+      if (!desktopConfig.desktopControl) return 'Allow desktop control in Settings first.'
+      if (tab.remote) return 'A remote session runs on another computer, so it can’t control this one.'
+      if (tab.sideChat) return 'Side chats can’t use desktop control.'
+      if (!desktopControlTabs.has(tabId)) return 'This session started before desktop control was allowed, or it is read-only. Restart it (with shell access) to use desktop control.'
+      return null
+    },
+    sessionTitle: tabId => tabsState.tabs.find(tab => tab.id === tabId)?.title ?? 'Session',
+    approve: askDesktopApproval,
+    displays: desktopDisplays,
+    capture: captureDesktopArea,
+    encodePng: encodeDesktopPng,
+    overlay: state => overlay.update(state),
+    stopKey: (active, stop) => {
+      if (!active) { globalShortcut.unregister(DESKTOP_STOP_SHORTCUT); return true }
+      return globalShortcut.isRegistered(DESKTOP_STOP_SHORTCUT) || globalShortcut.register(DESKTOP_STOP_SHORTCUT, stop)
+    },
+    changed: broadcastState,
+    locked: () => desktopScreenLocked,
+    log: message => { void writeAppLog(message).catch(() => {}) },
+  }, new WindowsDesktopNative(), new WindowsDesktopInputMonitor())
+  // Frames from before a lock, sleep or display change are never used.
+  powerMonitor.on('lock-screen', () => { desktopScreenLocked = true; desktopControl?.invalidateFrames() })
+  powerMonitor.on('unlock-screen', () => { desktopScreenLocked = false; desktopControl?.invalidateFrames() })
+  powerMonitor.on('suspend', () => { desktopControl?.invalidateFrames(); void desktopControl?.disableAll('Turned off: the computer went to sleep.') })
+  screen.on('display-metrics-changed', () => desktopControl?.invalidateFrames())
+  screen.on('display-added', () => desktopControl?.invalidateFrames())
+  screen.on('display-removed', () => desktopControl?.invalidateFrames())
+}
+
+/** Only the person, from the session's own window or the main window, turns desktop control on or changes its grants. */
+function desktopControlTab(event: IpcMainInvokeEvent, tabId: unknown): string {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId) || !tabsState.tabs.some(tab => tab.id === tabId)) throw new Error('Invalid session tab')
+  const own = sessionWindowId(event.sender)
+  if (own !== undefined && own !== tabId) throw new Error('Invalid session tab')
+  if (!desktopControl) throw new Error('Desktop control is available on Windows only.')
+  return tabId
+}
+ipcMain.handle('desktop:desktop-control-set', async (event, tabId: unknown, enabled: unknown) => {
+  const id = desktopControlTab(event, tabId)
+  if (typeof enabled !== 'boolean') throw new Error('Invalid desktop control state')
+  try {
+    if (enabled) await desktopControl!.enable(id)
+    else await desktopControl!.disable(id)
+  } catch (error) {
+    if (error instanceof DesktopControlError) throw new Error(error.message)
+    throw error
+  }
+  broadcastState()
+  return snapshot(sessionWindowId(event.sender))
+})
+ipcMain.handle('desktop:desktop-control-resume', (event, tabId: unknown) => {
+  desktopControl!.resume(desktopControlTab(event, tabId))
+  return snapshot(sessionWindowId(event.sender))
+})
+ipcMain.handle('desktop:desktop-control-revoke', (event, tabId: unknown, key: unknown) => {
+  const id = desktopControlTab(event, tabId)
+  if (typeof key !== 'string' || key.length > 2048) throw new Error('Invalid app')
+  desktopControl!.revoke(id, key)
+  return snapshot(sessionWindowId(event.sender))
+})
+ipcMain.handle('desktop:desktop-control-full-screen', (event, tabId: unknown, allowed: unknown) => {
+  const id = desktopControlTab(event, tabId)
+  if (typeof allowed !== 'boolean') throw new Error('Invalid full-screen choice')
+  desktopControl!.setFullScreen(id, allowed)
+  return snapshot(sessionWindowId(event.sender))
 })
 ipcMain.handle('desktop:pop-out-browser', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
@@ -4197,6 +4336,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'meetingMaxRounds',
     'meetingRoundTimeoutMinutes',
     'meetingDiscussion',
+    'desktopControl',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -4215,6 +4355,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('meetingMaxRounds' in values && !isMeetingMaxRounds(values.meetingMaxRounds))
     || ('meetingRoundTimeoutMinutes' in values && !isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes))
     || ('meetingDiscussion' in values && typeof values.meetingDiscussion !== 'boolean')
+    || ('desktopControl' in values && typeof values.desktopControl !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -4224,6 +4365,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let updateChecksChanged = false
   let shortcutChanged = false
   let overridesChanged = false
+  let desktopControlChanged = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
@@ -4253,6 +4395,9 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes)) desktopConfig.meetingRoundTimeoutMinutes = values.meetingRoundTimeoutMinutes
     // Read when a round's reviews are all in, so it applies to open meetings from their next round.
     if (typeof values.meetingDiscussion === 'boolean') desktopConfig.meetingDiscussion = values.meetingDiscussion
+    // Sessions started from now on get the helper; turning it off also turns control off everywhere at once.
+    desktopControlChanged = typeof values.desktopControl === 'boolean' && desktopConfig.desktopControl !== values.desktopControl
+    if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -4273,6 +4418,10 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   })
   broadcastSettingsPreferences()
   if (overridesChanged) broadcastState()
+  if (desktopControlChanged) {
+    if (!desktopConfig.desktopControl) await desktopControl?.disableAll('Turned off: desktop control was turned off in Settings.')
+    broadcastState()
+  }
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })
@@ -4735,6 +4884,15 @@ if (!app.requestSingleInstanceLock()) {
             await usageService?.collect()
             await usageService?.stop()
             usageService = null
+            // Desktop control's workers load koffi's native addon from app.asar.unpacked.
+            if (process.platform === 'win32') {
+              const { WindowsDesktopInputMonitor, WindowsDesktopNative } = await import('./desktop-native.js')
+              const native = new WindowsDesktopNative()
+              try { await native.windows() } finally { await native.dispose() }
+              const monitor = new WindowsDesktopInputMonitor()
+              await monitor.start()
+              await monitor.stop()
+            }
             process.stderr.write(`${PACKAGE_SMOKE_READY_MARKER}\n`)
             setTimeout(() => app.exit(0), 250)
           })().catch((error) => {
@@ -4751,6 +4909,7 @@ if (!app.requestSingleInstanceLock()) {
     updateTrayVisibility()
     installApplicationMenu()
     applyGlobalShortcut(desktopConfig.globalShortcutEnabled)
+    if (process.platform === 'win32') await startDesktopControl()
 
     await retryResolution(true)
     scheduleAutomaticUpdateCheck()
@@ -4791,7 +4950,8 @@ app.on('before-quit', (event) => {
       usageService = null
       meetingHub.dispose()
       // Open meetings are saved as they stand, for the next start to restore.
-      await Promise.allSettled([service?.stop(), meetingControl.close(), guestMcp.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose())])
+      await Promise.allSettled([service?.stop(), meetingControl.close(), guestMcp.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose()), desktopControl?.dispose()])
+      desktopOverlay?.dispose()
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)
         .catch(error => writeAppLog(`Could not remove browser helpers on quit: ${String(error)}`))
