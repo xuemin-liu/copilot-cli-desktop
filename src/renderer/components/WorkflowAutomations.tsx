@@ -28,6 +28,7 @@ export function WorkflowAutomations({profiles,rules,previews,paused,pausedProjec
     </li>)}</ul>
     <h3>Preview history · {previews.length}</h3>
     <ul>{previews.slice(0,limit).map(p=><li key={p.id}><strong>{p.title}</strong><p>{p.summary}</p><span>{p.state}</span>
+      {p.refusal&&p.state==='preview'&&<p role="status">{p.refusal}. No session or checkout was created; this refusal did not consume launch budget.</p>}
       {p.state==='preview'&&rules.some(r=>r.id===p.ruleId&&r.revision===p.revision&&r.mode!=='off')&&<button disabled={pending||paused} type="button" onClick={()=>run(()=>window.copilotDesktop.automationAction(p.id,'start'))}>Start selected preview</button>}
       {p.sessionId&&<button type="button" onClick={()=>run(()=>window.copilotDesktop.openSessionHistory(p.sessionId!))}>Open task session</button>}
       {p.state==='uncertain'&&<p>Launch may have created a session or checkout. Inspect Tasks and sessions; this event will not be launched again automatically.</p>}

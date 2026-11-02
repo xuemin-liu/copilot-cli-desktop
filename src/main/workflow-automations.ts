@@ -3,9 +3,11 @@ import { randomUUID } from 'node:crypto'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { validGithubRepository, type GithubApi } from './workflow-github.js'
 import { readAutomationEvents,resolveAutomationActors,type AutomationActor,type AutomationEvent,type AutomationTemplate } from './workflow-automation-source.js'
+/** Only the host may assert that it refused before creating a session, checkout or submitting input. */
+export class AutomationLaunchRefused extends Error {}
 
 export interface AutomationRule {id:string;revision:string;projectId:string;scopeKey:string;repository:string;template:AutomationTemplate;actors:AutomationActor[];mode:'off'|'preview'|'automatic';seen:Record<string,string>;activatedAt:number;health:string;launches:number;day:number;dayLaunches:number}
-export interface AutomationPreview {id:string;ruleId:string;revision:string;key:string;version:string;title:string;summary:string;createdAt:number;state:'preview'|'launching'|'started'|'uncertain'|'stale'|'overlap'|'limit';sessionId?:string;taskId?:string}
+export interface AutomationPreview {id:string;ruleId:string;revision:string;key:string;version:string;title:string;summary:string;createdAt:number;state:'preview'|'launching'|'started'|'uncertain'|'stale'|'overlap'|'limit';refusal?:string;sessionId?:string;taskId?:string}
 export interface AutomationHost {api:GithubApi;changed():void;interrupt(projectId?:string):void;ready(projectId:string):boolean;
   scopeKey(projectId:string):string|null;
   launch(rule:AutomationRule,event:AutomationEvent,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>;now?:()=>number}
@@ -22,6 +24,7 @@ export class WorkflowAutomations {
   private db:DatabaseSync;private busy=false;private stopped=false;private timer:NodeJS.Timeout|null=null
   private next=new Map<string,number>();private failures=new Map<string,number>();private now:()=>number
   private pauseEpoch=0
+  private readonly nextLaunch=new Map<string,number>()
   failed=false
   constructor(path:string,private host:AutomationHost){
     this.now=host.now??Date.now;this.db=new DatabaseSync(path)
@@ -145,6 +148,7 @@ export class WorkflowAutomations {
   close():void{this.stop();this.db.close()}
   private async dispatch(rule:AutomationRule,preview:AutomationPreview,manual=false):Promise<void>{
     if(!this.permitted(rule,manual)||!this.host.ready(rule.projectId))return
+    if(!manual&&(this.nextLaunch.get(preview.id)??0)>this.now())return
     const day=Math.floor(this.now()/86400000),count=rule.day===day?rule.dayLaunches:0
     if(rule.launches>=10||count>=3){this.savePreview({...preview,state:'limit'});return}
     let events:AutomationEvent[]
@@ -166,7 +170,24 @@ export class WorkflowAutomations {
     try{
       const receipt=await this.host.launch(rule,event,()=>this.permitted(rule,manual))
       if(!this.stopped)this.savePreview({...preview,...receipt,state:'started'})
-    }catch{if(!this.stopped)this.savePreview({...preview,state:'uncertain'})}
+    }catch(error){
+      if(this.stopped)return
+      if(error instanceof AutomationLaunchRefused){
+        // This typed host assertion is emitted only before session/worktree creation. Refund exactly our reservation.
+        this.db.exec('BEGIN IMMEDIATE')
+        try{
+          const owner=this.db.prepare('SELECT preview FROM owners WHERE source=?').get(preview.key) as {preview:string}|undefined
+          if(owner?.preview!==preview.id)throw new Error('Launch ownership changed')
+          this.db.prepare('DELETE FROM owners WHERE source=? AND preview=?').run(preview.key,preview.id)
+          const current=this.rules().find(r=>r.id===rule.id)
+          if(!current)throw new Error('Launch rule is missing')
+          this.saveRule({...current,launches:Math.max(0,current.launches-1),dayLaunches:current.day===day?Math.max(0,current.dayLaunches-1):current.dayLaunches})
+          this.savePreview({...preview,state:'preview',refusal:clean(error.message,300)})
+          this.db.exec('COMMIT')
+          this.nextLaunch.set(preview.id,this.now()+120000)
+        }catch(failure){this.db.exec('ROLLBACK');throw failure}
+      }else this.savePreview({...preview,state:'uncertain'})
+    }
   }
   private async read(rule:AutomationRule):Promise<AutomationEvent[]>{return readAutomationEvents(this.host.api,rule.repository,rule.template)}
   private retain(projectId:string):boolean{
@@ -193,6 +214,7 @@ export class WorkflowAutomations {
     const p=JSON.parse(value) as AutomationPreview
     if(!p||!/^[-a-f0-9]{36}$/.test(p.id)||!/^[-a-f0-9]{36}$/.test(p.ruleId)||!/^[-a-f0-9]{36}$/.test(p.revision)||typeof p.key!=='string'||!p.key.startsWith('github/')||p.key.length>300||!/^[a-f0-9]{64}$/.test(p.version)
       ||typeof p.title!=='string'||p.title!==clean(p.title,120)||typeof p.summary!=='string'||p.summary!==clean(p.summary,2000)||!Number.isFinite(p.createdAt)
+      ||(p.refusal!==undefined&&(typeof p.refusal!=='string'||p.refusal!==clean(p.refusal,300)))
       ||!['preview','launching','started','uncertain','stale','overlap','limit'].includes(p.state))throw new Error('Invalid preview record')
     return p
   }

@@ -5,6 +5,7 @@ and allowed actor identities. New and edited rules always start in Preview. Ther
 
 - **New issue assigned to my GitHub account** accepts assignment events from explicitly named GitHub users/bots.
   The issue must currently be open and assigned to the authenticated account. Editing an issue body alone is not a new assignment.
+  Polls read only currently open assigned issues (up to thirty) and each candidate's own events, avoiding repository-wide history.
 - **Failed default-branch CI check** accepts current failed/timed-out check runs from explicitly named GitHub app slugs.
   App IDs and user IDs are distinct. The newest run for an app/check name supersedes older runs. Legacy commit statuses
   are supported by task follow-ups, but are not a rule-created investigation source in this release.
@@ -39,6 +40,9 @@ pause request supersedes an in-flight resume. Off rules collect nothing. Desktop
 A durable source owner prevents overlapping rules or revisions from launching the same issue/check twice, including
 after restart. A possibly interrupted launch becomes Uncertain and never automatically retries. Inspect Tasks, sessions
 and worktrees to recover that work manually. No cleanup operation deletes those resources. Source owner tombstones
+are released, and the budget refunded, when the host proves it refused before creating a session or checkout. That
+preview stays retryable with a redacted reason; automatic retries back off for two minutes. Other failures remain uncertain.
+Source owner tombstones
 outlive preview retention. Maximums: five configured rules, 1,000 source versions per rule, 1,000 previews per project,
 30 days of ordinary preview history, 1,000 ownership records. Unresolved launch evidence is preserved, and intake stops
 at a limit when it cannot be pruned safely. GitHub reads are paginated and bounded; polling is every two minutes with

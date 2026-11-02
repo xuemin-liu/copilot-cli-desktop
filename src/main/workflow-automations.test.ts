@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {mkdtemp,rm,readFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
-import {WorkflowAutomations,type AutomationHost} from './workflow-automations.js'
+import {WorkflowAutomations,AutomationLaunchRefused,type AutomationHost} from './workflow-automations.js'
 import {readAutomationEvents} from './workflow-automation-source.js'
 const head='a'.repeat(40)
 async function fixture(action:(h:Awaited<ReturnType<typeof setup>>)=>Promise<void>):Promise<void>{const h=await setup();try{await action(h)}finally{h.close();await rm(h.dir,{recursive:true,force:true})}}
@@ -16,13 +16,15 @@ async function setup(){
     api:async(path)=>{
       reads++
       if(wait){const w=wait;wait=null;await w()}
-      if(path==='user')return {id:8}
+      if(path==='user')return {id:8,login:'viewer'}
       if(path==='users/assigner')return {id:7,login:'assigner'}
       if(path==='apps/actions')return {id:9,slug:'actions'}
       if(path==='repos/owner/repo')return {default_branch:'main'}
       if(path==='repos/owner/repo/commits/main')return {sha:head}
       if(path.endsWith('/check-runs?per_page=100'))return [{check_runs:checks}]
       if(path.endsWith('/issues/events?per_page=100'))return [assignments]
+      if(path==='repos/owner/repo/issues?assignee=viewer&state=open&per_page=100')return [[{number:1}]]
+      if(path==='repos/owner/repo/issues/1/events?per_page=100')return [assignments]
       if(path==='repos/owner/repo/issues/1')return {state:'open',title:'Bug token=fixture-secret',body:'Please investigate',assignees:[{id:8}]}
       throw new Error('Unexpected fixture path')
     },launch:async(_rule,_event,authorized)=>{assert.equal(authorized(),true);launches++;return {sessionId:'session',taskId:'task'}},
@@ -119,4 +121,25 @@ test('long redacted preview summaries remain decodable after restart',async()=>f
   h.advance();await h.store.tick();h.reopen()
   assert.equal(h.store.previews().length,1)
   assert.ok(h.store.previews()[0]!.summary.length<=2000)
+}))
+test('assigned-issue rules never download unrelated repository event history',async()=>fixture(async h=>{
+  h.assign();const api=h.host.api
+  let historyReads=0
+  h.host.api=async(path,paged)=>{
+    if(path==='repos/owner/repo/issues/events?per_page=100'){historyReads++;return [Array.from({length:1001},(_,id)=>({id:id+10,event:'closed'}))]}
+    return api(path,paged)
+  }
+  const events=await readAutomationEvents(h.host.api,'owner/repo','assigned-issue')
+  assert.equal(events.length,1);assert.equal(historyReads,0)
+}))
+test('a proven pre-creation refusal releases source ownership and budgets for an explicit retry',async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions'])
+  h.fail(1);h.advance();await h.store.tick();const preview=h.store.previews()[0]!
+  h.host.launch=async()=>{throw new AutomationLaunchRefused('Reconcile the default-branch checkout before retrying')}
+  await h.store.startPreview(preview.id)
+  assert.equal(h.store.previews()[0]?.state,'preview')
+  assert.equal(h.store.rules()[0]?.launches,0);assert.equal(h.store.rules()[0]?.dayLaunches,0)
+  h.host.launch=async()=>({sessionId:'session',taskId:'task'})
+  await h.store.startPreview(preview.id)
+  assert.equal(h.store.previews()[0]?.state,'started');assert.equal(h.store.rules()[0]?.launches,1)
 }))
