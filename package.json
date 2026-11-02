@@ -12,6 +12,7 @@
     "copilot-desktop": "dist/src/cli/cli.js"
   },
   "scripts": {
+    "workflow:check": "npm run build && node scripts/workflow-capabilities-check.mjs",
     "clean": "node scripts/clean.mjs",
     "build": "npm run clean && npm run icon && tsc -p tsconfig.build.json && node scripts/build-renderer.mjs && node scripts/copy-static.mjs",
     "icon": "node scripts/generate-icon.mjs",
