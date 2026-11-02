@@ -91,6 +91,11 @@ export class WorkflowStore {
     const task = decode(row.value)
     this.save({ ...task, outcome, updatedAt: Date.now() })
   }
+  /** An integration without a report helper can expose turn completion without claiming a successful outcome. */
+  unreportedTurn(sessionId:string):void {
+    const task=this.active(sessionId)
+    if(task?.outcome==='working')this.save({...task,outcome:'unknown',summary:'The investigation turn ended. Review its session; no structured outcome report is available.',updatedAt:Date.now()})
+  }
   private save(task: WorkflowTask): void {
     this.db.prepare('INSERT INTO tasks(id,session,active,value) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET active=excluded.active,value=excluded.value')
       .run(task.id, task.sessionId, Number(task.outcome !== 'completed' && task.outcome !== 'cancelled'), JSON.stringify(task))

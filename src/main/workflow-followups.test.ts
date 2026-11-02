@@ -138,3 +138,12 @@ test('a changed permission fingerprint revokes enrollment without consuming inta
   assert.equal(h.controller.grant(grant.id)?.health,'scope-changed')
   assert.equal(h.controller.grant(grant.id)?.enabled,false)
 }))
+test('project/global holds cancel pending work and resume baselines feedback collected during the pause',async()=>fixture(async h=>{
+  await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
+  h.host.ready=()=>false;h.comment(1);await h.controller.tick()
+  h.controller.hold('project');assert.equal(h.journal.list()[0]?.state,'cancelled')
+  h.comment(2);await h.controller.rebaseline('project')
+  h.host.ready=()=>true;h.advance();await h.controller.tick()
+  assert.equal(h.injected.length,0)
+  h.comment(3);h.advance();await h.controller.tick();assert.equal(h.injected.length,1)
+}))

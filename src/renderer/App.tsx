@@ -349,6 +349,10 @@ export function App(): JSX.Element {
         workflowTasks={state.workflowTasks ?? []}
         workflowFollowups={state.workflowFollowups ?? []}
         workflowFollowupError={state.workflowFollowupError ?? null}
+        workflowAutomation={state.workflowAutomation??{rules:[],previews:[]}}
+        workflowAutomaticPaused={state.workflowAutomaticPaused??false}
+        workflowPausedProjects={state.workflowPausedProjects??[]}
+        workflowAutomationError={state.workflowAutomationError??null}
         workflowError={state.workflowError ?? null}
         workflowDeliveries={state.workflowDeliveries ?? []}
         workflowDeliveryError={state.workflowDeliveryError ?? null}

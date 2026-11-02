@@ -113,6 +113,9 @@ export interface CopilotDesktopBridge {
   taskAction(id: string, action: 'completed' | 'cancelled'): Promise<void>
   enrollFollowup(taskId:string,url:string,reviewers:string[],failedChecks:boolean):Promise<void>
   pauseFollowup(id:string):Promise<void>
+  configureAutomation(projectId:string,repository:string,template:'assigned-issue'|'default-ci',actors:string[],id?:string):Promise<void>
+  automationAction(id:string,action:'off'|'preview'|'automatic'|'start'):Promise<void>
+  pauseAutomatic(paused:boolean,projectId?:string):Promise<void>
   deliveryAction(id: string, action: 'retry' | 'discard'): Promise<void>
   meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): Promise<void>
   /** Invite an outside agent to review: returns the invitation to paste into it, also put on the clipboard. `short`: the

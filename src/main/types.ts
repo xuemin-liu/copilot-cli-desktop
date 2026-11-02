@@ -175,6 +175,10 @@ export interface DesktopState {
   workflowTasks?: import('./workflow-types.js').WorkflowTask[]
   workflowFollowups?: import('./workflow-followups.js').FollowupGrant[]
   workflowFollowupError?: string | null
+  workflowAutomation?: {rules:import('./workflow-automations.js').AutomationRule[];previews:import('./workflow-automations.js').AutomationPreview[]}
+  workflowAutomaticPaused?:boolean
+  workflowPausedProjects?:string[]
+  workflowAutomationError?:string|null
   workflowError?: string | null
   /** Runtime window placement, never persisted as session configuration. */
   poppedOutTabIds?: string[]

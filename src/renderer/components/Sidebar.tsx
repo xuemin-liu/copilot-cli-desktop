@@ -11,6 +11,7 @@ import { RemoveIcon } from './Icons.js'
 import { workflowAttention } from '../../main/workflow-attention.js'
 import { NeedsYou } from './NeedsYou.js'
 import { WorkflowTasks } from './WorkflowTasks.js'
+import { WorkflowAutomations } from './WorkflowAutomations.js'
 import { DeliveryQueue } from './WorkflowDeliveries.js'
 import type { WorkflowDelivery } from '../../main/workflow-deliveries.js'
 import type { WorkflowTask } from '../../main/workflow-types.js'
@@ -42,6 +43,10 @@ function writeSidebarPreference(key: string, value: string): void {
 }
 
 export interface SidebarProps {
+  workflowAutomation?: import('../../main/types.js').DesktopState['workflowAutomation']
+  workflowAutomaticPaused?:boolean
+  workflowPausedProjects?:string[]
+  workflowAutomationError?:string|null
   workflowFollowups?: readonly import('../../main/workflow-followups.js').FollowupGrant[]
   workflowFollowupError?: string | null
   workflowDeliveries?: readonly WorkflowDelivery[]
@@ -78,6 +83,7 @@ export interface SidebarProps {
 }
 
 export function Sidebar({
+  workflowAutomation={rules:[],previews:[]},workflowAutomaticPaused=false,workflowPausedProjects=[],workflowAutomationError,
   workflowFollowups=[],workflowFollowupError,
   workflowDeliveries = [], workflowDeliveryError,
   workflowTasks = [], workflowError,
@@ -406,8 +412,9 @@ export function Sidebar({
         </div>
       </div>
 
-      <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
+      <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks,workflowFollowups,workflowDeliveries)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
       {!collapsed && <WorkflowTasks tasks={workflowTasks} followups={workflowFollowups} error={workflowError ?? workflowFollowupError ?? null} />}
+      {!collapsed && <WorkflowAutomations profiles={profiles} rules={workflowAutomation.rules} previews={workflowAutomation.previews} paused={workflowAutomaticPaused} pausedProjects={workflowPausedProjects} error={workflowAutomationError??null} />}
       {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (
         <input

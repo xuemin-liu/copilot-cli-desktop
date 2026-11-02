@@ -94,6 +94,20 @@ export class WorkflowFollowups {
     this.host.journal.cancelScope(id)
     this.host.interrupt(grant)
   }
+  hold(projectId?:string):void {
+    for(const grant of this.list().filter(g=>g.enabled&&(!projectId||g.projectId===projectId))){this.host.journal.cancelScope(grant.id);this.host.interrupt(grant)}
+  }
+  async rebaseline(projectId?:string):Promise<void> {
+    for(const grant of this.list().filter(g=>g.enabled&&(!projectId||g.projectId===projectId))){
+      const snapshot=await this.read(grant)
+      if(this.stopped)return
+      const current=this.grant(grant.id)
+      if(!current?.enabled)continue
+      if(snapshot.feedback.length>1000)throw new Error('Follow-up source limit reached; remain paused')
+      if(!snapshot.open){this.closeGrant(current);continue}
+      this.save({...current,seen:Object.fromEntries(snapshot.feedback.map(e=>[e.source,e.version])),head:snapshot.head,activatedAt:this.now(),checks:snapshot.checks,health:'watching'})
+    }
+  }
   authorized(grant:FollowupGrant):boolean {
     if(this.stopped||this.failed)return false
     const current=this.grant(grant.id),task=this.host.task(grant.taskId)
