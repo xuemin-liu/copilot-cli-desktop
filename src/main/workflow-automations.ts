@@ -25,6 +25,7 @@ export class WorkflowAutomations {
   private next=new Map<string,number>();private failures=new Map<string,number>();private now:()=>number
   private pauseEpoch=0
   private readonly nextLaunch=new Map<string,number>()
+  private readonly sourceRetryAt=new Map<string,number>()
   failed=false
   constructor(path:string,private host:AutomationHost){
     this.now=host.now??Date.now;this.db=new DatabaseSync(path)
@@ -109,15 +110,10 @@ export class WorkflowAutomations {
     this.busy=true
     try {
       for(const rule of this.rules()){
-        if(rule.mode==='off'||this.paused(rule.projectId)||(this.next.get(rule.id)??0)>this.now())continue
+        if(rule.mode==='off'||this.paused(rule.projectId)||Math.max(this.next.get(rule.id)??0,this.sourceRetryAt.get(rule.id)??0)>this.now())continue
         this.next.set(rule.id,this.now()+120000)
         let events:AutomationEvent[]
-        try{events=await this.read(rule);this.failures.delete(rule.id)}catch{
-          if(this.stopped)return
-          const failures=(this.failures.get(rule.id)??0)+1;this.failures.set(rule.id,failures)
-          this.next.set(rule.id,this.now()+Math.min(1800000,120000*2**Math.min(failures-1,4)))
-          this.saveRule({...rule,health:'source unavailable'});continue
-        }
+        try{events=await this.read(rule)}catch{if(this.stopped)return;continue}
         if(this.stopped)return
         const current=this.rules().find(r=>r.id===rule.id)
         if(current?.revision!==rule.revision||current.mode==='off'||this.paused(rule.projectId))continue
@@ -148,11 +144,12 @@ export class WorkflowAutomations {
   close():void{this.stop();this.db.close()}
   private async dispatch(rule:AutomationRule,preview:AutomationPreview,manual=false):Promise<void>{
     if(!this.permitted(rule,manual)||!this.host.ready(rule.projectId))return
+    if((this.sourceRetryAt.get(rule.id)??0)>this.now())return
     if(!manual&&(this.nextLaunch.get(preview.id)??0)>this.now())return
     const day=Math.floor(this.now()/86400000),count=rule.day===day?rule.dayLaunches:0
     if(rule.launches>=10||count>=3){this.savePreview({...preview,state:'limit'});return}
     let events:AutomationEvent[]
-    try{events=await this.read(rule)}catch{if(!this.stopped)this.saveRule({...rule,health:'source unavailable'});return}
+    try{events=await this.read(rule)}catch{return}
     if(!this.permitted(rule,manual))return
     const event=events.find(e=>e.key===preview.key&&e.version===preview.version&&rule.actors.some(a=>a.id===e.actorId))
     if(!event){this.savePreview({...preview,state:'stale'});return}
@@ -189,7 +186,24 @@ export class WorkflowAutomations {
       }else this.savePreview({...preview,state:'uncertain'})
     }
   }
-  private async read(rule:AutomationRule):Promise<AutomationEvent[]>{return readAutomationEvents(this.host.api,rule.repository,rule.template)}
+  private async read(rule:AutomationRule):Promise<AutomationEvent[]>{
+    try{
+      const events=await readAutomationEvents(this.host.api,rule.repository,rule.template)
+      if(!this.stopped&&this.rules().find(r=>r.id===rule.id)?.revision===rule.revision){this.failures.delete(rule.id);this.sourceRetryAt.delete(rule.id)}
+      return events
+    }catch(error){
+      if(!this.stopped){
+        const current=this.rules().find(r=>r.id===rule.id)
+        // Failure is evidence about this observation, never authority to restore a captured rule revision.
+        if(current?.revision===rule.revision){
+          const failures=(this.failures.get(rule.id)??0)+1;this.failures.set(rule.id,failures)
+          this.sourceRetryAt.set(rule.id,this.now()+Math.min(1800000,120000*2**Math.min(failures-1,4)))
+          this.saveRule({...current,health:'source unavailable'})
+        }
+      }
+      throw error
+    }
+  }
   private retain(projectId:string):boolean{
     const ids=new Set(this.rules().filter(r=>r.projectId===projectId).map(r=>r.id))
     const rows=this.previews().filter(p=>ids.has(p.ruleId))
@@ -199,7 +213,11 @@ export class WorkflowAutomations {
     // Owner tombstones outlive preview retention. Refuse new launches once the bounded ownership ledger fills.
     return (this.db.prepare('SELECT COUNT(*) AS n FROM owners').get() as {n:number}).n<1000
   }
-  private saveRule(rule:AutomationRule):void {this.db.prepare('INSERT OR REPLACE INTO rules VALUES(?,?)').run(rule.id,JSON.stringify(rule));this.host.changed()}
+  private saveRule(rule:AutomationRule):void {
+    const old=this.db.prepare('SELECT value FROM rules WHERE id=?').get(rule.id) as {value:string}|undefined
+    if(old&&this.ruleValue(old.value).revision!==rule.revision){this.next.delete(rule.id);this.failures.delete(rule.id);this.sourceRetryAt.delete(rule.id)}
+    this.db.prepare('INSERT OR REPLACE INTO rules VALUES(?,?)').run(rule.id,JSON.stringify(rule));this.host.changed()
+  }
   private savePreview(p:AutomationPreview):void {this.db.prepare('INSERT INTO previews VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(p.id,p.ruleId,p.revision,p.key,p.version,JSON.stringify(p));this.host.changed()}
   private ruleValue(value:string):AutomationRule {
     const r=JSON.parse(value) as AutomationRule
