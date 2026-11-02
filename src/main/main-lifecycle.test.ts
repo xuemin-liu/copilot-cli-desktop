@@ -258,6 +258,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           flushConfig: () => configWriteQueue,
           maintenanceCalls,
           configure(config, capabilities) { desktopConfig = config; copilotCapabilities = capabilities;
+            deliveryJournal??=new WorkflowDeliveries(join(app.getPath('userData'),'workflow-deliveries.sqlite'));
             state.resolution = { kind: 'direct', command: 'inert-pty', prefixArgs: [], resolvedPath: null, version: '1.0.82', error: null, pathAdditions: ['C:/Program Files/nodejs'] }; syncWorkspaceState(); },
           createMain: () => createSessionTab(),
           enableTasks: (tabId) => { app.isReady = () => true; tabsState.tabs.find(t => t.id === tabId).cliVersion = '1.0.105'; workflows(); },
@@ -554,6 +555,7 @@ for (const kind of ['post', 'add-dir'] as const) test(`restored meeting ${kind} 
   harness.queueMeetingDelivery(tab.id, kind)
   await harness.pumpMeetingDelivery()
   assert.ok(spawn.written.some(text => text.includes('automatic meeting material')), 'initial no-owner recipient takes its first delivery')
+  if(kind==='post')assert.equal((await harness.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'submitted','meeting intent is durable before Enter')
   await pause(350)
   assert.equal(spawn.written.at(-1), '\r', 'delivery was submitted')
   assert.equal((await harness.meetingCommand(tab.id, 'start')).ok, false, 'startup delivery cannot authorize creating a meeting')

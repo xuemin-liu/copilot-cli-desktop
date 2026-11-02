@@ -513,6 +513,7 @@ test('a meeting saved mid-round goes on after a restart: new tabs, the open roun
   const resent = after.to('tab-c2')
   assert.equal(resent.length, 1, 'C gets the round it had not answered')
   assert.equal(resent[0]!.round, 1)
+  assert.equal(resent[0]!.id,saved.outstanding[0].delivery.id,'restart preserves the journal identity')
   assert.match(resent[0]!.text, /plan v1/)
   assert.equal(after.to('tab-b2').length, 0, 'B had answered: nothing again')
   assert.match(after.files.get(at('K7QF', 'transcript.md'))!, /B: needs a lock[\s\S]*## Restored/)
@@ -527,6 +528,14 @@ test('a meeting saved mid-round goes on after a restart: new tabs, the open roun
   later.hub.restore(saved, transcript, (sessionId) => tabs[sessionId] ? { tabId: tabs[sessionId]!, title: 't', folder: null } : null)
   later.advance(10 * 60_000)
   assert.equal(later.last('tab-host2').kind, 'digest', 'the restored round times out like any other')
+})
+test('legacy saved meeting messages get a deterministic recovery identity and an explicit ambiguity marker',()=>{
+  const before=harness();before.hub.start(host,{topic:'plan',post:'plan',changes:null});before.hub.join(reviewerB,'K7QF')
+  const saved=JSON.parse(before.files.get(at('K7QF','meeting.json'))!)
+  for(const outstanding of saved.outstanding)delete outstanding.delivery.id
+  const restore=():Harness=>{const after=harness();after.hub.restore(saved,'',sessionId=>({tabId:sessionId===SESSIONS['tab-host']?'new-host':'new-b',title:'Restored',folder:null}));return after}
+  const first=restore().last('new-b'),second=restore().last('new-b')
+  assert.equal(first.recovered,true);assert.equal(first.id,second.id);assert.match(first.id!,/^[a-f0-9-]{36}$/)
 })
 
 test('after a restart a missing reviewer leaves the meeting and a missing host closes it', () => {

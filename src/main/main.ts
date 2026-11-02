@@ -5,6 +5,7 @@ import { githubCliApi } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
+import { journalMeetingDelivery } from './workflow-meeting-journal.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -59,7 +60,7 @@ import {
   type DesktopPreferences,
   type RemovedWorkspaceProfile,
 } from './desktop-config.js'
-import { formatDesktopDiagnostics } from './desktop-diagnostics.js'
+import { formatDesktopDiagnostics, redactDiagnosticText } from './desktop-diagnostics.js'
 import { attentionTitle } from './workflow-attention.js'
 import { isWorktreeTimeoutMinutes } from './worktree-timeout.js'
 import {
@@ -651,6 +652,10 @@ function workflowsPaused(projectId?:string):boolean {
 }
 function interruptAutomaticProject(projectId?:string):void {
   for(const run of automaticTurns.values())if(!projectId||run.grant.projectId===projectId)interruptAutomatic(run.grant)
+  for(const [tabId,run] of meetingJournalTurns)if(!projectId||tabsState.tabs.find(t=>t.id===tabId)?.workspaceProfileId===projectId){
+    run.stopping=true;deliveryJournal?.uncertain(run.id)
+    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.sessionId&&!run.session.sessionBindingPending)run.session.write('\x03')
+  }
 }
 function automationViews():{rules:AutomationRule[];previews:AutomationPreview[]} {
   try {if(automations?.failed)automationError='Automatic work stopped after a storage failure. Restart Desktop to recover.';return {rules:automations?.rules()??[],previews:automations?.previews()??[]}}
@@ -745,7 +750,7 @@ function interruptAutomatic(grant:FollowupGrant):void {
   for(const [tabId,run] of automaticTurns)if(run.grant.id===grant.id&&!run.stopping){
     run.stopping=true;clearTimeout(run.timer)
     deliveryJournal?.uncertain(run.deliveryId)
-    if(managedTabs.get(tabId)?.session===run.session)run.session.write('\x03')
+    if(managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===grant.sessionId&&run.session.lastSessionId===grant.sessionId&&!run.session.sessionBindingPending)run.session.write('\x03')
   }
 }
 function endAutomatic(tabId:string,answered:boolean):void {
@@ -1743,6 +1748,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (managedTabs.get(id)?.session !== session) return
     const previous = tabsState.tabs.find(candidate => candidate.id === id)?.lastSessionId
     if (previous && previous !== sessionId) {
+      endAutomatic(id,false);endMeetingJournal(id,false)
       sessionLastOutputAt.delete(id)
       meetingHub.leave(id)
       meetingOutbox.forget(id)
@@ -2160,7 +2166,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
  * that moment is not now the answer is `busy`, and the renderer pastes the task for the person to send.
  */
 function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void}): SessionTaskSend {
-  if(!hooks&&automaticTurns.has(tabId))return {result:'busy',message:'An automatic task turn is still running.'}
+  if(!hooks&&(automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)))return {result:'busy',message:'An automatic task turn is still running.'}
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -2232,10 +2238,26 @@ function sendSessionCommand(tabId: string, command: string): boolean {
 function meetingRoot(): string { return join(app.getPath('userData'), 'meetings') }
 const meetingReaders = new Map<string, MeetingTurnReader>()
 const meetingWrites = new Map<string, Promise<void>>()
+const meetingWriteFailures=new Set<string>()
 const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
 let meetingPumpRunning = false
 const meetingDeliveryChecks = new Map<string, () => boolean>()
+const meetingJournalTurns=new Map<string,{id:string;session:PtySession;sessionId:string;meetingId:string;stopping:boolean}>()
+function endMeetingJournal(tabId:string,answered:boolean):void {
+  const run=meetingJournalTurns.get(tabId)
+  if(!run)return
+  meetingJournalTurns.delete(tabId)
+  const same=managedTabs.get(tabId)?.session===run.session&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===run.sessionId&&!run.session.sessionBindingPending
+  if(answered&&same&&!run.stopping){
+    // Persist the meeting's round/reply state first. A crash in this gap remains uncertain, never an automatic repeat.
+    void (meetingWrites.get(run.meetingId)??Promise.resolve()).then(()=>{
+      if(meetingWriteFailures.has(run.meetingId))deliveryJournal?.uncertain(run.id)
+      else if(deliveryJournal?.get(run.id)?.state==='submitted')deliveryJournal.answered(run.id)
+      broadcastState();scheduleMeetingPump(0)
+    }).catch(()=>{deliveryJournal?.uncertain(run.id);broadcastState()})
+  }else deliveryJournal?.uncertain(run.id)
+}
 
 function meetingReader(tabId: string): MeetingTurnReader {
   let reader = meetingReaders.get(tabId)
@@ -2286,15 +2308,37 @@ async function pumpMeetingOutbox(): Promise<void> {
 }
 
 const meetingOutbox = new MeetingOutbox({
-  sendTask: (tabId, text) => {
+  settled:(tabId,delivery)=>{
+    if(delivery.kind==='add-dir'||!deliveryJournal||deliveryError)return false
+    const sessionId=tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId
+    if(!sessionId)return false
+    try{const item=journalMeetingDelivery(deliveryJournal,sessionId,delivery);return item!==null&&['answered','cancelled'].includes(item.state)}
+    catch {deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.';return false}
+  },
+  sendTask: (tabId, text,delivery) => {
     if(automaticTurns.has(tabId)||deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
     // A session restored with its meeting is still starting: its messages wait instead of being dropped.
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (tab && !tab.unloaded && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
-    return sendSessionTask(tabId, text, false)
+    if(!deliveryJournal||deliveryError||!tab?.lastSessionId||workflowsPaused(tab.workspaceProfileId))return {result:'busy',message:'Meeting delivery is paused or unavailable.'}
+    const session=managedTabs.get(tabId)?.session,sessionId=tab.lastSessionId
+    if(!session)return {result:'busy',message:'The session is unavailable.'}
+    const journal=deliveryJournal
+    try{
+      const item=journalMeetingDelivery(journal,sessionId,delivery)
+      if(!item||item.state!=='queued')return {result:'busy',message:'Inspect the meeting handoff in Handoffs.'}
+      return sendSessionTask(tabId,item.text,false,{
+        beforePaste:()=>{
+          if(!meetingPromptShown(tabId)||!journal.begin(item.id,()=>!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingPromptShown(tabId)))return false
+          meetingJournalTurns.set(tabId,{id:item.id,session,sessionId,meetingId:delivery.meetingId,stopping:false});return true
+        },
+        beforeEnter:()=>!shuttingDown()&&!workflowsPaused(tab.workspaceProfileId)&&meetingJournalTurns.get(tabId)?.stopping===false&&tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId===sessionId,
+        aborted:()=>{endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt()},
+      })
+    }catch {endMeetingJournal(tabId,false);meetingReader(tabId).cancelExpectedDesktopPrompt();deliveryError='Meeting handoff history could not be saved; automatic delivery is disabled.';return {result:'busy',message:'Handoff history is unavailable.'}}
   },
   sendCommand: (tabId, command) => !automaticTurns.has(tabId) && !deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)) && meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
-  sent: (tabId) => meetingReader(tabId).expectDesktopPrompt(),
+  sent: (tabId) => {const run=meetingJournalTurns.get(tabId);if(run)deliveryJournal?.submitted(run.id);meetingReader(tabId).expectDesktopPrompt()},
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
   },
@@ -2307,12 +2351,16 @@ const meetingHub = new MeetingHub(meetingRoot, {
     meetingOutbox.enqueue(tabId, delivery)
     scheduleMeetingPump(0)
   },
-  cancel: (meetingId, tabId) => { meetingOutbox.cancel(meetingId, tabId); guestMailbox.cancel(meetingId, tabId) },
+  cancel: (meetingId, tabId) => {
+    meetingOutbox.cancel(meetingId, tabId); guestMailbox.cancel(meetingId, tabId)
+    const sessionId=tabId?tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId:null
+    for(const d of deliveryViews())if(d.scope===`meeting/${meetingId}`&&d.state==='queued'&&(!tabId||d.sessionId===sessionId))deliveryJournal?.discard(d.id)
+  },
   write: (meetingId, path, text) => {
     // One meeting's files are written in order, so the transcript on disk is always the latest one.
     const previous = meetingWrites.get(meetingId) ?? Promise.resolve()
-    const next = previous.then(() => writeMeetingFile(meetingRoot(), meetingId, path, text))
-      .catch((error) => writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {}))
+    const next = previous.then(() => writeMeetingFile(meetingRoot(), meetingId, path, text)).then(()=>{meetingWriteFailures.delete(meetingId)})
+      .catch((error) => {meetingWriteFailures.add(meetingId);return writeAppLog(`Could not write meeting ${meetingId} file: ${String(error)}`).catch(() => {})})
     meetingWrites.set(meetingId, next)
   },
   changed: () => {
@@ -2573,6 +2621,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   endAutomatic(tabId,false)
+  if(meetingJournalTurns.has(tabId)){endMeetingJournal(tabId,false);meetingOutbox.turnEnded(tabId);meetingReader(tabId).cancelExpectedDesktopPrompt()}
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
   if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
@@ -2601,11 +2650,13 @@ function onMeetingIdle(tabId: string): void {
   const delivery = meetingOutbox.turnEnded(tabId)
   endAutomatic(tabId,Boolean(turn?.desktop))
   if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
+  endMeetingJournal(tabId,Boolean(turn?.desktop))
   scheduleMeetingPump(0)
 }
 
 function forgetMeetingSession(tabId: string): void {
   endAutomatic(tabId,false)
+  endMeetingJournal(tabId,false)
   sessionLastOutputAt.delete(tabId)
   meetingHub.leave(tabId)
   meetingOutbox.forget(tabId)
@@ -3235,6 +3286,11 @@ async function restoreMeetings(): Promise<void> {
       const folder = join(meetingRoot(), entry.name)
       let saved: unknown
       try { saved = JSON.parse(await readFile(join(folder, MEETING_STATE_FILE), 'utf8')) } catch { continue }
+      const old=saved as {outstanding?:{delivery?:{id?:unknown}}[]}|null
+      if(Array.isArray(old?.outstanding)&&old.outstanding.some(item=>!item?.delivery?.id)){
+        const backup=join(folder,'meeting.pre-journal.json')
+        if(!existsSync(backup))await writeFileAtomic(backup,redactDiagnosticText(JSON.stringify(saved)))
+      }
       const transcript = await readFile(join(folder, 'transcript.md'), 'utf8').catch(() => '')
       const tabs = meetingHub.restore(saved, transcript, (sessionId) => {
         // A guest comes back with its seat, if the seat is still open and belongs to this meeting.
