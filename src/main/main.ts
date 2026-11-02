@@ -3,7 +3,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { githubCliApi } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
-import { WorkflowAutomations, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
+import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries } from './workflow-deliveries.js'
@@ -673,10 +673,11 @@ function openAutomations():WorkflowAutomations {
 }
 async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}> {
   const profile=desktopConfig.profiles.find(p=>p.id===rule.projectId),runner=await meetingGitRunner()
-  if(!profile||!runner||!authorized()||!automaticProjectReady(rule.projectId))throw new Error('Project is unavailable for automatic work')
+  if(!profile||!runner||!authorized()||!automaticProjectReady(rule.projectId))throw new AutomationLaunchRefused('Project is unavailable for automatic work; open its settings before retrying')
   const snapshot={repository:rule.repository,headRepository:rule.repository,branch:event.branch,head:event.head,base:event.head,open:true,checks:'absent' as const,feedback:[]}
-  await verifyWorkflowCheckout(profile.path,snapshot,runner,gitTrustStore())
-  if(!authorized()||!automaticProjectReady(rule.projectId))throw new Error('Automatic work was paused')
+  try{await verifyWorkflowCheckout(profile.path,snapshot,runner,gitTrustStore())}
+  catch{throw new AutomationLaunchRefused('Reconcile the project checkout with the clean, current default branch and review its Git settings before retrying')}
+  if(!authorized()||!automaticProjectReady(rule.projectId))throw new AutomationLaunchRefused('Automatic work was paused before creation; resume before retrying')
   pendingAutomaticLaunches.set(rule.projectId,(pendingAutomaticLaunches.get(rule.projectId)??0)+1)
   let createdTab:string|null=null
   try {

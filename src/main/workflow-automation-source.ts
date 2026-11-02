@@ -35,14 +35,17 @@ export async function readAutomationEvents(api:GithubApi,repository:string,templ
   if(!/^[a-f0-9]{40,64}$/.test(head))throw new Error('Invalid default branch revision')
   const result:AutomationEvent[]=[]
   if(template==='assigned-issue') {
-    const viewer=id(object(await api('user')).id)
-    const events=await pages(api,`${root}/issues/events?per_page=100`)
-    // Bound detailed issue reads independently of the source's history size.
-    const assignments=events.filter(e=>e.event==='assigned'&&e.assignee&&object(e.assignee).id===viewer)
-    if(assignments.length>30)throw new Error('Too many assignment events; narrow the repository source')
-    const latest=new Map<number,Record<string,unknown>>()
-    for(const event of assignments){const number=id(object(event.issue).number);if(!latest.has(number)||id(event.id)>id(latest.get(number)!.id))latest.set(number,event)}
-    for(const [number,event] of latest){
+    const account=object(await api('user')),viewer=id(account.id),login=str(account.login)
+    if(!/^[a-zA-Z0-9-]+$/.test(login)||login.length>100)throw new Error('Invalid authenticated GitHub login')
+    // Repository history grows without bound. Inspect only currently open assigned issues and their own events.
+    const candidates=await pages(api,`${root}/issues?assignee=${encodeURIComponent(login)}&state=open&per_page=100`)
+    const numbers=[...new Set(candidates.filter(issue=>!issue.pull_request).map(issue=>id(issue.number)))]
+    if(numbers.length>30)throw new Error('More than thirty current assigned issues; narrow the repository source')
+    for(const number of numbers){
+      const events=await pages(api,`${root}/issues/${number}/events?per_page=100`)
+      const assignments=events.filter(e=>e.event==='assigned'&&e.assignee&&object(e.assignee).id===viewer)
+      const event=assignments.reduce<Record<string,unknown>|null>((latest,next)=>!latest||id(next.id)>id(latest.id)?next:latest,null)
+      if(!event)continue
       const issue=object(await api(`${root}/issues/${number}`))
       if(issue.state!=='open'||issue.pull_request||!Array.isArray(issue.assignees)||!issue.assignees.some(a=>object(a).id===viewer))continue
       const actor=id(object(event.actor).id),title=str(issue.title),body=typeof issue.body==='string'?issue.body:''

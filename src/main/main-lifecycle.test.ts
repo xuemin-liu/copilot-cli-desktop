@@ -2648,6 +2648,10 @@ test('a rule investigation launches a restricted dedicated checkout and journals
   plain('init','-q');await writeFile(join(repo,'a.txt'),'one');plain('add','.');plain('commit','-qm','init');plain('remote','add','origin','https://github.com/owner/repo.git')
   const {capabilities}=configure(h,directory),profile=createWorkspaceProfile(repo,'default')
   h.configure({...DEFAULT_DESKTOP_CONFIG,profiles:[profile],activeProfileId:profile.id},capabilities)
+  await writeFile(join(repo,'a.txt'),'dirty')
+  await assert.rejects(h.launchInvestigation(profile.id,plain('rev-parse','HEAD').trim(),()=>true),error=>error instanceof Error&&error.constructor.name==='AutomationLaunchRefused')
+  assert.equal(h.spawns.length,0,'a checkout refusal is proven before session/worktree creation')
+  await writeFile(join(repo,'a.txt'),'one')
   let authorized=true
   const launch=h.launchInvestigation(profile.id,plain('rev-parse','HEAD').trim(),()=>authorized)
   void launch.catch(()=>{})
