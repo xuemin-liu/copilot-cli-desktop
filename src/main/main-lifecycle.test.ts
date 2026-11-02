@@ -2786,6 +2786,26 @@ for(const foreign of [false,true])test(`automatic interruption ${foreign?'does n
   assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'uncertain')
 }))
 
+test('desktop input keeps delayed cancellation with its original native conversation',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const path=(id:string)=>join(directory,'session-state',id,'events.jsonl'),line=(type:string,data:object)=>JSON.stringify({type,data})+'\n'
+  for(const id of [SOURCE,FORK]){await mkdir(dirname(path(id)),{recursive:true});await writeFile(path(id),line('session.start',{sessionId:id,startTime:new Date().toISOString()}))}
+  await h.restoreSaved();const tab=(await h.request('desktop:get-state')).activeTabId!,spawn=h.spawns[0]!
+  h.configureBinding(tab,7700,[7700]);await writeFile(join(dirname(path(SOURCE)),'inuse.7700.lock'),'');await h.refreshRecords(tab)
+  spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
+  let authorized=true
+  h.deferTaskEnter();assert.equal(h.automaticPaste(tab,()=>authorized).result,'sent')
+  const before=spawn.written.length
+  await h.request('desktop:write-tab',tab,'held draft for A')
+  await writeFile(join(dirname(path(FORK)),'inuse.7700.lock'),'')
+  await appendFile(path(FORK),line('session.resume',{resumeTime:new Date().toISOString()})+line('user.message',{content:'Start a review meeting in B',interactionId:'person-in-B'}))
+  const started=await h.meetingCommand(tab,'start',FORK)
+  assert.equal(started.ok,true,started.message)
+  assert.equal((await h.request('desktop:get-state')).tabs.find(t=>t.id===tab)?.lastSessionId,FORK)
+  authorized=false;await h.request('desktop:write-tab',tab,'new B draft');h.flushTaskEnter()
+  assert.deepEqual(spawn.written.slice(before),['new B draft'],'old Enter, Ctrl+C and held keys never reach B')
+}))
+
 test('task reports require the owned current assignment and cannot complete tasks', async () => fixture(async (harness, directory) => {
   const { profile, capabilities } = configure(harness, directory)
   const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'

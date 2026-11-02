@@ -15,6 +15,8 @@ The origin, branch and HEAD must match the PR's head repository and the checkout
 wait for the person. Unknown CLI versions, remote sessions and restricted side chats cannot receive these continuations.
 
 The normal idle/empty/quiet prompt gate protects drafts and pickers; authorization is checked again before delayed Enter.
+A native conversation switch invalidates pending input for the old recipient: its Enter, cancellation and held keys
+cannot reach the replacement conversation. The original delivery remains uncertain for reconciliation.
 Meetings and workflow input cannot overlap, and uncertain journal entries block later automatic input to their session.
 Feedback is untrusted context inside the original task scope. No model routes events or edits grants; source polling
 does not post comments or merge PRs. Existing tool approval requirements still apply.
