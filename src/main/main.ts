@@ -4468,11 +4468,35 @@ ipcMain.handle('desktop:delivery-action', (event, id: unknown, action: unknown):
   else deliveryJournal.discard(id)
   broadcastState()
 })
+ipcMain.handle('desktop:task-create', (event,tabId:unknown,title:unknown,replace:unknown):void=>{
+  assertTrustedIpcSender(event)
+  if(typeof tabId!=='string'||typeof title!=='string'||title.length>120||typeof replace!=='boolean')throw new Error('Invalid task choice')
+  const tab=tabsState.tabs.find(tab=>tab.id===tabId),store=workflows()
+  if(!tab?.lastSessionId||!store)throw new Error('Open a known session before tracking it')
+  const recipient=managedTabs.get(tabId)?.session
+  const verifiedIdle=recipient?.sessionBindingReady&&recipient.bindingDiagnostic.kind==='bound'&&recipient.bindingDiagnostic.sessionId===tab.lastSessionId&&recipient.lastSessionId===tab.lastSessionId&&recipient.activity==='idle'
+  // Adoption is bookkeeping. Replacement additionally requires proof that no old worker/input is in flight.
+  if(replace&&(!verifiedIdle||meetingHub.meetingOf(tabId)||automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)||(meetingOutbox.inTurn(tabId)||meetingOutbox.next(tabId))||workflowDestinationBlocked(tab.lastSessionId)
+    ||sessionTaskAvailability(tabId,false).result!=='sent'||managedTabs.get(tabId)?.session.sessionBindingPending))throw new Error('Finish the meeting, wait for a verified idle, empty prompt and reconcile handoffs before starting another task')
+  const previous=store.active(tab.lastSessionId)
+  if(Boolean(previous)!==replace)throw new Error('Task state changed; refresh the task list')
+  store.manual(tab.lastSessionId,tab.workspaceProfileId,title,replace,taskContext(tab))
+  if(previous)for(const grant of followupViews().filter(g=>g.taskId===previous.id&&g.enabled))followups?.pause(grant.id)
+  workflowNotice=null;broadcastState()
+})
 ipcMain.handle('desktop:task-action', (event, id: unknown, action: unknown): void => {
   assertTrustedIpcSender(event)
-  if (typeof id !== 'string' || !isValidSessionId(id) || (action !== 'completed' && action !== 'cancelled')) throw new Error('Invalid task action')
+  if (typeof id !== 'string' || !isValidSessionId(id) || !['unknown','working','needs-input','ready','blocked','failed','completed','cancelled','delete'].includes(String(action))) throw new Error('Invalid task action')
   const store = workflows()
   if (!store) throw new Error('Task tracking is unavailable')
+  if(action==='delete'){
+    const task=store.list().find(task=>task.id===id)
+    if(!task||workflowDestinationBlocked(task.sessionId)||[...automaticTurns.values()].some(run=>run.grant.taskId===id))throw new Error('Reconcile active work and handoffs before deleting its task history')
+    store.remove(id);broadcastState();return
+  }
+  if(action!=='completed'&&action!=='cancelled'){
+    store.manualOutcome(id,action as import('./workflow-types.js').TaskOutcome);broadcastState();return
+  }
   store.finish(id, action)
   for(const run of automaticTurns.values())if(run.grant.taskId===id)interruptAutomatic(run.grant)
   for(const grant of followupViews().filter(g=>g.taskId===id&&g.enabled))followups?.pause(grant.id)

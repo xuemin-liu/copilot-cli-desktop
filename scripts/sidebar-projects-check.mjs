@@ -26,6 +26,8 @@ if (!process.versions.electron) {
     window.fixture = { calls: [], openChanges: [], errors: [], views: [] };
     // Stands in for the preload bridge: the View menu's sidebar choices arrive and are reported here.
     window.copilotDesktop = {
+      createTask:(tabId,title,replace)=>{window.fixture.calls.push({kind:'createTask',tabId,title,replace});return Promise.resolve();},
+      taskAction:(id,action)=>{window.fixture.calls.push({kind:'taskAction',id,action});return Promise.resolve();},
       reportSidebarView: view => { window.fixture.views.push(view); return Promise.resolve(); },
       onSidebarViewRequest: listener => { window.fixture.requestView = listener; return () => { window.fixture.requestView = null; }; },
     };
@@ -285,6 +287,29 @@ if (!process.versions.electron) {
       assert.equal(await ui(`document.querySelector('.workflow-tasks').textContent.includes('Which rounding policy?')`),true)
       await writeFile(join(artifacts,'task-details.png'),(await window.webContents.capturePage()).toPNG())
       checks.push('Task question, evidence and long resource links fit a narrow sidebar')
+      await ui(`window.setTasks([]);window.setAttentionTabs([{id:'choice-a',title:'Session A',workspaceProfileId:'project-1',lastSessionId:'session-a',status:'running'},{id:'choice-b',title:'Session B',workspaceProfileId:'project-1',lastSessionId:'session-b',status:'running'}])`)
+      await until(`document.querySelector('.workflow-tasks > form select')?.options.length===2`,'two known sessions offered')
+      await ui(`document.querySelector('.workflow-tasks').open=true;const select=document.querySelector('.workflow-tasks > form select');select.value='choice-b';select.dispatchEvent(new Event('change',{bubbles:true}))`)
+      await click('.workflow-tasks > form input')
+      await window.webContents.insertText('Selected task')
+      await ui(`window.setAttentionTabs([{id:'choice-a',title:'Session A',workspaceProfileId:'project-1',lastSessionId:'session-a',status:'running'}])`)
+      await until(`document.querySelector('.workflow-tasks > form select')?.value==='choice-a'`,'removed selection displays the remaining session')
+      await click('.workflow-tasks > form button[type=submit]')
+      await ui('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+      assert.deepEqual(await ui('window.fixture.calls.at(-1)'),{kind:'createTask',tabId:'choice-a',title:'Selected task',replace:false})
+      checks.push('Closing a selected session submits the task to the remaining displayed session')
+      await ui(`window.setAttentionTabs([]);window.setTasks([{id:'history-a',sessionId:'session-a',projectId:'project-1',title:'Named history',request:'',assignmentId:'assignment',scopeRevision:1,outcome:'completed',summary:'',validation:[],updatedAt:1}]);window.confirm=()=>false;void 0`)
+      await until(`document.querySelector('.workflow-tasks').textContent.includes('Delete task history')`,'terminal history has a deletion action')
+      const beforeDelete=await ui('window.fixture.calls.length')
+      await click('.workflow-tasks li > button:last-child')
+      assert.equal(await ui('window.fixture.calls.length'),beforeDelete,'declined confirmation preserves task history')
+      await ui(`window.confirm=message=>{window.fixture.confirmation=message;return true};void 0`)
+      await click('.workflow-tasks li > button:last-child')
+      await until(`window.fixture.calls.at(-1)?.action==='delete'`,'confirmed local deletion reaches the bridge')
+      assert.match(await ui('window.fixture.confirmation'),/Named history/)
+      assert.match(await ui('window.fixture.confirmation'),/sessions, files, worktrees and handoff evidence are kept/i)
+      checks.push('History deletion confirms the named task and the resources it preserves')
+
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)

@@ -34,6 +34,25 @@ test('task details expose questions, validation revisions, host links and report
   } finally {store.close();await rm(dir,{recursive:true,force:true})}
 })
 
+test('unsupported existing conversations offer manual tracking and supported resumption, with history-only deletion',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'workflow-manual-ui-')),store=new WorkflowStore(join(dir,'tasks.sqlite'))
+  try {
+    const tab={id:'open-tab',title:'Existing conversation',lastSessionId:'existing-session',cliVersion:'1.0.82',sessionPermissionPreset:'default',workspaceProfileId:'project'} as import('./types.js').DesktopSessionTab
+    const empty=renderToStaticMarkup(<WorkflowTasks tasks={[]} tabs={[tab]} />)
+    assert.match(empty,/Track this conversation/)
+    const task=store.manual('existing-session','project','Existing work',false)
+    const active=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[tab]} installedCliVersion="1.0.105" onRestart={()=>{}} />)
+    assert.match(active,/Resume with task support/)
+    assert.match(active,/Recorded outcome/)
+    assert.match(active,/End current task and track another/)
+    assert.doesNotMatch(active,/Delete task history/)
+    store.finish(task.id,'completed')
+    const history=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} />)
+    assert.match(history,/Delete task history/)
+    assert.match(history,/sessions, files, worktrees and handoff evidence are kept/)
+  }finally{store.close();await rm(dir,{recursive:true,force:true})}
+})
+
 test('untrusted artifact destinations and earlier report references remain visible before navigation',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'workflow-artifacts-ui-')),store=new WorkflowStore(join(dir,'tasks.sqlite'))
   try{

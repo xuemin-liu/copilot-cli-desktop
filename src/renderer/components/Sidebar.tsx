@@ -413,7 +413,7 @@ export function Sidebar({
       </div>
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks,workflowFollowups,workflowDeliveries)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
-      {!collapsed && <WorkflowTasks tasks={workflowTasks} followups={workflowFollowups} error={workflowError ?? workflowFollowupError ?? null} />}
+      {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} error={workflowError ?? workflowFollowupError ?? null} />}
       {!collapsed && <WorkflowAutomations profiles={profiles} rules={workflowAutomation.rules} previews={workflowAutomation.previews} paused={workflowAutomaticPaused} pausedProjects={workflowPausedProjects} error={workflowAutomationError??null} />}
       {!collapsed && <DeliveryQueue deliveries={workflowDeliveries} error={workflowDeliveryError ?? null} />}
       {searchOpen && (

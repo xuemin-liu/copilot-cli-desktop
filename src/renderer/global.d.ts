@@ -110,7 +110,8 @@ export interface CopilotDesktopBridge {
   gitResolve(profileId: string, repoId: string, tabId: string, text: string): Promise<SessionTaskSend>
   /** The person's controls for a review meeting between sessions. `join` adds the session `tabId` to it, reviewing as `role`;
    * `remove` takes out the outside agent whose seat id is `tabId`, joined or only invited. */
-  taskAction(id: string, action: 'completed' | 'cancelled'): Promise<void>
+  createTask(tabId:string,title:string,replace:boolean):Promise<void>
+  taskAction(id: string, action: import('../main/workflow-types.js').TaskAction): Promise<void>
   enrollFollowup(taskId:string,url:string,reviewers:string[],failedChecks:boolean):Promise<void>
   pauseFollowup(id:string):Promise<void>
   configureAutomation(projectId:string,repository:string,template:'assigned-issue'|'default-ci',actors:string[],id?:string):Promise<void>
