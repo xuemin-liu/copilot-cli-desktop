@@ -664,6 +664,17 @@ function endAutomatic(tabId:string,answered:boolean):void {
   else deliveryJournal?.uncertain(run.deliveryId)
   broadcastState()
 }
+function workflowDestinationBlocked(sessionId:string|null):boolean {
+  if(!deliveryJournal||deliveryError||!sessionId)return true
+  const deliveries=deliveryViews()
+  return Boolean(deliveryError)||deliveries.some(d=>d.sessionId===sessionId&&['submitting','submitted','uncertain'].includes(d.state))
+}
+function followupReady(grant:FollowupGrant):boolean {
+  const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null
+  return Boolean(tab&&!automaticTurns.has(tab.id)&&!meetingOutbox.inTurn(tab.id)&&!meetingOutbox.readyTabs().includes(tab.id)
+    &&[...automaticTurns.values()].filter(run=>run.grant.projectId===grant.projectId).length<2
+    &&meetingPromptSettled(tab.id)&&sessionTaskAvailability(tab.id).result==='sent'&&!workflowDestinationBlocked(grant.sessionId))
+}
 function followupViews(): FollowupGrant[] {
   try { if(followups?.failed)followupError='Automatic follow-ups stopped after a storage failure. Restart Desktop to recover.'; return followups?.list()??[] }
   catch { followupError='Follow-up history is unavailable; automatic work is disabled.';followups?.stop();return [] }
@@ -682,11 +693,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
         if(!folder||!runner)throw new Error('Open the local task checkout first')
         await verifyWorkflowCheckout(folder,pr,runner,gitTrustStore())
       },
-      ready:grant=>{
-        const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null
-        return Boolean(tab&&!automaticTurns.has(tab.id)&&!meetingOutbox.inTurn(tab.id)&&!meetingOutbox.readyTabs().includes(tab.id)
-          &&[...automaticTurns.values()].filter(run=>run.grant.projectId===grant.projectId).length<2)
-      },
+      ready:followupReady,
       send:async(delivery,grant)=>{
         const task=workflowViews().find(task=>task.id===grant.taskId),tab=task?followupTab(task):null,session=tab?managedTabs.get(tab.id)?.session:null
         if(!tab||!session||!meetingPromptSettled(tab.id))return 'busy'
@@ -2067,7 +2074,13 @@ function sendSessionRename(tabId: string, closing = false): boolean {
 function scheduleTaskEnter(action:()=>void):void {setTimeout(action,300)}
 function sameSessionRecipient(tabId:string,session:PtySession,sessionId:string|null):boolean {
   return managedTabs.get(tabId)?.session===session&&tabsState.tabs.find(tab=>tab.id===tabId)?.lastSessionId===sessionId
-    &&session.lastSessionId===sessionId&&!session.sessionBindingPending&&session.sessionBindingReady
+    &&session.lastSessionId===sessionId&&!session.sessionBindingPending
+}
+function sessionTaskAvailability(tabId:string,needsWrite=true):SessionTaskSend {
+  const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId)?.session,draft=promptDrafts.get(tabId)
+  if(!tab||!session||!draft)return {result:'refused',message:'This session is not running. Start or resume it first.'}
+  return sessionTaskDecision({status:tab.status,activity:session.activity,promptVisible:session.recentOutputText.includes('open sidebar'),preset:tab.sessionPermissionPreset,
+    sideChat:tab.sideChat===true,remote:tab.remote,draft:!draft.empty,recentInput:!draft.quiet(),picker:draft.beforeFirstEnter,typing:heldInput.has(tabId),bracketedPaste:session.bracketedPaste},needsWrite)
 }
 function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void}): SessionTaskSend {
   if(!hooks&&automaticTurns.has(tabId))return {result:'busy',message:'An automatic task turn is still running.'}
@@ -2077,19 +2090,7 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   if (!tab || !managed || !draft) return { result: 'refused', message: 'This session is not running. Start or resume it first.' }
   const session = managed.session
   const recipientId=tab.lastSessionId
-  const decision = sessionTaskDecision({
-    status: tab.status,
-    activity: session.activity,
-    promptVisible: session.recentOutputText.includes('open sidebar'),
-    preset: tab.sessionPermissionPreset,
-    sideChat: tab.sideChat === true,
-    remote: tab.remote,
-    draft: !draft.empty,
-    recentInput: !draft.quiet(),
-    picker: draft.beforeFirstEnter,
-    typing: heldInput.has(tabId),
-    bracketedPaste: session.bracketedPaste,
-  }, needsWrite)
+  const decision = sessionTaskAvailability(tabId,needsWrite)
   if (decision.result !== 'sent') return decision
   if(hooks&&!hooks.beforePaste())return {result:'busy',message:'Authorization changed.'}
   const held: string[] = []
@@ -2201,13 +2202,13 @@ async function pumpMeetingOutbox(): Promise<void> {
 
 const meetingOutbox = new MeetingOutbox({
   sendTask: (tabId, text) => {
-    if(automaticTurns.has(tabId)||deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
+    if(automaticTurns.has(tabId)||workflowDestinationBlocked(tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId??null))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
     // A session restored with its meeting is still starting: its messages wait instead of being dropped.
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (tab && !tab.unloaded && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
     return sendSessionTask(tabId, text, false)
   },
-  sendCommand: (tabId, command) => !automaticTurns.has(tabId) && !deliveryViews().some(d=>d.sessionId===tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId&&['submitting','submitted','uncertain'].includes(d.state)) && meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
+  sendCommand: (tabId, command) => !automaticTurns.has(tabId) && !workflowDestinationBlocked(tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId??null) && meetingPromptShown(tabId) && sendSessionCommand(tabId, command),
   sent: (tabId) => meetingReader(tabId).expectDesktopPrompt(),
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
