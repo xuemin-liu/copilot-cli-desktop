@@ -2757,7 +2757,7 @@ test('a native conversation switch before delayed Enter sends neither Enter nor 
   assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.sessionId===SOURCE)?.state,'uncertain')
 }))
 
-test('long meeting code proposals reach the CLI unchanged while the journal stores only a summary',async()=>fixture(async(h,directory)=>{
+for(const unverifiedBeforeEnter of [false,true])test(`long meeting code proposals ${unverifiedBeforeEnter?'wait when their recipient becomes unverifiable':'reach the verified CLI unchanged'}`,async()=>fixture(async(h,directory)=>{
   const {profile}=configure(h,directory);profile.tabs=[{title:'Restored',lastSessionId:SOURCE}]
   const log=join(directory,'session-state',SOURCE,'events.jsonl');await mkdir(dirname(log),{recursive:true})
   await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
@@ -2766,12 +2766,18 @@ test('long meeting code proposals reach the CLI unchanged while the journal stor
   spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n');await pause(1600)
   const code='interface Login { user: string; password: string }\nconst API_KEY = process.env.SERVICE_KEY\nconst url = `${base}?token=${token}`\n'+'// ordinary review material\n'.repeat(500)
   assert.ok(code.length>12000)
+  if(unverifiedBeforeEnter)h.deferTaskEnter()
   h.queueMeetingDelivery(tab,'post',code);await h.pumpMeetingDelivery()
   assert.ok(spawn.written.includes('\x1b[200~'+code+'\x1b[201~'),'review material is neither redacted nor truncated')
   const state=await h.request('desktop:get-state')
   assert.equal(state.workflowDeliveryError,null)
   assert.equal(state.workflowDeliveries?.[0]?.state,'submitted')
   assert.ok(!JSON.stringify(state.workflowDeliveries).includes('interface Login'),'the journal does not duplicate executable material')
+  if(unverifiedBeforeEnter){
+    h.makeBindingUnreadable(tab);await h.refreshRecords(tab);h.flushTaskEnter()
+    assert.ok(!spawn.written.includes('\r'),'automatic meeting Enter waits for a verified recipient')
+    assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.[0]?.state,'uncertain')
+  }else{await pause(350);assert.equal(spawn.written.at(-1),'\r')}
 }))
 
 test('legacy handoff reconciliation reaches the renderer while the CLI stays silent',async()=>fixture(async(h,directory)=>{

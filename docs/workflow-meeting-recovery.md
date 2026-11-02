@@ -8,6 +8,8 @@ original text is delivered unchanged within its existing meeting-size caps; cred
 not rewritten by audit redaction. It checks authorization again before delayed Enter. Drafts, pickers and held person input retain
 the same protection as other desktop-composed tasks. Idempotent `/add-dir` setup retains the existing command path;
 an unresolved workflow submission blocks that path too.
+Identity changes are distinct from a temporary inventory failure: ordinary manual submissions preserve their Enter and
+held keys when identity is unchanged, while automatic meeting/rule hooks still require a verified recipient before Enter.
 
 An observed matching live desktop turn can supply a meeting reply. The journal marks it answered only after the
 meeting's reply/round snapshot has finished writing. A write failure, native session switch, interrupted turn,
