@@ -53,6 +53,7 @@ interface Harness {
   launchInvestigation(projectId:string,head:string,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>
   interruptOwnedTurn(tabId:string,foreign:boolean):void
   meetingWrite(meetingId:string,path:string,text:string):Promise<boolean>
+  queueLegacyMeeting(tabId:string):void
   meetingCommand(tabId: string, command: MeetingCommand, sessionId?: string, text?: string): Promise<MeetingResponse>
   configureBinding(tabId: string, rootPid: number, ownedPids: number[]): void
   bindingReader(tabId: string): Pick<SessionBindingReader, 'read'>
@@ -290,6 +291,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           bindingReader: (tabId) => managedTabs.get(tabId).session.bindingReader,
           refreshRecords: (tabId) => managedTabs.get(tabId).session.refreshSessionRecords(),
           queueMeetingDelivery: (tabId, kind) => { meetingOutbox.forget(tabId); meetingOutbox.enqueue(tabId, { meetingId: 'TEST', round: 1, kind, text: 'automatic meeting material' }); },
+          queueLegacyMeeting: tabId=>{meetingOutbox.enqueue(tabId,{meetingId:'K7QF',id:randomUUID(),recovered:true,round:1,kind:'post',text:'Legacy outstanding material'})},
           pumpMeetingDelivery: () => pumpMeetingOutbox(),
           refreshNames: () => refreshSessionNames(),
           createSide: (profile, parentId) => createSessionTab(profile, 'auto-resume', '${FORK}', [], null, 'Side', { sideChat: true, sideParentTabId: parentId }),
@@ -2708,6 +2710,14 @@ test('a successful write to another meeting file cannot clear a failed snapshot/
   assert.equal(await h.meetingWrite('K7QF',join(folder,'meeting.json'),'{}'),true)
   await rm(blocked,{recursive:true})
   assert.equal(await h.meetingWrite('K7QF',blocked,'material'),false)
+}))
+test('legacy handoff reconciliation reaches the renderer while the CLI stays silent',async()=>fixture(async(h,directory)=>{
+  configure(h,directory);h.createTestWindow();const tab=(await h.createMain()).activeTabId!,spawn=h.spawns[0]!
+  const before=h.windowFor().messages.length
+  h.queueLegacyMeeting(tab);await h.pumpMeetingDelivery()
+  const updates=h.windowFor().messages.slice(before).filter(m=>m.channel==='desktop:state-changed')
+  assert.ok(updates.some(m=>m.payload.workflowDeliveries?.some((d:{state:string})=>d.state==='uncertain')),'recovery is visible without a PTY activity event or reload')
+  assert.deepEqual(spawn.written,[],'legacy prompts wait for a person')
 }))
 
 for(const foreign of [false,true])test(`automatic interruption ${foreign?'does not type into a newly bound conversation':'stops the verified original recipient'}`,async()=>fixture(async(h,directory)=>{

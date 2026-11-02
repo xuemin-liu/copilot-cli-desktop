@@ -33,8 +33,12 @@ test('legacy outstanding prompts require reconciliation and respect another sour
     assert.equal(journalMeetingDelivery(journal,'session',legacy),null)
     assert.equal(journal.list().length,1,'legacy input is not silently queued behind ambiguous ownership')
     journal.uncertain(other.id);journal.discard(other.id)
-    const item=journalMeetingDelivery(journal,'session',legacy)!
+    let changes=0
+    const item=journalMeetingDelivery(journal,'session',legacy,()=>{changes++})!
     assert.equal(item.state,'uncertain')
+    assert.equal(changes,1,'legacy reconciliation becomes visible without waiting for CLI output')
+    journalMeetingDelivery(journal,'session',legacy,()=>{changes++})
+    assert.equal(changes,1,'unchanged queue polls do not send repeated UI updates')
     journal.retry(item.id)
     assert.equal(journalMeetingDelivery(journal,'session',legacy)?.state,'queued','an explicit person decision is preserved')
   }finally{journal.close();await rm(dir,{recursive:true,force:true})}

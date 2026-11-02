@@ -3,7 +3,7 @@ import type { MeetingDelivery } from './meeting.js'
 import type { WorkflowDeliveries,WorkflowDelivery } from './workflow-deliveries.js'
 
 /** Maps the meeting's persisted message identity to the shared destination arbiter. */
-export function journalMeetingDelivery(journal:WorkflowDeliveries,sessionId:string,delivery:MeetingDelivery):WorkflowDelivery|null {
+export function journalMeetingDelivery(journal:WorkflowDeliveries,sessionId:string,delivery:MeetingDelivery,changed?:()=>void):WorkflowDelivery|null {
   if(delivery.kind==='add-dir')throw new Error('Folder commands are idempotent meeting setup, not worker turns')
   delivery.id??=randomUUID()
   const source=`meeting/${delivery.meetingId}/${delivery.id}`,scope=`meeting/${delivery.meetingId}`
@@ -15,5 +15,6 @@ export function journalMeetingDelivery(journal:WorkflowDeliveries,sessionId:stri
     if(journal.begin(item.id,()=>true))journal.uncertain(item.id)
     else throw new Error('A recovered meeting needs reconciliation before more input')
   }
+  if(!existing)changed?.()
   return journal.get(item.id)!
 }
