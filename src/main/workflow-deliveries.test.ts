@@ -7,6 +7,28 @@ import { WorkflowDeliveries,makeDeliveryBatch,deliveryBatchIdentity } from './wo
 import {DatabaseSync} from 'node:sqlite'
 import { spawnSync } from 'node:child_process'
 
+test('legacy receipts for GitHub owner batch survive migration and remain ordinary sources',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'workflow-batch-owner-')),path=join(dir,'deliveries.sqlite')
+  const source='github/batch/repo/pull/1/comment/7',legacy=new DatabaseSync(path)
+  legacy.exec('CREATE TABLE deliveries(id TEXT PRIMARY KEY,session TEXT NOT NULL,source TEXT NOT NULL,revision TEXT NOT NULL,scope TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL,UNIQUE(session,source,revision,scope));PRAGMA user_version=1')
+  legacy.prepare('INSERT INTO deliveries VALUES(?,?,?,?,?,?,?)').run('legacy','session',source,'r1','scope','Feedback','queued');legacy.close()
+  let journal:WorkflowDeliveries|undefined
+  try{
+    journal=new WorkflowDeliveries(path)
+    assert.equal(journal.list()[0]?.source,source)
+    assert.equal(journal.list()[0]?.batch,undefined)
+    assert.equal(journal.enqueue({sessionId:'session',scope:'scope',source,revision:'r1',text:'Feedback'}).id,'legacy')
+    const batch=makeDeliveryBatch('a'.repeat(40),[{source,version:'b'.repeat(64)}])
+    journal.enqueue({sessionId:'session',scope:'scope',text:'Batched feedback',batch,...deliveryBatchIdentity(batch)})
+    assert.throws(()=>journal!.enqueue({sessionId:'session',scope:'scope',text:'Corrupt envelope',source:'github/batch/'+'c'.repeat(64),revision:'r2'}),/Invalid delivery batch/)
+    journal.close();journal=new WorkflowDeliveries(path)
+    assert.equal(journal.list().length,2)
+    assert.equal(journal.list()[1]?.batch?.members[0]?.source,source)
+    const backup=new DatabaseSync(path+'.pre-v2.sqlite',{readOnly:true})
+    try{assert.equal((backup.prepare('SELECT source FROM deliveries').get() as {source:string}).source,source)}finally{backup.close()}
+  }finally{journal?.close();await rm(dir,{recursive:true,force:true})}
+})
+
 test('restart preserves queued work, blocks uncertain resubmission, and retains source deduplication', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'workflow-deliveries-'))
   const path = join(dir, 'deliveries.sqlite')

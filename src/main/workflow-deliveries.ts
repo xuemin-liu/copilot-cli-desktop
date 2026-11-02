@@ -10,12 +10,14 @@ export interface WorkflowDelivery {
   id: string; sessionId: string; source: string; revision: string; scope: string; text: string; state: DeliveryState
 }
 const identifier = (value: string): boolean => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value)
+// Provider sources contain owner/repository/path; only this complete envelope grammar is host-owned.
+const isBatchSource=(source:string):boolean=>/^github\/batch\/[a-f0-9]{64}$/.test(source)
 function validBatch(value:unknown):DeliveryBatch{
   const batch=value as DeliveryBatch
   if(!batch||typeof batch!=='object'||Array.isArray(batch)||Object.keys(batch).some(key=>!['reservation','head','members'].includes(key))
     ||typeof batch.reservation!=='string'||!/^[a-f0-9]{64}$/.test(batch.reservation)||typeof batch.head!=='string'||!/^[a-f0-9]{40,64}$/.test(batch.head)||!Array.isArray(batch.members)||batch.members.length<1||batch.members.length>10
     ||!batch.members.every(member=>member&&typeof member==='object'&&!Array.isArray(member)&&Object.keys(member).every(key=>['source','version'].includes(key))
-      &&identifier(member.source)&&member.source.startsWith('github/')&&!member.source.startsWith('github/batch/')&&typeof member.version==='string'&&/^[a-f0-9]{64}$/.test(member.version))
+      &&identifier(member.source)&&member.source.startsWith('github/')&&!isBatchSource(member.source)&&typeof member.version==='string'&&/^[a-f0-9]{64}$/.test(member.version))
     ||new Set(batch.members.map(member=>member.source)).size!==batch.members.length)throw new Error('Invalid delivery batch')
   return {reservation:batch.reservation,head:batch.head,members:batch.members.map(member=>({source:member.source,version:member.version})).sort((a,b)=>a.source<b.source?-1:a.source>b.source?1:0)}
 }
@@ -63,7 +65,7 @@ export class WorkflowDeliveries {
     let batch:DeliveryBatch|undefined
     try{
       if(input.batch!==undefined){batch=validBatch(input.batch);const identity=deliveryBatchIdentity(batch);if(identity.source!==input.source||identity.revision!==input.revision)throw new Error('Invalid batch identity')}
-      else if(input.source.startsWith('github/batch/'))throw new Error('Missing batch metadata')
+      else if(isBatchSource(input.source))throw new Error('Missing batch metadata')
     }catch{throw new WorkflowDeliveryRejected('Invalid delivery batch')}
     const existing = this.db.prepare('SELECT id FROM deliveries WHERE session=? AND source=? AND revision=? AND scope=?')
       .get(input.sessionId,input.source,input.revision,input.scope) as {id: string} | undefined
@@ -145,7 +147,7 @@ export class WorkflowDeliveries {
       if(identity.source!==row.source||identity.revision!==row.revision)throw new Error('Invalid stored batch identity')
       return {...delivery,batch}
     }
-    if(row.source.startsWith('github/batch/'))throw new Error('Missing stored batch metadata')
+    if(isBatchSource(row.source as string))throw new Error('Missing stored batch metadata')
     return delivery
   }
 }

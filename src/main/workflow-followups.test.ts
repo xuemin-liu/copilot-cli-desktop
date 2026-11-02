@@ -8,11 +8,11 @@ import { WorkflowDeliveries } from './workflow-deliveries.js'
 import { WorkflowStore } from './workflow-store.js'
 import {DatabaseSync} from 'node:sqlite'
 const head='a'.repeat(40),base='b'.repeat(40)
-async function fixture(run:(h:Awaited<ReturnType<typeof setup>>)=>Promise<void>):Promise<void> {
-  const h=await setup()
+async function fixture(run:(h:Awaited<ReturnType<typeof setup>>)=>Promise<void>,repository='owner/repo'):Promise<void> {
+  const h=await setup(repository)
   try{await run(h)}finally{h.controller.close();h.journal.close();h.tasks.close();await rm(h.dir,{recursive:true,force:true})}
 }
-async function setup() {
+async function setup(repository='owner/repo') {
   const dir=await mkdtemp(join(tmpdir(),'workflow-followups-'))
   const tasks=new WorkflowStore(join(dir,'tasks.sqlite'))
   const task=tasks.submitted('session','project','Fix the existing checkout bug')
@@ -28,14 +28,14 @@ async function setup() {
     complete:(task,snapshot,grant)=>{tasks.mergeCompleted(task.id,grant.repository,grant.number,snapshot.head,snapshot.base);completions++},
     api:async path=>{
       requests++
-      if(path==='repos/owner/repo')return {full_name:'owner/repo'}
+      if(path===`repos/${repository}`)return {full_name:repository}
       if(path==='users/reviewer')return {id:7,login:'reviewer'}
-      if(path==='repos/owner/repo/pulls/1'){
+      if(path===`repos/${repository}/pulls/1`){
         if(block){const wait=block;block=null;await wait()}
-        return {state:open?'open':'closed',merged,head:{sha:head,ref:'feature',repo:{full_name:'owner/repo'}},base:{sha:base}}
+        return {state:open?'open':'closed',merged,head:{sha:head,ref:'feature',repo:{full_name:repository}},base:{sha:base}}
       }
       if(path.endsWith('/check-runs?per_page=100'))return [{check_runs:[]}]
-      if(path==='repos/owner/repo/pulls/1/comments?per_page=100')return [comments]
+      if(path===`repos/${repository}/pulls/1/comments?per_page=100`)return [comments]
       return [[]]
     },
     send:async(delivery,grant)=>{
@@ -53,6 +53,15 @@ async function setup() {
     comment:(id:number,actor=7,commit=head)=>comments.push({id,user:{id:actor},body:`Feedback ${id}`,updated_at:new Date(now+1).toISOString(),commit_id:commit}),
   }
 }
+test('a repository owned by batch can receive ordinary feedback in a batch',async()=>fixture(async h=>{
+  await h.controller.enroll(h.task.id,'https://github.com/batch/repo/pull/1',['reviewer'],false)
+  h.comment(1);await h.controller.tick()
+  assert.equal(h.injected.length,1)
+  const delivery=h.journal.list()[0]!
+  assert.equal(delivery.state,'submitted')
+  assert.match(delivery.batch!.members[0]!.source,/^github\/batch\/repo\/pull\//)
+},'batch/repo'))
+
 test('enrollment baselines old feedback and only allowed new versions enter the durable queue',async()=>fixture(async h=>{
   h.comment(1)
   const grant=await h.controller.enroll(h.task.id,'https://github.com/owner/repo/pull/1',['reviewer'],false)
