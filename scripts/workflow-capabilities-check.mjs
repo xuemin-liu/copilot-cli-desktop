@@ -24,7 +24,8 @@ async function check(name, args, expectedTest) {
   child.stderr.on('data', collect)
   // Child checks own their cleanup; no arbitrary watchdog kills or shared profile writes.
   const code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done) })
-  const selected = !expectedTest || output.split(/\r?\n/).some(line => /^ok \d+ - /.test(line) && line.endsWith(` - ${expectedTest}`))
+  const expectedTests=expectedTest?(Array.isArray(expectedTest)?expectedTest:[expectedTest]):[]
+  const selected = expectedTests.every(name=>output.split(/\r?\n/).some(line => /^ok \d+ - /.test(line) && line.endsWith(` - ${name}`)))
   const passed = code === 0 && selected
   result.checks.push({ name, passed, exitCode: code, ...(expectedTest ? { expectedTest, selected } : {}) })
   await save()
@@ -45,6 +46,13 @@ try {
   const restartTest = 'a process restart during a Git context paste cannot submit or replay input into the replacement process'
   await check('successful restart invalidates pending Enter and held input', ['--test', '--test-reporter=tap',
     '--test-name-pattern=^a process restart during a Git context paste', 'dist/src/main/main-lifecycle.test.js'], restartTest)
+  await check('failed restart restoration and eager lifecycle cancellation', ['--test','--test-reporter=tap',
+    '--test-name-pattern=^failed restart setup|^slow unload and close|^close requested during failed', 'dist/src/main/main-lifecycle.test.js'], [
+    'failed restart setup restores pending input only to the original live process',
+    'slow unload and close cancel pending Enter before stopping the process',
+    'close requested during failed restart setup wins over restoring pending input',
+    'failed restart setup never restores held input after a native conversation switch',
+  ])
   await check('real CLI helper and A/B/B/A session switching in one PTY', ['scripts/session-meeting-binding-check.mjs'])
   result.completedAt = new Date().toISOString()
   await save()

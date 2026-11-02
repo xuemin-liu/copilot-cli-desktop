@@ -2144,17 +2144,56 @@ const renamesSent = new Map<string, { title: string; at: number }>()
 /**
  * Terminal input that arrived while the desktop was typing into that tab's session (`/rename`, a task, a command or a Git
  * context paste), waiting for its Enter. Each typist holds its own array and presses Enter only while it is still the one
- * held: a restart drops the hold (cancelHeldInput), so neither that Enter nor the held keys reach the old process.
+ * held. Restart setup suspends it; requesting a stop or switching native recipient cancels it before any further input.
  */
 const heldInput = new Map<string, string[]>()
+type HeldInputStage={paused:boolean;dueAt:number;fire:()=>void}
+const heldInputStages=new WeakMap<string[],HeldInputStage>()
+
+/** A suspended stage retains its deadline and original callback, including any journal-abort hook. */
+function scheduleHeldInput(held:string[],action:()=>void,delay:number,schedule?:(action:()=>void)=>void):void {
+  const stage:HeldInputStage={paused:false,dueAt:performance.now()+delay,fire:()=>{
+    if(heldInputStages.get(held)!==stage||stage.paused)return
+    heldInputStages.delete(held)
+    action()
+  }}
+  heldInputStages.set(held,stage)
+  if(schedule)schedule(stage.fire)
+  else setTimeout(stage.fire,delay)
+}
+
+function suspendHeldInput(tabId:string):(()=>void)|undefined {
+  const held=heldInput.get(tabId),session=managedTabs.get(tabId)?.session
+  const stage=held&&heldInputStages.get(held),recipient=tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId
+  if(!held||!stage||!session||recipient===undefined)return
+  stage.paused=true
+  return ()=>{
+    if(heldInput.get(tabId)!==held||heldInputStages.get(held)!==stage)return
+    const tab=tabsState.tabs.find(t=>t.id===tabId)
+    if(shuttingDown()||tab?.status!=='running'||!sameSessionRecipient(tabId,session,recipient)
+      ||!(session.activity==='idle'||(session.activity===null&&session.recentOutputText.includes('open sidebar')))){
+      cancelHeldInput(tabId,true);return
+    }
+    stage.paused=false
+    setTimeout(stage.fire,Math.max(0,stage.dueAt-performance.now()))
+  }
+}
+
+function inputTransitionPending(tabId:string):boolean {return shuttingDown()||pendingRestarts.has(tabId)||tabTransitionQueue.has(tabId)}
 
 /** A restart or native conversation switch invalidates the old typist. Its held keys never reach the new recipient. */
 function cancelHeldInput(tabId: string,conversationChanged=false): void {
-  if(conversationChanged&&heldInput.get(tabId)?.length){
+  const held=heldInput.get(tabId)
+  heldInput.delete(tabId)
+  if(held){
+    const stage=heldInputStages.get(held)
+    // Run the original cancelled callback once, so task delivery ownership is reconciled too.
+    if(stage){stage.paused=false;setTimeout(stage.fire,0)}
+  }
+  if(conversationChanged&&held?.length){
     workflowNotice='Input held during a conversation switch was not sent. Inspect the prompt before continuing.'
     broadcastState()
   }
-  heldInput.delete(tabId)
 }
 
 /** A new process for the tab: its prompt starts empty, or on the resume picker. */
@@ -2165,7 +2204,7 @@ function trackSessionName(tabId: string, env: NodeJS.ProcessEnv, picker: boolean
 }
 
 function forgetSessionName(tabId: string): void {
-  heldInput.delete(tabId)
+  cancelHeldInput(tabId)
   sessionNameRoots.delete(tabId)
   promptDrafts.delete(tabId)
   copilotNames.delete(tabId)
@@ -2194,6 +2233,7 @@ async function readSessionName(tabId: string): Promise<void> {
  * just now. `closing` allows clearing a draft with Ctrl+C first, since closing discards it anyway.
  */
 function sendSessionRename(tabId: string, closing = false): boolean {
+  if(!closing&&inputTransitionPending(tabId))return false
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -2202,6 +2242,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   const command = action.kind === 'rename' ? renameCommand(action.title) : null
   if (!command || action.kind !== 'rename') return false
   const session = managed.session
+  const recipientId=tab.lastSessionId
   // Idle by its event log, or (before any turn) showing the prompt's footer.
   const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
   if (!ready || (!closing && (!draft.empty || !draft.quiet()))) return false
@@ -2219,15 +2260,18 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   const release = (): void => {
     if (!holding()) return
     heldInput.delete(tabId)
+    if(closing||!sameSessionRecipient(tabId,session,recipientId))return
     const current = managedTabs.get(tabId)?.session
     for (const data of held) { promptDrafts.get(tabId)?.note(data); current?.write(data) }
   }
   if (!draft.empty) { session.write('\x03'); draft.note('\x03') }
-  setTimeout(() => {
-    if (!holding() || managedTabs.get(tabId)?.session !== session) { release(); return }
+  scheduleHeldInput(held,() => {
+    if (!holding()) return
+    if(!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
     session.write(command, 'rename')
-    setTimeout(() => {
-      if (holding() && managedTabs.get(tabId)?.session === session) session.write('\r', 'rename')
+    scheduleHeldInput(held,() => {
+      if(holding()&&!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
+      if (holding()) session.write('\r', 'rename')
       release()
     }, 200)
   }, closing ? 300 : 0)
@@ -2245,6 +2289,7 @@ function sameSessionRecipient(tabId:string,session:PtySession,sessionId:string|n
     &&session.lastSessionId===sessionId&&!session.sessionBindingPending
 }
 function sessionTaskAvailability(tabId:string,needsWrite=true):SessionTaskSend {
+  if(inputTransitionPending(tabId))return {result:'busy',message:'This session is changing. Wait for it to finish.'}
   const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId)?.session,draft=promptDrafts.get(tabId)
   if(!tab||!session||!draft)return {result:'refused',message:'This session is not running. Start or resume it first.'}
   return sessionTaskDecision({status:tab.status,activity:session.activity,promptVisible:session.recentOutputText.includes('open sidebar'),preset:tab.sessionPermissionPreset,
@@ -2275,18 +2320,19 @@ function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?:
   draft.note(paste)
   session.write(paste)
   // Copilot needs a moment to take a large paste before Enter submits it.
-  scheduleTaskEnter(() => {
+  scheduleHeldInput(held,() => {
     if (holding() && sameSessionRecipient(tabId,session,recipientId)) {
       if(!hooks||hooks.beforeEnter()){session.write('\r'); promptDrafts.get(tabId)?.note('\r')}
       else {session.write('\x03');draft.note('\x03');hooks.aborted()}
     } else {if(holding())cancelHeldInput(tabId,true);hooks?.aborted()}
     release()
-  })
+  },300,scheduleTaskEnter)
   return decision
 }
 
 /** Types a one-line slash command (a meeting's `/add-dir`) at the same safe moment, holding back keys pressed meanwhile. */
 function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolean): boolean {
+  if(inputTransitionPending(tabId))return false
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const managed = managedTabs.get(tabId)
   const draft = promptDrafts.get(tabId)
@@ -2300,7 +2346,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
   const text = command.replace(/[\u0000-\u001f\u007f]/g, '')
   draft.note(text)
   session.write(text, 'add-dir')
-  setTimeout(() => {
+  scheduleHeldInput(held,() => {
     if (heldInput.get(tabId) !== held) return
     if(!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
     heldInput.delete(tabId)
@@ -2811,11 +2857,14 @@ async function flushSessionName(tabId: string): Promise<void> {
 /** Stops a session's process and its browser to free their memory, but keeps the tab: it becomes Not started, keeping
  * its conversation, folder and browser data, and resumes when Resume (Restart) is chosen. */
 async function unloadSessionTab(tabId: string): Promise<DesktopState> {
+  const requested=tabsState.tabs.find(tab=>tab.id===tabId)
+  if(requested&&!requested.remote&&requested.status!=='dormant')cancelHeldInput(tabId)
   return queueTabTransition(tabId, async () => {
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab) throw new Error('This session tab no longer exists')
     if (tab.remote) throw new Error('A remote session cannot be unloaded')
     if (tab.status === 'dormant') return snapshot()
+    cancelHeldInput(tabId)
     const activityTimer = activityBroadcastTimers.get(tabId)
     if (activityTimer) clearTimeout(activityTimer)
     activityBroadcastTimers.delete(tabId)
@@ -2852,6 +2901,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
 }
 
 async function closeSessionTab(tabId: string): Promise<DesktopState> {
+  cancelHeldInput(tabId)
   // Share the queue with restartSessionTab: closing a tab while its restart
   // is still in flight could otherwise stop the very session the restart is
   // about to replace, then delete the tab from tabsState — after which the
@@ -2861,6 +2911,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
   // takes effect once the restart's turn finishes, instead of silently
   // dropping the user's click.
   return queueTabTransition(tabId, async () => {
+    cancelHeldInput(tabId)
     closingBrowserTabs.add(tabId)
     const activityTimer = activityBroadcastTimers.get(tabId)
     if (activityTimer) clearTimeout(activityTimer)
@@ -2997,14 +3048,16 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   // below, once this restart's turn actually comes up, in case a shutdown
   // starts while it was queued behind another transition on the same tab.
   if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
-  // The restart's setup can take longer than a pending paste's wait for its Enter, and the old process runs until the
-  // setup is done: drop that Enter and the keys held for it now, not when the old process stops.
-  cancelHeldInput(tabId)
   // Coalesce with any restart already running or queued for this tab —
   // every caller gets the one outcome instead of a second restart running
   // right after the first and stopping the replacement it just started.
   const pending = pendingRestarts.get(tabId)
   if (pending) return pending
+  if(tabsState.tabs.find(tab=>tab.id===tabId)?.remote)throw new Error('A remote session cannot be restarted')
+  // Setup can fail while the original process remains healthy. Suspend, then either restore that exact recipient or
+  // cancel before requesting its stop. A close/unload/native switch independently cancels and wins over restoration.
+  const restoreInput=tabTransitionQueue.has(tabId)?undefined:suspendHeldInput(tabId)
+  let stopRequested=false
   const restartPromise = queueTabTransition(tabId, async () => {
     if (shuttingDown()) throw new Error('An update is installing; sessions cannot be restarted right now')
     // Re-read tab/profile fresh: this callback may run well after the
@@ -3057,6 +3110,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     await desktopControl?.disable(tabId, 'Turned off: the session restarted.')
     plan.env = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
 
+    stopRequested=true
+    cancelHeldInput(tabId)
     if (managed) await managed.session.stop()
     // Read the freshest known session id directly off the old session
     // object, before removing its listeners: PtySession.stop() can return as
@@ -3161,7 +3216,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     }
     persistProfileTabs()
     return snapshot()
-  })
+  }).catch(error=>{if(!stopRequested)restoreInput?.();throw error})
   pendingRestarts.set(tabId, restartPromise)
   void restartPromise.catch(() => {}).finally(() => {
     if (pendingRestarts.get(tabId) === restartPromise) pendingRestarts.delete(tabId)
@@ -4094,7 +4149,9 @@ async function stopAllSessions(): Promise<void> {
   // transition already queued (but not yet in managedTabs, e.g. a restart
   // that hasn't reached managedTabs.set() yet) are included too.
   const tabIds = new Set([...managedTabs.keys(), ...tabTransitionQueue.keys()])
+  for(const tabId of tabIds)cancelHeldInput(tabId)
   await Promise.all([...tabIds].map((tabId) => queueTabTransition(tabId, async () => {
+    cancelHeldInput(tabId)
     const managed = managedTabs.get(tabId)
     if (!managed) return
     await managed.session.stop().catch(() => {})
@@ -4466,18 +4523,19 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
   const session = managedTabs.get(tabId)?.session
   const idle = session?.activity === 'idle' || (session?.activity === null && session.recentOutputText.includes('open sidebar'))
   if (data === '\r' && typeof gitCursorContext === 'string' && gitCursorContext.trim() && gitCursorContext.length <= 8_000
-    && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && session?.bracketedPaste && idle) {
+    && !inputTransitionPending(tabId) && draft?.canAttachContext && tab?.status === 'running' && !tab.remote && session?.bracketedPaste && idle) {
     // This Enter belongs to the person. Append one bracketed excerpt to their existing draft, then submit once it has
     // landed, holding subsequent input just as sendSessionTask does. No cursor movement or draft replacement is needed.
     const paste = taskPasteSequence(`\n\n${gitCursorContext}`)
     const queued: string[] = []
+    const recipientId=tab.lastSessionId
     heldInput.set(tabId, queued)
     draft.note(paste)
     session.write(paste)
-    setTimeout(() => {
+    scheduleHeldInput(queued,() => {
       if (heldInput.get(tabId) !== queued) return
+      if(!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
       heldInput.delete(tabId)
-      if (managedTabs.get(tabId)?.session !== session) return
       session.write('\r')
       draft.note('\r')
       for (const input of queued) { draft.note(input); session.write(input) }

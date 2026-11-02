@@ -1,7 +1,7 @@
 # Plan: tasks, attention, and automatic follow-ups
 
-Status: implementation in progress. The five main feature areas have implementation PRs, but that does not mean every
-acceptance detail is complete. See the [implementation coverage](workflow-implementation-coverage.md) for remaining work.
+Status: every planned acceptance item has implementation coverage in the stacked feature PRs. Integrated validation,
+current-revision review and merge status remain separate gates. See the [implementation coverage](workflow-implementation-coverage.md).
 
 Copilot CLI Desktop already runs multiple sessions, creates worktrees, shows live activity, and coordinates review
 meetings. The next step is to keep track of what those sessions are trying to deliver and bring the person back only
