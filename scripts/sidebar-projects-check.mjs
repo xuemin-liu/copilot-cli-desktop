@@ -48,9 +48,10 @@ if (!process.versions.electron) {
       const [collapsed, setCollapsed] = useState(true);
       const [attentionTabs, setAttentionTabs] = useState([]);
       window.setAttentionTabs = setAttentionTabs;
+      const [tasks,setTasks]=useState([]);window.setTasks=setTasks;
       window.setCollapsed = setCollapsed;
       return <>
-        <Sidebar profiles={profiles} tabs={attentionTabs} activeProfileId="project-1" activeTabId={null}
+        <Sidebar profiles={profiles} tabs={attentionTabs} workflowTasks={tasks} activeProfileId="project-1" activeTabId={null}
           installedCliVersion={null} canOpenTab collapsed={collapsed}
           onProjectsOpenChange={recordOpen} onToggleCollapsed={() => setCollapsed(value => !value)}
           onSelectWorkspace={() => window.fixture.calls.push('add')}
@@ -276,6 +277,14 @@ if (!process.versions.electron) {
       assert.equal(formBounds,true,'automation controls fit the narrow sidebar')
       await writeFile(join(artifacts,'automation-preview.png'),(await window.webContents.capturePage()).toPNG())
       checks.push('Preview-first automation controls fit the narrow sidebar with scrolling')
+      await ui(`window.setTasks([{id:'task-a',sessionId:'history-a',projectId:'project-1',title:'Checkout change',request:'Original request',assignmentId:'assignment-a',scopeRevision:1,outcome:'needs-input',summary:'Choose behavior',updatedAt:1,question:'Which rounding policy?',worktreePath:'/worktrees/'+ 'long-directory-name-'.repeat(20),comparisonGroup:'comparison-a',meetingIds:['review-a'],validation:[{name:'Tests',status:'passed',revision:'abc123'}],artifacts:[{kind:'url',label:'Review PR',value:'https://github.com/o/r/pull/1'}],reports:[]}])`)
+      await until(`!!document.querySelector('.workflow-tasks')`,'task details rendered')
+      await ui(`document.querySelector('.workflow-automations').open=false;document.querySelectorAll('.workflow-tasks details,.workflow-tasks').forEach(node=>node.open=true)`)
+      await ui('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+      assert.equal(await ui(`document.querySelector('.workflow-tasks').scrollWidth<=document.querySelector('.workflow-tasks').clientWidth+1`),true,'long task links fit the sidebar')
+      assert.equal(await ui(`document.querySelector('.workflow-tasks').textContent.includes('Which rounding policy?')`),true)
+      await writeFile(join(artifacts,'task-details.png'),(await window.webContents.capturePage()).toPNG())
+      checks.push('Task question, evidence and long resource links fit a narrow sidebar')
       assert.deepEqual(await ui('window.fixture.errors'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks, bounds, electron: process.versions.electron }, null, 2))
       console.log(`Sidebar projects check passed (${checks.length} checks)`)

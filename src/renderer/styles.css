@@ -1503,3 +1503,5 @@ button:disabled {
 .needs-you li button { width: 100%; text-align: left; padding: 6px; border-radius: 4px; }
 .needs-you strong, .needs-you span { display: block; overflow-wrap: anywhere; }
 .needs-you span { font-size: 11px; opacity: .8; }
+
+.workflow-tasks p, .workflow-tasks summary, .workflow-tasks button { white-space: normal; overflow-wrap: anywhere; }

@@ -71,6 +71,7 @@ export interface DesktopSessionTab {
   unloaded?: true
   /** Sessions started together by one fan-out share this label. Runtime-only; not restored. */
   fanOutLabel?: string | null
+  fanOutGroupId?: string
   processId: number | null
   /** Copilot CLI executable version captured when this process was spawned. */
   cliVersion: string | null
