@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -2638,7 +2638,7 @@ test('automatic paste uses production draft gates and rechecks authorization bef
   assert.ok(!spawn.written.includes('\r'),'revocation prevents submission')
 }))
 
-test('a rule investigation launches a restricted dedicated checkout and journals its task before automatic input',async t=>fixture(async(h,directory)=>{
+test('a rule investigation launches a restricted dedicated checkout through a filesystem alias and journals its task before automatic input',async t=>fixture(async(h,directory)=>{
   const git=await findGitForTests();if(!git){t.skip('Git unavailable');return}
   const {execFileSync}=await import('node:child_process')
   const repo=join(directory,'project');await mkdir(repo)
@@ -2662,13 +2662,19 @@ test('a rule investigation launches a restricted dedicated checkout and journals
     assert.ok(spawn.args.includes('--available-tools=view,glob,grep,ask_user'))
     const name=spawn.args.find(a=>a.startsWith('--worktree='))!.slice('--worktree='.length),worktree=join(`${repo}.worktrees`,name)
     plain('worktree','add','-q','-b',name,worktree,'HEAD')
+    const alias=join(directory,'worktrees-alias')
+    await symlink(dirname(worktree),alias,process.platform==='win32'?'junction':'dir')
+    const reportedCwd=join(alias,name)
+    assert.equal(await realPathNative(reportedCwd),await realPathNative(worktree))
     const sessionId=SOURCE,log=join(directory,'session-state',sessionId,'events.jsonl')
-    await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId,startTime:new Date().toISOString(),context:{cwd:worktree}}})+'\n')
+    await mkdir(dirname(log),{recursive:true});await writeFile(log,JSON.stringify({type:'session.start',data:{sessionId,startTime:new Date().toISOString(),context:{cwd:reportedCwd}}})+'\n')
     await writeFile(join(dirname(log),'inuse.7700.lock'),'')
     h.configureBinding(tabId,7700,[7700]);spawn.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
-    const receipt=await launch
+    let launchTimeout:NodeJS.Timeout|undefined
+    const receipt=await Promise.race([launch,new Promise<never>((_resolve,reject)=>{launchTimeout=setTimeout(()=>reject(new Error('The verified alias did not receive the investigation')),15000);launchTimeout.unref()})]).finally(()=>clearTimeout(launchTimeout))
     assert.equal(receipt.sessionId,sessionId)
     const snapshot=await h.request('desktop:get-state')
+    assert.notEqual(snapshot.tabs[0]?.sessionCwd,snapshot.tabs[0]?.worktree?.path,'fixture exercises distinct raw and canonical spellings')
     assert.equal(snapshot.tabs[0]?.sessionPermissionPreset,'read-only')
     assert.equal(snapshot.workflowTasks?.[0]?.id,receipt.taskId)
     assert.equal(snapshot.workflowDeliveries?.[0]?.state,'submitted')
