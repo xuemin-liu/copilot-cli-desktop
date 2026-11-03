@@ -304,11 +304,15 @@ same computer. Once it has the meeting tools (set up once, see below), no invita
   meeting bar as a guest with **Remove**. A Copilot tab joins the same way, as always, whoever hosts.
 
 Any agent can host, a Copilot tab or an outside one, and any can review. An agent is named after its client ("Claude
-Code", "Codex"); a second one of the same kind is "Claude Code 2". After a desktop restart it calls `meeting_join` with the
-same id and gets its own seat back, a host's included.
+Code", "Codex"); a second one of the same kind is "Claude Code 2". Joining or starting answers a seat key: after a desktop
+restart, the agent calls `meeting_join` with that key as the invitation and gets its own seat back, a host's included. A
+name is not enough, since two agents of one client share it.
 
-Asking your agent is the consent: the desktop does not ask again. Anything on this computer that can call the tools could
-join an open meeting the same way, so the meeting bar always shows who is in, and **Remove** takes a guest out.
+Asking your agent is the consent: the desktop does not ask again. Anything on this computer that can reach `127.0.0.1`
+could join an open meeting the same way, including programs of other Windows accounts on a shared computer: it would get
+the plan and the patch, and its replies would reach the host. Wrong meeting ids are limited to a few a minute, so ids
+cannot be guessed, and the meeting bar always shows who is in, with **Remove**. On a computer others use too, prefer
+invitations.
 
 ### Outside agents as reviewers, with an invitation
 

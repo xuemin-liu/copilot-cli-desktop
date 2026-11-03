@@ -21,6 +21,9 @@ export const GUEST_MCP_PATH = '/mcp'
 export const DEFAULT_GUEST_MCP_PORT = 47391
 export const GUEST_MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'] as const
 const MAX_MCP_SESSIONS = 64
+/** Wrong meeting ids a minute, all sessions together: a few typos pass, guessing one of ~923,000 ids does not. */
+const MAX_MISSED_IDS = 5
+const MISSED_ID_WINDOW_MS = 60_000
 /** A reply as a JSON string argument, escaped, and the rest of the call. */
 const MAX_MCP_BODY_BYTES = MAX_MEETING_REPLY_CHARS * 6 + 64 * 1024
 
@@ -31,12 +34,12 @@ const NAME_PROPERTY = { type: 'string', description: 'How the meeting shows you,
 export const GUEST_MCP_TOOLS = [
   {
     name: 'meeting_join',
-    description: 'Join a Copilot CLI Desktop review meeting with the meeting id the person gave you ("join meeting K7QF"), or with an invitation token. Call it again with the same id if another tool says to join.',
+    description: 'Join a Copilot CLI Desktop review meeting with the meeting id the person gave you ("join meeting K7QF"), or with an invitation token. If another tool says to join first, call it with the seat key your join or start answered, as the invitation.',
     inputSchema: {
       type: 'object',
       properties: {
         meeting: { type: 'string', description: 'The 4-character meeting id, such as K7QF.' },
-        invitation: { type: 'string', description: 'A 64-character invitation token, if the person gave you one instead.' },
+        invitation: { type: 'string', description: 'A 64-character invitation token the person gave you, or the seat key a join or start answered.' },
         name: NAME_PROPERTY,
         role: { type: 'string', description: 'Your role, if the person gave one, such as "security reviewer".' },
       },
@@ -119,6 +122,7 @@ export interface McpAnswer { status: number; body?: unknown; sessionId?: string 
 /** MCP sessions, each tied to at most one seat by `meeting_join`. Bounded: the oldest unused one goes first. */
 export class GuestMcpSessions {
   private readonly sessions = new Map<string, Session>()
+  private readonly misses: number[] = []
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
@@ -132,10 +136,16 @@ export class GuestMcpSessions {
     return id
   }
 
-  /** Some session is tied to this seat: no other agent may take it over by name. */
-  holds(seatId: string): boolean {
-    for (const session of this.sessions.values()) if (session.seatId === seatId) return true
-    return false
+  /** A program guessing meeting ids: too many wrong ones lately, from all sessions together (opening more does not help). */
+  guessing(): boolean {
+    const now = this.now()
+    while (this.misses.length && now - this.misses[0]! >= MISSED_ID_WINDOW_MS) this.misses.shift()
+    return this.misses.length >= MAX_MISSED_IDS
+  }
+
+  /** A join named a meeting that is not open. */
+  missed(): void {
+    this.misses.push(this.now())
   }
 
   get(id: string | undefined): Session | null {
@@ -208,9 +218,15 @@ function busy(mailbox: GuestMailbox, deps: GuestDeps, session: Session): string 
 }
 
 /**
+ * The seat's own token, handed to the agent that took the seat without an invitation. After the desktop restarted its MCP
+ * session is new, and only this key gets the seat back: a name is not proof, since two agents of one client share it.
+ */
+const seatKey = (token: string): string =>
+  ` Keep this seat key: if a tool later says to join first (the desktop restarted), call meeting_join with invitation: "${token}" to get your seat back.`
+
+/**
  * "join meeting K7QF", on this computer: the agent takes a seat of its own in that meeting, by the person's word to it, and
- * the meeting bar shows it with Remove. After the desktop restarted its MCP session is new: the seat of its name in that
- * meeting that no session holds is its own again, a host's included.
+ * the meeting bar shows it with Remove. Wrong ids are counted, so a program cannot guess its way into a meeting.
  */
 function joinById(sessions: GuestMcpSessions, session: Session, mailbox: GuestMailbox, deps: GuestDeps, args: Record<string, unknown>): unknown {
   const meetingId = typeof args.meeting === 'string' ? args.meeting.trim().replace(/^#/, '').toUpperCase() : ''
@@ -218,25 +234,22 @@ function joinById(sessions: GuestMcpSessions, session: Session, mailbox: GuestMa
   if (!deps.ready()) return toolText('The desktop is starting. Call meeting_join again in a minute.', true)
   const current = session.seatId ? mailbox.seat(session.seatId) : null
   if (current && current.closed === null && current.meetingId === meetingId) { mailbox.seen(current, 'mcp'); return toolText(joinedText(current)) }
-  if (!deps.isOpen(meetingId)) return toolText(`There is no open meeting ${meetingId}.`, true)
+  if (sessions.guessing()) return toolText('Too many wrong meeting ids in the last minute. Check the id with the person, then try again in a minute.', true)
+  if (!deps.isOpen(meetingId)) { sessions.missed(); return toolText(`There is no open meeting ${meetingId}.`, true) }
   const occupied = busy(mailbox, deps, session)
   if (occupied) return toolText(occupied, true)
   const name = agentName(args.name, session.client)
-  const seats = mailbox.seatsOf(meetingId)
-  const numbered = (seatName: string): boolean => seatName === name || (seatName.startsWith(`${name} `) && /^\d+$/.test(seatName.slice(name.length + 1)))
-  const own = seats.find((seat) => seat.joined && numbered(seat.name) && !sessions.holds(seat.id))
-  if (own) { session.seatId = own.id; mailbox.seen(own, 'mcp'); return toolText(joinedText(own)) }
-  const taken = new Set(seats.map((seat) => seat.name))
+  const taken = new Set(mailbox.seatsOf(meetingId).map((seat) => seat.name))
   const base = name.slice(0, MAX_GUEST_NAME_CHARS - 3).trim()
   let unique = name
   for (let count = 2; taken.has(unique); count++) unique = `${base} ${count}`
-  const { seat } = mailbox.invite(meetingId, unique, typeof args.role === 'string' ? args.role : null)
+  const { seat, token } = mailbox.invite(meetingId, unique, typeof args.role === 'string' ? args.role : null)
   mailbox.seen(seat, 'mcp')
   const failure = deps.join(seat)
   if (failure) { mailbox.close(seat.id, failure); return toolText(failure, true) }
   mailbox.joined(seat)
   session.seatId = seat.id
-  return toolText(joinedText(seat))
+  return toolText(joinedText(seat) + seatKey(token))
 }
 
 /** "start a meeting", on this computer: a host seat of its own and its meeting, with the project folder the agent names. */
@@ -249,11 +262,11 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
     const failure = await deps.checkFolder(folder)
     if (failure) return toolText(failure, true)
   }
-  const { seat } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder })
+  const { seat, token } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder })
   session.seatId = seat.id
   const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
-  if (!answer.ok) { mailbox.close(seat.id, answer.message); session.seatId = null }
-  return toolText(answer.message, !answer.ok)
+  if (!answer.ok) { mailbox.close(seat.id, answer.message); session.seatId = null; return toolText(answer.message, true) }
+  return toolText(answer.message + seatKey(token))
 }
 
 async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: GuestMailbox, deps: GuestDeps, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -279,7 +292,7 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
   const command = TOOL_COMMANDS[name]
   if (!command) return toolText(`Unknown tool: ${name}`, true)
   const seat = session.seatId ? mailbox.seat(session.seatId) : null
-  if (!seat) return toolText('Call meeting_join first, with the meeting id or invitation the person gave you, or meeting_start to host a meeting.', true)
+  if (!seat) return toolText('Call meeting_join first, with the meeting id or invitation the person gave you, or meeting_start to host a meeting. After a restart, pass the seat key you were given as the invitation.', true)
   const fields: Record<string, unknown> = command === 'next' ? { wait: args.wait_seconds }
     : command === 'reply' ? { text: args.text }
     : command === 'show' ? { name: args.name, round: args.round, offset: args.offset }

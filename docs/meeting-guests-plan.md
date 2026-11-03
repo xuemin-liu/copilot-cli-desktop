@@ -445,12 +445,18 @@ just says "join meeting K7QF". With the meeting tools, an outside agent now does
 - **`meeting_start(topic, post, folder?, changes?)`** without an invitation gives the agent a host seat and opens its
   meeting. `folder` is its project: checked as the host-invitation IPC checks a picked folder (absolute, local, a folder),
   and Git reads it as before (`folderChanges`), so a home folder or drive root still attaches nothing.
-- **After a restart** the agent's MCP session is new and holds no seat. `meeting_join` with the same id gives it back the
-  joined seat of its name in that meeting that no live session holds, a host's included. A second agent of the same name,
-  while the first holds its seat, gets a seat of its own.
+- **After a restart** the agent's MCP session is new and holds no seat. The join or start answered a seat key, the seat's
+  own token: `meeting_join` with it as the invitation gives the seat back, a host's included. A name is not proof (two
+  agents of one client share it, and any program can claim it), so `meeting_join` with only the id gives a new seat.
 - **One meeting per agent session:** joining or starting while in an open meeting says to leave or end it first.
+- **Wrong ids are throttled:** after five joins in a minute that name no open meeting, from all MCP sessions together,
+  refuse every join by id until the minute is over. A few typos pass; guessing one of ~923,000 ids does not.
 - **Invitations stay,** for the helper and for agents that are given one; with the tools they work as before.
 
 The trade: the tools listen only on 127.0.0.1 and refuse anything a web page could send, so what can call them is a
-program on this computer. Such a program can already read and change the person's files; what it gains here is a seat in
-an open meeting, which the meeting bar shows. The person telling their agent to join is the consent the token stood for.
+program on this computer. A program of the person's own account can already read and change their files; what it gains
+here is a seat in an open meeting, which the meeting bar shows. But loopback is open to every account on the computer, and
+to programs that can open a connection but not read the person's files: for them a seat is new access to the plan and the
+patch, and a way to steer the host. The throttle keeps them from guessing an id, not from using one they learn. So joining
+by id trusts every local account, and on a shared computer the person should use invitations. The person telling their
+agent to join is the consent the token stood for.

@@ -125,8 +125,11 @@ With the tools set up, just ask the agent:
   it as a guest, with **Remove**.
 
 Any agent can host and any can review: a Copilot tab joins an outside agent's meeting with "join meeting K7QF" as usual,
-and an outside agent joins a Copilot tab's meeting the same way. If the desktop restarts, the agent calls `meeting_join`
-with the same id and gets its own seat back.
+and an outside agent joins a Copilot tab's meeting the same way. Joining or starting answers a seat key: if the desktop
+restarts, the agent calls `meeting_join` with that key as the invitation and gets its own seat back.
+
+Joining by id trusts everything that can reach `127.0.0.1` on this computer, programs of other accounts included. Wrong
+ids are limited to five a minute, so an id cannot be guessed; on a computer others use too, prefer invitations.
 
 Invitations still work, and an agent without the tools needs one:
 
@@ -151,6 +154,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the port is taken (its log says so). Start or update the desktop. |
 | The agent does not list the tools | The server was added after the session started: start a new session. In Codex, see the experimental flag above. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
-| "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with the same meeting id (or invitation), and gets its seat back, as host too. |
+| "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with its seat key (or invitation) as the invitation, and gets its seat back, as host too. With only the meeting id it gets a new seat. |
+| "Too many wrong meeting ids in the last minute" | Five joins in the last minute named a meeting that is not open. Check the id on the meeting bar and try again a minute later. |
 | "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
 | The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |
