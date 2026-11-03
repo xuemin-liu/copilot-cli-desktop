@@ -13,8 +13,8 @@ This page is the one-time setup per agent. How meetings work is in the [README](
   tools arrived in 0.1.61; the short invitations this page uses, in 0.1.62.)
 - **The agent on the same computer.** The tools listen only on `127.0.0.1`, so an agent on another machine, or in WSL with
   its default (NAT) networking, cannot reach them. WSL works with mirrored networking.
-- **The address:** `http://127.0.0.1:47391/mcp`, a Streamable HTTP MCP server. It needs no key or header: the tools do
-  nothing until the agent is given an invitation from the desktop.
+- **The address:** `http://127.0.0.1:47391/mcp`, a Streamable HTTP MCP server. It needs no key or header: it listens only
+  on this computer, and refuses requests a web page could send.
 
 The port can be changed by starting the desktop with the environment variable `COPILOT_DESKTOP_MEETING_MCP_PORT` set; then
 use that port below. If the port is taken, the desktop leaves the tools out of its invitations, and agents use the helper
@@ -117,14 +117,23 @@ Any MCP client that supports **Streamable HTTP** works. What it needs to know ab
 
 ## Using the tools
 
-Every meeting still starts in the desktop, and only you make invitations:
+With the tools set up, just ask the agent:
 
-- **To review:** start the meeting from a Copilot session ("start a meeting to review your local changes"). On its meeting
-  bar, press **Invite outside agent…** and then **Copy short invitation** (for an agent set up as above) or **Copy
-  invitation** (it also explains the helper). Paste it into the agent.
+- **To host:** "start a meeting to review your changes". The agent calls `meeting_start` with a topic, its post and its
+  project folder, and tells you the meeting id, say K7QF.
+- **To review:** "join meeting K7QF". The agent calls `meeting_join` with the id and is in at once; the meeting bar lists
+  it as a guest, with **Remove**.
+
+Any agent can host and any can review: a Copilot tab joins an outside agent's meeting with "join meeting K7QF" as usual,
+and an outside agent joins a Copilot tab's meeting the same way. If the desktop restarts, the agent calls `meeting_join`
+with the same id and gets its own seat back.
+
+Invitations still work, and an agent without the tools needs one:
+
+- **To review:** on a meeting bar, press **Invite outside agent…** and then **Copy short invitation** (for an agent set up
+  as above) or **Copy invitation** (it also explains the helper). Paste it into the agent.
 - **To host:** **File → Host a Meeting from an Outside Agent…**, optionally pick the agent's project folder, tick **Short
-  invitation**, and paste the host invitation into the agent with what you want reviewed. Then add reviewers from the
-  meeting bar.
+  invitation**, and paste the host invitation into the agent with what you want reviewed.
 
 An invitation works for one agent in one meeting and expires after 15 minutes if unused. Treat it like a password: do
 not post it anywhere public.
@@ -141,6 +150,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | --- | --- |
 | "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the port is taken (its log says so). Start or update the desktop. |
 | The agent does not list the tools | The server was added after the session started: start a new session. In Codex, see the experimental flag above. |
-| "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one. |
+| "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
+| "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with the same meeting id (or invitation), and gets its seat back, as host too. |
 | "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
 | The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |

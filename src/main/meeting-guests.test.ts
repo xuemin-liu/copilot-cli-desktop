@@ -191,7 +191,7 @@ test('a short invitation, for an agent that has the meeting tools, names only th
 const FOLDER_PATCH = 'diff --git a/login.cfg b/login.cfg\n--- a/login.cfg\n+++ b/login.cfg\n-retry = 1\n+retry = 3\n'
 
 /** The host's part of `GuestDeps`, wired to a hub as main wires it. */
-function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes'> {
+function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes' | 'checkFolder'> {
   return {
     start: (seat, topic, post, changes) => {
       try { return { meetingId: hub().start({ tabId: seat.id, title: `${seat.name} (guest)`, folder: seat.folder }, { topic, post, changes }).id } }
@@ -203,13 +203,14 @@ function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'en
     end: (seat) => { hub().end(seat.id); return { ok: true, message: 'The meeting is closed.' } },
     status: (seat) => `status of ${seat.meetingId}`,
     changes: async () => FOLDER_PATCH,
+    checkFolder: async () => null,
   }
 }
 
 /** For tests whose guests never host. */
-const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes'> = {
+const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes' | 'checkFolder'> = {
   start: () => ({ error: 'not here' }), post: () => ({ ok: false, message: 'not here' }), end: () => ({ ok: false, message: 'not here' }),
-  status: () => '', changes: async () => '',
+  status: () => '', changes: async () => '', checkFolder: async () => null,
 }
 
 /** A hub with a host, and a mailbox whose guests take part through `handleGuestRequest`, wired as main wires them. */
@@ -495,7 +496,7 @@ test('an outside host starts a meeting, answers the rounds, is reminded when it 
   assert.equal(await call(host, 'start', { topic: 'login', text: ' ' }), 'ERROR The post is empty. Send your whole plan, answer or agreed items.')
 
   const started = await call(host, 'start', { topic: 'login race', text: 'Plan v1', changes: '1' })
-  assert.match(started, /^Meeting K7QF is open\. The person adds the reviewers from the desktop\. Run next to wait for their replies/)
+  assert.match(started, /^Meeting K7QF is open\. Tell the person its id: they add reviewers by telling another agent "join meeting K7QF", or from the desktop\. Run next to wait for their replies/)
   assert.equal(host.meetingId, 'K7QF')
   const view = hub.views()[0]!
   assert.equal(view.hostTabId, host.id)
@@ -542,7 +543,7 @@ test('a host can attach changes only from a folder the person picked', async () 
   const host = mailbox.invite('', 'Claude Code', 'ignored role', { kind: 'host' }).seat
   assert.equal(host.folder, null)
   assert.equal(host.role, null, 'a host has no reviewer role')
-  assert.match(await call(host, 'start', { topic: 't', text: 'Plan', changes: true }), /^ERROR The person picked no project folder for this meeting/)
+  assert.match(await call(host, 'start', { topic: 't', text: 'Plan', changes: true }), /^ERROR This meeting has no project folder/)
   assert.match(await call(host, 'start', { topic: 't', text: 'Plan' }), /^Meeting K7QF is open/)
 })
 
