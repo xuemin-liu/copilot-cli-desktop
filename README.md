@@ -296,7 +296,9 @@ A meeting lets several sessions review one session's plan or local changes witho
 ### Outside agents: start or join by meeting id
 
 An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI or Gemini CLI, takes part in meetings on the
-same computer. Once it has the meeting tools (set up once, see below), no invitation is needed:
+same computer. Once it has the meeting tools (set up once, see below) and the desktop is 0.1.78 or later, no invitation is
+needed. An agent chat that was already open when the desktop updated keeps the old tool list, whose `meeting_join` still
+asks for an invitation: start a new chat, or reconnect its `copilot-meeting` server, first.
 
 - **Start:** tell the agent "start a meeting to review your changes". It calls `meeting_start` with a topic, its post and
   its project folder, and answers the meeting id, say **K7QF**. The meeting bar appears above your tabs.
