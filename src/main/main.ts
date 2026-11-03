@@ -2585,6 +2585,13 @@ const guestDeps: GuestDeps = {
     if (!runner) throw new Error('Git is not available on this computer, so no changes can be attached.')
     return folderChanges(seat.folder!, { runner, trust: gitTrustStore() })
   },
+  checkFolder: async (folder) => {
+    if (!isAbsolute(folder) || folder.length > 4096) return 'Pass your project folder as an absolute path.'
+    // Checked before anything touches it: a network path would be opened by the stat below.
+    if (!isLocalFilesystemPath(folder)) return `${folder} is not on this computer. Pass a local project folder.`
+    if (!(await stat(folder).then((info) => info.isDirectory(), () => false))) return `${folder} is not a folder.`
+    return null
+  },
 }
 
 /** The helper and the endpoint file, written each time the endpoint starts: its port changes with every app start. */
@@ -4667,7 +4674,7 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
 
 /**
  * The person invites an outside agent (Claude Code, Codex CLI, …) to review: a seat with its own token, and the invitation
- * to paste into that agent, also put on the clipboard. Only the person can do this; no model can add a guest.
+ * to paste into that agent, also put on the clipboard. An agent with the meeting tools needs none: it joins by meeting id.
  */
 ipcMain.handle('desktop:meeting-invite', async (event, meetingId: unknown, name: unknown, role: unknown, short: unknown): Promise<string> => {
   assertTrustedIpcSender(event)

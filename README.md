@@ -51,7 +51,7 @@ handle, only input/output/resize events.
 - **Review meetings** let other sessions, in any project and with any model, review one session's plan or uncommitted
   changes. Say "start a meeting to review your plan" in one session and "join meeting <id>" in the others; the desktop
   passes the rounds between them until every reviewer agrees. An agent outside the desktop, such as Claude Code or Codex CLI,
-  can review too: **Invite outside agent…** on the meeting bar. See [Review meetings](#review-meetings).
+  can review or host too: tell one "join meeting K7QF" or "start a meeting". See [Review meetings](#review-meetings).
 - **Debug browser** opens your web app beside the terminal, with native Chromium
   DevTools and Local Overrides. Console and network activity are also available
   through `copilot-desktop browser` commands, without an MCP server. Testing mode
@@ -293,10 +293,31 @@ A meeting lets several sessions review one session's plan or local changes witho
 - The host needs a session started (or resumed once) by this version, so that it has the meeting helper. The helper runs in
   the host's own shell, so it asks for approval like any other command unless the session allows it.
 
-### Outside agents as reviewers
+### Outside agents: start or join by meeting id
 
-An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI or Gemini CLI, can review in a meeting if it
-runs on the same computer and has MCP or a shell tool.
+An agent that is not a Copilot tab of this app, such as Claude Code, Codex CLI or Gemini CLI, takes part in meetings on the
+same computer. Once it has the meeting tools (set up once, see below), no invitation is needed:
+
+- **Start:** tell the agent "start a meeting to review your changes". It calls `meeting_start` with a topic, its post and
+  its project folder, and answers the meeting id, say **K7QF**. The meeting bar appears above your tabs.
+- **Join:** tell another agent "join meeting K7QF". It calls `meeting_join` with that id and is in at once, listed on the
+  meeting bar as a guest with **Remove**. A Copilot tab joins the same way, as always, whoever hosts.
+
+Any agent can host, a Copilot tab or an outside one, and any can review. An agent is named after its client ("Claude
+Code", "Codex"); a second one of the same kind is "Claude Code 2". Joining or starting answers a seat key: after a desktop
+restart, the agent calls `meeting_join` with that key as the invitation and gets its own seat back, a host's included. A
+name is not enough, since two agents of one client share it.
+
+Asking your agent is the consent: the desktop does not ask again. Anything on this computer that can reach `127.0.0.1`
+could join an open meeting the same way, including programs of other Windows accounts on a shared computer: it would get
+the plan and the patch, and its replies would reach the host. Wrong meeting ids are limited to a few a minute, so ids
+cannot be guessed, and the meeting bar always shows who is in, with **Remove**. On a computer others use too, prefer
+invitations.
+
+### Outside agents as reviewers, with an invitation
+
+An agent without the meeting tools reviews through the guest helper, with an invitation; an agent with them can use one
+too. It needs MCP or a shell tool.
 
 1. On the meeting bar, press **Invite outside agent…**, give the agent a name and, optionally, a role, and press **Copy
    invitation**. If the agent already has the meeting tools (see below), **Copy short invitation** gives a few lines with
@@ -310,7 +331,7 @@ runs on the same computer and has MCP or a shell tool.
    bar lists it as a guest, with **Remove**, and says when it stopped polling.
 
 The meeting tools are served by the desktop at `http://127.0.0.1:47391/mcp`, a streamable HTTP MCP server. Add it to an
-agent once; it needs no key, because the tools do nothing without an invitation. For Claude Code:
+agent once; it needs no key, because it listens only on this computer. For Claude Code:
 
 ```bash
 claude mcp add --transport http copilot-meeting http://127.0.0.1:47391/mcp
@@ -321,7 +342,7 @@ Claude Code, Codex CLI, Gemini CLI, a standalone Copilot CLI and other harnesses
 taken, invitations leave the tools out and the helper still works. On Windows, prefer the tools with Claude Code: its
 PowerShell tool refuses to start `powershell.exe -File`, which the helper needs, while its Bash tool runs it.
 
-- Only you invite: an invitation is made only from the meeting bar. Its token works for that one agent in that one meeting
+- An invitation is made only from the meeting bar. Its token works for that one agent in that one meeting
   and stops working when the agent leaves, is removed or the meeting closes. An invitation nobody uses expires after 15
   minutes. Tokens are saved only as hashes, outside the meeting folder.
 - The agent's own model provider sees the plan, the patch and the other reviews. Patches are filtered as for any reviewer.
@@ -341,7 +362,8 @@ PowerShell tool refuses to start `powershell.exe -File`, which the helper needs,
 
 ### An outside agent as host
 
-An outside agent can also host: Copilot sessions (and other agents) review its plan or changes.
+An outside agent can also host: Copilot sessions (and other agents) review its plan or changes. With the meeting tools it
+just starts one, as [above](#outside-agents-start-or-join-by-meeting-id). Without them, or to pick its folder yourself:
 
 1. Choose **File → Host a Meeting from an Outside Agent…**. To let the agent attach its uncommitted changes, pick its
    project folder; the host invitation goes to the clipboard. Tick **Short invitation** if the agent has the meeting tools.
@@ -351,8 +373,8 @@ An outside agent can also host: Copilot sessions (and other agents) review its p
 4. The agent waits for each round's replies with `meeting_next` and answers with `meeting_round`, or proposes to close
    with `meeting_propose_close`. When everyone agrees, it gets the agreed message and carries on.
 
-- Only you make host invitations. One starts a single meeting and expires after 15 minutes unused.
-- The changes come from the folder you picked, and only from inside it (a subfolder of a repository attaches just that
+- A host invitation starts a single meeting and expires after 15 minutes unused.
+- The changes come from the folder you picked (or, without an invitation, the folder the agent named), and only from inside it (a subfolder of a repository attaches just that
   subfolder's changes): the desktop runs Git there as the Git panel does, with the same hardening
   and the same trust check. If the repository's own Git settings name a program (a filter, for example), accept them in
   the Git panel first; until then the agent is told the changes cannot be attached. The patch is filtered as for any

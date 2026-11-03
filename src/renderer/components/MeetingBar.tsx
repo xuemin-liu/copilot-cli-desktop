@@ -192,7 +192,7 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
                 </span>
                 {toolsUrl && (
                   <span className="meeting-bar-note meeting-bar-tools">
-                    Agents with MCP can use the meeting tools instead of the helper. Add them once:{' '}
+                    An agent with the meeting tools needs no invitation: tell it &ldquo;join meeting {meeting.id}&rdquo;. Add them once:{' '}
                     <code>{meetingToolsSetup(toolsUrl)}</code>{' '}
                     <button type="button" className="meeting-bar-button"
                       onClick={() => { void window.copilotDesktop.copyText(meetingToolsSetup(toolsUrl)).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error))) }}>Copy</button>

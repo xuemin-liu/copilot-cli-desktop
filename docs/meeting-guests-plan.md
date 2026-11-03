@@ -123,8 +123,9 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 
 ## Safety
 
-- **Only the person invites.** A seat is created only from the renderer's IPC, never from a helper call. No model, Copilot
-  or outside, can add a guest. This keeps the rule that only the person starts and joins.
+- **Only the person invites** (phases 1 to 3). A seat is created only from the renderer's IPC, never from a helper call.
+  No model, Copilot or outside, can add a guest. This keeps the rule that only the person starts and joins. Phase 4 relaxes
+  it for the meeting tools: see [Joining by meeting id](#phase-4-joining-by-meeting-id).
 - **Material leaves Copilot.** A guest sends the post, the patch and the other replies to its own model provider. The invite
   dialog says so in one line, before the invitation can be copied. Patches are filtered (`sharedChanges`) as for any
   reviewer.
@@ -145,6 +146,7 @@ grows: the spike's 3-round meeting cost $1.23 on Opus.
 | 1 | Outside agents as reviewers through the guest helper: invite, poll, reply, vote, remove, restarts |
 | 2 | A bundled MCP server (`meeting_next`, `meeting_reply`, `meeting_show`) for harnesses that use MCP, so no shell approvals and no token in commands. The invitation gives the one-line `claude mcp add` / Codex config |
 | 3 | An outside host: the person makes a host invitation, the agent starts the meeting and answers its rounds with the host's tools or helper commands. See [Phase 3](#phase-3-an-outside-agent-as-host) |
+| 4 | No invitation with the meeting tools: "join meeting K7QF" and "start a meeting" in any outside agent. See [Phase 4](#phase-4-joining-by-meeting-id) |
 
 ## Tests
 
@@ -431,3 +433,30 @@ post.
    so it has to be pasted each time anyway; a skill could only hold the generic instructions, which the meeting tools'
    own MCP instructions and the invitation already give. Agents set the tools up once (`claude mcp add …`), which is the
    part worth keeping.
+
+## Phase 4: joining by meeting id
+
+Invitations were hard to use: a 64-character token to copy from the desktop into each agent, for each meeting. A Copilot tab
+just says "join meeting K7QF". With the meeting tools, an outside agent now does the same.
+
+- **`meeting_join(meeting: "K7QF")`** gives the agent a seat of its own in that open meeting and joins it at once, so the
+  meeting bar lists it (with **Remove**) and a full or closed meeting answers why. `name` and `role` are optional; the
+  name defaults to the MCP client's (`claude-code` is "Claude Code"), numbered when another seat in the meeting has it.
+- **`meeting_start(topic, post, folder?, changes?)`** without an invitation gives the agent a host seat and opens its
+  meeting. `folder` is its project: checked as the host-invitation IPC checks a picked folder (absolute, local, a folder),
+  and Git reads it as before (`folderChanges`), so a home folder or drive root still attaches nothing.
+- **After a restart** the agent's MCP session is new and holds no seat. The join or start answered a seat key, the seat's
+  own token: `meeting_join` with it as the invitation gives the seat back, a host's included. A name is not proof (two
+  agents of one client share it, and any program can claim it), so `meeting_join` with only the id gives a new seat.
+- **One meeting per agent session:** joining or starting while in an open meeting says to leave or end it first.
+- **Wrong ids are throttled:** after five joins in a minute that name no open meeting, from all MCP sessions together,
+  refuse every join by id until the minute is over. A few typos pass; guessing one of ~923,000 ids does not.
+- **Invitations stay,** for the helper and for agents that are given one; with the tools they work as before.
+
+The trade: the tools listen only on 127.0.0.1 and refuse anything a web page could send, so what can call them is a
+program on this computer. A program of the person's own account can already read and change their files; what it gains
+here is a seat in an open meeting, which the meeting bar shows. But loopback is open to every account on the computer, and
+to programs that can open a connection but not read the person's files: for them a seat is new access to the plan and the
+patch, and a way to steer the host. The throttle keeps them from guessing an id, not from using one they learn. So joining
+by id trusts every local account, and on a shared computer the person should use invitations. The person telling their
+agent to join is the consent the token stood for.

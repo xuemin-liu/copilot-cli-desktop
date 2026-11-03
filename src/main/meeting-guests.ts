@@ -6,9 +6,9 @@ import type { MeetingDelivery, MeetingTimers } from './meeting.js'
 /**
  * Outside agents in meetings (docs/meeting-guests-plan.md). A Copilot tab is driven by the desktop: it types the message
  * and reads the reply from the session's event log. An agent in another harness (Claude Code, Codex CLI, …) is a guest
- * instead: the person invites it, and it pulls its messages and pushes its answers through a helper or the meeting tools,
- * with its own token. To the hub a guest is a party like any other, with a `guest:` id in place of a tab id. A guest
- * reviews, or, with a host invitation, starts and hosts a meeting of its own.
+ * instead: it pulls its messages and pushes its answers through a helper or the meeting tools. With the helper the person
+ * invites it, with a token; with the tools on this computer it joins by meeting id or starts a meeting of its own, as the
+ * person tells it. To the hub a guest is a party like any other, with a `guest:` id in place of a tab id.
  */
 
 export const GUEST_ID_PATTERN = /^guest:[0-9a-f]{16}$/
@@ -145,6 +145,11 @@ export class GuestMailbox {
 
   seat(id: string): GuestSeat | null {
     return this.seats.get(id) ?? null
+  }
+
+  /** The open seats of a meeting, its host's included. */
+  seatsOf(meetingId: string): GuestSeat[] {
+    return [...this.seats.values()].filter((seat) => seat.closed === null && seat.meetingId === meetingId)
   }
 
   /** Open seats, joined or still invited. */
@@ -343,8 +348,10 @@ export interface GuestDeps {
   post(seat: GuestSeat, kind: 'round' | 'propose-close', text: string, changes: string | null): GuestResponse
   end(seat: GuestSeat): GuestResponse
   status(seat: GuestSeat): string
-  /** The uncommitted changes of the host's folder (`seat.folder`, which the person picked). Throws with a message to show. */
+  /** The uncommitted changes of the host's folder (`seat.folder`). Throws with a message to show. */
   changes(seat: GuestSeat): Promise<string>
+  /** A folder an agent names as its project, as a host without an invitation: why it cannot be used, or null. */
+  checkFolder(path: string): Promise<string | null>
 }
 
 export interface GuestResponse { ok: boolean; message: string }
@@ -472,7 +479,7 @@ function postText(fields: Record<string, unknown>): string | GuestResponse {
 /** The host's changes when it asked for them, from the folder the person picked; null when it did not ask. */
 async function hostChanges(deps: GuestDeps, seat: GuestSeat, fields: Record<string, unknown>): Promise<string | null | GuestResponse> {
   if (!wantsChanges(fields.changes)) return null
-  if (seat.folder === null) return { ok: false, message: 'The person picked no project folder for this meeting, so no changes can be attached. Describe them in your post, or ask the person for a host invitation with a folder.' }
+  if (seat.folder === null) return { ok: false, message: 'This meeting has no project folder, so no changes can be attached. Describe them in your post, or start the meeting with your project folder.' }
   try { return await deps.changes(seat) } catch (error) { return { ok: false, message: error instanceof Error ? error.message : String(error) } }
 }
 
@@ -486,7 +493,7 @@ async function hostStart(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat
   mailbox.started(seat, started.meetingId)
   return {
     ok: true,
-    message: `Meeting ${started.meetingId} is open. The person adds the reviewers from the desktop. ${nextStep(via)} to wait for their replies; they arrive together, once per round.`,
+    message: `Meeting ${started.meetingId} is open. Tell the person its id: they add reviewers by telling another agent "join meeting ${started.meetingId}", or from the desktop. ${nextStep(via)} to wait for their replies; they arrive together, once per round.`,
   }
 }
 
