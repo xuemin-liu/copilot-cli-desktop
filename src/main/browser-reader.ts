@@ -190,6 +190,13 @@ export class BrowserReader {
     void this.attach(page).catch(() => {})
   }
 
+  /** Resolves once a page's capture is enabled; rejects when it cannot be. */
+  async capturing(contents: WebContents): Promise<void> {
+    const page = this.readers.get(contents.id)
+    if (!page) throw new Error('Page is unavailable in this session.')
+    await this.attach(page)
+  }
+
   private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
     if (signal?.aborted) throw new Error('Test stopped.')
     const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') || method === 'Page.reload' || method === 'Page.navigate'))

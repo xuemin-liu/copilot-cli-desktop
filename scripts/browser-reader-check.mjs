@@ -88,7 +88,11 @@ if (!process.versions.electron) {
       browser.setBounds({ x: 0, y: 0, width: 900, height: 750 })
       window.showInactive()
       await browser.open(); await second.open()
+      // The ticket's fetch runs while the never-loaded page's first document loads; Chromium 156 enables capture only after
+      // a first commit, so the browser commits about:blank first. That entry must not stay in history.
       await browser.navigate(`http://127.0.0.1:${site.address().port}/`)
+      assert.deepEqual(browser.view.webContents.navigationHistory.getAllEntries().map(entry => entry.url), [`http://127.0.0.1:${site.address().port}/`])
+      assert.equal(browser.snapshot.canGoBack, false, 'Back does not return to the blank page that enabled capture')
       const page = String(browser.view.webContents.id)
       await until(async () => (await browserCommand(['snapshot', page])).text?.includes('Dynamic linked issue'), 'dynamic page snapshot')
       const snapshot = await browserCommand(['snapshot', page])

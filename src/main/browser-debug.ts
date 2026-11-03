@@ -809,13 +809,29 @@ export class BrowserDebug {
     const page = this.activePage
     page.error = null
     page.lastUrl = target
-    try { await this.view.webContents.loadURL(target) }
+    try { await this.load(page, target) }
     catch (error) {
       if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ERR_ABORTED')) {
         throw new Error(sanitizedText(error instanceof Error ? error.message : String(error)))
       }
     }
     return this.snapshot
+  }
+
+  /**
+   * Since Chromium 156 a page that has never loaded answers the reader's Network.enable only once its first document
+   * commits, after that document's own scripts have started requests whose bodies are then lost. Such a page commits
+   * about:blank first, with capture enabled before the address loads, and the blank entry then leaves its history.
+   */
+  private async load(page: BrowserPage, url: string): Promise<void> {
+    const contents = page.contents
+    const fresh = !contents.getURL()
+    if (fresh) await contents.loadURL('about:blank').then(() => this.reader.capturing(contents)).catch(() => {})
+    try { await contents.loadURL(url) }
+    finally {
+      const history = contents.navigationHistory
+      if (fresh && !contents.isDestroyed() && history.getActiveIndex() > 0 && history.getEntryAtIndex(0)?.url === 'about:blank') history.removeEntryAtIndex(0)
+    }
   }
 
   /** User-initiated only (desktop IPC). Resolves to prompt text for the clicked element, or null if cancelled. */
@@ -920,7 +936,7 @@ export class BrowserDebug {
     const page = this.addPage(new WebContentsView({ webPreferences: { session: source.contents.session,
       sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
     this.layout()
-    void page.contents.loadURL(url).catch(error => { page.error = sanitizedText(String(error)) })
+    void this.load(page, url).catch(error => { page.error = sanitizedText(String(error)) })
   }
 
   get picking(): boolean { return this.reader.picking }
