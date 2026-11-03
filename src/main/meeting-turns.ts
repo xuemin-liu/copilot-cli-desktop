@@ -48,6 +48,15 @@ interface Interaction extends PromptSeen {
 }
 
 const MAX_CHUNKS = 64
+const SIGNATURE_CHARS = 200
+
+/** The start of a prompt's first line, compared the way the CLI records a bracketed paste. */
+function promptSignature(text: string): string {
+  return (text.replace(/\r\n?/g, '\n').split('\n').find(line => line.trim()) ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, SIGNATURE_CHARS)
+}
+/** Older CLIs recorded a large paste as a placeholder instead of its text. */
+const PASTE_PLACEHOLDER = /^\[Paste(?:d text| #\d)/
 
 /** Metadata only: never retain prompt, reply, tool arguments, or arbitrary record fields here. */
 interface TurnEventDiagnostic { type: string; live: boolean; eventId: string | null; interactionId: string | null; turnId: string | null }
@@ -64,6 +73,8 @@ export interface MeetingTurnDiagnostic {
 export class MeetingTurnReader {
   private current: Interaction | null = null
   private expectingDesktop = false
+  private expectedSignature: string | null = null
+  private desktopPrompts = 0
   private usageValue: MeetingUsage | null = null
   private usageChanged = false
   private lastEvent: TurnEventDiagnostic | null = null
@@ -93,6 +104,7 @@ export class MeetingTurnReader {
     this.lastEvent = null
     this.current = null
     this.expectingDesktop = false
+    this.expectedSignature = null
     this.usageValue = null
     this.usageChanged = false
   }
@@ -107,12 +119,26 @@ export class MeetingTurnReader {
     return this.usageValue
   }
 
-  /** The desktop is about to type a prompt; the next prompt recorded is that one. */
-  expectDesktopPrompt(): void {
+  /**
+   * The desktop is about to type `text`. Only a recorded prompt that matches it is the desktop's: typed input can be lost,
+   * and the person's next, unrelated message must not be taken as the answer to it.
+   */
+  expectDesktopPrompt(text?: string): void {
     this.expectingDesktop = true
+    this.expectedSignature = text === undefined ? null : promptSignature(text)
   }
   /** A cancelled paste must not consume the next prompt the person sends. */
-  cancelExpectedDesktopPrompt():void { this.expectingDesktop=false }
+  cancelExpectedDesktopPrompt():void { this.expectingDesktop=false; this.expectedSignature=null }
+
+  /** How many prompts were recorded as the desktop's; a delivery is confirmed when this grows. */
+  get desktopPromptCount(): number { return this.desktopPrompts }
+
+  private matchesExpected(content: string): boolean {
+    if (!this.expectingDesktop) return false
+    if (this.expectedSignature === null) return true
+    const recorded = promptSignature(content)
+    return PASTE_PLACEHOLDER.test(recorded) || (this.expectedSignature !== '' && recorded.startsWith(this.expectedSignature))
+  }
 
   /** Whether the prompt being answered now came from the person. */
   get answeringPerson(): boolean {
@@ -141,8 +167,10 @@ export class MeetingTurnReader {
     if (!live) return null
     if (record.type === 'user.message') {
       if (typeof data.content !== 'string') return null
-      const desktop = this.expectingDesktop || data.content.startsWith(MEETING_MARKER_PREFIX)
-      this.expectingDesktop = false
+      const desktop = this.matchesExpected(data.content) || data.content.startsWith(MEETING_MARKER_PREFIX)
+      // A recorded prompt settles the expectation either way: an unmatched one means the typed input never arrived.
+      this.cancelExpectedDesktopPrompt()
+      if (desktop) this.desktopPrompts++
       this.current = { id: typeof data.interactionId === 'string' ? data.interactionId : null, content: data.content, desktop, final: null, last: null, chunks: new Map() }
       return { content: data.content, desktop }
     }

@@ -17,6 +17,13 @@ closed process or restart leaves possibly submitted input uncertain. A manual pr
 meeting turn. The person can inspect the linked session and choose Send again or Discard in Handoffs. Discarding a
 handoff does not manufacture a reviewer reply; the meeting keeps its normal timeout/person controls.
 
+Typed input can also be lost without any error: in meeting W7A4 the post was submitted, but the reviewer's CLI never
+recorded it, and the person's later "why are you stuck?" turn was taken as the reply. A Desktop-typed prompt is now
+confirmed only by a recorded `user.message` whose text matches what was typed (or carries the meeting marker or an
+older CLI's paste placeholder). A non-matching prompt is the person's: it settles the expectation and leaves the
+delivery uncertain. If no matching prompt is recorded within 60 seconds, the delivery also becomes uncertain and the
+session's later turns are not attributed to it. Uncertain deliveries are never typed again automatically.
+
 On upgrade, outstanding prompts in old meeting files lack submission receipts. Desktop creates a bounded-format
 recovery identity deterministically from the meeting, durable recipient, round, kind and body. Such a prompt becomes
 uncertain and needs a person's decision before replay. Repeated restarts preserve the same identity and decision.
