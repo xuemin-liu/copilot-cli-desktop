@@ -117,6 +117,9 @@ Any MCP client that supports **Streamable HTTP** works. What it needs to know ab
 
 ## Using the tools
 
+Joining by meeting id and hosting without an invitation require Copilot CLI Desktop **0.1.78 or later**. Older versions
+use the invitation workflow below.
+
 With the tools set up, just ask the agent:
 
 - **To host:** "start a meeting to review your changes". The agent calls `meeting_start` with a topic, its post and its
@@ -153,6 +156,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | --- | --- |
 | "Failed to connect" | Copilot CLI Desktop is not running, is older than 0.1.61 (the tools; 0.1.62 for the short invitations), or the port is taken (its log says so). Start or update the desktop. |
 | The agent does not list the tools | The server was added after the session started: start a new session. In Codex, see the experimental flag above. |
+| The tools still say an invitation is required after updating | Reconnect the meeting MCP server or start a new agent session to refresh its cached tool descriptions. Check that the running desktop is 0.1.78 or later. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
 | "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with its seat key (or invitation) as the invitation, and gets its seat back, as host too. With only the meeting id it gets a new seat. |
 | "Too many wrong meeting ids in the last minute" | Five joins in the last minute named a meeting that is not open. Check the id on the meeting bar and try again a minute later. |
