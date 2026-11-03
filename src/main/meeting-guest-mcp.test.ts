@@ -390,6 +390,24 @@ test('wrong meeting ids are throttled across sessions: a few typos pass, guessin
   assert.match(await desktop.tool(await desktop.open('x'), 'meeting_join', { meeting: 'K7QF' }), /^Joined meeting K7QF\./, 'a minute later it passes')
 })
 
+test('a start waiting on its folder check holds the session: an overlapping start or join is refused, and the session stays tied to its meeting', async () => {
+  const { hub, mailbox, deps } = meeting()
+  let release = (): void => {}
+  const held = new Promise<null>((resolveCheck) => { release = () => resolveCheck(null) })
+  const desktop = restarted(mailbox, { ...deps, checkFolder: () => held })
+  const session = await desktop.open('claude-code')
+  const first = desktop.tool(session, 'meeting_start', { topic: 'login race', post: 'Plan v1', folder: 'D:\\api' })
+  const underWay = 'Your meeting_start is still under way: wait for its answer.'
+  assert.equal(await desktop.tool(session, 'meeting_start', { topic: 'other', post: 'Plan B' }), underWay)
+  assert.equal(await desktop.tool(session, 'meeting_join', { meeting: 'K7QF' }), underWay)
+  assert.equal(hub.views().length, 0, 'nothing started meanwhile')
+  release()
+  assert.match(await first, /^Meeting K7QF is open\./)
+  assert.equal(hub.views().length, 1, 'one meeting')
+  assert.equal(await desktop.tool(session, 'meeting_status'), 'status of K7QF', 'the session holds the meeting it started')
+  assert.equal(await desktop.tool(session, 'meeting_start', { topic: 'other', post: 'Plan B' }), 'You are already in meeting K7QF. Close it with meeting_end first.')
+})
+
 test('a seat is named by what the agent passed, else by its client', () => {
   assert.equal(agentName('  Opus "reviewer" ', null), 'Opus reviewer')
   assert.equal(agentName(undefined, 'claude-code'), 'Claude Code')

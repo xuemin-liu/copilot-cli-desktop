@@ -113,8 +113,12 @@ const TOOL_COMMANDS: Record<string, GuestCommand> = {
   meeting_round: 'round', meeting_propose_close: 'propose-close', meeting_end: 'end', meeting_status: 'status',
 }
 
-/** `client`: the name the MCP client gave in `initialize` ("claude-code"), which names its seat by default. */
-interface Session { seatId: string | null; usedAt: number; client: string | null }
+/**
+ * `client`: the name the MCP client gave in `initialize` ("claude-code"), which names its seat by default. `starting`: a
+ * `meeting_start` of this session is waiting (on the folder check or Git), so no other join or start may slip past the
+ * one-meeting check meanwhile.
+ */
+interface Session { seatId: string | null; usedAt: number; client: string | null; starting: boolean }
 
 /** What the HTTP layer sends back: a JSON-RPC answer, or only a status. */
 export interface McpAnswer { status: number; body?: unknown; sessionId?: string }
@@ -132,7 +136,7 @@ export class GuestMcpSessions {
       this.sessions.delete(oldest)
     }
     const id = randomUUID()
-    this.sessions.set(id, { seatId: null, usedAt: this.now(), client })
+    this.sessions.set(id, { seatId: null, usedAt: this.now(), client, starting: false })
     return id
   }
 
@@ -269,10 +273,17 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
   return toolText(answer.message + seatKey(token))
 }
 
+/** A start, with its session reserved from before its first wait until its answer. */
+async function reserved(session: Session, start: () => Promise<unknown>): Promise<unknown> {
+  session.starting = true
+  try { return await start() } finally { session.starting = false }
+}
+
 async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: GuestMailbox, deps: GuestDeps, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (name === 'meeting_join' || name === 'meeting_start') {
+    if (session.starting) return toolText('Your meeting_start is still under way: wait for its answer.', true)
     const invitation = typeof args.invitation === 'string' ? args.invitation.trim() : ''
-    if (!invitation) return name === 'meeting_join' ? joinById(sessions, session, mailbox, deps, args) : startOpen(session, mailbox, deps, args, signal)
+    if (!invitation) return name === 'meeting_join' ? joinById(sessions, session, mailbox, deps, args) : reserved(session, () => startOpen(session, mailbox, deps, args, signal))
     const seat = mailbox.seatOf(invitation)
     if (!seat) return toolText('This invitation is not known to the desktop. Ask the person for a new one.', true)
     if (name === 'meeting_join' && seat.kind === 'host' && seat.meetingId === '') return toolText('This is a host invitation: call meeting_start with it.', true)
@@ -284,8 +295,10 @@ async function callTool(sessions: GuestMcpSessions, session: Session, mailbox: G
     // invitation: that binds the new session to its open meeting, and is no error.
     if (seat.kind === 'host' && seat.meetingId !== '') return toolText(joinedText(seat))
     if (name === 'meeting_start') {
-      const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
-      return toolText(answer.message, !answer.ok)
+      return reserved(session, async () => {
+        const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
+        return toolText(answer.message, !answer.ok)
+      })
     }
     return toolText(joinedText(seat))
   }
