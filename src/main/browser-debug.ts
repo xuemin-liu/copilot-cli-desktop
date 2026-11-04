@@ -45,6 +45,12 @@ const POPUP_OVERRIDES_ACTIVATION_MS = 15000
 const POPUP_OVERRIDES_LISTING_MS = 5 * 60_000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
 
+/** The address a page shows: while its capture-enabling blank document is up, the address it is loading. */
+function shownUrl(page: BrowserPage): string {
+  const url = page.contents.isDestroyed() ? '' : page.contents.getURL()
+  return page.priming && url === 'about:blank' ? page.lastUrl : url || page.lastUrl
+}
+
 interface BrowserPage {
   contents: WebContents
   view: WebContentsView
@@ -53,6 +59,8 @@ interface BrowserPage {
   loading: boolean
   error: string | null
   lastUrl: string
+  /** The blank document that enables capture on a never-loaded page is showing; report lastUrl instead. */
+  priming: boolean
   devtools: boolean
   panel: 'console' | 'network' | 'sources' | null
   /** Local Overrides as this page's running DevTools last reported it. */
@@ -225,7 +233,7 @@ export class BrowserDebug {
   private addPage(view: WebContentsView, activate: boolean, window: BaseWindow | null = null, opener: number | null = null): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0 }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0 }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
@@ -704,7 +712,7 @@ export class BrowserDebug {
     const contents = this.view.webContents
     if (contents && !contents.isDestroyed()) {
       const page = this.activePage
-      this.state.url = contents.getURL() || page.lastUrl
+      this.state.url = shownUrl(page)
       this.state.loading = page.loading
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
       const failed = page.error ? undefined : this.failedPopupWindow()
@@ -716,7 +724,7 @@ export class BrowserDebug {
       this.state.zoomFactor = contents.getZoomFactor()
       this.state.pages = [...this.pages].map(([id, entry]) => ({ id,
         title: entry.view.webContents.getTitle().slice(0, 160) || 'New page',
-        url: entry.view.webContents.getURL() || entry.lastUrl,
+        url: shownUrl(entry),
         ...(entry.window ? { window: true } : {}),
         ...(entry.error ? { error: entry.error } : {}),
       }))
@@ -826,9 +834,14 @@ export class BrowserDebug {
   private async load(page: BrowserPage, url: string): Promise<void> {
     const contents = page.contents
     const fresh = !contents.getURL()
-    if (fresh) await contents.loadURL('about:blank').then(() => this.reader.capturing(contents)).catch(() => {})
+    page.lastUrl = url
+    if (fresh) {
+      page.priming = true
+      await contents.loadURL('about:blank').then(() => this.reader.capturing(contents)).catch(() => {})
+    }
     try { await contents.loadURL(url) }
     finally {
+      page.priming = false
       const history = contents.navigationHistory
       if (fresh && !contents.isDestroyed() && history.getActiveIndex() > 0 && history.getEntryAtIndex(0)?.url === 'about:blank') history.removeEntryAtIndex(0)
     }
