@@ -40,6 +40,11 @@ export interface PromptSeen {
 
 export interface CompletedTurn extends PromptSeen { reply: string }
 
+/** The reply a finished turn gives to the delivery the desktop typed, or null when that prompt was never confirmed. */
+export function confirmedMeetingReply(turn: CompletedTurn | null): string | null {
+  return turn?.desktop ? turn.reply : null
+}
+
 interface Interaction extends PromptSeen {
   id: string | null
   final: string | null

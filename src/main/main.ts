@@ -133,7 +133,7 @@ import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
-import { MeetingTurnReader } from './meeting-turns.js'
+import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
@@ -2833,8 +2833,15 @@ function onMeetingIdle(tabId: string): void {
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
   endAutomatic(tabId,Boolean(turn?.desktop))
-  if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
-  endMeetingJournal(tabId,Boolean(turn?.desktop))
+  // Only a turn confirmed as the typed prompt answers it; otherwise the reviewer stays awaited and the handoff uncertain.
+  const reply = confirmedMeetingReply(turn)
+  if (delivery && reply !== null) meetingHub.turnCompleted(tabId, delivery, reply)
+  else if (delivery) {
+    clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
+    meetingReaders.get(tabId)?.cancelExpectedDesktopPrompt()
+    void writeAppLog(`Meeting ${delivery.meetingId}: session ${tabId} went idle without recording the typed message; the handoff is uncertain.`).catch(() => {})
+  }
+  endMeetingJournal(tabId,reply !== null)
   scheduleMeetingPump(0)
 }
 

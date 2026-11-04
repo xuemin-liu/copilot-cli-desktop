@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingTurnReader } from './meeting-turns.js'
+import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 
 const record = (type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}): string => JSON.stringify({ type, data, ...extra })
 const user = (content: string, interactionId = 'i1'): string => record('user.message', { content, interactionId })
@@ -47,6 +47,19 @@ test('a typed prompt that never arrived does not claim the person\'s next messag
   assert.equal(reader.desktopPromptCount, 0, 'the delivery is not confirmed')
   reader.finish()
   assert.equal(reader.consume(user('Investigate this source in the dedicated checkout.', 'i2'))?.desktop, false, 'nor is a later look-alike')
+})
+
+test('only a turn confirmed as the typed prompt yields a meeting reply; the person\'s turn or no turn does not', () => {
+  const reader = new MeetingTurnReader()
+  reader.expectDesktopPrompt('[meeting W7A4 · round 1 · from the desktop]\nReview this')
+  reader.consume(user('why are you stuck?'))
+  reader.consume(JSON.stringify({ type: 'assistant.message', data: { content: 'Waiting for the meeting material.', toolRequests: [] } }))
+  assert.equal(confirmedMeetingReply(reader.finish()), null, 'the person\'s answer is not recorded as the review')
+  assert.equal(confirmedMeetingReply(reader.finish()), null, 'idle with no prompt recorded is not an empty review')
+  reader.expectDesktopPrompt('[meeting W7A4 · round 2 · from the desktop]\nReview this')
+  reader.consume(user('[meeting W7A4 · round 2 · from the desktop]\nReview this', 'i2'))
+  reader.consume(JSON.stringify({ type: 'assistant.message', data: { content: 'Looks good.', toolRequests: [] } }))
+  assert.equal(confirmedMeetingReply(reader.finish()), 'Looks good.')
 })
 
 test('the expected prompt is confirmed by its text, CRLF and surrounding whitespace aside, or by a paste placeholder', () => {
