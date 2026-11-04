@@ -64,8 +64,9 @@ if (!process.versions.electron) {
           onRemoveProfile={profile => window.fixture.calls.push('remove:' + profile.id)}
           onCreateTab={id => window.fixture.calls.push('create:' + id)}
           onActivateTab={id => window.fixture.calls.push('tab:' + id)} onPopOutTab={noop} onRenameTab={noop} onCloseTab={noop}
-          onRestartTab={noop} onUnloadTab={noop} onOpenHistory={noop} onCreateTabWithAttachments={noop} onResumePicker={noop}
-          onConnectRemote={noop} onOpenSettings={noop} />
+          onRestartTab={noop} onUnloadTab={noop} onOpenHistory={() => window.fixture.calls.push('history')}
+          onCreateTabWithAttachments={() => window.fixture.calls.push('attachments')} onResumePicker={() => window.fixture.calls.push('resume')}
+          onFanOut={() => window.fixture.calls.push('fan-out')} onConnectRemote={() => window.fixture.calls.push('remote')} onOpenSettings={noop} />
         <button id="outside" style={{position:'fixed',left:500,top:20}}>Outside</button>
       </>;
     }
@@ -229,25 +230,77 @@ if (!process.versions.electron) {
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 0)
       checks.push('Expanding sidebar dismisses flyout and reports unobscured')
 
-      // At the app's 280px sidebar width no header action may be clipped off the edge.
-      const heading = await ui(`(() => {
-        const sidebar = document.querySelector('.sidebar');
-        sidebar.style.width = '280px';
-        const box = sidebar.getBoundingClientRect();
-        const contentRight = box.right - parseFloat(getComputedStyle(sidebar).paddingRight);
-        const actions = [...document.querySelectorAll('.sidebar-heading-actions button')].map(button => {
-          const rect = button.getBoundingClientRect();
-          return {label: button.getAttribute('aria-label'), left: rect.left, right: rect.right};
-        });
-        return {contentRight, left: box.left, actions};
-      })()`)
-      assert.ok(heading.actions.some(action => action.label === 'Add workspace'), 'Add workspace is in the header')
-      assert.ok(!heading.actions.some(action => action.label === 'View options'), 'View options moved to the View menu')
-      for (const action of heading.actions) {
-        assert.ok(action.left >= heading.left && action.right <= heading.contentRight + 0.5, `${action.label} fits in the sidebar`)
+      // At the app's 280px sidebar and the narrow window's 224px one, the header keeps its label and
+      // three actions, and none may reach past the heading's padding.
+      for (const [width, padding] of [['280px', ''], ['224px', '8px']]) {
+        const heading = await ui(`(() => {
+          const sidebar = document.querySelector('.sidebar');
+          sidebar.style.width = ${JSON.stringify(width)};
+          sidebar.style.paddingInline = ${JSON.stringify(padding)};
+          const row = document.querySelector('.sidebar-section-heading');
+          const box = row.getBoundingClientRect();
+          const contentRight = box.right - parseFloat(getComputedStyle(row).paddingRight);
+          const label = row.querySelector(':scope > span');
+          const actions = [...document.querySelectorAll('.sidebar-heading-actions button')].map(button => {
+            const rect = button.getBoundingClientRect();
+            return {label: button.getAttribute('aria-label'), left: rect.left, right: rect.right};
+          });
+          return {contentRight, left: box.left, labelClipped: label.scrollWidth > label.clientWidth, actions};
+        })()`)
+        assert.deepEqual(heading.actions.map(action => action.label), ['Search workspaces and sessions', 'Add workspace', 'More workspace actions'], `header actions at ${width}`)
+        assert.equal(heading.labelClipped, false, `Workspaces label is whole at ${width}`)
+        for (const action of heading.actions) {
+          assert.ok(action.left >= heading.left && action.right <= heading.contentRight + 0.5, `${action.label} fits the ${width} sidebar`)
+        }
       }
-      await ui(`document.querySelector('.sidebar').style.width = ''`)
-      checks.push('Header actions, including Add workspace, fit a 280px sidebar')
+      await ui(`(() => { const sidebar = document.querySelector('.sidebar'); sidebar.style.width = '280px'; sidebar.style.paddingInline = '' })()`)
+      checks.push('Header label and actions fit both the 280px and the narrow 224px sidebar')
+
+      // The More menu holds the other actions: it opens focused on its first item, arrows move, Escape
+      // returns to its button, and an item closes the menu before running.
+      const menuItems = `[...document.querySelectorAll('.sidebar-more-menu [role="menuitem"]')]`
+      await click('[aria-label="More workspace actions"]')
+      await until(`document.activeElement?.matches('.sidebar-more-menu [role="menuitem"]') && document.activeElement.textContent.includes('New session with attachments')`, 'More menu focuses its first item')
+      assert.deepEqual(await ui(`${menuItems}.map(item => item.textContent)`),
+        ['＋⃞New session with attachments', '⫶Fan out into sessions', '☰Resume a session', '◷Session history', '⇄Connect to remote'])
+      const inside = await ui(`(() => {
+        const menu = document.querySelector('.sidebar-more-menu').getBoundingClientRect();
+        const sidebar = document.querySelector('.sidebar').getBoundingClientRect();
+        const button = document.querySelector('[aria-label="More workspace actions"]').getBoundingClientRect();
+        return {ok: menu.left >= sidebar.left && menu.right <= sidebar.right && (menu.top >= button.bottom || menu.bottom <= button.top) && menu.bottom <= innerHeight, menu: [menu.left, menu.right, menu.top, menu.bottom], sidebar: [sidebar.left, sidebar.right], button: [button.top, button.bottom], height: innerHeight};
+      })()`)
+      assert.equal(inside.ok, true, `expanded More menu sits inside the sidebar, off its button and on screen: ${JSON.stringify(inside)}`)
+      assert.equal(await ui('window.fixture.openChanges.at(-1)'), false, 'a menu inside the sidebar does not hide the session pane')
+      key('Up')
+      await until(`document.activeElement?.textContent.includes('Connect to remote')`, 'ArrowUp wraps to the last item')
+      key('Home')
+      await until(`document.activeElement?.textContent.includes('New session with attachments')`, 'Home moves to the first item')
+      key('Down')
+      await until(`document.activeElement?.textContent.includes('Fan out into sessions')`, 'ArrowDown moves to the next item')
+      key('Escape')
+      await until(`!document.querySelector('.sidebar-more-menu') && document.activeElement?.getAttribute('aria-label') === 'More workspace actions'`, 'Escape closes the menu onto its button')
+      await click('[aria-label="More workspace actions"]')
+      await until(`!!document.querySelector('.sidebar-more-menu')`, 'More menu reopens')
+      await ui(`(${menuItems}).find(item => item.textContent.includes('Fan out')).setAttribute('data-check', 'fan-out')`)
+      await click('[data-check="fan-out"]')
+      await until(`!document.querySelector('.sidebar-more-menu') && window.fixture.calls.at(-1) === 'fan-out'`, 'Fan out runs from the menu and closes it')
+      await click('[aria-label="More workspace actions"]')
+      await until(`!!document.querySelector('.sidebar-more-menu')`, 'More menu opens for an outside click')
+      await click('#outside')
+      await until(`!document.querySelector('.sidebar-more-menu')`, 'a click outside closes the More menu')
+      checks.push('More menu lists the other actions, moves by keyboard, closes on Escape, outside click and use')
+
+      // Collapsed, the menu opens beside the strip over the session pane, so it reports itself as covering it.
+      await ui(`document.querySelector('.sidebar').style.width = ''; window.setCollapsed(true)`)
+      await until(`!!document.querySelector('.sidebar-collapsed [aria-label="More workspace actions"]')`, 'collapsed sidebar keeps More')
+      await click('[aria-label="More workspace actions"]')
+      await until(`!!document.querySelector('.sidebar-more-menu') && window.fixture.openChanges.at(-1) === true`, 'collapsed More menu reports it covers the session pane')
+      assert.equal(await ui(`document.querySelector('.sidebar-more-menu').getBoundingClientRect().left >= document.querySelector('.sidebar').getBoundingClientRect().right`), true, 'collapsed More menu opens beside the strip')
+      key('Escape')
+      await until(`!document.querySelector('.sidebar-more-menu') && window.fixture.openChanges.at(-1) === false`, 'closing the collapsed More menu uncovers the session pane')
+      await ui('window.setCollapsed(false)')
+      await until(`!document.querySelector('.sidebar-collapsed')`, 'sidebar expanded again')
+      checks.push('Collapsed More menu opens beside the strip and hides the session pane while open')
 
       await until(`JSON.stringify(window.fixture.views.at(-1)) === '{"group":"workspace","order":"manual"}'`, 'initial view reported to the menu')
       await ui(`window.fixture.requestView({ group: 'list' })`)

@@ -24,10 +24,15 @@ export async function runFanOutCheck() {
     const initial = await state()
     const profileId = initial.activeProfileId
     // Through the real dialog: open it from the sidebar, type the task, pick two sessions, submit.
-    // The sidebar's Fan out action, once the renderer has its state and a workspace is active.
-    const fanOutButton = '[aria-label="Fan out into several sessions"]'
-    await until(() => ui(`!!document.querySelector(${JSON.stringify(fanOutButton)}) && !document.querySelector(${JSON.stringify(fanOutButton)}).disabled`), 'Fan out action available')
-    await ui(`document.querySelector(${JSON.stringify(fanOutButton)}).click()`)
+    // The sidebar's Fan out action, in the header's More menu, once the renderer has its state and a workspace is active.
+    const moreButton = '[aria-label="More workspace actions"]'
+    const fanOutButton = `[...document.querySelectorAll('.sidebar-more-menu [role="menuitem"]')].find(item => item.textContent.includes('Fan out into sessions'))`
+    await until(() => ui(`!!document.querySelector(${JSON.stringify(moreButton)})`), 'More workspace actions available')
+    await until(async () => {
+      if (!await ui(`!!document.querySelector('.sidebar-more-menu')`)) await ui(`document.querySelector(${JSON.stringify(moreButton)}).click()`)
+      return ui(`!!(${fanOutButton}) && !(${fanOutButton}).disabled`)
+    }, 'Fan out action available')
+    await ui(`(${fanOutButton}).click()`)
     await until(() => ui('!!document.querySelector("#fan-out-count")'), 'fan-out dialog')
     await ui('(() => { const input = document.querySelector("#input-dialog-value"); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, "Reply with the saved marker."); input.dispatchEvent(new Event("input", { bubbles: true })) })()')
     await ui('(() => { const select = document.querySelector("#fan-out-count"); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, "2"); select.dispatchEvent(new Event("change", { bubbles: true })) })()')

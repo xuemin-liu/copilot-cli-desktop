@@ -278,6 +278,42 @@ button:disabled {
 .sidebar-projects-empty { margin: 12px 8px; color: #9ca4b3; }
 .sidebar-projects-button:focus-visible, .sidebar-projects-popover button:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
 
+.sidebar-heading-actions .icon-button[aria-expanded="true"] { background: #2b2e35; color: white; }
+
+.sidebar-more-menu {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  border: 1px solid #373b45;
+  border-radius: 10px;
+  background: #20232a;
+  color: #eef2f8;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 45%);
+}
+
+.sidebar-more-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.sidebar-more-item:hover:not(:disabled), .sidebar-more-item:focus-visible { background: #30343d; }
+.sidebar-more-item:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+.sidebar-more-icon { width: 20px; color: #9ca4b3; font-size: 16px; text-align: center; }
+
 .sidebar-compact-sessions {
   display: flex;
   flex-direction: column;
