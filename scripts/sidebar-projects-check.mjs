@@ -230,6 +230,19 @@ if (!process.versions.electron) {
       assert.equal(await ui('document.querySelectorAll(".sidebar-projects-button").length'), 0)
       checks.push('Expanding sidebar dismisses flyout and reports unobscured')
 
+      // The expanded list removes a workspace from its row too: hidden until hovered, and blocked while it has a session.
+      const removeRow = '.workspace-heading button[aria-label="Remove Project 2"]'
+      assert.equal(await ui(`getComputedStyle(document.querySelector(${JSON.stringify(removeRow)})).opacity`), '0')
+      await ui('window.fixture.calls.length = 0')
+      await click(removeRow)
+      await until(`getComputedStyle(document.querySelector(${JSON.stringify(removeRow)})).opacity === '1'`, 'hovered row shows remove')
+      assert.deepEqual(await ui('window.fixture.calls'), ['remove:project-2'])
+      await ui(`window.setAttentionTabs([{id:'open',title:'Open',workspaceProfileId:'project-2',status:'running',lastSessionId:null,lastActivityAt:1}])`)
+      await until(`document.querySelector(${JSON.stringify(removeRow)}).disabled`, 'open session blocks remove')
+      assert.match(await ui(`document.querySelector(${JSON.stringify(removeRow)}).title`), /^Close the session open in Project 2/)
+      await ui('window.setAttentionTabs([])')
+      checks.push('Expanded workspace row removes the workspace, and an open session blocks it')
+
       // At the app's 280px sidebar and the narrow window's 224px one, the header keeps its label and
       // three actions, and none may reach past the heading's padding.
       for (const [width, padding] of [['280px', ''], ['224px', '8px']]) {

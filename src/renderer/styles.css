@@ -331,8 +331,13 @@ button:disabled {
 .sidebar-session-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .sidebar-collapsed .sidebar-session-actions { flex-direction: column; align-items: center; }
 .workspace-row[aria-current="true"] { background: #2b2e35; }
-.workspace-heading { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; }
+.workspace-heading { display: grid; grid-template-columns: minmax(0, 1fr) 28px 28px; align-items: center; }
 .workspace-new-session { width: 28px; height: 28px; font-size: 18px; }
+/* Shown on hover or focus so the list stays quiet; the disabled state still explains itself in its title. */
+.workspace-remove { width: 28px; height: 28px; opacity: 0; }
+.workspace-heading:hover .workspace-remove,
+.workspace-heading:focus-within .workspace-remove { opacity: 1; }
+@media (hover: none) { .workspace-remove { opacity: 1; } }
 .workspace-heading .workspace-row { min-width: 0; }
 .sidebar-collapsed .workspace-heading { grid-template-columns: minmax(0, 1fr) 20px; }
 .sidebar-collapsed .workspace-new-session { width: 20px; }
