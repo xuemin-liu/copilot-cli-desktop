@@ -52,6 +52,10 @@ if (!process.versions.electron) {
       if (request.url === '/frame') { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<h2>Attachment preview</h2><p>Frame attachment content</p><input value="private-frame-form">'); return }
       if (request.url === '/child') { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<h1>Linked issue APP-456</h1>'); return }
       response.writeHead(200, { 'content-type': 'text/html' })
+      if (request.url === '/?slow') { setTimeout(() => sendTicket(response), 1500); return }
+      sendTicket(response)
+    })
+    const sendTicket = response => {
       response.end(`<!doctype html><title>APP-123</title><style>body{font:16px sans-serif}section{height:1500px}</style>
         <h1>APP-123: Broken layout</h1><p>Description: verify dynamic ticket reading</p>
         <input type="password" value="private-password"><input type="text" value="private-username">
@@ -69,7 +73,7 @@ if (!process.versions.electron) {
         <iframe src="http://localhost:${site.address().port}/frame"></iframe>
         <section>Scroll to more fields</section><p>Last field: priority high</p>
         <script>localStorage.setItem('token','private-storage');fetch('/ticket.json');setTimeout(()=>document.getElementById('dynamic').textContent='Dynamic linked issue APP-789',80)</script>`)
-    })
+    }
     await new Promise(accept => site.listen(0, accept))
     const window = new BrowserWindow({ show: false, width: 1000, height: 900 })
     await window.loadURL('data:text/html,<title>Browser reader fixture</title>')
@@ -88,7 +92,18 @@ if (!process.versions.electron) {
       browser.setBounds({ x: 0, y: 0, width: 900, height: 750 })
       window.showInactive()
       await browser.open(); await second.open()
-      await browser.navigate(`http://127.0.0.1:${site.address().port}/`)
+      // The ticket's fetch runs while the never-loaded page's first document loads; Chromium 156 enables capture only after
+      // a first commit, so the browser commits about:blank first. That entry must not stay in history, and while the slow
+      // address loads the browser keeps showing it rather than the blank page.
+      const ticket = `http://127.0.0.1:${site.address().port}/?slow`
+      const shown = new Set()
+      const watch = setInterval(() => shown.add(browser.snapshot.url), 20)
+      try { await browser.navigate(ticket) } finally { clearInterval(watch) }
+      shown.add(browser.snapshot.url)
+      assert.ok(!shown.has('about:blank'), `the address never reads about:blank during a slow first load: ${[...shown]}`)
+      assert.ok(shown.has(ticket))
+      assert.deepEqual(browser.view.webContents.navigationHistory.getAllEntries().map(entry => entry.url), [ticket])
+      assert.equal(browser.snapshot.canGoBack, false, 'Back does not return to the blank page that enabled capture')
       const page = String(browser.view.webContents.id)
       await until(async () => (await browserCommand(['snapshot', page])).text?.includes('Dynamic linked issue'), 'dynamic page snapshot')
       const snapshot = await browserCommand(['snapshot', page])
