@@ -348,7 +348,7 @@ test('a session that runs in a worktree shows its branch as a chip, in the toolt
   assert.match(compact, /aria-label="1: Fix login \(worktree desktop-fix-login-abc123\) — Idle — one"/)
 })
 
-test('the sidebar offers Fan out beside the attachment action, and rows started together share a label chip', () => {
+test('the sidebar header keeps Fan out in its More menu, and rows started together share a label chip', () => {
   const profile: WorkspaceProfile = {
     id: 'one', name: 'one', path: 'D:\\one', permissionPreset: 'default', defaultResumeMode: 'new',
     launch: { ...DEFAULT_SESSION_LAUNCH_CONFIG }, tabs: [],
@@ -362,7 +362,8 @@ test('the sidebar offers Fan out beside the attachment action, and rows started 
   const other = { ...tab, id: 'b', title: 'one 2/2' }
   const plain = { ...tab, id: 'c', title: 'Plain', fanOutLabel: null, worktree: null }
   const markup = renderAccess([profile], tab, false, [tab, other, plain])
-  assert.match(markup, /aria-label="Fan out into several sessions"/)
+  assert.match(markup, /aria-label="More workspace actions" aria-haspopup="menu" aria-expanded="false"/)
+  assert.doesNotMatch(markup, /aria-label="Fan out into several sessions"/)
   assert.equal((markup.match(/session-fanout-chip/g) ?? []).length, 2)
   assert.match(markup, /session-fanout-chip" title="Started together: fan-out · fix &lt;login&gt;">fan-out · fix &lt;login&gt;<\/span><span class="session-worktree-chip"/)
   assert.match(markup, /aria-label="one 1\/2 \(worktree desktop-one-1-2-abc123\) \[fan-out · fix &lt;login&gt;\] — Idle"/)

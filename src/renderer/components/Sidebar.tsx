@@ -1,6 +1,6 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { JSX } from 'react'
+import type { JSX, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
 import type { MeetingView } from '../../main/meeting.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
@@ -40,6 +40,46 @@ function writeSidebarPreference(key: string, value: string): void {
   } catch {
     // A locked-down renderer can refuse storage; the in-memory choice still works.
   }
+}
+
+// A flyout closes on a pointer or focus outside it and its button, on Escape (focus returns
+// to the button), and on resize, since its position was measured for the old window.
+function useFlyoutDismiss(open: boolean, popover: RefObject<HTMLElement | null>, button: RefObject<HTMLElement | null>, close: () => void): void {
+  useEffect(() => {
+    if (!open) return
+    const inside = (node: EventTarget | null): boolean => node instanceof Node && (popover.current?.contains(node) === true || button.current?.contains(node) === true)
+    const outside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !inside(event.target)) close()
+    }
+    const focusOutside = (event: FocusEvent): void => {
+      if (inside(event.target) && !inside(event.relatedTarget)) close()
+    }
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      close()
+      button.current?.focus()
+    }
+    document.addEventListener('pointerdown', outside, true)
+    document.addEventListener('focusout', focusOutside, true)
+    document.addEventListener('keydown', escape, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('pointerdown', outside, true)
+      document.removeEventListener('focusout', focusOutside, true)
+      document.removeEventListener('keydown', escape, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [open, popover, button, close])
+}
+
+interface HeaderAction {
+  label: string
+  icon: string
+  title?: string
+  disabled?: boolean
+  run: () => void
 }
 
 export interface SidebarProps {
@@ -121,6 +161,13 @@ export function Sidebar({
   const projectsId = useId()
   const projectsPopover = useRef<HTMLDivElement>(null)
   const projectsButton = useRef<HTMLButtonElement>(null)
+  const dismissProjects = useCallback(() => setProjectsOpen(false), [])
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [moreCovers, setMoreCovers] = useState(false)
+  const moreId = useId()
+  const moreMenu = useRef<HTMLDivElement>(null)
+  const moreButton = useRef<HTMLButtonElement>(null)
+  const dismissMore = useCallback(() => setMoreOpen(false), [])
   const [openActionsTabId, setOpenActionsTabId] = useState<string | null>(null)
   const [groupMode, setGroupMode] = useState<'workspace' | 'list'>(() => readSidebarPreference('sidebar-group-mode') === 'list' ? 'list' : 'workspace')
   const [orderMode, setOrderMode] = useState<'manual' | 'last-updated'>(() => readSidebarPreference('sidebar-order-mode') === 'last-updated' ? 'last-updated' : 'manual')
@@ -142,40 +189,15 @@ export function Sidebar({
   const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? null
   useEffect(() => {
     if (!collapsed) setProjectsOpen(false)
+    setMoreOpen(false)
   }, [collapsed])
+  // Either flyout can cover the session pane, whose native browser view would otherwise draw over it.
   useEffect(() => {
-    onProjectsOpenChange?.(collapsed && projectsOpen)
+    onProjectsOpenChange?.((collapsed && projectsOpen) || moreCovers)
     return () => onProjectsOpenChange?.(false)
-  }, [collapsed, projectsOpen, onProjectsOpenChange])
-  useEffect(() => {
-    if (!projectsOpen) return
-    const dismiss = (): void => setProjectsOpen(false)
-    const outside = (event: PointerEvent): void => {
-      if (event.target instanceof Node && !projectsPopover.current?.contains(event.target) && !projectsButton.current?.contains(event.target)) dismiss()
-    }
-    const focusOutside = (event: FocusEvent): void => {
-      const fromProjects = event.target instanceof Node && (projectsPopover.current?.contains(event.target) || projectsButton.current?.contains(event.target))
-      const toProjects = event.relatedTarget instanceof Node && (projectsPopover.current?.contains(event.relatedTarget) || projectsButton.current?.contains(event.relatedTarget))
-      if (fromProjects && !toProjects) dismiss()
-    }
-    const escape = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      event.stopPropagation()
-      dismiss()
-      projectsButton.current?.focus()
-    }
-    document.addEventListener('pointerdown', outside, true)
-    document.addEventListener('focusout', focusOutside, true)
-    document.addEventListener('keydown', escape, true)
-    window.addEventListener('resize', dismiss)
-    return () => {
-      document.removeEventListener('pointerdown', outside, true)
-      document.removeEventListener('focusout', focusOutside, true)
-      document.removeEventListener('keydown', escape, true)
-      window.removeEventListener('resize', dismiss)
-    }
-  }, [projectsOpen])
+  }, [collapsed, projectsOpen, moreCovers, onProjectsOpenChange])
+  useFlyoutDismiss(projectsOpen, projectsPopover, projectsButton, dismissProjects)
+  useFlyoutDismiss(moreOpen, moreMenu, moreButton, dismissMore)
   const closeProjects = (): void => {
     setProjectsOpen(false)
     projectsButton.current?.focus()
@@ -199,6 +221,47 @@ export function Sidebar({
     const target = selected ?? first
     target?.focus()
   }, [projectsOpen])
+  // Expanded, the menu drops below its button, right-aligned; collapsed, it opens beside the strip.
+  useLayoutEffect(() => {
+    const menu = moreMenu.current
+    const button = moreButton.current
+    if (!moreOpen || !menu || !button) {
+      setMoreCovers(false)
+      return
+    }
+    menu.style.maxHeight = ''
+    const anchor = button.getBoundingClientRect()
+    const { width, height } = menu.getBoundingClientRect()
+    const left = collapsed ? anchor.right + 12 : anchor.right - width
+    const placedLeft = Math.max(8, Math.min(left, window.innerWidth - width - 8))
+    menu.style.left = `${placedLeft}px`
+    if (collapsed) {
+      menu.style.top = `${Math.max(8, Math.min(anchor.top, window.innerHeight - height - 8))}px`
+    } else {
+      // Never over its own button: below it, else above it, else below it and scrolling.
+      const below = anchor.bottom + 4
+      const above = anchor.top - 4 - height
+      const fitsBelow = below + height <= window.innerHeight - 8
+      menu.style.top = `${fitsBelow || above < 8 ? below : above}px`
+      if (!fitsBelow && above < 8) menu.style.maxHeight = `${Math.max(64, window.innerHeight - below - 8)}px`
+    }
+    const sidebarRight = button.closest('.sidebar')?.getBoundingClientRect().right ?? 0
+    setMoreCovers(placedLeft + width > sidebarRight)
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+  }, [moreOpen, collapsed])
+  const moveMenuFocus = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')]
+    if (items.length === 0) return
+    const current = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = event.key === 'ArrowDown' ? (current + 1) % items.length
+      : event.key === 'ArrowUp' ? (current - 1 + items.length) % items.length
+        : event.key === 'Home' ? 0
+          : event.key === 'End' ? items.length - 1
+            : null
+    if (next === null) return
+    event.preventDefault()
+    items[next]?.focus()
+  }
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
   const activeTabProfile = activeTab
     ? profiles.find((profile) => profile.id === activeTab.workspaceProfileId) ?? null
@@ -216,6 +279,15 @@ export function Sidebar({
   const orderTabs = (items: DesktopSessionTab[]): DesktopSessionTab[] => orderMode === 'last-updated'
     ? [...items].sort((left, right) => right.lastActivityAt - left.lastActivityAt)
     : items
+  // The header keeps only Search, Add workspace and this menu, so new actions belong here and can never push it wider.
+  const noProject = activeProfileId === null || !canOpenTab
+  const moreActions: HeaderAction[] = [
+    { label: 'New session with attachments', icon: '＋⃞', disabled: noProject, run: onCreateTabWithAttachments },
+    { label: 'Fan out into sessions', icon: '⫶', title: 'Start the same task in several sessions, each in its own worktree', disabled: noProject, run: onFanOut },
+    { label: 'Resume a session', icon: '☰', title: 'Resume a Copilot session', disabled: noProject, run: onResumePicker },
+    { label: 'Session history', icon: '◷', title: 'Find a closed session by its prompts and reopen it (Ctrl+Shift+H)', run: onOpenHistory },
+    { label: 'Connect to remote', icon: '⇄', title: 'Connect to a remote Copilot session', disabled: noProject, run: onConnectRemote },
+  ]
   const workspaceName = (tab: DesktopSessionTab): string | undefined => profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name
   const workspaceRow = (profile: WorkspaceProfile): JSX.Element => (
     <div key={profile.id} className="workspace-heading">
@@ -355,63 +427,38 @@ export function Sidebar({
           <button
             type="button"
             className="icon-button"
-            title="New session with attachments"
-            aria-label="New session with attachments"
-            disabled={activeProfileId === null || !canOpenTab}
-            onClick={onCreateTabWithAttachments}
-          >
-            ＋⃞
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            title="Fan out: start the same task in several sessions, each in its own worktree"
-            aria-label="Fan out into several sessions"
-            disabled={activeProfileId === null || !canOpenTab}
-            onClick={onFanOut}
-          >
-            ⫶
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            title="Resume a Copilot session"
-            aria-label="Resume a Copilot session"
-            disabled={activeProfileId === null || !canOpenTab}
-            onClick={onResumePicker}
-          >
-            ☰
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            title="Session history: find a closed session by its prompts and reopen it (Ctrl+Shift+H)"
-            aria-label="Session history"
-            onClick={onOpenHistory}
-          >
-            ◷
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            title="Connect to a remote Copilot session"
-            aria-label="Connect to a remote Copilot session"
-            disabled={activeProfileId === null || !canOpenTab}
-            onClick={onConnectRemote}
-          >
-            ⇄
-          </button>
-          <button
-            type="button"
-            className="icon-button"
             title="Add workspace"
             aria-label="Add workspace"
             onClick={onSelectWorkspace}
           >
             ＋
           </button>
+          <button
+            type="button"
+            className="icon-button"
+            ref={moreButton}
+            title="More workspace actions"
+            aria-label="More workspace actions"
+            aria-haspopup="menu"
+            aria-expanded={moreOpen}
+            aria-controls={moreOpen ? moreId : undefined}
+            onClick={() => setMoreOpen((open) => !open)}
+          >
+            ⋯
+          </button>
         </div>
       </div>
+      {moreOpen && createPortal(<div id={moreId} ref={moreMenu} className="sidebar-more-menu" role="menu"
+        aria-label="More workspace actions" onKeyDown={moveMenuFocus}>
+        {moreActions.map((action) => (
+          <button key={action.label} type="button" role="menuitem" className="sidebar-more-item"
+            title={action.title} disabled={action.disabled}
+            onClick={() => { setMoreOpen(false); action.run() }}>
+            <span className="sidebar-more-icon" aria-hidden="true">{action.icon}</span>
+            <span>{action.label}</span>
+          </button>
+        ))}
+      </div>, document.body)}
 
       <NeedsYou items={workflowAttention(tabs, meetings, workflowTasks,workflowFollowups,workflowDeliveries)} compact={collapsed} onExpand={onToggleCollapsed} onActivate={onActivateTab} />
       {!collapsed && <WorkflowTasks tasks={workflowTasks} tabs={tabs} installedCliVersion={installedCliVersion} onRestart={onRestartTab} followups={workflowFollowups} defaults={workflowFollowupDefaults} error={workflowError ?? workflowFollowupError ?? null} />}
