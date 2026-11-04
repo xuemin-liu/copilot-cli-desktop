@@ -1158,6 +1158,8 @@ function persistProfileTabs(): void {
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
+          ...(tab.unloaded ? { unloaded: true as const } : {}),
+          ...(tab.id === tabsState.activeTabId ? { active: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
           ...(tab.lastSessionId && tab.sessionPermissionMode && !tab.sideChat
@@ -2100,8 +2102,11 @@ function withSessionChoices(profile: WorkspaceProfile | null, options: NewSessio
 
 function activateSessionTab(tabId: string): DesktopState {
   const popout = sessionWindows.get(tabId)
+  const previous = tabsState.activeTabId
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
+  // The saved tabs mark the one on screen, which a restart shows again.
+  if (tabsState.activeTabId !== previous) persistProfileTabs()
   followActiveTabWorkspace()
   if (popout) focusSessionWindow(popout)
   else restoreMainWindow()
@@ -3298,6 +3303,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
+    unloaded: candidate.unloaded === true,
   })
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
@@ -3423,17 +3429,21 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
       catch (error) { await writeAppLog(`Failed to start a session for ${profile.path}: ${String(error)}`) }
       return
     }
+    // The tab that was on screen when it was saved is shown again; a config from an older release shows the last one.
     let last: string | null = null
+    let shown: string | null = null
     for (const candidate of restored) {
       if (shuttingDown() || tabsState.tabs.length >= MAX_SESSION_TABS) break
       try { last = addDormantSessionTab(profile, candidate) }
       catch (error) { await writeAppLog(`Failed to restore tab for ${profile.path}: ${String(error)}`); continue }
+      if (candidate.active) shown = last
       const remaining = (unrestoredProfileTabs.get(profile.id) ?? []).filter(saved => saved !== candidate)
       if (remaining.length) unrestoredProfileTabs.set(profile.id, remaining)
       else unrestoredProfileTabs.delete(profile.id)
     }
-    if (activate && last) {
-      tabsState = activateTab(tabsState, last)
+    const target = shown ?? last
+    if (activate && target) {
+      tabsState = activateTab(tabsState, target)
       desktopConfig.activeProfileId = profile.id
       syncWorkspaceState()
     }

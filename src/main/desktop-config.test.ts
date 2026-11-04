@@ -256,6 +256,19 @@ test('a saved tab keeps whether its title follows Copilot and whether a rename s
   ])
 })
 
+test('a saved tab keeps whether it was unloaded and whether it was on screen', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
+    { title: 'Asleep', lastSessionId: 'a', unloaded: true },
+    { title: 'Shown', lastSessionId: 'b', active: true },
+    { title: 'Bad flags', lastSessionId: 'c', unloaded: 'yes', active: 1 },
+  ] }] })
+  assert.deepEqual(config.profiles[0]!.tabs, [
+    { title: 'Asleep', lastSessionId: 'a', unloaded: true },
+    { title: 'Shown', lastSessionId: 'b', active: true },
+    { title: 'Bad flags', lastSessionId: 'c' },
+  ])
+})
+
 test('a saved tab keeps whether it was started in its own worktree', () => {
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
     { title: 'In a worktree', lastSessionId: null, launchWorktree: true },

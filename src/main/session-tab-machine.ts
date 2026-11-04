@@ -33,6 +33,8 @@ export interface NewTabInput {
   launchWorktree?: boolean
   launchWorktreePath?: string
   privateOverrides?: boolean
+  /** A saved tab that was unloaded: it waits for Resume instead of starting when shown. */
+  unloaded?: boolean
 }
 
 export function createTab(state: TabsState, input: NewTabInput): TabsState {
@@ -73,6 +75,7 @@ function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleSt
     ...(input.privateOverrides ? { privateOverrides: true as const } : {}),
     ...(input.autoTitle !== undefined ? { autoTitle: input.autoTitle } : {}),
     ...(input.renamePending ? { renamePending: true as const } : {}),
+    ...(input.unloaded && status === 'dormant' ? { unloaded: true as const } : {}),
   }
 }
 
