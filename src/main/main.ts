@@ -133,7 +133,7 @@ import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
-import { MeetingTurnReader } from './meeting-turns.js'
+import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
   GUEST_ENDPOINT_FILE, GUEST_HELPER, GUEST_HELPER_SH, GUEST_ID_PATTERN, GUEST_SEATS_FILE, GuestMailbox, guestHelperCommand, guestHostInvitation, guestInvitation,
@@ -739,7 +739,7 @@ async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,au
                   &&store.active(sessionId)?.id===task.id
                 const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},10*60_000);timer.unref()
                 automaticTurns.set(tabId,{deliveryId:delivery.id,grant,session,timer,stopping:false,authorized:stillAuthorized})
-                meetingReader(tabId).expectDesktopPrompt();return true
+                meetingReader(tabId).expectDesktopPrompt(delivery.text);return true
               },
               beforeEnter:()=>automaticTurns.get(tabId)?.authorized()===true&&!automaticTurns.get(tabId)?.stopping,
               aborted:()=>{if(automaticTurns.get(tabId)?.deliveryId===delivery.id)endAutomatic(tabId,false)},
@@ -839,7 +839,7 @@ async function openFollowups():Promise<WorkflowFollowups> {
             store.submitted(grant.sessionId,grant.projectId,delivery.text)
             const timer=setTimeout(()=>{interruptAutomatic(grant);broadcastState()},10*60_000);timer.unref()
             automaticTurns.set(tab.id,{deliveryId:delivery.id,grant,session,timer,stopping:false,authorized:()=>controller.authorized(grant)})
-            meetingReader(tab.id).expectDesktopPrompt()
+            meetingReader(tab.id).expectDesktopPrompt(delivery.text)
             return true
           },
           beforeEnter:()=>automaticTurns.get(tab.id)?.deliveryId===delivery.id&&controller.authorized(grant)&&managedTabs.get(tab.id)?.session===session&&!automaticTurns.get(tab.id)?.stopping,
@@ -2391,6 +2391,30 @@ function meetingReader(tabId: string): MeetingTurnReader {
   return reader
 }
 
+/**
+ * Typing can be lost without any error (observed in meeting W7A4: the delivery was submitted, but the session never recorded
+ * the message). If the session records no matching prompt in time, the delivery becomes uncertain for the person to retry or
+ * discard; it is never typed again automatically and the session's later turns are not taken as its answer.
+ */
+const MEETING_PROMPT_CONFIRM_MS = 60_000
+const meetingPromptChecks = new Map<string, NodeJS.Timeout>()
+function confirmMeetingPrompt(tabId: string, deliveryId: string, seen: number): void {
+  clearTimeout(meetingPromptChecks.get(tabId))
+  const timer = setTimeout(() => {
+    if (meetingPromptChecks.get(tabId) === timer) meetingPromptChecks.delete(tabId)
+    const run = meetingJournalTurns.get(tabId)
+    if (run?.id !== deliveryId || meetingReader(tabId).desktopPromptCount !== seen) return
+    void writeAppLog(`Meeting ${run.meetingId}: session ${tabId} did not record the typed message within ${MEETING_PROMPT_CONFIRM_MS / 1000} s; the handoff is uncertain.`).catch(() => {})
+    endMeetingJournal(tabId, false)
+    meetingOutbox.turnEnded(tabId)
+    meetingReader(tabId).cancelExpectedDesktopPrompt()
+    broadcastState()
+    scheduleMeetingPump(0)
+  }, MEETING_PROMPT_CONFIRM_MS)
+  timer.unref()
+  meetingPromptChecks.set(tabId, timer)
+}
+
 function meetingParty(tabId: string): { tabId: string; title: string; folder: string | null } {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
@@ -2477,7 +2501,14 @@ const meetingOutbox = new MeetingOutbox({
     const allowed=():boolean=>!shuttingDown()&&!workflowsPaused(tabsState.tabs.find(t=>t.id===tabId)?.workspaceProfileId)
     return allowed()&&!automaticTurns.has(tabId)&&!workflowDestinationBlocked(tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId??null)&&meetingPromptShown(tabId)&&sendSessionCommand(tabId,command,allowed)
   },
-  sent: (tabId) => {const run=meetingJournalTurns.get(tabId);if(run)deliveryJournal?.submitted(run.id);meetingReader(tabId).expectDesktopPrompt();broadcastState()},
+  sent: (tabId,delivery) => {
+    const run=meetingJournalTurns.get(tabId)
+    if(run)deliveryJournal?.submitted(run.id)
+    const reader=meetingReader(tabId)
+    reader.expectDesktopPrompt(delivery.text)
+    if(run)confirmMeetingPrompt(tabId,run.id,reader.desktopPromptCount)
+    broadcastState()
+  },
   refused: (tabId, delivery, message) => {
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
   },
@@ -2802,12 +2833,20 @@ function onMeetingIdle(tabId: string): void {
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
   endAutomatic(tabId,Boolean(turn?.desktop))
-  if (delivery) meetingHub.turnCompleted(tabId, delivery, turn?.desktop ? turn.reply : '')
-  endMeetingJournal(tabId,Boolean(turn?.desktop))
+  // Only a turn confirmed as the typed prompt answers it; otherwise the reviewer stays awaited and the handoff uncertain.
+  const reply = confirmedMeetingReply(turn)
+  if (delivery && reply !== null) meetingHub.turnCompleted(tabId, delivery, reply)
+  else if (delivery) {
+    clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
+    meetingReaders.get(tabId)?.cancelExpectedDesktopPrompt()
+    void writeAppLog(`Meeting ${delivery.meetingId}: session ${tabId} went idle without recording the typed message; the handoff is uncertain.`).catch(() => {})
+  }
+  endMeetingJournal(tabId,reply !== null)
   scheduleMeetingPump(0)
 }
 
 function forgetMeetingSession(tabId: string): void {
+  clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
   endAutomatic(tabId,false)
   endMeetingJournal(tabId,false)
   sessionLastOutputAt.delete(tabId)

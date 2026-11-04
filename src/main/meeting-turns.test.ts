@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingTurnReader } from './meeting-turns.js'
+import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 
 const record = (type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}): string => JSON.stringify({ type, data, ...extra })
 const user = (content: string, interactionId = 'i1'): string => record('user.message', { content, interactionId })
@@ -35,6 +35,49 @@ test('the prompt the desktop typed is marked as the desktop\'s; the next one the
   assert.equal(reader.consume(user('join meeting K7QF', 'i2'))?.desktop, false)
   assert.equal(reader.answeringPerson, true)
   assert.equal(reader.consume(user('[meeting K7QF · round 1 · from the desktop]\n...', 'i3'))?.desktop, true, 'by its marker')
+})
+
+test('a typed prompt that never arrived does not claim the person\'s next message (meeting W7A4)', () => {
+  const reader = new MeetingTurnReader()
+  reader.expectDesktopPrompt('Investigate this source in the dedicated checkout.\nExpected revision: abc')
+  assert.equal(reader.desktopPromptCount, 0)
+  assert.equal(reader.consume(user('why are you stuck?'))?.desktop, false, 'an unrelated prompt is the person\'s')
+  assert.equal(reader.answeringPerson, true)
+  assert.equal(reader.diagnostic.expectingDesktop, false, 'the expectation is settled, not carried to a later prompt')
+  assert.equal(reader.desktopPromptCount, 0, 'the delivery is not confirmed')
+  reader.finish()
+  assert.equal(reader.consume(user('Investigate this source in the dedicated checkout.', 'i2'))?.desktop, false, 'nor is a later look-alike')
+})
+
+test('only a turn confirmed as the typed prompt yields a meeting reply; the person\'s turn or no turn does not', () => {
+  const reader = new MeetingTurnReader()
+  reader.expectDesktopPrompt('[meeting W7A4 · round 1 · from the desktop]\nReview this')
+  reader.consume(user('why are you stuck?'))
+  reader.consume(JSON.stringify({ type: 'assistant.message', data: { content: 'Waiting for the meeting material.', toolRequests: [] } }))
+  assert.equal(confirmedMeetingReply(reader.finish()), null, 'the person\'s answer is not recorded as the review')
+  assert.equal(confirmedMeetingReply(reader.finish()), null, 'idle with no prompt recorded is not an empty review')
+  reader.expectDesktopPrompt('[meeting W7A4 · round 2 · from the desktop]\nReview this')
+  reader.consume(user('[meeting W7A4 · round 2 · from the desktop]\nReview this', 'i2'))
+  reader.consume(JSON.stringify({ type: 'assistant.message', data: { content: 'Looks good.', toolRequests: [] } }))
+  assert.equal(confirmedMeetingReply(reader.finish()), 'Looks good.')
+})
+
+test('the expected prompt is confirmed by its text, CRLF and surrounding whitespace aside, or by a paste placeholder', () => {
+  const reader = new MeetingTurnReader()
+  reader.expectDesktopPrompt('  Investigate this source.\r\nExpected revision: abc')
+  assert.equal(reader.consume(user('Investigate this source.\nExpected revision: abc'))?.desktop, true)
+  assert.equal(reader.desktopPromptCount, 1)
+  reader.finish()
+  reader.expectDesktopPrompt('Investigate this source.')
+  assert.equal(reader.consume(user('[Paste #1 - 40 lines]', 'i2'))?.desktop, true, 'older CLIs record a placeholder')
+  assert.equal(reader.desktopPromptCount, 2)
+  reader.finish()
+  reader.expectDesktopPrompt('[meeting K7QF · round 2 · from the desktop]\nReview this')
+  assert.equal(reader.consume(user('[meeting K7QF · round 2 · from the desktop]\nReview this', 'i3'))?.desktop, true)
+  assert.equal(reader.desktopPromptCount, 3)
+  reader.expectDesktopPrompt('Investigate this source.')
+  reader.reset('monitor-attached')
+  assert.equal(reader.consume(user('Investigate this source.', 'i4'))?.desktop, false, 'a new monitor drops the expectation')
 })
 
 test('subagent records, other interactions and unreadable lines are ignored; chunked messages are joined', () => {
