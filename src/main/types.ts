@@ -40,6 +40,10 @@ export interface RestoredTab {
   autoTitle?: boolean
   /** A rename made in the desktop that had not reached Copilot when the tab was saved. */
   renamePending?: true
+  /** The tab was unloaded: after a restart it still waits for Resume. */
+  unloaded?: true
+  /** The tab on screen when it was saved: a restart shows it again instead of the project's last tab. */
+  active?: true
 }
 
 export interface WorkspaceProfile {
@@ -67,7 +71,7 @@ export interface DesktopSessionTab {
   sessionCwd?: string | null
   /** Set when `sessionCwd` is a linked worktree of a repository in the workspace folder. Runtime-only. */
   worktree?: SessionWorktreeInfo | null
-  /** Dormant because it was unloaded: it waits for Resume instead of starting when shown. Runtime-only; not restored. */
+  /** Dormant because it was unloaded: it waits for Resume instead of starting when shown, also after a restart. */
   unloaded?: true
   /** Sessions started together by one fan-out share this label. Runtime-only; not restored. */
   fanOutLabel?: string | null

@@ -1424,6 +1424,25 @@ test('a restored tab that fails to start stays saved, shows as crashed, and star
   assert.ok(harness.spawns[0]!.args.some(arg => arg.endsWith(FORK)), harness.spawns[0]!.args.join(' '))
 }))
 
+test('a restart shows the tab that was on screen, and an unloaded tab still waits for Resume', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  // Two sessions with one name: the one resumed last was on screen, the other was unloaded after it.
+  profile.tabs = [{ title: 'x', lastSessionId: SOURCE, active: true }, { title: 'x', lastSessionId: FORK, unloaded: true }]
+  await harness.restore()
+  const state = await harness.request('desktop:get-state')
+  assert.equal(state.activeTabId, state.tabs[0]!.id)
+  assert.deepEqual(state.tabs.map(tab => [tab.status, tab.unloaded ?? false]), [['running', false], ['dormant', true]])
+  assert.equal(harness.spawns.length, 1)
+  assert.ok(harness.spawns[0]!.args.some(arg => arg.endsWith(SOURCE)), harness.spawns[0]!.args.join(' '))
+  await harness.request('desktop:activate-tab', state.tabs[1]!.id)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.equal(harness.spawns.length, 1, 'showing the unloaded tab does not start it')
+  await harness.flushConfig()
+  const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
+  assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.lastSessionId, tab.active ?? false, tab.unloaded ?? false]),
+    [[SOURCE, false, false], [FORK, true, true]])
+}))
+
 test('saved tabs that are never shown never start, and closing one starts nothing', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.tabs = [{ title: 'First', lastSessionId: SOURCE }, { title: 'Second', lastSessionId: FORK }, { title: 'Shown', lastSessionId: null }]
