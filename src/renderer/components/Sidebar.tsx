@@ -289,6 +289,15 @@ export function Sidebar({
     { label: 'Connect to remote', icon: '⇄', title: 'Connect to a remote Copilot session', disabled: noProject, run: onConnectRemote },
   ]
   const workspaceName = (tab: DesktopSessionTab): string | undefined => profiles.find((profile) => profile.id === tab.workspaceProfileId)?.name
+  const removeProfileButton = (profile: WorkspaceProfile, className = 'icon-button'): JSX.Element => {
+    const open = tabs.filter((tab) => tab.workspaceProfileId === profile.id).length
+    const title = open > 0
+      ? `Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} to remove it`
+      : `Remove ${profile.name} from the list (its folder is not changed)`
+    return <button type="button" className={className} disabled={open > 0}
+      aria-label={`Remove ${profile.name}`} title={title}
+      onClick={() => { closeProjects(); onRemoveProfile(profile) }}><RemoveIcon /></button>
+  }
   const workspaceRow = (profile: WorkspaceProfile): JSX.Element => (
     <div key={profile.id} className="workspace-heading">
       <button type="button" className="workspace-row"
@@ -301,17 +310,9 @@ export function Sidebar({
       <button type="button" className="icon-button workspace-new-session"
         aria-label={`New session in ${profile.name}`} title={`New session in ${profile.name}${profile.id === activeProfileId ? ' (Ctrl+T)' : ''}`}
         disabled={!canOpenTab} onClick={() => onCreateTab(profile.id)}>+</button>
+      {removeProfileButton(profile, 'icon-button workspace-remove')}
     </div>
   )
-  const removeProfileButton = (profile: WorkspaceProfile): JSX.Element => {
-    const open = tabs.filter((tab) => tab.workspaceProfileId === profile.id).length
-    const title = open > 0
-      ? `Close the ${open === 1 ? 'session' : `${open} sessions`} open in ${profile.name} to remove it`
-      : `Remove ${profile.name} from the list (its folder is not changed)`
-    return <button type="button" className="icon-button" disabled={open > 0}
-      aria-label={`Remove ${profile.name}`} title={title}
-      onClick={() => { closeProjects(); onRemoveProfile(profile) }}><RemoveIcon /></button>
-  }
   const [now, setNow] = useState(() => Date.now())
   const ticking = tabs.some((tab) => tab.status === 'running' && tab.activityDetail)
   useEffect(() => {
