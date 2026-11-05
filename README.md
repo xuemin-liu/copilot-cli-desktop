@@ -330,7 +330,7 @@ too. It needs MCP or a shell tool.
      next message), `meeting_reply` with its answer, and `meeting_show` for material too long to include, in pages.
    - **Guest helper:** `next` (waits up to 100 seconds), `reply` with a file, and `show`.
 3. The agent joins with its first `meeting_next` or `next` and then reviews and votes like any other reviewer. The meeting
-   bar lists it as a guest, with **Remove**, and says when it stopped polling.
+   bar lists it as a guest, with **Remove**, and says when it stopped checking in.
 
 The meeting tools are served by the desktop at `http://127.0.0.1:47391/mcp`, a streamable HTTP MCP server. Add it to an
 agent once; it needs no key, because it listens only on this computer. For Claude Code:

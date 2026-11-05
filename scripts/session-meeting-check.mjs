@@ -201,13 +201,13 @@ export async function runMeetingCheck() {
 
     await mkdir(dirname(replyPath), { recursive: true })
     await writeFile(replyPath, `Guest review: three retries is fine. ${GUEST_REVIEW_MARK}\n`)
-    assert.equal((await guest('reply', '-File', replyPath)).out, 'Reply sent. Run next for the next message.')
-    assert.equal(await tools.call('meeting_reply', { text: `Tool review: the lock looks right. ${TOOL_REVIEW_MARK}` }), 'Reply sent. Call meeting_next for the next message.')
+    assert.equal((await guest('reply', '-File', replyPath)).out, 'Reply sent. Run next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.')
+    assert.equal(await tools.call('meeting_reply', { text: `Tool review: the lock looks right. ${TOOL_REVIEW_MARK}` }), 'Reply sent. Call meeting_next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.')
     // The vote: each guest polls until it comes, then agrees.
     const vote = await until(async () => { const next = await guest('next', '-Wait', '30'); return / · vote · from the desktop\]/.test(next.out) ? next : null }, 'vote reached the guest', 150_000)
     const votePath = /To answer, write your whole reply to (.+?) and run the reply command/.exec(vote.out)[1]
     await writeFile(votePath, 'AGREE: the guest agrees.\n')
-    assert.equal((await guest('reply', '-File', votePath)).out, 'Reply sent. Run next for the next message.')
+    assert.equal((await guest('reply', '-File', votePath)).out, 'Reply sent. Run next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.')
     await until(async () => / · vote · from the desktop\]/.test(await tools.call('meeting_next', { wait_seconds: 30 })), 'vote reached the tool agent', 150_000)
     await tools.call('meeting_reply', { text: 'AGREE: the tool agent agrees.' })
 

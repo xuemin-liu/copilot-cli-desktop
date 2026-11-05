@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
+import { guestQuiet, guestStalled, type GuestContact } from '../../main/meeting-contact.js'
 import type { MeetingView } from '../../main/meeting.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 
@@ -34,10 +35,15 @@ const OUTCOME: Record<NonNullable<MeetingView['outcome']>, string> = {
   'host-left': 'Closed: the host session closed',
 }
 
-/** A guest polls about every 100 s; one quiet for longer than this has probably stopped. */
-export const GUEST_QUIET_MS = 3 * 60_000
 /** A guest that stops polling also stops the state updates that re-render the bar, so the bar ticks on its own. */
 const GUEST_CLOCK_MS = 30_000
+
+/** What the desktop knows of a quiet guest, and no more: one holding a message may be working on it, or may have stopped. */
+function GuestQuietNote({ contact, now }: { contact: GuestContact; now: number }): JSX.Element | null {
+  if (!guestQuiet(contact, now)) return null
+  const time = new Date(contact.lastSeenAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return <span className="meeting-bar-quiet"> · {guestStalled(contact, now) ? `no contact since ${time}` : `last contact ${time}, message delivered`}</span>
+}
 
 /** Where the meeting stands, in a few words. */
 export function meetingStageLabel(meeting: MeetingView, titleOf: (tabId: string) => string): string {
@@ -47,7 +53,7 @@ export function meetingStageLabel(meeting: MeetingView, titleOf: (tabId: string)
       const waiting = meeting.waitingFor.map(titleOf)
       return `${meeting.discussing ? 'Reviewers answering each other' : meeting.vote ? 'Voting' : 'Reviewing'}${waiting.length ? ` · waiting for ${waiting.join(', ')}` : ''}`
     }
-    case 'host': return 'The host is answering'
+    case 'host': return 'Waiting for the host\'s answer'
     case 'paused': return meeting.pauseReason === 'round-limit' ? `Paused at the ${meeting.maxRounds}-round limit` : 'Paused: the host did not answer'
     case 'closed': return meeting.outcome ? OUTCOME[meeting.outcome] : 'Closed'
   }
@@ -69,7 +75,7 @@ export function formatMeetingCost(cost: MeetingView['cost'], withGuests = false)
  */
 export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow, toolsUrl = null }: MeetingBarProps): JSX.Element | null {
   const [clock, setClock] = useState(() => Date.now())
-  const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && meeting.participants.some((participant) => participant.guest))
+  const ticking = fixedNow === undefined && meetings.some((meeting) => meeting.stage !== 'closed' && (meeting.hostGuest || meeting.participants.some((participant) => participant.guest)))
   useEffect(() => {
     if (!ticking) return undefined
     setClock(Date.now())
@@ -153,19 +159,16 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
               ? <button type="button" className="meeting-bar-button meeting-bar-stop" onClick={() => act(meeting, 'stop')}>{meeting.stage === 'paused' ? 'End' : 'Stop'}</button>
               : <button type="button" className="icon-button" aria-label={`Dismiss meeting ${meeting.id}`}
                   onClick={() => setDismissed((previous) => new Set([...previous, meeting.id]))}>×</button>}
-            {open && (guests.length > 0 || pending.length > 0) && (
+            {open && (meeting.hostGuest || guests.length > 0 || pending.length > 0) && (
               <ul className="meeting-bar-guests" aria-label={`Outside agents in meeting ${meeting.id}`}>
-                {guests.map((guest) => {
-                  const lastSeenAt = guest.guest?.lastSeenAt ?? null
-                  const quiet = lastSeenAt !== null && now - lastSeenAt > GUEST_QUIET_MS
-                  return (
-                    <li key={guest.tabId}>
-                      {named(guest)}
-                      {quiet && <span className="meeting-bar-quiet"> · not polling since {new Date(lastSeenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
-                      <button type="button" className="meeting-bar-button" onClick={() => act(meeting, 'remove', guest.tabId)}>Remove</button>
-                    </li>
-                  )
-                })}
+                {meeting.hostGuest && <li>{meeting.hostTitle} · host<GuestQuietNote contact={meeting.hostGuest} now={now} /></li>}
+                {guests.map((guest) => (
+                  <li key={guest.tabId}>
+                    {named(guest)}
+                    {guest.guest && <GuestQuietNote contact={guest.guest} now={now} />}
+                    <button type="button" className="meeting-bar-button" onClick={() => act(meeting, 'remove', guest.tabId)}>Remove</button>
+                  </li>
+                ))}
                 {pending.map((guest) => (
                   <li key={guest.id}>
                     {guest.name}{guest.role ? ` (${guest.role})` : ''} · invited, not connected yet

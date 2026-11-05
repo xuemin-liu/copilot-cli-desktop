@@ -133,6 +133,7 @@ import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
+import { GuestStallNotices, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
 import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
@@ -2569,6 +2570,7 @@ const meetingHub = new MeetingHub(meetingRoot, {
 function guestRoot(): string { return join(app.getPath('userData'), 'meeting-guest') }
 /** Guests are answered once saved meetings are restored; before that a guest's meeting may only look closed. */
 let guestsReady = false
+let guestsReadyAt = 0
 let guestSeatsWrite: Promise<void> = Promise.resolve()
 let guestEndpointWrite: Promise<void> = Promise.resolve()
 const guestMailbox = new GuestMailbox(realMeetingTimers, () => {
@@ -2616,6 +2618,10 @@ const guestDeps: GuestDeps = {
     catch (error) { if (error instanceof MeetingError) return { ok: false, message: error.message }; throw error }
   },
   status: (seat) => meetingStatus(seat.id),
+  waitingOn: (seat) => {
+    const view = meetingHub.views().find((meeting) => meeting.id === seat.meetingId)
+    return view ? meetingWaitingOn(view, seat.id) : null
+  },
   changes: async (seat) => {
     const runner = await meetingGitRunner()
     if (!runner) throw new Error('Git is not available on this computer, so no changes can be attached.')
@@ -2665,14 +2671,22 @@ async function startGuestMcp(): Promise<void> {
 /** The hub's views, with what only main knows: which parties are guests, and who is invited but not connected yet. */
 function meetingViews(): MeetingView[] {
   const guests = guestMailbox.views()
-  return meetingHub.views().map((meeting) => ({
-    ...meeting,
-    participants: meeting.participants.map((participant) => {
-      const seat = guests.find((guest) => guest.id === participant.tabId)
-      return seat ? { ...participant, guest: { lastSeenAt: seat.lastSeenAt } } : participant
-    }),
-    invited: guests.filter((guest) => guest.meetingId === meeting.id && !guest.joined).map(({ id, name, role }) => ({ id, name, role })),
-  }))
+  const contactOf = (partyId: string): GuestContact | null => {
+    const seat = guests.find((guest) => guest.id === partyId)
+    return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding } : null
+  }
+  return meetingHub.views().map((meeting) => {
+    const hostGuest = contactOf(meeting.hostTabId)
+    return {
+      ...meeting,
+      ...(hostGuest ? { hostGuest } : {}),
+      participants: meeting.participants.map((participant) => {
+        const guest = contactOf(participant.tabId)
+        return guest ? { ...participant, guest } : participant
+      }),
+      invited: guests.filter((guest) => guest.meetingId === meeting.id && !guest.joined).map(({ id, name, role }) => ({ id, name, role })),
+    }
+  })
 }
 
 /** Unused invitations expire; seats over for an hour are forgotten, with their reply folders. */
@@ -2680,6 +2694,24 @@ const guestSweepTimer = setInterval(() => {
   for (const seat of guestMailbox.sweep()) void rm(guestSeatFolder(guestRoot(), seat.id), { recursive: true, force: true }).catch(() => {})
 }, 60_000)
 guestSweepTimer.unref()
+
+/**
+ * An outside agent that ended its turn cannot be woken, and nothing else would tell: the person hears, once per quiet spell,
+ * and the meeting goes on as it was. A wait starting makes no state update of its own, so the bar is told about those here.
+ */
+const guestStallNotices = new GuestStallNotices()
+let guestContactShown = ''
+const guestContactTimer = setInterval(() => {
+  if (!guestsReady) return
+  for (const stall of guestStallNotices.take(meetingStalls(meetingViews(), Date.now(), guestsReadyAt))) {
+    const who = stall.host ? `${stall.title}, its host,` : stall.title
+    void writeAppLog(`Meeting ${stall.meetingId}: ${who} stopped checking in.`).catch(() => {})
+    showNotification('Copilot CLI Desktop', `Meeting ${stall.meetingId}: ${who} stopped checking in. Tell it to call meeting_next until the meeting is closed.`)
+  }
+  const contact = guestMailbox.views().map(({ id, waiting, holding }) => `${id}:${waiting}:${holding}`).join()
+  if (contact !== guestContactShown) { guestContactShown = contact; broadcastState() }
+}, 30_000)
+guestContactTimer.unref()
 
 async function restoreGuestSeats(): Promise<void> {
   try { guestMailbox.restore(JSON.parse(await readFile(join(guestRoot(), GUEST_SEATS_FILE), 'utf8'))) } catch { /* None saved yet. */ }
@@ -2793,9 +2825,7 @@ function meetingStatus(partyId: string): string {
   const current = meetingHub.meetingOf(partyId)
   const view = current ? meetingHub.views().find((meeting) => meeting.id === current.id) : undefined
   if (!view) return 'You are not in an open meeting.'
-  const waiting = view.waitingFor.map((id) => tabsState.tabs.find((candidate) => candidate.id === id)?.title
-    ?? view.participants.find((participant) => participant.tabId === id)?.title ?? id)
-  return `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s)${waiting.length ? `; waiting for ${waiting.join(', ')}` : ''}.`
+  return `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s). ${meetingWaitingOn(view, partyId)}`
 }
 
 /**
@@ -3516,6 +3546,7 @@ async function restoreMeetings(): Promise<void> {
     }
   } finally {
     guestsReady = true
+    guestsReadyAt = Date.now()
     guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
     await startGuestMcp()
   }
