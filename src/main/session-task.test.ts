@@ -5,7 +5,7 @@ import type { SessionTaskState } from './session-task.js'
 
 const ready: SessionTaskState = {
   status: 'running', activity: 'idle', promptVisible: true, preset: 'default', sideChat: false, remote: false,
-  draft: false, recentInput: false, picker: false, typing: false, bracketedPaste: true,
+  draft: false, recentInput: false, picker: false, dialog: false, typing: false, bracketedPaste: true,
 }
 
 test('only complete terminal replies preserve an initial recipient; navigation and mixed input do not', () => {
@@ -20,7 +20,7 @@ test('a task is sent only when the session is idle and its prompt box is untouch
   assert.deepEqual(sessionTaskDecision({ ...ready, activity: null }), { result: 'sent' }, 'before the first turn the prompt footer shows it is ready')
   for (const busy of [
     { activity: 'working' as const }, { activity: null, promptVisible: false }, { status: 'approval-needed' as const },
-    { draft: true }, { recentInput: true }, { picker: true }, { typing: true }, { bracketedPaste: false },
+    { draft: true }, { recentInput: true }, { picker: true }, { dialog: true }, { typing: true }, { bracketedPaste: false },
   ]) assert.equal(sessionTaskDecision({ ...ready, ...busy }).result, 'busy', JSON.stringify(busy))
 })
 

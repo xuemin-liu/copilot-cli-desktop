@@ -26,6 +26,8 @@ export interface SessionTaskState {
   recentInput: boolean
   /** Still on the resume picker, where typed text would pick something. */
   picker: boolean
+  /** A command may have opened a dialog, which would take typed text and choose something on Enter. */
+  dialog: boolean
   /** The desktop is already typing into this session (a `/rename`). */
   typing: boolean
   /** The terminal has bracketed paste on, so a multi-line task arrives as one paste instead of a line at a time. */
@@ -58,7 +60,7 @@ export function sessionTaskDecision(state: SessionTaskState, needsWrite = true):
   if (blocker) return { result: 'refused', message: blocker }
   const idle = state.activity === 'idle' || (state.activity === null && state.promptVisible)
   if (state.status === 'approval-needed' || !idle) return { result: 'busy', message: 'Copilot is busy.' }
-  if (state.picker || state.typing || state.draft || state.recentInput) return { result: 'busy', message: 'The prompt box is in use.' }
+  if (state.picker || state.dialog || state.typing || state.draft || state.recentInput) return { result: 'busy', message: 'The prompt box is in use.' }
   if (!state.bracketedPaste) return { result: 'busy', message: 'The task has several lines, and this terminal would send each one on its own.' }
   return { result: 'sent' }
 }

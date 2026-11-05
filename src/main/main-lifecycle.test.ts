@@ -2094,6 +2094,27 @@ test('failed restart setup never restores held input after a native conversation
   assert.ok(old_handoff===undefined||old_handoff.state==='uncertain',`cancelled callback reconciles the old handoff, not ${old_handoff?.state}`)
 }))
 
+test('a command dialog keeps out every automatic sender, not only meetings, until it is closed',async()=>fixture(async(h,directory)=>{
+  const {profile}=configure(h,directory);profile.tabs=[{title:'A',lastSessionId:SOURCE}]
+  const path=join(directory,'session-state',SOURCE,'events.jsonl')
+  await mkdir(dirname(path),{recursive:true});await writeFile(path,JSON.stringify({type:'session.start',data:{sessionId:SOURCE,startTime:new Date().toISOString()}})+'\n')
+  await h.restoreSaved();const id=(await h.request('desktop:get-state')).activeTabId!,pty=h.spawns[0]!
+  h.configureBinding(id,7700,[7700]);await writeFile(join(dirname(path),'inuse.7700.lock'),'');await h.refreshRecords(id)
+  pty.emitData('\x1b[?2004h <- open sidebar\r\n')
+  await h.request('desktop:write-tab',id,'/model');await h.request('desktop:write-tab',id,'\r')
+  pty.emitData(' <- open sidebar\r\n Search models\r\n Scanning local providers · ↑/↓ to navigate · enter to select\r\n')
+  await h.request('desktop:write-tab',id,'\x1b[B')
+  await pause(2100)
+  const before=[...pty.written]
+  assert.equal(h.automaticPaste(id,()=>true).result,'busy','automatic work')
+  assert.equal(h.composedPaste(id).result,'busy','a composed task')
+  assert.deepEqual(pty.written,before,'nothing went into the dialog')
+  // Esc closes it, and the session can take work again.
+  await h.request('desktop:write-tab',id,'\x1b')
+  await pause(2100)
+  assert.equal(h.composedPaste(id).result,'sent')
+}))
+
 test('an unnamed session starts without --name and its tab takes the name Copilot gives it', async () => {
   await fixture(async (harness, directory) => {
     const { profile } = configure(harness, directory)

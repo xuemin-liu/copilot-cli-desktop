@@ -2251,7 +2251,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
   const recipientId=tab.lastSessionId
   // Idle by its event log, or (before any turn) showing the prompt's footer.
   const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
-  if (!ready || (!closing && (!draft.empty || !draft.quiet()))) return false
+  if (!ready || (!closing && (!draft.empty || !draft.quiet() || sessionDialogMayBeOpen(tabId)))) return false
   // Ctrl+C on the resume picker would leave it, not clear a prompt.
   if (closing && draft.beforeFirstEnter) return false
   if (heldInput.has(tabId)) return false
@@ -2299,7 +2299,7 @@ function sessionTaskAvailability(tabId:string,needsWrite=true):SessionTaskSend {
   const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId)?.session,draft=promptDrafts.get(tabId)
   if(!tab||!session||!draft)return {result:'refused',message:'This session is not running. Start or resume it first.'}
   return sessionTaskDecision({status:tab.status,activity:session.activity,promptVisible:session.recentOutputText.includes('open sidebar'),preset:tab.sessionPermissionPreset,
-    sideChat:tab.sideChat===true,remote:tab.remote,draft:!draft.empty,recentInput:!draft.quiet(),picker:draft.beforeFirstEnter,typing:heldInput.has(tabId),bracketedPaste:session.bracketedPaste},needsWrite)
+    sideChat:tab.sideChat===true,remote:tab.remote,draft:!draft.empty,recentInput:!draft.quiet(),picker:draft.beforeFirstEnter,dialog:sessionDialogMayBeOpen(tabId),typing:heldInput.has(tabId),bracketedPaste:session.bracketedPaste},needsWrite)
 }
 function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void;maximumChars?:number}): SessionTaskSend {
   if(!hooks&&(automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)))return {result:'busy',message:'An automatic task turn is still running.'}
@@ -2346,7 +2346,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
   const session = managed.session
   const recipientId=tab.lastSessionId
   const ready = session.activity === 'idle' || (session.activity === null && session.recentOutputText.includes('open sidebar'))
-  if (!ready || !draft.empty || !draft.quiet() || draft.beforeFirstEnter || heldInput.has(tabId)) return false
+  if (!ready || !draft.empty || !draft.quiet() || draft.beforeFirstEnter || sessionDialogMayBeOpen(tabId) || heldInput.has(tabId)) return false
   const held: string[] = []
   heldInput.set(tabId, held)
   const text = command.replace(/[\u0000-\u001f\u007f]/g, '')
@@ -2440,11 +2440,11 @@ function meetingPromptSettled(tabId: string): boolean {
 }
 
 function meetingPromptShown(tabId: string): boolean {
-  return meetingPromptSettled(tabId) && !meetingDialogMayBeOpen(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
+  return meetingPromptSettled(tabId) && !sessionDialogMayBeOpen(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
 }
 
 /** After a command, a dialog may have the keyboard: typed text would go into it, and Enter would choose something there. */
-function meetingDialogMayBeOpen(tabId: string): boolean {
+function sessionDialogMayBeOpen(tabId: string): boolean {
   const draft = promptDrafts.get(tabId)
   const session = managedTabs.get(tabId)?.session
   if (!draft?.afterCommand || !session) return false
@@ -2475,7 +2475,7 @@ function meetingBlockReason(tabId: string): string | null {
   if (workflowsPaused(tab.workspaceProfileId)) return 'Automatic work is paused for this project.'
   if (draft.beforeFirstEnter) return 'Its session picker is open. Choose a session in that tab.'
   if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
-  if (meetingDialogMayBeOpen(tabId)) return 'It may have a menu or dialog open. Close it with Esc, and the message goes in.'
+  if (sessionDialogMayBeOpen(tabId)) return 'It may have a menu or dialog open. Close it with Esc, and the message goes in.'
   if (session.activity !== 'idle' && session.activity !== null) return 'It is still working on another turn.'
   const binding = session.bindingDiagnostic
   if (binding.kind === 'bound' && !binding.deliveryReady) return 'Its CLI holds more than one session, so the desktop cannot tell which would receive the message. Restart this session to continue.'
