@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { cleanRole, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, MEETING_HELPER_COMMAND, roundPaths } from './meeting-messages.js'
+import type { GuestContact } from './meeting-contact.js'
 import type { MeetingDelivery, MeetingTimers } from './meeting.js'
 
 /**
@@ -15,7 +16,7 @@ export const GUEST_ID_PATTERN = /^guest:[0-9a-f]{16}$/
 /** A reviewer's commands, then a host's. */
 export const GUEST_COMMANDS = ['next', 'reply', 'show', 'leave', 'start', 'round', 'propose-close', 'end', 'status'] as const
 export type GuestCommand = typeof GUEST_COMMANDS[number]
-const HOST_COMMANDS: readonly GuestCommand[] = ['start', 'round', 'propose-close', 'end', 'status']
+const HOST_COMMANDS: readonly GuestCommand[] = ['start', 'round', 'propose-close', 'end']
 export type GuestKind = 'reviewer' | 'host'
 export const GUEST_MATERIAL = ['post', 'changes', 'replies', 'transcript'] as const
 export type GuestMaterial = typeof GUEST_MATERIAL[number]
@@ -34,6 +35,11 @@ export const GUEST_SEATS_FILE = 'seats.json'
 export const GUEST_ENDPOINT_FILE = 'endpoint.json'
 
 const CLOSED = 'The meeting is closed.'
+/**
+ * What invitations say, and every answer on the way repeats. An agent gets messages only by asking, and nothing can wake one
+ * that stopped; a meeting joined by its id has no invitation to tell it so.
+ */
+export const GUEST_STAY_IN_TURN = 'do not end your turn until the meeting is closed, unless the person tells you to'
 
 export interface GuestSeat {
   id: string
@@ -61,7 +67,7 @@ export interface GuestSeat {
 export type GuestChannel = 'helper' | 'mcp'
 
 /** What the meeting bar shows of a seat. */
-export interface GuestView { id: string; meetingId: string; kind: GuestKind; name: string; role: string | null; joined: boolean; lastSeenAt: number | null }
+export interface GuestView extends GuestContact { id: string; meetingId: string; kind: GuestKind; name: string; role: string | null; joined: boolean }
 
 interface Queue {
   items: MeetingDelivery[]
@@ -155,7 +161,7 @@ export class GuestMailbox {
   /** Open seats, joined or still invited. */
   views(): GuestView[] {
     return [...this.seats.values()].filter((seat) => seat.closed === null)
-      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt }) => ({ id, meetingId, kind, name, role, joined, lastSeenAt }))
+      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt }) => ({ id, meetingId, kind, name, role, joined, lastSeenAt, waiting: this.waiting(id), holding: this.given(id) !== null }))
   }
 
   /** The seat asked for something, through `via`: its messages from now on are worded for that channel. */
@@ -348,6 +354,8 @@ export interface GuestDeps {
   post(seat: GuestSeat, kind: 'round' | 'propose-close', text: string, changes: string | null): GuestResponse
   end(seat: GuestSeat): GuestResponse
   status(seat: GuestSeat): string
+  /** Whom its meeting waits for, in a sentence; null when that is not known. */
+  waitingOn(seat: GuestSeat): string | null
   /** The uncommitted changes of the host's folder (`seat.folder`). Throws with a message to show. */
   changes(seat: GuestSeat): Promise<string>
   /** A folder an agent names as its project, as a host without an invitation: why it cannot be used, or null. */
@@ -381,8 +389,13 @@ function nextStep(via: GuestChannel): string {
  */
 export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat, command: GuestCommand, fields: Record<string, unknown>, signal?: AbortSignal, via: GuestChannel = 'helper'): Promise<GuestResponse> {
   mailbox.seen(seat, via)
-  const nothingYet = `Nothing yet. ${nextStep(via)} again.`
-  if (seat.closed !== null) return { ok: true, message: mailbox.closing(seat) }
+  const nothingYet = (): string => {
+    const waitingOn = deps.waitingOn(seat)
+    return `Nothing yet. ${waitingOn ? `${waitingOn} ` : ''}${nextStep(via)} again; ${GUEST_STAY_IN_TURN}.`
+  }
+  // A closed meeting's closing message names its material, so that stays readable. A seat taken out of an open meeting reads no more.
+  const closedReading = command === 'show' && seat.closed === CLOSED
+  if (seat.closed !== null && !closedReading) return { ok: true, message: mailbox.closing(seat) }
   if (!deps.ready()) return { ok: true, message: `The desktop is starting. ${nextStep(via)} again in a minute.` }
   if (seat.kind === 'reviewer' && HOST_COMMANDS.includes(command)) return { ok: false, message: 'This invitation is for reviewing. Hosting a meeting needs a host invitation from the person.' }
   if (seat.kind === 'host') {
@@ -391,7 +404,10 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
     if (seat.meetingId !== '' && command === 'start') return { ok: false, message: `This invitation already started meeting ${seat.meetingId}.` }
     if (command === 'start') return hostStart(mailbox, deps, seat, fields, via)
   }
-  if (!deps.isOpen(seat.meetingId)) { mailbox.close(seat.id, CLOSED); return { ok: true, message: mailbox.closing(seat) } }
+  if (!deps.isOpen(seat.meetingId)) {
+    mailbox.close(seat.id, CLOSED)
+    if (command !== 'show') return { ok: true, message: mailbox.closing(seat) }
+  }
   switch (command) {
     case 'next': {
       if (!seat.joined) {
@@ -400,7 +416,8 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
         mailbox.joined(seat)
       }
       const wait = Math.round(Number(fields.wait ?? (via === 'mcp' ? GUEST_MCP_WAIT_SECONDS : GUEST_DEFAULT_WAIT_SECONDS)))
-      if (!Number.isFinite(wait) || wait < 1 || wait > GUEST_MAX_WAIT_SECONDS) return { ok: false, message: `The wait takes 1 to ${GUEST_MAX_WAIT_SECONDS} seconds.` }
+      const longest = via === 'mcp' ? GUEST_MCP_WAIT_SECONDS : GUEST_MAX_WAIT_SECONDS
+      if (!Number.isFinite(wait) || wait < 1 || wait > longest) return { ok: false, message: `The wait takes 1 to ${longest} seconds.` }
       // A host asking for the same replies again has let its turn pass without answering them, as a Copilot host's turn
       // ends: the hub reminds it once, then pauses the meeting.
       const unanswered = seat.kind === 'host' ? mailbox.given(seat.id) : null
@@ -412,8 +429,8 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       mailbox.seen(seat, via)
       if (seat.closed !== null) return { ok: true, message: mailbox.closing(seat) }
       // Nobody is listening: leave the next message for the call that is.
-      if (signal?.aborted) return { ok: true, message: nothingYet }
-      return { ok: true, message: mailbox.read(seat.id) ?? nothingYet }
+      if (signal?.aborted) return { ok: true, message: nothingYet() }
+      return { ok: true, message: mailbox.read(seat.id) ?? nothingYet() }
     }
     case 'reply': {
       const text = typeof fields.text === 'string' ? fields.text : ''
@@ -422,7 +439,7 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       const delivery = mailbox.answer(seat.id)
       if (!delivery) return { ok: false, message: `There is no message to answer. ${nextStep(via)}.` }
       deps.turnCompleted(seat, delivery, text)
-      return { ok: true, message: `Reply sent. ${nextStep(via)} for the next message.` }
+      return { ok: true, message: `Reply sent. ${nextStep(via)} for the next message; ${GUEST_STAY_IN_TURN}.` }
     }
     case 'show': {
       const name = GUEST_MATERIAL.find((candidate) => candidate === fields.name)
@@ -448,16 +465,11 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       const changes = command === 'round' ? await hostChanges(deps, seat, fields) : null
       if (changes !== null && typeof changes !== 'string') return changes
       const answer = deps.post(seat, command, text, changes)
-      if (!answer.ok) return answer
+      if (!answer.ok) return { ok: false, message: outsideHostWords(answer.message, via) }
       // The replies it had are answered; that turn of the host's is over.
       const answered = mailbox.answer(seat.id)
       if (answered) deps.turnCompleted(seat, answered, '')
-      // The hub words its answer for a Copilot host, whose turn ends; an outside host waits with next instead.
-      const message = answer.message
-        .replace('Their replies arrive as your next message; end your turn now.', `${nextStep(via)} to wait for their replies.`)
-        .replace(/; end your turn\.$/, `; ${nextStep(via).toLowerCase()} to wait.`)
-        .replace(/End your turn\.$/, `${nextStep(via)} to wait.`)
-      return { ok: true, message }
+      return { ok: true, message: outsideHostWords(answer.message, via) }
     }
     case 'end':
       return deps.end(seat)
@@ -466,6 +478,16 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
     case 'start':
       return { ok: false, message: 'Only a host invitation starts a meeting.' }
   }
+}
+
+/** The hub words its answers, refusals too, for a Copilot host, whose turn ends; an outside host waits with next instead. */
+function outsideHostWords(message: string, via: GuestChannel): string {
+  const wait = `${nextStep(via)} to wait for their replies; ${GUEST_STAY_IN_TURN}.`
+  return message
+    .replace('Their replies arrive as your next message; end your turn now.', wait)
+    .replace('End your turn; their replies arrive as your next message.', wait)
+    .replace(/; end your turn\.$/, `; ${nextStep(via).toLowerCase()} to wait.`)
+    .replace(/End your turn\.$/, `${nextStep(via)} to wait.`)
 }
 
 /** The post a host sends with start, round or propose-close; an error when there is none or it is too long. */
@@ -493,7 +515,7 @@ async function hostStart(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat
   mailbox.started(seat, started.meetingId)
   return {
     ok: true,
-    message: `Meeting ${started.meetingId} is open. Tell the person its id: they add reviewers by telling another agent "join meeting ${started.meetingId}", or from the desktop. ${nextStep(via)} to wait for their replies; they arrive together, once per round.`,
+    message: `Meeting ${started.meetingId} is open. Tell the person its id now, in a message that does not end your turn: they add reviewers by telling another agent "join meeting ${started.meetingId}", or from the desktop. ${nextStep(via)} to wait for their replies; they arrive together, once per round. Answer each round first, then ${nextStep(via).toLowerCase()} again; ${GUEST_STAY_IN_TURN}.`,
   }
 }
 
@@ -508,8 +530,8 @@ function hostCommandSwaps(via: GuestChannel): Array<[string, string]> {
     [`${MEETING_HELPER_COMMAND} propose-close -File <agreed items.md>`, mcp ? 'meeting_propose_close(items: "<the agreed items>")' : 'propose-close -File <agreed items.md>'],
     [`${MEETING_HELPER_COMMAND} end`, mcp ? 'meeting_end()' : 'end'],
     ['Then end your turn: the next replies arrive as your next message.', mcp
-      ? 'Then call meeting_next: the next replies arrive there.'
-      : 'Run them with the helper and token from your invitation, then run next: the next replies arrive there.'],
+      ? 'Then call meeting_next: the next replies arrive there. Calling it before you answer counts as not answering.'
+      : 'Run them with the helper and token from your invitation, then run next: the next replies arrive there. Running it before you answer counts as not answering.'],
   ]
 }
 

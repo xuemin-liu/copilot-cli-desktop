@@ -3,12 +3,17 @@ import { createServer, request } from 'node:http'
 import { join } from 'node:path'
 import test from 'node:test'
 import { MeetingHub, realMeetingTimers } from './meeting.js'
-import { GuestMailbox, GUEST_PAGE_CHARS, guestDeliveryText, type GuestDeps } from './meeting-guests.js'
+import { meetingWaitingOn } from './meeting-contact.js'
+import { GuestMailbox, GUEST_PAGE_CHARS, GUEST_STAY_IN_TURN, guestDeliveryText, type GuestDeps } from './meeting-guests.js'
 import { agentName, GUEST_MCP_TOOLS, GuestMcpServer, GuestMcpSessions, handleMcpMessage, type McpAnswer } from './meeting-guest-mcp.js'
 import { roundPaths } from './meeting-messages.js'
 
 const MEETINGS = join('C:', 'meetings')
 const realTimers = realMeetingTimers
+const STAY = GUEST_STAY_IN_TURN
+const FIRST_MESSAGE = `Call meeting_next for your first message. Answer each message with meeting_reply, then call meeting_next again; ${STAY}.`
+const REJOINED_HOST = `Rejoined meeting K7QF as host. Call meeting_next for the reviewers' replies. Answer each round first, then call meeting_next again; ${STAY}.`
+const REPLY_SENT = `Reply sent. Call meeting_next for the next message; ${STAY}.`
 const JOIN_FIRST = 'Call meeting_join first, with the meeting id or invitation the person gave you, or meeting_start to host a meeting. After a restart, pass the seat key you were given as the invitation.'
 
 /** A hub with a host, guests wired to it as main wires them, and an MCP client talking to `handleMcpMessage`. */
@@ -51,6 +56,10 @@ function meeting(): {
     },
     end: (seat) => { hub.end(seat.id); return { ok: true, message: 'The meeting is closed.' } },
     status: (seat) => `status of ${seat.meetingId}`,
+    waitingOn: (seat) => {
+      const view = hub.views().find((candidate) => candidate.id === seat.meetingId)
+      return view ? meetingWaitingOn(view, seat.id) : null
+    },
     changes: async () => 'diff --git a/login.cfg b/login.cfg\n+retry = 3\n',
     checkFolder: async (folder) => folder.startsWith('D:\\') ? null : `${folder} is not a folder.`,
   }
@@ -95,7 +104,7 @@ test('an agent joins with its invitation, reviews with the tools, pages the patc
 
   assert.deepEqual(await tool(session, 'meeting_next'), { text: JOIN_FIRST, isError: true })
   assert.deepEqual(await tool(session, 'meeting_join', { invitation: 'f'.repeat(64) }), { text: 'This invitation is not known to the desktop. Ask the person for a new one.', isError: true })
-  assert.deepEqual(await tool(session, 'meeting_join', { invitation: ` ${token} ` }), { text: 'Joined meeting K7QF as security reviewer. Call meeting_next for your first message.', isError: false })
+  assert.deepEqual(await tool(session, 'meeting_join', { invitation: ` ${token} ` }), { text: `Joined meeting K7QF as security reviewer. ${FIRST_MESSAGE}`, isError: false })
   assert.equal(mailbox.seat(seat.id)?.via, 'mcp')
 
   const post = await tool(session, 'meeting_next', { wait_seconds: 5 })
@@ -103,9 +112,9 @@ test('an agent joins with its invitation, reviews with the tools, pages the patc
   assert.ok(post.text.endsWith('To answer, call meeting_reply with your whole reply.'), 'no reply file for an agent with the tools')
   assert.match(post.text, /the result of meeting_show\(name: "post", round: 1\)/)
   assert.deepEqual(await tool(session, 'meeting_reply', { text: ' ' }), { text: 'The reply is empty. Call meeting_reply with your whole answer.', isError: true })
-  assert.deepEqual(await tool(session, 'meeting_reply', { text: 'Review: keyed by user, not session.' }), { text: 'Reply sent. Call meeting_next for the next message.', isError: false })
+  assert.deepEqual(await tool(session, 'meeting_reply', { text: 'Review: keyed by user, not session.' }), { text: REPLY_SENT, isError: false })
   assert.match(toHost.at(-1)!, /Review: keyed by user, not session\./)
-  assert.deepEqual(await tool(session, 'meeting_next', { wait_seconds: 1 }), { text: 'Nothing yet. Call meeting_next again.', isError: false })
+  assert.deepEqual(await tool(session, 'meeting_next', { wait_seconds: 1 }), { text: `Nothing yet. Waiting for the host, fix login race. Call meeting_next again; ${STAY}.`, isError: false })
 
   hub.post('tab-host', 'round', 'Plan v2', 'x'.repeat(GUEST_PAGE_CHARS + 3))
   const round2 = await tool(session, 'meeting_next', { wait_seconds: 5 })
@@ -205,6 +214,30 @@ test('the HTTP endpoint answers JSON on POST, refuses what a web page could send
   }
 })
 
+test('every request over HTTP refreshes the state, so a quiet agent that asks for its status clears from the bar at once', async () => {
+  const { hub, mailbox, deps } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const { seat, token } = mailbox.invite('K7QF', 'Claude Code', null)
+  let refreshed = 0
+  const server = new GuestMcpServer(mailbox, deps, () => { refreshed++ })
+  const port = (await server.listen(0))!
+  const json = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+  const call = (id: number, name: string, args: Record<string, unknown>): string => JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+  try {
+    const init = await http(port, 'POST', json, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }))
+    const headers = { ...json, 'mcp-session-id': String(init.headers['mcp-session-id']) }
+    await http(port, 'POST', headers, call(2, 'meeting_join', { invitation: token }))
+    seat.lastSeenAt = 1
+    const before = refreshed
+    const status = await http(port, 'POST', headers, call(3, 'meeting_status', {}))
+    assert.equal(JSON.parse(status.body).result.content[0].text, 'status of K7QF')
+    await until(() => refreshed > before, 'the state was refreshed')
+    assert.ok(seat.lastSeenAt > 1, 'its contact moved on before that refresh')
+  } finally {
+    await server.close()
+  }
+})
+
 test('a taken port leaves the tools off instead of failing', async () => {
   const blocker = createServer()
   await new Promise<void>((resolveListen) => blocker.listen(0, '127.0.0.1', () => resolveListen()))
@@ -239,7 +272,7 @@ test('an outside host uses the tools: start with its invitation, answer the roun
   // session to its open meeting, and says so, instead of an error the agent might stop at.
   const again = (await rpc(undefined, 'initialize', {})).sessionId!
   assert.deepEqual(await tool(again, 'meeting_start', { invitation: host.token, topic: 'again', post: 'again' }),
-    { text: 'Rejoined meeting K7QF as host. Call meeting_next for the reviewers\' replies.', isError: false })
+    { text: REJOINED_HOST, isError: false })
   assert.equal((await tool(again, 'meeting_status')).text, 'status of K7QF')
   assert.equal(hub.views().length, 1, 'no second meeting')
 
@@ -255,7 +288,7 @@ test('an outside host uses the tools: start with its invitation, answer the roun
   assert.match(digest.text, /Then call meeting_next: the next replies arrive there\./)
   assert.ok(!digest.text.includes('To answer, call meeting_reply'), 'a host gets no reviewer footer')
   assert.deepEqual(await tool(session, 'meeting_reply', { text: 'x' }), { text: 'As the host, answer with meeting_round, meeting_propose_close or meeting_end.', isError: true })
-  assert.equal((await tool(session, 'meeting_propose_close', { items: 'Lock on logout.' })).text, 'Sent round 2 to 1 reviewer. Call meeting_next to wait for their replies.')
+  assert.equal((await tool(session, 'meeting_propose_close', { items: 'Lock on logout.' })).text, `Sent round 2 to 1 reviewer. Call meeting_next to wait for their replies; ${STAY}.`)
   await tool(other, 'meeting_next', { wait_seconds: 5 })
   await tool(other, 'meeting_reply', { text: 'AGREE' })
   assert.match((await tool(session, 'meeting_next', { wait_seconds: 5 })).text, /^\[meeting K7QF · closed · from the desktop\]/)
@@ -293,10 +326,10 @@ test('an agent joins by meeting id alone, named after its client, and a second o
   assert.deepEqual(await tool(claude, 'meeting_join', {}), { text: 'Pass the meeting id the person gave you, such as meeting: "K7QF", or the invitation they pasted.', isError: true })
   assert.deepEqual(await tool(claude, 'meeting_join', { meeting: 'ZZZZ' }), { text: 'There is no open meeting ZZZZ.', isError: true })
   const joined = await tool(claude, 'meeting_join', { meeting: ' k7qf ', role: 'security reviewer' })
-  assert.match(joined.text, /^Joined meeting K7QF as security reviewer\. Call meeting_next for your first message\. Keep this seat key: /)
+  assert.match(joined.text, /^Joined meeting K7QF as security reviewer\. Call meeting_next for your first message\. .* Keep this seat key: /)
   assert.equal(mailbox.seatOf(keyOf(joined.text))?.name, 'Claude Code', 'the key is the seat\'s own token')
   assert.deepEqual(hub.views()[0]!.participants.map((party) => party.title), ['Claude Code (guest)'], 'joined at once: the meeting bar shows it')
-  assert.deepEqual(await tool(claude, 'meeting_join', { meeting: 'K7QF' }), { text: 'Joined meeting K7QF as security reviewer. Call meeting_next for your first message.', isError: false }, 'joining again changes nothing')
+  assert.deepEqual(await tool(claude, 'meeting_join', { meeting: 'K7QF' }), { text: `Joined meeting K7QF as security reviewer. ${FIRST_MESSAGE}`, isError: false }, 'joining again changes nothing')
 
   const second = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
   assert.match((await tool(second, 'meeting_join', { meeting: 'K7QF' })).text, /^Joined meeting K7QF\./)
@@ -309,7 +342,7 @@ test('an agent joins by meeting id alone, named after its client, and a second o
   const post = await tool(claude, 'meeting_next', { wait_seconds: 5 })
   assert.match(post.text, /^\[meeting K7QF · round 1 · from the desktop\]/)
   assert.ok(post.text.endsWith('To answer, call meeting_reply with your whole reply.'))
-  assert.deepEqual(await tool(claude, 'meeting_reply', { text: 'Keyed by user.' }), { text: 'Reply sent. Call meeting_next for the next message.', isError: false })
+  assert.deepEqual(await tool(claude, 'meeting_reply', { text: 'Keyed by user.' }), { text: REPLY_SENT, isError: false })
   for (const other of [second, codex, named]) { await tool(other, 'meeting_next', { wait_seconds: 5 }); await tool(other, 'meeting_reply', { text: 'Fine.' }) }
   assert.match(toHost.at(-1)!, /Keyed by user\./)
 
@@ -331,13 +364,13 @@ test('after a restart only the seat key gets a seat back: the same name gets a n
   const desktop = restarted(mailbox, deps)
   const again = await desktop.open('claude-code')
   assert.equal(await desktop.tool(again, 'meeting_next'), JOIN_FIRST)
-  assert.equal(await desktop.tool(again, 'meeting_join', { invitation: key }), 'Joined meeting K7QF. Call meeting_next for your first message.')
+  assert.equal(await desktop.tool(again, 'meeting_join', { invitation: key }), `Joined meeting K7QF. ${FIRST_MESSAGE}`)
   assert.equal(mailbox.seatsOf('K7QF').length, 1, 'the same seat, not a second one')
   assert.equal(await desktop.tool(again, 'meeting_next', { wait_seconds: 5 }), post.text, 'the message handed out stays given')
 
   // Another agent of the same client, by id alone: a seat of its own, never the first one's.
   const other = await desktop.open('claude-code')
-  assert.match(await desktop.tool(other, 'meeting_join', { meeting: 'K7QF' }), /^Joined meeting K7QF\. Call meeting_next for your first message\. Keep this seat key: /)
+  assert.match(await desktop.tool(other, 'meeting_join', { meeting: 'K7QF' }), /^Joined meeting K7QF\. Call meeting_next for your first message\. .* Keep this seat key: /)
   assert.deepEqual(mailbox.seatsOf('K7QF').map((entry) => entry.name), ['Claude Code', 'Claude Code 2'])
 })
 
@@ -349,14 +382,14 @@ test('an outside agent starts a meeting with its own folder, another of the same
   assert.equal(hub.views().length, 0)
   assert.equal(mailbox.views().length, 0, 'a start that failed leaves no open seat')
   const started = await tool(host, 'meeting_start', { topic: 'login race', post: 'Plan v1', folder: 'D:\\api', changes: true })
-  assert.match(started.text, /^Meeting K7QF is open\. Tell the person its id: they add reviewers by telling another agent "join meeting K7QF", or from the desktop\. Call meeting_next .* Keep this seat key: /)
+  assert.match(started.text, /^Meeting K7QF is open\. Tell the person its id now, in a message that does not end your turn: they add reviewers by telling another agent "join meeting K7QF", or from the desktop\. Call meeting_next .* Keep this seat key: /)
   const hostKey = keyOf(started.text)
   const seat = mailbox.seat(hub.views()[0]!.hostTabId)!
   assert.equal(seat.name, 'Claude Code')
   assert.equal(seat.folder, 'D:\\api')
   assert.equal(mailbox.seatOf(hostKey), seat)
   assert.deepEqual(await tool(host, 'meeting_start', { topic: 'again', post: 'again' }), { text: 'You are already in meeting K7QF. Close it with meeting_end first.', isError: true })
-  assert.deepEqual(await tool(host, 'meeting_join', { meeting: 'K7QF' }), { text: 'Rejoined meeting K7QF as host. Call meeting_next for the reviewers\' replies.', isError: false })
+  assert.deepEqual(await tool(host, 'meeting_join', { meeting: 'K7QF' }), { text: REJOINED_HOST, isError: false })
 
   const reviewer = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
   const reviewerKey = keyOf((await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })).text)
@@ -370,9 +403,9 @@ test('an outside agent starts a meeting with its own folder, another of the same
   assert.match(await desktop.tool(reviewerAgain, 'meeting_join', { meeting: 'K7QF' }), /^Joined meeting K7QF\. /)
   assert.equal(await desktop.tool(reviewerAgain, 'meeting_end'), 'This invitation is for reviewing. Hosting a meeting needs a host invitation from the person.')
   const hostAgain = await desktop.open('claude-code')
-  assert.equal(await desktop.tool(hostAgain, 'meeting_join', { invitation: hostKey }), 'Rejoined meeting K7QF as host. Call meeting_next for the reviewers\' replies.')
+  assert.equal(await desktop.tool(hostAgain, 'meeting_join', { invitation: hostKey }), REJOINED_HOST)
   assert.equal(await desktop.tool(hostAgain, 'meeting_status'), 'status of K7QF')
-  assert.equal(await desktop.tool(await desktop.open('claude-code'), 'meeting_join', { invitation: reviewerKey }), 'Joined meeting K7QF. Call meeting_next for your first message.')
+  assert.equal(await desktop.tool(await desktop.open('claude-code'), 'meeting_join', { invitation: reviewerKey }), `Joined meeting K7QF. ${FIRST_MESSAGE}`)
   assert.equal(hub.views().length, 1, 'no second meeting')
   assert.equal(hub.views()[0]!.hostTabId, seat.id, 'the host is still the host')
 })
@@ -414,4 +447,102 @@ test('a seat is named by what the agent passed, else by its client', () => {
   assert.equal(agentName(undefined, 'codex-mcp-client'), 'Codex')
   assert.equal(agentName(undefined, 'gemini-cli-mcp-client'), 'Gemini CLI')
   assert.equal(agentName('', null), 'Outside agent')
+})
+
+test('every answer on the way says to stay in the turn, since a meeting joined by id has no invitation to say it', async () => {
+  const { rpc, tool } = meeting()
+  const init = await rpc(undefined, 'initialize', {})
+  assert.ok(String((init.body as { result: { instructions: string } }).result.instructions).includes(STAY))
+  assert.match(GUEST_MCP_TOOLS.find((entry) => entry.name === 'meeting_next')!.description, /Keep calling it until the meeting is closed, answering each message first/)
+  const host = init.sessionId!
+  const started = await tool(host, 'meeting_start', { topic: 'login race', post: 'Plan v1' })
+  assert.match(started.text, /Tell the person its id now, in a message that does not end your turn/)
+  assert.ok(started.text.includes(STAY))
+  assert.deepEqual(await tool(host, 'meeting_next', { wait_seconds: 1 }), { text: `Nothing yet. Nobody has joined yet. Call meeting_next again; ${STAY}.`, isError: false })
+
+  const reviewer = (await rpc(undefined, 'initialize', {})).sessionId!
+  assert.ok((await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })).text.includes(STAY))
+  assert.deepEqual(await tool(host, 'meeting_next', { wait_seconds: 1 }), { text: `Nothing yet. Waiting for Outside agent 2 (guest). Call meeting_next again; ${STAY}.`, isError: false })
+})
+
+test('a round sent too early tells an outside host to wait with meeting_next, not to end its turn', async () => {
+  const { rpc, tool } = meeting()
+  const host = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(host, 'meeting_start', { topic: 'login race', post: 'Plan v1' })
+  const reviewer = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })
+  const answer = `The reviewers have not all answered yet. Call meeting_next to wait for their replies; ${STAY}.`
+  assert.deepEqual(await tool(host, 'meeting_round', { post: 'Plan v2' }), { text: answer, isError: true })
+  assert.deepEqual(await tool(host, 'meeting_propose_close', { items: 'Agreed.' }), { text: answer, isError: true })
+})
+
+test('a reviewer can ask where the meeting stands, but still cannot act as the host', async () => {
+  const { hub, rpc, tool } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const reviewer = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })
+  assert.deepEqual(await tool(reviewer, 'meeting_status'), { text: 'status of K7QF', isError: false })
+  assert.match((await tool(reviewer, 'meeting_end')).text, /This invitation is for reviewing/)
+  assert.equal(hub.views()[0]!.stage, 'reviewing')
+})
+
+test('a wait over the tools is capped under what clients allow; a bad value is still refused', async () => {
+  const { hub, mailbox, rpc, tool } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const session = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(session, 'meeting_join', { meeting: 'K7QF' })
+  assert.equal(GUEST_MCP_TOOLS.find((entry) => entry.name === 'meeting_next')!.inputSchema.properties.wait_seconds.maximum, 50)
+  const asked: number[] = []
+  mailbox.wait = async (_seatId, ms) => { asked.push(ms); return false }
+  for (const wait_seconds of [540, 120, 50, 5]) await tool(session, 'meeting_next', { wait_seconds })
+  await tool(session, 'meeting_next')
+  assert.deepEqual(asked, [50_000, 50_000, 50_000, 5_000, 50_000])
+  for (const wait_seconds of [0, 'soon']) assert.deepEqual(await tool(session, 'meeting_next', { wait_seconds }), { text: 'The wait takes 1 to 50 seconds.', isError: true })
+  assert.equal(asked.length, 5, 'refused before waiting')
+})
+
+test('a retry after the answer with the replies was lost gets a reminder that says where they are, and the host can still answer', async () => {
+  const { hub, rpc, tool } = meeting()
+  const host = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(host, 'meeting_start', { topic: 'login race', post: 'Plan v1' })
+  const reviewer = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })
+  await tool(reviewer, 'meeting_next', { wait_seconds: 1 })
+  await tool(reviewer, 'meeting_reply', { text: 'Keyed by user.' })
+  assert.match((await tool(host, 'meeting_next', { wait_seconds: 1 })).text, /round 1 · replies · from the desktop\]/)
+
+  // The client never saw that answer and asks again: to the desktop that is a host passing over the replies.
+  const reminder = await tool(host, 'meeting_next', { wait_seconds: 1 })
+  assert.match(reminder.text, /^\[meeting K7QF · reminder · from the desktop\]/)
+  assert.ok(reminder.text.includes('The reviewers\' replies are in the result of meeting_show(name: "replies", round: 1).'), reminder.text)
+  assert.match((await tool(host, 'meeting_show', { name: 'replies', round: 1 })).text, /Keyed by user\./)
+  assert.equal(hub.views()[0]!.stage, 'host', 'one retry does not pause the meeting')
+  assert.match((await tool(host, 'meeting_round', { post: 'Plan v2' })).text, /^Sent round 2 to 1 reviewer\./)
+})
+
+test('a closed meeting stays readable by those who took part to the end, not by a seat taken out earlier', async () => {
+  const { hub, mailbox, rpc, tool } = meeting()
+  const host = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(host, 'meeting_start', { topic: 'login race', post: 'Plan v1' })
+  const reviewer = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(reviewer, 'meeting_join', { meeting: 'K7QF' })
+  const removed = (await rpc(undefined, 'initialize', {})).sessionId!
+  await tool(removed, 'meeting_join', { meeting: 'K7QF', name: 'Removed' })
+  const removedSeat = mailbox.seatsOf('K7QF').find((seat) => seat.name === 'Removed')!
+  hub.leave(removedSeat.id)
+  mailbox.close(removedSeat.id, 'The person removed you from the meeting.')
+  await tool(reviewer, 'meeting_next', { wait_seconds: 1 })
+  await tool(reviewer, 'meeting_reply', { text: 'Fine.' })
+  await tool(host, 'meeting_next', { wait_seconds: 1 })
+  await tool(host, 'meeting_propose_close', { items: 'Lock on logout.' })
+  await tool(reviewer, 'meeting_next', { wait_seconds: 1 })
+  await tool(reviewer, 'meeting_reply', { text: 'AGREE' })
+  assert.equal(hub.views()[0]!.outcome, 'agreed')
+
+  const closing = await tool(host, 'meeting_next', { wait_seconds: 1 })
+  assert.match(closing.text, /the agreed items are in the result of meeting_show\(name: "post", round: 2\)/)
+  assert.match((await tool(host, 'meeting_show', { name: 'post', round: 2 })).text, /Lock on logout\./)
+  assert.match((await tool(reviewer, 'meeting_show', { name: 'transcript' })).text, /AGREE/)
+  assert.equal((await tool(removed, 'meeting_show', { name: 'transcript' })).text, 'The person removed you from the meeting.')
+  assert.equal((await tool(host, 'meeting_next', { wait_seconds: 1 })).text, 'The meeting is closed.')
 })

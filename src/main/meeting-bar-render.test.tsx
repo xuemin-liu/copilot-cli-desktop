@@ -41,8 +41,8 @@ test('outside agents are listed with Remove, a quiet one says since when, and in
     ...meeting,
     participants: [
       ...meeting.participants,
-      { tabId: 'guest:0123456789abcdef', title: 'Claude Code (guest)', role: 'performance', replied: false, guest: { lastSeenAt: now - 30_000 } },
-      { tabId: 'guest:fedcba9876543210', title: 'Codex (guest)', role: null, replied: false, guest: { lastSeenAt: now - 10 * 60_000 } },
+      { tabId: 'guest:0123456789abcdef', title: 'Claude Code (guest)', role: 'performance', replied: false, guest: { lastSeenAt: now - 30_000, waiting: false, holding: false } },
+      { tabId: 'guest:fedcba9876543210', title: 'Codex (guest)', role: null, replied: false, guest: { lastSeenAt: now - 10 * 60_000, waiting: false, holding: false } },
     ],
     waitingFor: ['tab-b', 'guest:0123456789abcdef'],
     invited: [{ id: 'guest:1111111111111111', name: 'Gemini', role: 'security' }],
@@ -51,9 +51,26 @@ test('outside agents are listed with Remove, a quiet one says since when, and in
   assert.match(html, /waiting for reviewer, Claude Code \(guest\) · reviewers: reviewer \(security reviewer\), Claude Code \(guest\) \(performance\), Codex \(guest\)/, 'a guest is named by its seat, not as a closed session')
   assert.match(html, /AI credits used \(Copilot sessions only\)/)
   assert.match(html, /<li>Claude Code \(guest\) \(performance\)<button[^>]*>Remove<\/button><\/li>/, 'a guest that polls is not flagged')
-  assert.match(html, /<li>Codex \(guest\)<span class="meeting-bar-quiet"> · not polling since [^<]+<\/span><button[^>]*>Remove<\/button><\/li>/)
+  assert.match(html, /<li>Codex \(guest\)<span class="meeting-bar-quiet"> · no contact since [^<]+<\/span><button[^>]*>Remove<\/button><\/li>/)
   assert.match(html, /Gemini \(security\) · invited, not connected yet<button[^>]*>Cancel<\/button>/)
   assert.match(html, />Invite outside agent…<\/button>/)
+})
+
+test('a quiet guest is told apart by what it holds, an open wait is not quiet, and an outside host is listed too', () => {
+  const now = Date.UTC(2026, 9, 28, 12, 0)
+  const quiet = now - 10 * 60_000
+  const hosted: MeetingView = {
+    ...meeting, hostTabId: 'guest:0123456789abcdef', hostTitle: 'Codex (guest)', hostGuest: { lastSeenAt: quiet, waiting: false, holding: false }, stage: 'host', waitingFor: [],
+    participants: [
+      { tabId: 'guest:1111111111111111', title: 'Holding (guest)', role: null, replied: false, guest: { lastSeenAt: quiet, waiting: false, holding: true } },
+      { tabId: 'guest:2222222222222222', title: 'Waiting (guest)', role: null, replied: false, guest: { lastSeenAt: quiet, waiting: true, holding: false } },
+    ],
+  }
+  const html = renderToStaticMarkup(<MeetingBar meetings={[hosted]} tabs={[tab('tab-a', 'some session')]} activeTabId="tab-a" onError={() => undefined} now={now} />)
+  assert.match(html, /Hosted by Codex \(guest\) · round 1 of 6 · Waiting for the host&#x27;s answer/, 'the bar does not claim the host is doing anything')
+  assert.match(html, /<li>Codex \(guest\) · host<span class="meeting-bar-quiet"> · no contact since [^<]+<\/span><\/li>/, 'no Remove: a host is not a reviewer')
+  assert.match(html, /<li>Holding \(guest\)<span class="meeting-bar-quiet"> · last contact [^<]+, message delivered<\/span><button/)
+  assert.match(html, /<li>Waiting \(guest\)<button/)
 })
 
 test('the meeting cost reads as AI credits, with premium requests only when there are any', () => {

@@ -22,6 +22,7 @@ import {
   type MeetingReplyView,
   type MeetingVote,
 } from './meeting-messages.js'
+import type { GuestContact } from './meeting-contact.js'
 import { MAX_MEETING_MAX_ROUNDS } from './meeting-settings.js'
 import type { MeetingUsage } from './meeting-turns.js'
 
@@ -68,7 +69,7 @@ const OUTCOMES: readonly MeetingOutcome[] = ['agreed', 'ended', 'stopped', 'host
 const DELIVERY_KINDS: readonly MeetingDeliveryKind[] = ['post', 'vote', 'discussion', 'digest', 'agreed', 'reminder']
 
 /** `guest`: an outside agent (meeting-guests.ts), whose `tabId` is its seat id; filled in by main, which knows the seats. */
-export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean; guest?: { lastSeenAt: number | null } }
+export interface MeetingParticipantView { tabId: string; title: string; role: string | null; replied: boolean; guest?: GuestContact }
 
 /** An outside agent invited to the meeting that has not asked for its first message yet. */
 export interface MeetingInviteView { id: string; name: string; role: string | null }
@@ -80,6 +81,8 @@ export interface MeetingView {
   id: string
   hostTabId: string
   hostTitle: string
+  /** An outside agent hosts it; filled in by main, like a participant's `guest`. */
+  hostGuest?: GuestContact
   topic: string
   stage: MeetingStage
   round: number
@@ -388,7 +391,7 @@ export class MeetingHub {
     } else {
       meeting.stage = 'host'
       meeting.remindedHost = true
-      this.send(meeting, meeting.host.tabId, 'reminder', reminderMessage(meeting.id))
+      this.send(meeting, meeting.host.tabId, 'reminder', reminderMessage(meeting.id, roundPaths(meeting.folder, meeting.round).replies))
     }
     this.changed(meeting)
   }
@@ -740,7 +743,7 @@ export class MeetingHub {
   private hostSilent(meeting: Meeting): void {
     if (!meeting.remindedHost) {
       meeting.remindedHost = true
-      this.send(meeting, meeting.host.tabId, 'reminder', reminderMessage(meeting.id))
+      this.send(meeting, meeting.host.tabId, 'reminder', reminderMessage(meeting.id, roundPaths(meeting.folder, meeting.round).replies))
       this.changed(meeting)
       return
     }

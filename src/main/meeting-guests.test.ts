@@ -191,7 +191,7 @@ test('a short invitation, for an agent that has the meeting tools, names only th
 const FOLDER_PATCH = 'diff --git a/login.cfg b/login.cfg\n--- a/login.cfg\n+++ b/login.cfg\n-retry = 1\n+retry = 3\n'
 
 /** The host's part of `GuestDeps`, wired to a hub as main wires it. */
-function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes' | 'checkFolder'> {
+function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'waitingOn' | 'changes' | 'checkFolder'> {
   return {
     start: (seat, topic, post, changes) => {
       try { return { meetingId: hub().start({ tabId: seat.id, title: `${seat.name} (guest)`, folder: seat.folder }, { topic, post, changes }).id } }
@@ -202,15 +202,16 @@ function hostDeps(hub: () => MeetingHub): Pick<GuestDeps, 'start' | 'post' | 'en
     },
     end: (seat) => { hub().end(seat.id); return { ok: true, message: 'The meeting is closed.' } },
     status: (seat) => `status of ${seat.meetingId}`,
+    waitingOn: () => null,
     changes: async () => FOLDER_PATCH,
     checkFolder: async () => null,
   }
 }
 
 /** For tests whose guests never host. */
-const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'changes' | 'checkFolder'> = {
+const NO_HOST: Pick<GuestDeps, 'start' | 'post' | 'end' | 'status' | 'waitingOn' | 'changes' | 'checkFolder'> = {
   start: () => ({ error: 'not here' }), post: () => ({ ok: false, message: 'not here' }), end: () => ({ ok: false, message: 'not here' }),
-  status: () => '', changes: async () => '', checkFolder: async () => null,
+  status: () => '', waitingOn: () => null, changes: async () => '', checkFolder: async () => null,
 }
 
 /** A hub with a host, and a mailbox whose guests take part through `handleGuestRequest`, wired as main wires them. */
@@ -274,9 +275,9 @@ test('a guest joins with its first next, reviews, pages a long patch, votes, and
   assert.deepEqual(hub.views()[0]!.participants.map((participant) => participant.title), ['Claude Code (guest)'])
   assert.equal(await call(seat, 'next'), post, 'the same message until it is answered')
   assert.equal(await call(seat, 'reply', { text: '  ' }), 'ERROR The reply is empty. Write your whole answer to the file, then run reply again.')
-  assert.equal(await call(seat, 'reply', { text: 'Review: the cache is keyed by user.' }), 'Reply sent. Run next for the next message.')
+  assert.equal(await call(seat, 'reply', { text: 'Review: the cache is keyed by user.' }), 'Reply sent. Run next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.')
   assert.match(toHost.at(-1)!.text, /Review: the cache is keyed by user\./, 'the host gets the guest\'s review')
-  assert.equal(await call(seat, 'next', { wait: 1 }), 'Nothing yet. Run next again.')
+  assert.equal(await call(seat, 'next', { wait: 1 }), 'Nothing yet. Run next again; do not end your turn until the meeting is closed, unless the person tells you to.')
 
   const patch = 'x'.repeat(GUEST_PAGE_CHARS + 5)
   hub.post('tab-host', 'round', 'Plan v2', patch)
@@ -446,7 +447,7 @@ test('the endpoint keeps guest and session tokens apart, and a waiting next answ
     const quitting = post(session.port, '/guest/next', token, JSON.stringify({ wait: 30 }))
     await new Promise((resolveSoon) => setTimeout(resolveSoon, 100))
     await server.close()
-    assert.deepEqual(JSON.parse((await quitting).body), { ok: true, message: 'Nothing yet. Run next again.' }, 'closing the app does not wait out a guest\'s poll')
+    assert.deepEqual(JSON.parse((await quitting).body), { ok: true, message: 'Nothing yet. Run next again; do not end your turn until the meeting is closed, unless the person tells you to.' }, 'closing the app does not wait out a guest\'s poll')
   } finally {
     await server.close()
   }
@@ -469,14 +470,14 @@ test('the guest helper polls, pages and replies through the real endpoint', asyn
     await server.port()
     await new Promise((resolveSoon) => setTimeout(resolveSoon, 100))
     assert.equal((await run('next', '-Token', 'nope')).err, 'Meeting command failed: Pass -Token with the token from your invitation.')
-    assert.equal((await run('next', '-Token', token, '-Wait', '1')).out, 'Nothing yet. Run next again.')
+    assert.equal((await run('next', '-Token', token, '-Wait', '1')).out, 'Nothing yet. Run next again; do not end your turn until the meeting is closed, unless the person tells you to.')
     mailbox.enqueue(seat.id, delivery(1, '[meeting K7QF · round 1 · from the desktop]\nReview "this" — café'))
     assert.equal((await run('next', '-Token', token)).out, '[meeting K7QF · round 1 · from the desktop]\nReview "this" — café')
     assert.equal((await run('show', '-Token', token, '-Name', 'post')).out, 'the post\n[end]')
     const answer = join(folder, 'reply-1-post.md')
     await writeFile(answer, 'Looks fine — merci.\n')
     const reply = await run('reply', '-Token', token, '-File', answer)
-    assert.equal(reply.out, 'Reply sent. Run next for the next message.', reply.err)
+    assert.equal(reply.out, 'Reply sent. Run next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.', reply.err)
     assert.equal(replied.replace(/\r\n/g, '\n'), 'Looks fine — merci.\n', 'the reply file reaches the desktop as written')
     assert.deepEqual(await run('reply', '-Token', token, '-File', answer), { code: 1, out: 'There is no message to answer. Run next.', err: '' }, 'a refusal is printed and fails the command')
     assert.equal((await run('next', '-Token', 'f'.repeat(64), '-Wait', '1')).err, 'Meeting command failed: This invitation is not known to the desktop. Ask the person for a new one.')
@@ -496,7 +497,7 @@ test('an outside host starts a meeting, answers the rounds, is reminded when it 
   assert.equal(await call(host, 'start', { topic: 'login', text: ' ' }), 'ERROR The post is empty. Send your whole plan, answer or agreed items.')
 
   const started = await call(host, 'start', { topic: 'login race', text: 'Plan v1', changes: '1' })
-  assert.match(started, /^Meeting K7QF is open\. Tell the person its id: they add reviewers by telling another agent "join meeting K7QF", or from the desktop\. Run next to wait for their replies/)
+  assert.match(started, /^Meeting K7QF is open\. Tell the person its id now, in a message that does not end your turn: they add reviewers by telling another agent "join meeting K7QF", or from the desktop\. Run next to wait for their replies/)
   assert.equal(host.meetingId, 'K7QF')
   const view = hub.views()[0]!
   assert.equal(view.hostTabId, host.id)
@@ -518,13 +519,13 @@ test('an outside host starts a meeting, answers the rounds, is reminded when it 
 
   // It asks for the replies again without answering: its turn has passed. A reminder, then a pause.
   assert.match(await call(host, 'next'), /^\[meeting K7QF · reminder · from the desktop\]/)
-  assert.equal(await call(host, 'next', { wait: 1 }), 'Nothing yet. Run next again.')
+  assert.equal(await call(host, 'next', { wait: 1 }), 'Nothing yet. Run next again; do not end your turn until the meeting is closed, unless the person tells you to.')
   assert.equal(hub.views()[0]!.stage, 'paused')
   assert.equal(hub.views()[0]!.pauseReason, 'host-silent')
   hub.resume('K7QF')
   assert.match(await call(host, 'next'), /reminder · from the desktop\]/)
 
-  assert.equal(await call(host, 'round', { text: 'Plan v2: lock on logout.', changes: true }), 'Sent round 2 to 1 reviewer. Run next to wait for their replies.')
+  assert.equal(await call(host, 'round', { text: 'Plan v2: lock on logout.', changes: true }), 'Sent round 2 to 1 reviewer. Run next to wait for their replies; do not end your turn until the meeting is closed, unless the person tells you to.')
   assert.equal(mailbox.given(host.id), null, 'answering the round answered what it had been given')
   assert.match(await call(reviewer, 'next'), /round 2 · from the desktop\]/)
   await call(reviewer, 'reply', { text: 'Good.' })
@@ -576,7 +577,7 @@ test('an unanswered message is worded for the channel that reads it, when a gues
   assert.match(withHelper, /the output of: show -Name changes -Round 1/)
   assert.ok(withHelper.endsWith(`run the reply command from your invitation with -File "${guestReplyPath(GUESTS, seat.id, { meetingId: 'K7QF', round: 1, kind: 'post', text: '' })}".`), 'a reply file to answer with')
   assert.equal(withHelper.split('\n-----\n')[1], withTools.split('\n-----\n')[1], 'the same material, unchanged')
-  assert.equal(await call(seat, 'reply', { text: 'Fine.' }), 'Reply sent. Run next for the next message.')
+  assert.equal(await call(seat, 'reply', { text: 'Fine.' }), 'Reply sent. Run next for the next message; do not end your turn until the meeting is closed, unless the person tells you to.')
 })
 
 test('a host\'s agreed message is worded for its channel when the meeting closes', () => {

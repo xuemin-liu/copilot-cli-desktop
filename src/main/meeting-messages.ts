@@ -210,11 +210,14 @@ export function agreedMessage(id: string, round: number, count: number, folder: 
   ].join('\n')
 }
 
-/** The host's turn ended without answering the round. */
-export function reminderMessage(id: string): string {
+/**
+ * The host's turn ended without answering the round. It names where the replies are: an outside host may be here because the
+ * answer that carried them never reached it (its tool call timed out), so it may never have read them.
+ */
+export function reminderMessage(id: string, replies: string): string {
   return [
     `${MEETING_MARKER_PREFIX}${id} · reminder · from the desktop]`,
-    `Meeting ${id} is waiting for you. Run one of:`,
+    `Meeting ${id} is waiting for you. The reviewers' replies are in ${replies}. Run one of:`,
     helperCommands(),
   ].join('\n')
 }
