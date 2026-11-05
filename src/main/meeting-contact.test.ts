@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { GUEST_QUIET_MS, GuestStallNotices, guestQuiet, guestStalled, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
+import { GUEST_QUIET_MS, GuestStallNotices, guestContactKey, guestQuiet, guestStalled, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
 import type { MeetingView } from './meeting.js'
 
 const NOW = 100 * 60_000
@@ -25,6 +25,16 @@ test('a guest is quiet only with no request for a while and none open; it has st
   assert.equal(guestStalled(contact({ holding: true }), NOW), false, 'it may be reading code')
   assert.equal(guestQuiet(contact({ holding: true }), NOW), true, 'the bar still shows the last contact')
   assert.equal(guestStalled(contact(), NOW, NOW - 1), false, 'the desktop just started: agents get time to reconnect')
+})
+
+test('the bar is told when anything it shows of a seat changes, a newer contact included, and not otherwise', () => {
+  const seat = { id: HOST, ...contact() }
+  const key = guestContactKey([seat])
+  assert.equal(guestContactKey([{ ...seat }]), key)
+  assert.notEqual(guestContactKey([{ ...seat, lastSeenAt: NOW }]), key, 'it asked for its status: "no contact since" has to clear')
+  assert.notEqual(guestContactKey([{ ...seat, waiting: true }]), key)
+  assert.notEqual(guestContactKey([{ ...seat, holding: true }]), key)
+  assert.notEqual(guestContactKey([]), key, 'the seat is gone')
 })
 
 test('the person hears about a host or reviewer that stopped, but not of a paused meeting, a closed one, or a host alone', () => {

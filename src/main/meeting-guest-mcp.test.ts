@@ -214,6 +214,30 @@ test('the HTTP endpoint answers JSON on POST, refuses what a web page could send
   }
 })
 
+test('every request over HTTP refreshes the state, so a quiet agent that asks for its status clears from the bar at once', async () => {
+  const { hub, mailbox, deps } = meeting()
+  hub.start({ tabId: 'tab-host', title: 'fix login race', folder: 'D:\\api' }, { topic: 'login', post: 'Plan v1', changes: null })
+  const { seat, token } = mailbox.invite('K7QF', 'Claude Code', null)
+  let refreshed = 0
+  const server = new GuestMcpServer(mailbox, deps, () => { refreshed++ })
+  const port = (await server.listen(0))!
+  const json = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' }
+  const call = (id: number, name: string, args: Record<string, unknown>): string => JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+  try {
+    const init = await http(port, 'POST', json, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }))
+    const headers = { ...json, 'mcp-session-id': String(init.headers['mcp-session-id']) }
+    await http(port, 'POST', headers, call(2, 'meeting_join', { invitation: token }))
+    seat.lastSeenAt = 1
+    const before = refreshed
+    const status = await http(port, 'POST', headers, call(3, 'meeting_status', {}))
+    assert.equal(JSON.parse(status.body).result.content[0].text, 'status of K7QF')
+    await until(() => refreshed > before, 'the state was refreshed')
+    assert.ok(seat.lastSeenAt > 1, 'its contact moved on before that refresh')
+  } finally {
+    await server.close()
+  }
+})
+
 test('a taken port leaves the tools off instead of failing', async () => {
   const blocker = createServer()
   await new Promise<void>((resolveListen) => blocker.listen(0, '127.0.0.1', () => resolveListen()))

@@ -133,7 +133,7 @@ import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
-import { GuestStallNotices, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
+import { guestContactKey, GuestStallNotices, meetingStalls, meetingWaitingOn, type GuestContact } from './meeting-contact.js'
 import { MeetingTurnReader, confirmedMeetingReply } from './meeting-turns.js'
 import { MEETING_MARKER_PREFIX, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, roundPaths } from './meeting-messages.js'
 import {
@@ -2697,7 +2697,7 @@ guestSweepTimer.unref()
 
 /**
  * An outside agent that ended its turn cannot be woken, and nothing else would tell: the person hears, once per quiet spell,
- * and the meeting goes on as it was. A wait starting makes no state update of its own, so the bar is told about those here.
+ * and the meeting goes on as it was. A wait starting makes no state update of its own, so the bar is told about changes here.
  */
 const guestStallNotices = new GuestStallNotices()
 let guestContactShown = ''
@@ -2708,7 +2708,7 @@ const guestContactTimer = setInterval(() => {
     void writeAppLog(`Meeting ${stall.meetingId}: ${who} stopped checking in.`).catch(() => {})
     showNotification('Copilot CLI Desktop', `Meeting ${stall.meetingId}: ${who} stopped checking in. Tell it to call meeting_next until the meeting is closed.`)
   }
-  const contact = guestMailbox.views().map(({ id, waiting, holding }) => `${id}:${waiting}:${holding}`).join()
+  const contact = guestContactKey(guestMailbox.views())
   if (contact !== guestContactShown) { guestContactShown = contact; broadcastState() }
 }, 30_000)
 guestContactTimer.unref()

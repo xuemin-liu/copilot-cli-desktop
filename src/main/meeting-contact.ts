@@ -25,6 +25,11 @@ export function guestStalled(contact: GuestContact, now: number, notBefore = 0):
   return !contact.holding && guestQuiet(contact, now, notBefore)
 }
 
+/** What the bar shows of each seat, to tell when it needs telling: any of it can change with no state update of its own. */
+export function guestContactKey(guests: ReadonlyArray<GuestContact & { id: string }>): string {
+  return JSON.stringify(guests.map(({ id, lastSeenAt, waiting, holding }) => [id, lastSeenAt, waiting, holding]))
+}
+
 export interface GuestStall { meetingId: string; seatId: string; title: string; host: boolean }
 
 /**
