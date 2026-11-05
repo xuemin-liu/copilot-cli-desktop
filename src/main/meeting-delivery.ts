@@ -22,7 +22,13 @@ export interface MeetingOutboxDeps {
 }
 
 /** A message that is waiting to be typed, and why. A session stays blocked with no error, so this is the only trace of it. */
-export interface BlockedDelivery { tabId: string; meetingId: string; reason: string; since: number }
+export interface BlockedDelivery {
+  tabId: string; meetingId: string; reason: string; since: number
+  /** It waits behind a turn that is still running, which is usually just a session working: worth telling only much later. */
+  behindTurn: boolean
+}
+
+export const BEHIND_TURN_REASON = 'It has not finished answering an earlier message. If it is stuck, restart that session.'
 
 /** A slash command makes no turn; give the CLI a moment before typing the next thing. */
 const COMMAND_SETTLE_MS = 1_500
@@ -62,16 +68,20 @@ export class MeetingOutbox {
     return [...this.queues.values()].some(queue=>queue.inTurn?.meetingId===meetingId||queue.items.some(item=>item.meetingId===meetingId))
   }
 
-  /** This session still has this meeting's message waiting to be typed, so it has not been asked yet. */
+  /**
+   * This session still has this meeting's message waiting to be typed, so it has not been asked yet. Not while a turn of its is
+   * running: that session was asked something, and a turn that never ends must not hold a round open with it.
+   */
   undelivered(tabId: string, meetingId: string): boolean {
-    return this.queues.get(tabId)?.items.some((item) => item.meetingId === meetingId && item.kind !== 'add-dir') === true
+    const queue = this.queues.get(tabId)
+    return !queue?.inTurn && queue?.items.some((item) => item.meetingId === meetingId && item.kind !== 'add-dir') === true
   }
 
   /** Every message the last pump could not type, longest waiting first. */
   blockedDeliveries(): BlockedDelivery[] {
     return [...this.queues].flatMap(([tabId, queue]) => {
       const next = queue.items[0]
-      return next && queue.blocked && !queue.inTurn ? [{ tabId, meetingId: next.meetingId, reason: queue.blocked.reason, since: queue.blocked.since }] : []
+      return next && queue.blocked ? [{ tabId, meetingId: next.meetingId, reason: queue.blocked.reason, since: queue.blocked.since, behindTurn: queue.inTurn !== null }] : []
     }).sort((a, b) => a.since - b.since)
   }
 
@@ -125,6 +135,7 @@ export class MeetingOutbox {
         queue.inTurn = delivery
         this.deps.sent(tabId, delivery)
       }
+      if (queue.items.length && queue.inTurn) queue.blocked = { reason: BEHIND_TURN_REASON, since: queue.blocked?.since ?? this.deps.now() }
       if (!queue.items.length && !queue.inTurn) this.queues.delete(tabId)
     }
     return this.hasWork()

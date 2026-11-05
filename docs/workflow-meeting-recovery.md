@@ -46,8 +46,11 @@ it is distinct from an unavailable/corrupt journal.
 
 A message that cannot be typed is never silent. After 15 seconds the person gets one notification and the meeting bar
 says which session and why: text in its prompt box, an open session picker, a second session held by its CLI, an earlier
-handoff awaiting a decision. A prompt recalled from history holds nothing the person wrote, so after 5 quiet seconds the
-desktop clears it with Ctrl+C. A round does not time out while a reviewer's message is still waiting to be typed.
+handoff awaiting a decision, a menu or dialog possibly open. A prompt recalled from history holds nothing the person wrote,
+so after 5 quiet seconds the desktop clears it with Ctrl+C. Right after a command a dialog may have the keyboard, and typed
+text would go into it, so nothing is typed until the prompt's footer is the last thing on screen. A round does not time out
+while a reviewer's message is waiting to be typed, or was typed and never confirmed. One waiting behind a running turn does
+not hold the round, and is reported after 5 minutes.
 
 Validation uses real SQLite reopen/retry/discard tests, legacy identity fixtures, existing meeting/guest round tests,
 and production lifecycle fixtures for recipient switching, no-lock initial delivery and draft/Enter protection.

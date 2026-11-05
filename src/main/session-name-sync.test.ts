@@ -216,3 +216,36 @@ test('a tab follows Copilot\'s name until someone names it, and then Copilot is 
   // A tab saved by an older release, or named when it started: nothing is typed into it unasked.
   assert.deepEqual(nameSyncAction({ ...named, renamePending: false }, { name: 'Something else', userNamed: false }), { kind: 'none' })
 })
+
+test('after a command a dialog may be open: Up and Down move its selection, and clearing the box would close it', () => {
+  const draft = new PromptDraft()
+  for (const key of '/theme') draft.note(key, 1000)
+  draft.note('\r', 1001)
+  assert.equal(draft.afterCommand, true)
+  draft.note('\x1b[B', 1002)
+  assert.equal(draft.recalled, false, 'that moved a picker, it recalled nothing')
+  assert.equal(draft.empty, true)
+  draft.promptShown()
+  assert.equal(draft.afterCommand, false)
+  draft.note('\x1b[A', 1003)
+  assert.equal(draft.recalled, true, 'at the prompt it recalls history')
+
+  for (const close of ['\x1b', '\x03', '\r']) {
+    const open = new PromptDraft()
+    open.note('/model', 1000); open.note('\r', 1001)
+    open.note(close, 1002)
+    assert.equal(open.afterCommand, false, `${JSON.stringify(close)} leaves the dialog, so the advice on the bar works`)
+  }
+
+  const prompt = new PromptDraft()
+  for (const key of 'hello') prompt.note(key, 1000)
+  prompt.note('\r', 1001)
+  assert.equal(prompt.afterCommand, false, 'an ordinary prompt opens no dialog')
+  const caret = new PromptDraft()
+  caret.note('/help', 1000); caret.note('\x1b[D', 1001); caret.note('\r', 1002)
+  assert.equal(caret.afterCommand, true, 'after the caret moved, what went in is not known')
+  const pasted = new PromptDraft()
+  pasted.note('\x1b[200~[meeting K7QF · round 1 · from the desktop]\nPlan\x1b[201~', 1000)
+  pasted.note('\r', 1300)
+  assert.equal(pasted.afterCommand, false, 'a meeting message opens no dialog')
+})

@@ -436,6 +436,15 @@ export class MeetingHub {
     else this.changed(meeting)
   }
 
+  /** Whether this session is a reviewer owing a reply now, which is when `postAnswer` takes one. */
+  owesReply(tabId: string): boolean {
+    for (const meeting of this.meetings.values()) {
+      if (meeting.stage === 'closed' || !meeting.participants.has(tabId)) continue
+      return ['post', 'vote', 'discussion'].includes(meeting.outstanding.get(tabId)?.kind ?? '')
+    }
+    return false
+  }
+
   /**
    * The person hands in what a reviewer already answered. When a message could not be typed they may ask the session themselves,
    * and the desktop does not take such a turn for a reply on its own: it may be about anything. False when nothing is owed.
@@ -443,8 +452,8 @@ export class MeetingHub {
   postAnswer(tabId: string, text: string): boolean {
     for (const meeting of this.meetings.values()) {
       if (meeting.stage === 'closed' || !meeting.participants.has(tabId)) continue
-      const delivery = meeting.outstanding.get(tabId)
-      if (!delivery || !['post', 'vote', 'discussion'].includes(delivery.kind)) return false
+      if (!this.owesReply(tabId)) return false
+      const delivery = meeting.outstanding.get(tabId)!
       // What was waiting to be typed has been answered. The folder still goes in, for the rounds to come.
       this.cancel(meeting, tabId)
       this.send(meeting, tabId, 'add-dir', meeting.folder)

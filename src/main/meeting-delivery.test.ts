@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingOutbox } from './meeting-delivery.js'
+import { BEHIND_TURN_REASON, MeetingOutbox } from './meeting-delivery.js'
 import type { SessionTaskSend } from './session-task.js'
 
 function outbox(answers: Record<string, SessionTaskSend['result']>) {
@@ -44,7 +44,7 @@ test('a message that cannot be typed keeps its reason and since when, until it g
   assert.equal(o.box.undelivered('tab-1', 'M2NB'), false)
   assert.deepEqual(o.box.blockedDeliveries(), [], 'nothing has been tried yet')
   o.box.pump()
-  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 0 }])
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 0, behindTurn: false }])
   o.advance(5_000)
   o.box.pump()
   assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'the same stall')
@@ -107,4 +107,22 @@ test('settled journal deliveries leave the outbox without starting a duplicate t
   box.enqueue('tab-1',{meetingId:'K7QF',round:1,kind:'post',text:'already answered',id:'stable'})
   assert.equal(box.hasMeetingWork('K7QF'),true);box.pump()
   assert.equal(sent,0);assert.equal(box.inTurn('tab-1'),null);assert.equal(box.hasMeetingWork('K7QF'),false)
+})
+
+test('a turn that never ends does not count as a message waiting to be typed, and the wait behind it is reported', () => {
+  const o = outbox({})
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  o.box.pump()
+  assert.equal(o.box.inTurn('tab-1')?.text, 'round 1')
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 2, kind: 'post', text: 'round 2' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false, 'the session was asked something: the round may time out as usual')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: BEHIND_TURN_REASON, since: 0, behindTurn: true }])
+  o.advance(60 * 60_000)
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'still the same wait')
+  o.box.turnEnded('tab-1')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [])
+  assert.deepEqual(o.typed, ['tab-1: round 1', 'tab-1: round 2'])
 })

@@ -676,8 +676,11 @@ test('the person can hand in what a reviewer already answered: it counts as the 
   const h = harness()
   h.hub.start({ tabId: 'tab-a', title: 'host', folder: 'D:\\a' }, { topic: 't', post: 'Plan v1', changes: null })
   assert.equal(h.hub.postAnswer('tab-b', 'Not in a meeting'), false)
+  assert.equal(h.hub.owesReply('tab-a'), false, 'a host owes no reply, so nothing offers it one')
+  assert.equal(h.hub.postAnswer('tab-a', 'A host answers with its commands'), false)
   h.hub.join({ tabId: 'tab-b', title: 'reviewer', folder: 'D:\\b' }, 'K7QF')
   assert.equal(h.hub.views()[0]!.stage, 'reviewing')
+  assert.equal(h.hub.owesReply('tab-b'), true)
   const before = h.cancelled.length
   assert.equal(h.hub.postAnswer('tab-b', 'Review typed in the terminal.'), true)
   assert.deepEqual(h.cancelled.slice(before), [{ meetingId: 'K7QF', tabId: 'tab-b' }], 'the post is no longer waiting')
@@ -687,5 +690,6 @@ test('the person can hand in what a reviewer already answered: it counts as the 
   assert.equal(digest.kind, 'digest')
   assert.match(digest.text, /Review typed in the terminal\./)
   assert.equal(h.hub.views()[0]!.stage, 'host')
+  assert.equal(h.hub.owesReply('tab-b'), false)
   assert.equal(h.hub.postAnswer('tab-b', 'Again'), false, 'nothing is owed now')
 })

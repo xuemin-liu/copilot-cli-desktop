@@ -129,7 +129,7 @@ import { listStoredSessions, type SessionCatalogCache, type StoredSession } from
 import { isValidSessionId } from './session-id.js'
 import { newSessionOptions, newSessionTitle, type NewSessionOptions } from './session-name.js'
 import { PromptDraft, nameSyncAction, readCopilotSessionName, renameCommand, type CopilotSessionName } from './session-name-sync.js'
-import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend } from './session-task.js'
+import { sessionTaskDecision, taskPasteSequence, type SessionTaskSend, dialogOnScreen } from './session-task.js'
 import { MeetingError, MeetingHub, joinRequest, MAX_MEETING_PARTICIPANTS, MEETING_ID_PATTERN, MEETING_STATE_FILE, realMeetingTimers, type MeetingDelivery, type MeetingView } from './meeting.js'
 import { isMeetingMaxRounds, isMeetingRoundTimeoutMinutes } from './meeting-settings.js'
 import { MeetingOutbox } from './meeting-delivery.js'
@@ -2440,11 +2440,24 @@ function meetingPromptSettled(tabId: string): boolean {
 }
 
 function meetingPromptShown(tabId: string): boolean {
-  return meetingPromptSettled(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
+  return meetingPromptSettled(tabId) && !meetingDialogMayBeOpen(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
+}
+
+/** After a command, a dialog may have the keyboard: typed text would go into it, and Enter would choose something there. */
+function meetingDialogMayBeOpen(tabId: string): boolean {
+  const draft = promptDrafts.get(tabId)
+  const session = managedTabs.get(tabId)?.session
+  if (!draft?.afterCommand || !session) return false
+  if (dialogOnScreen(session.recentOutputText)) return true
+  draft.promptShown()
+  return false
 }
 
 /** After this long the person hears about a message that cannot be typed. Shorter ones are a session finishing what it does. */
 const MEETING_BLOCK_NOTICE_MS = 15_000
+/** A message waiting behind a running turn is usually a session at work, so this says something only when that looks stuck. */
+const MEETING_BEHIND_TURN_NOTICE_MS = 5 * 60_000
+const LOST_DELIVERY_REASON = 'A message to it may not have arrived. Choose Send again or Discard in Handoffs.'
 /** A recalled prompt is left alone this long, in case the person is still looking through their history. */
 const RECALLED_PROMPT_QUIET_MS = 5_000
 
@@ -2462,6 +2475,7 @@ function meetingBlockReason(tabId: string): string | null {
   if (workflowsPaused(tab.workspaceProfileId)) return 'Automatic work is paused for this project.'
   if (draft.beforeFirstEnter) return 'Its session picker is open. Choose a session in that tab.'
   if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
+  if (meetingDialogMayBeOpen(tabId)) return 'It may have a menu or dialog open. Close it with Esc, and the message goes in.'
   if (session.activity !== 'idle' && session.activity !== null) return 'It is still working on another turn.'
   const binding = session.bindingDiagnostic
   if (binding.kind === 'bound' && !binding.deliveryReady) return 'Its CLI holds more than one session, so the desktop cannot tell which would receive the message. Restart this session to continue.'
@@ -2487,11 +2501,40 @@ function clearRecalledPrompt(tabId: string): void {
 const sessionAnswers = new Map<string, { text: string; at: number }>()
 const meetingBlocksTold = new Set<string>()
 let meetingBlocksShown = ''
+const lostDeliveriesSeen = new Map<string, number>()
+
+/** The tab holding this session now. */
+function tabOfSession(sessionId: string): string | null {
+  return tabsState.tabs.find((tab) => tab.lastSessionId === sessionId)?.id ?? null
+}
+
+/** Each open meeting's message that was typed and never confirmed. It has left the outbox, and only the person can settle it. */
+function lostMeetingDeliveries(): Array<{ tabId: string; meetingId: string; reason: string; since: number }> {
+  const now = Date.now()
+  const seen = new Set<string>()
+  const lost = deliveryViews().flatMap((delivery) => {
+    const meetingId = delivery.scope.startsWith('meeting/') ? delivery.scope.slice('meeting/'.length) : ''
+    const tabId = delivery.state === 'uncertain' && meetingHub.isOpen(meetingId) ? tabOfSession(delivery.sessionId) : null
+    if (!tabId) return []
+    seen.add(delivery.id)
+    if (!lostDeliveriesSeen.has(delivery.id)) lostDeliveriesSeen.set(delivery.id, now)
+    return [{ tabId, meetingId, reason: LOST_DELIVERY_REASON, since: lostDeliveriesSeen.get(delivery.id)! }]
+  })
+  for (const id of lostDeliveriesSeen.keys()) if (!seen.has(id)) lostDeliveriesSeen.delete(id)
+  return lost
+}
+
+/** Every message the person should hear about by now. */
+function stalledMeetingDeliveries(): Array<{ tabId: string; meetingId: string; reason: string; since: number }> {
+  const now = Date.now()
+  const blocked = meetingOutbox.blockedDeliveries().filter((item) => now - item.since >= (item.behindTurn ? MEETING_BEHIND_TURN_NOTICE_MS : MEETING_BLOCK_NOTICE_MS))
+  const lost = lostMeetingDeliveries().filter((item) => now - item.since >= MEETING_BLOCK_NOTICE_MS && !blocked.some((other) => other.tabId === item.tabId && other.meetingId === item.meetingId))
+  return [...blocked, ...lost]
+}
 
 /** Tells the person, once per stall, which message cannot be typed and why, and keeps the meeting bar current. */
 function reportBlockedDeliveries(): void {
-  const now = Date.now()
-  const long = meetingOutbox.blockedDeliveries().filter((blocked) => now - blocked.since >= MEETING_BLOCK_NOTICE_MS)
+  const long = stalledMeetingDeliveries()
   const told = new Set<string>()
   for (const { tabId, meetingId, reason } of long) {
     const key = `${meetingId}/${tabId}`
@@ -2631,7 +2674,8 @@ const meetingHub = new MeetingHub(meetingRoot, {
   // An outside agent that stopped polling would hold every round to its timeout; a Copilot tab is the person's to judge.
   dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId),
   dropped: (tabId, message) => guestMailbox.close(tabId, message),
-  undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId),
+  // A message typed and never confirmed has not asked that session anything either, as far as anyone can tell.
+  undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId) || lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === meetingId),
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
 // Outside agents as reviewers (docs/meeting-guests-plan.md): seats, tokens and messages live in the mailbox; the hub sees
@@ -2744,10 +2788,10 @@ function meetingViews(): MeetingView[] {
     const seat = guests.find((guest) => guest.id === partyId)
     return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding } : null
   }
-  const blocked = meetingOutbox.blockedDeliveries().filter((delivery) => Date.now() - delivery.since >= MEETING_BLOCK_NOTICE_MS)
+  const blocked = stalledMeetingDeliveries()
   return meetingHub.views().map((meeting) => {
     const hostGuest = contactOf(meeting.hostTabId)
-    const undelivered = blocked.filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
+    const undelivered = blocked.filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: meetingHub.owesReply(tabId) && (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
     return {
       ...meeting,
       ...(hostGuest ? { hostGuest } : {}),
@@ -2780,6 +2824,7 @@ const guestContactTimer = setInterval(() => {
     void writeAppLog(`Meeting ${stall.meetingId}: ${who} stopped checking in.`).catch(() => {})
     showNotification('Copilot CLI Desktop', `Meeting ${stall.meetingId}: ${who} stopped checking in. Tell it to call meeting_next until the meeting is closed.`)
   }
+  reportBlockedDeliveries()
   const contact = guestContactKey(guestMailbox.views())
   if (contact !== guestContactShown) { guestContactShown = contact; broadcastState() }
 }, 30_000)

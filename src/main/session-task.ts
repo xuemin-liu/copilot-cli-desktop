@@ -70,6 +70,19 @@ export function taskPasteSequence(text: string,maximumChars=MAX_TASK_CHARS): str
   return `\u001b[200~${bounded}\u001b[201~`
 }
 
+const TERMINAL_CONTROL = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|[\u0000- \u007f]/g
+const DIALOG_HINTS = /esc(?:ape)?(?:to)?(?:close|cancel|back)|enter(?:to)?(?:select|open|confirm)|tonavigate|↑\/↓/i
+
+/**
+ * Whether a dialog (`/model`, `/help`, a picker) has drawn its key hints since the prompt's footer last did. A dialog takes typed
+ * keys, and Enter chooses something in it, so nothing may be typed then. A missing footer proves nothing, since a command that
+ * only prints (`/add-dir`) does not draw it again; a hint is the evidence. Only for right after a command, when one is possible.
+ */
+export function dialogOnScreen(output: string): boolean {
+  const at = output.lastIndexOf('open sidebar')
+  return DIALOG_HINTS.test(output.slice(at < 0 ? 0 : at).replace(TERMINAL_CONTROL, ''))
+}
+
 /** Tracks DECSET 2004 (bracketed paste) across output chunks, which may split the sequence anywhere. */
 export class BracketedPasteTracker {
   private tail = ''
