@@ -120,13 +120,12 @@ export class PromptDraft {
       else if (this.content === 'typed') this.typedChars = null
       return
     }
-    // An edit of a recalled prompt is the person's own text now, of a length not known here.
+    // An edit of a recalled prompt is the person's own text now, of a length not known here. Only keys typed one by one and deleted
+    // one by one can prove the box empty: a paste may hold several lines, and Ctrl+U clears only the line the caret is on.
     let chars = this.content === 'recalled' ? null : this.typedChars
-    if (text.startsWith('\x1b[200~') && text.endsWith('\x1b[201~')) chars = chars === null ? null : chars + text.length
-    else for (const char of text) {
+    for (const char of text) {
       if (chars === null) break
       if (char === '\x7f' || char === '\b') chars = Math.max(0, chars - 1)
-      else if (char === '\x15') chars = 0
       else if (char >= ' ') chars++
       else chars = null
     }

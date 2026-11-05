@@ -137,12 +137,37 @@ test('keys that add nothing leave the prompt empty, and text typed then deleted 
   assert.equal(deleted.empty, false, 'one character is still there')
   deleted.note('\x7f', 1005)
   assert.equal(deleted.empty, true)
-  const cleared = new PromptDraft()
-  cleared.note('some words', 1000); cleared.note('\x15', 1001)
-  assert.equal(cleared.empty, true, 'Ctrl+U clears the line')
   const pasted = new PromptDraft()
   pasted.note('\x1b[200~pasted\x1b[201~', 1000)
   assert.equal(pasted.typed, true)
+})
+
+test('a paste or Ctrl+U never proves the box empty, so what is left of a draft is not submitted with an automatic message', () => {
+  const lines = new PromptDraft()
+  lines.note('\x1b[200~KEEP THIS LINE\nremove this line\x1b[201~', 1000)
+  lines.note('\x15', 1001)
+  assert.equal(lines.typed, true, 'Ctrl+U clears only the line the caret is on')
+  for (let index = 0; index < 500; index++) lines.note('\x7f', 1002)
+  assert.equal(lines.typed, true, 'a pasted length is not followed, whatever is deleted after it')
+
+  const wrapped = new PromptDraft()
+  wrapped.note('a long line of typed words that may wrap on screen', 1000)
+  wrapped.note('\x15', 1001)
+  assert.equal(wrapped.typed, true, 'it may clear only what shows on one row')
+  for (let index = 0; index < 500; index++) wrapped.note('\x7f', 1002)
+  assert.equal(wrapped.typed, true)
+
+  const onlyPaste = new PromptDraft()
+  onlyPaste.note('\x1b[200~one line\x1b[201~', 1000)
+  for (let index = 0; index < 500; index++) onlyPaste.note('\x7f', 1001)
+  assert.equal(onlyPaste.typed, true)
+  onlyPaste.note('\x03', 1002)
+  assert.equal(onlyPaste.empty, true, 'Ctrl+C clears the whole box')
+
+  const sent = new PromptDraft()
+  sent.note('\x1b[200~the desktop\'s own message\x1b[201~', 1000)
+  sent.note('\r', 1300)
+  assert.equal(sent.empty, true, 'Enter submits it, so a typed delivery leaves the box empty')
 })
 
 test('what may hold the person\'s own words is never taken for empty, and only a recalled prompt can be cleared for them', () => {
