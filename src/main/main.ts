@@ -2277,7 +2277,7 @@ function sendSessionRename(tabId: string, closing = false): boolean {
     session.write(command, 'rename')
     scheduleHeldInput(held,() => {
       if(holding()&&!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
-      if (holding()) session.write('\r', 'rename')
+      if (holding()) { session.write('\r', 'rename'); draft.commandOpensNoDialog() }
       release()
     }, 200)
   }, closing ? 300 : 0)
@@ -2357,7 +2357,7 @@ function sendSessionCommand(tabId: string, command: string,authorize?:()=>boolea
     if(!sameSessionRecipient(tabId,session,recipientId)){cancelHeldInput(tabId,true);return}
     heldInput.delete(tabId)
     if (managedTabs.get(tabId)?.session === session) {
-      if(!authorize||authorize()){session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r')}
+      if(!authorize||authorize()){session.write('\r', 'add-dir'); promptDrafts.get(tabId)?.note('\r'); promptDrafts.get(tabId)?.commandOpensNoDialog()}
       else {session.write('\x03','add-dir');draft.note('\x03')}
     }
     for (const data of held) { promptDrafts.get(tabId)?.note(data); managedTabs.get(tabId)?.session.write(data) }
@@ -2445,12 +2445,8 @@ function meetingPromptShown(tabId: string): boolean {
 
 /** After a command, a dialog may have the keyboard: typed text would go into it, and Enter would choose something there. */
 function sessionDialogMayBeOpen(tabId: string): boolean {
-  const draft = promptDrafts.get(tabId)
   const session = managedTabs.get(tabId)?.session
-  if (!draft?.afterCommand || !session) return false
-  if (dialogOnScreen(session.recentOutputText)) return true
-  draft.promptShown()
-  return false
+  return promptDrafts.get(tabId)?.afterCommand === true && session !== undefined && dialogOnScreen(session.recentOutputText)
 }
 
 /** After this long the person hears about a message that cannot be typed. Shorter ones are a session finishing what it does. */
@@ -2474,8 +2470,8 @@ function meetingBlockReason(tabId: string): string | null {
   if (deliveryError) return deliveryError
   if (workflowsPaused(tab.workspaceProfileId)) return 'Automatic work is paused for this project.'
   if (draft.beforeFirstEnter) return 'Its session picker is open. Choose a session in that tab.'
-  if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
   if (sessionDialogMayBeOpen(tabId)) return 'It may have a menu or dialog open. Close it with Esc, and the message goes in.'
+  if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
   if (session.activity !== 'idle' && session.activity !== null) return 'It is still working on another turn.'
   const binding = session.bindingDiagnostic
   if (binding.kind === 'bound' && !binding.deliveryReady) return 'Its CLI holds more than one session, so the desktop cannot tell which would receive the message. Restart this session to continue.'
@@ -4748,7 +4744,7 @@ ipcMain.handle('desktop:write-tab', (event, tabId: unknown, data: unknown, gitCu
     }, 300)
     return { gitCursorContextAttached: true }
   }
-  promptDrafts.get(tabId)?.note(data)
+  promptDrafts.get(tabId)?.note(data, Date.now(), sessionDialogMayBeOpen(tabId))
   managedTabs.get(tabId)?.session.write(data)
   return { gitCursorContextAttached: false }
 })

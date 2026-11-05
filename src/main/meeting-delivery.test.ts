@@ -122,7 +122,22 @@ test('a turn that never ends does not count as a message waiting to be typed, an
   o.box.pump()
   assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'still the same wait')
   o.box.turnEnded('tab-1')
+  assert.deepEqual(o.box.blockedDeliveries(), [], 'that wait is over')
   o.box.pump()
   assert.deepEqual(o.box.blockedDeliveries(), [])
   assert.deepEqual(o.typed, ['tab-1: round 1', 'tab-1: round 2'])
+})
+
+test('a refusal right after a long turn starts its own clock, so a normal delivery raises no notice', () => {
+  const answers: Record<string, SessionTaskSend['result']> = {}
+  const o = outbox(answers)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  o.box.pump()
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 2, kind: 'post', text: 'round 2' })
+  o.box.pump()
+  o.advance(60_000)
+  o.box.turnEnded('tab-1')
+  answers['tab-1'] = 'busy'
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 60_000, behindTurn: false }])
 })

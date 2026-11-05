@@ -96,7 +96,8 @@ export class PromptDraft {
   /** Still before the first Enter of a session that opened on the resume picker. */
   get beforeFirstEnter(): boolean { return this.pickerShowing }
 
-  note(data: string, now = Date.now()): void {
+  /** `dialogShown`: a dialog's hints are on screen as this key is pressed, so an arrow key moves its selection. */
+  note(data: string, now = Date.now(), dialogShown = false): void {
     const text = data.replace(NON_TEXT_INPUT, '')
     if (!text) return
     const before = this.contextText
@@ -109,11 +110,11 @@ export class PromptDraft {
       this.typedChars = 0
       // What it submitted is not known when the caret moved: that may have been a command too.
       this.commandSubmitted = last === '\r' && !text.startsWith('\x1b[200~[meeting ') && (before === null || (before + text).trimStart().startsWith('/'))
-    } else this.noteContent(text)
+    } else this.noteContent(text, dialogShown)
     if (last === '\r') this.pickerShowing = false
   }
 
-  private noteContent(text: string): void {
+  private noteContent(text: string, dialogShown: boolean): void {
     if (NO_TEXT_KEYS.test(text)) {
       // With text in the box the caret may have moved, so a later Backspace may not delete what it seems to.
       if (this.content === 'typed') this.typedChars = null
@@ -123,7 +124,9 @@ export class PromptDraft {
     }
     if (RECALL_KEYS.test(text)) {
       // In a dialog these move its selection, and clearing the box would close it.
-      if (this.content === 'empty' && !this.commandSubmitted) this.content = 'recalled'
+      if (this.commandSubmitted && dialogShown) return
+      if (this.commandSubmitted) { this.content = 'typed'; this.typedChars = null; return } // Which of the two is not known.
+      if (this.content === 'empty') this.content = 'recalled'
       else if (this.content === 'typed') this.typedChars = null
       return
     }
@@ -151,8 +154,8 @@ export class PromptDraft {
   /** A command went in last, which may have opened a dialog that takes the keys meant for the prompt. */
   get afterCommand(): boolean { return this.commandSubmitted }
 
-  /** No dialog came of that command. */
-  promptShown(): void { this.commandSubmitted = false }
+  /** The desktop typed that command itself, and it is known to open no dialog. */
+  commandOpensNoDialog(): void { this.commandSubmitted = false }
 
   /** Only attach to a known ordinary prompt with the caret at its end. Commands, history/picker navigation and
    * unrecognized editing sequences must keep their native Enter behavior. */

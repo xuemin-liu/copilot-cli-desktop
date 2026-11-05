@@ -96,6 +96,8 @@ export class MeetingOutbox {
     if (!queue) return null
     const delivery = queue.inTurn
     queue.inTurn = null
+    // That wait is over. A short refusal right after it is a new one, not a stall that has gone on since.
+    queue.blocked = null
     return delivery
   }
 
