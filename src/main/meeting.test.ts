@@ -632,3 +632,64 @@ test('a guest that lets two rounds in a row time out is taken out and told why; 
   assert.match(files.get(at('K7QF', 'transcript.md'))!, /"Claude Code \(guest\)" was taken out: no reply in 2 rounds in a row/)
   assert.equal(hub.views()[0]!.stage, 'host', 'the round still went to the host')
 })
+
+test('a round does not time out while a reviewer has not been asked: its message stays, and the host is not told nobody answered', () => {
+  let now = 1_000
+  let timers: Array<{ at: number; callback: () => void; live: boolean }> = []
+  const clock: MeetingTimers = {
+    now: () => now,
+    set: (callback, ms) => { const timer = { at: now + ms, callback, live: true }; timers.push(timer); return () => { timer.live = false } },
+  }
+  const advance = (ms: number): void => {
+    now += ms
+    const due = timers.filter((timer) => timer.live && timer.at <= now)
+    timers = timers.filter((timer) => !due.includes(timer))
+    for (const timer of due) { timer.live = false; timer.callback() }
+  }
+  const delivered: Array<{ tabId: string; kind: string; round: number }> = []
+  const cancelled: string[] = []
+  let undelivered = true
+  const hub = new MeetingHub(() => MEETINGS, {
+    deliver: (tabId, delivery) => delivered.push({ tabId, kind: delivery.kind, round: delivery.round }),
+    cancel: (_meetingId, tabId) => cancelled.push(tabId ?? ''),
+    write: () => {}, changed: () => {}, notify: () => {}, sessionIdOf: (tabId) => tabId,
+    undelivered: () => undelivered,
+  }, () => ({ maxRounds: 6, roundTimeoutMinutes: 10 }), clock, () => 'K7QF')
+  hub.start({ tabId: 'tab-a', title: 'host', folder: 'D:\\a' }, { topic: 't', post: 'Plan v1', changes: null })
+  hub.join({ tabId: 'tab-b', title: 'reviewer', folder: 'D:\\b' }, 'K7QF')
+
+  advance(10 * 60_000)
+  assert.equal(hub.views()[0]!.stage, 'reviewing', 'the reviewer never got the post')
+  assert.deepEqual(hub.views()[0]!.waitingFor, ['tab-b'])
+  assert.deepEqual(cancelled, [], 'and its message is still waiting to go in')
+  assert.equal(delivered.filter((item) => item.tabId === 'tab-a' && item.kind === 'digest').length, 0)
+  advance(10 * 60_000)
+  assert.equal(hub.views()[0]!.stage, 'reviewing', 'it keeps waiting')
+
+  undelivered = false
+  advance(10 * 60_000)
+  assert.equal(hub.views()[0]!.stage, 'host', 'once asked, a reviewer has the usual time')
+  assert.equal(delivered.filter((item) => item.tabId === 'tab-a' && item.kind === 'digest').length, 1)
+})
+
+test('the person can hand in what a reviewer already answered: it counts as the reply, and the waiting message is not typed after it', () => {
+  const h = harness()
+  h.hub.start({ tabId: 'tab-a', title: 'host', folder: 'D:\\a' }, { topic: 't', post: 'Plan v1', changes: null })
+  assert.equal(h.hub.postAnswer('tab-b', 'Not in a meeting'), false)
+  assert.equal(h.hub.owesReply('tab-a'), false, 'a host owes no reply, so nothing offers it one')
+  assert.equal(h.hub.postAnswer('tab-a', 'A host answers with its commands'), false)
+  h.hub.join({ tabId: 'tab-b', title: 'reviewer', folder: 'D:\\b' }, 'K7QF')
+  assert.equal(h.hub.views()[0]!.stage, 'reviewing')
+  assert.equal(h.hub.owesReply('tab-b'), true)
+  const before = h.cancelled.length
+  assert.equal(h.hub.postAnswer('tab-b', 'Review typed in the terminal.'), true)
+  assert.deepEqual(h.cancelled.slice(before), [{ meetingId: 'K7QF', tabId: 'tab-b' }], 'the post is no longer waiting')
+  assert.equal(h.delivered.at(-2)?.kind, 'add-dir', 'the folder still goes in, for the rounds to come')
+  const digest = h.delivered.at(-1)!
+  assert.equal(digest.tabId, 'tab-a')
+  assert.equal(digest.kind, 'digest')
+  assert.match(digest.text, /Review typed in the terminal\./)
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  assert.equal(h.hub.owesReply('tab-b'), false)
+  assert.equal(h.hub.postAnswer('tab-b', 'Again'), false, 'nothing is owed now')
+})

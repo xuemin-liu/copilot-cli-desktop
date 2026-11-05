@@ -26,6 +26,8 @@ export interface SessionTaskState {
   recentInput: boolean
   /** Still on the resume picker, where typed text would pick something. */
   picker: boolean
+  /** A command may have opened a dialog, which would take typed text and choose something on Enter. */
+  dialog: boolean
   /** The desktop is already typing into this session (a `/rename`). */
   typing: boolean
   /** The terminal has bracketed paste on, so a multi-line task arrives as one paste instead of a line at a time. */
@@ -58,7 +60,7 @@ export function sessionTaskDecision(state: SessionTaskState, needsWrite = true):
   if (blocker) return { result: 'refused', message: blocker }
   const idle = state.activity === 'idle' || (state.activity === null && state.promptVisible)
   if (state.status === 'approval-needed' || !idle) return { result: 'busy', message: 'Copilot is busy.' }
-  if (state.picker || state.typing || state.draft || state.recentInput) return { result: 'busy', message: 'The prompt box is in use.' }
+  if (state.picker || state.dialog || state.typing || state.draft || state.recentInput) return { result: 'busy', message: 'The prompt box is in use.' }
   if (!state.bracketedPaste) return { result: 'busy', message: 'The task has several lines, and this terminal would send each one on its own.' }
   return { result: 'sent' }
 }
@@ -68,6 +70,19 @@ export function taskPasteSequence(text: string,maximumChars=MAX_TASK_CHARS): str
   // Only main chooses a larger cap for already bounded meeting material. Ordinary composed tasks retain 12,000.
   const bounded = text.slice(0, Math.min(1_000_000,maximumChars)).replace(/\r\n?/g, '\n').replace(CONTROL_CHARS, '')
   return `\u001b[200~${bounded}\u001b[201~`
+}
+
+const TERMINAL_CONTROL = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|[\u0000- \u007f]/g
+const DIALOG_HINTS = /esc(?:ape)?(?:to)?(?:close|cancel|back)|enter(?:to)?(?:select|open|confirm)|tonavigate|↑\/↓/i
+
+/**
+ * Whether a dialog (`/model`, `/help`, a picker) has drawn its key hints since the prompt's footer last did. A dialog takes typed
+ * keys, and Enter chooses something in it, so nothing may be typed then. A missing footer proves nothing, since a command that
+ * only prints (`/add-dir`) does not draw it again; a hint is the evidence. Only for right after a command, when one is possible.
+ */
+export function dialogOnScreen(output: string): boolean {
+  const at = output.lastIndexOf('open sidebar')
+  return DIALOG_HINTS.test(output.slice(at < 0 ? 0 : at).replace(TERMINAL_CONTROL, ''))
 }
 
 /** Tracks DECSET 2004 (bracketed paste) across output chunks, which may split the sequence anywhere. */

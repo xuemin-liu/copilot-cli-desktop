@@ -37,10 +37,20 @@ meeting dispatch and requests interruption only when the same live session is st
 switch invalidates the old delivery; it does not authorize Ctrl+C against the newly bound conversation.
 
 Queued handoffs can be inspected and discarded, including when a crash left a queue entry without a restored meeting.
-Closed meeting scopes are retired only when the in-memory outbox has no work and every journal entry is terminal.
-Unresolved evidence is retained. Storage failure disables automatic meeting input while ordinary terminals remain usable.
+Closed meeting scopes are retired when the in-memory outbox has no work and no turn is still running. An entry left
+uncertain is discarded then: a closed meeting takes no more replies, so it can no longer matter, and keeping it would block
+that session from every later meeting. In an open meeting uncertain evidence is retained, and the meeting bar and a
+notification say so. Storage failure disables automatic meeting input while ordinary terminals remain usable.
 An individual intake rejection is shown as a waiting handoff and leaves other destinations and recovery actions usable;
 it is distinct from an unavailable/corrupt journal.
+
+A message that cannot be typed is never silent. After 15 seconds the person gets one notification and the meeting bar
+says which session and why: text in its prompt box, an open session picker, a second session held by its CLI, an earlier
+handoff awaiting a decision, a menu or dialog possibly open. A prompt recalled from history holds nothing the person wrote,
+so after 5 quiet seconds the desktop clears it with Ctrl+C. Right after a command a dialog may have the keyboard, and typed
+text would go into it, so nothing is typed until the prompt's footer is the last thing on screen. A round does not time out
+while a reviewer's message is waiting to be typed, or was typed and never confirmed. One waiting behind a running turn does
+not hold the round, and is reported after 5 minutes.
 
 Validation uses real SQLite reopen/retry/discard tests, legacy identity fixtures, existing meeting/guest round tests,
 and production lifecycle fixtures for recipient switching, no-lock initial delivery and draft/Enter protection.

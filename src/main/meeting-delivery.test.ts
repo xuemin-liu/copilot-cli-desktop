@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { MeetingOutbox } from './meeting-delivery.js'
+import { BEHIND_TURN_REASON, MeetingOutbox } from './meeting-delivery.js'
 import type { SessionTaskSend } from './session-task.js'
 
 function outbox(answers: Record<string, SessionTaskSend['result']>) {
@@ -34,6 +34,43 @@ test('one prompt per session at a time: the next waits until the turn it started
   assert.equal(o.box.turnEnded('tab-1')?.text, 'round 1')
   assert.equal(o.box.pump(), false)
   assert.deepEqual(o.typed, ['tab-1: round 1', 'tab-1: round 2'])
+})
+
+test('a message that cannot be typed keeps its reason and since when, until it goes in', () => {
+  const answers: Record<string, SessionTaskSend['result']> = { 'tab-1': 'busy' }
+  const o = outbox(answers)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), true)
+  assert.equal(o.box.undelivered('tab-1', 'M2NB'), false)
+  assert.deepEqual(o.box.blockedDeliveries(), [], 'nothing has been tried yet')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 0, behindTurn: false }])
+  o.advance(5_000)
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'the same stall')
+  answers['tab-1'] = 'sent'
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [])
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false)
+})
+
+test('the reason the desktop can give wins, and a blocked folder command counts as blocked too, though not as undelivered', () => {
+  const o = outbox({})
+  o.setCommands(false)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'add-dir', text: 'C:\\m' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false, 'no message is waiting yet')
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.reason, 'The session cannot take a command now.')
+  let typed = false
+  const told = new MeetingOutbox({
+    sendTask: () => { typed = true; return { result: 'busy', message: 'The session is starting.' } },
+    sendCommand: () => false, sent: () => {}, refused: () => {}, now: () => 0,
+    blockReason: () => 'Its prompt box may hold text.',
+  })
+  told.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  told.pump()
+  assert.equal(typed, true)
+  assert.equal(told.blockedDeliveries()[0]!.reason, 'Its prompt box may hold text.')
 })
 
 test('a busy session keeps its message for later; a refused one drops it; other sessions are not held up', () => {
@@ -70,4 +107,37 @@ test('settled journal deliveries leave the outbox without starting a duplicate t
   box.enqueue('tab-1',{meetingId:'K7QF',round:1,kind:'post',text:'already answered',id:'stable'})
   assert.equal(box.hasMeetingWork('K7QF'),true);box.pump()
   assert.equal(sent,0);assert.equal(box.inTurn('tab-1'),null);assert.equal(box.hasMeetingWork('K7QF'),false)
+})
+
+test('a turn that never ends does not count as a message waiting to be typed, and the wait behind it is reported', () => {
+  const o = outbox({})
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  o.box.pump()
+  assert.equal(o.box.inTurn('tab-1')?.text, 'round 1')
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 2, kind: 'post', text: 'round 2' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false, 'the session was asked something: the round may time out as usual')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: BEHIND_TURN_REASON, since: 0, behindTurn: true }])
+  o.advance(60 * 60_000)
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'still the same wait')
+  o.box.turnEnded('tab-1')
+  assert.deepEqual(o.box.blockedDeliveries(), [], 'that wait is over')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [])
+  assert.deepEqual(o.typed, ['tab-1: round 1', 'tab-1: round 2'])
+})
+
+test('a refusal right after a long turn starts its own clock, so a normal delivery raises no notice', () => {
+  const answers: Record<string, SessionTaskSend['result']> = {}
+  const o = outbox(answers)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  o.box.pump()
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 2, kind: 'post', text: 'round 2' })
+  o.box.pump()
+  o.advance(60_000)
+  o.box.turnEnded('tab-1')
+  answers['tab-1'] = 'busy'
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 60_000, behindTurn: false }])
 })

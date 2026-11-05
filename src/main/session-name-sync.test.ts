@@ -123,6 +123,84 @@ test('the prompt counts as empty only after Enter or Ctrl+C, and mouse or focus 
   assert.equal(picker.empty, true)
 })
 
+test('keys that add nothing leave the prompt empty, and text typed then deleted is gone', () => {
+  for (const key of ['\x1b', '\x1b[C', '\x1b[D', '\x1b[H', '\x1b[F', '\x1b[5~', '\x1b[6~', '\x1bOD', '\x1b[1;5D']) {
+    const draft = new PromptDraft()
+    draft.note(key, 1000)
+    assert.equal(draft.empty, true, JSON.stringify(key))
+    assert.equal(draft.quiet(1500), false, 'it still counts as the person being at the keyboard')
+  }
+  const deleted = new PromptDraft()
+  deleted.note('a', 1000); deleted.note('b', 1001); deleted.note('c', 1002)
+  assert.equal(deleted.empty, false)
+  deleted.note('\x7f', 1003); deleted.note('\x7f', 1004)
+  assert.equal(deleted.empty, false, 'one character is still there')
+  deleted.note('\x7f', 1005)
+  assert.equal(deleted.empty, true)
+  const pasted = new PromptDraft()
+  pasted.note('\x1b[200~pasted\x1b[201~', 1000)
+  assert.equal(pasted.typed, true)
+})
+
+test('a paste or Ctrl+U never proves the box empty, so what is left of a draft is not submitted with an automatic message', () => {
+  const lines = new PromptDraft()
+  lines.note('\x1b[200~KEEP THIS LINE\nremove this line\x1b[201~', 1000)
+  lines.note('\x15', 1001)
+  assert.equal(lines.typed, true, 'Ctrl+U clears only the line the caret is on')
+  for (let index = 0; index < 500; index++) lines.note('\x7f', 1002)
+  assert.equal(lines.typed, true, 'a pasted length is not followed, whatever is deleted after it')
+
+  const wrapped = new PromptDraft()
+  wrapped.note('a long line of typed words that may wrap on screen', 1000)
+  wrapped.note('\x15', 1001)
+  assert.equal(wrapped.typed, true, 'it may clear only what shows on one row')
+  for (let index = 0; index < 500; index++) wrapped.note('\x7f', 1002)
+  assert.equal(wrapped.typed, true)
+
+  const onlyPaste = new PromptDraft()
+  onlyPaste.note('\x1b[200~one line\x1b[201~', 1000)
+  for (let index = 0; index < 500; index++) onlyPaste.note('\x7f', 1001)
+  assert.equal(onlyPaste.typed, true)
+  onlyPaste.note('\x03', 1002)
+  assert.equal(onlyPaste.empty, true, 'Ctrl+C clears the whole box')
+
+  const sent = new PromptDraft()
+  sent.note('\x1b[200~the desktop\'s own message\x1b[201~', 1000)
+  sent.note('\r', 1300)
+  assert.equal(sent.empty, true, 'Enter submits it, so a typed delivery leaves the box empty')
+})
+
+test('what may hold the person\'s own words is never taken for empty, and only a recalled prompt can be cleared for them', () => {
+  const recalled = new PromptDraft()
+  recalled.note('\x1b[A', 1000)
+  assert.deepEqual([recalled.empty, recalled.recalled, recalled.typed], [false, true, false])
+  recalled.note('\x1b[B', 1001)
+  assert.equal(recalled.recalled, true, 'Down may still show a recalled prompt')
+  recalled.note('!', 1002)
+  assert.deepEqual([recalled.empty, recalled.recalled, recalled.typed], [false, false, true], 'editing it makes it their own')
+  recalled.note('\x7f', 1003)
+  assert.equal(recalled.typed, true, 'its length is not known, so deleting cannot prove it empty')
+
+  const caret = new PromptDraft()
+  caret.note('abc', 1000); caret.note('\x1b[D', 1001); caret.note('\x7f', 1002); caret.note('\x7f', 1003); caret.note('\x7f', 1004)
+  assert.equal(caret.typed, true, 'after moving the caret, Backspace may have deleted less than it seems')
+  const up = new PromptDraft()
+  up.note('abc', 1000); up.note('\x1b[A', 1001); up.note('\x7f', 1002); up.note('\x7f', 1003); up.note('\x7f', 1004)
+  assert.equal(up.typed, true, 'Up may move within a draft of several lines')
+  for (const key of ['\t', '\x17', '\x16', '\x1b[3~', '\x1b[2~', '\x1bv', '\x1b[1;2A']) {
+    const unknown = new PromptDraft()
+    unknown.note(key, 1000)
+    assert.equal(unknown.typed, true, `${JSON.stringify(key)} is not known to add nothing`)
+    unknown.note('\x7f', 1001)
+    assert.equal(unknown.typed, true, 'and nothing proves it empty but Enter or Ctrl+C')
+    unknown.note('\x03', 1002)
+    assert.equal(unknown.empty, true)
+  }
+  const line = new PromptDraft()
+  line.note('first\x1b\r', 1000); line.note('\x15', 1001)
+  assert.equal(line.typed, true, 'Ctrl+U clears one line of several')
+})
+
 test('a tab follows Copilot\'s name until someone names it, and then Copilot is renamed to match', () => {
   const tab = { title: 'project', autoTitle: true, remote: false, lastSessionId: 'id' }
   assert.deepEqual(nameSyncAction(tab, undefined), { kind: 'none' }, 'nothing before the name is read')
@@ -137,4 +215,52 @@ test('a tab follows Copilot\'s name until someone names it, and then Copilot is 
   assert.deepEqual(nameSyncAction({ ...named, lastSessionId: null }, null), { kind: 'none' })
   // A tab saved by an older release, or named when it started: nothing is typed into it unasked.
   assert.deepEqual(nameSyncAction({ ...named, renamePending: false }, { name: 'Something else', userNamed: false }), { kind: 'none' })
+})
+
+test('after a command an arrow key moves a dialog if one shows, and otherwise may have recalled text that must not be typed over', () => {
+  const dialog = new PromptDraft()
+  for (const key of '/theme') dialog.note(key, 1000)
+  dialog.note('\r', 1001)
+  assert.equal(dialog.afterCommand, true)
+  dialog.note('\x1b[B', 1002, true)
+  assert.deepEqual([dialog.empty, dialog.recalled, dialog.typed], [true, false, false], 'that moved a picker: nothing is in the box, and no Ctrl+C will close it')
+  dialog.note('\x1b', 1003)
+  assert.equal(dialog.afterCommand, false, 'Esc closes it')
+  assert.equal(dialog.empty, true, 'so the waiting message can go in')
+
+  const recalled = new PromptDraft()
+  recalled.note('/usage', 1000); recalled.note('\r', 1001)
+  recalled.note('\x1b[A', 1002)
+  assert.deepEqual([recalled.empty, recalled.recalled, recalled.typed], [false, false, true], 'no dialog shows, so this may be a recalled prompt')
+  recalled.note('\x1b', 1003)
+  assert.equal(recalled.empty, false, 'Esc is not known to clear the box')
+  recalled.note('\x03', 1004)
+  assert.equal(recalled.empty, true, 'Ctrl+C is')
+
+  const own = new PromptDraft()
+  own.note('/rename a title', 1000); own.note('\r', 1001); own.commandOpensNoDialog()
+  assert.equal(own.afterCommand, false, 'the desktop knows its own commands')
+  own.note('\x1b[A', 1002)
+  assert.equal(own.recalled, true, 'so Up recalls history as usual')
+
+  for (const close of ['\x1b', '\x03', '\r']) {
+    const open = new PromptDraft()
+    open.note('/model', 1000); open.note('\r', 1001)
+    open.note(close, 1002)
+    assert.equal(open.afterCommand, false, `${JSON.stringify(close)} leaves the dialog, so the advice on the bar works`)
+  }
+
+  const prompt = new PromptDraft()
+  for (const key of 'hello') prompt.note(key, 1000)
+  prompt.note('\r', 1001)
+  assert.equal(prompt.afterCommand, false, 'an ordinary prompt opens no dialog')
+  prompt.note('\x1b[A', 1002)
+  assert.equal(prompt.recalled, true)
+  const caret = new PromptDraft()
+  caret.note('/help', 1000); caret.note('\x1b[D', 1001); caret.note('\r', 1002)
+  assert.equal(caret.afterCommand, true, 'after the caret moved, what went in is not known')
+  const pasted = new PromptDraft()
+  pasted.note('\x1b[200~[meeting K7QF · round 1 · from the desktop]\nPlan\x1b[201~', 1000)
+  pasted.note('\r', 1300)
+  assert.equal(pasted.afterCommand, false, 'a meeting message opens no dialog')
 })

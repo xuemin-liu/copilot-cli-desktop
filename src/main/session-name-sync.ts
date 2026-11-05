@@ -64,39 +64,98 @@ export function renameCommand(title: string): string | null {
 // or ST), cursor position (CPR), device attributes (DA) and status (DSR, DECRPM) reports.
 const NON_TEXT_INPUT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[\??\d+;\d+R|\x1b\[[?>]?[\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\[\??\d+n/g
 
+// Keys that put nothing in the prompt box: Esc, and moving the caret or the view (Left, Right, Home, End, PageUp, PageDown).
+const NO_TEXT_KEYS = /^(?:\x1b(?:\[(?:1;\d+)?[CDHF]|O[CDHF]|\[[1456789](?:;\d+)?~)|\x1b)+$/
+// Up and Down: these recall an earlier prompt into the box.
+const RECALL_KEYS = /^(?:\x1b(?:\[[AB]|O[AB]))+$/
+
 /**
- * Whether the prompt box may hold something the person typed. The desktop types `/rename` into the session only while
- * it is empty, since a draft would be sent to the model with the command appended. Only Enter (submits) and Ctrl+C
- * (clears) make it empty again; anything else, including arrow keys and pastes, counts as a draft.
+ * What the prompt box holds, as far as the keys pressed can tell. The desktop types into the session only while it is empty,
+ * since a draft would be sent to the model with the typed text appended. A key that adds nothing leaves it as it was, and text
+ * typed and then deleted leaves it empty. A recalled prompt is apart: it is only history, so Ctrl+C loses nothing the person
+ * wrote. Whatever cannot be followed for certain (an edit after moving the caret, a key not known here) counts as a draft
+ * until Enter or Ctrl+C.
  */
 export class PromptDraft {
-  private dirty: boolean
+  private content: 'empty' | 'recalled' | 'typed'
+  /** Characters in the box when it holds `typed` text; null once that can no longer be followed for certain. */
+  private typedChars: number | null = 0
   private contextText: string | null = ''
   private lastInputAt = 0
   private pickerShowing: boolean
+  private commandSubmitted = false
 
   /** `awaitingFirstEnter`: the session may open on a screen of its own (the resume picker), where typed text would pick
    * something; it counts as a draft until the first Enter. */
   constructor({ awaitingFirstEnter = false }: { awaitingFirstEnter?: boolean } = {}) {
-    this.dirty = awaitingFirstEnter
+    this.content = awaitingFirstEnter ? 'typed' : 'empty'
+    this.typedChars = awaitingFirstEnter ? null : 0
     this.pickerShowing = awaitingFirstEnter
   }
 
   /** Still before the first Enter of a session that opened on the resume picker. */
   get beforeFirstEnter(): boolean { return this.pickerShowing }
 
-  note(data: string, now = Date.now()): void {
+  /** `dialogShown`: a dialog's hints are on screen as this key is pressed, so an arrow key moves its selection. */
+  note(data: string, now = Date.now(), dialogShown = false): void {
     const text = data.replace(NON_TEXT_INPUT, '')
     if (!text) return
+    const before = this.contextText
     this.noteContextText(text)
     this.lastInputAt = now
     const last = text.at(-1)
     // Alt+Enter (`ESC CR`) adds a line to the draft rather than sending it.
-    this.dirty = !((last === '\r' && !text.endsWith('\x1b\r')) || last === '\x03')
+    if ((last === '\r' && !text.endsWith('\x1b\r')) || last === '\x03') {
+      this.content = 'empty'
+      this.typedChars = 0
+      // What it submitted is not known when the caret moved: that may have been a command too.
+      this.commandSubmitted = last === '\r' && !text.startsWith('\x1b[200~[meeting ') && (before === null || (before + text).trimStart().startsWith('/'))
+    } else this.noteContent(text, dialogShown)
     if (last === '\r') this.pickerShowing = false
   }
 
-  get empty(): boolean { return !this.dirty }
+  private noteContent(text: string, dialogShown: boolean): void {
+    if (NO_TEXT_KEYS.test(text)) {
+      // With text in the box the caret may have moved, so a later Backspace may not delete what it seems to.
+      if (this.content === 'typed') this.typedChars = null
+      // Esc closes a dialog, and is what the person is told to press.
+      if (/^\x1b+$/.test(text)) this.commandSubmitted = false
+      return
+    }
+    if (RECALL_KEYS.test(text)) {
+      // In a dialog these move its selection, and clearing the box would close it.
+      if (this.commandSubmitted && dialogShown) return
+      if (this.commandSubmitted) { this.content = 'typed'; this.typedChars = null; return } // Which of the two is not known.
+      if (this.content === 'empty') this.content = 'recalled'
+      else if (this.content === 'typed') this.typedChars = null
+      return
+    }
+    // An edit of a recalled prompt is the person's own text now, of a length not known here. Only keys typed one by one and deleted
+    // one by one can prove the box empty: a paste may hold several lines, and Ctrl+U clears only the line the caret is on.
+    let chars = this.content === 'recalled' ? null : this.typedChars
+    for (const char of text) {
+      if (chars === null) break
+      if (char === '\x7f' || char === '\b') chars = Math.max(0, chars - 1)
+      else if (char >= ' ') chars++
+      else chars = null
+    }
+    this.typedChars = chars
+    this.content = chars === 0 ? 'empty' : 'typed'
+  }
+
+  get empty(): boolean { return this.content === 'empty' }
+
+  /** It holds only a prompt recalled from history, with nothing the person wrote: Ctrl+C clears it and loses nothing. */
+  get recalled(): boolean { return this.content === 'recalled' }
+
+  /** It may hold what the person wrote: never typed over, and never cleared for them. */
+  get typed(): boolean { return this.content === 'typed' }
+
+  /** A command went in last, which may have opened a dialog that takes the keys meant for the prompt. */
+  get afterCommand(): boolean { return this.commandSubmitted }
+
+  /** The desktop typed that command itself, and it is known to open no dialog. */
+  commandOpensNoDialog(): void { this.commandSubmitted = false }
 
   /** Only attach to a known ordinary prompt with the caret at its end. Commands, history/picker navigation and
    * unrecognized editing sequences must keep their native Enter behavior. */

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { BracketedPasteTracker, isTerminalReply, sessionTaskDecision, taskPasteSequence } from './session-task.js'
+import { BracketedPasteTracker, isTerminalReply, sessionTaskDecision, taskPasteSequence, dialogOnScreen } from './session-task.js'
 import type { SessionTaskState } from './session-task.js'
 
 const ready: SessionTaskState = {
   status: 'running', activity: 'idle', promptVisible: true, preset: 'default', sideChat: false, remote: false,
-  draft: false, recentInput: false, picker: false, typing: false, bracketedPaste: true,
+  draft: false, recentInput: false, picker: false, dialog: false, typing: false, bracketedPaste: true,
 }
 
 test('only complete terminal replies preserve an initial recipient; navigation and mixed input do not', () => {
@@ -20,7 +20,7 @@ test('a task is sent only when the session is idle and its prompt box is untouch
   assert.deepEqual(sessionTaskDecision({ ...ready, activity: null }), { result: 'sent' }, 'before the first turn the prompt footer shows it is ready')
   for (const busy of [
     { activity: 'working' as const }, { activity: null, promptVisible: false }, { status: 'approval-needed' as const },
-    { draft: true }, { recentInput: true }, { picker: true }, { typing: true }, { bracketedPaste: false },
+    { draft: true }, { recentInput: true }, { picker: true }, { dialog: true }, { typing: true }, { bracketedPaste: false },
   ]) assert.equal(sessionTaskDecision({ ...ready, ...busy }).result, 'busy', JSON.stringify(busy))
 })
 
@@ -58,4 +58,18 @@ test('bracketed paste is tracked across chunks that split the sequence', () => {
   assert.equal(tracker.on, true)
   tracker.note('\u001b[?2004l\u001b[?2004h\u001b[?2004l')
   assert.equal(tracker.on, false, 'the last one wins')
+})
+
+test('a dialog is told by its key hints since the footer, and a missing footer alone proves nothing', () => {
+  const footer = '\x1b[1m ← open sidebar\x1b[22m · Interactive · Manual Approval · / commands · ? help · tab next tab     ui-check-model'
+  assert.equal(dialogOnScreen(`earlier output\r\n${footer}\x1b[?25h\x1b[12;3H`), false)
+  assert.equal(dialogOnScreen('no footer, no hints'), false)
+  // Real output: the footer is drawn once more as a dialog opens.
+  assert.equal(dialogOnScreen(`${footer}\r\n ❯ ui-check-model ✓ \r\n ❯  Search models…\r\n ● Scanning local providers · ↑/↓ to navigate · enter to select`), true, '/model')
+  assert.equal(dialogOnScreen(`${footer}\r\n /model  Select the AI model\r\n↑/↓ scroll · esc close`), true, '/help')
+  assert.equal(dialogOnScreen(`${footer}\r\n / search · ↑/↓ navigate · enter open · r refresh`), true, 'the session picker')
+  assert.equal(dialogOnScreen(`${footer}\r\n\x1b[3;1Henter\x1b[0m to \x1b[1mselect\x1b[0m · esc to cancel`), true, 'hints split up by colours')
+  // Real output of /add-dir: it prints above the prompt and does not draw the footer again.
+  assert.equal(dialogOnScreen(`${footer}\r\n ● Added directory to allowed list: C:\\m\\9XHV\r\n${'more printed text '.repeat(40)}\r\n❯`), false, 'a command that only prints')
+  assert.equal(dialogOnScreen(`/model · ↑/↓ to navigate\r\n${footer}\r\n❯`), false, 'a dialog closed: the footer came after it')
 })

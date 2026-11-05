@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {randomUUID} from 'node:crypto'
 import {WorkflowDeliveries} from './workflow-deliveries.js'
-import {journalMeetingDelivery} from './workflow-meeting-journal.js'
+import {journalMeetingDelivery,settleClosedMeeting} from './workflow-meeting-journal.js'
 import type {MeetingDelivery} from './meeting.js'
 
 test('meeting identity survives restart and never resends an ambiguous turn without a person',async()=>{
@@ -25,6 +25,30 @@ test('meeting identity survives restart and never resends an ambiguous turn with
     assert.equal(journalMeetingDelivery(journal,'session',delivery)?.state,'answered')
   }finally{journal.close();await rm(dir,{recursive:true,force:true})}
 })
+test('what a closed meeting left uncertain stops blocking its session, and other meetings keep theirs',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'meeting-journal-')),path=join(dir,'journal.sqlite')
+  try{
+    let journal=new WorkflowDeliveries(path)
+    const session=randomUUID(),other=randomUUID()
+    const post=(meetingId:string):MeetingDelivery=>({meetingId,round:1,kind:'post',text:'Plan',id:randomUUID()})
+    const closed=journalMeetingDelivery(journal,session,post('K7QF'))!
+    journal.begin(closed.id,()=>true);journal.submitted(closed.id)
+    const open=journalMeetingDelivery(journal,other,post('M2NB'))!
+    journal.begin(open.id,()=>true);journal.submitted(open.id)
+    // The app restarts during both turns: everything in flight becomes uncertain, and blocks its session.
+    journal.close();journal=new WorkflowDeliveries(path)
+    assert.equal(journal.get(closed.id)?.state,'uncertain')
+    const next=journalMeetingDelivery(journal,session,post('P3RT'))!
+    assert.equal(journal.begin(next.id,()=>true),null,'the leftover blocks the next meeting')
+
+    settleClosedMeeting(journal,'meeting/K7QF')
+    assert.equal(journal.get(closed.id),null,'nothing is left of the closed meeting')
+    assert.equal(journal.begin(next.id,()=>true)?.state,'submitting','the next meeting gets through')
+    assert.equal(journal.get(open.id)?.state,'uncertain','an open meeting keeps its evidence for the person')
+    journal.close()
+  }finally{await rm(dir,{recursive:true,force:true})}
+})
+
 test('legacy outstanding prompts require reconciliation and respect another source’s unresolved ownership',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'meeting-legacy-')),journal=new WorkflowDeliveries(join(dir,'journal.sqlite'))
   const legacy:MeetingDelivery={id:randomUUID(),recovered:true,meetingId:'K7QF',round:1,kind:'post',text:'Old outstanding prompt'}

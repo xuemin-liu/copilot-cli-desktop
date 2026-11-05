@@ -73,6 +73,17 @@ test('a quiet guest is told apart by what it holds, an open wait is not quiet, a
   assert.match(html, /<li>Waiting \(guest\)<button/)
 })
 
+test('a message that cannot be typed says so on the bar, naming the session and why', () => {
+  const stuck: MeetingView = { ...meeting, undelivered: [{ tabId: 'tab-b', reason: 'Its prompt box may hold text.', since: 1, hasAnswer: false }] }
+  const html = renderToStaticMarkup(<MeetingBar meetings={[stuck]} tabs={[tab('tab-host', 'host'), tab('tab-b', 'reviewer')]} activeTabId="tab-host" onError={() => undefined} />)
+  assert.match(html, /role="status">Not delivered to reviewer: Its prompt box may hold text\.<\/span>/)
+  const answered: MeetingView = { ...meeting, undelivered: [{ tabId: 'tab-b', reason: 'x', since: 1, hasAnswer: true }] }
+  assert.match(renderToStaticMarkup(<MeetingBar meetings={[answered]} tabs={[tab('tab-host', 'host'), tab('tab-b', 'reviewer')]} activeTabId="tab-host" onError={() => undefined} />), />Send its last answer as the reply<\/button>/)
+  assert.doesNotMatch(html, /Send its last answer/, 'nothing to hand in yet')
+  const fine = renderToStaticMarkup(<MeetingBar meetings={[meeting]} tabs={[tab('tab-host', 'host'), tab('tab-b', 'reviewer')]} activeTabId="tab-host" onError={() => undefined} />)
+  assert.doesNotMatch(fine, /Not delivered/)
+})
+
 test('the meeting cost reads as AI credits, with premium requests only when there are any', () => {
   assert.equal(formatMeetingCost({ aiCredits: 0, premiumRequests: 0 }), '0.00 AI credits used')
   assert.equal(formatMeetingCost({ aiCredits: 0.004, premiumRequests: 0 }), '<0.01 AI credits used')

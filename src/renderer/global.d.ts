@@ -120,7 +120,7 @@ export interface CopilotDesktopBridge {
   automationAction(id:string,action:'off'|'preview'|'automatic'|'start'):Promise<void>
   pauseAutomatic(paused:boolean,projectId?:string):Promise<void>
   deliveryAction(id: string, action: 'retry' | 'discard'): Promise<void>
-  meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): Promise<void>
+  meetingAction(meetingId: string, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript' | 'use-answer', tabId?: string, role?: string): Promise<void>
   /** Invite an outside agent to review: returns the invitation to paste into it, also put on the clipboard. `short`: the
    * agent has the meeting tools, so the invitation names only them (refused when the tools are not served). */
   meetingInvite(meetingId: string, name: string, role?: string, short?: boolean): Promise<string>
