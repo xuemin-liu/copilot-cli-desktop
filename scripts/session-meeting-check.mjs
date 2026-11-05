@@ -67,7 +67,8 @@ export async function runMeetingCheck() {
     const opened = async (profileId, title) => {
       const before = new Set((await state()).tabs.map(tab => tab.id))
       await ui(`window.copilotDesktop.createTab("new", ${JSON.stringify(profileId)}, ${JSON.stringify(title)})`)
-      const tab = await until(async () => (await state()).tabs.find(tab => !before.has(tab.id)), `${title} tab`)
+      // By title too: the fresh tab the app opens for an empty workspace can appear after the snapshot above.
+      const tab = await until(async () => (await state()).tabs.find(tab => !before.has(tab.id) && tab.title === title), `${title} tab`)
       await ready(tab, title)
       return tab
     }
