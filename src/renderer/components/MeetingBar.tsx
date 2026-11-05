@@ -98,7 +98,7 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
   if (!shown.length) return null
   const busy = new Set(meetings.filter((meeting) => meeting.stage !== 'closed')
     .flatMap((meeting) => [meeting.hostTabId, ...meeting.participants.map((participant) => participant.tabId)]))
-  const act = (meeting: MeetingView, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript', tabId?: string, role?: string): void => {
+  const act = (meeting: MeetingView, action: 'stop' | 'resume' | 'join' | 'remove' | 'transcript' | 'use-answer', tabId?: string, role?: string): void => {
     void window.copilotDesktop.meetingAction(meeting.id, action, tabId, role).catch((error: unknown) => onError(error instanceof Error ? error.message : String(error)))
   }
   /** `short`: for an agent that already has the meeting tools; the invitation names only them. */
@@ -159,6 +159,18 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
               ? <button type="button" className="meeting-bar-button meeting-bar-stop" onClick={() => act(meeting, 'stop')}>{meeting.stage === 'paused' ? 'End' : 'Stop'}</button>
               : <button type="button" className="icon-button" aria-label={`Dismiss meeting ${meeting.id}`}
                   onClick={() => setDismissed((previous) => new Set([...previous, meeting.id]))}>×</button>}
+            {open && meeting.undelivered?.map((delivery) => (
+              <span key={delivery.tabId} className="meeting-bar-note meeting-bar-quiet" role="status">
+                Not delivered to {titleOf(delivery.tabId)}: {delivery.reason}
+                {delivery.hasAnswer && (
+                  <>
+                    {' '}
+                    <button type="button" className="meeting-bar-button" title="If you asked that session yourself, this hands its latest answer to the meeting as its reply"
+                      onClick={() => act(meeting, 'use-answer', delivery.tabId)}>Send its last answer as the reply</button>
+                  </>
+                )}
+              </span>
+            ))}
             {open && (meeting.hostGuest || guests.length > 0 || pending.length > 0) && (
               <ul className="meeting-bar-guests" aria-label={`Outside agents in meeting ${meeting.id}`}>
                 {meeting.hostGuest && <li>{meeting.hostTitle} · host<GuestQuietNote contact={meeting.hostGuest} now={now} /></li>}

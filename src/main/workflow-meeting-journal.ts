@@ -2,6 +2,15 @@ import { randomUUID } from 'node:crypto'
 import type { MeetingDelivery } from './meeting.js'
 import type { WorkflowDeliveries,WorkflowDelivery } from './workflow-deliveries.js'
 
+/**
+ * A closed meeting can take no more replies, so nothing in its scope can be sent again or matter to anyone. What was left
+ * uncertain (the app restarted during a turn, say) must not go on blocking that session from every later meeting.
+ */
+export function settleClosedMeeting(journal:WorkflowDeliveries,scope:string):void {
+  for(const delivery of journal.list())if(delivery.scope===scope&&delivery.state==='uncertain')journal.discard(delivery.id)
+  journal.retireScope(scope)
+}
+
 /** Maps the meeting's persisted message identity to the shared destination arbiter. */
 export function journalMeetingDelivery(journal:WorkflowDeliveries,sessionId:string,delivery:MeetingDelivery,changed?:()=>void):WorkflowDelivery|null {
   if(delivery.kind==='add-dir')throw new Error('Folder commands are idempotent meeting setup, not worker turns')

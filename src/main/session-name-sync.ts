@@ -64,13 +64,22 @@ export function renameCommand(title: string): string | null {
 // or ST), cursor position (CPR), device attributes (DA) and status (DSR, DECRPM) reports.
 const NON_TEXT_INPUT = /\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[\??\d+;\d+R|\x1b\[[?>]?[\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\[\??\d+n/g
 
+// Keys that put nothing in the prompt box: Esc, and moving the caret or the view (Left, Right, Home, End, PageUp, PageDown).
+const NO_TEXT_KEYS = /^(?:\x1b(?:\[(?:1;\d+)?[CDHF]|O[CDHF]|\[[1456789](?:;\d+)?~)|\x1b)+$/
+// Up and Down: these recall an earlier prompt into the box.
+const RECALL_KEYS = /^(?:\x1b(?:\[[AB]|O[AB]))+$/
+
 /**
- * Whether the prompt box may hold something the person typed. The desktop types `/rename` into the session only while
- * it is empty, since a draft would be sent to the model with the command appended. Only Enter (submits) and Ctrl+C
- * (clears) make it empty again; anything else, including arrow keys and pastes, counts as a draft.
+ * What the prompt box holds, as far as the keys pressed can tell. The desktop types into the session only while it is empty,
+ * since a draft would be sent to the model with the typed text appended. A key that adds nothing leaves it as it was, and text
+ * typed and then deleted leaves it empty. A recalled prompt is apart: it is only history, so Ctrl+C loses nothing the person
+ * wrote. Whatever cannot be followed for certain (an edit after moving the caret, a key not known here) counts as a draft
+ * until Enter or Ctrl+C.
  */
 export class PromptDraft {
-  private dirty: boolean
+  private content: 'empty' | 'recalled' | 'typed'
+  /** Characters in the box when it holds `typed` text; null once that can no longer be followed for certain. */
+  private typedChars: number | null = 0
   private contextText: string | null = ''
   private lastInputAt = 0
   private pickerShowing: boolean
@@ -78,7 +87,8 @@ export class PromptDraft {
   /** `awaitingFirstEnter`: the session may open on a screen of its own (the resume picker), where typed text would pick
    * something; it counts as a draft until the first Enter. */
   constructor({ awaitingFirstEnter = false }: { awaitingFirstEnter?: boolean } = {}) {
-    this.dirty = awaitingFirstEnter
+    this.content = awaitingFirstEnter ? 'typed' : 'empty'
+    this.typedChars = awaitingFirstEnter ? null : 0
     this.pickerShowing = awaitingFirstEnter
   }
 
@@ -92,11 +102,45 @@ export class PromptDraft {
     this.lastInputAt = now
     const last = text.at(-1)
     // Alt+Enter (`ESC CR`) adds a line to the draft rather than sending it.
-    this.dirty = !((last === '\r' && !text.endsWith('\x1b\r')) || last === '\x03')
+    if ((last === '\r' && !text.endsWith('\x1b\r')) || last === '\x03') {
+      this.content = 'empty'
+      this.typedChars = 0
+    } else this.noteContent(text)
     if (last === '\r') this.pickerShowing = false
   }
 
-  get empty(): boolean { return !this.dirty }
+  private noteContent(text: string): void {
+    if (NO_TEXT_KEYS.test(text)) {
+      // With text in the box the caret may have moved, so a later Backspace may not delete what it seems to.
+      if (this.content === 'typed') this.typedChars = null
+      return
+    }
+    if (RECALL_KEYS.test(text)) {
+      if (this.content === 'empty') this.content = 'recalled'
+      else if (this.content === 'typed') this.typedChars = null
+      return
+    }
+    // An edit of a recalled prompt is the person's own text now, of a length not known here.
+    let chars = this.content === 'recalled' ? null : this.typedChars
+    if (text.startsWith('\x1b[200~') && text.endsWith('\x1b[201~')) chars = chars === null ? null : chars + text.length
+    else for (const char of text) {
+      if (chars === null) break
+      if (char === '\x7f' || char === '\b') chars = Math.max(0, chars - 1)
+      else if (char === '\x15') chars = 0
+      else if (char >= ' ') chars++
+      else chars = null
+    }
+    this.typedChars = chars
+    this.content = chars === 0 ? 'empty' : 'typed'
+  }
+
+  get empty(): boolean { return this.content === 'empty' }
+
+  /** It holds only a prompt recalled from history, with nothing the person wrote: Ctrl+C clears it and loses nothing. */
+  get recalled(): boolean { return this.content === 'recalled' }
+
+  /** It may hold what the person wrote: never typed over, and never cleared for them. */
+  get typed(): boolean { return this.content === 'typed' }
 
   /** Only attach to a known ordinary prompt with the caret at its end. Commands, history/picker navigation and
    * unrecognized editing sequences must keep their native Enter behavior. */

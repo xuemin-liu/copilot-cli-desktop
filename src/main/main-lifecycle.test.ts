@@ -2089,7 +2089,9 @@ test('failed restart setup never restores held input after a native conversation
   }finally{rejectSetup(new Error('setup failed'));await rejected}
   h.flushTaskEnter();await pause(400)
   assert.deepEqual(old.written,[...pasted,'B draft'],'no old Enter, Ctrl+C or A keys reach B')
-  assert.equal((await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.sessionId===SOURCE)?.state,'uncertain','cancelled callback reconciles the old handoff')
+  // This fixture's meeting was never opened, so once uncertain its entry is settled as a closed meeting's would be. Never still in flight.
+  const old_handoff=(await h.request('desktop:get-state')).workflowDeliveries?.find(d=>d.sessionId===SOURCE)
+  assert.ok(old_handoff===undefined||old_handoff.state==='uncertain',`cancelled callback reconciles the old handoff, not ${old_handoff?.state}`)
 }))
 
 test('an unnamed session starts without --name and its tab takes the name Copilot gives it', async () => {

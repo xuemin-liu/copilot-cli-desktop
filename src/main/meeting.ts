@@ -99,6 +99,8 @@ export interface MeetingView {
   cost: MeetingCost
   /** Filled in by main. */
   invited?: MeetingInviteView[]
+  /** Messages waiting to be typed into a session for longer than a moment, and why; filled in by main. */
+  undelivered?: Array<{ tabId: string; reason: string; since: number; hasAnswer: boolean }>
 }
 
 /** `round` is the round the message belongs to: a reply counts only for that round, however late its turn ends. */
@@ -123,6 +125,8 @@ export interface MeetingEffects {
   dropsWhenSilent?(tabId: string): boolean
   /** A party was taken out for its silence; it is told why. */
   dropped?(tabId: string, message: string): void
+  /** This party's message for the meeting has not been typed yet, so it has had nothing to answer. */
+  undelivered?(tabId: string, meetingId: string): boolean
 }
 
 /** Rounds in a row a party that `dropsWhenSilent` may let time out before it is taken out. */
@@ -433,6 +437,24 @@ export class MeetingHub {
   }
 
   /**
+   * The person hands in what a reviewer already answered. When a message could not be typed they may ask the session themselves,
+   * and the desktop does not take such a turn for a reply on its own: it may be about anything. False when nothing is owed.
+   */
+  postAnswer(tabId: string, text: string): boolean {
+    for (const meeting of this.meetings.values()) {
+      if (meeting.stage === 'closed' || !meeting.participants.has(tabId)) continue
+      const delivery = meeting.outstanding.get(tabId)
+      if (!delivery || !['post', 'vote', 'discussion'].includes(delivery.kind)) return false
+      // What was waiting to be typed has been answered. The folder still goes in, for the rounds to come.
+      this.cancel(meeting, tabId)
+      this.send(meeting, tabId, 'add-dir', meeting.folder)
+      this.turnCompleted(tabId, delivery, text)
+      return true
+    }
+    return false
+  }
+
+  /**
    * A session's usage totals changed (a `session.usage_checkpoint`). What it used since it was last counted is added to its
    * meeting's cost. Totals that went down started over (a new process), so all of the new value counts.
    */
@@ -667,6 +689,12 @@ export class MeetingHub {
   private timeOut(meeting: Meeting): void {
     meeting.cancelTimer = null
     if (meeting.stage !== 'reviewing') return
+    // A reviewer that was never asked has not missed anything. Ending the round now would drop its message and tell the host
+    // nobody answered, so the round waits for the delivery, which the person is told about.
+    if ([...meeting.awaiting].some((tabId) => this.effects.undelivered?.(tabId, meeting.id) === true)) {
+      meeting.cancelTimer = this.timers.set(() => this.timeOut(meeting), this.settings().roundTimeoutMinutes * 60_000)
+      return
+    }
     for (const tabId of meeting.awaiting) this.cancel(meeting, tabId)
     // Those that may be taken out for silence count the round they let pass; the round ends as usual first.
     const silent = [...meeting.awaiting].flatMap((tabId) => {

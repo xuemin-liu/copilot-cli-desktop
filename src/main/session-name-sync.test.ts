@@ -123,6 +123,59 @@ test('the prompt counts as empty only after Enter or Ctrl+C, and mouse or focus 
   assert.equal(picker.empty, true)
 })
 
+test('keys that add nothing leave the prompt empty, and text typed then deleted is gone', () => {
+  for (const key of ['\x1b', '\x1b[C', '\x1b[D', '\x1b[H', '\x1b[F', '\x1b[5~', '\x1b[6~', '\x1bOD', '\x1b[1;5D']) {
+    const draft = new PromptDraft()
+    draft.note(key, 1000)
+    assert.equal(draft.empty, true, JSON.stringify(key))
+    assert.equal(draft.quiet(1500), false, 'it still counts as the person being at the keyboard')
+  }
+  const deleted = new PromptDraft()
+  deleted.note('a', 1000); deleted.note('b', 1001); deleted.note('c', 1002)
+  assert.equal(deleted.empty, false)
+  deleted.note('\x7f', 1003); deleted.note('\x7f', 1004)
+  assert.equal(deleted.empty, false, 'one character is still there')
+  deleted.note('\x7f', 1005)
+  assert.equal(deleted.empty, true)
+  const cleared = new PromptDraft()
+  cleared.note('some words', 1000); cleared.note('\x15', 1001)
+  assert.equal(cleared.empty, true, 'Ctrl+U clears the line')
+  const pasted = new PromptDraft()
+  pasted.note('\x1b[200~pasted\x1b[201~', 1000)
+  assert.equal(pasted.typed, true)
+})
+
+test('what may hold the person\'s own words is never taken for empty, and only a recalled prompt can be cleared for them', () => {
+  const recalled = new PromptDraft()
+  recalled.note('\x1b[A', 1000)
+  assert.deepEqual([recalled.empty, recalled.recalled, recalled.typed], [false, true, false])
+  recalled.note('\x1b[B', 1001)
+  assert.equal(recalled.recalled, true, 'Down may still show a recalled prompt')
+  recalled.note('!', 1002)
+  assert.deepEqual([recalled.empty, recalled.recalled, recalled.typed], [false, false, true], 'editing it makes it their own')
+  recalled.note('\x7f', 1003)
+  assert.equal(recalled.typed, true, 'its length is not known, so deleting cannot prove it empty')
+
+  const caret = new PromptDraft()
+  caret.note('abc', 1000); caret.note('\x1b[D', 1001); caret.note('\x7f', 1002); caret.note('\x7f', 1003); caret.note('\x7f', 1004)
+  assert.equal(caret.typed, true, 'after moving the caret, Backspace may have deleted less than it seems')
+  const up = new PromptDraft()
+  up.note('abc', 1000); up.note('\x1b[A', 1001); up.note('\x7f', 1002); up.note('\x7f', 1003); up.note('\x7f', 1004)
+  assert.equal(up.typed, true, 'Up may move within a draft of several lines')
+  for (const key of ['\t', '\x17', '\x16', '\x1b[3~', '\x1b[2~', '\x1bv', '\x1b[1;2A']) {
+    const unknown = new PromptDraft()
+    unknown.note(key, 1000)
+    assert.equal(unknown.typed, true, `${JSON.stringify(key)} is not known to add nothing`)
+    unknown.note('\x7f', 1001)
+    assert.equal(unknown.typed, true, 'and nothing proves it empty but Enter or Ctrl+C')
+    unknown.note('\x03', 1002)
+    assert.equal(unknown.empty, true)
+  }
+  const line = new PromptDraft()
+  line.note('first\x1b\r', 1000); line.note('\x15', 1001)
+  assert.equal(line.typed, true, 'Ctrl+U clears one line of several')
+})
+
 test('a tab follows Copilot\'s name until someone names it, and then Copilot is renamed to match', () => {
   const tab = { title: 'project', autoTitle: true, remote: false, lastSessionId: 'id' }
   assert.deepEqual(nameSyncAction(tab, undefined), { kind: 'none' }, 'nothing before the name is read')

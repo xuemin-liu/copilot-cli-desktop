@@ -36,6 +36,43 @@ test('one prompt per session at a time: the next waits until the turn it started
   assert.deepEqual(o.typed, ['tab-1: round 1', 'tab-1: round 2'])
 })
 
+test('a message that cannot be typed keeps its reason and since when, until it goes in', () => {
+  const answers: Record<string, SessionTaskSend['result']> = { 'tab-1': 'busy' }
+  const o = outbox(answers)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), true)
+  assert.equal(o.box.undelivered('tab-1', 'M2NB'), false)
+  assert.deepEqual(o.box.blockedDeliveries(), [], 'nothing has been tried yet')
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [{ tabId: 'tab-1', meetingId: 'K7QF', reason: 'busy', since: 0 }])
+  o.advance(5_000)
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.since, 0, 'the same stall')
+  answers['tab-1'] = 'sent'
+  o.box.pump()
+  assert.deepEqual(o.box.blockedDeliveries(), [])
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false)
+})
+
+test('the reason the desktop can give wins, and a blocked folder command counts as blocked too, though not as undelivered', () => {
+  const o = outbox({})
+  o.setCommands(false)
+  o.box.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'add-dir', text: 'C:\\m' })
+  assert.equal(o.box.undelivered('tab-1', 'K7QF'), false, 'no message is waiting yet')
+  o.box.pump()
+  assert.equal(o.box.blockedDeliveries()[0]!.reason, 'The session cannot take a command now.')
+  let typed = false
+  const told = new MeetingOutbox({
+    sendTask: () => { typed = true; return { result: 'busy', message: 'The session is starting.' } },
+    sendCommand: () => false, sent: () => {}, refused: () => {}, now: () => 0,
+    blockReason: () => 'Its prompt box may hold text.',
+  })
+  told.enqueue('tab-1', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'round 1' })
+  told.pump()
+  assert.equal(typed, true)
+  assert.equal(told.blockedDeliveries()[0]!.reason, 'Its prompt box may hold text.')
+})
+
 test('a busy session keeps its message for later; a refused one drops it; other sessions are not held up', () => {
   const o = outbox({ 'tab-busy': 'busy', 'tab-gone': 'refused' })
   o.box.enqueue('tab-busy', { meetingId: 'K7QF', round: 1, kind: 'post', text: 'wait' })

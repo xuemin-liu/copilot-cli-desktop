@@ -17,7 +17,12 @@ export interface MeetingOutboxDeps {
   sent(tabId: string, delivery: MeetingDelivery): void
   refused(tabId: string, delivery: MeetingDelivery, message: string): void
   now(): number
+  /** Why the session cannot take its next message now, in words for the person; a refusal alone may say little. */
+  blockReason?(tabId: string): string | null
 }
+
+/** A message that is waiting to be typed, and why. A session stays blocked with no error, so this is the only trace of it. */
+export interface BlockedDelivery { tabId: string; meetingId: string; reason: string; since: number }
 
 /** A slash command makes no turn; give the CLI a moment before typing the next thing. */
 const COMMAND_SETTLE_MS = 1_500
@@ -27,6 +32,7 @@ interface Queue {
   /** The delivery whose turn is running. */
   inTurn: MeetingDelivery | null
   settleUntil: number
+  blocked: { reason: string; since: number } | null
 }
 
 export class MeetingOutbox {
@@ -35,7 +41,7 @@ export class MeetingOutbox {
   constructor(private readonly deps: MeetingOutboxDeps) {}
 
   enqueue(tabId: string, delivery: MeetingDelivery): void {
-    const queue = this.queues.get(tabId) ?? { items: [], inTurn: null, settleUntil: 0 }
+    const queue = this.queues.get(tabId) ?? { items: [], inTurn: null, settleUntil: 0, blocked: null }
     this.queues.set(tabId, queue)
     queue.items.push(delivery)
   }
@@ -54,6 +60,24 @@ export class MeetingOutbox {
   next(tabId:string):MeetingDelivery|null {return this.queues.get(tabId)?.items[0]??null}
   hasMeetingWork(meetingId:string):boolean {
     return [...this.queues.values()].some(queue=>queue.inTurn?.meetingId===meetingId||queue.items.some(item=>item.meetingId===meetingId))
+  }
+
+  /** This session still has this meeting's message waiting to be typed, so it has not been asked yet. */
+  undelivered(tabId: string, meetingId: string): boolean {
+    return this.queues.get(tabId)?.items.some((item) => item.meetingId === meetingId && item.kind !== 'add-dir') === true
+  }
+
+  /** Every message the last pump could not type, longest waiting first. */
+  blockedDeliveries(): BlockedDelivery[] {
+    return [...this.queues].flatMap(([tabId, queue]) => {
+      const next = queue.items[0]
+      return next && queue.blocked && !queue.inTurn ? [{ tabId, meetingId: next.meetingId, reason: queue.blocked.reason, since: queue.blocked.since }] : []
+    }).sort((a, b) => a.since - b.since)
+  }
+
+  private block(tabId: string, queue: Queue, fallback: string): void {
+    const reason = this.deps.blockReason?.(tabId) ?? fallback
+    queue.blocked = { reason, since: queue.blocked?.since ?? this.deps.now() }
   }
 
   /** The session's prompt finished (it went idle). Returns the delivery that turn answered. */
@@ -87,13 +111,15 @@ export class MeetingOutbox {
         const delivery = queue.items[0]!
         if(this.deps.settled?.(tabId,delivery)){queue.items.shift();continue}
         if (delivery.kind === 'add-dir') {
-          if (!this.deps.sendCommand(tabId, `/add-dir ${delivery.text}`)) break
+          if (!this.deps.sendCommand(tabId, `/add-dir ${delivery.text}`)) { this.block(tabId, queue, 'The session cannot take a command now.'); break }
+          queue.blocked = null
           queue.items.shift()
           queue.settleUntil = this.deps.now() + COMMAND_SETTLE_MS
           break
         }
         const result = this.deps.sendTask(tabId, delivery.text,delivery)
-        if (result.result === 'busy') break
+        if (result.result === 'busy') { this.block(tabId, queue, result.message); break }
+        queue.blocked = null
         queue.items.shift()
         if (result.result === 'refused') { this.deps.refused(tabId, delivery, result.message); continue }
         queue.inTurn = delivery

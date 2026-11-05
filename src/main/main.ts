@@ -5,7 +5,7 @@ import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
 import { verifyWorkflowCheckout } from './workflow-checkout.js'
 import { WorkflowAutomations, AutomationLaunchRefused, type AutomationRule, type AutomationPreview } from './workflow-automations.js'
 import type { AutomationEvent } from './workflow-automation-source.js'
-import { journalMeetingDelivery } from './workflow-meeting-journal.js'
+import { journalMeetingDelivery,settleClosedMeeting } from './workflow-meeting-journal.js'
 import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -2443,11 +2443,76 @@ function meetingPromptShown(tabId: string): boolean {
   return meetingPromptSettled(tabId) && meetingDeliveryChecks.get(tabId)?.() === true
 }
 
+/** After this long the person hears about a message that cannot be typed. Shorter ones are a session finishing what it does. */
+const MEETING_BLOCK_NOTICE_MS = 15_000
+/** A recalled prompt is left alone this long, in case the person is still looking through their history. */
+const RECALLED_PROMPT_QUIET_MS = 5_000
+
+/**
+ * Why a session cannot take a meeting's message now, in words for the person. Every refusal on the way to typing ends up as
+ * "try again later", and a session can stay refused for good, so this is what makes that visible.
+ */
+function meetingBlockReason(tabId: string): string | null {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  const session = managedTabs.get(tabId)?.session
+  const draft = promptDrafts.get(tabId)
+  if (!tab || !session || !draft) return 'Its session is not running. Start or resume it.'
+  if (tab.status === 'approval-needed') return 'It is waiting for an approval. Answer it in that tab.'
+  if (deliveryError) return deliveryError
+  if (workflowsPaused(tab.workspaceProfileId)) return 'Automatic work is paused for this project.'
+  if (draft.beforeFirstEnter) return 'Its session picker is open. Choose a session in that tab.'
+  if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
+  if (session.activity !== 'idle' && session.activity !== null) return 'It is still working on another turn.'
+  const binding = session.bindingDiagnostic
+  if (binding.kind === 'bound' && !binding.deliveryReady) return 'Its CLI holds more than one session, so the desktop cannot tell which would receive the message. Restart this session to continue.'
+  if (session.sessionBindingPending) return 'Its session is changing.'
+  if (workflowDestinationBlocked(tab.lastSessionId)) return tab.lastSessionId ? 'An earlier message to it may not have arrived. Choose Send again or Discard in Handoffs.' : 'Its session has not started yet. Send it a first prompt.'
+  if (!session.bracketedPaste) return 'Its prompt is not ready for a message yet.'
+  if (Date.now() - (sessionLastOutputAt.get(tabId) ?? 0) < MEETING_SETTLE_MS) return 'Its terminal is still printing.'
+  // Copilot stores a session only with its first prompt, and until then the desktop cannot prove which session input would reach.
+  if (binding.kind !== 'bound') return 'Its session has not been used yet. Send it a first prompt, and the message goes in.'
+  return null
+}
+
+/** Only history is in the box, and nothing the person wrote: clear it, as nobody can recover a stalled meeting from a key they forgot. */
+function clearRecalledPrompt(tabId: string): void {
+  const session = managedTabs.get(tabId)?.session
+  const draft = promptDrafts.get(tabId)
+  if (!session || !draft?.recalled || session.activity !== 'idle' || heldInput.has(tabId) || !draft.quiet(Date.now(), RECALLED_PROMPT_QUIET_MS)) return
+  session.write('\x03')
+  draft.note('\x03')
+}
+
+/** Each session's latest answer to a prompt the person typed: the person can hand it in when a meeting's message could not be typed. */
+const sessionAnswers = new Map<string, { text: string; at: number }>()
+const meetingBlocksTold = new Set<string>()
+let meetingBlocksShown = ''
+
+/** Tells the person, once per stall, which message cannot be typed and why, and keeps the meeting bar current. */
+function reportBlockedDeliveries(): void {
+  const now = Date.now()
+  const long = meetingOutbox.blockedDeliveries().filter((blocked) => now - blocked.since >= MEETING_BLOCK_NOTICE_MS)
+  const told = new Set<string>()
+  for (const { tabId, meetingId, reason } of long) {
+    const key = `${meetingId}/${tabId}`
+    told.add(key)
+    if (meetingBlocksTold.has(key)) continue
+    const title = tabsState.tabs.find((tab) => tab.id === tabId)?.title ?? 'A session'
+    void writeAppLog(`Meeting ${meetingId}: could not deliver to "${title}" (${tabId}): ${reason}`).catch(() => {})
+    showNotification('Copilot CLI Desktop', `Meeting ${meetingId} cannot reach "${title}". ${reason}`)
+  }
+  meetingBlocksTold.clear()
+  for (const key of told) meetingBlocksTold.add(key)
+  const shown = JSON.stringify(long.map(({ tabId, meetingId, reason }) => [tabId, meetingId, reason]))
+  if (shown !== meetingBlocksShown) { meetingBlocksShown = shown; broadcastState() }
+}
+
 async function pumpMeetingOutbox(): Promise<void> {
   if (meetingPumpRunning) return
   meetingPumpRunning = true
   try {
     await Promise.all(meetingOutbox.readyTabs().map(async tabId => {
+      clearRecalledPrompt(tabId)
       const next=meetingOutbox.next(tabId)
       if(next){await meetingWrites.get(next.meetingId);if(meetingWriteFailures.has(next.meetingId))return}
       const session = managedTabs.get(tabId)?.session
@@ -2460,11 +2525,13 @@ async function pumpMeetingOutbox(): Promise<void> {
     meetingOutbox.pump()
     for(const scope of new Set(deliveryViews().filter(d=>d.scope.startsWith('meeting/')).map(d=>d.scope))){
       const id=scope.slice('meeting/'.length)
-      if(!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))deliveryJournal?.retireScope(scope)
+      // Not before meetings are restored, when an open meeting only looks closed.
+      if(guestsReady&&deliveryJournal&&!meetingHub.isOpen(id)&&!meetingOutbox.hasMeetingWork(id))settleClosedMeeting(deliveryJournal,scope)
     }
   } finally {
     meetingDeliveryChecks.clear()
     meetingPumpRunning = false
+    reportBlockedDeliveries()
     if (meetingOutbox.hasWork()) scheduleMeetingPump()
   }
 }
@@ -2519,6 +2586,7 @@ const meetingOutbox = new MeetingOutbox({
     void writeAppLog(`Meeting ${delivery.meetingId} could not reach session ${tabId}: ${message}`).catch(() => {})
   },
   now: () => Date.now(),
+  blockReason: meetingBlockReason,
 })
 
 const meetingHub = new MeetingHub(meetingRoot, {
@@ -2563,6 +2631,7 @@ const meetingHub = new MeetingHub(meetingRoot, {
   // An outside agent that stopped polling would hold every round to its timeout; a Copilot tab is the person's to judge.
   dropsWhenSilent: (tabId) => GUEST_ID_PATTERN.test(tabId),
   dropped: (tabId, message) => guestMailbox.close(tabId, message),
+  undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId),
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
 // Outside agents as reviewers (docs/meeting-guests-plan.md): seats, tokens and messages live in the mailbox; the hub sees
@@ -2675,11 +2744,14 @@ function meetingViews(): MeetingView[] {
     const seat = guests.find((guest) => guest.id === partyId)
     return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding } : null
   }
+  const blocked = meetingOutbox.blockedDeliveries().filter((delivery) => Date.now() - delivery.since >= MEETING_BLOCK_NOTICE_MS)
   return meetingHub.views().map((meeting) => {
     const hostGuest = contactOf(meeting.hostTabId)
+    const undelivered = blocked.filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
     return {
       ...meeting,
       ...(hostGuest ? { hostGuest } : {}),
+      ...(undelivered.length ? { undelivered } : {}),
       participants: meeting.participants.map((participant) => {
         const guest = contactOf(participant.tabId)
         return guest ? { ...participant, guest } : participant
@@ -2865,6 +2937,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
 /** The session went idle: a prompt the desktop typed (if that is what it answered) is done. */
 function onMeetingIdle(tabId: string): void {
   const turn = meetingReaders.get(tabId)?.finish() ?? null
+  if (turn && !turn.desktop && turn.reply.trim()) { sessionAnswers.set(tabId, { text: turn.reply, at: Date.now() }); broadcastState() }
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
   endAutomatic(tabId,Boolean(turn?.desktop))
@@ -2888,6 +2961,7 @@ function forgetMeetingSession(tabId: string): void {
   meetingHub.leave(tabId)
   meetingOutbox.forget(tabId)
   meetingReaders.delete(tabId)
+  sessionAnswers.delete(tabId)
 }
 
 /** Reads the session's name and acts on it: an unnamed tab takes Copilot's name, and a named one renames the session. */
@@ -4744,6 +4818,16 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
     try { meetingHub.join(meetingParty(tabId), meetingId, { role: role || null, usage: meetingReaders.get(tabId)?.usage ?? null }) }
     catch (error) { throw error instanceof MeetingError ? new Error(error.message) : error }
+  } else if (action === 'use-answer') {
+    if (!isSessionTabId(tabId)) throw new Error('Invalid session')
+    const answer = sessionAnswers.get(tabId)
+    if (!answer) throw new Error('That session has no answer to hand in.')
+    if (!meetingHub.postAnswer(tabId, answer.text)) throw new Error('That session owes the meeting no reply now.')
+    sessionAnswers.delete(tabId)
+    // The person has settled what that session owed, so a handoff left uncertain no longer holds up the rounds to come.
+    const sessionId = tabsState.tabs.find((candidate) => candidate.id === tabId)?.lastSessionId
+    for (const delivery of deliveryViews()) if (delivery.scope === `meeting/${meetingId}` && delivery.sessionId === sessionId && delivery.state === 'uncertain') deliveryJournal?.discard(delivery.id)
+    scheduleMeetingPump(0)
   } else if (action === 'transcript') {
     const folder = meetingHub.folderOf(meetingId)
     if (!folder) throw new Error('That meeting is no longer listed')
