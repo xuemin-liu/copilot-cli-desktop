@@ -99,7 +99,7 @@ jobs:
             release/*.blockmap
             release/latest.yml
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   # Only this job can write to the repository, and it runs only for a pushed version tag, never a manual run.
   publish:
