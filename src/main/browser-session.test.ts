@@ -175,6 +175,9 @@ test('the PowerShell helper prints the desktop message once, on one line', { ski
     // Page-authored dialog text must not turn into extra helper output that looks like a result.
     reply = { status: 400, body: JSON.stringify({ message: 'Blocked by a page dialog.\n\nPress Resume in the browser pane.' }) }
     assert.match(await failure(['console']), /^Browser diagnostics failed: Blocked by a page dialog\. Press Resume in the browser pane\.\r?\n$/)
+    // C1 controls, line/paragraph separators and a terminal sequence stay off the line too.
+    reply = { status: 400, body: JSON.stringify({ message: 'one\u0085two\u2028three\u2029four\u009b31mfive' }) }
+    assert.match(await failure(['console']), /^Browser diagnostics failed: one two three four 31mfive\r?\n$/)
     // Windows PowerShell captures an error body through ErrorDetails, which leaves one line.
     reply = { status: 400, body: JSON.stringify({ message: 'Usage: browser.ps1 status|console|network|request 123' }) }
     assert.match(await failure(['snapshot', '123', 'FRAME']), /^Browser diagnostics failed: Usage: browser\.ps1 status\|console\|network\|request 123\r?\n$/)
@@ -255,13 +258,14 @@ test('the browser session folder stops inheriting profile access to its tokens',
   // .NET types only: the Security module that owns Get-Acl does not autoload under every console host.
   const acl = async (path: string) => {
     const script = [
-      `$path = '${path.replaceAll("'", "''")}'`,
+      '$path = $env:COPILOT_TEST_ACL_PATH',
       '$info = if ([System.IO.Directory]::Exists($path)) { [System.IO.DirectoryInfo]::new($path) } else { [System.IO.FileInfo]::new($path) }',
       '$acl = $info.GetAccessControl()',
       `'protected=' + $acl.AreAccessRulesProtected`,
       `$acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value + '|' + $_.IsInherited }`,
     ].join('\n')
-    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 60000 })
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 60000, env: { ...process.env, COPILOT_TEST_ACL_PATH: path } })
     const [head, ...rules] = stdout.trim().split(/\r?\n/)
     return { protected: (head ?? '').trim() === 'protected=True',
       rules: rules.map(line => { const [sid, inherited] = line.split('|'); return { sid: (sid ?? '').trim(), inherited: (inherited ?? '').trim() === 'True' } }) }
@@ -281,6 +285,19 @@ test('the browser session folder stops inheriting profile access to its tokens',
     assert.ok(!(await acl(endpoint)).rules.some(rule => rule.sid === 'S-1-1-0'), 'the token file does not regain the group ACE')
     assert.match(await readFile(join(root, 'tab-1', 'browser.ps1'), 'utf8'), /NoProxy/)
     assert.match(await readFile(join(root, 'tab-1', 'browser-test.ps1'), 'utf8'), /NoProxy/)
+    // A typographic apostrophe, which PowerShell also reads as a quote, must not end the script early.
+    const quoted = join(parent, 'O’Brien', 'browser-sessions')
+    const errors: string[] = []
+    const warned: unknown[][] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => { warned.push(args) }
+    try { await prepareBrowserSessionEnvironment(quoted, 'tab-1', process.env, message => errors.push(message)) }
+    finally { console.warn = originalWarn }
+    assert.deepEqual(errors, [], 'a path with a typographic apostrophe is still protected')
+    assert.deepEqual(warned, [], 'the caller reports the failure, not a console nobody sees')
+    const quotedRoot = await acl(quoted)
+    assert.ok(quotedRoot.protected, 'the protected folder is the one the caller asked for')
+    assert.ok(!quotedRoot.rules.some(rule => rule.sid === 'S-1-1-0'), 'a machine-wide group loses this folder too')
   } finally { await rm(parent, { recursive: true, force: true }) }
 })
 test('the installed-app PowerShell helper reads only its assigned session without Node or desktop CLI', { skip: process.platform !== 'win32' }, async () => {

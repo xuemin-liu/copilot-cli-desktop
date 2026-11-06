@@ -119,7 +119,7 @@ try {
     $browserFiles[0].Write($bytes, 0, $bytes.Length)
   }
   # A dialog message comes from the page, so it must stay one line of helper output.
-  $browserFailureMessage = ([string]$_.Exception.Message -replace '[\x00-\x1f\x7f]+', ' ').Trim()
+  $browserFailureMessage = ([string]$_.Exception.Message -replace '[\x00-\x1f\x7f-\x9f\u2028\u2029]+', ' ').Trim()
   if (!$browserFailureMessage) { $browserFailureMessage = 'The browser test did not run.' }
   [Console]::Error.WriteLine('Browser test failed. ' + $browserFailureMessage)
   exit 1

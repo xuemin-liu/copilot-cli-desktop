@@ -214,7 +214,7 @@ try {
   } catch {}
   if (!$browserFailureMessage) { $browserFailureMessage = [string]$browserFailure.Exception.Message }
   # Dialog text comes from the page, so it must stay one line of helper output.
-  $browserFailureMessage = ([string]$browserFailureMessage -replace '[\x00-\x1f\x7f]+', ' ').Trim()
+  $browserFailureMessage = ([string]$browserFailureMessage -replace '[\x00-\x1f\x7f-\x9f\u2028\u2029]+', ' ').Trim()
   if (!$browserFailureMessage) { $browserFailureMessage = 'The browser command failed.' }
   [Console]::Error.WriteLine('Browser diagnostics failed: ' + $browserFailureMessage)
   exit 1
@@ -508,15 +508,17 @@ const protectedRoots = new Map<string, Promise<void>>()
  * Administrators only. Existing installations are repaired on every start because earlier releases
  * applied POSIX modes, which Windows ignores.
  */
-function protectBrowserSessionsRoot(root: string): Promise<void> {
+function protectBrowserSessionsRoot(root: string, reportError: (message: string) => void): Promise<void> {
   const existing = protectedRoots.get(root)
   if (existing) return existing
   const protection = (async () => {
     await mkdir(root, { recursive: true, mode: 0o700 })
     // Only .NET types, because the Security module that owns Get-Acl and Set-Acl does not always
     // autoload in the console hosts this runs under. SIDs, not account names, so no name lookup.
+    // The path arrives in the environment so no character in it, such as a typographic apostrophe
+    // that PowerShell also reads as a quote, can end the script early.
     const script = [
-      `$root = '${root.replaceAll("'", "''")}'`,
+      '$root = $env:COPILOT_DESKTOP_BROWSER_ROOT',
       '$acl = [System.Security.AccessControl.DirectorySecurity]::new()',
       '$acl.SetAccessRuleProtection($true, $false)',
       '$inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit',
@@ -532,20 +534,22 @@ function protectBrowserSessionsRoot(root: string): Promise<void> {
       '[System.IO.DirectoryInfo]::new($root).SetAccessControl($acl)',
     ].join('\n')
     await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      { windowsHide: true, timeout: 60000 })
+      { windowsHide: true, timeout: 60000, env: { ...process.env, COPILOT_DESKTOP_BROWSER_ROOT: root } })
   })().catch((error: unknown) => {
-    // A folder that cannot be protected must not stop the session; say so once and keep going.
-    console.warn(`Could not restrict access to ${root}: ${error instanceof Error ? error.message : String(error)}`)
+    // A folder that cannot be protected must not stop the session, but the tokens stay reachable,
+    // so the failure has to reach the app log rather than a console nobody sees.
+    reportError(`Could not restrict access to ${root}: ${error instanceof Error ? error.message : String(error)}`)
   })
   protectedRoots.set(root, protection)
   return protection
 }
 
-export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv,
+  reportError: (message: string) => void = message => console.warn(message)): Promise<NodeJS.ProcessEnv> {
   const paths = browserSessionPaths(root, tabId)
   if (process.platform === 'win32') {
     // Before the first file, so no temporary file is ever created under the inherited access.
-    await protectBrowserSessionsRoot(root)
+    await protectBrowserSessionsRoot(root, reportError)
     await writeFileAtomic(paths.helper, BROWSER_HELPER)
     await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
   } else await writeFileAtomic(paths.helper, BROWSER_HELPER_SH)
