@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
-import type { BrowserDebugState } from '../../main/browser-debug-types.js'
+import type { BrowserCertificateWarning, BrowserDebugState } from '../../main/browser-debug-types.js'
+import { certificateCanProceed, certificateProblem } from '../../main/browser-certificates.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
@@ -22,6 +23,29 @@ const EMPTY_BROWSER: BrowserDebugState = {
 function shownError(state: BrowserDebugState): string | null {
   const page = state.errorPageId === undefined ? undefined : state.pages.find(entry => entry.id === state.errorPageId)
   return page ? `⧉ ${page.title}: ${state.error}` : state.error
+}
+
+/** Drawn by the app rather than the page, so no website or assistant can answer it. Proceed stays behind Advanced. */
+function CertificateWarning({ warning, popup, banner, answer }: { warning: BrowserCertificateWarning; popup?: string | undefined; banner: boolean; answer: (kind: 'proceed' | 'back') => void }): JSX.Element {
+  return <section className={banner ? 'browser-certificate browser-certificate-banner' : 'browser-certificate'} role="alert" aria-label="Certificate warning">
+    <h2>⚠ Your connection to {warning.host} is not private</h2>
+    {popup && <p>In the popup window “{popup}”.</p>}
+    <p>{certificateProblem(warning.error, warning.host)} Someone could be reading or changing what you send to this site.</p>
+    <p className="browser-certificate-code">{warning.error}</p>
+    <div><button type="button" onClick={() => answer('back')}>Go back</button></div>
+    <details>
+      <summary>Advanced</summary>
+      <dl>
+        <dt>Issued to</dt><dd>{warning.subject || 'Not stated'}</dd>
+        <dt>Issued by</dt><dd>{warning.issuer || 'Not stated'}</dd>
+        <dt>Fingerprint</dt><dd>{warning.fingerprint}</dd>
+      </dl>
+      {certificateCanProceed(warning.error) ? <>
+        <p>Only continue if you trust this site and expect this certificate. The browser will accept this certificate for {warning.host} until the app quits, including when Copilot CLI uses the browser.</p>
+        <button type="button" className="browser-certificate-proceed" onClick={() => answer('proceed')}>Proceed to {warning.host} (unsafe)</button>
+      </> : <p>This error can't be bypassed, so the browser won't open this site.</p>}
+    </details>
+  </section>
 }
 
 function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: string; obscured: boolean; active: boolean; detached?: boolean }): JSX.Element {
@@ -86,7 +110,7 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     window.addEventListener('resize', resize)
     resize()
     return () => { disposed = true; observer.disconnect(); window.removeEventListener('resize', resize) }
-  }, [tabId, active, obscured, error, state.error])
+  }, [tabId, active, obscured, error, state.error, state.certificateWarning?.id])
   useEffect(() => window.copilotDesktop.onBrowserPicked((id, text) => {
     if (id === tabId) setSelection(list => list.length >= MAX_PICKED_ELEMENTS ? list : [...list, text])
   }), [tabId])
@@ -152,6 +176,14 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
   const report = (promise: Promise<void>): void => { setError(null); void promise.catch(error => setError(errorMessage(error))) }
   const overrides = overridesStatus(state.overrides)
   const activePage = state.pages.find(page => page.id === state.activePageId)
+  const certificate = state.certificateWarning
+  // The native page covers the viewport in other views, and a popup window's warning is not about the selected page.
+  const certificateInPage = certificate?.pageId === state.activePageId && state.view === 'page'
+  // key: each warning starts with Advanced closed, so a click meant for an earlier warning cannot land on Proceed.
+  const certificateNotice = certificate && <CertificateWarning key={certificate.id} warning={certificate} banner={!certificateInPage}
+    popup={certificate.pageId === state.activePageId ? undefined : state.pages.find(page => page.id === certificate.pageId)?.title ?? 'Another page'}
+    answer={kind => run(window.copilotDesktop.browserAction(tabId, `certificate-${kind}:${certificate.id}`))} />
+  const pageError = certificate?.pageId === (state.errorPageId ?? state.activePageId) ? null : state.error && shownError(state)
   const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
     : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
@@ -161,6 +193,7 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
       <button type="button" title="Forward" aria-label="Browser forward" disabled={!state.canGoForward} onClick={() => run(window.copilotDesktop.browserAction(tabId, 'forward'))}>→</button>
       <button type="button" title="Reload (Shift+click or Ctrl+Shift+R: hard reload that bypasses the cache)" aria-label="Reload browser" aria-keyshortcuts="Control+Shift+R" disabled={!state.url}
         onClick={event => run(window.copilotDesktop.browserAction(tabId, event.shiftKey || event.ctrlKey || event.metaKey ? 'hard-reload' : 'reload'))}>↻</button>
+      {state.certificateBypass && <span className="browser-not-secure" title="You proceeded past a certificate warning for this site. The warning comes back when the app restarts.">⚠ Not secure</span>}
       <input ref={urlInput} aria-label="Web app URL" list={`browser-history-${tabId}`} type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} required maxLength={8192} placeholder="localhost:3000 or example.com" value={url} onChange={event => setUrl(event.target.value)} />
       <button type="submit">Go</button>
       <datalist id={`browser-history-${tabId}`}>{state.history.slice(0, 50).map(address => <option key={address} value={address} />)}</datalist>
@@ -215,7 +248,8 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
       <button type="button" aria-label="Next match" disabled={!state.find?.matches} onClick={() => find(findText, true, true)}>↓</button>
       <button type="button" aria-label="Close find" onClick={closeFind}>×</button>
     </div>}
-    {(error || state.error) && <p className="browser-error" role="alert">{error || shownError(state)}</p>}
+    {(error || pageError) && <p className="browser-error" role="alert">{error || pageError}</p>}
+    {!certificateInPage && certificateNotice}
     {(selecting || selection.length > 0) && <div className="browser-selection" role="group" aria-label="Selected elements">
       <p>{selecting ? `Click elements in the page (${selection.length} of ${MAX_PICKED_ELEMENTS}). Press Esc when you are done.` : `${selection.length} element${selection.length === 1 ? '' : 's'} selected.`}</p>
       {selection.length > 0 && <ul>{selection.map((block, index) => <li key={index}><span>{pickedElementLabel(block)}</span>
@@ -229,7 +263,8 @@ function BrowserPanel({ tabId, obscured, active, detached = false }: { tabId: st
     {!error && !state.error && (picking && !selecting ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
       : notice && <p className="browser-notice" role="status">{notice}</p>)}
     <div className="browser-viewport" ref={viewport}>
-      {state.view === 'page' && (activePage?.window
+      {certificateInPage && certificateNotice}
+      {state.view === 'page' && !certificateInPage && (activePage?.window
         ? <p className="browser-hint">This page is open in its own window.{' '}
             <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${activePage.id}`))}>Show window</button></p>
         : !state.url && <p className="browser-hint">Enter your web app URL above.</p>)}
