@@ -30,7 +30,7 @@ async function saveScreenshot(value: unknown, path: string): Promise<unknown> {
   return { ...metadata, path }
 }
 import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePermission } from './browser-permissions.js'
-import { CertificateExceptions, certificateHost, type CertificateFailure } from './browser-certificates.js'
+import { CertificateExceptions, certificateCanProceed, certificateHost, type CertificateFailure } from './browser-certificates.js'
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
@@ -923,12 +923,14 @@ export class BrowserDebug {
 
   /**
    * The user's answer to a certificate warning, from the panel only: the CLI API cannot reach this. A warning that has
-   * since been replaced is left alone, so a click never accepts a certificate its user was not shown.
+   * since been replaced is left alone, so a click never accepts a certificate its user was not shown. So is a Proceed
+   * for an error that has no way past it, whatever sent the answer.
    */
   private answerCertificate(answer: 'proceed' | 'back', id: number): void {
     const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id)
     if (!page) return
     const failure = page.certificateWarning!
+    if (answer === 'proceed' && !certificateCanProceed(failure.error)) return
     const contents = page.contents
     page.certificateWarning = null
     page.error = null

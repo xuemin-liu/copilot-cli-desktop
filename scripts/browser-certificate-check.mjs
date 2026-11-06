@@ -265,6 +265,31 @@ if (!process.versions.electron) {
     await cleared()
     await title('Mismatch site api')
     assert.equal(browser.snapshot.certificateBypass, true)
+
+    // Errors a person cannot judge have no way past them: no Proceed, and an answer for one accepts nothing.
+    for (const [code, error, text] of [[-206, 'ERR_CERT_REVOKED', 'has been revoked'], [-207, 'ERR_CERT_INVALID', 'could not be verified'], [-203, 'ERR_CERT_CONTAINS_ERRORS', 'could not be verified']]) {
+      const log = []
+      const port = await serve(createHttpsServer(await certificate(`refused${-code}`), handler(log, 'Refused site')))
+      browser.view.webContents.session.setCertificateVerifyProc((_request, callback) => callback(code))
+      await go(`https://127.0.0.1:${port}/`)
+      warning = await warned(warning.id)
+      assert.equal(warning.error, error)
+      await until(() => ui(`document.querySelector(".browser-certificate").textContent.includes(${JSON.stringify(text)})`), `${error} explained`)
+      await ui('document.querySelector(".browser-certificate details").open = true')
+      assert.equal(await ui('document.querySelector(".browser-certificate-proceed")'), null, `${error} offers no Proceed`)
+      assert.equal(await ui('[...document.querySelectorAll(".browser-certificate button")].some(button => button.textContent === "Go back")'), true, `${error} offers Go back`)
+      if (code === -206) { await delay(300); await shot('revoked') }
+      browser.action(`certificate-proceed:${warning.id}`)
+      await delay(500)
+      assert.equal(browser.snapshot.certificateWarning?.id, warning.id, `an answer for ${error} leaves the warning`)
+      assert.equal(browser.view.getVisible(), false, `the page stays hidden behind ${error}`)
+      assert.equal(browser.snapshot.certificateBypass, undefined, `${error} is not marked as proceeded past`)
+      assert.deepEqual(log, [], `an answer for ${error} accepts nothing`)
+      await click('Go back')
+      await cleared()
+      await until(() => browser.view.getVisible() && !browser.snapshot.loading, `page shown after ${error}`)
+      assert.deepEqual(log, [])
+    }
     browser.view.webContents.session.setCertificateVerifyProc(null)
 
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true }))

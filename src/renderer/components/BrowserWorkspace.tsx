@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { BrowserCertificateWarning, BrowserDebugState } from '../../main/browser-debug-types.js'
-import { certificateProblem } from '../../main/browser-certificates.js'
+import { certificateCanProceed, certificateProblem } from '../../main/browser-certificates.js'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { errorMessage } from '../errors.js'
 import { BrowserActivity } from './BrowserActivity.js'
@@ -40,8 +40,10 @@ function CertificateWarning({ warning, popup, banner, answer }: { warning: Brows
         <dt>Issued by</dt><dd>{warning.issuer || 'Not stated'}</dd>
         <dt>Fingerprint</dt><dd>{warning.fingerprint}</dd>
       </dl>
-      <p>Only continue if you trust this site and expect this certificate. The browser will accept this certificate for {warning.host} until the app quits, including when Copilot CLI uses the browser.</p>
-      <button type="button" className="browser-certificate-proceed" onClick={() => answer('proceed')}>Proceed to {warning.host} (unsafe)</button>
+      {certificateCanProceed(warning.error) ? <>
+        <p>Only continue if you trust this site and expect this certificate. The browser will accept this certificate for {warning.host} until the app quits, including when Copilot CLI uses the browser.</p>
+        <button type="button" className="browser-certificate-proceed" onClick={() => answer('proceed')}>Proceed to {warning.host} (unsafe)</button>
+      </> : <p>This error can't be bypassed, so the browser won't open this site.</p>}
     </details>
   </section>
 }

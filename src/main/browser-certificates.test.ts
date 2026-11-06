@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CertificateExceptions, certificateHost, certificateProblem } from './browser-certificates.js'
+import { CertificateExceptions, certificateCanProceed, certificateHost, certificateProblem } from './browser-certificates.js'
 
 const failure = { host: 'dev.example', error: 'ERR_CERT_COMMON_NAME_INVALID', fingerprint: 'sha256/one' }
 
@@ -43,9 +43,22 @@ test('a certificate without a fingerprint is never allowed', () => {
   assert.equal(exceptions.allows('https://dev.example/', failure.error, ''), false)
 })
 
+test('only errors a person can judge can be proceeded past', () => {
+  for (const error of ['ERR_CERT_COMMON_NAME_INVALID', 'ERR_CERT_DATE_INVALID', 'ERR_CERT_AUTHORITY_INVALID']) assert.equal(certificateCanProceed(error), true, error)
+  for (const error of ['ERR_CERT_REVOKED', 'ERR_CERT_INVALID', 'ERR_CERT_CONTAINS_ERRORS', 'ERR_CERT_SOMETHING_NEW', '']) assert.equal(certificateCanProceed(error), false, error)
+})
+
+test('an error that cannot be proceeded past never becomes an exception', () => {
+  const exceptions = new CertificateExceptions()
+  exceptions.add({ ...failure, error: 'ERR_CERT_REVOKED' })
+  assert.equal(exceptions.allows('https://dev.example/', 'ERR_CERT_REVOKED', failure.fingerprint), false)
+  assert.equal(exceptions.coversHost('https://dev.example/'), false, 'the host is not marked as proceeded past')
+})
+
 test('the warning explains common errors and has a fallback', () => {
   assert.match(certificateProblem('ERR_CERT_COMMON_NAME_INVALID', 'dev.example'), /not valid for dev\.example/)
   assert.match(certificateProblem('ERR_CERT_DATE_INVALID', 'dev.example'), /expired/)
   assert.match(certificateProblem('ERR_CERT_AUTHORITY_INVALID', 'dev.example'), /authority/)
-  assert.match(certificateProblem('ERR_CERT_REVOKED', 'dev.example'), /could not be verified/)
+  assert.match(certificateProblem('ERR_CERT_REVOKED', 'dev.example'), /revoked/)
+  assert.match(certificateProblem('ERR_CERT_INVALID', 'dev.example'), /could not be verified/)
 })

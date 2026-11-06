@@ -317,6 +317,10 @@ pane shows a warning in place of the page, with the reason and **Go back**. To c
 **Advanced**, check the certificate's details and choose **Proceed**. A page in its own popup window
 shows its warning in the browser pane, above the selected page.
 
+**Proceed** is offered only for a wrong name, an expired certificate or an unknown issuer
+(`ERR_CERT_COMMON_NAME_INVALID`, `ERR_CERT_DATE_INVALID`, `ERR_CERT_AUTHORITY_INVALID`). Every other
+certificate error, such as `ERR_CERT_REVOKED`, shows the warning with **Go back** only.
+
 Proceeding accepts that certificate, for that host and that error, until the app quits. Every page in
 the same browser profile uses it, including when the assistant uses the browser, and the toolbar shows
 **Not secure** for that host. A different certificate or a new error warns again. Images, scripts,

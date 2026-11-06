@@ -18,12 +18,21 @@ export function certificateHost(url: string): string | null {
   } catch { return null }
 }
 
+/** The errors a person can judge for themselves. Any other error, such as a revoked certificate, has no way past it. */
+const OVERRIDABLE_ERRORS = new Set(['ERR_CERT_COMMON_NAME_INVALID', 'ERR_CERT_DATE_INVALID', 'ERR_CERT_AUTHORITY_INVALID'])
+
+/** Whether the user may proceed past this error. */
+export function certificateCanProceed(error: string): boolean {
+  return OVERRIDABLE_ERRORS.has(error)
+}
+
 /** Why the certificate was refused, in words. */
 export function certificateProblem(error: string, host: string): string {
   switch (error) {
     case 'ERR_CERT_COMMON_NAME_INVALID': return `The certificate is not valid for ${host}.`
     case 'ERR_CERT_DATE_INVALID': return 'The certificate has expired or is not valid yet. Check that this computer’s date is correct.'
     case 'ERR_CERT_AUTHORITY_INVALID': return 'The certificate was not issued by an authority this computer trusts.'
+    case 'ERR_CERT_REVOKED': return `The certificate for ${host} has been revoked, so it should no longer be trusted.`
     default: return `The certificate for ${host} could not be verified.`
   }
 }
@@ -39,6 +48,7 @@ export class CertificateExceptions {
   private key(host: string, error: string, fingerprint: string): string { return `${host}\n${error}\n${fingerprint}` }
 
   add(failure: Pick<CertificateFailure, 'host' | 'error' | 'fingerprint'>): void {
+    if (!certificateCanProceed(failure.error)) return
     this.allowed.add(this.key(failure.host, failure.error, failure.fingerprint))
     this.hosts.add(failure.host)
   }
