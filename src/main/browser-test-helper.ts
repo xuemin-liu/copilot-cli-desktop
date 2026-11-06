@@ -11,6 +11,9 @@ function Assert-TestPath([string]$Path) {
   }
 }
 try {
+  if (!$env:COPILOT_DESKTOP_BROWSER_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_BROWSER_STATE)) {
+    throw 'Open the Browser pane for this session first.'
+  }
   Assert-TestPath $PlanPath
   if (!$OutputPath) { $OutputPath = [regex]::Replace($PlanPath, '\.json$', '.report-' + [Guid]::NewGuid().ToString() + '.json', 'IgnoreCase') }
   Assert-TestPath $OutputPath
@@ -38,11 +41,25 @@ try {
       $browserControl.port -notmatch '^\d+$' -or [long]$browserControl.port -lt 1 -or [long]$browserControl.port -gt 65535 -or
       $browserControl.token -notmatch '^[a-f0-9]{64}$') { throw 'Browser control state is stale or invalid. Reopen this session Browser pane.' }
   $browserPerformed = $true
+  # Windows PowerShell already bypasses a system proxy for loopback; PowerShell 6 and later do not
+  # unless -NoProxy is passed, and that parameter does not exist on 5.1.
+  $browserRequest = @{
+    UseBasicParsing = $true
+    Method = 'POST'
+    Uri = 'http://127.0.0.1:' + $browserControl.port + '/test'
+    Headers = @{ Authorization = 'Bearer ' + $browserControl.token }
+    ContentType = 'application/json; charset=utf-8'
+    Body = [Text.Encoding]::UTF8.GetBytes($browserBody)
+    TimeoutSec = 315
+    MaximumRedirection = 0
+  }
+  if ($PSVersionTable.PSVersion.Major -ge 6) { $browserRequest['NoProxy'] = $true }
   try {
-    $browserResponse = Invoke-WebRequest -UseBasicParsing -Method POST -Uri ('http://127.0.0.1:' + $browserControl.port + '/test') -Headers @{ Authorization = 'Bearer ' + $browserControl.token } -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($browserBody)) -TimeoutSec 315 -MaximumRedirection 0
+    $browserResponse = Invoke-WebRequest @browserRequest
   } catch {
     $browserRequestFailure = $_
     $browserRequestMessage = $null
+    $browserExecutionStarted = $false
     try {
       if ($browserRequestFailure.ErrorDetails.Message -is [string]) { $browserErrorBody = $browserRequestFailure.ErrorDetails.Message }
       $browserErrorResponse = $browserRequestFailure.Exception.Response
@@ -53,9 +70,19 @@ try {
       if ($browserErrorBody) {
         $browserError = $browserErrorBody | ConvertFrom-Json
         if ($browserError.message -is [string] -and $browserError.message) { $browserRequestMessage = $browserError.message }
+        if ($browserError.executionStarted -eq $true) { $browserExecutionStarted = $true }
       }
     } catch {}
-    if ($browserRequestMessage) { $browserPerformed = $false; throw $browserRequestMessage }
+    if (!$browserRequestMessage -and $browserRequestFailure.Exception.InnerException -and
+        [string]$browserRequestFailure.Exception.InnerException.SocketErrorCode -eq 'ConnectionRefused') {
+      # Nothing reached the desktop, so no step can have run.
+      $browserRequestMessage = 'The desktop did not answer. Is Copilot CLI Desktop still running?'
+    }
+    if ($browserRequestMessage) {
+      # Only a run the desktop had started holds evidence; a rejected request leaves none to keep.
+      if (!$browserExecutionStarted) { $browserPerformed = $false }
+      throw $browserRequestMessage
+    }
     throw $browserRequestFailure
   }
   $browserReport = $browserResponse.Content | ConvertFrom-Json
@@ -79,14 +106,28 @@ try {
   if (!$browserPerformed) {
     for ($i = 0; $i -lt $browserFiles.Count; $i++) { $browserFiles[$i].Dispose(); Remove-Item -LiteralPath $browserPaths[$i] -ErrorAction SilentlyContinue }
   } elseif ($browserFiles.Count) {
-    $bytes = [Text.Encoding]::UTF8.GetBytes('{"status":"unavailable","message":"Inspect Last test in the browser before rerunning actions."}')
+    # A run the desktop had started keeps its evidence, but never its screenshots as base64 and never
+    # in a shape that reads as a valid result.
+    $browserEvidence = [ordered]@{ status = 'unavailable'; message = 'Inspect Last test in the browser before rerunning actions.' }
+    if ($browserReport -is [System.Management.Automation.PSCustomObject]) {
+      foreach ($browserImage in $browserReport.screenshots) { if ($browserImage) { $browserImage.PSObject.Properties.Remove('imageBase64') } }
+      foreach ($browserProperty in $browserReport.PSObject.Properties) {
+        if ($browserProperty.Name -ne 'status' -and $browserProperty.Name -ne 'message') { $browserEvidence[$browserProperty.Name] = $browserProperty.Value }
+      }
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($browserEvidence | ConvertTo-Json -Depth 20 -Compress))
     $browserFiles[0].Write($bytes, 0, $bytes.Length)
   }
-  [Console]::Error.WriteLine('Browser test failed. ' + $_.Exception.Message)
+  # A dialog message comes from the page, so it must stay one line of helper output.
+  $browserFailureMessage = ([string]$_.Exception.Message -replace '[\x00-\x1f\x7f-\x9f\u2028\u2029]+', ' ').Trim()
+  if (!$browserFailureMessage) { $browserFailureMessage = 'The browser test did not run.' }
+  [Console]::Error.WriteLine('Browser test failed. ' + $browserFailureMessage)
   exit 1
 } finally {
   foreach ($file in $browserFiles) { $file.Dispose() }
   $browserBody = $null; $browserPlan = $null; $browserValue = $null; $browserControl = $null
-  $browserRequestFailure = $null; $browserRequestMessage = $null; $browserErrorResponse = $null; $browserErrorBody = $null; $browserError = $null
+  $browserRequest = $null; $browserReport = $null; $browserEvidence = $null; $browserFailureMessage = $null
+  $browserRequestFailure = $null; $browserRequestMessage = $null; $browserExecutionStarted = $false
+  $browserErrorResponse = $null; $browserErrorBody = $null; $browserError = $null
 }
 `

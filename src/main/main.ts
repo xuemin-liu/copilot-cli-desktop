@@ -1947,7 +1947,7 @@ async function startSessionTab(
     plan.nameSession = !autoTitle
     if (existingWorktree) plan.cwd = existingWorktree.root
     if (reusedSessionId) plan.sessionId = reusedSessionId
-    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env)
+    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env, logBrowserError)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
     plan.env = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
   }
@@ -3300,7 +3300,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     if (existingWorktree) plan.cwd = existingWorktree.root
     const worktreeGone = !existingWorktree && !!tab.launchWorktreePath && !tab.sideChat
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
-    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env)
+    plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env, logBrowserError)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset })
     // The restarted process starts with control off; the person turns it on again.
     await desktopControl?.disable(tabId, 'Turned off: the session restarted.')

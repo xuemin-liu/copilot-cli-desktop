@@ -1,4 +1,7 @@
+import { execFile } from 'node:child_process'
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { writeFileAtomic } from './atomic-file.js'
 import { isSessionTabId } from './external-targets.js'
 import { BROWSER_TEST_HELPER } from './browser-test-helper.js'
@@ -126,8 +129,12 @@ param(
   [string]$OutputPath
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 if ($null -eq $Arguments) { $Arguments = @() }
 try {
+  if (!$env:COPILOT_DESKTOP_BROWSER_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_BROWSER_STATE)) {
+    throw 'Open the Browser pane for this session first.'
+  }
   if ($Command -eq 'test') {
     if ($Arguments.Count -ne 1) { throw 'Usage: browser.ps1 test <absolute-plan.json> [-OutputPath new-report.json]' }
     & (Join-Path $PSScriptRoot 'browser-test.ps1') -PlanPath $Arguments[0] -OutputPath $OutputPath
@@ -141,9 +148,6 @@ try {
         $OutputPath -match '(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)') {
       throw 'Screenshot output must be a local absolute .png path; network and device paths are not allowed.'
     }
-  }
-  if (!$env:COPILOT_DESKTOP_BROWSER_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_BROWSER_STATE)) {
-    throw 'Open the Browser pane for this session first.'
   }
   $browserReadCommands = @('tabs', 'select', 'frames', 'snapshot', 'screenshot', 'scroll', 'activate', 'responses', 'response', 'test-targets')
   $browserIsReadCommand = $browserReadCommands -contains $Command
@@ -166,8 +170,18 @@ try {
   } elseif ($Command -eq 'request') { 'request/' + $Arguments[0] } else { $Command }
   $browserMethod = if (@('select', 'scroll', 'activate') -contains $Command) { 'POST' } else { 'GET' }
   $browserTimeout = if ($Command -eq 'activate') { 300 } else { 30 }
-  $browserHeaders = @{ Authorization = 'Bearer ' + $browserControl.token }
-  $browserResponse = Invoke-WebRequest -UseBasicParsing -Method $browserMethod -Uri ('http://127.0.0.1:' + $browserControl.port + '/' + $browserRoute) -Headers $browserHeaders -TimeoutSec $browserTimeout -MaximumRedirection 0
+  $browserRequest = @{
+    UseBasicParsing = $true
+    Method = $browserMethod
+    Uri = 'http://127.0.0.1:' + $browserControl.port + '/' + $browserRoute
+    Headers = @{ Authorization = 'Bearer ' + $browserControl.token }
+    TimeoutSec = $browserTimeout
+    MaximumRedirection = 0
+  }
+  # Windows PowerShell already bypasses a system proxy for loopback; PowerShell 6 and later do not
+  # unless -NoProxy is passed, and that parameter does not exist on 5.1.
+  if ($PSVersionTable.PSVersion.Major -ge 6) { $browserRequest['NoProxy'] = $true }
+  $browserResponse = Invoke-WebRequest @browserRequest
   if ($OutputPath) {
     $browserImage = $browserResponse.Content | ConvertFrom-Json
     if ($browserImage.imageBase64) {
@@ -180,11 +194,38 @@ try {
     } else { $browserResponse.Content }
   } else { $browserResponse.Content }
 } catch {
-  [Console]::Error.WriteLine('Browser diagnostics failed: ' + $_.Exception.Message)
+  # The desktop's own messages (usage text, a blocked dialog, Testing mode) arrive in the response
+  # body. PowerShell 5.1 throws WebException with the body in ErrorDetails; PowerShell 6 and later
+  # throw HttpResponseException, which only has that body in ErrorDetails as well.
+  $browserFailure = $_
+  $browserFailureMessage = $null
+  try {
+    $browserErrorBody = $null
+    if ($browserFailure.ErrorDetails.Message -is [string]) { $browserErrorBody = $browserFailure.ErrorDetails.Message }
+    $browserErrorResponse = $browserFailure.Exception.Response
+    if (!$browserErrorBody -and $browserErrorResponse -and $browserErrorResponse.PSObject.Methods['GetResponseStream']) {
+      $browserErrorReader = New-Object IO.StreamReader($browserErrorResponse.GetResponseStream())
+      try { $browserErrorBody = $browserErrorReader.ReadToEnd() } finally { $browserErrorReader.Dispose() }
+    }
+    if ($browserErrorBody) {
+      $browserError = $browserErrorBody | ConvertFrom-Json
+      if ($browserError.message -is [string] -and $browserError.message) { $browserFailureMessage = $browserError.message }
+    }
+  } catch {}
+  if (!$browserFailureMessage) { $browserFailureMessage = [string]$browserFailure.Exception.Message }
+  # Dialog text comes from the page, so it must stay one line of helper output.
+  $browserFailureMessage = ([string]$browserFailureMessage -replace '[\x00-\x1f\x7f-\x9f\u2028\u2029]+', ' ').Trim()
+  if (!$browserFailureMessage) { $browserFailureMessage = 'The browser command failed.' }
+  [Console]::Error.WriteLine('Browser diagnostics failed: ' + $browserFailureMessage)
   exit 1
 } finally {
   $browserControl = $null
-  $browserHeaders = $null
+  $browserRequest = $null
+  $browserFailure = $null
+  $browserFailureMessage = $null
+  $browserErrorBody = $null
+  $browserErrorResponse = $null
+  $browserError = $null
 }
 `
 
@@ -456,9 +497,59 @@ export function browserInstructions(platform: NodeJS.Platform = process.platform
 
 export const BROWSER_INSTRUCTIONS = browserInstructions()
 
-export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
+const execFileAsync = promisify(execFile)
+const protectedRoots = new Map<string, Promise<void>>()
+
+/**
+ * The only documented caller of a session's helper and `control.json` is that session's own shell,
+ * running as the signed-in user; the desktop writes the state itself and launches nothing as another
+ * account. The folder that holds the bearer tokens therefore stops inheriting profile access, which on
+ * a machine with a sandbox account group can include read access, and grants the owner, SYSTEM and
+ * Administrators only. Existing installations are repaired on every start because earlier releases
+ * applied POSIX modes, which Windows ignores.
+ */
+function protectBrowserSessionsRoot(root: string, reportError: (message: string) => void): Promise<void> {
+  const existing = protectedRoots.get(root)
+  if (existing) return existing
+  const protection = (async () => {
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    // Only .NET types, because the Security module that owns Get-Acl and Set-Acl does not always
+    // autoload in the console hosts this runs under. SIDs, not account names, so no name lookup.
+    // The path arrives in the environment so no character in it, such as a typographic apostrophe
+    // that PowerShell also reads as a quote, can end the script early.
+    const script = [
+      '$root = $env:COPILOT_DESKTOP_BROWSER_ROOT',
+      '$acl = [System.Security.AccessControl.DirectorySecurity]::new()',
+      '$acl.SetAccessRuleProtection($true, $false)',
+      '$inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit',
+      `$sids = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User,`,
+      `  [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18'),`,
+      `  [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))`,
+      'foreach ($sid in $sids) {',
+      '  $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($sid,',
+      '    [System.Security.AccessControl.FileSystemRights]::FullControl, $inherit,',
+      '    [System.Security.AccessControl.PropagationFlags]::None,',
+      '    [System.Security.AccessControl.AccessControlType]::Allow))',
+      '}',
+      '[System.IO.DirectoryInfo]::new($root).SetAccessControl($acl)',
+    ].join('\n')
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, timeout: 60000, env: { ...process.env, COPILOT_DESKTOP_BROWSER_ROOT: root } })
+  })().catch((error: unknown) => {
+    // A folder that cannot be protected must not stop the session, but the tokens stay reachable,
+    // so the failure has to reach the app log rather than a console nobody sees.
+    reportError(`Could not restrict access to ${root}: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  protectedRoots.set(root, protection)
+  return protection
+}
+
+export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv,
+  reportError: (message: string) => void = message => console.warn(message)): Promise<NodeJS.ProcessEnv> {
   const paths = browserSessionPaths(root, tabId)
   if (process.platform === 'win32') {
+    // Before the first file, so no temporary file is ever created under the inherited access.
+    await protectBrowserSessionsRoot(root, reportError)
     await writeFileAtomic(paths.helper, BROWSER_HELPER)
     await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
   } else await writeFileAtomic(paths.helper, BROWSER_HELPER_SH)

@@ -117,12 +117,14 @@ export class BrowserReader {
     // a new run starts. The running-step indicator describes the current test.
     this.testProgress = { running: true, step: 0, total: plan.steps.length, label: '', report: this.testProgress.report, lastCompletedAction: this.testProgress.lastCompletedAction ?? null }
     const active = (): boolean => !this.disposed && !page.contents.isDestroyed() && this.options.active() === page.contents.id && this.testPageId === page.contents.id
+    let executionStarted = false
     try {
       const frames = await this.frames(page, this.testAbort.signal)
       page.testNetwork = new BrowserTestNetwork(plan.networkFailures ?? [], origin,
         new Set(frames.filter(frame => this.httpOrigin(frame.url) === origin).map(frame => frame.id)),
         (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted)
       await page.testNetwork.start()
+      executionStarted = true
       const report = await runBrowserTest(plan, page.contents.id, { active,
         execute: (step, stop) => this.testStep(page, step, stop),
         progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
@@ -147,6 +149,13 @@ export class BrowserReader {
       this.testProgress.report = summary
       this.testProgress.journal = summary
       return report
+    } catch (error) {
+      // A helper keeps its reserved report only when a step can have run; a request rejected before
+      // the run began leaves no evidence, so it must not look like an interrupted run.
+      if (executionStarted && typeof error === 'object' && error !== null) {
+        Object.assign(error, { executionStarted: true, ...(this.testProgress.runId ? { runId: this.testProgress.runId } : {}) })
+      }
+      throw error
     } finally {
       await page.testNetwork?.stop()
       if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
