@@ -1154,6 +1154,20 @@ export class BrowserDebug {
     return executeBrowserTest(plan, output, output, value => this.reader.test(value, signal))
   }
 
+  /**
+   * A refused or failed test, plus the run state that tells the helper whether its reserved report
+   * holds evidence: `executionStarted` means a step can have run.
+   */
+  private testFailure(error: unknown): Record<string, unknown> {
+    const started = typeof error === 'object' && error !== null && (error as { executionStarted?: unknown }).executionStarted === true
+    const runId = started ? (error as { runId?: unknown }).runId : undefined
+    return {
+      message: sanitizedText(error instanceof Error ? error.message : 'Test unavailable.'),
+      ...(started ? { executionStarted: true } : {}),
+      ...(typeof runId === 'string' && runId ? { runId } : {}),
+    }
+  }
+
   private async listen(): Promise<void> {
     const server = createServer((request, response) => {
       const send = (status: number, body: unknown): void => {
@@ -1172,7 +1186,7 @@ export class BrowserDebug {
         response.once('close', () => cancelled.abort())
         if (isFormType(type)) {
           void this.testFromForm(request, type!, cancelled.signal).then(result => { if (!response.destroyed) send(200, result) },
-            error => { if (!response.destroyed && !response.headersSent) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Test unavailable.') }) })
+            error => { if (!response.destroyed && !response.headersSent) send(400, this.testFailure(error)) })
           return
         }
         if (!isJsonType(type)) { send(415, { message: 'Tests require JSON.' }); return }
@@ -1188,7 +1202,7 @@ export class BrowserDebug {
           catch { send(400, { message: 'Invalid test JSON.' }); return }
           const result = await this.reader.test(plan, cancelled.signal)
           if (!response.destroyed) send(200, result)
-        })().catch(error => { if (!response.destroyed && !response.headersSent) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Test unavailable.') }) })
+        })().catch(error => { if (!response.destroyed && !response.headersSent) send(400, this.testFailure(error)) })
         return
       }
       if (request.url?.startsWith('/read/')) {

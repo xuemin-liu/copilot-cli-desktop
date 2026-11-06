@@ -223,7 +223,10 @@ from their terminal session. An external shell must explicitly set that variable
 to the desired session's endpoint; it does not select whichever browser is focused.
 
 Each session owns a private loopback API with a random bearer token saved in its
-private Desktop session directory. It accepts no browser Origin requests and exposes
+private Desktop session directory. On Windows that folder stops inheriting profile
+access and grants the signed-in user, SYSTEM and Administrators only; the only
+documented caller of the helper and `control.json` is that session's own shell,
+running as the same user. It accepts no browser Origin requests and exposes
 no arbitrary JavaScript, CDP, storage, credential or file-write routes. Test plans
 can navigate to HTTP/HTTPS pages only while Testing mode is enabled.
 Constrained browser reading actions use the same authenticated transport. It is independent of the background CLI

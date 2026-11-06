@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -153,6 +153,136 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('the PowerShell helper prints the desktop message once, on one line', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-helper-error-'))
+  const exec = promisify(execFile)
+  let reply = { status: 400, body: '' }
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      response.statusCode = reply.status
+      response.setHeader('content-type', 'application/json; charset=utf-8')
+      response.end(reply.body)
+    })
+  })
+  try {
+    await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept))
+    const env = await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
+    const paths = browserSessionPaths(root, 'tab-1')
+    await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token: 'e'.repeat(64) }))
+    const failure = (args: string[]) => exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, ...args], { env, windowsHide: true, timeout: 60000 })
+      .then(() => '', (error: { stderr?: string }) => error.stderr ?? '')
+    // Page-authored dialog text must not turn into extra helper output that looks like a result.
+    reply = { status: 400, body: JSON.stringify({ message: 'Blocked by a page dialog.\n\nPress Resume in the browser pane.' }) }
+    assert.match(await failure(['console']), /^Browser diagnostics failed: Blocked by a page dialog\. Press Resume in the browser pane\.\r?\n$/)
+    // Windows PowerShell captures an error body through ErrorDetails, which leaves one line.
+    reply = { status: 400, body: JSON.stringify({ message: 'Usage: browser.ps1 status|console|network|request 123' }) }
+    assert.match(await failure(['snapshot', '123', 'FRAME']), /^Browser diagnostics failed: Usage: browser\.ps1 status\|console\|network\|request 123\r?\n$/)
+    // A body that is not JSON still reports one line instead of the raw page.
+    reply = { status: 500, body: '<html>gateway down</html>' }
+    const fallback = await failure(['console'])
+    assert.match(fallback, /^Browser diagnostics failed: [^\r\n]+\r?\n$/)
+    assert.ok(!fallback.includes('gateway'), 'a non-JSON body is not echoed as the message')
+  } finally {
+    server.closeAllConnections(); server.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the PowerShell test helper reports missing pane guidance and keeps evidence only for a started run', { skip: process.platform !== 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-test-helper-'))
+  const exec = promisify(execFile)
+  let reply = { status: 400, body: '' }
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      response.statusCode = reply.status
+      response.setHeader('content-type', 'application/json; charset=utf-8')
+      response.end(reply.body)
+    })
+  })
+  try {
+    await new Promise<void>(accept => server.listen(0, '127.0.0.1', accept))
+    const env = await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
+    const paths = browserSessionPaths(root, 'tab-1')
+    const plan = join(root, 'plan.json')
+    await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'screenshot' }] }))
+    const run = (args: string[], environment: NodeJS.ProcessEnv = env) =>
+      exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, ...args], { env: environment, windowsHide: true, timeout: 60000 })
+    const failure = (args: string[], environment: NodeJS.ProcessEnv = env) => run(args, environment).then(() => '', (error: { stderr?: string }) => error.stderr ?? '')
+    const reserved = async (base: string) => (await readdir(root)).filter(name => name.startsWith(base))
+    // The pane check comes before the hand-off, so a missing pane names the pane.
+    const report = join(root, 'missing.json')
+    assert.match(await failure(['test', plan, '-OutputPath', report], { ...env, COPILOT_DESKTOP_BROWSER_STATE: '' }), /^Browser diagnostics failed: Open the Browser pane for this session first\.\r?\n$/)
+    assert.deepEqual(await reserved('missing'), [], 'a missing pane reserves nothing')
+    await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token: 'e'.repeat(64) }))
+    // A payload that arrived but failed validation keeps its evidence, minus the base64 images.
+    reply = { status: 200, body: JSON.stringify({ status: 'ok', steps: [], screenshots: [{ imageBase64: 'Zml4dHVyZQ==' }] }) }
+    const invalid = join(root, 'invalid.json')
+    assert.match(await failure(['test', plan, '-OutputPath', invalid]), /Browser test failed\. Invalid test response/)
+    const evidence = await readFile(invalid, 'utf8')
+    assert.equal(JSON.parse(evidence).status, 'unavailable')
+    assert.equal(JSON.parse(evidence).screenshots[0].imageBase64, undefined)
+    assert.ok(!evidence.includes('Zml4dHVyZQ'), 'a preserved payload never holds base64 images')
+    // A rejected request the desktop had not started leaves no evidence at all.
+    reply = { status: 400, body: JSON.stringify({ message: 'Enable Testing mode in the selected browser page first.' }) }
+    assert.match(await failure(['test', plan, '-OutputPath', join(root, 'rejected.json')]), /^Browser test failed\. Enable Testing mode/)
+    assert.deepEqual(await reserved('rejected'), [])
+    // A run the desktop had started keeps its report so the next step is inspection, not a rerun.
+    reply = { status: 400, body: JSON.stringify({ message: 'Stopped: the page changed.\n\nInspect Last test.', executionStarted: true }) }
+    assert.match(await failure(['test', plan, '-OutputPath', join(root, 'interrupted.json')]), /^Browser test failed\. Stopped: the page changed\. Inspect Last test\.\r?\n$/)
+    const interrupted = JSON.parse(await readFile(join(root, 'interrupted.json'), 'utf8'))
+    assert.equal(interrupted.status, 'unavailable')
+    assert.equal(interrupted.message, 'Inspect Last test in the browser before rerunning actions.')
+    // Nothing reached the desktop, so nothing can have run and nothing is kept.
+    const closed = createServer()
+    await new Promise<void>(accept => closed.listen(0, '127.0.0.1', accept))
+    const closedPort = (closed.address() as { port: number }).port
+    await new Promise<void>(accept => closed.close(() => accept()))
+    await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: closedPort, token: 'e'.repeat(64) }))
+    assert.match(await failure(['test', plan, '-OutputPath', join(root, 'offline.json')]), /Browser test failed\. The desktop did not answer\./)
+    assert.deepEqual(await reserved('offline'), [])
+  } finally {
+    server.closeAllConnections(); server.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the browser session folder stops inheriting profile access to its tokens', { skip: process.platform !== 'win32' }, async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'browser-dacl-'))
+  const root = join(parent, 'browser-sessions')
+  const exec = promisify(execFile)
+  // .NET types only: the Security module that owns Get-Acl does not autoload under every console host.
+  const acl = async (path: string) => {
+    const script = [
+      `$path = '${path.replaceAll("'", "''")}'`,
+      '$info = if ([System.IO.Directory]::Exists($path)) { [System.IO.DirectoryInfo]::new($path) } else { [System.IO.FileInfo]::new($path) }',
+      '$acl = $info.GetAccessControl()',
+      `'protected=' + $acl.AreAccessRulesProtected`,
+      `$acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value + '|' + $_.IsInherited }`,
+    ].join('\n')
+    const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 60000 })
+    const [head, ...rules] = stdout.trim().split(/\r?\n/)
+    return { protected: (head ?? '').trim() === 'protected=True',
+      rules: rules.map(line => { const [sid, inherited] = line.split('|'); return { sid: (sid ?? '').trim(), inherited: (inherited ?? '').trim() === 'True' } }) }
+  }
+  try {
+    await mkdir(root, { recursive: true })
+    // A machine-wide group ACE stands in for the profile access a sandbox account group inherits.
+    await exec('icacls', [root, '/grant', '*S-1-1-0:(OI)(CI)R'], { windowsHide: true, timeout: 60000 })
+    assert.ok((await acl(root)).rules.some(rule => rule.sid === 'S-1-1-0'))
+    await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
+    const protectedRoot = await acl(root)
+    assert.ok(protectedRoot.protected, 'the session folder no longer inherits profile access')
+    assert.ok(!protectedRoot.rules.some(rule => rule.sid === 'S-1-1-0'), 'a machine-wide group loses the token folder')
+    assert.ok(protectedRoot.rules.every(rule => !rule.inherited))
+    const endpoint = join(root, 'tab-1', 'control.json')
+    await writeFile(endpoint, JSON.stringify({ pid: process.pid, port: 1, token: 'f'.repeat(64) }))
+    assert.ok(!(await acl(endpoint)).rules.some(rule => rule.sid === 'S-1-1-0'), 'the token file does not regain the group ACE')
+    assert.match(await readFile(join(root, 'tab-1', 'browser.ps1'), 'utf8'), /NoProxy/)
+    assert.match(await readFile(join(root, 'tab-1', 'browser-test.ps1'), 'utf8'), /NoProxy/)
+  } finally { await rm(parent, { recursive: true, force: true }) }
+})
 test('the installed-app PowerShell helper reads only its assigned session without Node or desktop CLI', { skip: process.platform !== 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'browser-helper-'))
   const exec = promisify(execFile)
