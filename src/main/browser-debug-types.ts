@@ -59,6 +59,21 @@ export interface BrowserDebugState {
   history: string[]
   /** Local Overrides for the selected page; absent until it has been read. */
   overrides?: BrowserOverridesState
+  /** A page's certificate was refused and the user has not answered: the selected page's, otherwise a popup window's.
+   * Only the user answers it, so it stays out of CLI metadata. */
+  certificateWarning?: BrowserCertificateWarning
+  /** The user proceeded past a certificate warning for the selected page's host. */
+  certificateBypass?: boolean
+}
+
+export interface BrowserCertificateWarning {
+  id: number
+  pageId: number
+  host: string
+  error: string
+  issuer: string
+  subject: string
+  fingerprint: string
 }
 
 export interface BrowserOverridesState {

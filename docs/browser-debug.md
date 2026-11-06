@@ -310,6 +310,23 @@ queued one at a time, and a request from a page that closes while the dialog is 
 nothing. The assistant cannot answer a prompt, and the list of answers is not part of the
 assistant's browser status.
 
+## Certificate warnings
+
+When a page's certificate cannot be trusted, for example `ERR_CERT_COMMON_NAME_INVALID`, the browser
+pane shows a warning in place of the page, with the reason and **Go back**. To continue anyway, open
+**Advanced**, check the certificate's details and choose **Proceed**. A page in its own popup window
+shows its warning in the browser pane, above the selected page.
+
+Proceeding accepts that certificate, for that host and that error, until the app quits. Every page in
+the same browser profile uses it, including when the assistant uses the browser, and the toolbar shows
+**Not secure** for that host. A different certificate or a new error warns again. Images, scripts,
+frames and other resources with an untrusted certificate never ask: they fail unless you already
+accepted that certificate through a page.
+
+The warning is drawn by the app, so a website cannot answer it. The assistant cannot answer it either:
+it sees the error in the browser status, without the warning. Unlike Chrome, the browser cannot tell
+whether a site requires HTTPS through HSTS, so **Proceed** is offered on those sites too.
+
 ## Reading authenticated Jira tickets and other pages
 
 Ask the session's Copilot **"Read this Jira ticket, including its comments and linked

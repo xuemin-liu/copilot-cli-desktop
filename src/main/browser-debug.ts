@@ -30,6 +30,7 @@ async function saveScreenshot(value: unknown, path: string): Promise<unknown> {
   return { ...metadata, path }
 }
 import { SITE_PERMISSIONS, SitePermissions, sitePermissionTarget, type AskSitePermission } from './browser-permissions.js'
+import { CertificateExceptions, certificateHost, type CertificateFailure } from './browser-certificates.js'
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
@@ -44,9 +45,18 @@ const POPUP_OVERRIDES_ACTIVATION_MS = 15000
 /** DevTools reports no progress while it lists the folder, so this only stops a folder that never finishes listing. */
 const POPUP_OVERRIDES_LISTING_MS = 5 * 60_000
 const browsersBySession = new WeakMap<Session, Set<BrowserDebug>>()
+const certificateExceptionsBySession = new WeakMap<Session, CertificateExceptions>()
+
+/** A session's certificate exceptions: browsers on the shared browser profile share them, as in one Chrome profile. */
+function certificateExceptions(session: Session): CertificateExceptions {
+  let exceptions = certificateExceptionsBySession.get(session)
+  if (!exceptions) certificateExceptionsBySession.set(session, exceptions = new CertificateExceptions())
+  return exceptions
+}
 
 /** The address a page shows: while its capture-enabling blank document is up, the address it is loading. */
 function shownUrl(page: BrowserPage): string {
+  if (page.certificateWarning) return page.certificateWarning.url
   const url = page.contents.isDestroyed() ? '' : page.contents.getURL()
   return page.priming && url === 'about:blank' ? page.lastUrl : url || page.lastUrl
 }
@@ -71,6 +81,10 @@ interface BrowserPage {
   opener: number | null
   /** When someone last clicked, tapped or typed in the page (0 once a popup window used it). */
   activatedAt: number
+  /** The certificate refused for the navigation in progress, until the navigation reports how it ended. */
+  certificateFailure: CertificateFailure | null
+  /** The refused certificate the user is being asked about; the panel shows this warning in place of the page. */
+  certificateWarning: CertificateFailure | null
 }
 
 /** Input that lets a page open a popup window, and how long it lasts: Chromium's transient user activation. */
@@ -88,6 +102,7 @@ export class BrowserDebug {
   private readonly endpointPath: string
   private readonly reportError: (message: string) => void
   private consoleSequence = 0
+  private certificateSequence = 0
   private bounds: BrowserBounds | null = null
   private readonly started = new Map<string, number>()
   private disposed = false
@@ -233,7 +248,7 @@ export class BrowserDebug {
   private addPage(view: WebContentsView, activate: boolean, window: BaseWindow | null = null, opener: number | null = null): BrowserPage {
     const contents = view.webContents
     const storage = contents.session
-    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0 }
+    const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0, certificateFailure: null, certificateWarning: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
@@ -336,6 +351,8 @@ export class BrowserDebug {
     contents.on('did-start-loading', () => { page.loading = true })
     contents.on('did-start-navigation', details => {
       if (!details.isMainFrame || details.isSameDocument) return
+      page.certificateFailure = null
+      if (page.certificateWarning) { page.certificateWarning = null; this.layout() }
       if (this.findQuery && this.activePageId === contents.id) { this.stopFind(); this.notifyShortcut('find-close') }
       if (!this.state.preserveConsole) this.state.console = this.state.console.filter(entry => entry.pageId !== contents.id)
       if (!this.state.preserveNetwork) {
@@ -346,7 +363,27 @@ export class BrowserDebug {
     })
     contents.on('did-stop-loading', () => { page.loading = false })
     contents.on('did-fail-load', (_event, code, description, _url, main) => {
-      if (main && code !== -3) page.error = sanitizedText(description)
+      if (!main || code === -3) return
+      page.error = sanitizedText(description)
+      if (page.certificateFailure) {
+        page.certificateWarning = page.certificateFailure
+        page.certificateFailure = null
+        this.layout()
+      }
+    })
+    // Chromium waits for this answer, and refuses when nothing answers. A certificate the user has not accepted is refused
+    // at once, whatever loaded it: only the panel's warning can accept one, for the main document of a page.
+    contents.on('certificate-error', (event, url, error, certificate, callback, isMainFrame) => {
+      event.preventDefault()
+      const code = error.replace(/^net::/, '')
+      const allowed = certificateExceptions(contents.session).allows(url, code, certificate.fingerprint)
+      const host = certificateHost(url)
+      if (!allowed && isMainFrame && host && certificate.fingerprint) {
+        page.certificateFailure = { id: ++this.certificateSequence, url, host, error: code, fingerprint: certificate.fingerprint,
+          issuer: certificate.issuerName.slice(0, 200), subject: certificate.subjectName.slice(0, 200) }
+      }
+      // Answering a subresource's error during this event crashes Electron 45 (0xC0000005), so never answer inside it.
+      setImmediate(() => callback(allowed))
     })
     contents.on('did-navigate', (_event, url) => {
       this.rememberUrl(page, url)
@@ -719,6 +756,14 @@ export class BrowserDebug {
       this.state.error = page.error ?? failed?.error ?? null
       if (failed) this.state.errorPageId = failed.contents.id
       else delete this.state.errorPageId
+      // A popup window has no panel of its own, so its warning shows here too.
+      const warned = page.certificateWarning ? page : [...this.pages.values()].filter(entry => entry.window && entry.certificateWarning).at(-1)
+      if (warned?.certificateWarning) {
+        const { url: _url, ...warning } = warned.certificateWarning
+        this.state.certificateWarning = { ...warning, pageId: warned.contents.id }
+      } else delete this.state.certificateWarning
+      if (!page.certificateWarning && certificateExceptions(contents.session).coversHost(shownUrl(page))) this.state.certificateBypass = true
+      else delete this.state.certificateBypass
       this.state.devtools = page.devtools
       this.state.activePageId = this.activePageId
       this.state.zoomFactor = contents.getZoomFactor()
@@ -819,7 +864,8 @@ export class BrowserDebug {
     page.lastUrl = target
     try { await this.load(page, target) }
     catch (error) {
-      if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ERR_ABORTED')) {
+      // A refused certificate is answered in the page's warning, not reported as a failed address.
+      if (!page.certificateWarning && !(error && typeof error === 'object' && 'code' in error && error.code === 'ERR_ABORTED')) {
         throw new Error(sanitizedText(error instanceof Error ? error.message : String(error)))
       }
     }
@@ -873,6 +919,31 @@ export class BrowserDebug {
     if (this.disposed) throw new Error('Browser has closed')
     await this.reader.answerDialog(accept)
     return this.snapshot
+  }
+
+  /**
+   * The user's answer to a certificate warning, from the panel only: the CLI API cannot reach this. A warning that has
+   * since been replaced is left alone, so a click never accepts a certificate its user was not shown.
+   */
+  private answerCertificate(answer: 'proceed' | 'back', id: number): void {
+    const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id)
+    if (!page) return
+    const failure = page.certificateWarning!
+    const contents = page.contents
+    page.certificateWarning = null
+    page.error = null
+    if (answer === 'proceed') {
+      certificateExceptions(contents.session).add(failure)
+      // did-fail-load reports a failure here, including another certificate warning.
+      void this.load(page, failure.url).catch(() => {})
+    } else if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack()
+    // With nowhere to go back to, a popup window closes and a tab goes blank.
+    else if (page.window) contents.close()
+    else {
+      page.lastUrl = ''
+      void contents.loadURL('about:blank').catch(() => {})
+    }
+    this.layout()
   }
 
   /** Find text in the selected page. `next` continues the current search instead of starting a new one. */
@@ -989,6 +1060,12 @@ export class BrowserDebug {
     const forget = /^forget-permission:(\d+)$/.exec(action)
     if (forget) { this.sitePermissions.forget(Number(forget[1])); return this.snapshot }
     if (action === 'forget-permissions') { this.sitePermissions.clear(); return this.snapshot }
+    const certificate = /^certificate-(proceed|back):(\d+)$/.exec(action)
+    if (certificate) {
+      if (this.disposed) throw new Error('Browser has closed')
+      this.answerCertificate(certificate[1] as 'proceed' | 'back', Number(certificate[2]))
+      return this.snapshot
+    }
     const pageAction = /^(select-page|close-page):(\d+)$/.exec(action)
     if (pageAction) {
       const id = Number(pageAction[2])
@@ -1090,7 +1167,8 @@ export class BrowserDebug {
         if (page.tools) this.owner.contentView.addChildView(page.tools)
         page.attached = true
       }
-      if (!page.window) page.view.setVisible(Boolean(b && id === this.activePageId && this.state.view === 'page'))
+      // A page with a certificate warning is hidden: the panel draws the warning in its place.
+      if (!page.window) page.view.setVisible(Boolean(b && id === this.activePageId && this.state.view === 'page' && !page.certificateWarning))
       page.tools?.setVisible(Boolean(b && id === this.activePageId && page.devtools && ['console', 'network', 'devtools'].includes(this.state.view)))
     }
     if (!b) return
@@ -1215,7 +1293,7 @@ export class BrowserDebug {
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, ...state } = this.state
+        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = this.state
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
