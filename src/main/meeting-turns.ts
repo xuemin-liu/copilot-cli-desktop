@@ -1,4 +1,5 @@
 import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
+import { SessionActivityTracker } from './session-activity.js'
 
 /**
  * Reads one session's live event-log records to tell what each prompt was and what Copilot answered.
@@ -6,9 +7,10 @@ import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
  * Observed in local logs (CLI 1.0.80 to 1.0.103): a `user.message` and every `assistant.message` it caused share
  * `data.interactionId`; one prompt spans several `assistant.turn_end` records (one per model call), so the answer is complete
  * only when the session goes idle. Newer CLIs mark the answer with `phase: "final_answer"`; older ones do not, and there the
- * answer is the last message with text and no tool requests. A `session.error` means the model failed: the session goes idle
- * with nothing answered, whatever text came before it. Records of subagents (`agentId`, `parentToolCallId`) are not the
- * session's own conversation and are skipped, as the activity tracker does.
+ * answer is the last message with text and no tool requests. A `session.error` that the activity tracker takes for the turn's
+ * end means the model failed: the session goes idle with nothing answered, whatever text came before it. One during a running
+ * turn changes nothing, for the tracker or here. Records of subagents (`agentId`, `parentToolCallId`) are not the session's own
+ * conversation and are skipped, as the activity tracker does.
  */
 
 interface TurnRecord {
@@ -89,6 +91,8 @@ export class MeetingTurnReader {
   private usageChanged = false
   private lastEvent: TurnEventDiagnostic | null = null
   private lastClearedCurrent: MeetingTurnDiagnostic['lastClearedCurrent'] = null
+  /** Decides when an error ends a turn, so this never disagrees with the session's activity. */
+  private readonly activity = new SessionActivityTracker()
 
   get diagnostic(): MeetingTurnDiagnostic {
     return {
@@ -117,6 +121,7 @@ export class MeetingTurnReader {
     this.expectedSignature = null
     this.usageValue = null
     this.usageChanged = false
+    this.activity.reset()
   }
 
   /** The session's latest usage totals, from its history or since; null before any checkpoint. */
@@ -163,6 +168,7 @@ export class MeetingTurnReader {
     let record: TurnRecord
     try { record = JSON.parse(line) } catch { return null }
     if (!record || typeof record !== 'object' || record.agentId || record.data?.parentToolCallId) return null
+    const activity = this.activity.consume(line)
     const data = record.data ?? {}
     // Only known event names, and bounded identifiers, go into rejection diagnostics.
     const type = typeof record.type === 'string' && /^(?:user\.message|assistant\.(?:message|turn_start|turn_end)|session\.(?:start|resume|usage_checkpoint|error)|tool\.execution_(?:start|complete)|abort)$/.test(record.type) ? record.type : 'other'
@@ -185,7 +191,7 @@ export class MeetingTurnReader {
       return { content: data.content, desktop }
     }
     if (record.type === 'session.error') {
-      if (this.current) this.current.failure = (typeof data.message === 'string' ? data.message.trim().slice(0, MAX_FAILURE_CHARS) : '') || 'The model failed.'
+      if (this.current && activity === 'idle') this.current.failure = (typeof data.message === 'string' ? data.message.trim().slice(0, MAX_FAILURE_CHARS) : '') || 'The model failed.'
       return null
     }
     if (record.type === 'assistant.turn_start' && this.current) this.current.failure = null

@@ -17,11 +17,18 @@ test('the final answer is the reply; commentary and tool-call messages before it
   assert.equal(reader.finish(), null, 'reported once')
 })
 
-test('a model error marks the turn failed, whatever text came before it; a turn that starts after it clears the mark', () => {
+/** One model step that ends with no final answer, as a failed model call does. */
+const failedStep = (reader: MeetingTurnReader, turnId: string): void => {
+  reader.consume(record('assistant.turn_start', { turnId }))
+  reader.consume(record('assistant.turn_end', { turnId }))
+}
+
+test('a model error after a turn with no final answer marks it failed, whatever text came before; a turn that starts after it clears the mark', () => {
   const reader = new MeetingTurnReader()
   reader.expectDesktopPrompt()
   reader.consume(user('[meeting K7QF · round 1 · from the desktop]'))
-  reader.consume(assistant({ content: 'Looking at the files.', toolRequests: [] }))
+  reader.consume(record('assistant.turn_start', { turnId: '1' }))
+  reader.consume(assistant({ content: 'Looking at the files.', toolRequests: [{ id: 't' }] }))
   reader.consume(record('assistant.turn_end', { turnId: '1' }))
   reader.consume(record('session.error', { errorType: 'query', message: '400 The `reasoning_content` must be passed back.' }))
   const failed = reader.finish()
@@ -29,19 +36,47 @@ test('a model error marks the turn failed, whatever text came before it; a turn 
   assert.equal(failed?.desktop, true)
 
   reader.consume(user('Next', 'i2'))
-  reader.consume(record('session.error', { message: 'x'.repeat(1_000) }))
-  reader.consume(record('assistant.turn_start', { turnId: '2' }))
+  failedStep(reader, '2')
+  reader.consume(record('session.error', { message: 'x' }))
+  reader.consume(record('assistant.turn_start', { turnId: '3' }))
   assert.equal(reader.finish()?.failure, null)
 
   reader.consume(user('No message', 'i3'))
+  failedStep(reader, '4')
   reader.consume(record('session.error', {}))
   assert.equal(reader.finish()?.failure, 'The model failed.')
   reader.consume(user('Long', 'i4'))
+  failedStep(reader, '5')
   reader.consume(record('session.error', { message: 'x'.repeat(1_000) }))
   assert.equal(reader.finish()?.failure?.length, 300)
 
   reader.consume(user('A subagent failed', 'i5'))
+  failedStep(reader, '6')
   reader.consume(record('session.error', { message: 'child' }, { agentId: 'child' }))
+  assert.equal(reader.finish()?.failure, null)
+})
+
+test('a model error the activity tracker ignores does not fail the turn, so its answer still counts', () => {
+  const reader = new MeetingTurnReader()
+  const answered = (data: Record<string, unknown>): string => record('assistant.message', { interactionId: 'i1', ...data })
+  reader.expectDesktopPrompt()
+  reader.consume(user('[meeting K7QF · round 1 · from the desktop]'))
+  reader.consume(record('assistant.turn_start', { turnId: '1' }))
+  reader.consume(record('session.error', { message: 'a transient error during the turn' }))
+  reader.consume(answered({ content: 'My full review: step 2 races.', phase: 'final_answer', toolRequests: [] }))
+  reader.consume(record('assistant.turn_end', { turnId: '1' }))
+  assert.deepEqual(reader.finish(), { content: '[meeting K7QF · round 1 · from the desktop]', desktop: true, reply: 'My full review: step 2 races.', failure: null })
+
+  reader.consume(user('After an answer', 'i2'))
+  reader.consume(record('assistant.turn_start', { turnId: '2' }))
+  reader.consume(record('assistant.message', { interactionId: 'i2', content: 'Done.', toolRequests: [] }))
+  reader.consume(record('assistant.turn_end', { turnId: '2' }))
+  reader.consume(record('session.error', { message: 'after the turn was answered' }))
+  assert.equal(reader.finish()?.failure, null)
+
+  reader.reset('monitor-attached')
+  reader.consume(user('After a gap in the log', 'i3'))
+  reader.consume(record('session.error', { message: 'no turn seen since the gap' }))
   assert.equal(reader.finish()?.failure, null)
 })
 
