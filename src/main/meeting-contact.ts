@@ -1,23 +1,25 @@
 import type { MeetingView } from './meeting.js'
 
 /**
- * Whether an outside agent still takes part. The desktop cannot wake one: it gets its messages only by asking, so an agent
- * that ended its turn looks like one that is thinking, until the person is told. Nothing here changes the meeting: a late
- * answer still counts, and the person decides what to do. No Node imports: the meeting bar reads this too.
+ * Whether an outside agent still takes part. It gets its messages by asking, so an agent that ended its turn looks like one
+ * that is thinking. The desktop can wake some agents (meeting-guest-wake.ts); when it cannot, or a wake-up brings no answer, the
+ * person is told. Nothing here changes the meeting: a late answer still counts, and the person decides what to do. No Node
+ * imports: the meeting bar reads this too.
  */
 
 /**
- * `lastSeenAt`: its latest request of any kind, not its latest poll. `waiting`: a `next` of its is open now. `holding`: it was
- * handed a message and has not answered, so it may be working on it for a long time.
+ * `lastSeenAt`: its latest request of any kind, not its latest poll. `waiting`: the desktop can reach it now, by a `next` of its
+ * that is open or a wake-up it has not used this quiet spell. `holding`: it was handed a message and has not answered, so it may
+ * be working on it for a long time. `wokenAt`: when it was last woken, if nothing was heard from it since.
  */
-export interface GuestContact { lastSeenAt: number | null; waiting: boolean; holding: boolean }
+export interface GuestContact { lastSeenAt: number | null; waiting: boolean; holding: boolean; wokenAt?: number | null }
 
 /** A heuristic, not a measured limit: an agent polling in a loop asks again within seconds of a wait ending. */
 export const GUEST_QUIET_MS = 3 * 60_000
 
-/** No request for a while and none open, whatever it may be doing. */
+/** No request for a while and none open, whatever it may be doing. A wake-up gets the same time to bring an answer. */
 export function guestQuiet(contact: GuestContact, now: number, notBefore = 0): boolean {
-  return contact.lastSeenAt !== null && !contact.waiting && now - Math.max(contact.lastSeenAt, notBefore) > GUEST_QUIET_MS
+  return contact.lastSeenAt !== null && !contact.waiting && now - Math.max(contact.lastSeenAt, contact.wokenAt ?? 0, notBefore) > GUEST_QUIET_MS
 }
 
 /** It should be asking for its next message and is not. One holding a message is left to its round's deadline, or its answer. */
@@ -27,7 +29,7 @@ export function guestStalled(contact: GuestContact, now: number, notBefore = 0):
 
 /** What the bar shows of each seat, to tell when it needs telling: any of it can change with no state update of its own. */
 export function guestContactKey(guests: ReadonlyArray<GuestContact & { id: string }>): string {
-  return JSON.stringify(guests.map(({ id, lastSeenAt, waiting, holding }) => [id, lastSeenAt, waiting, holding]))
+  return JSON.stringify(guests.map(({ id, lastSeenAt, waiting, holding, wokenAt }) => [id, lastSeenAt, waiting, holding, wokenAt ?? null]))
 }
 
 export interface GuestStall { meetingId: string; seatId: string; title: string; host: boolean }
