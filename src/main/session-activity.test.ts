@@ -20,6 +20,25 @@ test('tool-turn completion becomes unknown and only a final root response establ
   assert.equal(tracker.consume(event('abort')), 'idle')
 })
 
+test('a model error after a turn with no final response is the session back at its prompt', () => {
+  const tracker = new SessionActivityTracker()
+  tracker.consume(event('assistant.turn_start', { turnId: '1' }))
+  assert.equal(tracker.consume(event('session.error', { message: 'mid-turn' })), undefined, 'a turn still running carries on')
+  tracker.consume(event('assistant.message', { content: 'Looking', toolRequests: [{ name: 'bash' }] }))
+  assert.equal(tracker.consume(event('assistant.turn_end', { turnId: '1' })), null)
+  assert.equal(tracker.consume(event('session.error', { message: 'child' }, { agentId: 'child' })), undefined, 'a subagent\'s error is not the session\'s')
+  assert.equal(tracker.consume(event('session.error', { message: '400' })), 'idle')
+  assert.equal(tracker.consume(event('session.error', { message: 'again' })), undefined)
+
+  assert.equal(tracker.consume(event('assistant.turn_start', { turnId: '2' })), 'working')
+  tracker.consume(event('assistant.message', { content: 'Done.' }))
+  assert.equal(tracker.consume(event('assistant.turn_end', { turnId: '2' })), 'idle')
+
+  const fresh = new SessionActivityTracker()
+  assert.equal(fresh.consume(event('session.error', { message: 'before any turn' })), undefined, 'no turn ended, so it proves nothing')
+  assert.equal(fresh.activity, null)
+})
+
 test('subagents, malformed records, and historical unfinished turns do not claim completion or current work', () => {
   const tracker = new SessionActivityTracker()
   tracker.consume(event('assistant.turn_start', { turnId: 'main' }))

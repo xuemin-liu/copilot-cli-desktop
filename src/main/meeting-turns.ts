@@ -1,4 +1,5 @@
 import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
+import { SessionActivityTracker } from './session-activity.js'
 
 /**
  * Reads one session's live event-log records to tell what each prompt was and what Copilot answered.
@@ -6,8 +7,10 @@ import { MEETING_MARKER_PREFIX } from './meeting-messages.js'
  * Observed in local logs (CLI 1.0.80 to 1.0.103): a `user.message` and every `assistant.message` it caused share
  * `data.interactionId`; one prompt spans several `assistant.turn_end` records (one per model call), so the answer is complete
  * only when the session goes idle. Newer CLIs mark the answer with `phase: "final_answer"`; older ones do not, and there the
- * answer is the last message with text and no tool requests. Records of subagents (`agentId`, `parentToolCallId`) are not the
- * session's own conversation and are skipped, as the activity tracker does.
+ * answer is the last message with text and no tool requests. A `session.error` that the activity tracker takes for the turn's
+ * end means the model failed: the session goes idle with nothing answered, whatever text came before it. One during a running
+ * turn changes nothing, for the tracker or here. Records of subagents (`agentId`, `parentToolCallId`) are not the session's own
+ * conversation and are skipped, as the activity tracker does.
  */
 
 interface TurnRecord {
@@ -26,6 +29,7 @@ interface TurnRecord {
     chunkCount?: unknown
     totalNanoAiu?: unknown
     totalPremiumRequests?: unknown
+    message?: unknown
   }
 }
 
@@ -38,7 +42,8 @@ export interface PromptSeen {
   desktop: boolean
 }
 
-export interface CompletedTurn extends PromptSeen { reply: string }
+/** `failure`: the model's error when the turn failed instead of answering; its `reply` is then no answer. */
+export interface CompletedTurn extends PromptSeen { reply: string; failure: string | null }
 
 /** The reply a finished turn gives to the delivery the desktop typed, or null when that prompt was never confirmed. */
 export function confirmedMeetingReply(turn: CompletedTurn | null): string | null {
@@ -49,11 +54,13 @@ interface Interaction extends PromptSeen {
   id: string | null
   final: string | null
   last: string | null
+  failure: string | null
   chunks: Map<string, { count: number; parts: string[] }>
 }
 
 const MAX_CHUNKS = 64
 const SIGNATURE_CHARS = 200
+const MAX_FAILURE_CHARS = 300
 
 /** The start of a prompt's first line, compared the way the CLI records a bracketed paste. */
 function promptSignature(text: string): string {
@@ -84,6 +91,8 @@ export class MeetingTurnReader {
   private usageChanged = false
   private lastEvent: TurnEventDiagnostic | null = null
   private lastClearedCurrent: MeetingTurnDiagnostic['lastClearedCurrent'] = null
+  /** Decides when an error ends a turn, so this never disagrees with the session's activity. */
+  private readonly activity = new SessionActivityTracker()
 
   get diagnostic(): MeetingTurnDiagnostic {
     return {
@@ -112,6 +121,7 @@ export class MeetingTurnReader {
     this.expectedSignature = null
     this.usageValue = null
     this.usageChanged = false
+    this.activity.reset()
   }
 
   /** The session's latest usage totals, from its history or since; null before any checkpoint. */
@@ -158,9 +168,10 @@ export class MeetingTurnReader {
     let record: TurnRecord
     try { record = JSON.parse(line) } catch { return null }
     if (!record || typeof record !== 'object' || record.agentId || record.data?.parentToolCallId) return null
+    const activity = this.activity.consume(line)
     const data = record.data ?? {}
     // Only known event names, and bounded identifiers, go into rejection diagnostics.
-    const type = typeof record.type === 'string' && /^(?:user\.message|assistant\.(?:message|turn_start|turn_end)|session\.(?:start|resume|usage_checkpoint)|tool\.execution_(?:start|complete)|abort)$/.test(record.type) ? record.type : 'other'
+    const type = typeof record.type === 'string' && /^(?:user\.message|assistant\.(?:message|turn_start|turn_end)|session\.(?:start|resume|usage_checkpoint|error)|tool\.execution_(?:start|complete)|abort)$/.test(record.type) ? record.type : 'other'
     const identifier = (value: unknown): string | null => typeof value === 'string' ? value.slice(0, 128) : null
     this.lastEvent = { type, live, eventId: identifier(record.id), interactionId: identifier(data.interactionId), turnId: identifier(data.turnId) }
     if (record.type === 'session.usage_checkpoint') {
@@ -176,9 +187,14 @@ export class MeetingTurnReader {
       // A recorded prompt settles the expectation either way: an unmatched one means the typed input never arrived.
       this.cancelExpectedDesktopPrompt()
       if (desktop) this.desktopPrompts++
-      this.current = { id: typeof data.interactionId === 'string' ? data.interactionId : null, content: data.content, desktop, final: null, last: null, chunks: new Map() }
+      this.current = { id: typeof data.interactionId === 'string' ? data.interactionId : null, content: data.content, desktop, final: null, last: null, failure: null, chunks: new Map() }
       return { content: data.content, desktop }
     }
+    if (record.type === 'session.error') {
+      if (this.current && activity === 'idle') this.current.failure = (typeof data.message === 'string' ? data.message.trim().slice(0, MAX_FAILURE_CHARS) : '') || 'The model failed.'
+      return null
+    }
+    if (record.type === 'assistant.turn_start' && this.current) this.current.failure = null
     if (record.type !== 'assistant.message' || !this.current) return null
     const interaction = this.current
     if (interaction.id !== null && typeof data.interactionId === 'string' && data.interactionId !== interaction.id) return null
@@ -195,7 +211,7 @@ export class MeetingTurnReader {
     this.current = null
     if (!interaction) return null
     this.lastClearedCurrent = { reason, event: this.lastEvent }
-    return { content: interaction.content, desktop: interaction.desktop, reply: interaction.final ?? interaction.last ?? '' }
+    return { content: interaction.content, desktop: interaction.desktop, reply: interaction.final ?? interaction.last ?? '', failure: interaction.failure }
   }
 
   /** A message split into chunks (none observed so far, but the fields exist) counts once all its chunks are in. */

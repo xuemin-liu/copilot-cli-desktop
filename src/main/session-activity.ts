@@ -25,7 +25,9 @@ interface ActivityEvent {
 const MAX_CWD_CHARS = 4_096
 
 /** A turn may end after tool calls and immediately start another model call.
- * Only a root turn with a final, tool-free response establishes idle.
+ * Only a root turn with a final, tool-free response establishes idle, or a turn that failed: a model call that fails ends its
+ * turn and then records `session.error`, and the CLI is back at its prompt. In real logs (CLI 1.0.104 to 1.0.106) it never went
+ * on by itself after one, and no turn stopped without a final response any other way.
  *
  * Besides the coarse activity, the tracker keeps a bounded set of the tools running in the
  * current root turn (tools overlap: most tool starts in real logs happen while another tool of
@@ -34,6 +36,7 @@ export class SessionActivityTracker {
   activity: SessionActivity | null = null
   private turnId: string | null = null
   private finalResponse = false
+  private endedWithoutResponse = false
   private readonly runningTools = new Map<string, RunningTool>()
   private thinkingSince: number | null = null
   /** The folder the session reports it runs in (`session.start` / `session.resume`); the latest record wins. */
@@ -45,6 +48,7 @@ export class SessionActivityTracker {
     this.activity = null
     this.turnId = null
     this.finalResponse = false
+    this.endedWithoutResponse = false
     this.clearDetail()
     this.sessionCwd = null
   }
@@ -78,6 +82,7 @@ export class SessionActivityTracker {
         if (typeof event.data?.turnId !== 'string') return undefined
         this.turnId = event.data.turnId
         this.finalResponse = false
+        this.endedWithoutResponse = false
         this.activity = 'working'
         this.clearDetail()
         this.thinkingSince = clampTimestamp(event.timestamp, this.clock())
@@ -100,14 +105,21 @@ export class SessionActivityTracker {
       case 'assistant.turn_end':
         if (event.data?.turnId !== this.turnId || this.turnId === null) return undefined
         this.activity = this.finalResponse ? 'idle' : null
+        this.endedWithoutResponse = !this.finalResponse
         this.turnId = null
         this.finalResponse = false
         this.clearDetail()
+        break
+      case 'session.error':
+        if (!this.endedWithoutResponse) return undefined
+        this.endedWithoutResponse = false
+        this.activity = 'idle'
         break
       case 'abort':
         this.activity = 'idle'
         this.turnId = null
         this.finalResponse = false
+        this.endedWithoutResponse = false
         this.clearDetail()
         break
       case 'session.start':
@@ -145,6 +157,7 @@ export class SessionActivityTracker {
     if (this.activity !== 'idle') this.activity = null
     this.turnId = null
     this.finalResponse = false
+    this.endedWithoutResponse = false
     this.clearDetail()
     return this.activity
   }
