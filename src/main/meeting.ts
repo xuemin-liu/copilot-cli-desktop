@@ -468,25 +468,32 @@ export class MeetingHub {
     meeting.failedTurns.set(tabId, { round: delivery.round, kind: delivery.kind, tries, error, since: same ? earlier.since : this.timers.now() })
     const retrying = tries <= MEETING_TURN_RETRIES
     this.effects.turnFailed?.(meeting.id, tabId, error, retrying)
-    if (retrying) {
-      this.sendAgainSoon(meeting, tabId, delivery)
-      this.changed(meeting)
-      return
-    }
-    if (meeting.host.tabId === tabId) {
+    if (meeting.host.tabId === tabId && !retrying) {
       this.settleOutstanding(meeting, tabId, delivery)
       this.pause(meeting, 'host-silent')
-    } else this.changed(meeting)
+      return
+    }
+    const again = this.renew(meeting, tabId, delivery)
+    if (retrying) this.sendAgainSoon(meeting, tabId, again)
+    this.changed(meeting)
   }
 
   /**
-   * The person typed in this session during the turn of a meeting's message, so its answer went to them and no answer reached
-   * the meeting. Now that it is free, what it still owes goes in again; otherwise the round would only run out. Not at once: its
-   * host may have a post on the way from a command that is still running.
+   * The person typed in this session during the turn of a meeting's message, so its answer goes to them and none reaches the
+   * meeting. What it still owes goes in again (`askAgain`), or the round would only run out; null when it owes nothing.
    */
-  askAgain(tabId: string, delivery: MeetingDelivery): void {
+  takenOver(tabId: string, delivery: MeetingDelivery): MeetingDelivery | null {
     const meeting = this.meetings.get(delivery.meetingId)
-    if (meeting && this.owes(meeting, tabId, delivery)) this.sendAgainSoon(meeting, tabId, delivery)
+    if (!meeting || !this.owes(meeting, tabId, delivery)) return null
+    const again = this.renew(meeting, tabId, delivery)
+    this.changed(meeting)
+    return again
+  }
+
+  /** The session is free now. Not at once: its host may have a post on the way from a command that is still running. */
+  askAgain(tabId: string, again: MeetingDelivery): void {
+    const meeting = this.meetings.get(again.meetingId)
+    if (meeting) this.sendAgainSoon(meeting, tabId, again)
   }
 
   /** A message going in again that is no longer owed, so it must not be typed: a stale digest would draw a round nobody needs. */
@@ -498,9 +505,24 @@ export class MeetingHub {
     return true
   }
 
-  private sendAgainSoon(meeting: Meeting, tabId: string, delivery: MeetingDelivery): void {
+  /**
+   * What the session owes under a receipt of its own, saved as what is outstanding. The old receipt is about to be settled and a
+   * restart drops a settled one, so this must be saved first: a restart in the wait then types the new one.
+   */
+  private renew(meeting: Meeting, tabId: string, delivery: MeetingDelivery): MeetingDelivery {
+    const again: MeetingDelivery = { ...delivery, id: randomUUID(), again: true }
+    meeting.outstanding.set(tabId, again)
+    return again
+  }
+
+  private sendAgainSoon(meeting: Meeting, tabId: string, again: MeetingDelivery): void {
     this.timers.set(() => {
-      if (this.meetings.get(meeting.id) === meeting && this.owes(meeting, tabId, delivery)) this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round, randomUUID(), false, true)
+      if (this.meetings.get(meeting.id) !== meeting || meeting.outstanding.get(tabId)?.id !== again.id) return
+      if (this.owes(meeting, tabId, again)) this.effects.deliver(tabId, again)
+      else {
+        meeting.outstanding.delete(tabId)
+        this.changed(meeting)
+      }
     }, MEETING_TURN_RETRY_MS)
   }
 
@@ -650,7 +672,7 @@ export class MeetingHub {
         // Stable across repeated upgrades/restarts even when the old file has no delivery identity.
         const legacy=createHash('sha256').update(JSON.stringify([meeting.id,sessionId,delivery.round,delivery.kind,delivery.text])).digest('hex')
         const id=delivery.id??`${legacy.slice(0,8)}-${legacy.slice(8,12)}-${legacy.slice(12,16)}-${legacy.slice(16,20)}-${legacy.slice(20,32)}`
-        this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round,id,!delivery.id||delivery.recovered===true)
+        this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round,id,!delivery.id||delivery.recovered===true,delivery.again===true)
       }
     }
     if (meeting.stage === 'reviewing') {
@@ -985,7 +1007,7 @@ function deliveryOf(value: unknown, meetingId: string): MeetingDelivery | null {
   const kind = DELIVERY_KINDS.find((candidate) => candidate === value.kind)
   const body = text(value.text, MAX_MEETING_POST_CHARS + MAX_MEETING_REPLY_CHARS * MAX_MEETING_PARTICIPANTS)
   if(value.id!==undefined&&(typeof value.id!=='string'||!/^[a-f0-9-]{36}$/.test(value.id)))return null
-  return round && kind && body !== null ? { meetingId, round, kind, text: body,...(typeof value.id==='string'?{id:value.id}:{}),...(value.recovered===true?{recovered:true as const}:{}) } : null
+  return round && kind && body !== null ? { meetingId, round, kind, text: body,...(typeof value.id==='string'?{id:value.id}:{}),...(value.recovered===true?{recovered:true as const}:{}),...(value.again===true?{again:true as const}:{}) } : null
 }
 
 /** A saved meeting as written by `snapshot`; anything malformed is not restored. The file is the desktop's own, but on disk. */

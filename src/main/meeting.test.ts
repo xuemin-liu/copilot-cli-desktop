@@ -479,7 +479,8 @@ test('a message whose turn the person took over goes in again only if it is stil
   h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
   h.hub.join(reviewerB, 'K7QF')
   const post = h.last('tab-b')
-  h.hub.askAgain('tab-b', post)
+  const again = h.hub.takenOver('tab-b', post)!
+  h.hub.askAgain('tab-b', again)
   assert.equal(h.to('tab-b').length, 1, 'not at once')
   h.advance(MEETING_TURN_RETRY_MS)
   assert.equal(h.to('tab-b').length, 2)
@@ -488,12 +489,15 @@ test('a message whose turn the person took over goes in again only if it is stil
   h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
   const digest = h.last('tab-host')
   h.hub.post('tab-host', 'round', 'plan v2', null)
-  h.hub.askAgain('tab-host', digest)
+  assert.equal(h.hub.takenOver('tab-host', digest), null, 'the host posted its round, so it owes nothing')
+  assert.equal(h.hub.takenOver('tab-b', post), null, 'an old round\'s message is not typed again')
+
+  const round2 = h.last('tab-b')
+  const lateAgain = h.hub.takenOver('tab-b', round2)!
+  h.hub.turnCompleted('tab-b', round2, 'r2')
+  h.hub.askAgain('tab-b', lateAgain)
   h.advance(MEETING_TURN_RETRY_MS)
-  assert.equal(h.to('tab-host').length, 1, 'the host posted its round, so it owes nothing')
-  h.hub.askAgain('tab-b', post)
-  h.advance(MEETING_TURN_RETRY_MS)
-  assert.equal(h.last('tab-b').round, 2, 'an old round\'s message is not typed again')
+  assert.equal(h.last('tab-b').id, round2.id, 'answered in the wait, so nothing goes in')
 })
 
 test('a host whose post lands while the digest waits to go in again never gets that digest', () => {
@@ -503,7 +507,7 @@ test('a host whose post lands while the digest waits to go in again never gets t
   h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
   const digest = h.last('tab-host')
   assert.equal(h.hub.superseded('tab-host', digest), false, 'a first delivery is always typed')
-  h.hub.askAgain('tab-host', digest)
+  h.hub.askAgain('tab-host', h.hub.takenOver('tab-host', digest)!)
   h.advance(MEETING_TURN_RETRY_MS)
   const again = h.last('tab-host')
   assert.equal(again.again, true)

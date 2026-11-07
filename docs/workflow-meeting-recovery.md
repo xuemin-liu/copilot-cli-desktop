@@ -36,6 +36,10 @@ nor a host's silence. What the session still owes goes in again 15 seconds later
 that the person gets a notification, the meeting bar shows the model's error, a host's meeting pauses, and a reviewer's round
 runs out as usual. A host that posted its round before its model failed owes nothing, so the replies reach it as usual.
 
+The new delivery's identity is saved in the meeting before the old receipt is settled, since a restart drops a settled
+receipt. A restart during a wait therefore types what is owed at once, and its marker comes back with it, so a message no
+longer owed by then is still dropped.
+
 On upgrade, outstanding prompts in old meeting files lack submission receipts. Desktop creates a bounded-format
 recovery identity deterministically from the meeting, durable recipient, round, kind and body. Such a prompt becomes
 uncertain and needs a person's decision before replay. Repeated restarts preserve the same identity and decision.

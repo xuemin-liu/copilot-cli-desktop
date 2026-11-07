@@ -2966,9 +2966,10 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   // A message the session recorded did arrive, whatever the person asks it next: only one it never recorded may be lost.
   if(journalRun){
     const arrived=journalRun.promptsBefore!==undefined&&reader.desktopPromptCount>journalRun.promptsBefore
-    endMeetingJournal(tabId,arrived)
     const delivery=meetingOutbox.turnEnded(tabId)
-    if(arrived&&delivery)meetingTurnsTakenOver.set(tabId,delivery)
+    const again=arrived&&delivery?meetingHub.takenOver(tabId,delivery):null
+    if(again)meetingTurnsTakenOver.set(tabId,again)
+    endMeetingJournal(tabId,arrived)
     reader.cancelExpectedDesktopPrompt()
   }
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
