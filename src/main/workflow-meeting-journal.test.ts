@@ -38,7 +38,8 @@ function appRun(journal:WorkflowDeliveries,saved?:unknown){
       return item!==null&&['answered','cancelled'].includes(item.state)
     },
     sendTask:(tabId,_text,delivery)=>{
-      const item=journalMeetingDelivery(journal,SESSION[tabId]!,delivery)!
+      const item=journalMeetingDelivery(journal,SESSION[tabId]!,delivery)
+      if(item?.state!=='queued')return {result:'busy',message:'Inspect the meeting handoff in Handoffs.'}
       journal.begin(item.id,()=>true);journal.submitted(item.id)
       typed.push({tabId,...delivery})
       return {result:'sent'}
@@ -139,6 +140,37 @@ test('a queued retry whose host moved the round on stays dropped after a restart
     after.hub.turnCompleted('reviewer',round2,'r2')
     after.pump()
     assert.deepEqual(after.typed.filter(item=>item.tabId==='host').map(item=>[item.kind,item.round]),[['digest',2]],'the next digest goes in')
+  }finally{journal.close();await rm(dir,{recursive:true,force:true})}
+})
+
+for(const [name,repeat] of [
+  ['its model failed',(run:ReturnType<typeof appRun>,delivery:MeetingDelivery)=>run.hub.turnFailed('host',delivery,'400')],
+  ['the person took over its turn',(run:ReturnType<typeof appRun>,delivery:MeetingDelivery)=>run.hub.askAgain('host',run.hub.takenOver('host',delivery)!)],
+] as const)test(`a legacy message sent again by the person repeats as an ordinary one after ${name}`,async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'meeting-retry-')),journal=new WorkflowDeliveries(join(dir,'journal.sqlite'))
+  try{
+    const before=appRun(journal),digest=untilHostHasReplies(before)
+    before.answered('host',digest)
+    const saved=before.saved()
+    delete saved.outstanding.find((entry:{sessionId:string})=>entry.sessionId===SESSION.host).delivery.id
+
+    const after=appRun(journal,saved)
+    after.pump()
+    assert.equal(after.typed.length,0,'a meeting file from before the journal cannot prove it was not typed')
+    const legacy=journal.list().find(item=>item.state==='uncertain')!
+    journal.retry(legacy.id)
+    after.pump()
+    assert.equal(after.typed.length,1,'the person chose Send again')
+    assert.equal(after.typed[0]!.recovered,true)
+
+    const turn=after.outbox.turnEnded('host')!
+    repeat(after,turn)
+    after.answered('host',turn)
+    after.advance(MEETING_TURN_RETRY_MS)
+    after.pump()
+    assert.equal(after.typed.length,2,'it goes in without another decision')
+    assert.equal(after.typed[1]!.recovered,undefined)
+    assert.equal(journalMeetingDelivery(journal,SESSION.host!,after.typed[1]!)?.state,'submitted')
   }finally{journal.close();await rm(dir,{recursive:true,force:true})}
 })
 

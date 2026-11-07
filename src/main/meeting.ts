@@ -507,10 +507,11 @@ export class MeetingHub {
 
   /**
    * What the session owes under a receipt of its own, saved as what is outstanding. The old receipt is about to be settled and a
-   * restart drops a settled one, so this must be saved first: a restart in the wait then types the new one.
+   * restart drops a settled one, so this must be saved first: a restart in the wait then types the new one. It has never been
+   * typed, so it is not `recovered`, whatever the message it repeats was.
    */
-  private renew(meeting: Meeting, tabId: string, delivery: MeetingDelivery): MeetingDelivery {
-    const again: MeetingDelivery = { ...delivery, id: randomUUID(), again: true }
+  private renew(meeting: Meeting, tabId: string, { meetingId, round, kind, text }: MeetingDelivery): MeetingDelivery {
+    const again: MeetingDelivery = { meetingId, round, kind, text, id: randomUUID(), again: true }
     meeting.outstanding.set(tabId, again)
     return again
   }
