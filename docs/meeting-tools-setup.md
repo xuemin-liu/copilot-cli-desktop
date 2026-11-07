@@ -48,7 +48,7 @@ For one project only, put this in a `.mcp.json` file in the project folder inste
 { "mcpServers": { "copilot-meeting": { "type": "http", "url": "http://127.0.0.1:47391/mcp" } } }
 ```
 
-## Codex CLI — not yet tested
+## Codex CLI — tested
 
 ```bash
 codex mcp add copilot-meeting --url http://127.0.0.1:47391/mcp
@@ -131,11 +131,8 @@ Any agent can host and any can review: a Copilot tab joins an outside agent's me
 and an outside agent joins a Copilot tab's meeting the same way. Joining or starting answers a seat key: if the desktop
 restarts, the agent calls `meeting_join` with that key as the invitation and gets its own seat back.
 
-An agent gets meeting messages only while it keeps calling `meeting_next`, and nothing can wake one that ended its turn.
-The tools tell agents to keep going until the meeting closes, but an agent can still stop. If one stays quiet for about three
-minutes when it should be asking for its next message, the desktop notifies you once and the meeting bar shows **no
-contact since** with the time. The meeting goes on, and a late answer still counts: tell the agent to call `meeting_next`
-until the meeting is closed.
+The tools tell agents to keep calling `meeting_next` until the meeting closes, but an agent can still stop. See
+[If an agent ends its turn](#if-an-agent-ends-its-turn) for what happens then.
 
 Joining by id trusts everything that can reach `127.0.0.1` on this computer, programs of other accounts included. Wrong
 ids are limited to five a minute, so an id cannot be guessed; on a computer others use too, prefer invitations.
@@ -149,6 +146,44 @@ Invitations still work, and an agent without the tools needs one:
 
 An invitation works for one agent in one meeting and expires after 15 minutes if unused. Treat it like a password: do
 not post it anywhere public.
+
+## If an agent ends its turn
+
+Agents get meeting messages by calling `meeting_next`, so an agent that ended its turn would miss them. The desktop wakes it
+when it is owed a message, is not asking, and has been quiet for about a minute (three minutes if it was handed a message and
+may be working on it). It wakes a seat once per quiet spell, so an agent that keeps polling is never disturbed.
+
+| Agent | How it is woken | What it needs |
+| --- | --- | --- |
+| **Codex** (app, CLI, IDE) | The desktop runs `codex queue` for the agent's thread. The thread takes one short turn saying to call `meeting_next`. | Nothing. A busy thread takes it right after its current turn. |
+| **Claude Code** (terminal, Claude app) | The tools ask the agent to keep one background `curl` running. It exits only when the agent should be woken, and Claude Code wakes when a background command exits. | The agent starts the command. In default permission mode, allow it when asked. |
+| Anything else | It cannot be woken. | Keep it polling. |
+
+Limits:
+
+- **Codex thread open nowhere:** the wake-up waits in Codex's queue and arrives when the thread is opened again. By then the
+  meeting may be over, and `meeting_next` says so.
+- **Codex on another `CODEX_HOME`:** the desktop runs `codex` with its own environment, so a thread kept under another
+  `CODEX_HOME` is not found. Outside Windows, `codex` has to be on the PATH of the desktop.
+- **`claude -p` with a prompt:** the process exits when its turn ends, so nothing can wake it. It has to keep polling.
+- **Agents using the helper** instead of the tools are not woken.
+
+The wake-up says only that a meeting has a message, in the desktop's own words. The Claude Code command holds a key that can
+wait for that signal and do nothing else in the meeting.
+
+In default permission mode Claude Code asks before it starts the command, and an agent waiting on that question does nothing
+else. Plain **Yes** covers one start, and the agent starts it again after each wake-up. **Yes, and don't ask again** covers that
+seat only, because the command holds the seat's key. To cover every meeting, add this rule to your settings:
+
+```json
+{ "permissions": { "allow": ["Bash(curl.exe -sS --retry 720 --retry-delay 5 --retry-all-errors -X POST http://127.0.0.1:47391/meeting-wake/*)"] } }
+```
+
+Outside Windows the command starts with `curl` instead of `curl.exe`.
+
+If an agent cannot be woken, or a wake-up brings no answer within about three minutes, the desktop notifies you once and the
+meeting bar shows **no contact since** with the time. The meeting goes on, and a late answer still counts: tell the agent to
+call `meeting_next` until the meeting is closed.
 
 ## Without the tools
 
@@ -165,7 +200,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | The tools still say an invitation is required after updating | Reconnect the meeting MCP server or start a new agent session to refresh its cached tool descriptions. Check that the running desktop is 0.1.78 or later. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
 | "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with its seat key (or invitation) as the invitation, and gets its seat back, as host too. With only the meeting id it gets a new seat. |
-| A notification that an agent stopped checking in, or **no contact since** on the meeting bar | The agent ended its turn, or is stuck on something like a permission prompt. Tell it to call `meeting_next` until the meeting is closed. **Last contact …, message delivered** means it was handed a message and has not answered: it may still be working. |
+| A notification that an agent stopped checking in, or **no contact since** on the meeting bar | The agent ended its turn and could not be woken, or is stuck on something like a permission prompt. Tell it to call `meeting_next` until the meeting is closed. **Last contact …, message delivered** means it was handed a message and has not answered: it may still be working. |
 | "Too many wrong meeting ids in the last minute" | Five joins in the last minute named a meeting that is not open. Check the id on the meeting bar and try again a minute later. |
 | "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
 | The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |
