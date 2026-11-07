@@ -13,8 +13,36 @@ test('the final answer is the reply; commentary and tool-call messages before it
   reader.consume(record('assistant.turn_end', { turnId: '1' }))
   reader.consume(assistant({ content: 'Step 2 is racy.', phase: 'final_answer', toolRequests: [] }))
   reader.consume(assistant({ content: '', toolRequests: [] }))
-  assert.deepEqual(reader.finish(), { content: 'Review this', desktop: false, reply: 'Step 2 is racy.' })
+  assert.deepEqual(reader.finish(), { content: 'Review this', desktop: false, reply: 'Step 2 is racy.', failure: null })
   assert.equal(reader.finish(), null, 'reported once')
+})
+
+test('a model error marks the turn failed, whatever text came before it; a turn that starts after it clears the mark', () => {
+  const reader = new MeetingTurnReader()
+  reader.expectDesktopPrompt()
+  reader.consume(user('[meeting K7QF · round 1 · from the desktop]'))
+  reader.consume(assistant({ content: 'Looking at the files.', toolRequests: [] }))
+  reader.consume(record('assistant.turn_end', { turnId: '1' }))
+  reader.consume(record('session.error', { errorType: 'query', message: '400 The `reasoning_content` must be passed back.' }))
+  const failed = reader.finish()
+  assert.equal(failed?.failure, '400 The `reasoning_content` must be passed back.')
+  assert.equal(failed?.desktop, true)
+
+  reader.consume(user('Next', 'i2'))
+  reader.consume(record('session.error', { message: 'x'.repeat(1_000) }))
+  reader.consume(record('assistant.turn_start', { turnId: '2' }))
+  assert.equal(reader.finish()?.failure, null)
+
+  reader.consume(user('No message', 'i3'))
+  reader.consume(record('session.error', {}))
+  assert.equal(reader.finish()?.failure, 'The model failed.')
+  reader.consume(user('Long', 'i4'))
+  reader.consume(record('session.error', { message: 'x'.repeat(1_000) }))
+  assert.equal(reader.finish()?.failure?.length, 300)
+
+  reader.consume(user('A subagent failed', 'i5'))
+  reader.consume(record('session.error', { message: 'child' }, { agentId: 'child' }))
+  assert.equal(reader.finish()?.failure, null)
 })
 
 test('without a phase (older CLIs) the reply is the last message with text and no tool requests', () => {

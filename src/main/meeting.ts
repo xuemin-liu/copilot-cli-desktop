@@ -104,7 +104,9 @@ export interface MeetingView {
 }
 
 /** `round` is the round the message belongs to: a reply counts only for that round, however late its turn ends. */
-export interface MeetingDelivery { meetingId: string; round: number; kind: MeetingDeliveryKind; text: string; id?:string; recovered?:true }
+export interface MeetingDelivery { meetingId: string; round: number; kind: MeetingDeliveryKind; text: string; id?:string; recovered?:true
+  /** It goes in again after a turn that gave no answer; `superseded` tells if that is still wanted when it is typed. */
+  again?:true }
 
 export interface MeetingEffects {
   /** Queue a message (or, for `add-dir`, a command) for the session; it is typed when the session can take it. */
@@ -127,10 +129,16 @@ export interface MeetingEffects {
   dropped?(tabId: string, message: string): void
   /** This party's message for the meeting has not been typed yet, so it has had nothing to answer. */
   undelivered?(tabId: string, meetingId: string): boolean
+  /** The model failed in a turn the desktop started in this session. `retrying`: what it owes goes in again shortly. */
+  turnFailed?(meetingId: string, tabId: string, error: string, retrying: boolean): void
 }
 
 /** Rounds in a row a party that `dropsWhenSilent` may let time out before it is taken out. */
 export const MAX_SILENT_ROUNDS = 2
+
+/** How many times what a session owes is typed again after its model failed, and how long after. */
+export const MEETING_TURN_RETRIES = 2
+export const MEETING_TURN_RETRY_MS = 15_000
 
 export interface MeetingTimers {
   now(): number
@@ -188,8 +196,12 @@ interface Meeting {
   transcript: string
   /** What each session was given and has not finished answering; sent again after a restart. */
   outstanding: Map<string, MeetingDelivery>
+  /** Sessions whose model failed on what they owe now. Not saved: after a restart they simply get it again. */
+  failedTurns: Map<string, FailedTurn>
   cost: MeetingUsage
 }
+
+interface FailedTurn { round: number; kind: MeetingDeliveryKind; tries: number; error: string; since: number }
 
 export interface StartMeeting { topic: string; post: string; changes: string | null }
 
@@ -305,6 +317,7 @@ export class MeetingHub {
       held: null,
       pauseReason: null,
       remindedHost: false,
+      failedTurns: new Map(),
       outcome: null,
       closedAt: null,
       cancelTimer: null,
@@ -395,6 +408,7 @@ export class MeetingHub {
     } else {
       meeting.stage = 'host'
       meeting.remindedHost = true
+      meeting.failedTurns.delete(meeting.host.tabId)
       this.send(meeting, meeting.host.tabId, 'reminder', reminderMessage(meeting.id, roundPaths(meeting.folder, meeting.round).replies))
     }
     this.changed(meeting)
@@ -409,23 +423,22 @@ export class MeetingHub {
     const { kind } = delivery
     const meeting = this.meetings.get(delivery.meetingId)
     if (!meeting || meeting.stage === 'closed') return
-    const outstanding = meeting.outstanding.get(tabId)
-    if (outstanding && outstanding.round === delivery.round && outstanding.kind === kind) meeting.outstanding.delete(tabId)
+    const owed = this.owes(meeting, tabId, delivery)
+    meeting.failedTurns.delete(tabId)
+    this.settleOutstanding(meeting, tabId, delivery)
     if (meeting.host.tabId === tabId) {
-      if ((kind === 'digest' || kind === 'reminder') && meeting.stage === 'host' && delivery.round === meeting.round) this.hostSilent(meeting)
+      if (owed) this.hostSilent(meeting)
       else this.changed(meeting)
       return
     }
     const participant = meeting.participants.get(tabId)
     if (!participant || (kind !== 'post' && kind !== 'vote' && kind !== 'discussion')) return
     const text = bound(reply.trim(), MAX_MEETING_REPLY_CHARS) || '(an empty reply)'
-    const expected: MeetingDeliveryKind = meeting.discussing ? 'discussion' : meeting.vote ? 'vote' : 'post'
-    const answersThisRound = meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && delivery.round === meeting.round && kind === expected
     const heading = `Round ${delivery.round}${kind === 'discussion' ? ' discussion' : ''}: ${partyLabel(participant)}`
-    this.appendTranscript(meeting, `${heading}${answersThisRound ? '' : ` (late, read in round ${meeting.round})`}`, text)
+    this.appendTranscript(meeting, `${heading}${owed ? '' : ` (late, read in round ${meeting.round})`}`, text)
     // Any reply, late too, shows it is there: only rounds of true silence count toward being taken out.
     participant.missed = 0
-    if (!answersThisRound) {
+    if (!owed) {
       meeting.late.push({ title: participant.title, folder: participant.folder, role: participant.role ?? null, text })
       this.changed(meeting)
       return
@@ -434,6 +447,84 @@ export class MeetingHub {
     meeting.replies.set(tabId, { text, vote: meeting.vote ? parseVote(text) : null })
     if (meeting.awaiting.size === 0) this.finishRound(meeting)
     else this.changed(meeting)
+  }
+
+  /**
+   * The model failed in a turn the desktop started (a provider's error, an exhausted balance), and the session is back at its
+   * prompt. That is no reply, and no silence either. What it still owes goes in again, a few times, and then the person is told
+   * why. A host that posted its round before its model failed owes nothing: the replies to that round reach it as usual.
+   */
+  turnFailed(tabId: string, delivery: MeetingDelivery, error: string): void {
+    const meeting = this.meetings.get(delivery.meetingId)
+    if (!meeting || meeting.stage === 'closed') return
+    if (!this.owes(meeting, tabId, delivery)) {
+      this.settleOutstanding(meeting, tabId, delivery)
+      this.changed(meeting)
+      return
+    }
+    const earlier = meeting.failedTurns.get(tabId)
+    const same = earlier?.round === delivery.round && earlier.kind === delivery.kind
+    const tries = same ? earlier.tries + 1 : 1
+    meeting.failedTurns.set(tabId, { round: delivery.round, kind: delivery.kind, tries, error, since: same ? earlier.since : this.timers.now() })
+    const retrying = tries <= MEETING_TURN_RETRIES
+    this.effects.turnFailed?.(meeting.id, tabId, error, retrying)
+    if (retrying) {
+      this.sendAgainSoon(meeting, tabId, delivery)
+      this.changed(meeting)
+      return
+    }
+    if (meeting.host.tabId === tabId) {
+      this.settleOutstanding(meeting, tabId, delivery)
+      this.pause(meeting, 'host-silent')
+    } else this.changed(meeting)
+  }
+
+  /**
+   * The person typed in this session during the turn of a meeting's message, so its answer went to them and no answer reached
+   * the meeting. Now that it is free, what it still owes goes in again; otherwise the round would only run out. Not at once: its
+   * host may have a post on the way from a command that is still running.
+   */
+  askAgain(tabId: string, delivery: MeetingDelivery): void {
+    const meeting = this.meetings.get(delivery.meetingId)
+    if (meeting && this.owes(meeting, tabId, delivery)) this.sendAgainSoon(meeting, tabId, delivery)
+  }
+
+  /** A message going in again that is no longer owed, so it must not be typed: a stale digest would draw a round nobody needs. */
+  superseded(tabId: string, delivery: MeetingDelivery): boolean {
+    if (!delivery.again) return false
+    const meeting = this.meetings.get(delivery.meetingId)
+    if (meeting && this.owes(meeting, tabId, delivery)) return false
+    if (meeting) this.settleOutstanding(meeting, tabId, delivery)
+    return true
+  }
+
+  private sendAgainSoon(meeting: Meeting, tabId: string, delivery: MeetingDelivery): void {
+    this.timers.set(() => {
+      if (this.meetings.get(meeting.id) === meeting && this.owes(meeting, tabId, delivery)) this.send(meeting, tabId, delivery.kind, delivery.text, delivery.round, randomUUID(), false, true)
+    }, MEETING_TURN_RETRY_MS)
+  }
+
+  /** Sessions whose model kept failing on what they owe now, after every retry. */
+  failedTurns(meetingId: string): Array<{ tabId: string; error: string; since: number }> {
+    const meeting = this.meetings.get(meetingId)
+    if (!meeting || meeting.stage === 'closed') return []
+    return [...meeting.failedTurns].flatMap(([tabId, failed]) => {
+      const waiting = meeting.host.tabId === tabId ? meeting.stage === 'paused' && meeting.pauseReason === 'host-silent' : this.owes(meeting, tabId, failed)
+      return failed.tries > MEETING_TURN_RETRIES && failed.round === meeting.round && waiting ? [{ tabId, error: failed.error, since: failed.since }] : []
+    })
+  }
+
+  /** What this message asked of the session is still wanted now: the host's answer to its round, or a reviewer's reply to it. */
+  private owes(meeting: Meeting, tabId: string, { round, kind }: { round: number; kind: MeetingDeliveryKind }): boolean {
+    if (round !== meeting.round) return false
+    if (meeting.host.tabId === tabId) return meeting.stage === 'host' && (kind === 'digest' || kind === 'reminder')
+    const expected: MeetingDeliveryKind = meeting.discussing ? 'discussion' : meeting.vote ? 'vote' : 'post'
+    return meeting.stage === 'reviewing' && meeting.awaiting.has(tabId) && kind === expected
+  }
+
+  private settleOutstanding(meeting: Meeting, tabId: string, { round, kind }: MeetingDelivery): void {
+    const outstanding = meeting.outstanding.get(tabId)
+    if (outstanding && outstanding.round === round && outstanding.kind === kind) meeting.outstanding.delete(tabId)
   }
 
   /** Whether this session is a reviewer owing a reply now, which is when `postAnswer` takes one. */
@@ -531,6 +622,7 @@ export class MeetingHub {
       held: state.held,
       pauseReason: state.pauseReason,
       remindedHost: state.remindedHost,
+      failedTurns: new Map(),
       outcome: null,
       closedAt: null,
       cancelTimer: null,
@@ -587,8 +679,8 @@ export class MeetingHub {
   }
 
   /** Every message goes through here, so what a session has not finished answering is known (and saved). */
-  private send(meeting: Meeting, tabId: string, kind: MeetingDeliveryKind, text: string, round = meeting.round,id:string=randomUUID(),recovered=false): void {
-    const delivery: MeetingDelivery = { meetingId: meeting.id, round, kind, text,...(kind!=='add-dir'?{id}:{}),...(recovered?{recovered:true as const}:{}) }
+  private send(meeting: Meeting, tabId: string, kind: MeetingDeliveryKind, text: string, round = meeting.round,id:string=randomUUID(),recovered=false,again=false): void {
+    const delivery: MeetingDelivery = { meetingId: meeting.id, round, kind, text,...(kind!=='add-dir'?{id}:{}),...(recovered?{recovered:true as const}:{}),...(again?{again:true as const}:{}) }
     if (kind !== 'add-dir') meeting.outstanding.set(tabId, delivery)
     this.effects.deliver(tabId, delivery)
   }

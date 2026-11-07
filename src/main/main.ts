@@ -2375,7 +2375,9 @@ const meetingCommands = new Map<string, Promise<MeetingResponse>>()
 let meetingPumpTimer: NodeJS.Timeout | null = null
 let meetingPumpRunning = false
 const meetingDeliveryChecks = new Map<string, () => boolean>()
-const meetingJournalTurns=new Map<string,{id:string;session:PtySession;sessionId:string;meetingId:string;stopping:boolean}>()
+const meetingJournalTurns=new Map<string,{id:string;session:PtySession;sessionId:string;meetingId:string;stopping:boolean;promptsBefore?:number}>()
+/** A meeting's message the session recorded, then the person typed in it during that turn: what it answers now is theirs. */
+const meetingTurnsTakenOver=new Map<string,MeetingDelivery>()
 function endMeetingJournal(tabId:string,answered:boolean):void {
   const run=meetingJournalTurns.get(tabId)
   if(!run)return
@@ -2577,6 +2579,7 @@ async function pumpMeetingOutbox(): Promise<void> {
 
 const meetingOutbox = new MeetingOutbox({
   settled:(tabId,delivery)=>{
+    if(meetingHub.superseded(tabId,delivery))return true
     if(delivery.kind==='add-dir'||!deliveryJournal||deliveryError)return false
     const sessionId=tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId
     if(!sessionId)return false
@@ -2618,7 +2621,7 @@ const meetingOutbox = new MeetingOutbox({
     if(run)deliveryJournal?.submitted(run.id)
     const reader=meetingReader(tabId)
     reader.expectDesktopPrompt(delivery.text)
-    if(run)confirmMeetingPrompt(tabId,run.id,reader.desktopPromptCount)
+    if(run){run.promptsBefore=reader.desktopPromptCount;confirmMeetingPrompt(tabId,run.id,reader.desktopPromptCount)}
     broadcastState()
   },
   refused: (tabId, delivery, message) => {
@@ -2672,6 +2675,11 @@ const meetingHub = new MeetingHub(meetingRoot, {
   dropped: (tabId, message) => guestMailbox.close(tabId, message),
   // A message typed and never confirmed has not asked that session anything either, as far as anyone can tell.
   undelivered: (tabId, meetingId) => meetingOutbox.undelivered(tabId, meetingId) || lostMeetingDeliveries().some((item) => item.tabId === tabId && item.meetingId === meetingId),
+  turnFailed: (meetingId, tabId, error, retrying) => {
+    const title = tabsState.tabs.find((tab) => tab.id === tabId)?.title ?? 'A session'
+    void writeAppLog(`Meeting ${meetingId}: the model failed in "${title}" (${tabId})${retrying ? '; its message goes in again' : '; no more tries'}: ${error}`).catch(() => {})
+    if (!retrying) showNotification('Copilot CLI Desktop', `Meeting ${meetingId}: the model of "${title}" keeps failing, so it has not answered. ${error}`)
+  },
 }, () => ({ maxRounds: desktopConfig.meetingMaxRounds, roundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes, discussion: desktopConfig.meetingDiscussion }))
 
 // Outside agents as reviewers (docs/meeting-guests-plan.md): seats, tokens and messages live in the mailbox; the hub sees
@@ -2787,7 +2795,8 @@ function meetingViews(): MeetingView[] {
   const blocked = stalledMeetingDeliveries()
   return meetingHub.views().map((meeting) => {
     const hostGuest = contactOf(meeting.hostTabId)
-    const undelivered = blocked.filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: meetingHub.owesReply(tabId) && (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
+    const failed = meetingHub.failedTurns(meeting.id).map(({ tabId, error, since }) => ({ tabId, meetingId: meeting.id, since, reason: `It got the message, but its model failed each time: ${error} Try /model, then ask it yourself.` }))
+    const undelivered = [...blocked, ...failed].filter((delivery) => delivery.meetingId === meeting.id).map(({ tabId, reason, since }) => ({ tabId, reason, since, hasAnswer: meetingHub.owesReply(tabId) && (sessionAnswers.get(tabId)?.at ?? 0) >= since }))
     return {
       ...meeting,
       ...(hostGuest ? { hostGuest } : {}),
@@ -2953,7 +2962,15 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (usage) meetingHub.usage(tabId, usage)
   if (!prompt || prompt.desktop || prompt.content.startsWith(MEETING_MARKER_PREFIX)) return
   endAutomatic(tabId,false)
-  if(meetingJournalTurns.has(tabId)){endMeetingJournal(tabId,false);meetingOutbox.turnEnded(tabId);meetingReader(tabId).cancelExpectedDesktopPrompt()}
+  const journalRun=meetingJournalTurns.get(tabId)
+  // A message the session recorded did arrive, whatever the person asks it next: only one it never recorded may be lost.
+  if(journalRun){
+    const arrived=journalRun.promptsBefore!==undefined&&reader.desktopPromptCount>journalRun.promptsBefore
+    endMeetingJournal(tabId,arrived)
+    const delivery=meetingOutbox.turnEnded(tabId)
+    if(arrived&&delivery)meetingTurnsTakenOver.set(tabId,delivery)
+    reader.cancelExpectedDesktopPrompt()
+  }
   const tab = tabsState.tabs.find(candidate => candidate.id === tabId)
   const session = managedTabs.get(tabId)?.session
   if (tab && !tab.remote && supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }) && tab.lastSessionId && session?.sessionBindingReady) {
@@ -2978,23 +2995,27 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
 /** The session went idle: a prompt the desktop typed (if that is what it answered) is done. */
 function onMeetingIdle(tabId: string): void {
   const turn = meetingReaders.get(tabId)?.finish() ?? null
-  if (turn && !turn.desktop && turn.reply.trim()) { sessionAnswers.set(tabId, { text: turn.reply, at: Date.now() }); broadcastState() }
+  if (turn && !turn.desktop && !turn.failure && turn.reply.trim()) { sessionAnswers.set(tabId, { text: turn.reply, at: Date.now() }); broadcastState() }
   if (managedTabs.get(tabId)?.session.sessionBindingPending) return
   const delivery = meetingOutbox.turnEnded(tabId)
-  endAutomatic(tabId,Boolean(turn?.desktop))
+  endAutomatic(tabId,Boolean(turn?.desktop)&&!turn?.failure)
   // Only a turn confirmed as the typed prompt answers it; otherwise the reviewer stays awaited and the handoff uncertain.
   const reply = confirmedMeetingReply(turn)
-  if (delivery && reply !== null) meetingHub.turnCompleted(tabId, delivery, reply)
+  if (delivery && reply !== null && turn?.failure) meetingHub.turnFailed(tabId, delivery, turn.failure)
+  else if (delivery && reply !== null) meetingHub.turnCompleted(tabId, delivery, reply)
   else if (delivery) {
     clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
     meetingReaders.get(tabId)?.cancelExpectedDesktopPrompt()
     void writeAppLog(`Meeting ${delivery.meetingId}: session ${tabId} went idle without recording the typed message; the handoff is uncertain.`).catch(() => {})
   }
   endMeetingJournal(tabId,reply !== null)
+  const takenOver = meetingTurnsTakenOver.get(tabId)
+  if (takenOver) { meetingTurnsTakenOver.delete(tabId); meetingHub.askAgain(tabId, takenOver) }
   scheduleMeetingPump(0)
 }
 
 function forgetMeetingSession(tabId: string): void {
+  meetingTurnsTakenOver.delete(tabId)
   clearTimeout(meetingPromptChecks.get(tabId)); meetingPromptChecks.delete(tabId)
   endAutomatic(tabId,false)
   endMeetingJournal(tabId,false)

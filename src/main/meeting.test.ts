@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
-import { MeetingError, MeetingHub, joinRequest, type MeetingDelivery, type MeetingSettings, type MeetingTimers } from './meeting.js'
+import { MEETING_TURN_RETRIES, MEETING_TURN_RETRY_MS, MeetingError, MeetingHub, joinRequest, type MeetingDelivery, type MeetingSettings, type MeetingTimers } from './meeting.js'
 
 /** The Copilot session id behind each test tab; a saved meeting remembers sessions by these. */
 const SESSIONS: Record<string, string> = {
@@ -21,6 +21,7 @@ interface Harness {
   to(tabId: string): Array<{ tabId: string } & MeetingDelivery>
   /** The latest message delivered to a tab: the one its next finished turn answers. */
   last(tabId: string): MeetingDelivery
+  onTurnFailed(listener: (error: string, retrying: boolean) => void): void
 }
 
 const MEETINGS = 'C:\\meetings'
@@ -43,7 +44,9 @@ function harness(settings: MeetingSettings = { maxRounds: 6, roundTimeoutMinutes
   const files = new Map<string, string>()
   const notes: string[] = []
   const ids = ['K7QF', 'M2NB', 'P3RT']
+  let turnFailed: (error: string, retrying: boolean) => void = () => {}
   const hub = new MeetingHub(() => MEETINGS, {
+    turnFailed: (_meetingId, _tabId, error, retrying) => turnFailed(error, retrying),
     deliver: (tabId, delivery) => delivered.push({ tabId, ...delivery }),
     cancel: (meetingId, tabId) => cancelled.push({ meetingId, ...(tabId === undefined ? {} : { tabId }) }),
     write: (_meetingId, path, text) => files.set(path, text),
@@ -62,6 +65,7 @@ function harness(settings: MeetingSettings = { maxRounds: 6, roundTimeoutMinutes
     },
     to: (tabId) => delivered.filter((delivery) => delivery.tabId === tabId && delivery.kind !== 'add-dir'),
     last: (tabId) => delivered.filter((delivery) => delivery.tabId === tabId && delivery.kind !== 'add-dir').at(-1)!,
+    onTurnFailed: (listener) => { turnFailed = listener },
   }
 }
 
@@ -392,6 +396,135 @@ test('a host that does not answer is reminded once, then the meeting pauses', ()
   h.hub.turnCompleted('tab-host', h.last('tab-host'), 'Still thinking.')
   assert.equal(h.hub.views()[0]!.stage, 'paused')
   assert.equal(h.hub.views()[0]!.pauseReason, 'host-silent')
+})
+
+test('a host whose model fails after it posted its round still gets the replies to that round', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  const digest = h.last('tab-host')
+  h.hub.post('tab-host', 'round', 'plan v2', null)
+  h.hub.turnFailed('tab-host', digest, '400 reasoning_content')
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-host').length, 1, 'it owed nothing, so nothing goes in again')
+  assert.equal(h.hub.views()[0]!.stage, 'reviewing')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r2')
+  assert.equal(h.last('tab-host').kind, 'digest')
+  assert.equal(h.last('tab-host').round, 2)
+  assert.deepEqual(h.hub.failedTurns('K7QF'), [])
+})
+
+test('a host whose model fails before it answered gets the replies again, then the meeting pauses and says why', () => {
+  const h = harness()
+  const failures: Array<[string, boolean]> = []
+  h.onTurnFailed((error, retrying) => failures.push([error, retrying]))
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  for (let tries = 1; tries <= MEETING_TURN_RETRIES; tries++) {
+    const digest = h.last('tab-host')
+    h.hub.turnFailed('tab-host', digest, '400')
+    assert.equal(h.to('tab-host').length, tries, 'not typed again at once')
+    h.advance(MEETING_TURN_RETRY_MS)
+    assert.equal(h.to('tab-host').length, tries + 1)
+    assert.notEqual(h.last('tab-host').id, digest.id, 'each try has a receipt of its own')
+    assert.equal(h.last('tab-host').text, digest.text)
+    assert.equal(h.hub.views()[0]!.stage, 'host', 'a failure is not silence: no reminder and no pause yet')
+    assert.deepEqual(h.hub.failedTurns('K7QF'), [])
+  }
+  h.hub.turnFailed('tab-host', h.last('tab-host'), '402 Insufficient Balance')
+  assert.equal(h.hub.views()[0]!.pauseReason, 'host-silent')
+  assert.deepEqual(h.hub.failedTurns('K7QF').map(({ tabId, error }) => [tabId, error]), [['tab-host', '402 Insufficient Balance']])
+  assert.deepEqual(failures, [['400', true], ['400', true], ['402 Insufficient Balance', false]])
+  h.hub.resume('K7QF')
+  assert.equal(h.last('tab-host').kind, 'reminder')
+  assert.deepEqual(h.hub.failedTurns('K7QF'), [])
+})
+
+test('a reviewer whose model fails gets the post again; its failure is never recorded as its reply', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnFailed('tab-b', h.last('tab-b'), '400')
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-b').length, 2)
+  assert.deepEqual(h.hub.views()[0]!.waitingFor, ['tab-b'])
+  assert.doesNotMatch(h.files.get(at('K7QF', 'transcript.md'))!, /an empty reply/)
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1 after all')
+  assert.equal(h.last('tab-host').kind, 'digest')
+  assert.match(h.last('tab-host').text, /r1 after all/)
+})
+
+test('a reviewer whose model keeps failing is reported, stays handable, and the round still times out', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  for (let tries = 1; tries <= MEETING_TURN_RETRIES; tries++) {
+    h.hub.turnFailed('tab-b', h.last('tab-b'), '400')
+    h.advance(MEETING_TURN_RETRY_MS)
+  }
+  h.hub.turnFailed('tab-b', h.last('tab-b'), '400')
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-b').length, 1 + MEETING_TURN_RETRIES, 'no more tries')
+  assert.deepEqual(h.hub.failedTurns('K7QF').map(({ tabId }) => tabId), ['tab-b'])
+  assert.equal(h.hub.owesReply('tab-b'), true, 'the person may still hand in what it says when they ask it')
+  h.advance(10 * 60_000)
+  assert.equal(h.last('tab-host').kind, 'digest')
+  assert.deepEqual(h.hub.failedTurns('K7QF'), [])
+})
+
+test('a message whose turn the person took over goes in again only if it is still owed', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  const post = h.last('tab-b')
+  h.hub.askAgain('tab-b', post)
+  assert.equal(h.to('tab-b').length, 1, 'not at once')
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-b').length, 2)
+  assert.equal(h.last('tab-b').text, post.text)
+  assert.notEqual(h.last('tab-b').id, post.id)
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  const digest = h.last('tab-host')
+  h.hub.post('tab-host', 'round', 'plan v2', null)
+  h.hub.askAgain('tab-host', digest)
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-host').length, 1, 'the host posted its round, so it owes nothing')
+  h.hub.askAgain('tab-b', post)
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.last('tab-b').round, 2, 'an old round\'s message is not typed again')
+})
+
+test('a host whose post lands while the digest waits to go in again never gets that digest', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  const digest = h.last('tab-host')
+  assert.equal(h.hub.superseded('tab-host', digest), false, 'a first delivery is always typed')
+  h.hub.askAgain('tab-host', digest)
+  h.advance(MEETING_TURN_RETRY_MS)
+  const again = h.last('tab-host')
+  assert.equal(again.again, true)
+  assert.equal(h.hub.superseded('tab-host', again), false, 'it is still owed')
+  h.hub.post('tab-host', 'round', 'plan v2', null)
+  assert.equal(h.hub.superseded('tab-host', again), true, 'the post landed first')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r2')
+  assert.equal(h.last('tab-host').round, 2)
+  assert.equal(h.hub.superseded('tab-host', h.last('tab-host')), false, 'the next digest goes in')
+})
+
+test('a try still waiting when the round moved on goes nowhere', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'plan', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnFailed('tab-b', h.last('tab-b'), '400')
+  h.advance(10 * 60_000)
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  assert.equal(h.to('tab-b').length, 1)
+  h.advance(MEETING_TURN_RETRY_MS)
+  assert.equal(h.to('tab-b').length, 1)
 })
 
 test('closing sessions: a reviewer leaving finishes the round for the others; the host leaving closes the meeting', () => {

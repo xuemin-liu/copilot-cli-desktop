@@ -24,6 +24,18 @@ older CLI's paste placeholder). A non-matching prompt is the person's: it settle
 delivery uncertain. If no matching prompt is recorded within 60 seconds, the delivery also becomes uncertain and the
 session's later turns are not attributed to it. Uncertain deliveries are never typed again automatically.
 
+A prompt the person types after the session recorded the delivery proves it arrived, so the delivery is settled, not
+uncertain: leaving it uncertain blocked every later message of that meeting. The turn is theirs now, so 15 seconds after the
+session is free, what it still owes goes in again as a new delivery. A message going in again is dropped instead of typed if
+it is no longer owed by then, such as a digest whose host's post landed from a command that was still running.
+
+A model call that fails (a provider's error, an exhausted balance) ends its turn with no final answer and then records
+`session.error`, with the CLI back at its prompt. In real logs (CLI 1.0.104 to 1.0.106) it never went on by itself after
+one. Desktop reads that as the turn's end: the delivery is settled because it arrived, and the failure is neither a reply
+nor a host's silence. What the session still owes goes in again 15 seconds later, at most twice, as a new delivery. After
+that the person gets a notification, the meeting bar shows the model's error, a host's meeting pauses, and a reviewer's round
+runs out as usual. A host that posted its round before its model failed owes nothing, so the replies reach it as usual.
+
 On upgrade, outstanding prompts in old meeting files lack submission receipts. Desktop creates a bounded-format
 recovery identity deterministically from the meeting, durable recipient, round, kind and body. Such a prompt becomes
 uncertain and needs a person's decision before replay. Repeated restarts preserve the same identity and decision.
