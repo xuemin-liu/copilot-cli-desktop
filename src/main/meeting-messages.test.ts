@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import test from 'node:test'
-import { cleanRole, digestMessage, discussionMessage, parseVote, partyLabel, postMessage, shareablePatch, voteMessage } from './meeting-messages.js'
+import { cleanRole, digestMessage, discussionMessage, MEETING_HELPER_COMMAND, MEETING_HELPER_NOTE, parseVote, partyLabel, postMessage, shareablePatch, voteMessage } from './meeting-messages.js'
+
+test('on Windows the helper runs inside the agent shell, and a nested powershell.exe is only the named fallback', { skip: process.platform !== 'win32' }, () => {
+  assert.equal(MEETING_HELPER_COMMAND, '& "$env:COPILOT_DESKTOP_MEETING_HELPER"')
+  assert.match(MEETING_HELPER_NOTE, /running scripts is disabled.*powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/)
+})
 
 test('the shared patch withholds files that hold secrets and masks credential-looking values elsewhere', () => {
   const patch = [
