@@ -100,10 +100,13 @@ test('activateWorkspaceProfile never evicts a profile with open session tabs', (
   assert.ok(!config.profiles.some((profile) => profile.id === evictableId))
 })
 
+/** A path this platform splits into folders, so a workspace's name comes out the same everywhere. */
+const fixturePath = (...parts: string[]): string => resolve('fixture', ...parts)
+
 test('a general workspace keeps its type across a save and reload', () => {
   const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
-  activateWorkspaceProfile(config, 'C:\\general\\PC performance', new Set(), { general: true })
-  activateWorkspaceProfile(config, 'C:\\work\\project')
+  activateWorkspaceProfile(config, fixturePath('general', 'PC performance'), new Set(), { general: true })
+  activateWorkspaceProfile(config, fixturePath('work', 'project'))
   const reloaded = normalizeDesktopConfig(JSON.parse(JSON.stringify(config)))
   assert.equal(reloaded.profiles.find((profile) => profile.name === 'PC performance')?.general, true)
   assert.equal(reloaded.profiles.find((profile) => profile.name === 'project')?.general, undefined)
@@ -111,9 +114,9 @@ test('a general workspace keeps its type across a save and reload', () => {
 
 test('a new general workspace replaces an older general one, never a project', () => {
   const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
-  activateWorkspaceProfile(config, 'C:\\general\\old', new Set(), { general: true })
-  for (let index = 1; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, `C:\\work\\project-${index}`)
-  activateWorkspaceProfile(config, 'C:\\general\\new', new Set(), { general: true })
+  activateWorkspaceProfile(config, fixturePath('general', 'old'), new Set(), { general: true })
+  for (let index = 1; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, fixturePath('work', `project-${index}`))
+  activateWorkspaceProfile(config, fixturePath('general', 'new'), new Set(), { general: true })
   assert.equal(config.profiles.length, MAX_PROFILES)
   assert.equal(config.profiles.filter((profile) => !profile.general).length, MAX_PROFILES - 1, 'every project stayed')
   assert.ok(!config.profiles.some((profile) => profile.name === 'old'))
@@ -121,18 +124,18 @@ test('a new general workspace replaces an older general one, never a project', (
 
 test('a general workspace is refused when only projects could make room', () => {
   const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
-  for (let index = 0; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, `C:\\work\\project-${index}`)
-  assert.throws(() => activateWorkspaceProfile(config, 'C:\\general\\new', new Set(), { general: true }), /Remove one before adding a general workspace/)
+  for (let index = 0; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, fixturePath('work', `project-${index}`))
+  assert.throws(() => activateWorkspaceProfile(config, fixturePath('general', 'new'), new Set(), { general: true }), /Remove one before adding a general workspace/)
   assert.equal(config.profiles.length, MAX_PROFILES)
   assert.ok(config.profiles.every((profile) => !profile.general))
 })
 
 test('a new project replaces the oldest general workspace before any project', () => {
   const config: DesktopConfig = { ...DEFAULT_DESKTOP_CONFIG, profiles: [] }
-  activateWorkspaceProfile(config, 'C:\\work\\oldest-project')
-  activateWorkspaceProfile(config, 'C:\\general\\recent', new Set(), { general: true })
-  for (let index = 2; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, `C:\\work\\project-${index}`)
-  activateWorkspaceProfile(config, 'C:\\work\\new-project')
+  activateWorkspaceProfile(config, fixturePath('work', 'oldest-project'))
+  activateWorkspaceProfile(config, fixturePath('general', 'recent'), new Set(), { general: true })
+  for (let index = 2; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, fixturePath('work', `project-${index}`))
+  activateWorkspaceProfile(config, fixturePath('work', 'new-project'))
   assert.ok(config.profiles.some((profile) => profile.name === 'oldest-project'))
   assert.ok(!config.profiles.some((profile) => profile.general))
 })
