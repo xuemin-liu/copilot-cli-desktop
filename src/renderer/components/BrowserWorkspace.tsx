@@ -347,6 +347,6 @@ export function BrowserOnlyWindow({ tab, onReturn }: { tab: DesktopSessionTab; o
       <span className="session-pane-title" title={tab.title}><BrowserIcon /> {tab.title}</span>
       <button type="button" onClick={onReturn} title="Show the browser beside the session's terminal again (Ctrl+W)">Return browser to session</button>
     </header>
-    <BrowserPanel tabId={tab.id} active={!tab.unloaded} obscured={false} detached />
+    <BrowserPanel tabId={tab.id} active={tab.status !== 'dormant'} obscured={false} detached />
   </main>
 }

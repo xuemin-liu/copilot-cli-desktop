@@ -75,7 +75,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
-            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && !tab.unloaded} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <><header className="session-pane-header">
+            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && tab.status !== 'dormant'} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <><header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
@@ -116,7 +116,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
               {tab.status === 'crashed' && !tab.remote && (
                 <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Restart this session</button>
               )}
-              {tab.status === 'dormant' && tab.unloaded && (
+              {tab.status === 'dormant' && !tab.remote && !poppedOutTabIds.includes(tab.id) && (
                 <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Resume this session</button>
               )}
             </div>

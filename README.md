@@ -79,9 +79,10 @@ handle, only input/output/resize events.
   `--resume <id>` (or `--continue`) when reopened, plus a
   manual "Resume session…" action that opens `copilot --resume`'s own
   interactive picker directly inside the terminal pane.
-- Saved tabs start lazily: at launch only the tab on screen starts, and every other saved tab is listed as
-  **Not started** and starts the first time it is shown. **Unload** (☾ in a session's actions, or File → Unload Active
-  Session) stops a session to free its memory but keeps its tab; **Resume this session** picks the conversation up again.
+- Saved tabs start lazily: at launch only the tab on screen (and its side chat) starts, and every other saved tab is
+  listed as **Not running**. **Unload** (☾ in a session's actions, or File → Unload Active Session) stops a session to
+  free its memory but keeps its tab, also as **Not running**. Opening such a tab does not start it; **Resume this
+  session** picks the conversation up again. A session taking part in a meeting that is restored at launch starts by itself.
 - **Session history** (◷ in the sidebar, or Ctrl+Shift+H) lists the sessions Copilot has stored, newest first, by their
   first and latest prompt, project, branch and last use, with a search box. Opening one shows its tab when it is open, or
   resumes it in a new tab in its project (or that project's worktree), adding the project when it is not open yet.

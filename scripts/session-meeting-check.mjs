@@ -192,6 +192,7 @@ export async function runMeetingCheck() {
     // The person asks the reviewer, in another project, to join with a role; the desktop does the rest. It joins the round
     // the guest is in, so the round waits for both.
     await ui(`window.copilotDesktop.activateTab(${JSON.stringify(reviewer.id)})`)
+    await ui(`window.copilotDesktop.restartTab(${JSON.stringify(reviewer.id)})`)
     await ready(reviewer, 'restored reviewer')
     await type(reviewer.id, `join meeting ${id} as security reviewer`)
     const joined = await until(async () => (await state()).meetings?.find(meeting => meeting.id === id)?.participants.find(participant => participant.tabId === reviewer.id), 'reviewer joined')

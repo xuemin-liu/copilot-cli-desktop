@@ -256,14 +256,14 @@ test('a saved tab keeps whether its title follows Copilot and whether a rename s
   ])
 })
 
-test('a saved tab keeps whether it was unloaded and whether it was on screen', () => {
+test('a saved tab keeps whether it was on screen, and a config from an older release loses its unloaded flag', () => {
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
     { title: 'Asleep', lastSessionId: 'a', unloaded: true },
     { title: 'Shown', lastSessionId: 'b', active: true },
     { title: 'Bad flags', lastSessionId: 'c', unloaded: 'yes', active: 1 },
   ] }] })
   assert.deepEqual(config.profiles[0]!.tabs, [
-    { title: 'Asleep', lastSessionId: 'a', unloaded: true },
+    { title: 'Asleep', lastSessionId: 'a' },
     { title: 'Shown', lastSessionId: 'b', active: true },
     { title: 'Bad flags', lastSessionId: 'c' },
   ])

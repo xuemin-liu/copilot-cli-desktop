@@ -938,8 +938,6 @@ function broadcastState(): void {
   for (const [tabId, browser] of sessionBrowsers) {
     if (!sessionWindows.has(tabId) && !browserWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
   }
-  // A restored tab starts the first time it is on screen.
-  for (const tabId of [visible.main?.id, visible.side?.id, ...sessionWindows.keys()]) if (tabId) void wakeDormantTab(tabId)
   const shared=snapshot()
   if(workflowAttentionReady)workflowNotifications.update(attentionItems(shared),desktopConfig.notifications)
   const window = mainWindow
@@ -1058,7 +1056,7 @@ function popOutSessionBrowser(tabId: string): DesktopState {
   if (shuttingDown()) throw new Error('The application is shutting down')
   const tab = tabsState.tabs.find(tab => tab.id === tabId)
   if (!tab) throw new Error('Unknown session tab')
-  if (tab.unloaded) throw new Error('This session is unloaded; resume it to use its browser')
+  if (tab.status === 'dormant') throw new Error('This session is not running; resume it to use its browser')
   const existing = browserWindows.get(tabId)
   if (existing) { focusSessionWindow(existing); return snapshot() }
   const window = new BrowserWindow({
@@ -1159,7 +1157,6 @@ function persistProfileTabs(): void {
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
           ...(tab.autoTitle !== undefined ? { autoTitle: tab.autoTitle } : {}),
           ...(tab.renamePending ? { renamePending: true as const } : {}),
-          ...(tab.unloaded ? { unloaded: true as const } : {}),
           ...(tab.id === tabsState.activeTabId ? { active: true as const } : {}),
           ...(tab.browserProfileId ? { browserProfileId: tab.browserProfileId } : {}),
           ...(tab.sessionPermissionPreset ? { sessionPermissionPreset: tab.sessionPermissionPreset } : {}),
@@ -2591,9 +2588,11 @@ const meetingOutbox = new MeetingOutbox({
   },
   sendTask: (tabId, text,delivery) => {
     if(automaticTurns.has(tabId)||workflowDestinationBlocked(tabsState.tabs.find(t=>t.id===tabId)?.lastSessionId??null))return {result:'busy',message:'A workflow handoff needs reconciliation.'}
-    // A session restored with its meeting is still starting: its messages wait instead of being dropped.
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-    if (tab && !tab.unloaded && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
+    // Nothing is starting a stopped session, so waiting for it would never end.
+    if (tab?.status === 'dormant' && !wakingTabs.has(tabId)) return { result: 'refused', message: 'This session is not running. Resume it first.' }
+    // A session restored with its meeting is still starting: its messages wait instead of being dropped.
+    if (tab && (tab.status === 'dormant' || tab.status === 'starting' || !meetingPromptShown(tabId))) return { result: 'busy', message: 'The session is starting.' }
     if(!deliveryJournal||deliveryError||!tab?.lastSessionId||workflowsPaused(tab.workspaceProfileId))return {result:'busy',message:'Meeting delivery is paused or unavailable.'}
     const session=managedTabs.get(tabId)?.session,sessionId=tab.lastSessionId
     if(!session)return {result:'busy',message:'The session is unavailable.'}
@@ -3072,7 +3071,7 @@ async function flushSessionName(tabId: string): Promise<void> {
   void writeAppLog(`Copilot did not confirm the new name for ${tabId} before it closed`).catch(() => {})
 }
 
-/** Stops a session's process and its browser to free their memory, but keeps the tab: it becomes Not started, keeping
+/** Stops a session's process and its browser to free their memory, but keeps the tab: it becomes Not running, keeping
  * its conversation, folder and browser data, and resumes when Resume (Restart) is chosen. */
 async function unloadSessionTab(tabId: string): Promise<DesktopState> {
   const requested=tabsState.tabs.find(tab=>tab.id===tabId)
@@ -3097,7 +3096,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     forgetSessionName(tabId)
     // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
     forgetMeetingSession(tabId)
-    // Until the tab is marked unloaded, a browser request finds it closing rather than creating a new browser.
+    // Until the tab is marked as not running, a browser request finds it closing rather than creating a new browser.
     closingBrowserTabs.add(tabId)
     const browser = sessionBrowsers.get(tabId)
     sessionBrowsers.delete(tabId)
@@ -3105,7 +3104,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     catch (error) { void writeAppLog(`Failed to dispose browser for ${tabId}: ${String(error)}`).catch(() => {}) }
     // The session resumes where it ran, so its folder and worktree stay known and protected.
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId
-      ? { ...candidate, status: 'dormant' as const, unloaded: true as const, processId: null, activity: null, activityDetail: null }
+      ? { ...candidate, status: 'dormant' as const, processId: null, activity: null, activityDetail: null }
       : candidate) }
     closingBrowserTabs.delete(tabId)
     sessionWindows.get(tabId)?.close()
@@ -3390,7 +3389,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     trackSessionName(tabId, { ...process.env, ...plan.env }, false)
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
       if (candidate.id !== tabId) return candidate
-      const { launchWorktreePath: _gone, unloaded: _resumed, ...rest } = candidate
+      const { launchWorktreePath: _gone, ...rest } = candidate
       // It runs in the project folder now, so it is no longer a session of that worktree.
       return { ...rest, ...(worktreeGone || !candidate.launchWorktreePath ? {} : { launchWorktreePath: candidate.launchWorktreePath }),
         activity: null, activityDetail: null, sessionCwd: null, worktree: null }
@@ -3442,8 +3441,8 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
   return restartPromise
 }
 
-/** Lists a saved tab without starting it: its process starts the first time it is shown (`wakeDormantTab`), so a launch
- * with many saved tabs starts one Copilot process instead of all of them. */
+/** Lists a saved tab without starting it, so a launch with many saved tabs starts one Copilot process instead of all of
+ * them. Showing it does not start it: only Resume does, apart from the starts that call `startDormantTab`. */
 function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab): string {
   assertWorkspaceListed(profile)
   const id = `tab-${nextTabSequence++}`
@@ -3470,7 +3469,6 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
     // A saved tab from an older release has no flag; one still titled with the project's name was never renamed.
     autoTitle: candidate.autoTitle ?? candidate.title === profile.name,
     renamePending: candidate.renamePending === true,
-    unloaded: candidate.unloaded === true,
   })
   profilesWithSessionTabs.add(profile.id)
   if (candidate.lastSessionId) {
@@ -3484,14 +3482,14 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
 
 const wakingTabs = new Map<string, Promise<void>>()
 
-/** Starts a dormant tab's process, resuming its saved conversation the way Restart does. A failure leaves the tab
- * crashed, with its Restart button, rather than retrying each time it is shown. Settles once the start is over. */
-function wakeDormantTab(tabId: string): Promise<void> {
+/** Starts a stopped tab's process without a click on Resume: the tab on screen at launch, a restored meeting's sessions,
+ * and a session opened from History. It resumes the saved conversation the way Restart does. A failure leaves the tab
+ * crashed, with its Restart button. Settles once the start is over. */
+function startDormantTab(tabId: string): Promise<void> {
   const pending = wakingTabs.get(tabId)
   if (pending) return pending
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-  // An unloaded tab was stopped on purpose: it waits for Resume.
-  if (shuttingDown() || tab?.status !== 'dormant' || tab.unloaded) return Promise.resolve()
+  if (shuttingDown() || tab?.status !== 'dormant') return Promise.resolve()
   const waking = restartSessionTab(tabId).then(() => {}, (error) => {
     void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
     if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
@@ -3567,7 +3565,7 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   })
   persistProfileTabs()
   activateSessionTab(tabId)
-  await wakingTabs.get(tabId)
+  await startDormantTab(tabId)
   return snapshot()
 }
 
@@ -3614,15 +3612,15 @@ async function restoreTabsForProfile(profile = activeWorkspaceProfile(desktopCon
       desktopConfig.activeProfileId = profile.id
       syncWorkspaceState()
     }
-    // Showing the active tab wakes it; a restore that showed its tab is over once that tab has started. One that only
-    // listed its tabs does not wait for another project's tab on screen.
     syncTabState()
     persistProfileTabs()
     broadcastState()
     refreshMenus()
-    if (!activate) return
+    // A restore that showed its tab starts it, with its side chat on screen, and is over once they have started. One
+    // that only listed its tabs starts nothing.
+    if (!activate || !target) return
     const visible = visibleSessionTabs(tabsState)
-    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [wakingTabs.get(id)] : []))
+    await Promise.all([visible.main?.id, visible.side?.id].flatMap(id => id ? [startDormantTab(id)] : []))
   })()
   pendingProfileRestores.set(profile.id, operation)
   try {
@@ -3652,7 +3650,7 @@ async function restoreSavedWorkspaceTabs(): Promise<void> {
 
 /**
  * Meetings that were open when the app closed go on: each saved session is found among the restored tabs by its Copilot
- * session id, and the tabs taking part are started, since a meeting cannot wait for each of them to be shown.
+ * session id, and the tabs taking part are started, since a meeting cannot wait for each of them to be resumed.
  */
 async function restoreMeetings(): Promise<void> {
   await restoreGuestSeats()
@@ -3676,10 +3674,10 @@ async function restoreMeetings(): Promise<void> {
           const seat = guestMailbox.seat(sessionId)
           return seat && seat.closed === null && seat.joined && seat.meetingId === entry.name ? { tabId: seat.id, title: `${seat.name} (guest)`, folder: null } : null
         }
-        const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote && !candidate.unloaded)
+        const tab = tabsState.tabs.find((candidate) => candidate.lastSessionId === sessionId && !candidate.remote)
         return tab ? { tabId: tab.id, title: tab.title, folder: tab.sessionCwd ?? null } : null
       })
-      for (const tabId of tabs ?? []) if (!GUEST_ID_PATTERN.test(tabId)) observe(wakeDormantTab(tabId), 'Could not start a session of a restored meeting')
+      for (const tabId of tabs ?? []) if (!GUEST_ID_PATTERN.test(tabId)) observe(startDormantTab(tabId), 'Could not start a session of a restored meeting')
     }
   } finally {
     guestsReady = true
@@ -4399,7 +4397,7 @@ function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDeb
     if (closingBrowserTabs.has(tabId)) throw new Error('Browser session is closing')
     const tab = tabsState.tabs.find(tab => tab.id === tabId)!
     // Unloading freed this browser; a poll from a panel still on screen must not bring it back before Resume.
-    if (tab.unloaded) throw new Error('This session is unloaded; resume it to use its browser')
+    if (tab.status === 'dormant') throw new Error('This session is not running; resume it to use its browser')
     const paths = browserSessionPaths(browserSessionRoot(), tabId)
     // The tab's own settings keep its last page; the browser profile setting decides whose cookies and storage it uses.
     const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
@@ -4875,7 +4873,7 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || tab.remote) throw new Error('Only a local session can join a meeting')
     // Nothing can be typed into a session without a running CLI: it would sit in the round as a reviewer that never answers.
-    if (tab.unloaded || !managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
+    if (!managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
       throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
     }
     if (role !== undefined && role !== null && (typeof role !== 'string' || role.length > 200)) throw new Error('Invalid role')
