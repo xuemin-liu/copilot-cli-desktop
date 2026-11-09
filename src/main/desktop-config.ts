@@ -253,7 +253,6 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
       ...(typeof tab.launchWorktreePath === 'string' && tab.launchWorktreePath.length > 0 && tab.launchWorktreePath.length <= 4_096
         ? { launchWorktreePath: tab.launchWorktreePath } : {}),
       ...(tab.privateOverrides === true ? { privateOverrides: true as const } : {}),
-      ...(tab.unloaded === true ? { unloaded: true as const } : {}),
       ...(tab.active === true ? { active: true as const } : {}),
       ...(tab.sideChat === true ? {
         sideChat: true as const,

@@ -17,7 +17,7 @@ import type { WorkflowDelivery } from '../../main/workflow-deliveries.js'
 import type { WorkflowTask } from '../../main/workflow-types.js'
 
 const STATUS_LABEL: Record<SessionLifecycleStatus, string> = {
-  dormant: 'Not started',
+  dormant: 'Not running',
   starting: 'Starting',
   running: 'Open',
   'approval-needed': 'Needs approval',
@@ -330,7 +330,7 @@ export function Sidebar({
     const statusLabel = detail
       ? formatActivityLabel(detail)
       : tab.status === 'running' && tab.activity ? (tab.activity === 'working' ? 'Working' : 'Idle')
-        : tab.unloaded ? 'Unloaded' : STATUS_LABEL[tab.status]
+        : STATUS_LABEL[tab.status]
     const elapsed = detail ? formatElapsed(detail.since, now) : null
     const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
     const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)

@@ -23,8 +23,7 @@ test('Add session lists only sessions whose CLI is running and that are in no me
     tab('tab-host', 'host'), tab('tab-b', 'reviewer'),
     tab('tab-ready', 'ready reviewer'),
     tab('tab-approval', 'waiting for approval', { status: 'approval-needed' }),
-    tab('tab-unloaded', 'unloaded session', { status: 'dormant', unloaded: true, processId: null }),
-    tab('tab-dormant', 'restored, not started', { status: 'dormant', processId: null }),
+    tab('tab-dormant', 'not running', { status: 'dormant', processId: null }),
     tab('tab-stopped', 'stopped session', { status: 'completed', processId: null }),
     tab('tab-remote', 'remote session', { remote: true }),
   ]

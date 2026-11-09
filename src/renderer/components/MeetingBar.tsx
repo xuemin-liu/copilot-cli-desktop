@@ -118,8 +118,8 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
         const named = (participant: MeetingView['participants'][number]): string => `${titleOf(participant.tabId)}${participant.role ? ` (${participant.role})` : ''}`
         const guests = meeting.participants.filter((participant) => participant.guest)
         const pending = meeting.invited ?? []
-        // Only a session whose CLI is running can take the material; an unloaded or stopped one has to be resumed first.
-        const candidates = tabs.filter((tab) => !tab.remote && !tab.unloaded && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
+        // Only a session whose CLI is running can take the material; a stopped one has to be resumed first.
+        const candidates = tabs.filter((tab) => !tab.remote && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
         const role = meeting.hostTabId === activeTabId ? 'Host'
           : meeting.participants.some((participant) => participant.tabId === activeTabId) ? 'Reviewer'
           : `Hosted by ${meeting.hostTitle}`
