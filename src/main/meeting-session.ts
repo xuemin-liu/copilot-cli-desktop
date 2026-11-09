@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve, isAbsolute } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS } from './meeting-messages.js'
+import { HELPER_SHELL_FENCE, MEETING_HELPER_COMMAND, MEETING_HELPER_NOTE, MAX_MEETING_PATCH_CHARS, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS } from './meeting-messages.js'
 import { MEETING_ID_PATTERN } from './meeting.js'
 import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
 
@@ -205,7 +205,7 @@ For example "start a meeting to review your plan" or "open a chat to discuss you
 ${MEETING_HELPER_COMMAND} start -Topic "<one line>" -File "<that file>"
 \`\`\`
 
-   Add \`-Changes\` to attach a patch of the uncommitted changes in the current Git folder.
+   Add \`-Changes\` to attach a patch of the uncommitted changes in the current Git folder.${MEETING_HELPER_NOTE}
 3. Tell the person the meeting id it prints, so they can ask another Copilot tab or an outside agent with the meeting
    tools to "join meeting <id>". The outside agent needs no invitation when it has the tools. Then end your turn.
 
