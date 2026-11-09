@@ -58,7 +58,7 @@
     "@xterm/addon-serialize": "0.14.0",
     "electron-updater": "6.8.11",
     "jsonc-parser": "3.3.1",
-    "koffi": "3.3.4",
+    "koffi": "3.3.7",
     "node-pty": "1.1.0",
     "proper-lockfile": "4.1.2",
     "react": "19.3.1",
