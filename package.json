@@ -33,6 +33,7 @@
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",
     "meeting:check": "npm run build && node scripts/electron-side-chat-check.mjs --meeting",
+    "meeting-wake:check": "npm run build && node scripts/guest-wake-real-check.mjs",
     "meeting-binding:check": "npm run build && node scripts/session-meeting-binding-check.mjs",
     "side-chat:preview": "npm run build && node scripts/side-chat-preview.mjs",
     "cli": "npm run build && node dist/src/cli/cli.js",

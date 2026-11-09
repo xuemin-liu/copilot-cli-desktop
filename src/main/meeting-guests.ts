@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { cleanRole, MAX_MEETING_POST_CHARS, MAX_MEETING_REPLY_CHARS, MEETING_HELPER_COMMAND, roundPaths } from './meeting-messages.js'
-import type { GuestContact } from './meeting-contact.js'
+import { GUEST_QUIET_MS, type GuestContact } from './meeting-contact.js'
 import type { MeetingDelivery, MeetingTimers } from './meeting.js'
 
 /**
@@ -33,11 +33,15 @@ export const GUEST_PAGE_CHARS = 20_000
 export const MAX_GUEST_NAME_CHARS = 40
 export const GUEST_SEATS_FILE = 'seats.json'
 export const GUEST_ENDPOINT_FILE = 'endpoint.json'
+/** A polling agent asks again sooner than this, so one that is quiet for longer gets woken if it is owed a message. */
+export const GUEST_WAKE_GRACE_MS = 60_000
+/** Background commands waiting to wake one seat. An agent needs one; more would each cost it a turn. */
+const MAX_WATCHERS_PER_SEAT = 4
 
 const CLOSED = 'The meeting is closed.'
 /**
- * What invitations say, and every answer on the way repeats. An agent gets messages only by asking, and nothing can wake one
- * that stopped; a meeting joined by its id has no invitation to tell it so.
+ * What invitations say, and every answer on the way repeats. An agent gets messages by asking, and not every agent can be woken
+ * once it stopped; a meeting joined by its id has no invitation to tell it so.
  */
 export const GUEST_STAY_IN_TURN = 'do not end your turn until the meeting is closed, unless the person tells you to'
 
@@ -62,6 +66,8 @@ export interface GuestSeat {
   closedAt: number | null
   /** How it talks to the desktop, by its latest request: the meeting tools over MCP, or the helper. */
   via: GuestChannel | null
+  /** The Codex thread that uses this seat, which Codex names on its tool calls: where a wake-up goes. */
+  codexThread: string | null
 }
 
 export type GuestChannel = 'helper' | 'mcp'
@@ -77,8 +83,19 @@ interface Queue {
 
 interface Waiter { resolve(): void; cancel(): void }
 
+/** Why a background wake-up command ended. */
+export type GuestWatchEnd = 'wake' | 'closed' | 'replaced'
+
 export function hashGuestToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex')
+}
+
+/**
+ * What a seat's wake-up command names, instead of its token: it can only wait for the seat's next wake-up, so it is safe in
+ * an agent's command history. It comes from the saved hash, so it stays the same when the desktop restarts.
+ */
+export function guestWakeKey(seat: Pick<GuestSeat, 'tokenHash'>): string {
+  return createHash('sha256').update(`wake:${seat.tokenHash}`, 'utf8').digest('hex').slice(0, 32)
 }
 
 /** A name the person typed: one line, bounded, without quotes or brackets that could pass for desktop text. */
@@ -101,6 +118,10 @@ export class GuestMailbox {
   private readonly queues = new Map<string, Queue>()
   /** At most one waiting `next` per seat: a newer call takes over from an older one. */
   private readonly waiters = new Map<string, Waiter>()
+  /** Background commands that end when the seat is woken. `null` ends one because the desktop is going away. */
+  private readonly watchers = new Map<string, Set<(end: GuestWatchEnd | null) => void>>()
+  /** Seats woken this quiet spell, and when: one wake-up per spell. */
+  private readonly woken = new Map<string, number>()
 
   /**
    * `format` words a hub message for a seat as `next` hands it out, for the channel the seat uses then. Messages are kept as
@@ -122,7 +143,7 @@ export class GuestMailbox {
     const seat: GuestSeat = {
       id, meetingId: kind === 'host' ? '' : meetingId, kind, folder: kind === 'host' ? options.folder ?? null : null, farewell: null,
       name: cleanGuestName(name) || 'Outside agent', role: kind === 'host' ? null : role ? cleanRole(role) || null : null,
-      tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null,
+      tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null, codexThread: null,
     }
     this.seats.set(id, seat)
     this.changed()
@@ -161,13 +182,85 @@ export class GuestMailbox {
   /** Open seats, joined or still invited. */
   views(): GuestView[] {
     return [...this.seats.values()].filter((seat) => seat.closed === null)
-      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt }) => ({ id, meetingId, kind, name, role, joined, lastSeenAt, waiting: this.waiting(id), holding: this.given(id) !== null }))
+      .map(({ id, meetingId, kind, name, role, joined, lastSeenAt, codexThread }) => {
+        const wokenAt = this.woken.get(id) ?? null
+        return { id, meetingId, kind, name, role, joined, lastSeenAt, waiting: this.waiting(id) || this.watching(id) || (codexThread !== null && wokenAt === null), holding: this.given(id) !== null, wokenAt }
+      })
   }
 
   /** The seat asked for something, through `via`: its messages from now on are worded for that channel. */
   seen(seat: GuestSeat, via: GuestChannel = 'helper'): void {
     seat.lastSeenAt = this.timers.now()
+    this.woken.delete(seat.id)
     if (seat.via !== via) { seat.via = via; this.changed() }
+  }
+
+  /** The Codex thread behind the seat, from its latest tool call. */
+  setCodexThread(seat: GuestSeat, threadId: string): void {
+    if (seat.codexThread !== threadId) { seat.codexThread = threadId; this.changed() }
+  }
+
+  /** The seat a wake-up command belongs to, or null. */
+  seatOfWakeKey(key: string): GuestSeat | null {
+    for (const seat of this.seats.values()) if (guestWakeKey(seat) === key) return seat
+    return null
+  }
+
+  /**
+   * Waits until the seat is woken or closed. It ends with null when `signal` fires or the desktop goes away. Starting one begins
+   * a new quiet spell: the agent has just done something, and a message it is owed wakes it again by the same rule.
+   */
+  watch(seatId: string, signal?: AbortSignal): Promise<GuestWatchEnd | null> {
+    const seat = this.seats.get(seatId)
+    if (!seat || seat.closed !== null) return Promise.resolve('closed')
+    if (signal?.aborted) return Promise.resolve(null)
+    this.woken.delete(seatId)
+    return new Promise((resolveWatch) => {
+      const watchers = this.watchers.get(seatId) ?? new Set()
+      this.watchers.set(seatId, watchers)
+      if (watchers.size >= MAX_WATCHERS_PER_SEAT) [...watchers][0]!('replaced')
+      const end = (result: GuestWatchEnd | null): void => {
+        signal?.removeEventListener('abort', onAbort)
+        watchers.delete(end)
+        if (!watchers.size && this.watchers.get(seatId) === watchers) this.watchers.delete(seatId)
+        resolveWatch(result)
+      }
+      const onAbort = (): void => end(null)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      watchers.add(end)
+    })
+  }
+
+  /** A background wake-up command of this seat is running. */
+  watching(seatId: string): boolean {
+    return this.watchers.has(seatId)
+  }
+
+  private endWatchers(seatId: string, end: GuestWatchEnd | null): void {
+    for (const watcher of [...this.watchers.get(seatId) ?? []]) watcher(end)
+  }
+
+  /**
+   * The seats to wake now: ones that can be woken, are owed a message, have no `next` open and have been quiet, and were not woken
+   * yet this quiet spell. One holding a message gets longer, since it may be working on it. A host's last message after its
+   * meeting closed counts too; that seat has no watcher left, since closing ended them.
+   */
+  wakeDue(now: number, notBefore = 0): GuestSeat[] {
+    return [...this.seats.values()].filter((seat) => {
+      if (seat.meetingId === '' || this.waiting(seat.id) || this.woken.has(seat.id)) return false
+      if (seat.codexThread === null && !this.watching(seat.id)) return false
+      const quiet = now - Math.max(seat.lastSeenAt ?? 0, notBefore)
+      if (seat.closed !== null) return seat.farewell !== null && quiet > GUEST_WAKE_GRACE_MS
+      const queue = this.queues.get(seat.id)
+      if (queue?.given) return quiet > GUEST_QUIET_MS
+      return Boolean(queue?.items.length) && quiet > GUEST_WAKE_GRACE_MS
+    })
+  }
+
+  /** The seat is being woken: its background commands end, which is what wakes an agent that keeps one. */
+  woke(seatId: string): void {
+    this.woken.set(seatId, this.timers.now())
+    this.endWatchers(seatId, 'wake')
   }
 
   joined(seat: GuestSeat): void {
@@ -258,6 +351,7 @@ export class GuestMailbox {
     seat.closedAt = this.timers.now()
     this.queues.delete(seatId)
     this.wake(seatId)
+    this.endWatchers(seatId, 'closed')
     this.changed()
   }
 
@@ -278,6 +372,7 @@ export class GuestMailbox {
   /** The desktop is quitting: every waiting `next` answers now, so the endpoint can close. Seats stay for the next start. */
   release(): void {
     for (const waiter of [...this.waiters.values()]) waiter.cancel()
+    for (const seatId of [...this.watchers.keys()]) this.endWatchers(seatId, null)
   }
 
   /** Unused invitations expire; closed seats are forgotten after a while. Returns the seats removed. */
@@ -288,7 +383,7 @@ export class GuestMailbox {
       if (seat.closed === null && !seat.joined && now - seat.createdAt > GUEST_UNUSED_SEAT_MS) this.close(seat.id, 'The invitation expired. Ask the person for a new one.')
       if (seat.closedAt !== null && now - seat.closedAt > GUEST_CLOSED_SEAT_MS) removed.push(seat)
     }
-    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel() }
+    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel(); this.woken.delete(seat.id) }
     if (removed.length) this.changed()
     return removed
   }
@@ -322,6 +417,7 @@ export class GuestMailbox {
         closed: typeof value.closed === 'string' ? value.closed.slice(0, 200) : null,
         closedAt: time(value.closedAt),
         via: value.via === 'helper' || value.via === 'mcp' ? value.via : null,
+        codexThread: typeof value.codexThread === 'string' && /^[0-9a-f-]{36}$/i.test(value.codexThread) ? value.codexThread : null,
       })
     }
   }

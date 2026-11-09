@@ -141,6 +141,7 @@ import {
   guestDeliveryText, guestSeatFolder, handleGuestRequest, type GuestDeps, type GuestSeat,
 } from './meeting-guests.js'
 import { DEFAULT_GUEST_MCP_PORT, GuestMcpServer } from './meeting-guest-mcp.js'
+import { guestWakeText, queueCodexWake } from './meeting-guest-wake.js'
 import { folderChanges } from './meeting-folder-changes.js'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
@@ -2789,7 +2790,7 @@ function meetingViews(): MeetingView[] {
   const guests = guestMailbox.views()
   const contactOf = (partyId: string): GuestContact | null => {
     const seat = guests.find((guest) => guest.id === partyId)
-    return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding } : null
+    return seat ? { lastSeenAt: seat.lastSeenAt, waiting: seat.waiting, holding: seat.holding, wokenAt: seat.wokenAt ?? null } : null
   }
   const blocked = stalledMeetingDeliveries()
   return meetingHub.views().map((meeting) => {
@@ -2815,9 +2816,24 @@ const guestSweepTimer = setInterval(() => {
 }, 60_000)
 guestSweepTimer.unref()
 
+/** An outside agent that ended its turn and is owed a message gets woken, if it can be (meeting-guest-wake.ts), once per quiet spell. */
+const guestWakeTimer = setInterval(() => {
+  if (!guestsReady) return
+  const due = guestMailbox.wakeDue(Date.now(), guestsReadyAt)
+  for (const seat of due) {
+    const text = guestWakeText(seat, guestMailbox.given(seat.id) !== null)
+    guestMailbox.woke(seat.id)
+    if (seat.codexThread === null) { void writeAppLog(`Meeting ${seat.meetingId}: woke ${seat.name} through its background command.`).catch(() => {}); continue }
+    void queueCodexWake(seat.codexThread, text).then((queued) => writeAppLog(`Meeting ${seat.meetingId}: ${queued ? `queued a wake-up for ${seat.name} in Codex thread ${seat.codexThread}` : `could not wake ${seat.name}: no Codex here took the message`}.`)).catch(() => {})
+  }
+  if (due.length) broadcastState()
+}, 5_000)
+guestWakeTimer.unref()
+
 /**
- * An outside agent that ended its turn cannot be woken, and nothing else would tell: the person hears, once per quiet spell,
- * and the meeting goes on as it was. A wait starting makes no state update of its own, so the bar is told about changes here.
+ * An outside agent that cannot be woken, or that a wake-up did not bring back, would stall with nothing to tell: the person
+ * hears, once per quiet spell, and the meeting goes on as it was. A wait starting makes no state update of its own, so the bar is
+ * told about changes here.
  */
 const guestStallNotices = new GuestStallNotices()
 let guestContactShown = ''
