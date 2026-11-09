@@ -4,7 +4,7 @@ import test from 'node:test'
 import { GUEST_QUIET_MS, guestQuiet, guestStalled } from './meeting-contact.js'
 import { GuestMailbox, GUEST_WAKE_GRACE_MS, guestWakeKey, type GuestDeps } from './meeting-guests.js'
 import { guestMcpInstructions, GuestMcpServer, GuestMcpSessions, GUEST_MCP_INSTRUCTIONS, handleMcpMessage } from './meeting-guest-mcp.js'
-import { guestWakeCommand, guestWakeText, guestWatchText, queueCodexWake, type CodexQueueDeps } from './meeting-guest-wake.js'
+import { guestWakeCommand, guestWakeRequest, guestWakeText, guestWatchText, queueCodexWake, type CodexQueueDeps } from './meeting-guest-wake.js'
 import { realMeetingTimers, type MeetingDelivery, type MeetingTimers } from './meeting.js'
 
 const THREAD = '01a1b44d-0120-7672-998c-37e26f2afe93'
@@ -153,7 +153,7 @@ test('watchers end when the seat is woken or closed, and quietly when the deskto
   mailbox.close(seat.id, 'The meeting is closed.')
   assert.equal(await closing, 'closed')
   assert.equal(await mailbox.watch(seat.id), 'closed', 'already over')
-  assert.match(guestWatchText(seat, 'closed'), /nothing more to do/)
+  assert.match(guestWatchText(seat, 'closed', false), /nothing more to do/)
 })
 
 test('an agent cannot pile up watchers, each of which would cost it a turn', async () => {
@@ -182,6 +182,42 @@ test('a host holding replies is told to answer them, since another meeting_next 
   mailbox.started(seat, 'K7QF')
   assert.match(guestWakeText(seat, true), /Answer with meeting_round, meeting_propose_close or meeting_end/)
   assert.match(guestWakeText(seat, false), /has a message for you\. Call meeting_next/)
+})
+
+test('the wake-up request tells the agent to do what the command prints, not always to call meeting_next', () => {
+  const text = guestWakeRequest('curl http://x/')
+  assert.match(text, /When it exits, read what it printed and do that/)
+  assert.doesNotMatch(text, /When it exits, call meeting_next/)
+})
+
+test('over HTTP: a host woken while holding the replies or a reminder is told to answer, and only then to call meeting_next', async () => {
+  const mailbox = new GuestMailbox(clock().timers)
+  const { seat } = mailbox.invite('', 'Claude Code', null, { kind: 'host' })
+  mailbox.started(seat, 'K7QF')
+  const server = new GuestMcpServer(mailbox, noDeps())
+  const port = (await server.listen(0))!
+  const woken = async (): Promise<string> => {
+    const waiting = post(port, `/meeting-wake/${guestWakeKey(seat)}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    mailbox.woke(seat.id)
+    return (await waiting).text
+  }
+  try {
+    mailbox.enqueue(seat.id, delivery(1, 'digest'))
+    assert.match(await woken(), /has a message for you\. Call meeting_next/, 'not read yet: meeting_next is how it gets the replies')
+    for (const kind of ['digest', 'reminder'] as const) {
+      if (kind === 'reminder') { mailbox.answer(seat.id); mailbox.enqueue(seat.id, delivery(1, kind)) }
+      assert.equal(mailbox.take(seat.id)?.kind, kind)
+      const text = await woken()
+      assert.match(text, /waiting for your answer to the reviewers' replies\. Answer with meeting_round, meeting_propose_close or meeting_end, then call meeting_next/, kind)
+      assert.doesNotMatch(text, /Call meeting_next and answer/, kind)
+    }
+  } finally { await server.close() }
+})
+
+test('a reviewer holding a message is still told to call meeting_next: the host wording is only for a host', () => {
+  const { seat } = seated()
+  assert.match(guestWatchText(seat, 'wake', true), /has a message for you\. Call meeting_next/)
 })
 
 /** The Codex tools a computer has: what `where codex` and the app's package answer, and who fails. */

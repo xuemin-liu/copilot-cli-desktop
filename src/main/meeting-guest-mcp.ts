@@ -441,6 +441,6 @@ export class GuestMcpServer {
     this.changed()
     const end = await watching
     if (end === null) response.destroy()
-    else text(200, guestWatchText(seat, end))
+    else text(200, guestWatchText(seat, end, this.mailbox.given(seat.id) !== null))
   }
 }

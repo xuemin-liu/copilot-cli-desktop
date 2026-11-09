@@ -28,10 +28,10 @@ export function guestWakeText(seat: GuestSeat, holding: boolean): string {
   return `${meeting} has a message for you. Call meeting_next and answer what it gives you, unless the person told you to stop.`
 }
 
-/** What the background command prints when it ends. */
-export function guestWatchText(seat: GuestSeat, end: GuestWatchEnd): string {
+/** What the background command prints when it ends. `holding`: the seat has a message it has not answered. */
+export function guestWatchText(seat: GuestSeat, end: GuestWatchEnd, holding: boolean): string {
   switch (end) {
-    case 'wake': return guestWakeText(seat, false)
+    case 'wake': return guestWakeText(seat, holding)
     case 'closed': return seat.farewell === null ? `Meeting ${seat.meetingId} is over; there is nothing more to do for it.` : guestWakeText(seat, false)
     case 'replaced': return `A newer wake-up for meeting ${seat.meetingId} took over from this one.`
   }
@@ -44,7 +44,7 @@ export function guestWakeCommand(url: string, windows = process.platform === 'wi
 
 /** What the meeting tools ask of Claude Code, whose turn can otherwise end for good. */
 export function guestWakeRequest(command: string): string {
-  return `Keep a wake-up running, once: start this with the Bash tool in the background (run_in_background: true), and do not wait for it: ${command} . It uses no tokens, and exits only if you have a message and are not calling meeting_next; its exit wakes you even after your turn ended. When it exits, call meeting_next. If you cannot start it, go on without it.`
+  return `Keep a wake-up running, once: start this with the Bash tool in the background (run_in_background: true), and do not wait for it: ${command} . It uses no tokens, and exits only if you have a message and are not calling meeting_next; its exit wakes you even after your turn ended. When it exits, read what it printed and do that. If you cannot start it, go on without it.`
 }
 
 export interface CodexQueueDeps {
