@@ -159,7 +159,7 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
         const index = profiles.findIndex((candidate) => candidate.id === id)
         const launch = normalizeSessionLaunchConfig(profile.launch)
         if (!choices.allowPermissions) { launch.mode = 'interactive'; launch.remoteControl = 'inherit'; launch.remoteExport = 'inherit' }
-        const next = normalizeDesktopConfig({ profiles: [{ name: profile.name, path: mapped, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch, tabs: [] }] }).profiles[0]!
+        const next = normalizeDesktopConfig({ profiles: [{ name: profile.name, path: mapped, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch, tabs: [], general: profile.general }] }).profiles[0]!
         if (addChange(`${file.path}#profile:${project!.id}`, mapped, 'desktop', index < 0 ? null : jsonBytes(profiles[index]), jsonBytes(next), `Incoming profile: ${JSON.stringify(next)}. History is unavailable; tabs are not restored.`, true)) {
           if (index < 0) { if (profiles.length >= MAX_PROFILES) throw new Error('Destination already has 20 workspace profiles'); profiles.push(next) } else profiles[index] = next
         }

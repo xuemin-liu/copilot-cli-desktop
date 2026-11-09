@@ -46,6 +46,8 @@ type InputDialog =
   | { kind: 'remote'; value: string; pending: boolean; error: string | null }
   | { kind: 'fork'; tabId: string; value: string; sourceSessionId: string; pending: boolean; error: string | null }
   | { kind: 'fan-out'; value: string; count: number; pending: boolean; error: string | null }
+  /** A project folder the person picks next, or a general workspace named here (`value`), whose folder the desktop makes. */
+  | { kind: 'add-workspace'; general: boolean; value: string; pending: boolean; error: string | null }
   /** Names a session before it starts; `profileId` null means the active project. */
   | { kind: 'new-session'; profileId: string | null; attachments: boolean; value: string; pending: boolean; error: string | null
       /** Whether this session starts in its own worktree; null until changed, which means the project's setting. */
@@ -111,6 +113,9 @@ export function App(): JSX.Element {
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
     setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, worktreePath: null, sharedOverrides: null, pending: false, error: null })
+  }
+  const openAddWorkspace = (): void => {
+    setInputDialog((current) => current ?? { kind: 'add-workspace', general: false, value: '', pending: false, error: null })
   }
   const requestTabRename = (tabId: string, currentTitle: string): void => {
     setInputDialog({ kind: 'rename', tabId, value: currentTitle, pending: false, error: null })
@@ -178,6 +183,20 @@ export function App(): JSX.Element {
             error: error instanceof Error ? error.message : String(error),
           } : current)
         })
+    }
+    if (inputDialog.kind === 'add-workspace') {
+      if (!inputDialog.general) {
+        setInputDialog(null)
+        void window.copilotDesktop.selectWorkspace()
+        return
+      }
+      if (!value) {
+        setInputDialog({ ...inputDialog, error: 'Enter a name for the workspace.' })
+        return
+      }
+      setInputDialog({ ...inputDialog, pending: true, error: null })
+      finish(window.copilotDesktop.createGeneralWorkspace(value))
+      return
     }
     if (inputDialog.kind === 'new-session') {
       // An empty name keeps the default shown in the box: the project's name.
@@ -313,7 +332,8 @@ export function App(): JSX.Element {
     : null
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
-  gitPanelAvailable.current = viewMode === 'desktop' && state.activeProfileId !== null
+  const generalActive = activeProfile?.general === true
+  gitPanelAvailable.current = viewMode === 'desktop' && state.activeProfileId !== null && !generalActive
 
   if (viewMode === 'loading') {
     return (
@@ -370,7 +390,7 @@ export function App(): JSX.Element {
             return next
           })
         }}
-        onSelectWorkspace={() => void window.copilotDesktop.selectWorkspace()}
+        onSelectWorkspace={openAddWorkspace}
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onRemoveProfile={(profile) => {
           if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?\n\nIts folder and files are not changed. Add it again any time.`)) return
@@ -410,21 +430,21 @@ export function App(): JSX.Element {
           <div className="empty-state welcome-state">
             <div className="welcome-mark" aria-hidden="true">C</div>
             <h1>Start with a workspace</h1>
-            <p>Choose a project folder to open GitHub Copilot CLI.</p>
-            <button type="button" className="primary-button" onClick={() => void window.copilotDesktop.selectWorkspace()}>
-              Choose workspace
+            <p>Add a project folder, or a general workspace for work with no project, to open GitHub Copilot CLI.</p>
+            <button type="button" className="primary-button" onClick={openAddWorkspace}>
+              Add workspace
             </button>
           </div>
         ) : (
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} />
-          <ProjectDock open={gitOpen} width={gitWidth} onWidthChange={changeGitWidth}
+          <ProjectDock open={gitOpen && !generalActive} width={gitWidth} onWidthChange={changeGitWidth}
             panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
               promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}
               worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
-            gitOpen={gitOpen} onToggleGit={toggleGit}
+            gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
@@ -456,7 +476,7 @@ export function App(): JSX.Element {
           <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}
             onKeyDown={(event) => { if (event.key === 'Escape' && !inputDialog.pending) { event.preventDefault(); setInputDialog(null) } }}>
             <h2 id="input-dialog-title">
-              {inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'New session with attachments' : 'New session') : 'Rename session'}
+              {inputDialog.kind === 'add-workspace' ? 'Add workspace' : inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'New session with attachments' : 'New session') : 'Rename session'}
             </h2>
             {inputDialog.kind === 'fork' && (
               <>
@@ -479,20 +499,39 @@ export function App(): JSX.Element {
                 </select>
               </>
             )}
+            {inputDialog.kind === 'add-workspace' && (
+              <div className="input-dialog-choices" role="radiogroup" aria-label="Workspace type">
+                <label className="input-dialog-check">
+                  <input type="radio" name="workspace-type" checked={!inputDialog.general} disabled={inputDialog.pending}
+                    onChange={() => setInputDialog({ ...inputDialog, general: false, error: null })} />
+                  <span><strong>Project folder</strong><small>A folder on this computer that you choose next.</small></span>
+                </label>
+                <label className="input-dialog-check">
+                  <input type="radio" name="workspace-type" checked={inputDialog.general} disabled={inputDialog.pending}
+                    onChange={() => setInputDialog({ ...inputDialog, general: true, error: null })} />
+                  <span><strong>General</strong><small>For work with no project, like investigating this computer. The app makes a folder for it.</small></span>
+                </label>
+              </div>
+            )}
+            {(inputDialog.kind !== 'add-workspace' || inputDialog.general) && <>
             <label htmlFor="input-dialog-value">
-              {inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : inputDialog.kind === 'new-session' ? 'Session name' : 'Session title'}
+              {inputDialog.kind === 'add-workspace' ? 'Workspace name' : inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : inputDialog.kind === 'new-session' ? 'Session name' : 'Session title'}
             </label>
             <input
               id="input-dialog-value"
               type="text"
               autoFocus
-              maxLength={inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : MAX_SESSION_TITLE_CHARS}
+              maxLength={inputDialog.kind === 'add-workspace' ? 60 : inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : MAX_SESSION_TITLE_CHARS}
               value={inputDialog.value}
               placeholder={newSessionDefault ?? undefined}
               disabled={inputDialog.pending}
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
             />
-            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
+            </>}
+            {inputDialog.kind === 'add-workspace' && inputDialog.general && (
+              <p className="fork-hint">The folder is created in your Documents folder, under Copilot Workspaces.</p>
+            )}
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && !newSessionProfile?.general && (
               <>
                 <label htmlFor="new-session-start-in">Start in</label>
                 <select id="new-session-start-in" name="start-in" disabled={inputDialog.pending || !newSessionFresh}
@@ -533,7 +572,7 @@ export function App(): JSX.Element {
             <div className="input-dialog-actions">
               <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
               <button type="submit" className="primary-button" disabled={inputDialog.pending}>
-                {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'Choose files…' : 'Start session') : 'Rename'}
+                {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'add-workspace' ? (inputDialog.general ? 'Create workspace' : 'Choose folder…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'Choose files…' : 'Start session') : 'Rename'}
               </button>
             </div>
           </form>

@@ -149,18 +149,22 @@ export function activateWorkspaceProfile(
   config: DesktopConfig,
   path: string,
   protectedProfileIds: ReadonlySet<string> = new Set(),
+  options: { general?: boolean } = {},
 ): WorkspaceProfile {
   const normalized = resolve(path)
   const id = workspaceProfileId(normalized)
   const existing = config.profiles.find((profile) => profile.id === id)
-  const profile = existing ?? createWorkspaceProfile(normalized)
+  const profile = existing ?? { ...createWorkspaceProfile(normalized), ...(options.general ? { general: true as const } : {}) }
   const ordered = [profile, ...config.profiles.filter((candidate) => candidate.id !== id)]
   if (ordered.length > MAX_PROFILES) {
-    const evictionIndex = ordered.findLastIndex(
-      (candidate, index) => index > 0 && !protectedProfileIds.has(candidate.id),
-    )
+    const evictable = (candidate: WorkspaceProfile, index: number): boolean => index > 0 && !protectedProfileIds.has(candidate.id)
+    // Quick investigations must not push a project out: general workspaces go first, and a new one can only replace another.
+    let evictionIndex = ordered.findLastIndex((candidate, index) => candidate.general === true && evictable(candidate, index))
+    if (evictionIndex < 0 && !profile.general) evictionIndex = ordered.findLastIndex(evictable)
     if (evictionIndex < 0) {
-      throw new Error(`Close a workspace session before adding more than ${MAX_PROFILES} workspace profiles`)
+      throw new Error(profile.general
+        ? `All ${MAX_PROFILES} workspaces are projects or have open sessions. Remove one before adding a general workspace.`
+        : `Close a workspace session before adding more than ${MAX_PROFILES} workspace profiles`)
     }
     ordered.splice(evictionIndex, 1)
   }
@@ -314,6 +318,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
         defaultResumeMode,
         launch: normalizeSessionLaunchConfig(profile.launch),
         tabs: readRestoredTabs(profile.tabs),
+        ...(profile.general === true ? { general: true as const } : {}),
       })
       if (profiles.length >= MAX_PROFILES) break
     }

@@ -811,6 +811,33 @@ button:disabled {
   accent-color: #537de8;
 }
 
+.input-dialog .input-dialog-choices {
+  margin-bottom: 14px;
+}
+
+.input-dialog .input-dialog-choices .input-dialog-check {
+  align-items: flex-start;
+}
+
+.input-dialog .input-dialog-choices input {
+  margin-top: 3px;
+}
+
+.input-dialog-choices strong,
+.input-dialog-choices small {
+  display: block;
+}
+
+.input-dialog-choices small {
+  margin-top: 2px;
+  color: #9ca4b3;
+  font-size: 12px;
+}
+
+.folder-icon-general {
+  color: #d9a441;
+}
+
 .session-history {
   width: min(680px, 100%);
 }

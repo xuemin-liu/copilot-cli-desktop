@@ -67,6 +67,7 @@ export interface CopilotDesktopBridge {
   onGitChanged(listener: (payload: { profileId: string; view: GitProjectView }) => void): () => void
   getState(): Promise<DesktopState>
   selectWorkspace(): Promise<DesktopState>
+  createGeneralWorkspace(name: string): Promise<DesktopState>
   activateProfile(profileId: string): Promise<DesktopState>
   removeProfile(profileId: string): Promise<DesktopState>
   /** `title` names the session; empty or absent uses the project's name. */
