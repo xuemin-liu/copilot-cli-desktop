@@ -10,7 +10,8 @@ import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
+import { access, appendFile, mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises'
+import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
 import { existsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -3731,6 +3732,23 @@ async function selectWorkspace(): Promise<DesktopState> {
     })
     return snapshot()
   }
+  return openAddedWorkspace(profile)
+}
+
+/** Adds a workspace for work with no project: the desktop makes its folder, so the person only gives it a name. */
+async function createGeneralWorkspace(name: string): Promise<DesktopState> {
+  const folder = await createGeneralWorkspaceFolder(join(app.getPath('documents'), GENERAL_WORKSPACES_FOLDER), name)
+  let profile: WorkspaceProfile
+  try {
+    profile = activateWorkspaceProfile(desktopConfig, folder, workspacesInUse(), { general: true })
+  } catch (error) {
+    await rmdir(folder).catch(() => {})
+    throw error
+  }
+  return openAddedWorkspace(profile)
+}
+
+async function openAddedWorkspace(profile: WorkspaceProfile): Promise<DesktopState> {
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
@@ -4666,6 +4684,11 @@ ipcMain.handle('desktop:sidebar-view-changed', (event, view: unknown) => {
 ipcMain.handle('desktop:select-workspace', (event) => {
   assertTrustedIpcSender(event)
   return selectWorkspace()
+})
+ipcMain.handle('desktop:create-general-workspace', (event, name: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof name !== 'string') throw new Error('Invalid workspace name')
+  return createGeneralWorkspace(name)
 })
 ipcMain.handle('desktop:activate-profile', (event, profileId: unknown) => {
   assertTrustedIpcSender(event)

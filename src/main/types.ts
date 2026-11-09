@@ -52,6 +52,8 @@ export interface WorkspaceProfile {
   defaultResumeMode: ResumeMode
   launch: SessionLaunchConfig
   tabs: RestoredTab[]
+  /** For work with no project behind it, in a folder the desktop made. Saved. */
+  general?: true
 }
 
 export interface DesktopSessionTab {

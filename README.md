@@ -568,6 +568,14 @@ startup permission, default resume mode, launch profile, and the last set of
 open tabs (title + deterministic session id + session-owned permission on
 current Copilot versions) to restore next time that profile is activated.
 
+**Add workspace** offers a project folder or a **General** workspace, for work
+with no project behind it, such as investigating this computer. A general
+workspace needs only a name: the app makes its folder in
+`Documents\Copilot Workspaces`, and you can have as many as the workspace limit
+allows. Git features are hidden for them. When the limit of 20 is reached,
+general workspaces are dropped before projects, and a new general workspace
+never replaces a project.
+
 ## Background CLI
 
 Run from the repository with `pnpm cli -- <command>`, or use

@@ -110,8 +110,8 @@ export async function portableDesktop(path: string): Promise<Buffer> {
     automaticUpdateChecks: config.automaticUpdateChecks, globalShortcutEnabled: config.globalShortcutEnabled,
     worktreeTimeoutMinutes: config.worktreeTimeoutMinutes, worktreeCleanup: config.worktreeCleanup,
     provider: { type: config.provider.type, model: config.provider.model, offline: config.provider.offline },
-    profiles: config.profiles.map(({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs }) =>
-      ({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs })) })
+    profiles: config.profiles.map(({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs, general }) =>
+      ({ name, path: profilePath, permissionPreset, defaultResumeMode, launch, tabs, ...(general ? { general } : {}) })) })
 }
 export function fileEntry(path: string, category: MigrationCategory, data: Buffer): MigrationFile {
   safeRelative(path)

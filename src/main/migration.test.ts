@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import yazl from 'yazl'
-import { DEFAULT_DESKTOP_CONFIG, normalizeDesktopConfig, readDesktopConfig, workspaceProfileId } from './desktop-config.js'
+import { DEFAULT_DESKTOP_CONFIG, normalizeDesktopConfig, readDesktopConfig, workspaceProfileId, writeDesktopConfig } from './desktop-config.js'
 import { applyMigrationImport, planMigrationImport, recoverMigrationReport } from './migration-import.js'
 import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableSettings, safeRelative } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
@@ -348,6 +348,22 @@ test('tool JSON serialization removes comments and shadowed duplicate secrets on
   const raw = archive(...samples.map((text, index) => fileEntry(`copilot/hooks/${index}.jsonc`, 'tools', Buffer.from(text))))
   await applyMigrationImport(await planMigrationImport(raw, target, {}, choices), target)
   for (let index = 0; index < samples.length; index++) assert.ok(!(await readFile(join(target.copilot, `hooks/${index}.jsonc`), 'utf8')).includes('LEAK_'))
+})
+
+test('a general workspace is still general after a real export and import', async (t) => {
+  const { root, source, target } = await fixture(t)
+  const [general, project, movedGeneral, movedProject] = ['general', 'project', 'moved-general', 'moved-project'].map((name) => join(root, name)) as [string, string, string, string]
+  for (const folder of [general, project, movedGeneral, movedProject]) await mkdir(folder)
+  await writeDesktopConfig(join(source.desktop, 'desktop.json'), normalizeDesktopConfig({ profiles: [{ path: general, general: true }, { path: project }] }))
+  const [generalId, projectId] = [workspaceProfileId(general), workspaceProfileId(project)]
+  const info = { ...manifest(), projects: [{ id: generalId, name: 'general', sourcePath: general }, { id: projectId, name: 'project', sourcePath: project }] }
+  const zip = join(root, 'export.zip')
+  await writeMigrationArchive(zip, info, await collectMigration(source, info, new Set(['desktop'])))
+  const plan = await planMigrationImport(await readMigrationArchive(zip), target, { [generalId]: movedGeneral, [projectId]: movedProject }, { ...choices, categories: ['desktop'] })
+  await applyMigrationImport(plan, target)
+  const imported = await readDesktopConfig(join(target.desktop, 'desktop.json'))
+  assert.equal(imported.profiles.find((profile) => profile.path === movedGeneral)?.general, true)
+  assert.equal(imported.profiles.find((profile) => profile.path === movedProject)?.general, undefined)
 })
 
 test('absent optional paths are quiet while unavailable selected workspaces are reported', async (t) => {

@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     return () => ipcRenderer.removeListener('desktop:git-changed', handler)
   },
   selectWorkspace: () => ipcRenderer.invoke('desktop:select-workspace'),
+  createGeneralWorkspace: (name) => ipcRenderer.invoke('desktop:create-general-workspace', name),
   activateProfile: (profileId) => ipcRenderer.invoke('desktop:activate-profile', profileId),
   removeProfile: (profileId) => ipcRenderer.invoke('desktop:remove-profile', profileId),
   createTab: (resumeMode, profileId, title, options) => ipcRenderer.invoke('desktop:create-tab', resumeMode ?? null, profileId, title ?? null, options ?? null),

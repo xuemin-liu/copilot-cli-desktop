@@ -301,10 +301,12 @@ export function Sidebar({
   const workspaceRow = (profile: WorkspaceProfile): JSX.Element => (
     <div key={profile.id} className="workspace-heading">
       <button type="button" className="workspace-row"
-        aria-label={profile.name} title={`${profile.name} — ${profile.path}`}
+        aria-label={profile.general ? `${profile.name}, general workspace` : profile.name}
+        title={`${profile.name}${profile.general ? ' (general workspace)' : ''} — ${profile.path}`}
         aria-current={profile.id === activeProfileId ? 'true' : undefined}
         onClick={() => onActivateProfile(profile.id)}>
-        <span className="folder-icon" aria-hidden="true">▱</span>
+        {/* An icon, not a label: the row is narrow, and a name's end ("PC performance 2") is what tells two apart. */}
+        <span className={profile.general ? 'folder-icon folder-icon-general' : 'folder-icon'} aria-hidden="true">{profile.general ? '◇' : '▱'}</span>
         <span className="workspace-name">{profile.name}</span>
       </button>
       <button type="button" className="icon-button workspace-new-session"
@@ -510,7 +512,7 @@ export function Sidebar({
             {profiles.length === 0 && <p className="sidebar-projects-empty">No projects yet.</p>}
           </nav>
           <button type="button" className="sidebar-project-add"
-            onClick={() => { closeProjects(); onSelectWorkspace() }}>+ Add project</button>
+            onClick={() => { closeProjects(); onSelectWorkspace() }}>+ Add workspace</button>
         </div>, document.body)}
       </>}
 
@@ -527,7 +529,7 @@ export function Sidebar({
         )}
         {!collapsed && profiles.length === 0 && (
           <button type="button" className="workspace-empty" onClick={onSelectWorkspace}>
-            Choose a project folder to begin
+            Add a workspace to begin
           </button>
         )}
         {!collapsed && groupMode === 'list' && profiles.length > 0 && (
