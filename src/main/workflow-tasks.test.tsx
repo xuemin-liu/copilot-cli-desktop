@@ -42,6 +42,12 @@ test('unsupported existing conversations offer manual tracking and supported res
     const tab={id:'open-tab',title:'Existing conversation',lastSessionId:'existing-session',cliVersion:'1.0.82',sessionPermissionPreset:'default',workspaceProfileId:'project'} as import('./types.js').DesktopSessionTab
     const empty=renderToStaticMarkup(<WorkflowTasks tasks={[]} tabs={[tab]} />)
     assert.match(empty,/Track this conversation/)
+    // A tab that runs another CLI has a session id too, but its conversation is not Copilot's: it is never offered.
+    const claude={...tab,id:'claude-tab',title:'Claude conversation',lastSessionId:'923c0d6e-59f2-44aa-874e-1bc7aebaefd3',cli:'claude'} as import('./types.js').DesktopSessionTab
+    assert.equal(renderToStaticMarkup(<WorkflowTasks tasks={[]} tabs={[claude]} />),'')
+    const mixed=renderToStaticMarkup(<WorkflowTasks tasks={[]} tabs={[tab,claude]} />)
+    assert.match(mixed,/Existing conversation/)
+    assert.doesNotMatch(mixed,/Claude conversation/)
     const task=store.manual('existing-session','project','Existing work',false)
     const active=renderToStaticMarkup(<WorkflowTasks tasks={store.list()} tabs={[tab]} installedCliVersion="1.0.105" onRestart={()=>{}} />)
     assert.match(active,/Resume with task support/)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { BracketedPasteTracker, isTerminalReply, sessionTaskDecision, taskPasteSequence, dialogOnScreen } from './session-task.js'
+import { BracketedPasteTracker, isTerminalReply, sessionTaskBlocker, sessionTaskDecision, taskPasteSequence, dialogOnScreen } from './session-task.js'
 import type { SessionTaskState } from './session-task.js'
 
 const ready: SessionTaskState = {
@@ -40,6 +40,15 @@ test('a task that only asks for an answer (a meeting round) reaches read-only se
   assert.equal(sessionTaskDecision({ ...ready, sideChat: true }, false).result, 'sent')
   assert.equal(sessionTaskDecision({ ...ready, remote: true }, false).result, 'refused')
   assert.equal(sessionTaskDecision({ ...ready, status: 'crashed' }, false).result, 'refused')
+})
+
+test('a tab that runs another CLI never takes a task, whether it edits files or only asks for an answer', () => {
+  const running = { status: 'running' as const, preset: null, sideChat: false, remote: false }
+  for (const needsWrite of [true, false]) {
+    assert.match(sessionTaskBlocker({ ...running, cli: 'claude' }, needsWrite) ?? '', /Tasks go to Copilot sessions; this one runs Claude Code/)
+    assert.match(sessionTaskBlocker({ ...running, cli: 'codex' }, needsWrite) ?? '', /this one runs Codex CLI/)
+  }
+  assert.equal(sessionTaskBlocker({ ...running, preset: 'default' }), null)
 })
 
 test('the task is one bracketed paste that its own text cannot end early', () => {

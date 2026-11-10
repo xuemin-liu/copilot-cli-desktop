@@ -3,6 +3,7 @@ import type { BrowserBounds, BrowserCaptureSetting, BrowserDebugState, BrowserVi
 import type { PermissionPreset } from '../main/permission-presets.js'
 import type { ResumeMode } from '../main/resume-args.js'
 import type { NewSessionOptions } from '../main/session-name.js'
+import type { SessionCliChoice } from '../main/session-cli.js'
 import type { CredentialName } from '../main/secure-credentials.js'
 import type { AccessStatus } from '../main/access-status.js'
 import type { CopilotProviderConfig } from '../main/provider-config.js'
@@ -76,6 +77,8 @@ export interface CopilotDesktopBridge {
   createTabWithAttachments(title?: string | null, options?: NewSessionOptions | null): Promise<DesktopState>
   /** The project's existing linked worktrees a new session can start in, read from the filesystem. */
   listSessionWorktrees(profileId: string): Promise<SessionWorktreeInfo[]>
+  /** The CLIs a new session tab can run, and whether each was found on this computer. */
+  listSessionClis(): Promise<SessionCliChoice[]>
   /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
   onNewSessionRequest(listener: (attachments: boolean) => void): () => void
   listSessionHistory(): Promise<SessionHistoryEntry[]>

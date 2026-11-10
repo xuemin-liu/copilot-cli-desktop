@@ -237,6 +237,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export function windowsSystemDirectory() { return 'C:/Windows/System32'; }
         export function windowsSystemExecutable(name) { return 'C:/Windows/System32/' + name; }
         export async function findWindowsExecutable() { return null; }
+        // Other CLIs (agent-cli.js) resolve through these; inert here, so no real program is ever looked up or run.
+        export const defaultExecFile = async () => { throw new Error('inert'); };
+        export async function resolveWindowsCommand() { return { paths: [], error: new Error('inert') }; }
+        export async function tryVersion() { return { ok: false, error: new Error('inert') }; }
+        export async function unwrapNpmShim() { return null; }
       `,
     }
     const source = await readFile(mainPath, 'utf8')

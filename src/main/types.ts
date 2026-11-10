@@ -5,6 +5,7 @@ import type { SessionLaunchConfig } from './session-launch.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import type { MeetingView } from './meeting.js'
+import type { OtherCli } from './session-cli.js'
 
 export type RevealPathResult =
   | { ok: true }
@@ -24,6 +25,8 @@ export type SessionLifecycleStatus =
 export interface RestoredTab {
   title: string
   lastSessionId: string | null
+  /** The CLI the tab runs when it is not Copilot; `lastSessionId` is then that CLI's own session id. */
+  cli?: OtherCli
   browserProfileId?: string
   /** Session-owned launch bundle. Missing in config files written by older releases. */
   sessionPermissionPreset?: PermissionPreset
@@ -59,6 +62,9 @@ export interface WorkspaceProfile {
 export interface DesktopSessionTab {
   id: string
   title: string
+  /** Set when the tab runs another CLI (Claude Code, Codex CLI) instead of Copilot: a terminal for it in the project
+   * folder, without the desktop's Copilot features (permission presets, meetings as a tab, side chats, tasks). Saved. */
+  cli?: OtherCli
   browserProfileId?: string
   workspaceProfileId: string
   lastSessionId: string | null

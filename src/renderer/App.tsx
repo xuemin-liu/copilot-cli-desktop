@@ -16,6 +16,7 @@ import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
 import { sessionTaskBlocker } from '../main/session-task.js'
+import { sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
 
 const EMPTY_STATE: DesktopState = {
@@ -55,7 +56,9 @@ type InputDialog =
       /** An existing worktree of the project to start in instead; null for the project folder or a new worktree. */
       worktreePath: string | null
       /** Whether its browser uses the shared Local Overrides; null until changed, which means the Settings default. */
-      sharedOverrides: boolean | null }
+      sharedOverrides: boolean | null
+      /** The CLI the tab runs. */
+      cli: SessionCli }
 
 export function App(): JSX.Element {
   const [state, setState] = useState<DesktopState>(EMPTY_STATE)
@@ -76,10 +79,13 @@ export function App(): JSX.Element {
     : null
   const newSessionDefault = newSessionProfile?.name ?? null
   // Only a fresh session can get one; 'continue' and the picker resume an earlier session where it ran.
-  const newSessionFresh = inputDialog?.kind === 'new-session' && inputDialog.attachments
+  const newSessionCli: SessionCli = inputDialog?.kind === 'new-session' ? inputDialog.cli : 'copilot'
+  // Another CLI's tab is always a new session of its own, in the project folder or an existing worktree.
+  const newSessionOther = newSessionCli !== 'copilot'
+  const newSessionFresh = inputDialog?.kind === 'new-session' && (inputDialog.attachments || newSessionOther)
     || newSessionProfile?.defaultResumeMode === 'new' || newSessionProfile?.defaultResumeMode === 'auto-resume'
   const newSessionExisting = inputDialog?.kind === 'new-session' && newSessionFresh ? inputDialog.worktreePath : null
-  const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh && newSessionExisting === null
+  const newSessionWorktree = inputDialog?.kind === 'new-session' && newSessionFresh && newSessionExisting === null && !newSessionOther
     && (inputDialog.worktree ?? Boolean(newSessionProfile?.launch?.worktree))
   // The project's existing worktrees, read when the dialog opens for it; empty when there are none or they cannot be read.
   const [projectWorktrees, setProjectWorktrees] = useState<{ profileId: string; items: SessionWorktreeInfo[] } | null>(null)
@@ -93,6 +99,19 @@ export function App(): JSX.Element {
     return () => { stale = true }
   }, [newSessionProfileId])
   const newSessionWorktrees = newSessionProfileId && projectWorktrees?.profileId === newSessionProfileId ? projectWorktrees.items : []
+  // Which CLIs are installed, looked up each time the dialog opens: one installed a moment ago is offered at once.
+  const [sessionClis, setSessionClis] = useState<SessionCliChoice[] | null>(null)
+  const newSessionOpen = inputDialog?.kind === 'new-session'
+  useEffect(() => {
+    if (!newSessionOpen) return
+    let stale = false
+    setSessionClis(null)
+    window.copilotDesktop.listSessionClis()
+      .then((choices) => { if (!stale) setSessionClis(choices) })
+      .catch(() => { if (!stale) setSessionClis([]) })
+    return () => { stale = true }
+  }, [newSessionOpen])
+  const newSessionCliMissing = sessionClis?.find((choice) => choice.cli === newSessionCli && choice.error !== null) ?? null
   const newSessionSharedOverrides = inputDialog?.kind === 'new-session'
     && (inputDialog.sharedOverrides ?? !state.newSessionPrivateOverrides)
   const handleOperation = (operation: Promise<DesktopState>): void => {
@@ -112,7 +131,7 @@ export function App(): JSX.Element {
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
-    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, worktreePath: null, sharedOverrides: null, pending: false, error: null })
+    setInputDialog((current) => current ?? { kind: 'new-session', profileId, attachments, value: '', worktree: null, worktreePath: null, sharedOverrides: null, cli: 'copilot', pending: false, error: null })
   }
   const openAddWorkspace = (): void => {
     setInputDialog((current) => current ?? { kind: 'add-workspace', general: false, value: '', pending: false, error: null })
@@ -204,8 +223,9 @@ export function App(): JSX.Element {
       // Only a choice made here is sent; otherwise the project's setting applies.
       const options = {
         ...(newSessionExisting !== null ? { worktreePath: newSessionExisting }
-          : inputDialog.worktree === null || !newSessionFresh ? {} : { worktree: inputDialog.worktree }),
+          : inputDialog.worktree === null || !newSessionFresh || newSessionOther ? {} : { worktree: inputDialog.worktree }),
         ...(inputDialog.sharedOverrides === null ? {} : { sharedOverrides: inputDialog.sharedOverrides }),
+        ...(inputDialog.cli !== 'copilot' ? { cli: inputDialog.cli } : {}),
       }
       finish(inputDialog.attachments
         ? window.copilotDesktop.createTabWithAttachments(value || null, options)
@@ -327,7 +347,7 @@ export function App(): JSX.Element {
   const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'dormant' && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
     ? {
         id: activeTab.id, title: activeTab.title, cwd: activeTab.sessionCwd ?? activeProfile?.path ?? null,
-        taskBlocker: sessionTaskBlocker({ status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
+        taskBlocker: sessionTaskBlocker({ cli: activeTab.cli, status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
       }
     : null
 
@@ -513,6 +533,20 @@ export function App(): JSX.Element {
                 </label>
               </div>
             )}
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && !inputDialog.attachments && (
+              <>
+                <label htmlFor="new-session-cli">Run</label>
+                <select id="new-session-cli" name="cli" disabled={inputDialog.pending} value={inputDialog.cli}
+                  onChange={(event) => setInputDialog({ ...inputDialog, cli: event.target.value as SessionCli, error: null })}>
+                  {(['copilot', 'claude', 'codex'] as const).map((cli) => {
+                    const choice = sessionClis?.find((candidate) => candidate.cli === cli)
+                    return <option key={cli} value={cli}>
+                      {sessionCliLabel(cli)}{choice?.error ? ' (not found)' : choice?.version && cli !== 'copilot' ? ` ${choice.version}` : ''}
+                    </option>
+                  })}
+                </select>
+              </>
+            )}
             {(inputDialog.kind !== 'add-workspace' || inputDialog.general) && <>
             <label htmlFor="input-dialog-value">
               {inputDialog.kind === 'add-workspace' ? 'Workspace name' : inputDialog.kind === 'remote' ? 'Remote Copilot session or task ID' : inputDialog.kind === 'fan-out' ? 'Task for every session' : inputDialog.kind === 'new-session' ? 'Session name' : 'Session title'}
@@ -523,7 +557,7 @@ export function App(): JSX.Element {
               autoFocus
               maxLength={inputDialog.kind === 'add-workspace' ? 60 : inputDialog.kind === 'remote' ? 128 : inputDialog.kind === 'fan-out' ? 4000 : MAX_SESSION_TITLE_CHARS}
               value={inputDialog.value}
-              placeholder={newSessionDefault ?? undefined}
+              placeholder={(newSessionOther ? sessionCliLabel(newSessionCli) : newSessionDefault) ?? undefined}
               disabled={inputDialog.pending}
               onChange={(event) => setInputDialog({ ...inputDialog, value: event.target.value, error: null })}
             />
@@ -544,7 +578,7 @@ export function App(): JSX.Element {
                       : { ...inputDialog, worktree: choice === 'new', worktreePath: null, error: null })
                   }}>
                   <option value="folder">The project folder</option>
-                  <option value="new">A new Git worktree</option>
+                  <option value="new" disabled={newSessionOther} title={newSessionOther ? 'The desktop makes new worktrees for Copilot sessions only.' : undefined}>A new Git worktree</option>
                   {newSessionWorktrees.map((worktree) => {
                     const users = state.tabs.filter((tab) => tab.worktree && tab.worktree.path.toLowerCase() === worktree.path.toLowerCase()).map((tab) => tab.title)
                     return <option key={worktree.path} value={`existing:${worktree.path}`} title={worktree.path}>
@@ -561,7 +595,17 @@ export function App(): JSX.Element {
                 Use the shared Local Overrides and DevTools settings
               </label>
             )}
-            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && newSessionOther && (
+              <p className="fork-hint">
+                The tab is {sessionCliLabel(newSessionCli)} itself, in this project’s folder, with its own sign-in, settings and approvals.
+                Permission presets, side chats and tasks are for Copilot sessions; it can still join a meeting as an outside agent.
+                {newSessionExisting !== null && <> It starts in the existing worktree <code>{newSessionExisting}</code>, on whatever it has checked out.</>}
+              </p>
+            )}
+            {inputDialog.kind === 'new-session' && newSessionCliMissing && (
+              <p className="input-dialog-error" role="alert">{newSessionCliMissing.error?.split('\n', 1)[0]}</p>
+            )}
+            {inputDialog.kind === 'new-session' && newSessionDefault !== null && !newSessionOther && (
               <p className="fork-hint">
                 Leave it empty and Copilot names the session from your first prompt; until then the tab shows “{newSessionDefault}”.
                 {newSessionWorktree && <> It starts in its own Git worktree and branch, <code>{worktreeNamePrefix(inputDialog.value.trim() || newSessionDefault)}-…</code>, named from this.</>}
@@ -571,7 +615,7 @@ export function App(): JSX.Element {
             {inputDialog.error && <p className="input-dialog-error" role="alert">{inputDialog.error}</p>}
             <div className="input-dialog-actions">
               <button type="button" disabled={inputDialog.pending} onClick={() => setInputDialog(null)}>Cancel</button>
-              <button type="submit" className="primary-button" disabled={inputDialog.pending}>
+              <button type="submit" className="primary-button" disabled={inputDialog.pending || (inputDialog.kind === 'new-session' && newSessionOther && newSessionCliMissing !== null)}>
                 {inputDialog.pending ? (inputDialog.kind === 'fan-out' ? 'Starting sessions…' : 'Working…') : inputDialog.kind === 'add-workspace' ? (inputDialog.general ? 'Create workspace' : 'Choose folder…') : inputDialog.kind === 'remote' ? 'Connect' : inputDialog.kind === 'fork' ? 'Fork side chat' : inputDialog.kind === 'fan-out' ? `Start ${inputDialog.count} sessions` : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'Choose files…' : 'Start session') : 'Rename'}
               </button>
             </div>

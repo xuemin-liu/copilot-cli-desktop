@@ -8,6 +8,7 @@ import { copilotSessionRoot } from './session-fork.js'
 import { SessionPermissionMonitor } from './session-permission-monitor.js'
 import { SessionStoreDiscovery } from './session-store-discovery.js'
 import type { StoreDiscoveryOptions } from './session-store-discovery.js'
+import type { SessionIdDiscovery } from './agent-cli.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
@@ -40,6 +41,12 @@ export interface PtySessionOptions {
   /** Watch the session store for the new session's directory (a worktree launch cannot be given an id). */
   discoverSessionIdFromStore?: StoreDiscoveryOptions
   monitorSessionPermissions?: boolean
+  /** Another CLI's own way to find the id of the session it started; used instead of the Copilot store watch. */
+  sessionIdDiscovery?: SessionIdDiscovery
+  /** False for a CLI other than Copilot: the approval-prompt patterns are Copilot's, and would misfire on its output. */
+  detectApprovals?: boolean
+  /** The program's name in the message shown when it exits unexpectedly. Defaults to `copilot`. */
+  processLabel?: string
   /** A backend may provide verified session ownership; the native backend defaults to CLI PID/registry evidence. */
   sessionBindingReader?: Pick<SessionBindingReader, 'read'> & Partial<Pick<SessionBindingReader, 'diagnostic' | 'initialRecipientReady'>>
 }
@@ -82,7 +89,7 @@ export class PtySession extends EventEmitter {
   private initialDeliverySessionId: string | null
   private pendingSessionId: string | null = null
   private readonly bindingPositions = new Map<string, { position: number; identity: string }>()
-  private storeDiscovery: SessionStoreDiscovery | null = null
+  private storeDiscovery: SessionIdDiscovery | null = null
   private exitHandled = false
   private exitCompletion: Promise<void> | null = null
   private permissionDrain: Promise<void> | null = null
@@ -376,8 +383,8 @@ export class PtySession extends EventEmitter {
     this.setStatus('starting')
     if (this.lastKnownSessionId) await this.attachPermissionMonitor(this.lastKnownSessionId)
     // The snapshot of what is already in the store must be complete before the spawn, or the new session could be in it.
-    if (this.lastKnownSessionId === null && this.options.discoverSessionIdFromStore) {
-      this.storeDiscovery = new SessionStoreDiscovery(this.options.discoverSessionIdFromStore)
+    if (this.lastKnownSessionId === null && (this.options.sessionIdDiscovery || this.options.discoverSessionIdFromStore)) {
+      this.storeDiscovery = this.options.sessionIdDiscovery ?? new SessionStoreDiscovery(this.options.discoverSessionIdFromStore!)
       await this.storeDiscovery.ready()
     }
     const spawnCols = this.options.cols
@@ -449,7 +456,7 @@ export class PtySession extends EventEmitter {
           void this.refreshSessionBinding()
         }
       }
-      if (this.statusValue !== 'approval-needed' && detectApprovalPrompt(this.heuristicBuffer)) {
+      if (this.statusValue !== 'approval-needed' && this.options.detectApprovals !== false && detectApprovalPrompt(this.heuristicBuffer)) {
         this.setStatus('approval-needed')
         this.emit('desktop-event', { type: 'approval-needed' })
       } else if (this.statusValue !== 'running' && this.statusValue !== 'approval-needed') {
@@ -479,7 +486,7 @@ export class PtySession extends EventEmitter {
             this.setStatus('crashed')
             this.emit('desktop-event', {
               type: 'session-crashed',
-              message: `copilot exited unexpectedly (code ${exitCode}, signal ${String(signal ?? 'none')})`,
+              message: `${this.options.processLabel ?? 'copilot'} exited unexpectedly (code ${exitCode}, signal ${String(signal ?? 'none')})`,
             })
           }
         }

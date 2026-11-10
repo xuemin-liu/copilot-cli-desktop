@@ -119,7 +119,8 @@ export function MeetingBar({ meetings, tabs, activeTabId, onError, now: fixedNow
         const guests = meeting.participants.filter((participant) => participant.guest)
         const pending = meeting.invited ?? []
         // Only a session whose CLI is running can take the material; a stopped one has to be resumed first.
-        const candidates = tabs.filter((tab) => !tab.remote && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
+        // A tab running another CLI joins as an outside agent, by the meeting's id, not from this list.
+        const candidates = tabs.filter((tab) => !tab.remote && !tab.cli && !busy.has(tab.id) && (tab.status === 'running' || tab.status === 'approval-needed'))
         const role = meeting.hostTabId === activeTabId ? 'Host'
           : meeting.participants.some((participant) => participant.tabId === activeTabId) ? 'Reviewer'
           : `Hosted by ${meeting.hostTitle}`

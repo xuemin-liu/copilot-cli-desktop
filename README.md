@@ -45,6 +45,8 @@ handle, only input/output/resize events.
   grouped or flat session views, manual/last-activity ordering, named recent
   workspace profiles, manual session naming, attachment-aware session
   creation, and restored session tabs.
+- **Other CLIs in a tab**: the new-session dialog's **Run** list starts Claude Code or Codex CLI in a tab instead of
+  Copilot, in the project folder. See [Claude Code and Codex CLI tabs](#claude-code-and-codex-cli-tabs).
 - The **Fork into side chat** button (branch icon in the session header) keeps a main conversation on the left and an independent,
   resizable conversation on the right. Side chats use read/search-only model tools,
   including after restart, and can be closed without stopping the main session.
@@ -165,6 +167,30 @@ handle, only input/output/resize events.
 - Packaging via `electron-builder` (Windows NSIS installer, macOS dmg and zip,
   Linux AppImage and deb), post-package runtime auditing, and signed
   tag-triggered Windows releases with unsigned publication blocked.
+
+## Claude Code and Codex CLI tabs
+
+A session tab normally runs Copilot CLI. In the new-session dialog, **Run** offers Claude Code and Codex CLI too, when
+they are installed (`npm install -g @anthropic-ai/claude-code`, `npm install -g @openai/codex`); one that is missing is
+listed as not found. The tab is that program's own terminal UI, started in the project folder or in an existing
+worktree you pick under **Start in**, with a chip naming the CLI on the tab and in the sidebar.
+
+- The CLI keeps its own sign-in, settings and approvals. The desktop passes it none of Copilot's credentials,
+  permission presets, flags or helpers, so the sidebar shows "Access set in Claude Code" instead of a preset.
+- The tab is saved and restored like any other. Restart, Resume and reopening the app resume the same conversation:
+  Claude Code by the session id the desktop gave it, Codex by the id read from its session store once Codex has
+  stored the session (with the first prompt). A tab that was never used starts fresh.
+- The Git panel, the debug browser pane, renaming, pop-out windows and unloading work as for any tab.
+- Features built on Copilot's event log and flags are for Copilot tabs only: activity and approval badges, new
+  worktrees made by the desktop, attachments, side chats, tasks and follow-ups, desktop control, History, usage and
+  fan-out. In a meeting, such a tab takes part as an [outside agent](#outside-agents-start-or-join-by-meeting-id):
+  ask it to join by the meeting id.
+- A new conversation started inside the CLI (`/clear`, `/new`, its own resume picker) is not followed: the tab still
+  resumes the session it knew. Two new Codex tabs opened in one folder before either has a prompt cannot be told
+  apart, so each takes the first session Codex stores there.
+
+`pnpm other-cli:check` starts both CLIs in the real app, with empty homes of their own, and checks what the desktop
+runs for a new, a restarted and a resumed tab.
 
 ## Session windows
 
