@@ -10,8 +10,13 @@ const execFileAsync = promisify(execFile)
 const COMMAND_LOOKUP_TIMEOUT_MS = 8_000
 // Loading the npm CLI can take longer on a cold Windows start.
 const COPILOT_PROBE_TIMEOUT_MS = 30_000
-const COPILOT_PACKAGE_PATH = ['@github', 'copilot'] as const
-const COPILOT_PACKAGE_MARKER = `\\node_modules\\${COPILOT_PACKAGE_PATH.join('\\')}\\`
+/** An npm package that installs a CLI, and the name of its command. */
+export interface NpmCliPackage { name: string; bin: string }
+const COPILOT_PACKAGE: NpmCliPackage = { name: '@github/copilot', bin: 'copilot' }
+
+function packageMarker(packageName: string): string {
+  return `\\node_modules\\${packageName.replaceAll('/', '\\')}\\`
+}
 
 export type ExecFileFn = (
   file: string,
@@ -21,7 +26,7 @@ export type ExecFileFn = (
 
 export type ReadTextFileFn = (path: string) => Promise<string>
 
-const defaultExecFile: ExecFileFn = (file, args, options) => execFileAsync(file, args, options)
+export const defaultExecFile: ExecFileFn = (file, args, options) => execFileAsync(file, args, options)
 const defaultReadTextFile: ReadTextFileFn = (path) => readFile(path, 'utf8')
 
 export function windowsSystemDirectory(env: NodeJS.ProcessEnv = process.env): string {
@@ -43,7 +48,7 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-async function tryVersion(
+export async function tryVersion(
   command: string,
   args: string[],
   env: NodeJS.ProcessEnv,
@@ -64,7 +69,7 @@ async function tryVersion(
   }
 }
 
-async function resolveWindowsCommand(
+export async function resolveWindowsCommand(
   command: string,
   env: NodeJS.ProcessEnv,
   execFileFn: ExecFileFn,
@@ -99,13 +104,13 @@ export async function findWindowsExecutable(
   return located.paths.find((candidate) => candidate.toLowerCase().endsWith('.exe')) ?? null
 }
 
-function packageBinEntry(manifest: unknown): string | null {
+function packageBinEntry(manifest: unknown, binName: string): string | null {
   if (!manifest || typeof manifest !== 'object') return null
   const bin = (manifest as { bin?: unknown }).bin
   if (typeof bin === 'string') return bin
   if (!bin || typeof bin !== 'object' || Array.isArray(bin)) return null
   const entries = Object.entries(bin as Record<string, unknown>)
-  const value = entries.find(([name]) => name === 'copilot')?.[1] ?? (entries.length === 1 ? entries[0]?.[1] : undefined)
+  const value = entries.find(([name]) => name === binName)?.[1] ?? (entries.length === 1 ? entries[0]?.[1] : undefined)
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
@@ -126,11 +131,12 @@ function shimPackageEntries(shimText: string, shimDirectory: string): string[] {
   return [...new Set(entries)]
 }
 
-function packageDirectoryForEntry(entry: string): string | null {
+function packageDirectoryForEntry(entry: string, packageName: string): string | null {
+  const marker = packageMarker(packageName)
   const normalized = entry.replaceAll('/', '\\')
-  const markerIndex = normalized.toLowerCase().lastIndexOf(COPILOT_PACKAGE_MARKER.toLowerCase())
+  const markerIndex = normalized.toLowerCase().lastIndexOf(marker.toLowerCase())
   if (markerIndex < 0) return null
-  return normalized.slice(0, markerIndex + COPILOT_PACKAGE_MARKER.length - 1)
+  return normalized.slice(0, markerIndex + marker.length - 1)
 }
 
 async function locateNodeExecutable(
@@ -154,17 +160,18 @@ async function locateNodeExecutable(
 /**
  * Windows package-manager shims ultimately invoke an installed package entry
  * with Node. Resolve the target declared by the shim, then verify it against
- * @github/copilot's manifest and execute it directly. This supports npm,
+ * the package's manifest and execute it directly. This supports npm,
  * pnpm, and Yarn layouts without crossing a cmd.exe parser.
  */
-async function unwrapCopilotNpmShim(
+export async function unwrapNpmShim(
   shimPath: string,
+  cliPackage: NpmCliPackage,
   env: NodeJS.ProcessEnv,
   execFileFn: ExecFileFn,
   pathExists: (path: string) => boolean,
   readTextFile: ReadTextFileFn,
 ): Promise<Pick<CopilotResolution, 'command' | 'prefixArgs' | 'resolvedPath' | 'pathAdditions'> | null> {
-  if (win32.basename(shimPath).toLowerCase() !== 'copilot.cmd') return null
+  if (win32.basename(shimPath).toLowerCase() !== `${cliPackage.bin}.cmd`) return null
   const shimDirectory = win32.dirname(shimPath)
   let shimText: string
   try {
@@ -174,7 +181,7 @@ async function unwrapCopilotNpmShim(
   }
 
   for (const declaredEntry of shimPackageEntries(shimText, shimDirectory)) {
-    const packageDirectory = packageDirectoryForEntry(declaredEntry)
+    const packageDirectory = packageDirectoryForEntry(declaredEntry, cliPackage.name)
     if (!packageDirectory) continue
     let manifest: unknown
     try {
@@ -182,8 +189,8 @@ async function unwrapCopilotNpmShim(
     } catch {
       continue
     }
-    if ((manifest as { name?: unknown }).name !== '@github/copilot') continue
-    const relativeEntry = packageBinEntry(manifest)
+    if ((manifest as { name?: unknown }).name !== cliPackage.name) continue
+    const relativeEntry = packageBinEntry(manifest, cliPackage.bin)
     if (!relativeEntry) continue
     const entry = win32.resolve(packageDirectory, relativeEntry)
     if (
@@ -226,7 +233,7 @@ async function probeWindowsCopilotPath(
 ): Promise<{ launch: Omit<CopilotResolution, 'kind' | 'error'>; error: null } | { launch: null; error: string }> {
   const launch = path.toLowerCase().endsWith('.exe')
     ? { command: path, prefixArgs: [], resolvedPath: path, pathAdditions: [] }
-    : await unwrapCopilotNpmShim(path, env, execFileFn, pathExists, readTextFile)
+    : await unwrapNpmShim(path, COPILOT_PACKAGE, env, execFileFn, pathExists, readTextFile)
   if (!launch) return { launch: null, error: 'package-manager shim target could not be verified' }
   const launchEnv = withCopilotPathAdditions(env, launch.pathAdditions)
   const result = await tryVersion(launch.command, [...launch.prefixArgs, '--version'], launchEnv, execFileFn)

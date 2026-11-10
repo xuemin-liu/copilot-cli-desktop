@@ -6,6 +6,7 @@ import type { MeetingView } from '../../main/meeting.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
 import { describeSessionPermission, SESSION_PERMISSION_MODE_INFO } from '../../main/permission-modes.js'
 import { isCopilotVersionOutdated } from '../../main/copilot-version.js'
+import { sessionCliLabel } from '../../main/session-cli.js'
 import { formatActivityLabel, formatElapsed } from '../../main/activity-label.js'
 import { RemoveIcon } from './Icons.js'
 import { workflowAttention } from '../../main/workflow-attention.js'
@@ -335,7 +336,7 @@ export function Sidebar({
         : STATUS_LABEL[tab.status]
     const elapsed = detail ? formatElapsed(detail.since, now) : null
     const statusClass = tab.status === 'running' && tab.activity ? tab.activity : tab.status
-    const outdatedCli = isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
+    const outdatedCli = !tab.cli && isCopilotVersionOutdated(tab.cliVersion, installedCliVersion)
     const versionLabel = outdatedCli
       ? `Old CLI ${tab.cliVersion ?? ''}; ${tab.remote ? 'close and reconnect' : 'restart this session'} to use ${installedCliVersion ?? 'the installed version'}`
       : null
@@ -346,7 +347,8 @@ export function Sidebar({
     const meetingLabel = meeting
       ? `Meeting ${meeting.id} · ${meeting.hostTabId === tab.id ? 'host' : meeting.waitingFor.includes(tab.id) ? 'reviewing' : 'reviewer'}${(() => { const role = meeting.participants.find((participant) => participant.tabId === tab.id)?.role; return role ? ` as ${role}` : '' })()} · round ${meeting.round}${meeting.stage === 'paused' ? ' · paused' : ''}`
       : null
-    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
+    const cliLabel = tab.cli ? sessionCliLabel(tab.cli) : null
+    const label = `${compactIndex !== undefined ? `${compactIndex + 1}: ` : ''}${tab.title}${cliLabel && cliLabel !== tab.title ? ` (${cliLabel})` : ''}${worktreeLabel ? ` (worktree ${worktreeLabel})` : ''}${fanOutLabel ? ` [${fanOutLabel}]` : ''}${meetingLabel ? ` [${meetingLabel}]` : ''} — ${statusLabel}${elapsed ? ` · ${elapsed}` : ''}${versionLabel ? ` — ${versionLabel}` : ''}${workspaceName ? ` — ${workspaceName}` : ''}`
     const busy = tab.status === 'starting' || tab.status === 'stopping'
     return <div key={tab.id} className="sidebar-session-row">
     <button
@@ -363,7 +365,8 @@ export function Sidebar({
       {compactIndex === undefined && <span className={`sidebar-session-status${outdatedCli ? ' cli-version-outdated' : ''}`}>
         {outdatedCli ? 'Old CLI' : detail ? elapsed : statusLabel}
       </span>}
-      {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel || meetingLabel) && <span className="sidebar-session-activity">
+      {compactIndex === undefined && (detail || worktreeLabel || fanOutLabel || meetingLabel || cliLabel) && <span className="sidebar-session-activity">
+        {cliLabel && <span className="session-cli-chip" title={`This tab runs ${cliLabel}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{cliLabel}</span>}
         {meetingLabel && <span className={`session-meeting-chip${meeting?.stage === 'paused' ? ' session-meeting-paused' : ''}`} title={meetingLabel}>⇄ {meeting!.id}{meeting!.hostTabId === tab.id ? ' host' : ''} · R{meeting!.round}</span>}
         {fanOutLabel && <span className="session-fanout-chip" title={`Started together: ${fanOutLabel}`}>{fanOutLabel}</span>}
         {worktreeLabel && <span className="session-worktree-chip" title={`Worktree ${tab.worktree?.path ?? ''}`}>⎇ {worktreeLabel}</span>}
@@ -564,7 +567,12 @@ export function Sidebar({
         })}
       </div>
 
-      {activeTab?.remote && !displayedPreset ? (
+      {activeTab?.cli ? (
+        <div className="sidebar-access" title={`${sessionCliLabel(activeTab.cli)} asks for its own approvals; the project's permission preset applies to Copilot sessions.`}>
+          <span className="sidebar-access-dot" aria-hidden="true" />
+          <span>Access set in {sessionCliLabel(activeTab.cli)}</span>
+        </div>
+      ) : activeTab?.remote && !displayedPreset ? (
         <div className="sidebar-access" title="The desktop cannot determine permissions configured by the remote session host.">
           <span className="sidebar-access-dot" aria-hidden="true" />
           <span>Remote session access unknown</span>

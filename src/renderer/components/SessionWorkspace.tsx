@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
+import { sessionCliLabel } from '../../main/session-cli.js'
 import { TerminalPane } from './TerminalPane.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
 import { GitBranchIcon, SideChatIcon } from './Icons.js'
@@ -77,6 +78,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
             <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && tab.status !== 'dormant'} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <><header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
+                {tab.cli && <span className="session-cli-chip" title={`This tab runs ${sessionCliLabel(tab.cli)}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{sessionCliLabel(tab.cli)}</span>}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
               {onToggleGit && !tab.sideChat && (
@@ -84,13 +86,13 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
               {browserToggle}
-              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && (
+              {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}
               {onPopOut && <button type="button" className="icon-button" title="Open in new window" aria-label={`Open ${tab.title} in new window`} onClick={() => onPopOut(tab.id)}>↗</button>}
               {tab.sideChat ? (
                 <span className="side-chat-badge" title={tab.permissionWarning ?? 'Only file-view and search tools are exposed to the model; not an OS sandbox.'}>Read/search only</span>
-              ) : !tab.remote && (
+              ) : !tab.remote && !tab.cli && (
                 <button type="button" className="icon-button session-fork" aria-label="Fork into side chat" disabled={busy || !canOpenTab || side !== null || !tab.canFork || tab.status === 'dormant' || tab.status === 'completed' || tab.status === 'crashed'}
                   title={!tab.canFork ? 'Requires Copilot CLI 1.0.82 or newer; update and restart this session' : side ? 'Close the existing side chat before forking again' : 'Copy saved conversation history into an independent right-hand pane'}
                   onClick={() => onFork(tab)}><SideChatIcon /></button>
@@ -104,7 +106,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
             </header>
-            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
+            {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
             )}</>}>
             <div className="session-terminal">

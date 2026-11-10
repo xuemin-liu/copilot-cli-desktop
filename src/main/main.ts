@@ -123,6 +123,8 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
+import { CodexSessionDiscovery, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { readSessionStart, worktreeNameFor } from './session-store-discovery.js'
@@ -1154,6 +1156,7 @@ function persistProfileTabs(): void {
         return {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
+          ...(tab.cli ? { cli: tab.cli } : {}),
           ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
           ...(tab.launchWorktreePath ? { launchWorktreePath: tab.launchWorktreePath } : {}),
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
@@ -1345,6 +1348,7 @@ function trayStatusLabel(): string {
 function activeAccessLabel(): string {
   const activeTab = tabsState.tabs.find((candidate) => candidate.id === tabsState.activeTabId)
   if (activeTab?.remote) return 'Unknown (remote session)'
+  if (activeTab?.cli) return `Set in ${sessionCliLabel(activeTab.cli)}`
   const preset = activeTab?.sessionPermissionPreset
     ?? activeWorkspaceProfile(desktopConfig)?.permissionPreset
     ?? 'default'
@@ -1454,6 +1458,7 @@ function copyDiagnosticsToClipboard(): void {
 function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   const title = attentionTitle(tab?.title ?? 'Copilot session')
+  const product = tab?.cli ? sessionCliLabel(tab.cli) : 'Copilot'
   const popout = sessionWindows.get(tabId)
   const window = popout ?? mainWindow
   const isFocusedOnThisTab = Boolean(window?.isFocused()) && (Boolean(popout) || tabsState.activeTabId === tabId)
@@ -1468,7 +1473,7 @@ function handleDesktopEvent(tabId: string, event: DesktopEvent): void {
   if (event.type === 'approval-needed') {
     if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   } else if (event.type === 'session-completed') {
-    showNotification('Copilot session finished', `"${title}" finished.`, openTab)
+    showNotification(`${product} session finished`, `"${title}" finished.`, openTab)
   } else if (event.type === 'session-crashed') {
     if(workflowAttentionReady)workflowNotifications.update(attentionItems(),desktopConfig.notifications)
   }
@@ -1827,7 +1832,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     }
     tabsState = setTabSessionId(tabsState, id, sessionId)
     const tab = tabsState.tabs.find((candidate) => candidate.id === id)
-    if (!tab?.remote) usageService?.associate(sessionId, tab?.sideChat === true)
+    if (!tab?.remote && !tab?.cli) usageService?.associate(sessionId, tab?.sideChat === true)
     syncTabState()
     persistProfileTabs()
     broadcastState()
@@ -1842,7 +1847,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
       const tab = tabsState.tabs.find((candidate) => candidate.id === id)
-      if (!tab?.remote) usageService?.associate(session.lastSessionId, tab?.sideChat === true)
+      if (!tab?.remote && !tab?.cli) usageService?.associate(session.lastSessionId, tab?.sideChat === true)
     }
     if (usageService && !preparingUpdate) observe(usageService.collect(), 'Could not collect final session usage')
     syncTabState()
@@ -1901,7 +1906,7 @@ async function startSessionTab(
   titleOverride: string | null = null,
   /** `privateOverrides`: the new-session dialog's choice; absent means the Settings default (or, restored, as saved).
    * `worktreePath`: the existing worktree chosen there, checked against the project's worktrees before anything starts. */
-  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean } = {},
+  sideOptions: { sideChat?: true; sideParentTabId?: string; privateOverrides?: boolean; worktreePath?: string; authorizeAutomatic?:()=>boolean; cli?: OtherCli } = {},
   sessionPermissionPresetOverride: PermissionPreset | null = null,
   sessionPermissionModeOverride: SessionPermissionMode | null = null,
   /** Called with the new tab's id the moment it is registered, before anything else can create a tab. */
@@ -1917,6 +1922,10 @@ async function startSessionTab(
   if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
   if (shuttingDown()) throw new Error('The app is shutting down or updating; new sessions cannot be started right now')
   if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
+  if (sideOptions.cli) {
+    if (connectSessionId || sideOptions.sideChat || attachmentPaths.length > 0) throw new Error(`${sessionCliLabel(sideOptions.cli)} sessions cannot be remote, side chats or started with attachments`)
+    return startOtherCliTab(profile, sideOptions.cli, titleOverride, existingWorktree?.root ?? null, sideOptions, onCreated)
+  }
 
   const id = `tab-${nextTabSequence++}`
   let resumeMode = resumeModeOverride ?? profile.defaultResumeMode
@@ -2040,6 +2049,162 @@ async function startSessionTab(
   return snapshot()
 }
 
+/** Other CLIs found on this computer, kept for a minute: finding one runs its `--version`. A miss is never kept, so a
+ * CLI installed a moment ago is found by the next look. */
+const otherCliResolutions = new Map<OtherCli, { at: number; resolution: Promise<AgentCliResolution> }>()
+
+function otherCliResolution(cli: OtherCli): Promise<AgentCliResolution> {
+  const known = otherCliResolutions.get(cli)
+  if (known && Date.now() - known.at < 60_000) return known.resolution
+  const resolution = resolveAgentCli(cli)
+  otherCliResolutions.set(cli, { at: Date.now(), resolution })
+  void resolution.then((found) => found.version === null, () => true).then((missed) => {
+    if (missed && otherCliResolutions.get(cli)?.resolution === resolution) otherCliResolutions.delete(cli)
+  })
+  return resolution
+}
+
+/** The CLIs a new session tab can run, for the new-session dialog. */
+async function listSessionClis(): Promise<SessionCliChoice[]> {
+  const copilot: SessionCliChoice = { cli: 'copilot', label: sessionCliLabel('copilot'), version: state.resolution?.version ?? null,
+    error: isCopilotResolved() ? null : state.resolution?.error ?? 'Copilot CLI is not available yet' }
+  const others = await Promise.all(OTHER_CLIS.map(async (cli): Promise<SessionCliChoice> => {
+    const found = await otherCliResolution(cli).catch((error): Pick<AgentCliResolution, 'version' | 'error'> => ({ version: null, error: String(error) }))
+    return { cli, label: sessionCliLabel(cli), version: found.version, error: found.version === null ? found.error ?? 'Not found' : null }
+  }))
+  return [copilot, ...others]
+}
+
+/** Codex session ids already given to a tab, so two new Codex tabs in one folder never take the same one. */
+const claimedCodexSessions = new Set<string>()
+
+/**
+ * The process for a tab that runs another CLI: its own terminal UI in `cwd`, with the desktop's own environment and none
+ * of Copilot's credentials, helpers or flags. `sessionId` is the CLI's session id when the tab has one; `stored` says
+ * whether the CLI can resume it.
+ */
+function createOtherCliSession(cli: OtherCli, resolution: AgentCliResolution, cwd: string, sessionId: string | null, stored: boolean,
+  dimensions?: { cols: number; rows: number }): PtySession {
+  const env = withCopilotPathAdditions(process.env, resolution.pathAdditions)
+  const resuming = sessionId !== null && stored
+  // Codex names its own sessions: an id it has not stored is dropped, and the new session's id is read from its store.
+  const knownId = cli === 'codex' && !resuming ? null : sessionId
+  return new PtySession({
+    file: resolution.command,
+    args: [...resolution.prefixArgs, ...buildAgentCliArgs(cli, { id: knownId, stored: resuming })],
+    cwd,
+    env,
+    spawnPty: spawnNodePty,
+    sessionId: knownId,
+    discoverSessionIdFromOutput: false,
+    monitorSessionPermissions: false,
+    detectApprovals: false,
+    processLabel: sessionCliLabel(cli),
+    ...(cli === 'codex' && knownId === null ? { sessionIdDiscovery: new CodexSessionDiscovery({
+      root: codexSessionsRoot(env), cwd,
+      claim: (id) => {
+        if (claimedCodexSessions.has(id) || tabsState.tabs.some((tab) => tab.lastSessionId === id)) return false
+        claimedCodexSessions.add(id)
+        return true
+      },
+    }) } : {}),
+    ...(dimensions ? { cols: dimensions.cols, rows: dimensions.rows } : {}),
+  })
+}
+
+/** A new tab that runs another CLI in the project folder, or in an existing worktree of the project. */
+async function startOtherCliTab(
+  profile: WorkspaceProfile,
+  cli: OtherCli,
+  titleOverride: string | null,
+  worktreeRoot: string | null,
+  options: { privateOverrides?: boolean; authorizeAutomatic?: () => boolean },
+  onCreated: ((tabId: string) => void) | null,
+): Promise<DesktopState> {
+  const label = sessionCliLabel(cli)
+  pendingSessionCreations++
+  let resolution: AgentCliResolution
+  try { resolution = await otherCliResolution(cli) }
+  finally { pendingSessionCreations-- }
+  if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
+  // Recheck after the lookup: another creation or a shutdown may have completed during the await.
+  if (shuttingDown()) throw new Error('The app is shutting down or updating')
+  if (options.authorizeAutomatic && !options.authorizeAutomatic()) throw new Error('Automatic work was paused')
+  if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error(`No more than ${MAX_SESSION_TABS} session tabs can be open`)
+  assertWorkspaceListed(profile)
+
+  const id = `tab-${nextTabSequence++}`
+  const cwd = worktreeRoot ?? profile.path
+  // Claude Code takes the id of a new session; Codex picks its own, read from its store once it has stored the session.
+  const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false)
+  managedTabs.set(id, { session })
+  profilesWithSessionTabs.add(profile.id)
+  const previousProfileId = desktopConfig.activeProfileId
+  onCreated?.(id)
+  tabsState = createTab(tabsState, {
+    id,
+    title: titleOverride?.trim().slice(0, 120) || label,
+    cli,
+    browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map(tab => tab.browserProfileId)),
+    workspaceProfileId: profile.id,
+    sessionPermissionPreset: null,
+    sessionPermissionMode: null,
+    permissionWarning: null,
+    remote: false,
+    cliVersion: resolution.version,
+    lastSessionId: session.lastSessionId,
+    privateOverrides: options.privateOverrides ?? desktopConfig.browserOverrides === 'private',
+    canFork: false,
+    launchWorktree: false,
+    ...(worktreeRoot ? { launchWorktreePath: worktreeRoot } : {}),
+    autoTitle: false,
+  })
+  desktopConfig.activeProfileId = profile.id
+  syncWorkspaceState()
+  syncTabState()
+  broadcastState()
+  refreshMenus()
+  wireSessionEvents(id, session)
+  reportOtherCliFolder(id, session, cwd)
+
+  try {
+    await queueTabTransition(id, async () => {
+      if (shuttingDown()) throw new Error('The app is shutting down or updating')
+      await session.start()
+      if (shuttingDown()) {
+        await session.stop()
+        throw new Error('The app is shutting down or updating')
+      }
+    })
+  } catch (error) {
+    if (managedTabs.get(id)?.session === session) {
+      session.removeAllListeners()
+      const wasActive = tabsState.activeTabId === id
+      tabsState = closeTab(tabsState, id)
+      managedTabs.delete(id)
+      if (wasActive) {
+        desktopConfig.activeProfileId = tabsState.tabs.find((tab) => tab.id === tabsState.activeTabId)?.workspaceProfileId
+          ?? (desktopConfig.activeProfileId === profile.id ? previousProfileId : desktopConfig.activeProfileId)
+        syncWorkspaceState()
+      }
+    }
+    syncTabState()
+    broadcastState()
+    refreshMenus()
+    persistProfileTabs()
+    throw error
+  }
+  persistProfileTabs()
+  return snapshot()
+}
+
+/** Another CLI writes no event log the desktop reads, so the folder its tab runs in is the one it was started in. */
+function reportOtherCliFolder(id: string, session: PtySession, cwd: string): void {
+  const generation = (sessionCwdGenerations.get(id) ?? 0) + 1
+  sessionCwdGenerations.set(id, generation)
+  observe(applySessionCwd(id, session, cwd, generation), 'Could not inspect the session folder')
+}
+
 async function forkSideChat(tabId: string, sourceSessionId: string, title: string): Promise<DesktopState> {
   if (!isForkSessionId(sourceSessionId)) throw new Error('Enter a full source session UUID')
   const pending = pendingForks.get(tabId)
@@ -2047,7 +2212,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
   const operation = queueTabTransition(tabId, async () => {
     if (shuttingDown()) throw new Error('The app is shutting down or updating')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
-    if (!tab || tab.remote || tab.sideChat) throw new Error('Select a local main session to fork into a side chat')
+    if (!tab || tab.remote || tab.sideChat || tab.cli) throw new Error('Select a local main Copilot session to fork into a side chat')
     const existing = tabsState.tabs.find((candidate) => candidate.sideParentTabId === tabId)
     if (existing) throw new Error('This session already has a side chat. Close it before creating another fork.')
     if (tabsState.tabs.length >= MAX_SESSION_TABS) throw new Error('Close a session tab before opening a side chat')
@@ -2075,6 +2240,7 @@ async function forkSideChat(tabId: string, sourceSessionId: string, title: strin
 
 async function createSessionWithAttachments(title: string | null = null, options: NewSessionOptions = {}): Promise<DesktopState> {
   if (!mainWindow) return snapshot()
+  if (options.cli) throw new Error('Attachments can only start a Copilot session')
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: 'Attach files to a new Copilot session',
     properties: ['openFile', 'multiSelections'],
@@ -2085,8 +2251,9 @@ async function createSessionWithAttachments(title: string | null = null, options
 }
 
 /** The new-session dialog's Local Overrides and existing-worktree choices, as createSessionTab takes them. */
-function dialogChoices(options: NewSessionOptions): { privateOverrides?: boolean; worktreePath?: string } {
+function dialogChoices(options: NewSessionOptions): { privateOverrides?: boolean; worktreePath?: string; cli?: OtherCli } {
   return {
+    ...(options.cli === undefined ? {} : { cli: options.cli }),
     ...(options.sharedOverrides === undefined ? {} : { privateOverrides: !options.sharedOverrides }),
     ...(options.worktreePath === undefined ? {} : { worktreePath: options.worktreePath }),
   }
@@ -2126,11 +2293,14 @@ function followActiveTabWorkspace(): void {
 
 function renameSessionTab(tabId: string, title: string): DesktopState {
   tabsState = renameTab(tabsState, tabId, title)
+  // Another CLI's session has no name the desktop keeps in step: the tab's title is all there is to change.
+  const otherCli = tabsState.tabs.find((tab) => tab.id === tabId)?.cli !== undefined
+  if (otherCli) tabsState = confirmTabRename(tabsState, tabId)
   syncTabState()
   persistProfileTabs()
   broadcastState()
   refreshMenus()
-  observe(syncSessionName(tabId), 'Could not rename the Copilot session')
+  if (!otherCli) observe(syncSessionName(tabId), 'Could not rename the Copilot session')
   return snapshot()
 }
 
@@ -3310,6 +3480,63 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     const workspaceProfileId = tab.workspaceProfileId
     const savedProfile = desktopConfig.profiles.find((candidate) => candidate.id === workspaceProfileId)
     if (!savedProfile) throw new Error('This session\'s workspace profile no longer exists')
+    if (tab.cli) {
+      // Another CLI: the same program in the same folder, resuming its own session when it stored one.
+      const cli = tab.cli
+      const resolution = await otherCliResolution(cli)
+      if (resolution.version === null) throw new Error(resolution.error ?? `${sessionCliLabel(cli)} is not available`)
+      const linked = tab.launchWorktreePath ? await resolveLinkedWorktree(savedProfile.path, tab.launchWorktreePath) : null
+      const gone = !linked && !!tab.launchWorktreePath
+      if (gone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
+      const cwd = linked?.root ?? savedProfile.path
+      stopRequested = true
+      cancelHeldInput(tabId)
+      if (managed) await managed.session.stop()
+      const sessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
+      // Codex ids are only ever read from its store. Claude Code stores a session with its first prompt.
+      const stored = sessionId !== null && (cli === 'codex' || await claudeSessionStored(sessionId))
+      managed?.session.removeAllListeners()
+      const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
+      let replacement: PtySession
+      try {
+        replacement = createOtherCliSession(cli, resolution, cwd, sessionId, stored, dimensions)
+      } catch (error) {
+        managedTabs.delete(tabId)
+        tabsState = setTabStatus(tabsState, tabId, 'crashed')
+        tabsState = setTabProcessId(tabsState, tabId, null)
+        syncTabState()
+        broadcastState()
+        throw error
+      }
+      managedTabs.set(tabId, { session: replacement })
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+        if (candidate.id !== tabId) return candidate
+        const { launchWorktreePath: _gone, ...rest } = candidate
+        return { ...rest, ...(gone || !candidate.launchWorktreePath ? {} : { launchWorktreePath: candidate.launchWorktreePath }),
+          activity: null, activityDetail: null, sessionCwd: null, worktree: null }
+      }) }
+      sessionWorktreeGitDirs.delete(tabId)
+      tabsState = setTabStatus(tabsState, tabId, 'starting')
+      tabsState = setTabLaunchConfig(tabsState, tabId, { cliVersion: resolution.version, sessionPermissionPreset: null, sessionPermissionMode: null, permissionWarning: null, canFork: false })
+      tabsState = setTabSessionId(tabsState, tabId, replacement.lastSessionId)
+      syncTabState()
+      broadcastState()
+      refreshMenus()
+      wireSessionEvents(tabId, replacement)
+      reportOtherCliFolder(tabId, replacement, cwd)
+      try {
+        await replacement.start()
+      } catch (error) {
+        managedTabs.delete(tabId)
+        tabsState = setTabStatus(tabsState, tabId, 'crashed')
+        tabsState = setTabProcessId(tabsState, tabId, null)
+        syncTabState()
+        broadcastState()
+        throw error
+      }
+      persistProfileTabs()
+      return snapshot()
+    }
     const sessionPermissionPreset = tab.sideChat
       ? 'read-only'
       : tab.sessionPermissionPreset ?? savedProfile.permissionPreset
@@ -3466,6 +3693,29 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
   const parent = candidate.sideParentSessionId
     ? tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id && !tab.sideChat && tab.lastSessionId === candidate.sideParentSessionId)
     : undefined
+  if (candidate.cli) {
+    // Another CLI's tab: no Copilot permission, name or side chat to restore, and its folder is the one it started in.
+    tabsState = addDormantTab(tabsState, {
+      id,
+      title: candidate.title.trim().slice(0, 120) || sessionCliLabel(candidate.cli),
+      cli: candidate.cli,
+      browserProfileId: selectBrowserProfileId(candidate.browserProfileId, tabsState.tabs.map(tab => tab.browserProfileId)),
+      workspaceProfileId: profile.id,
+      lastSessionId: candidate.lastSessionId,
+      sessionPermissionPreset: null,
+      sessionPermissionMode: null,
+      permissionWarning: null,
+      remote: false,
+      cliVersion: null,
+      canFork: false,
+      privateOverrides: candidate.privateOverrides === true,
+      launchWorktree: false,
+      ...(candidate.launchWorktreePath ? { launchWorktreePath: candidate.launchWorktreePath } : {}),
+      autoTitle: false,
+    })
+    profilesWithSessionTabs.add(profile.id)
+    return id
+  }
   const sessionPermissionPreset = candidate.sideChat ? 'read-only' : candidate.sessionPermissionPreset ?? profile.permissionPreset
   tabsState = addDormantTab(tabsState, {
     id,
@@ -4583,6 +4833,7 @@ async function startDesktopControl(): Promise<void> {
       if (!desktopConfig.desktopControl) return 'Allow desktop control in Settings first.'
       if (tab.remote) return 'A remote session runs on another computer, so it can’t control this one.'
       if (tab.sideChat) return 'Side chats can’t use desktop control.'
+      if (tab.cli) return `Desktop control works with Copilot sessions, not ${sessionCliLabel(tab.cli)}.`
       if (!desktopControlTabs.has(tabId)) return 'This session started before desktop control was allowed, or it is read-only. Restart it (with shell access) to use desktop control.'
       return null
     },
@@ -4711,6 +4962,10 @@ ipcMain.handle('desktop:create-tab', (event, resumeMode: unknown, profileId: unk
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
   return createSessionTab(withSessionChoices(profile, choices), override, null, [], null, sessionTitle, dialogChoices(choices))
+})
+ipcMain.handle('desktop:list-session-clis', (event) => {
+  assertTrustedIpcSender(event)
+  return listSessionClis()
 })
 ipcMain.handle('desktop:list-session-worktrees', async (event, profileId: unknown) => {
   assertTrustedIpcSender(event)
@@ -4911,6 +5166,7 @@ ipcMain.handle('desktop:meeting-action', async (event, meetingId: unknown, actio
     if (!isSessionTabId(tabId)) throw new Error('Invalid session')
     const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
     if (!tab || tab.remote) throw new Error('Only a local session can join a meeting')
+    if (tab.cli) throw new Error(`${sessionCliLabel(tab.cli)} joins as an outside agent: ask it to join the meeting by its id.`)
     // Nothing can be typed into a session without a running CLI: it would sit in the round as a reviewer that never answers.
     if (!managedTabs.has(tabId) || (tab.status !== 'running' && tab.status !== 'approval-needed')) {
       throw new Error(`"${tab.title}" is not running. Resume it, then add it to the meeting.`)
