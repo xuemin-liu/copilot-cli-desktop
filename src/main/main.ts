@@ -875,7 +875,7 @@ function taskContext(tab:DesktopSessionTab):import('./workflow-types.js').TaskCo
 }
 function linkTaskContext(tabId:string,extra:import('./workflow-types.js').TaskContext={}):void {
   const tab=tabsState.tabs.find(tab=>tab.id===tabId)
-  if(!tab?.lastSessionId||!workflowStore)return
+  if(!tab?.lastSessionId||tab.cli||!workflowStore)return
   try{workflowStore.link(tab.lastSessionId,{...taskContext(tab),...extra})}catch{workflowError='Task context could not be saved. Your terminal session remains usable.'}
 }
 const workflowResources=new WorkflowResources(async path=>{
@@ -2468,7 +2468,7 @@ function sessionTaskAvailability(tabId:string,needsWrite=true):SessionTaskSend {
   const tab=tabsState.tabs.find(t=>t.id===tabId),session=managedTabs.get(tabId)?.session,draft=promptDrafts.get(tabId)
   if(!tab||!session||!draft)return {result:'refused',message:'This session is not running. Start or resume it first.'}
   return sessionTaskDecision({status:tab.status,activity:session.activity,promptVisible:session.recentOutputText.includes('open sidebar'),preset:tab.sessionPermissionPreset,
-    sideChat:tab.sideChat===true,remote:tab.remote,draft:!draft.empty,recentInput:!draft.quiet(),picker:draft.beforeFirstEnter,dialog:sessionDialogMayBeOpen(tabId),typing:heldInput.has(tabId),bracketedPaste:session.bracketedPaste},needsWrite)
+    sideChat:tab.sideChat===true,remote:tab.remote,cli:tab.cli,draft:!draft.empty,recentInput:!draft.quiet(),picker:draft.beforeFirstEnter,dialog:sessionDialogMayBeOpen(tabId),typing:heldInput.has(tabId),bracketedPaste:session.bracketedPaste},needsWrite)
 }
 function sendSessionTask(tabId: string, text: string, needsWrite = true, hooks?: {beforePaste():boolean;beforeEnter():boolean;aborted():void;maximumChars?:number}): SessionTaskSend {
   if(!hooks&&(automaticTurns.has(tabId)||meetingJournalTurns.has(tabId)))return {result:'busy',message:'An automatic task turn is still running.'}
@@ -5075,6 +5075,7 @@ ipcMain.handle('desktop:task-create', (event,tabId:unknown,title:unknown,replace
   if(typeof tabId!=='string'||typeof title!=='string'||title.length>120||typeof replace!=='boolean')throw new Error('Invalid task choice')
   const tab=tabsState.tabs.find(tab=>tab.id===tabId),store=workflows()
   if(!tab?.lastSessionId||!store)throw new Error('Open a known session before tracking it')
+  if(tab.cli)throw new Error(`Tasks track Copilot sessions; this one runs ${sessionCliLabel(tab.cli)}.`)
   const recipient=managedTabs.get(tabId)?.session
   const verifiedIdle=recipient?.sessionBindingReady&&recipient.bindingDiagnostic.kind==='bound'&&recipient.bindingDiagnostic.sessionId===tab.lastSessionId&&recipient.lastSessionId===tab.lastSessionId&&recipient.activity==='idle'
   // Adoption is bookkeeping. Replacement additionally requires proof that no old worker/input is in flight.

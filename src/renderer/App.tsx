@@ -347,7 +347,7 @@ export function App(): JSX.Element {
   const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'dormant' && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
     ? {
         id: activeTab.id, title: activeTab.title, cwd: activeTab.sessionCwd ?? activeProfile?.path ?? null,
-        taskBlocker: activeTab.cli ? `Tasks go to Copilot sessions; this one runs ${sessionCliLabel(activeTab.cli)}.` : sessionTaskBlocker({ status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
+        taskBlocker: sessionTaskBlocker({ cli: activeTab.cli, status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
       }
     : null
 

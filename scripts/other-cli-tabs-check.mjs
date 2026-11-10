@@ -223,6 +223,19 @@ if (!process.versions.electron) {
     claude = await tabWhere(tab => tab.id === claude.id && tab.title === 'Review with Claude', 'the Claude Code tab is renamed')
     assert.equal(claude.renamePending, undefined)
 
+    // Tasks track Copilot sessions: the Tasks list offers only the Copilot tab, and main refuses the others outright.
+    await click('.sidebar details summary, [aria-label*="Tasks"]').catch(() => {})
+    const refusals = []
+    for (const tab of [claude, codex]) {
+      refusals.push(await ui(`window.copilotDesktop.createTask(${JSON.stringify(tab.id)}, 'Track me', false).then(() => 'created', error => String(error.message ?? error))`))
+    }
+    assert.match(refusals[0], /Tasks track Copilot sessions; this one runs Claude Code/)
+    assert.match(refusals[1], /Tasks track Copilot sessions; this one runs Codex CLI/)
+    assert.deepEqual((await ui('window.copilotDesktop.getState()')).workflowTasks ?? [], [], 'no task record was made for another CLI\'s conversation')
+    const offeredSessions = await ui(`[...document.querySelectorAll('select')].filter(select => select.closest('form')?.innerText.includes('Track')).flatMap(select => [...select.options].map(option => option.innerText))`)
+    assert.ok(!offeredSessions.some(name => /Claude|Codex/.test(name)), `the Tasks session list leaves other CLIs out: ${JSON.stringify(offeredSessions)}`)
+    results.tasksRefused = refusals
+
     // Restart, Claude Code session never stored: it starts fresh under the same id rather than resuming nothing.
     const firstPid = claude.processId
     await ui(`window.copilotDesktop.restartTab(${JSON.stringify(claude.id)})`)

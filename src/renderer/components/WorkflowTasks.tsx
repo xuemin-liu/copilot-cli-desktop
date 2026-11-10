@@ -10,7 +10,8 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
   const [failure, setFailure] = useState<string | null>(null)
   const [historyLimit, setHistoryLimit] = useState(50)
   const [sessionChoice,setSessionChoice]=useState(''),[title,setTitle]=useState(''),[pending,setPending]=useState(false)
-  const known=tabs.filter(tab=>tab.lastSessionId)
+  // Task records follow Copilot sessions: another CLI's conversation is not in Copilot's store, so it is never offered.
+  const known=tabs.filter(tab=>tab.lastSessionId&&!tab.cli)
   const selected=known.find(tab=>tab.id===sessionChoice)??known[0]
   if (!tasks.length && !error && !known.length) return null
   const finish = (id: string, action: TaskAction): void => {

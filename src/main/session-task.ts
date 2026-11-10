@@ -1,6 +1,7 @@
 import type { PermissionPreset } from './permission-presets.js'
 import type { SessionActivity } from './session-activity.js'
 import type { SessionLifecycleStatus } from './types.js'
+import { sessionCliLabel, type OtherCli } from './session-cli.js'
 
 /**
  * A task the desktop composed (the Git panel's "Resolve with Copilot") is typed into the session and sent only when that
@@ -13,6 +14,8 @@ import type { SessionLifecycleStatus } from './types.js'
 export type SessionTaskSend = { result: 'sent' } | { result: 'busy'; message: string } | { result: 'refused'; message: string }
 
 export interface SessionTaskState {
+  /** Set when the tab runs another CLI: it never takes a task. */
+  cli?: OtherCli | undefined
   status: SessionLifecycleStatus
   activity: SessionActivity | null
   /** Before any turn there is no activity yet; the prompt's footer is on screen. */
@@ -47,7 +50,9 @@ export function isTerminalReply(data: string): boolean {
 /** Why the session can never take a task that edits files and runs Git, or null when it can. The renderer shows it on the
  * button; main checks it again before typing anything. A task that only asks for an answer (a meeting's review round) passes
  * `needsWrite: false`, so read-only sessions and side chats can take it. */
-export function sessionTaskBlocker(session: Pick<SessionTaskState, 'status' | 'preset' | 'sideChat' | 'remote'>, needsWrite = true): string | null {
+export function sessionTaskBlocker(session: Pick<SessionTaskState, 'status' | 'preset' | 'sideChat' | 'remote' | 'cli'>, needsWrite = true): string | null {
+  // Tasks are typed into Copilot's prompt box and followed in its event log; another CLI's tab has neither.
+  if (session.cli) return `Tasks go to Copilot sessions; this one runs ${sessionCliLabel(session.cli)}.`
   if (session.remote) return 'This session runs on another machine, so it cannot work in this folder.'
   if (needsWrite && session.sideChat) return 'A side chat cannot edit files or run Git. Use its main session.'
   if (needsWrite && session.preset === 'read-only') return 'This session is read-only, so it cannot edit files or run Git. Start a session that can.'
