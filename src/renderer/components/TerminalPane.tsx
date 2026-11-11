@@ -46,6 +46,13 @@ function terminalHasText(terminal: Terminal): boolean {
 export function TerminalPane({ tabId, active, focused = active, sessionProcessId, stopped = false, onHasTextChange }: TerminalPaneProps): JSX.Element {
   const onHasTextChangeRef = useRef(onHasTextChange)
   onHasTextChangeRef.current = onHasTextChange
+  // A stopped session cannot redraw its screen, and xterm drops the rows that no longer fit when it shrinks. So while
+  // a stopped terminal holds text it keeps the size it had; what does not fit under the notice scrolls instead.
+  const hasTextRef = useRef(false)
+  const stoppedRef = useRef(stopped)
+  stoppedRef.current = stopped
+  const refitRef = useRef<(() => void) | null>(null)
+  const wasStoppedRef = useRef(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -82,6 +89,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       const next = terminalHasText(terminal)
       if (next === hasText) return
       hasText = next
+      hasTextRef.current = next
       onHasTextChangeRef.current?.(next)
     }
     const writeParsedDisposable = terminal.onWriteParsed(reportHasText)
@@ -360,10 +368,12 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         // display:none panes have no usable geometry. Preserve their last
         // viewport instead of sending hidden/placeholder sizes to Copilot.
         if (container.clientWidth === 0 || container.clientHeight === 0) return
+        if (stoppedRef.current && hasTextRef.current) return
         fitAddon.fit()
         void window.copilotDesktop.resizeTab(tabId, terminal.cols, terminal.rows)
       })
     }
+    refitRef.current = fitTerminal
     const resizeObserver = new ResizeObserver(fitTerminal)
     resizeObserver.observe(container)
 
@@ -386,6 +396,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       linkDisposable.dispose()
       writeParsedDisposable.dispose()
       if (hasText) onHasTextChangeRef.current?.(false)
+      hasTextRef.current = false
+      refitRef.current = null
       osc52Disposable.dispose()
       cursorHomeDisposable.dispose()
       eraseLineDisposable.dispose()
@@ -413,10 +425,28 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
 
   useEffect(() => {
     if (!active) return
-    fitRef.current?.fit()
+    if (!(stopped && hasTextRef.current)) fitRef.current?.fit()
     // A stopped session's notice holds the focus (its Resume button); the terminal takes it back once it runs.
     if (focused && !stopped) terminalRef.current?.focus()
   }, [active, focused, stopped])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    if (!stopped) {
+      if (!wasStoppedRef.current) return
+      // The session runs again: take the pane's real size, and tell the new process.
+      wasStoppedRef.current = false
+      container.scrollTop = 0
+      container.scrollLeft = 0
+      refitRef.current?.()
+      return
+    }
+    wasStoppedRef.current = true
+    // The end of the output, where a failing CLI says why, is what shows above the notice.
+    const frame = requestAnimationFrame(() => { container.scrollTop = container.scrollHeight })
+    return () => cancelAnimationFrame(frame)
+  }, [stopped, active])
 
   return <div className={`terminal-pane${active ? ' terminal-pane-active' : ''}`}>
     {active && linkNotice && <OperationError message={linkNotice.message} tone={linkNotice.tone} className="terminal-link-error"

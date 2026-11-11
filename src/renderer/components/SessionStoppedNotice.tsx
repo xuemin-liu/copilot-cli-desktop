@@ -50,10 +50,11 @@ export function SessionStoppedNotice({ tab, hasText, focused, onRestart, onShowL
     wasFocused.current = focused
     if (!focused || !action) return
     // Selecting the pane gives its button the focus, so Enter resumes. When the session stops while the pane is
-    // already selected, take the focus only from the pane itself: never from a field elsewhere the person types in.
+    // already selected, take the focus only from its own terminal: never from a field the person types in, such as
+    // the address bar of the pane's browser.
     const current = document.activeElement
-    const pane = rootRef.current?.closest('.session-pane, .session-window')
-    if (becameFocused || !current || current === document.body || pane?.contains(current)) buttonRef.current?.focus()
+    const terminal = rootRef.current?.closest('.session-terminal')
+    if (becameFocused || !current || current === document.body || terminal?.contains(current)) buttonRef.current?.focus()
   }, [focused, action])
   // A session that is starting says so only over an empty terminal; a bar would resize a restarting one twice.
   if (!content || (tab.status === 'starting' && hasText)) return null

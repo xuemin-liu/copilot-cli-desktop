@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const artifacts = resolve('test-results/stopped-notice')
+const ESC = String.fromCharCode(27)
+const CRLF = String.fromCharCode(13, 10)
 const delay = ms => new Promise(resolveWait => setTimeout(resolveWait, ms))
 
 if (!process.versions.electron) {
@@ -100,6 +102,13 @@ if (!process.versions.electron) {
       };
     })()`)
     const calls = () => ui('window.calls.splice(0)')
+    // The rows xterm holds for one tab, and how far its viewport is scrolled.
+    const screen = id => ui(`(() => {
+      const pane = document.querySelector('section[aria-label$=": ${id}"]');
+      const rows = Array.from(pane.querySelectorAll('.xterm-rows > div')).map(row => row.textContent.trim());
+      const viewport = pane.querySelector('.terminal-viewport');
+      return { rows, hidden: viewport.scrollHeight - viewport.clientHeight, scrolled: Math.round(viewport.scrollTop) };
+    })()`)
     const done = []
     try {
       window.show()
@@ -131,14 +140,20 @@ if (!process.versions.electron) {
       const fullHeight = one.terminal.height
       done.push('starting, then the terminal takes the keyboard')
 
-      // 3. It crashes while the person is in its terminal: a bar under the output, which stays whole.
+      // 3. It crashes while the person is in its terminal, with a full-screen CLI on the alternate screen: a bar under
+      // the terminal, which keeps every row. A stopped CLI cannot redraw rows that xterm dropped while shrinking.
+      const rowCount = (await screen('one')).rows.length
+      const fullScreen = Array.from({ length: rowCount }, (_, index) => 'ROW-' + (index + 1))
+      await ui(`window.pushOutput("one", ${JSON.stringify(ESC + "[?1049h" + ESC + "[H" + fullScreen.join(CRLF) + ESC + "[H")})`)
+      await until(async () => (await screen('one')).rows.at(-1) === fullScreen.at(-1), 'full alternate screen')
       await ui('window.setStatus("one", "crashed")')
       one = await until(async () => { const view = await pane('one'); return view.layout === 'bar' && view.focus.startsWith('notice') && view }, 'crashed bar')
       assert.equal(one.heading, 'This session stopped unexpectedly')
       assert.deepEqual(one.buttons, ['Restart session', 'Show log'])
       assert.equal(one.terminal.bottom, one.notice.top, 'the terminal ends where the bar begins, so no output is covered')
       assert.equal(one.terminal.height, fullHeight - one.notice.height)
-      assert.equal(await ui('document.querySelector(\'section[aria-label$=": one"] .xterm-rows\').textContent.includes("second line")'), true)
+      let stoppedScreen = await until(async () => { const view = await screen('one'); return view.hidden > 0 && view.scrolled === view.hidden && view }, 'the end of the screen shows above the bar')
+      assert.deepEqual(stoppedScreen.rows, fullScreen, 'the stopped terminal keeps every row of its last screen')
       await shot('03-crashed-with-output')
       await key('a')
       assert.deepEqual(await calls(), [], 'typing does not reach a stopped session')
@@ -149,18 +164,35 @@ if (!process.versions.electron) {
       await until(async () => (await pane('one')).heading === null, 'a restarting session with output shows no bar')
       await ui('window.setStatus("one", "crashed")')
       await until(async () => (await pane('one')).heading === 'This session stopped unexpectedly', 'failed start')
-      done.push('crashed bar under kept output, Show log, failed start')
+      assert.deepEqual((await screen('one')).rows, fullScreen, 'the screen is still whole after the bar went and came back')
+      done.push('crashed bar under a whole alternate screen, Show log, failed start')
 
-      // 4. A session that stops while the person types somewhere else does not take the keyboard from them.
+      // 4. A session that stops while the person types somewhere else does not take the keyboard from them: neither
+      // from a field of its own pane (the browser's address bar is one), nor from one outside it.
       await ui('window.setStatus("one", "running")')
       await until(async () => (await pane('one')).focus === 'terminal', 'running again')
+      stoppedScreen = await until(async () => { const view = await screen('one'); return view.hidden === 0 && view }, 'the running terminal fits its pane again')
+      assert.deepEqual(stoppedScreen.rows, fullScreen, 'no row was lost while the session was stopped')
+      await ui(`(() => {
+        const field = Object.assign(document.createElement('input'), { id: 'in-pane' });
+        document.querySelector('section[aria-label$=": one"] .session-pane-header').append(field);
+        field.focus();
+      })()`)
+      await ui('window.setStatus("one", "crashed")')
+      await until(async () => (await pane('one')).heading === 'This session stopped unexpectedly', 'crashed while typing in a pane field')
+      await delay(150)
+      assert.equal(await ui('document.activeElement.id'), 'in-pane', 'a field of the same pane keeps the keyboard')
+      await ui('document.getElementById("in-pane").remove()')
+      await ui('window.setStatus("one", "running")')
+      await ui(`document.querySelector('section[aria-label$=": one"] .xterm-helper-textarea').focus()`)
+      await until(async () => (await pane('one')).focus === 'terminal', 'running once more')
       await ui('document.getElementById("outside").focus()')
       await ui('window.setStatus("one", "completed")')
       one = await until(async () => { const view = await pane('one'); return view.heading === 'This session has ended' && view }, 'completed')
       assert.deepEqual(one.buttons, ['Restart session'])
       assert.equal(one.focus, 'elsewhere')
       assert.equal(await ui('document.activeElement.id'), 'outside')
-      done.push('no focus taken from another field')
+      done.push('no focus taken from a field inside or outside the pane')
 
       // 5. Selecting another not-running tab gives its button the keyboard.
       await ui('window.setFixture({ activeTabId: "two" })')

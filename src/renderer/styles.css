@@ -749,6 +749,8 @@ button:disabled {
 .session-stopped-bar .session-stopped-text { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-stopped-bar .session-stopped-actions { flex: none; margin-left: auto; }
 .session-terminal-with-bar > .terminal-pane { bottom: 44px; }
+/* The stopped terminal keeps its size, so its last screen stays whole; the rows the bar displaces scroll. */
+.session-terminal-with-bar .terminal-viewport { overflow: auto; }
 
 .dialog-backdrop {
   position: fixed;

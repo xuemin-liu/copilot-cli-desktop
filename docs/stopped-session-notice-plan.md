@@ -50,6 +50,11 @@ has not ended, so it gets the Starting row.
   "Has text" is read from the mounted xterm buffer (`TerminalPane` reports it), never inferred from the status or
   process id: an unloaded tab has no snapshot in the main process, and a freshly opened session window cannot
   rebuild the old screen.
+- **The stopped terminal keeps its size.** xterm drops the rows that no longer fit when it shrinks, and a stopped
+  CLI cannot redraw them. So while the bar shows, the terminal is not refitted: the rows the bar displaces scroll,
+  with the end of the output in view. It is fitted again, and the new process told its size, once the session runs.
+- **Focus moves to the button only from the session's own terminal** when a session stops, never from another field
+  of the pane such as the browser's address bar.
 - **An HTML layer, not text written into xterm**, so it never mixes with the session's output. The same keyed
   `TerminalPane` stays mounted underneath.
 - **One component**, `SessionStoppedNotice`, used by `SessionWorkspace.tsx` and `SessionWindow.tsx`. It takes
