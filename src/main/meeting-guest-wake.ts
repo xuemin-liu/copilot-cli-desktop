@@ -43,8 +43,8 @@ export function guestWakeCommand(url: string, windows = process.platform === 'wi
 }
 
 /** What the meeting tools ask of Claude Code, whose turn can otherwise end for good. */
-export function guestWakeRequest(command: string): string {
-  return `Keep a wake-up running, once: start this with the Bash tool in the background (run_in_background: true), and do not wait for it: ${command} . It uses no tokens, and exits only if you have a message and are not calling meeting_next; its exit wakes you even after your turn ended. When it exits, read what it printed and do that. If you cannot start it, go on without it.`
+export function guestWakeRequest(command: string, again = false): string {
+  return `${again ? 'Your wake-up command ended when it woke you, so start it again: keep one running. Start this' : 'Keep a wake-up running, once: start this'} with the Bash tool in the background (run_in_background: true), and do not wait for it: ${command} . It uses no tokens, and exits only if you have a message and are not calling meeting_next; its exit wakes you even after your turn ended. When it exits, read what it printed and do that. If you cannot start it, go on without it.`
 }
 
 export interface CodexQueueDeps {

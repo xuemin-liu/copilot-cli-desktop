@@ -2866,7 +2866,8 @@ const guestMailbox = new GuestMailbox(realMeetingTimers, () => {
   guestSeatsWrite = guestSeatsWrite.then(() => writeFileAtomic(join(guestRoot(), GUEST_SEATS_FILE), text))
     .catch((error) => writeAppLog(`Could not save meeting guests: ${String(error)}`).catch(() => {}))
   broadcastState()
-}, (seat, delivery) => guestDeliveryText(seat, delivery, meetingHub.folderOf(delivery.meetingId), guestRoot()))
+}, (seat, delivery) => guestDeliveryText(seat, delivery, meetingHub.folderOf(delivery.meetingId), guestRoot()),
+  (seatId, delivery) => !meetingHub.awaits(seatId, delivery))
 
 /** A meeting message for a guest: show commands in place of meeting files, and the file to write its reply to. */
 function deliverToGuest(seatId: string, delivery: MeetingDelivery): void {

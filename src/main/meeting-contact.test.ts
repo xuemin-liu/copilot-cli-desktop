@@ -23,6 +23,8 @@ test('a guest is quiet only with no request for a while and none open; it has st
   assert.equal(guestQuiet(contact({ lastSeenAt: null }), NOW), false, 'invited, not connected yet')
   assert.equal(guestStalled(contact(), NOW), true)
   assert.equal(guestStalled(contact({ holding: true }), NOW), false, 'it may be reading code')
+  assert.equal(guestStalled(contact({ holding: true, wokenAt: NOW - GUEST_QUIET_MS - 1 }), NOW), true, 'woken, and nothing came back: it stopped')
+  assert.equal(guestStalled(contact({ holding: true, wokenAt: NOW - 1 }), NOW), false, 'a wake-up gets time to work')
   assert.equal(guestQuiet(contact({ holding: true }), NOW), true, 'the bar still shows the last contact')
   assert.equal(guestStalled(contact(), NOW, NOW - 1), false, 'the desktop just started: agents get time to reconnect')
 })

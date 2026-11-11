@@ -537,6 +537,12 @@ export class MeetingHub {
     })
   }
 
+  /** The meeting still waits for this party's answer to this message. False once its round timed out or moved on, or it left. */
+  awaits(tabId: string, delivery: MeetingDelivery): boolean {
+    const meeting = this.meetings.get(delivery.meetingId)
+    return meeting !== undefined && meeting.stage !== 'closed' && this.owes(meeting, tabId, delivery)
+  }
+
   /** What this message asked of the session is still wanted now: the host's answer to its round, or a reviewer's reply to it. */
   private owes(meeting: Meeting, tabId: string, { round, kind }: { round: number; kind: MeetingDeliveryKind }): boolean {
     if (round !== meeting.round) return false
