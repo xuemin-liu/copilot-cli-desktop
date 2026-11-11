@@ -120,8 +120,10 @@ export class GuestMailbox {
   private readonly waiters = new Map<string, Waiter>()
   /** Background commands that end when the seat is woken. `null` ends one because the desktop is going away. */
   private readonly watchers = new Map<string, Set<(end: GuestWatchEnd | null) => void>>()
-  /** Seats woken this quiet spell, and when: one wake-up per spell. */
+  /** Seats woken this quiet spell, and when: one wake-up per spell, and one more for each message that arrives in it. */
   private readonly woken = new Map<string, number>()
+  /** Seats whose background command a wake-up ended: the agent has to start it again, however often it was asked before. */
+  private readonly spent = new Set<string>()
 
   /**
    * `format` words a hub message for a seat as `next` hands it out, for the channel the seat uses then. Messages are kept as
@@ -132,6 +134,8 @@ export class GuestMailbox {
     private readonly timers: MeetingTimers,
     private readonly changed: () => void = () => {},
     private readonly format: (seat: GuestSeat, delivery: MeetingDelivery) => string = (_seat, delivery) => delivery.text,
+    /** A reviewer's message that its meeting no longer waits for an answer to (its round timed out, or moved on). */
+    private readonly stale: (seatId: string, delivery: MeetingDelivery) => boolean = () => false,
   ) {}
 
   /** A reviewer seat for a meeting, or (`kind: 'host'`, no meeting id) a seat whose agent may start one. */
@@ -215,6 +219,7 @@ export class GuestMailbox {
     if (!seat || seat.closed !== null) return Promise.resolve('closed')
     if (signal?.aborted) return Promise.resolve(null)
     this.woken.delete(seatId)
+    this.spent.delete(seatId)
     return new Promise((resolveWatch) => {
       const watchers = this.watchers.get(seatId) ?? new Set()
       this.watchers.set(seatId, watchers)
@@ -236,6 +241,17 @@ export class GuestMailbox {
     return this.watchers.has(seatId)
   }
 
+  /** A wake-up ended this seat's background command, and it has not started one since. */
+  watcherSpent(seatId: string): boolean {
+    return this.spent.has(seatId) && !this.watching(seatId)
+  }
+
+  /** The message handed out is one a reviewer's meeting has stopped waiting for, and a newer one is queued behind it. */
+  private passedOver(seatId: string, queue: Queue | undefined): boolean {
+    const given = queue?.given
+    return Boolean(given && queue!.items.length && (given.kind === 'post' || given.kind === 'vote' || given.kind === 'discussion') && this.stale(seatId, given))
+  }
+
   private endWatchers(seatId: string, end: GuestWatchEnd | null): void {
     for (const watcher of [...this.watchers.get(seatId) ?? []]) watcher(end)
   }
@@ -252,7 +268,8 @@ export class GuestMailbox {
       const quiet = now - Math.max(seat.lastSeenAt ?? 0, notBefore)
       if (seat.closed !== null) return seat.farewell !== null && quiet > GUEST_WAKE_GRACE_MS
       const queue = this.queues.get(seat.id)
-      if (queue?.given) return quiet > GUEST_QUIET_MS
+      // One it may be working on gets longer. A message its meeting gave up on is not that: the newer one behind it is owed.
+      if (queue?.given && !this.passedOver(seat.id, queue)) return quiet > GUEST_QUIET_MS
       return Boolean(queue?.items.length) && quiet > GUEST_WAKE_GRACE_MS
     })
   }
@@ -260,6 +277,7 @@ export class GuestMailbox {
   /** The seat is being woken: its background commands end, which is what wakes an agent that keeps one. */
   woke(seatId: string): void {
     this.woken.set(seatId, this.timers.now())
+    if (this.watching(seatId)) this.spent.add(seatId)
     this.endWatchers(seatId, 'wake')
   }
 
@@ -273,6 +291,9 @@ export class GuestMailbox {
     if (!seat || seat.closed !== null) return
     const queue = this.queue(seatId)
     queue.items.push(delivery)
+    // A new message is worth one more wake-up, where one can still be sent: a Codex thread takes any number, while an agent
+    // woken through its background command has none left until it starts it again.
+    if (seat.codexThread !== null) this.woken.delete(seatId)
     this.wake(seatId)
   }
 
@@ -284,10 +305,15 @@ export class GuestMailbox {
     }
   }
 
-  /** The message to answer now: the one already handed out, or the next one. */
+  /**
+   * The message to answer now: the one already handed out, or the next one. One its meeting stopped waiting for gives way to a
+   * newer one, or the agent would review a round that is over before it sees the one being collected. Only here, when it asks:
+   * a reply it sends without asking again still answers the message it was handed, and counts as a late one.
+   */
   take(seatId: string): MeetingDelivery | null {
     const queue = this.queues.get(seatId)
     if (!queue) return null
+    if (this.passedOver(seatId, queue)) queue.given = null
     queue.given ??= queue.items.shift() ?? null
     return queue.given
   }
@@ -383,7 +409,7 @@ export class GuestMailbox {
       if (seat.closed === null && !seat.joined && now - seat.createdAt > GUEST_UNUSED_SEAT_MS) this.close(seat.id, 'The invitation expired. Ask the person for a new one.')
       if (seat.closedAt !== null && now - seat.closedAt > GUEST_CLOSED_SEAT_MS) removed.push(seat)
     }
-    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel(); this.woken.delete(seat.id) }
+    for (const seat of removed) { this.seats.delete(seat.id); this.waiters.get(seat.id)?.cancel(); this.woken.delete(seat.id); this.spent.delete(seat.id) }
     if (removed.length) this.changed()
     return removed
   }

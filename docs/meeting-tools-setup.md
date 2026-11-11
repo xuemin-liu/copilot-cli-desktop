@@ -151,7 +151,9 @@ not post it anywhere public.
 
 Agents get meeting messages by calling `meeting_next`, so an agent that ended its turn would miss them. The desktop wakes it
 when it is owed a message, is not asking, and has been quiet for about a minute (three minutes if it was handed a message and
-may be working on it). It wakes a seat once per quiet spell, so an agent that keeps polling is never disturbed.
+may be working on it). It wakes a seat once per quiet spell, so an agent that keeps polling is never disturbed. A Codex
+thread is woken once more for each new message that arrives in that spell; Claude Code has to start its command again first.
+An agent that comes back after a round ended without it gets the round being collected, not the one it missed.
 
 | Agent | How it is woken | What it needs |
 | --- | --- | --- |
@@ -200,7 +202,7 @@ Claude Code must run the helper from its Bash tool; its PowerShell tool refuses 
 | The tools still say an invitation is required after updating | Reconnect the meeting MCP server or start a new agent session to refresh its cached tool descriptions. Check that the running desktop is 0.1.78 or later. |
 | "This invitation is not known to the desktop" | The invitation expired (15 minutes unused) or its meeting closed. Make a new one, or have the agent join by meeting id. |
 | "Call meeting_join first" | The agent's MCP session started over (the desktop restarted). It calls `meeting_join` again with its seat key (or invitation) as the invitation, and gets its seat back, as host too. With only the meeting id it gets a new seat. |
-| A notification that an agent stopped checking in, or **no contact since** on the meeting bar | The agent ended its turn and could not be woken, or is stuck on something like a permission prompt. Tell it to call `meeting_next` until the meeting is closed. **Last contact …, message delivered** means it was handed a message and has not answered: it may still be working. |
+| A notification that an agent stopped checking in, or **no contact since** on the meeting bar | The agent ended its turn and could not be woken, or is stuck on something like a permission prompt. Tell it to call `meeting_next` until the meeting is closed. **Last contact …, message delivered** means it was handed a message and has not answered: it may still be working. Once a wake-up brought no answer from it either, it counts as stopped and you are notified. |
 | "Too many wrong meeting ids in the last minute" | Five joins in the last minute named a meeting that is not open. Check the id on the meeting bar and try again a minute later. |
 | "Call meeting_join (or meeting_start, as host) first" | The agent's MCP session started over (the desktop restarted). A reviewer calls `meeting_join` again with the same invitation. A host calls `meeting_start` again with its invitation: from 0.1.63 that answers "Rejoined meeting K7QF as host"; 0.1.62 answers "This invitation already started meeting K7QF", which is expected, since the session is bound again all the same: carry on with `meeting_next`. |
 | The invitation has no meeting-tools section | The desktop is not serving the tools (port taken). Use the helper, or free the port and restart the desktop. |

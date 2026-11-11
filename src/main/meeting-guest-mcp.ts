@@ -233,7 +233,8 @@ function withWakeRequest(sessions: GuestMcpSessions, session: Session, mailbox: 
   if (mailbox.watching(seat.id)) { session.wakeAsks = 0; return result }
   if (session.wakeAsks >= MAX_WAKE_ASKS) return result
   session.wakeAsks++
-  return { ...result, content: [...result.content, { type: 'text', text: guestWakeRequest(guestWakeCommand(sessions.wakeUrl(guestWakeKey(seat)))) }] }
+  // After a wake-up ended its command the request says so: "once" alone reads as done to an agent that started one before.
+  return { ...result, content: [...result.content, { type: 'text', text: guestWakeRequest(guestWakeCommand(sessions.wakeUrl(guestWakeKey(seat))), mailbox.watcherSpent(seat.id)) }] }
 }
 
 /** The name a seat gets: the one the agent passed, else its client's ("claude-code" becomes "Claude Code"). */

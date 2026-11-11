@@ -22,9 +22,12 @@ export function guestQuiet(contact: GuestContact, now: number, notBefore = 0): b
   return contact.lastSeenAt !== null && !contact.waiting && now - Math.max(contact.lastSeenAt, contact.wokenAt ?? 0, notBefore) > GUEST_QUIET_MS
 }
 
-/** It should be asking for its next message and is not. One holding a message is left to its round's deadline, or its answer. */
+/**
+ * It should be asking for its next message and is not. One holding a message is left to its round's deadline, or its answer,
+ * unless it was woken and that brought nothing: it is not working on the message then, it has stopped.
+ */
 export function guestStalled(contact: GuestContact, now: number, notBefore = 0): boolean {
-  return !contact.holding && guestQuiet(contact, now, notBefore)
+  return (!contact.holding || (contact.wokenAt ?? null) !== null) && guestQuiet(contact, now, notBefore)
 }
 
 /** What the bar shows of each seat, to tell when it needs telling: any of it can change with no state update of its own. */
