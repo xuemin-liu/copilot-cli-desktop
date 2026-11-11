@@ -3,7 +3,7 @@ import type { JSX } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionCliLabel } from '../../main/session-cli.js'
-import { TerminalPane } from './TerminalPane.js'
+import { SessionTerminal } from './SessionTerminal.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
 import { GitBranchIcon, SideChatIcon } from './Icons.js'
 import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
@@ -17,6 +17,7 @@ interface SessionWorkspaceProps {
   onFork: (tab: DesktopSessionTab) => void
   onClose: (tabId: string) => void
   onRestart: (tabId: string) => void
+  onShowLog: (tabId: string) => void
   onCreate: () => void
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
@@ -38,7 +39,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
@@ -109,19 +110,14 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
             )}</>}>
-            <div className="session-terminal">
-              {poppedOutTabIds.includes(tab.id) ? (
+            {/* A popped-out session shows its terminal and its stopped notice in its own window only. */}
+            {poppedOutTabIds.includes(tab.id) ? (
+              <div className="session-terminal">
                 <div className="empty-state"><p>This session is open in another window.</p>
                   <button type="button" onClick={() => onActivate(tab.id)}>Show session window</button>
                 </div>
-              ) : <TerminalPane tabId={tab.id} active={visible} focused={focused} sessionProcessId={tab.processId} />}
-              {tab.status === 'crashed' && !tab.remote && (
-                <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Restart this session</button>
-              )}
-              {tab.status === 'dormant' && !tab.remote && !poppedOutTabIds.includes(tab.id) && (
-                <button type="button" className="restart-button" onClick={() => onRestart(tab.id)}>Resume this session</button>
-              )}
-            </div>
+              </div>
+            ) : <SessionTerminal tab={tab} active={visible} focused={focused} onRestart={() => onRestart(tab.id)} onShowLog={() => onShowLog(tab.id)} />}
             </BrowserWorkspace>
           </section>
         )

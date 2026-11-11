@@ -1,6 +1,7 @@
 export const checkModes = [
   { flag: '--native-paste', env: 'DESKTOP_UI_PASTE_CHECK', module: './native-paste-check.mjs', run: 'runNativePasteCheck', artifacts: 'native-paste', label: 'native image/text paste' },
   { flag: '--popout', env: 'DESKTOP_UI_POPOUT_CHECK', module: './session-popout-check.mjs', run: 'runPopoutCheck', artifacts: 'session-popout', label: 'session pop-out' },
+  { flag: '--stopped-notice', env: 'DESKTOP_UI_STOPPED_NOTICE_CHECK', module: './session-stopped-notice-check.mjs', run: 'runStoppedNoticeCheck', artifacts: 'session-stopped-notice', label: 'stopped session notice' },
   { flag: '--browser-popout', env: 'DESKTOP_UI_BROWSER_POPOUT_CHECK', module: './browser-popout-check.mjs', run: 'runBrowserPopoutCheck', artifacts: 'browser-popout', label: 'browser pop-out' },
   { flag: '--browser-certificate', env: 'DESKTOP_UI_BROWSER_CERTIFICATE_CHECK', module: './browser-certificate-app-check.mjs', run: 'runBrowserCertificateCheck', artifacts: 'browser-certificate-app', label: 'browser certificate warning' },
   { flag: '--activity', env: 'DESKTOP_UI_ACTIVITY_CHECK', module: './session-activity-check.mjs', run: 'runActivityCheck', artifacts: 'session-activity', label: 'session activity' },

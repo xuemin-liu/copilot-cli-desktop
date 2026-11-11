@@ -18,6 +18,7 @@ if (!process.versions.electron) {
       import { createRoot } from 'react-dom/client';
       import { StrictMode, useState } from 'react';
       import { TerminalPane } from './src/renderer/components/TerminalPane';
+      import { SessionStoppedNotice } from './src/renderer/components/SessionStoppedNotice';
       import './src/renderer/styles.css';
       import '@xterm/xterm/css/xterm.css';
       window.unhandled = [];
@@ -25,9 +26,9 @@ if (!process.versions.electron) {
       function Fixture() {
         const [active, setActive] = useState(true);
         window.setActive = setActive;
-        return <div className="session-terminal" style={{ height: '100vh' }}>
+        return <div className="session-terminal session-terminal-with-bar" style={{ height: '100vh' }}>
           <TerminalPane tabId="tab-1" active={active} sessionProcessId={1} />
-          <button className="restart-button" onClick={() => { window.restarted = true; }}>Restart this session</button>
+          <SessionStoppedNotice tab={{ status: 'crashed', remote: false }} hasText focused={false} onRestart={() => { window.restarted = true; }} onShowLog={() => {}} />
         </div>;
       }
       createRoot(document.getElementById('root')).render(<StrictMode><Fixture /></StrictMode>);
@@ -126,7 +127,7 @@ if (!process.versions.electron) {
         const element = document.querySelector('.terminal-link-error');
         const rect = element.getBoundingClientRect();
         const terminal = document.querySelector('.terminal-viewport').getBoundingClientRect();
-        const restart = document.querySelector('.restart-button');
+        const restart = document.querySelector('.session-stopped-actions .primary-button');
         const button = restart.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= terminal.top && terminal.height > 0
           && element.contains(document.elementFromPoint(rect.x + 5, rect.y + 5))
