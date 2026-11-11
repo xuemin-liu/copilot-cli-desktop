@@ -2,17 +2,18 @@ import { useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopControlTabView, DesktopSessionTab } from '../../main/types.js'
 import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
-import { TerminalPane } from './TerminalPane.js'
+import { SessionTerminal } from './SessionTerminal.js'
 import { OperationError } from './OperationError.js'
 import { BrowserWorkspace } from './BrowserWorkspace.js'
 
-export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, onRestart, onDismissError, desktopControl }: {
+export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, onRestart, onShowLog, onDismissError, desktopControl }: {
   tab: DesktopSessionTab
   browserPoppedOut?: boolean
   desktopControl?: { allowed: boolean; ready: boolean; view: DesktopControlTabView | undefined }
   error: string | null
   onReturn: () => void
   onRestart: () => void
+  onShowLog: () => void
   onDismissError?: () => void
 }): JSX.Element {
   const [desktopPanel, setDesktopPanel] = useState(false)
@@ -31,9 +32,7 @@ export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, 
     </header>
     {showDesktop && desktopPanel && <DesktopControlPanel tab={tab} allowed={desktopControl!.allowed} ready={desktopControl!.ready} view={desktopControl!.view} />}</>}>
     {error && <OperationError message={error} {...(onDismissError ? { onDismiss: onDismissError } : {})} />}
-    <div className="session-terminal"><TerminalPane tabId={tab.id} active sessionProcessId={tab.processId} />
-      {tab.status === 'dormant' && !tab.remote && <button type="button" className="restart-button" onClick={onRestart}>Resume this session</button>}
-    </div>
+    <SessionTerminal tab={tab} active onRestart={onRestart} onShowLog={onShowLog} />
     </BrowserWorkspace>
   </main>
 }

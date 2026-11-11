@@ -721,11 +721,34 @@ button:disabled {
   background: #4b7cff;
 }
 
-.restart-button {
-  position: absolute;
-  bottom: 16px;
-  right: 16px;
+/* Explains a terminal whose session has no process. Over an empty terminal it is a centered card; when the terminal
+   still shows text it is a bar under it, and the terminal gives up that height so no output is covered. */
+.session-stopped-notice { position: absolute; z-index: 4; color: #c9d1dd; }
+.session-stopped-overlay { inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; pointer-events: none; }
+.session-stopped-overlay .session-stopped-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 420px;
+  padding: 22px 28px;
+  border: 1px solid #2b3144;
+  border-radius: 12px;
+  background: #121829;
+  text-align: center;
+  pointer-events: auto;
 }
+.session-stopped-heading { margin: 0; color: #eef2f8; font-size: 15px; font-weight: 600; }
+.session-stopped-text { margin: 0; color: #929baa; font-size: 13px; }
+.session-stopped-actions { display: flex; gap: 8px; }
+.session-stopped-overlay .session-stopped-actions { margin-top: 8px; }
+.session-stopped-actions button { min-height: 30px; padding: 0 14px; font-size: 13px; white-space: nowrap; }
+.session-stopped-bar { left: 0; right: 0; bottom: 0; height: 44px; border-top: 1px solid #2b3144; background: #121829; }
+.session-stopped-bar .session-stopped-card { display: flex; align-items: center; gap: 10px; height: 100%; padding: 0 12px; }
+.session-stopped-bar .session-stopped-heading { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.session-stopped-bar .session-stopped-text { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-stopped-bar .session-stopped-actions { flex: none; margin-left: auto; }
+.session-terminal-with-bar > .terminal-pane { bottom: 44px; }
 
 .dialog-backdrop {
   position: fixed;

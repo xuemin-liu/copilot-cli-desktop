@@ -26,6 +26,7 @@
     "paste:check": "npm run build && node --test scripts/check-helpers.test.mjs && node scripts/terminal-paste-check.mjs && node scripts/electron-side-chat-check.mjs --native-paste",
     "clipboard:smoke": "npm run build && node scripts/electron-side-chat-check.mjs --clipboard-switch",
     "links:check": "node scripts/terminal-links-check.mjs",
+    "stopped-notice:check": "npm run build && node scripts/stopped-notice-check.mjs && node scripts/electron-side-chat-check.mjs --stopped-notice",
     "sidebar:check": "node scripts/sidebar-projects-check.mjs",
     "git:check": "node scripts/git-ipc-check.mjs",
     "git-panel:check": "node scripts/git-panel-check.mjs",

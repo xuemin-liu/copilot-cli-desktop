@@ -114,6 +114,9 @@ export function App(): JSX.Element {
   const newSessionCliMissing = sessionClis?.find((choice) => choice.cli === newSessionCli && choice.error !== null) ?? null
   const newSessionSharedOverrides = inputDialog?.kind === 'new-session'
     && (inputDialog.sharedOverrides ?? !state.newSessionPrivateOverrides)
+  const showLog = (tabId: string): void => {
+    void window.copilotDesktop.showSessionLog(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))
+  }
   const handleOperation = (operation: Promise<DesktopState>): void => {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
@@ -338,7 +341,8 @@ export function App(): JSX.Element {
       desktopControl={{ allowed: state.desktopControlAllowed === true, ready: (state.desktopControlReadyTabIds ?? []).includes(tab.id), view: state.desktopControl?.[tab.id] }}
       onDismissError={() => setOperationError(null)}
       onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
-      onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))} /> : <div className="loading-screen">Returning session…</div>
+      onRestart={() => handleOperation(window.copilotDesktop.restartTab(tab.id))}
+      onShowLog={() => showLog(tab.id)} /> : <div className="loading-screen">Returning session…</div>
   }
 
   // "Add to prompt" fills the active session's prompt box, unless that session lives in another window.
@@ -475,6 +479,7 @@ export function App(): JSX.Element {
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
+            onShowLog={(tabId) => showLog(tabId)}
             onCreate={() => openNewSession()}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
           </ProjectDock>

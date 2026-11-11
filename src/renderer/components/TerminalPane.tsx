@@ -27,9 +27,25 @@ export interface TerminalPaneProps {
   active: boolean
   focused?: boolean
   sessionProcessId: number | null
+  /** The session has no process (not running, crashed or ended): its notice owns the focus, not the terminal. */
+  stopped?: boolean
+  /** Told whether the terminal holds any text, so a stopped session's notice can leave old output in view. */
+  onHasTextChange?: (hasText: boolean) => void
 }
 
-export function TerminalPane({ tabId, active, focused = active, sessionProcessId }: TerminalPaneProps): JSX.Element {
+/** Whether anything is on screen or in the scrollback. Reads the buffer itself: a stopped session has no snapshot. */
+function terminalHasText(terminal: Terminal): boolean {
+  const buffer = terminal.buffer.active
+  if (buffer.baseY > 0) return true
+  for (let row = 0; row < terminal.rows; row += 1) {
+    if (buffer.getLine(row)?.translateToString(true).trim()) return true
+  }
+  return false
+}
+
+export function TerminalPane({ tabId, active, focused = active, sessionProcessId, stopped = false, onHasTextChange }: TerminalPaneProps): JSX.Element {
+  const onHasTextChangeRef = useRef(onHasTextChange)
+  onHasTextChangeRef.current = onHasTextChange
   const containerRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -60,6 +76,15 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     fitAddon.fit()
     terminalRef.current = terminal
     fitRef.current = fitAddon
+
+    let hasText = false
+    const reportHasText = (): void => {
+      const next = terminalHasText(terminal)
+      if (next === hasText) return
+      hasText = next
+      onHasTextChangeRef.current?.(next)
+    }
+    const writeParsedDisposable = terminal.onWriteParsed(reportHasText)
 
     const copyStatusElement = document.createElement('div')
     copyStatusElement.className = 'terminal-copy-status'
@@ -359,6 +384,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       container.removeEventListener('mouseup', handleMouseUp, true)
       container.removeEventListener('contextmenu', handleContextMenu, true)
       linkDisposable.dispose()
+      writeParsedDisposable.dispose()
+      if (hasText) onHasTextChangeRef.current?.(false)
       osc52Disposable.dispose()
       cursorHomeDisposable.dispose()
       eraseLineDisposable.dispose()
@@ -387,8 +414,9 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   useEffect(() => {
     if (!active) return
     fitRef.current?.fit()
-    if (focused) terminalRef.current?.focus()
-  }, [active, focused])
+    // A stopped session's notice holds the focus (its Resume button); the terminal takes it back once it runs.
+    if (focused && !stopped) terminalRef.current?.focus()
+  }, [active, focused, stopped])
 
   return <div className={`terminal-pane${active ? ' terminal-pane-active' : ''}`}>
     {active && linkNotice && <OperationError message={linkNotice.message} tone={linkNotice.tone} className="terminal-link-error"
