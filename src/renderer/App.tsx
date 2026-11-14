@@ -9,7 +9,7 @@ import { SessionWindow } from './components/SessionWindow.js'
 import { BrowserOnlyWindow } from './components/BrowserWorkspace.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { ToolPanelWorkspace } from './components/ToolPanelWorkspace.js'
-import type { ToolsAction, ToolsState } from '../main/tool-tabs.js'
+import { panelButtonLabel, type ToolsAction, type ToolsState } from '../main/tool-tabs.js'
 import { readToolDockPreferences } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
@@ -456,6 +456,11 @@ export function App(): JSX.Element {
           <ToolPanelWorkspace desktop={state} tools={tools} act={actOnTools}
             obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            toolsControl={<button type="button" className="session-tools-toggle" aria-label={panelButtonLabel(projectPanel)} aria-expanded={dockOpen}
+              onClick={() => {
+                if (!state.activeProfileId) return
+                actOnTools(state.activeProfileId, projectPanel?.tabs.length ? { type: 'visible', visible: !dockOpen } : { type: 'add', kind: 'new' })
+              }}>{dockOpen ? '▥' : '+'} {panelButtonLabel(projectPanel)}</button>}
             browserOpenId={null} onOpenBrowser={openBrowser}
             gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
             poppedOutTabIds={state.poppedOutTabIds ?? []}

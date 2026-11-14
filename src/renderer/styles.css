@@ -1637,8 +1637,7 @@ button:disabled {
 
 /* Optional tool tabs: the panel itself never reserves space while hidden. */
 .tool-panel-workspace { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; }
-.tool-panel-commandbar { display:flex; justify-content:flex-end; padding:4px 10px; border-bottom:1px solid #252a33; }
-.tool-panel-commandbar button { background:transparent; border:1px solid #364153; border-radius:5px; color:#c8d3e3; padding:4px 9px; }
+.session-tools-toggle { flex:none; white-space:nowrap; }
 .workspace-tools[hidden], .tool-browser-host[hidden], .tool-git-host[hidden] { display:none; }
 .tool-tab-strip { min-width:0; overflow-x:auto; scrollbar-width:thin; }
 .tool-tab { flex:0 0 auto; display:flex; align-items:center; border:1px solid transparent; border-radius:5px; max-width:220px; }
