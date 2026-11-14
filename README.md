@@ -194,18 +194,13 @@ runs for a new, a restarted and a resumed tab.
 
 ## Session windows
 
-The main window has three areas: projects and sessions on the left, the CLI in the center, and a resizable tools panel on
-the right. **Browser** and **Git** share that panel as tabs. Opening either tool selects its tab; **Ctrl+Shift+G** selects
-Git or collapses the panel when Git is already shown. The panel remembers its width, selected tool and open state.
-Switching tools or collapsing preserves browser pages and fields, and the current project's Git draft and diff selection.
-Changing projects still resets the Git panel's unsaved UI state.
+The main window has three areas: projects and sessions on the left, the CLI in the center, and an optional resizable tools panel on the right. **New tab** opens a launcher; choose **Browser** or **Git**. **+** adds another tab, including another independent browser page. Every tab has a close button; closing the last one removes the panel. **Hide tabs** returns the space to the CLI while preserving all tabs, and **Show tabs** restores them.
 
-Browser normally follows the main session. Its **Session** selector can choose the side chat without changing the browser
-whenever keyboard focus moves. Narrow windows show **Back to CLI** when tools take over; if two terminals cannot fit,
-use the main/side session buttons to choose the visible terminal. Both processes keep running. Hiding Browser stops
-Testing mode and element picking and leaves an explanation when you return; it does not close the pages or resume a test.
+Tabs belong to the project. Changing CLI focus does not change the selected browser or Git repository. Project switching retains browser pages, forms, and Git drafts. **Ctrl+Shift+G** opens/focuses Git or hides the panel when Git is already selected. Narrow windows use the same **Hide tabs** control to return to the CLI. Hiding a browser stops Testing mode and picking without closing its page.
 
-Run `pnpm tool-dock:check` for the isolated lifecycle and layout check.
+Browsers work without a CLI session. To let a running Copilot session use the browser helper, choose **Connect to session** in a Browser tab. Connections cover that project's pages, but each session selects its own page independently. Resume requires reconnecting. Closing a CLI or a browser tab keeps project logins; removing the workspace removes its separate profile at the next startup. Existing session browser profiles are not merged into project profiles; separate profiles require signing in again after this upgrade.
+
+Run `pnpm project-tools:check` for the native lifecycle and real-app layout checks.
 
 For the browser pane, native Local Overrides, authenticated ticket reading and CLI console/network commands,
 see [web app debugging](docs/browser-debug.md).

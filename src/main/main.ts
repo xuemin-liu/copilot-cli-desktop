@@ -1,3 +1,5 @@
+import { ProjectToolService } from './project-tools.js'
+import type { ToolsAction } from './tool-tabs.js'
 import { supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
@@ -261,6 +263,19 @@ const MAX_SESSION_TABS = 20
 const COPILOT_RESOLUTION_REFRESH_DELAYS_MS = [10_000, 60_000, 5 * 60_000] as const
 
 let mainWindow: BrowserWindow | null = null
+let projectToolService: ProjectToolService | null = null
+function projectTools(): ProjectToolService {
+  return projectToolService ??= new ProjectToolService({
+    userData: app.getPath('userData'), owner: () => mainWindow,
+    project: id => desktopConfig.profiles.find(profile => profile.id === id),
+    session: id => tabsState.tabs.find(tab => tab.id === id),
+    defaults: () => ({ shared: desktopConfig.browserProfile === 'shared', overrides: desktopConfig.browserOverrides }),
+    browserOptions: () => ({ history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(), reportError: logBrowserError,
+      onAppShortcut: name => { if (name === 'git-toggle') { toggleGitPanel(); return true } return false } }),
+    changed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop:tools-changed', projectToolService?.state()) },
+    error: error => logBrowserError(String(error)),
+  })
+}
 const sessionBrowsers = new Map<string, BrowserDebug>()
 const logBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
 // Shared by every session's browser and kept across launches, like one Chrome profile.
@@ -1802,6 +1817,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (status === 'approval-needed') promptDrafts.get(id)?.suppressContext()
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
+    if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) {
+      void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
+    }
     // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host). Not while the app quits:
     // its meetings are saved as they stand and go on after the next start.
     if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed') && !shuttingDown()) forgetMeetingSession(id)
@@ -1843,6 +1861,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
+    if (managedTabs.get(id)?.session === session) void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
     usageService?.noteSourceChanged()
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
@@ -2020,6 +2039,7 @@ async function startSessionTab(
     await queueTabTransition(id, async () => {
       if (shuttingDown()) throw new Error('The app is shutting down or updating')
       if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
+      await projectTools().startBridge(id, profile.id, browserSessionPaths(browserSessionRoot(), id).endpoint)
       await session.start()
       if (shuttingDown()) {
         await session.stop()
@@ -2028,6 +2048,7 @@ async function startSessionTab(
     })
     scheduleCopilotResolutionRefresh()
   } catch (error) {
+    await projectToolService?.stopBridge(id)
     if (managedTabs.get(id)?.session === session) {
       session.removeAllListeners()
       const wasActive = tabsState.activeTabId === id
@@ -2177,6 +2198,7 @@ async function startOtherCliTab(
       }
     })
   } catch (error) {
+    await projectToolService?.stopBridge(id)
     if (managedTabs.get(id)?.session === session) {
       session.removeAllListeners()
       const wasActive = tabsState.activeTabId === id
@@ -3285,6 +3307,7 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
     forgetMeetingSession(tabId)
     // Until the tab is marked as not running, a browser request finds it closing rather than creating a new browser.
+    await projectToolService?.stopBridge(tabId)
     closingBrowserTabs.add(tabId)
     const browser = sessionBrowsers.get(tabId)
     sessionBrowsers.delete(tabId)
@@ -3317,6 +3340,7 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
   // dropping the user's click.
   return queueTabTransition(tabId, async () => {
     cancelHeldInput(tabId)
+    await projectToolService?.stopBridge(tabId)
     closingBrowserTabs.add(tabId)
     const activityTimer = activityBroadcastTimers.get(tabId)
     if (activityTimer) clearTimeout(activityTimer)
@@ -3660,6 +3684,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     wireSessionEvents(tabId, session)
 
     try {
+      await projectTools().startBridge(tabId, tab.workspaceProfileId, browserSessionPaths(browserSessionRoot(), tabId).endpoint)
       await session.start()
       scheduleCopilotResolutionRefresh()
     } catch (error) {
@@ -3678,7 +3703,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     }
     persistProfileTabs()
     return snapshot()
-  }).catch(error=>{if(!stopRequested)restoreInput?.();throw error})
+  }).catch(async error=>{if(!stopRequested)restoreInput?.();else await projectToolService?.stopBridge(tabId);throw error})
   pendingRestarts.set(tabId, restartPromise)
   void restartPromise.catch(() => {}).finally(() => {
     if (pendingRestarts.get(tabId) === restartPromise) pendingRestarts.delete(tabId)
@@ -4060,6 +4085,7 @@ async function removeWorkspace(profileId: string): Promise<void> {
     broadcastState()
     refreshMenus()
   })
+  await projectToolService?.removeProject(profileId)
   broadcastState()
   refreshMenus()
 }
@@ -4670,50 +4696,34 @@ async function stopAllSessions(): Promise<void> {
 // --- IPC: main window -------------------------------------------------
 function browserForSender(event: IpcMainInvokeEvent, tabId: unknown): BrowserDebug {
   assertTrustedIpcSender(event)
-  if (!isSessionTabId(tabId) || !tabsState.tabs.some(tab => tab.id === tabId)) {
-    throw new Error('Unknown browser session')
-  }
-  const owner = browserOwnerWindow(tabId)
-  if (!owner || owner.isDestroyed() || !ownsSessionBrowser(event, tabId) || shuttingDown()) {
-    throw new Error('Browser controls are only available in the owning session window')
-  }
-  let browser = sessionBrowsers.get(tabId)
-  if (!browser) {
-    if (closingBrowserTabs.has(tabId)) throw new Error('Browser session is closing')
-    const tab = tabsState.tabs.find(tab => tab.id === tabId)!
-    // Unloading freed this browser; a poll from a panel still on screen must not bring it back before Resume.
-    if (tab.status === 'dormant') throw new Error('This session is not running; resume it to use its browser')
-    const paths = browserSessionPaths(browserSessionRoot(), tabId)
-    // The tab's own settings keep its last page; the browser profile setting decides whose cookies and storage it uses.
-    const profile = browserProfilePaths(app.getPath('userData'), tab.browserProfileId!)
-    const partitionProfileId = desktopConfig.browserProfile === 'shared' ? SHARED_BROWSER_PROFILE_ID : tab.browserProfileId!
-    const partition = browserProfilePaths(app.getPath('userData'), partitionProfileId).partition
-    // Before BrowserDebug creates the partition's session, which reads Preferences only once; an open session keeps its own.
-    const partitionOpen = [...sessionBrowsers.values()].some(other => other.partition === partition)
-    // A session with Local Overrides of its own runs DevTools in its own partition (its folders) and keeps its page
-    // partition's DevTools settings (the on/off switch) out of the shared ones. On the shared browser profile every session's
-    // pages use one partition, so the switch is shared; the folder is still its own.
-    const privateOverrides = tab.privateOverrides === true
-    const privateSettings = privateOverrides && partitionProfileId !== SHARED_BROWSER_PROFILE_ID
-    try { shareDevtoolsSettings(app.getPath('userData'), partitionOpen ? undefined : partitionProfileId, { private: privateSettings }) }
-    catch (error) { logBrowserError(`Could not share DevTools settings: ${String(error)}`) }
-    browser = new BrowserDebug(owner, profile.settings, { endpointPath: paths.endpoint, partition, tabId,
-      history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(),
-      // Popups get windows of their own only while the browser is in its own window; beside the terminal they open as tabs.
-      popupWindows: () => browserWindows.has(tabId),
-      onAppShortcut: name => {
-        if (name === 'git-toggle') { toggleGitPanel(); return true }
-        if (!browserWindows.has(tabId)) return false
-        dockSessionBrowser(tabId)
-        return true
-      }, reportError: logBrowserError, ...(privateOverrides ? { devtoolsPartition: profile.devtoolsPartition } : {}) })
-    sessionBrowsers.set(tabId, browser)
-  }
-  browser.setOwner(owner)
-  return browser
+  if (!mainWindow || event.sender !== mainWindow.webContents || typeof tabId !== 'string') throw new Error('Browser controls belong to the main window')
+  const resource = projectTools().resource(tabId)
+  if (resource.browser.snapshot.activePageId !== resource.tab.pageId) throw new Error('Select this Browser tab first')
+  return resource.browser
 }
 
-ipcMain.handle('desktop:browser-open', (event, tabId: unknown) => browserForSender(event, tabId).open())
+ipcMain.handle('desktop:tools-state', (event, width: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents) throw new Error('Tools belong to the main window')
+  projectTools().showProject(desktopConfig.activeProfileId, typeof width === 'number' ? width : undefined)
+  return projectTools().state()
+})
+ipcMain.handle('desktop:tools-action', async (event, profileId: unknown, action: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || !action || typeof action !== 'object' || typeof (action as { type?: unknown }).type !== 'string') throw new Error('Invalid tools request')
+  return projectTools().action(profileId, action as ToolsAction)
+})
+ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
+  const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
+  await activateProfile(tab.workspaceProfileId)
+  await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser',
+    ...(projectTools().canConnect(tabId, tab.workspaceProfileId) ? { sessionId: tabId } : {}) })
+  if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
+})
+
+ipcMain.handle('desktop:browser-open', (event, tabId: unknown) => browserForSender(event, tabId).snapshot)
 ipcMain.handle('desktop:browser-state', (event, tabId: unknown) => browserForSender(event, tabId).snapshot)
 ipcMain.handle('desktop:browser-navigate', (event, tabId: unknown, url: unknown) => {
   const browser = browserForSender(event, tabId)
@@ -4746,7 +4756,7 @@ ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { brows
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)
   if (kind !== 'console' && kind !== 'network') throw new Error('Invalid browser export')
-  const data = JSON.stringify(browser.snapshot[kind], null, 2)
+  const data = JSON.stringify(browser.snapshot[kind].filter(entry => entry.pageId === browser.snapshot.activePageId), null, 2)
   const owner = BrowserWindow.fromWebContents(event.sender)
   if (!owner || owner.isDestroyed()) throw new Error('Browser window has closed')
   const result = await dialog.showSaveDialog(owner, { title: `Save captured ${kind} log`,
@@ -4756,23 +4766,11 @@ ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unk
 })
 ipcMain.handle('desktop:browser-bounds', (event, tabId: unknown, bounds: unknown) => {
   assertTrustedIpcSender(event)
-  // Ignore old renderer cleanup after a tab was closed or moved to another window.
-  if (bounds === null && isSessionTabId(tabId) && (!tabsState.tabs.some(tab => tab.id === tabId) || !ownsSessionBrowser(event, tabId))) return
-  const browser = browserForSender(event, tabId)
-  if (bounds !== null) {
-    if (!bounds || typeof bounds !== 'object' || !['x', 'y', 'width', 'height'].every(key => {
-      const value = (bounds as Record<string, unknown>)[key]
-      return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 20000
-    })) throw new Error('Invalid browser bounds')
-  }
-  const visible = visibleSessionTabs(tabsState)
-  if (bounds !== null && event.sender === mainWindow?.webContents && tabId !== visible.main?.id && tabId !== visible.side?.id) return
-  browser.setBounds(bounds as BrowserBounds | null)
+  if (event.sender !== mainWindow?.webContents || typeof tabId !== 'string') throw new Error('Invalid browser owner')
+  if (bounds !== null && (!bounds || typeof bounds !== 'object' || !['x', 'y', 'width', 'height'].every(key => typeof (bounds as Record<string, unknown>)[key] === 'number' && Number.isFinite((bounds as Record<string, number>)[key]) && (bounds as Record<string, number>)[key]! >= 0 && (bounds as Record<string, number>)[key]! <= 20000))) throw new Error('Invalid browser bounds')
+  projectTools().bounds(tabId, bounds as import('./browser-debug-types.js').BrowserBounds | null)
 })
 
-// pty IPC channels (write/resize) validate the sender against the launcher
-// shell URL like every other handler; the tabId itself is passed explicitly
-// by the renderer; only the current terminal owner may write or resize it.
 ipcMain.handle('desktop:get-state', (event) => {
   assertTrustedIpcSender(event)
   return snapshot(sessionWindowId(event.sender), browserWindowId(event.sender))
@@ -5531,7 +5529,7 @@ ipcMain.handle('desktop-settings:clear-shared-browser-data', async (event) => {
   const userData = app.getPath('userData')
   const { partition } = browserProfilePaths(userData, SHARED_BROWSER_PROFILE_ID)
   // Signs every session out of the shared profile; open pages stay where they are.
-  if (![...sessionBrowsers.values()].some(browser => browser.partition === partition) && !await browserProfileHasPartition(userData, SHARED_BROWSER_PROFILE_ID)) return
+  if (!projectToolService?.hasPartition(partition) && ![...sessionBrowsers.values()].some(browser => browser.partition === partition) && !await browserProfileHasPartition(userData, SHARED_BROWSER_PROFILE_ID)) return
   let failed = false
   await clearBrowserStorage(electronSession.fromPartition(partition), message => { failed = true; logBrowserError(message) })
   if (failed) throw new Error('Some shared browser data could not be cleared. See the app log.')
@@ -5949,8 +5947,8 @@ if (!app.requestSingleInstanceLock()) {
     try { shareDevtoolsSettings(app.getPath('userData')) }
     catch (error) { void writeAppLog(`Could not share DevTools settings: ${String(error)}`).catch(() => {}) }
     // Browser profiles referenced only by an unreadable or recovered config must survive until the hold is released.
-    if (!recoveryHold && !configWritesBlocked) {
-      await pruneBrowserProfiles(app.getPath('userData'), desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)))
+    if (!recoveryHold && !configWritesBlocked && !projectTools().profileRecoveryRequired) {
+      await pruneBrowserProfiles(app.getPath('userData'), [...desktopConfig.profiles.flatMap(profile => profile.tabs.map(tab => tab.browserProfileId)), ...projectTools().profileIds()])
         .catch(error => writeAppLog(`Could not prune old browser profiles: ${String(error)}`))
     }
     await pruneBrowserLaunches(app.getPath('userData'), launchId)
@@ -6043,7 +6041,7 @@ app.on('before-quit', (event) => {
     return
   }
   clearTimeout(updateQuitTimer)
-  if (managedTabs.size === 0 && !usageService && sessionBrowsers.size === 0) return
+  if (managedTabs.size === 0 && !usageService && sessionBrowsers.size === 0 && !projectToolService) return
   event.preventDefault()
   quittingAllSessions = true
   // Each stopped session's 'exit' handler persists its final resume id via
@@ -6058,7 +6056,7 @@ app.on('before-quit', (event) => {
       usageService = null
       meetingHub.dispose()
       // Open meetings are saved as they stand, for the next start to restore.
-      await Promise.allSettled([service?.stop(), meetingControl.close(), guestMcp.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose()), desktopControl?.dispose()])
+      await Promise.allSettled([projectToolService?.dispose(), service?.stop(), meetingControl.close(), guestMcp.close(), ...meetingWrites.values(), guestSeatsWrite, ...[...sessionBrowsers.values()].map(browser => browser.dispose()), desktopControl?.dispose()])
       desktopOverlay?.dispose()
       sessionBrowsers.clear()
       await removeBrowserLaunch(app.getPath('userData'), launchId)

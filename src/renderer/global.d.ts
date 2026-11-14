@@ -29,6 +29,10 @@ export interface TabExitPayload {
 }
 
 export interface CopilotDesktopBridge {
+  toolsState(initialWidth?: number): Promise<import('../main/tool-tabs.js').ToolsState>
+  toolsAction(profileId: string, action: import('../main/tool-tabs.js').ToolsAction): Promise<import('../main/tool-tabs.js').ToolsState>
+  onToolsChanged(listener: (state: import('../main/tool-tabs.js').ToolsState) => void): () => void
+  showBrowserInMain(tabId: string): Promise<void>
   browserOpen(tabId: string): Promise<BrowserDebugState>
   browserState(tabId: string): Promise<BrowserDebugState>
   browserNavigate(tabId: string, url: string): Promise<BrowserDebugState>

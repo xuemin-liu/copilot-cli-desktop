@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { shareDevtoolsSettings } from './browser-devtools-settings.js'
+import { shareDevtoolsSettings, prepareProjectDevtoolsSettings, completeProjectDevtoolsSharing } from './browser-devtools-settings.js'
 
 const A = '11111111-1111-4111-8111-111111111111'
 const B = '22222222-2222-4222-8222-222222222222'
@@ -103,4 +103,24 @@ test('a profile marked private before its partition exists stays private while s
   await writePrefs(root, B, { electron: { devtools: { preferences: { theme: '"light"' } } } }, 2000)
   shareDevtoolsSettings(root, A)
   assert.deepEqual((await readPrefs(root, A)).electron.devtools.preferences, {}, 'B\'s theme did not leak')
+}))
+
+
+test('project privacy transitions exclude private values until live shared settings replacement completes', () => fixture(async root => {
+  await writePrefs(root, A, {electron:{devtools:{preferences:{theme:'"dark"'}}}},1000)
+  shareDevtoolsSettings(root,B)
+  prepareProjectDevtoolsSettings(root,B,true,true)
+  await writePrefs(root,B,{cookies:'retained',electron:{devtools:{preferences:{'private-only':'"secret"',theme:'"light"'}}}},2000)
+  shareDevtoolsSettings(root,C)
+  assert.deepEqual((await readPrefs(root,C)).electron.devtools.preferences,{theme:'"dark"'})
+  const shared=prepareProjectDevtoolsSettings(root,B,false,true)!
+  assert.deepEqual(shared,{theme:'"dark"'})
+  assert.ok(JSON.parse(await readFile(join(root,'browser-devtools.json'),'utf8')).private.includes(B),'failed/cancelled live reset stays excluded')
+  completeProjectDevtoolsSharing(root,B,shared)
+  const store=JSON.parse(await readFile(join(root,'browser-devtools.json'),'utf8'))
+  assert.equal(store.private.includes(B),false)
+  assert.deepEqual((await readPrefs(root,B)).electron.devtools.preferences,shared)
+  assert.equal((await readPrefs(root,B)).cookies,'retained')
+  shareDevtoolsSettings(root)
+  assert.equal(JSON.parse(await readFile(join(root,'browser-devtools.json'),'utf8')).values['private-only'],undefined)
 }))

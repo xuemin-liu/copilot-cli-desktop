@@ -5,12 +5,9 @@ Copilot changed without leaving the app. You can review changes, stage and unsta
 to Copilot, including a failed pull for Copilot to merge and resolve. Fetch, pull, push, branches and discarding changes are not in the panel yet and are still done in the terminal (or by
 Copilot). See the [plan](git-panel-plan.md) for what comes next.
 
-Open it from the Git icon in the session header, or with **Ctrl+Shift+G** (the key is handled before the terminal or the
-debug browser sees it). In the main window, Git shares the right tools panel with Browser. The shortcut selects Git from
-another tool, or collapses the panel when Git is already shown. The panel remembers its width, selected tab and open state.
-Switching tools and collapsing retain the current project's unsubmitted commit message, file selection and scroll position.
-Changing projects resets that UI state. The prompt target is labelled above the repository list. General workspaces show
-a disabled Git tab with an explanation.
+Open **New tab → Git**, the Git icon in a session header, or **Ctrl+Shift+G**. There is one Git tab per project; adding it again focuses the existing tab. The shortcut selects Git or hides the panel when Git is already shown. **Hide tabs** preserves its state; its individual close button removes the tab. Reopening recovers the project's draft.
+
+Project switching retains the repository selection, commit draft, and diff selection. CLI focus never retargets the repository. Choose **Send to** explicitly before attaching context to a CLI prompt. General workspaces explain why Git is unavailable in the launcher and do not create a disabled Git tab.
 
 ## What it shows
 

@@ -47,7 +47,7 @@ function CertificateWarning({ warning, popup, banner, answer }: { warning: Brows
   </section>
 }
 
-export function BrowserPanel({ tabId, obscured, active, unloaded = false, detached = false, sessionTitle = 'Browser' }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; detached?: boolean; sessionTitle?: string }): JSX.Element {
+export function BrowserPanel({ tabId, obscured, active, unloaded = false, detached = false, sessionTitle = 'Browser', independent = false, promptTargetId = null }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; detached?: boolean; sessionTitle?: string; independent?: boolean; promptTargetId?: string | null }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -73,6 +73,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
   const lastUrl = useRef('')
   const lastPageId = useRef(0)
   const accept = (next: BrowserDebugState): void => {
+    if (independent) next = { ...next, console: next.console.filter(entry => entry.pageId === next.activePageId), network: next.network.filter(entry => entry.pageId === next.activePageId) }
     setState(next)
     const switchedPage = lastPageId.current !== next.activePageId
     lastPageId.current = next.activePageId
@@ -152,9 +153,11 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
   }), [tabId])
   // In its own window the browser has no terminal beside it, so main pastes in the window that shows the session.
   const toPrompt = (detail: { text: string } | { image: true }, done: string): void => {
+    if (independent && !promptTargetId) { setError('Choose a prompt destination first.'); return }
+    const destination = independent ? promptTargetId! : tabId
     if (!detached) {
-      if ('image' in detail) attachClipboardImage(tabId)
-      else insertIntoPrompt(tabId, detail.text)
+      if ('image' in detail) attachClipboardImage(destination)
+      else insertIntoPrompt(destination, detail.text)
       setNotice(done)
       return
     }
@@ -243,7 +246,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
       <button type="button" className="browser-zoom" aria-label={`Browser zoom ${Math.round(state.zoomFactor * 100)}%, select to reset`} title="Page zoom: Ctrl+= zooms in, Ctrl+- zooms out, Ctrl+0 or this button resets"
         onClick={() => run(window.copilotDesktop.browserAction(tabId, 'zoom-reset'))}>{Math.round(state.zoomFactor * 100)}%</button>
     </form>
-    <div className="browser-pages" role="tablist" aria-label="Browser pages">
+    {!independent && <div className="browser-pages" role="tablist" aria-label="Browser pages">
       {state.pages.map(page => <div className="browser-page" key={page.id}>
         <button type="button" role="tab" aria-selected={state.activePageId === page.id} title={[page.url, page.window && 'Open in its own window', page.error].filter(Boolean).join('\n')}
           onClick={() => run(window.copilotDesktop.browserAction(tabId, `select-page:${page.id}`))}>{page.error && <span className="browser-page-error" aria-label="Error">⚠ </span>}{page.window && <span className="browser-page-window" aria-label="In its own window">⧉ </span>}{page.title}</button>
@@ -252,7 +255,8 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
       </div>)}
       <button type="button" className="browser-new-page" aria-label="New browser page" title="New page" disabled={state.pages.length >= 32}
         onClick={() => run(window.copilotDesktop.browserAction(tabId, 'new-page'), true)}>+</button>
-    </div>
+    </div>}
+    {independent && state.view !== 'page' && <p className="browser-capture-scope">Showing this page. Capture, preserve and clear controls affect all project browser pages.</p>}
     <div className="browser-tabs" role="tablist" aria-label="Browser views">
       {(['page', 'console', 'network', 'devtools', 'activity'] as const).map(name => <button type="button" key={name} className={name === 'devtools' ? 'browser-tools-toggle' : undefined} role="tab" aria-selected={state.view === name}
         onClick={() => run(window.copilotDesktop.browserAction(tabId, `view:${name}`))}>
@@ -307,7 +311,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
         : !state.url && <p className="browser-hint">Enter your web app URL above.</p>)}
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
-    <footer className="browser-footer">{state.loading ? 'Loading…' : 'This session’s browser activity is available to Copilot CLI.'}
+    <footer className="browser-footer">{state.loading ? 'Loading…' : independent ? 'Connect a session to share this project’s browser activity.' : 'This session’s browser activity is available to Copilot CLI.'}
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>
         <p>{state.testing.report.description}</p><p>Expected: {state.testing.report.expected}</p>
         <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.outcome?.replaceAll('-', ' ') ?? step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>

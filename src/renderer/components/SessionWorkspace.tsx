@@ -107,7 +107,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
               {onOpenBrowser && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label={browserPoppedOutTabIds.includes(tab.id) ? 'Show browser window' : 'Open browser'}
-                title="Browser" disabled={tab.status === 'dormant'} onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
+                title="Browser" onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
               {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}

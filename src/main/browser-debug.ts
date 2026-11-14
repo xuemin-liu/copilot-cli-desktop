@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { open, readFile, rm } from 'node:fs/promises'
-import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http'
 import { join } from 'node:path'
 import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, screen, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
@@ -13,9 +13,10 @@ import { parseSafeHttpUrl } from './external-targets.js'
 import { parseBrowserAddress } from './browser-url.js'
 import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry, BrowserViewMode } from './browser-debug-types.js'
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
-import { BrowserReader } from './browser-reader.js'
+import { BrowserReader, type BrowserCursor } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
+import { replaceDevtoolsPreferencesScript, type DevtoolsPreferences } from './browser-devtools-settings.js'
 
 /** A plan sent as form data, with its test inputs. */
 const MAX_TEST_FORM_BYTES = 2 * MAX_TEST_BYTES + 64 * 1024
@@ -72,6 +73,7 @@ interface BrowserPage {
   /** The blank document that enables capture on a never-loaded page is showing; report lastUrl instead. */
   priming: boolean
   devtools: boolean
+  viewMode?: BrowserViewMode
   panel: 'console' | 'network' | 'sources' | null
   /** Local Overrides as this page's running DevTools last reported it. */
   overrides: OverridesSetting | null
@@ -96,6 +98,14 @@ const ACTIVATION_MS = 5000
 export class BrowserDebug {
   private readonly pages = new Map<number, BrowserPage>()
   private activePageId = 0
+  private preferencesWork: Promise<void> | null = null
+  private preparingPreferences = false
+  private storage!: Session
+  private readonly projectMode: boolean
+  private readonly changed: () => void
+  private readonly onNewTab: (() => void) | undefined
+  private readonly canCreatePage: () => string | null
+  private readonly pendingClose = new Map<number, Promise<boolean>>()
   private server: Server | null = null
   private serverStart: Promise<void> | null = null
   private readonly token = randomBytes(32).toString('hex')
@@ -141,7 +151,11 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void } = {}) {
+    this.projectMode = options.projectMode === true
+    this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
+    this.onNewTab = options.onNewTab
+    this.canCreatePage = options.canCreatePage ?? (() => null)
     this.popupWindows = options.popupWindows ?? (() => false)
     this.appShortcut = options.onAppShortcut
     this.history = options.history ?? new BrowserHistory()
@@ -169,13 +183,13 @@ export class BrowserDebug {
       if (owner.isMinimized()) owner.restore()
       if (!owner.isVisible()) owner.show()
       owner.focus()
-      const { response } = await dialog.showMessageBox(owner, { type: 'question', title: 'Allow site permission?', message: 'A page in the session browser is asking for permission.',
+      const { response } = await dialog.showMessageBox(owner, { type: 'question', title: 'Allow site permission?', message: this.projectMode ? 'A project browser page is asking for permission.' : 'A page in the session browser is asking for permission.',
         detail: description, buttons: ['Block', 'Allow'], defaultId: 0, cancelId: 0, noLink: true, signal })
       return signal.aborted ? null : response === 1
     }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
       active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
-      recording: () => this.state.recordingNetwork, visible: id => this.pages.get(id)?.view.getVisible() ?? false,
+      recording: () => this.state.recordingNetwork, visible: id => { const page = this.pages.get(id); return Boolean(page && (page.window || page.attached && this.bounds) && page.view.getVisible()) },
       evidence: (pageId, startedAt) => ({ console: this.state.console.filter(entry => entry.pageId === pageId && entry.timestamp >= startedAt).slice(-100),
         capture: { recordingConsole: this.state.recordingConsole, recordingNetwork: this.state.recordingNetwork,
           limitations: ['Console evidence retains at most 100 entries from this run; activity retains at most 300. Capture settings, navigation, clearing and debugger attachment can make evidence incomplete. Arbitrary application text can contain sensitive data.'] } }),
@@ -184,6 +198,7 @@ export class BrowserDebug {
       partition: this.partition, sandbox: true, contextIsolation: true,
       nodeIntegration: false, devTools: true,
     } })
+    this.storage = view.webContents.session
     this.addPage(view, true)
     BrowserDebug.browsersOn(view.webContents.session).add(this)
     // Another browser changing a site's zoom changes it here too, as in one Chrome profile.
@@ -234,6 +249,70 @@ export class BrowserDebug {
     return browsers
   }
 
+  get pageCount(): number { return this.pages.size }
+  get ready(): Promise<void> { return this.preferencesWork ?? Promise.resolve() }
+  initializePreferences(values: DevtoolsPreferences, complete: (values: DevtoolsPreferences) => void): void {
+    const page = this.firstTab
+    if (!page) throw new Error('Browser page closed')
+    this.preparingPreferences = true
+    this.preferencesWork = (async () => {
+      page.priming = true
+      if (!page.contents.getURL()) await page.contents.loadURL('about:blank')
+      if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser closed while opening')
+      const tools = this.ensureDevtools(page)
+      const current = await tools.executeJavaScript(replaceDevtoolsPreferencesScript(values)) as DevtoolsPreferences
+      if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser closed while opening')
+      complete(current)
+    })().catch(error => {
+      page.error = `Could not apply shared browser settings: ${sanitizedText(String(error))}. Close this project's Browser tabs and open a new one to retry.`
+      throw error
+    }).finally(() => { page.priming = false; this.preparingPreferences = false; if (!this.disposed) { this.layout(); this.changed() } })
+    void this.preferencesWork.catch(() => {})
+  }
+  pageList(): BrowserDebugState['pages'] {
+    return [...this.pages].filter(([, page]) => !page.contents.isDestroyed()).map(([id, page]) => ({ id,
+      title: page.contents.getTitle().slice(0, 160) || 'New browser', url: shownUrl(page),
+      ...(page.window ? { window: true } : {}), ...(page.error ? { error: page.error } : {}) }))
+  }
+  hasPage(id: number): boolean { return this.pages.has(id) && !this.pages.get(id)!.contents.isDestroyed() }
+  selectUiPage(id: number): void { if (this.activePageId !== id) { this.selectPage(id); this.changed() } }
+  createPage(): number {
+    const limit = this.canCreatePage(); if (limit) throw new Error(limit)
+    const page = this.addPage(new WebContentsView({ webPreferences: { session: this.storage, sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), false)
+    return page.contents.id
+  }
+  async closePage(id: number): Promise<boolean> {
+    const existing = this.pendingClose.get(id); if (existing) return existing
+    const page = this.pages.get(id); if (!page || page.contents.isDestroyed()) return true
+    const operation = this.reader.closePage(id, () => this.confirmLeave(page.window ?? this.owner))
+    this.pendingClose.set(id, operation)
+    try { return await operation } finally { this.pendingClose.delete(id) }
+  }
+  popOutPage(id: number): void {
+    const page = this.pages.get(id); if (!page) throw new Error('Browser page closed')
+    if (page.window) { page.window.show(); page.window.focus(); return }
+    this.detach(page)
+    page.window = new BaseWindow({ width: 1000, height: 750, title: page.contents.getTitle() || 'Browser' })
+    this.showInWindow(page, page.window)
+    this.changed()
+  }
+  returnPage(id: number): void {
+    const page = this.pages.get(id); if (!page?.window) return
+    const window = page.window
+    window.contentView.removeChildView(page.view)
+    page.window = null
+    window.destroy()
+    this.layout(); this.changed()
+  }
+  private controlState(pageId: number): BrowserDebugState {
+    const page = this.pages.get(pageId)
+    if (!page) throw new Error('Page closed; run tabs, then select a page ID.')
+    const { errorPageId: _errorPageId, ...snapshot } = this.snapshot
+    return { ...snapshot, activePageId: pageId, url: shownUrl(page), loading: page.loading,
+      canGoBack: page.contents.navigationHistory.canGoBack(), canGoForward: page.contents.navigationHistory.canGoForward(),
+      zoomFactor: page.contents.getZoomFactor(), error: page.error, testing: this.reader.testState }
+  }
+
   /** The toolbar and DevTools act on the selected page; every page belongs to this terminal. */
   get view(): WebContentsView { return this.activePage.view }
 
@@ -260,8 +339,8 @@ export class BrowserDebug {
         page.error = 'This browser opens HTTP and HTTPS links only.'
         return { action: 'deny' }
       }
-      if (this.pages.size >= MAX_PAGES) {
-        page.error = 'Close a browser page before opening another (32 pages maximum).'
+      if (this.pages.size >= MAX_PAGES || this.canCreatePage()) {
+        page.error = this.canCreatePage() ?? 'Close a browser page before opening another (32 pages maximum).'
         return { action: 'deny' }
       }
       return {
@@ -287,9 +366,9 @@ export class BrowserDebug {
           // beside the terminal, and for other links, the page opens as a tab. Like Chrome's popup blocker, only a click or key press in the page buys a window, one per input; a page opening
           // windows on its own gets tabs instead. The browser keeps showing the page that opened a popup window.
           const activated = Date.now() - page.activatedAt < ACTIVATION_MS
-          const window = details.disposition === 'new-window' && activated && this.popupWindows() ? this.popupWindow(options, page) : null
+          const window = details.disposition === 'new-window' && activated && (this.projectMode ? page.window !== null : this.popupWindows()) ? this.popupWindow(options, page) : null
           if (window) page.activatedAt = 0
-          const childPage = this.addPage(child, details.disposition !== 'background-tab' && !window, window, page.contents.id)
+          const childPage = this.addPage(child, !this.projectMode && details.disposition !== 'background-tab' && !window, window, page.contents.id)
           this.startPopupOverrides(page, childPage)
           this.layout()
           // Electron supplies no guest for browser-initiated background links.
@@ -316,6 +395,8 @@ export class BrowserDebug {
       // The page has no application menu, so give it the browser shortcuts people expect.
       const command = input.control || input.meta
       const handled = ((): boolean => {
+        if (this.projectMode && command && !input.shift && key === 'w') { void this.closePage(contents.id).catch(error => this.reportError(String(error))); return true }
+        if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(); return true }
         if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
         // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
         if (!selected) {
@@ -408,6 +489,12 @@ export class BrowserDebug {
       if (id === this.activePageId && ['console', 'network', 'devtools'].includes(this.state.view)) this.state.view = 'page'
       if (this.pages.has(id)) this.layout()
     })
+    contents.on('did-start-loading', this.changed)
+    contents.on('did-stop-loading', this.changed)
+    contents.on('page-title-updated', this.changed)
+    contents.on('did-navigate', this.changed)
+    contents.on('did-navigate-in-page', this.changed)
+    this.changed()
     contents.once('destroyed', () => this.removePage(id, storage))
     return page
   }
@@ -450,6 +537,7 @@ export class BrowserDebug {
       view.setBounds({ x: 0, y: 0, width, height })
     }
     window.contentView.addChildView(view)
+    view.setVisible(true)
     fit()
     window.on('resize', fit)
     // Closing the window asks the page first, so a beforeunload guard can keep unsaved edits; the window goes once the page
@@ -459,13 +547,14 @@ export class BrowserDebug {
     window.on('close', event => {
       if (contents.isDestroyed() || this.disposed) return
       event.preventDefault()
+      if (this.projectMode) { void this.closePage(contents.id); return }
       if (asking) return
       closing = true
       contents.close({ waitForBeforeUnload: true })
     })
     // Electron keeps a guarded page open without telling anyone, so ask, as Chrome does, and close it on Leave.
     contents.on('will-prevent-unload', () => {
-      if (!closing || asking) return
+      if (this.projectMode || !closing || asking) return
       closing = false
       asking = true
       void this.confirmLeave(window).catch(() => false).then(leave => {
@@ -473,7 +562,7 @@ export class BrowserDebug {
         if (leave && !contents.isDestroyed()) contents.close()
       })
     })
-    window.on('closed', () => { if (!contents.isDestroyed()) contents.close() })
+    window.on('closed', () => { if (page.window === window && !contents.isDestroyed()) contents.close() })
     contents.on('page-title-updated', (_event, title) => { if (!window.isDestroyed()) window.setTitle(title) })
     window.show()
   }
@@ -484,7 +573,7 @@ export class BrowserDebug {
     if (!page) throw new Error('Unknown browser page')
     if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() }
     this.activePageId = id
-    this.showView('page')
+    this.showView(page.viewMode ?? 'page')
     if (focus && page.window && !page.window.isDestroyed()) {
       if (page.window.isMinimized()) page.window.restore()
       page.window.focus()
@@ -745,12 +834,13 @@ export class BrowserDebug {
 
   private refreshState(): void {
     if (this.disposed) return
+    if (!this.pages.size) { this.state.pages = []; this.state.activePageId = 0; this.state.url = ''; return }
     this.state.testing = this.reader.testState
     const contents = this.view.webContents
     if (contents && !contents.isDestroyed()) {
       const page = this.activePage
       this.state.url = shownUrl(page)
-      this.state.loading = page.loading
+      this.state.loading = page.loading || this.preparingPreferences
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
       const failed = page.error ? undefined : this.failedPopupWindow()
       this.state.error = page.error ?? failed?.error ?? null
@@ -783,7 +873,7 @@ export class BrowserDebug {
       this.state.canGoBack = contents.navigationHistory.canGoBack()
       this.state.canGoForward = contents.navigationHistory.canGoForward()
       const setting = page.overrides ?? this.savedOverrides
-      if (setting) this.state.overrides = { ...setting, devtools: page.overrides !== null, scope: this.devtoolsPartition ? 'session' : 'shared' }
+      if (setting) this.state.overrides = { ...setting, devtools: page.overrides !== null, scope: this.devtoolsPartition ? this.projectMode ? 'project' : 'session' : 'shared' }
       else delete this.state.overrides
       this.refreshOverrides()
     }
@@ -830,7 +920,7 @@ export class BrowserDebug {
 
   async open(): Promise<BrowserDebugState> {
     if (this.disposed) throw new Error('Browser has closed')
-    await this.startControl()
+    if (!this.projectMode) await this.startControl()
     let target: string | null = null
     // Scrub legacy settings even if manual navigation has already started.
     // Serialize with rememberUrl writes so cleanup cannot delete a newer setting.
@@ -858,8 +948,14 @@ export class BrowserDebug {
   }
 
   async navigate(url: string): Promise<BrowserDebugState> {
+    return this.navigatePage(this.activePageId, url)
+  }
+  async navigatePage(id: number, url: string): Promise<BrowserDebugState> {
     const target = parseBrowserAddress(url).href
-    const page = this.activePage
+    const page = this.pages.get(id)
+    if (!page) throw new Error('Browser page closed')
+    await this.ready
+    if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser page closed')
     page.error = null
     page.lastUrl = target
     try { await this.load(page, target) }
@@ -1018,7 +1114,7 @@ export class BrowserDebug {
   private openInNewPage(url: string): void {
     const source = this.activePage
     try { parseSafeHttpUrl(url) } catch { source.error = 'This browser opens HTTP and HTTPS links only.'; return }
-    if (this.pages.size >= MAX_PAGES) { source.error = 'Close a browser page before opening another (32 pages maximum).'; return }
+    if (this.pages.size >= MAX_PAGES || this.canCreatePage()) { source.error = 'Close a browser page before opening another (32 pages maximum).'; return }
     const page = this.addPage(new WebContentsView({ webPreferences: { session: source.contents.session,
       sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
     this.layout()
@@ -1028,6 +1124,7 @@ export class BrowserDebug {
   get picking(): boolean { return this.reader.picking }
 
   action(action: string): BrowserDebugState {
+    if (this.preparingPreferences) throw new Error('The browser is still opening. Try again in a moment.')
     if (action === 'testing:on' || action === 'testing:off') {
       if (this.disposed) throw new Error('Browser has closed')
       if (action === 'testing:on') this.showView('page')
@@ -1036,6 +1133,7 @@ export class BrowserDebug {
     }
     if (action === 'new-page') {
       if (this.disposed) throw new Error('Browser has closed')
+      const limit = this.canCreatePage(); if (limit) throw new Error(limit)
       if (this.pages.size >= MAX_PAGES) throw new Error('Close a browser page before opening another (32 pages maximum).')
       this.addPage(new WebContentsView({ webPreferences: { session: this.activePage.contents.session,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
@@ -1075,6 +1173,7 @@ export class BrowserDebug {
       if (!page) throw new Error('Unknown browser page')
       if (pageAction[1] === 'select-page') this.selectPage(id, true)
       // A popup window can always close; the last tab stays.
+      else if (this.projectMode) void this.closePage(id)
       else if (page.window || [...this.pages.values()].filter(entry => !entry.window).length > 1) page.view.webContents.close()
       return this.snapshot
     }
@@ -1104,6 +1203,7 @@ export class BrowserDebug {
     if (view !== 'page') { this.reader.setTesting(false); this.reader.cancelPick() }
     this.state.view = view
     const page = this.activePage
+    page.viewMode = view
     page.devtools = ['console', 'network', 'devtools'].includes(view)
     if (!page.devtools) { this.layout(); return }
     page.panel = view === 'devtools' ? 'sources' : view as 'console' | 'network'
@@ -1161,7 +1261,7 @@ export class BrowserDebug {
 
   private layout(): void {
     if (this.disposed || this.owner.isDestroyed()) return
-    const b = this.bounds
+    const b = this.preparingPreferences ? null : this.bounds
     for (const [id, page] of this.pages) {
       // A popup window shows its page itself; only its DevTools shows in the browser.
       if (!page.attached && b) {
@@ -1196,7 +1296,13 @@ export class BrowserDebug {
     const tools = page.tools?.webContents
     if (this.disposed) { if (tools && !tools.isDestroyed()) tools.close(); return }
     // The browser always keeps a tab, even while popup windows stay open.
-    const firstTab = this.firstTab
+    const firstTab = this.firstTab ?? (this.projectMode ? this.pages.values().next().value as BrowserPage | undefined : undefined)
+    if (this.projectMode && !firstTab) {
+      this.activePageId = 0
+      if (tools && !tools.isDestroyed()) tools.close()
+      this.changed()
+      return
+    }
     if (!firstTab) {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), this.activePageId === id)
@@ -1205,9 +1311,10 @@ export class BrowserDebug {
       this.activePageId = page.window && page.opener !== null && this.pages.has(page.opener) ? page.opener : firstTab.contents.id
       this.showView('page')
     }
-    if (primary) this.rememberUrl(this.firstTab!, this.firstTab!.view.webContents.getURL())
+    if (primary && this.firstTab) this.rememberUrl(this.firstTab, this.firstTab.view.webContents.getURL())
     if (tools && !tools.isDestroyed()) tools.close()
     this.layout()
+    this.changed()
   }
 
   private async startControl(): Promise<void> {
@@ -1248,17 +1355,19 @@ export class BrowserDebug {
     }
   }
 
-  private async listen(): Promise<void> {
-    const server = createServer((request, response) => {
+  /** The session bridge owns its transport and token; it supplies a private page cursor. */
+  serveControl(request: IncomingMessage, response: ServerResponse, context: { port: number; token: string; cursor?: BrowserCursor }): void {
+    const dispatch = (): void => {
       const send = (status: number, body: unknown): void => {
         response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         response.end(JSON.stringify(body))
       }
-      const port = (server.address() as { port: number } | null)?.port
+      const { port, token, cursor } = context
+      cursor?.validate()
       // No CORS; reject browser-originated requests and DNS rebinding before authentication.
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { message: 'Forbidden' }); return }
       const authorization = request.headers.authorization ?? ''
-      if (!constantTimeTokenEqual(authorization, `Bearer ${this.token}`)) { send(401, { message: 'Unauthorized' }); return }
+      if (!constantTimeTokenEqual(authorization, `Bearer ${token}`)) { send(401, { message: 'Unauthorized' }); return }
       if (request.url === '/test') {
         if (request.method !== 'POST') { send(405, { message: 'Tests require POST.' }); return }
         const type = request.headers['content-type']
@@ -1306,22 +1415,33 @@ export class BrowserDebug {
         })
         return
       }
+      const pageId = cursor ? cursor.active() : this.activePageId
+      if (cursor && !this.pages.has(pageId)) { send(409, { message: 'Page closed; run tabs, then select a page ID.' }); return }
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = this.state
+        const scoped = cursor ? this.controlState(pageId) : this.snapshot
+        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
           pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
-          consoleCount: console.filter(entry => entry.pageId === this.activePageId).length,
-          networkCount: network.filter(entry => entry.pageId === this.activePageId).length })
-      } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === this.activePageId))
-      else if (request.url === '/network') send(200, this.state.network.filter(entry => entry.pageId === this.activePageId))
+          consoleCount: console.filter(entry => entry.pageId === pageId).length,
+          networkCount: network.filter(entry => entry.pageId === pageId).length })
+      } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === pageId))
+      else if (request.url === '/network') send(200, this.state.network.filter(entry => entry.pageId === pageId))
       else if (/^\/request\/\d+$/.test(request.url ?? '')) {
-        const entry = this.state.network.find(entry => entry.id === request.url!.slice(9))
+        const entry = this.state.network.find(entry => entry.id === request.url!.slice(9) && (!cursor || entry.pageId === pageId))
         send(entry ? 200 : 404, entry ?? { message: 'Request not found; activity retains the latest 300 requests.' })
       } else send(404, { message: 'Unknown browser route' })
+    }
+    if (context.cursor) this.reader.withCursor(context.cursor, dispatch)
+    else dispatch()
+  }
+
+  private async listen(): Promise<void> {
+    const server = createServer((request, response) => {
+      this.serveControl(request, response, { port: (server.address() as { port: number }).port, token: this.token })
     })
     this.server = server
     try {
@@ -1333,8 +1453,8 @@ export class BrowserDebug {
 
   async dispose(): Promise<void> {
     if (this.disposed) return
-    const storage = this.activePage.contents.session
-    this.setBounds(null)
+    const storage = this.storage
+    if (this.pages.size) this.setBounds(null)
     for (const page of this.pages.values()) this.detach(page)
     this.disposed = true
     // Site permissions and zoom belong to every session's browser; closing this one only stops following them.
@@ -1354,11 +1474,10 @@ export class BrowserDebug {
     } catch (error) {
       this.reportError(`Could not flush browser storage: ${sanitizedText(String(error))}`)
     } finally {
-      for (const page of [...this.pages.values()]) {
-        const tools = page.tools?.webContents
-        if (!page.contents.isDestroyed()) page.contents.close()
-        if (tools && !tools.isDestroyed()) tools.close()
-      }
+      await Promise.all([...this.pages.values()].flatMap(page => [page.contents, page.tools?.webContents]).map(contents => {
+        if (!contents || contents.isDestroyed()) return Promise.resolve()
+        return new Promise<void>(resolve => { contents.once('destroyed', resolve); contents.close({ waitForBeforeUnload: false }) })
+      }))
     }
   }
 }
