@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDaemonAlive, sendControl } from './control-client.js'
 import { browserCommand } from './browser-control.js'
+import { terminalCommand } from './terminal-control.js'
 import {
   ensureCliDirectories,
   acquireControllerLock,
@@ -254,6 +255,8 @@ Usage:
   copilot-desktop restart
   copilot-desktop logs [--tail N]
   copilot-desktop stop
+  copilot-desktop terminal list|read <id> [cursor]|interrupt <id>|close <id>
+  copilot-desktop terminal request <absolute-request.json>
   copilot-desktop browser status|console|network
   copilot-desktop browser request <id>
   copilot-desktop browser tabs|select <page-id>|frames [page-id]
@@ -287,6 +290,7 @@ async function main(): Promise<void> {
     case 'status': await status(args.includes('--json')); break
     case 'run': await runProgrammatic(args.slice(1)); break
     case 'browser': console.log(JSON.stringify(await browserCommand(args.slice(1)), null, 2)); break
+    case 'terminal': console.log(JSON.stringify(await terminalCommand(args.slice(1)), null, 2)); break
     case 'stop': await stop(); break
     case 'restart': await restart(); break
     case 'logs': {

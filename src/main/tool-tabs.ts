@@ -1,5 +1,8 @@
 /** Persistent panel IDs are independent of Chromium page IDs and CLI session IDs. */
-export type ToolTabKind = 'new' | 'browser' | 'git'
+export type TerminalKind = 'local' | 'wsl' | 'ssh'
+export type ToolTabKind = 'new' | 'browser' | 'git' | TerminalKind
+export interface TerminalConfig { host?: string; username?: string; port?: number; identityFile?: string; distro?: string }
+export const isTerminalKind = (kind: string): kind is TerminalKind => ['local', 'wsl', 'ssh'].includes(kind)
 export interface ToolTab {
   id: string
   kind: ToolTabKind
@@ -10,6 +13,7 @@ export interface ToolTab {
   detached?: boolean
   loading?: boolean
   error?: string
+  terminal?: TerminalConfig
 }
 export interface ProjectTools {
   profileId: string
@@ -23,7 +27,7 @@ export interface ProjectTools {
 export interface BrowserConnection { sessionId: string; profileId: string; pageId: number | null }
 export interface ToolsState { projects: ProjectTools[]; connections: BrowserConnection[]; recent?: string[] }
 export type ToolsAction =
-  | { type: 'add'; kind: ToolTabKind; replaceId?: string; url?: string }
+  | { type: 'add'; kind: ToolTabKind; replaceId?: string; url?: string; terminal?: TerminalConfig }
   | { type: 'select' | 'close' | 'pop-out' | 'return'; id: string }
   | { type: 'visible'; visible: boolean }
   | { type: 'width'; width: number }

@@ -1656,6 +1656,23 @@ button:disabled {
 .tool-launcher-types span { color:#a9b2c0; font-size:11px; }
 .tool-browser-host, .tool-git-host { display:flex; flex:1; min-height:0; min-width:0; }
 .tool-browser-host > .browser-panel, .tool-git-host > .git-panel { flex:1; }
+.tool-terminal-host { display:flex; flex:1; min-height:0; min-width:0; }
+.tool-terminal-host[hidden] { display:none; }
+.tool-terminal-panel { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
+.tool-terminal-screen { flex:1; min-height:0; min-width:0; overflow:hidden; background:#0b1020; padding:6px; }
+.tool-terminal-screen .xterm { height:100%; }
+.tool-terminal-toolbar, .tool-terminal-footer { display:flex; align-items:center; gap:4px; padding:4px 6px; flex:none; font-size:11px; }
+.tool-terminal-toolbar input { flex:1; min-width:45px; width:80px; background:#080b12; color:#e6edf3; border:1px solid #364153; padding:4px; }
+.tool-terminal-toolbar button, .tool-terminal-footer button { font-size:11px; white-space:nowrap; padding:3px 6px; }
+.tool-terminal-footer { min-height:28px; border-top:1px solid #303640; }
+.tool-terminal-footer span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tool-terminal-error { color:#ffb4aa; padding:6px; overflow-wrap:anywhere; max-height:100px; overflow:auto; }
+.tool-terminal-error button { float:right; }
+.tool-launcher .tool-connection-form { display:flex; flex-direction:column; gap:10px; padding-top:16px; }
+.tool-connection-form h3 { margin:0; }
+.tool-connection-form label { display:flex; flex-direction:column; gap:4px; font-size:12px; }
+.tool-connection-form p { color:#a9b2c0; font-size:12px; margin:0; }
+.tool-connection-form button { margin-right:6px; }
 .browser-capture-scope { margin:4px 8px; color:#a9b2c0; font-size:11px; }
 
 .tool-recents { display:flex; flex-direction:column; gap:6px; margin-top:20px; }

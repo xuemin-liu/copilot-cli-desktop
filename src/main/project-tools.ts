@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
-import { createServer, type Server } from 'node:http'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { BrowserDebug } from './browser-debug.js'
@@ -13,7 +13,9 @@ import { prepareProjectDevtoolsSettings, completeProjectDevtoolsSharing } from '
 import { parseBrowserAddress } from './browser-url.js'
 import { restorableUrl } from './browser-privacy.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab } from './tool-tabs.js'
+import { isTerminalKind, removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
+import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
+import { prepareBrowserSessionEnvironment } from './browser-session.js'
 
 interface Group { browser: BrowserDebug; generation: string }
 const liveSession = (status: string | undefined): boolean => status === 'running' || status === 'approval-needed'
@@ -22,8 +24,9 @@ interface Options {
   userData: string
   owner(): BrowserWindow | null
   project(id: string): { name: string; path: string | null } | undefined
-  session(id: string): { workspaceProfileId: string; status: string } | undefined
+  session(id: string): { workspaceProfileId: string; status: string; sideChat?: boolean; remote?: boolean; sessionPermissionPreset?: string | null } | undefined
   currentSession(): string | null
+  currentProject?(): string | null
   defaults(): { shared: boolean; overrides: 'shared' | 'private' }
   browserOptions(): Partial<NonNullable<ConstructorParameters<typeof BrowserDebug>[2]>>
   changed(): void
@@ -35,6 +38,9 @@ export class ProjectToolService {
   private readonly projects = new Map<string, ProjectTools>()
   private readonly groups = new Map<string, Group>()
   private readonly bridges = new Map<string, Bridge>()
+  private readonly terminals = new ToolTerminals()
+  private readonly terminalBridges = new Map<string, Promise<{ server: Server; endpoint: string; env: NodeJS.ProcessEnv }>>()
+  private readonly terminalStarts = new Map<string, Promise<unknown>>()
   private writing = Promise.resolve()
   private readonly file: string
   private stopping = false
@@ -54,6 +60,12 @@ export class ProjectToolService {
         for (const entry of candidate.tabs.slice(0, 128)) {
           if (!entry || typeof entry.id !== 'string' || !/^[a-f0-9-]{36}$/.test(entry.id) || tabs.some(tab => tab.id === entry.id)) continue
           if (entry.kind === 'git' && !tabs.some(tab => tab.kind === 'git')) tabs.push({ id: entry.id, kind: 'git', title: 'Git' })
+          if (isTerminalKind(entry.kind)) {
+            try {
+              const config = terminalLaunch(entry.kind, entry.terminal ?? {}, undefined, entry.kind === 'wsl' ? 'win32' : process.platform).config
+              tabs.push({ id: entry.id, kind: entry.kind, title: this.terminalTitle(entry.kind, config), terminal: config })
+            } catch { /* Ignore invalid saved terminal settings. Never restore live connections automatically. */ }
+          }
           if (entry.kind === 'browser') {
             let url: string | null = null
             try { url = typeof entry.url === 'string' ? restorableUrl(entry.url) : null } catch { /* Invalid saved URL. */ }
@@ -110,7 +122,7 @@ export class ProjectToolService {
     const projects = [...this.projects.values()].map(project => ({ ...project, tabs: project.tabs.filter(tab => tab.kind !== 'new').map(tab => {
       let url: string | null = null
       try { url = tab.url ? restorableUrl(tab.url) : null } catch { /* Blank or invalid URL. */ }
-      return { id: tab.id, kind: tab.kind, ...(url ? { url } : {}) }
+      return { id: tab.id, kind: tab.kind, ...(url ? { url } : {}), ...(tab.terminal ? { terminal: tab.terminal } : {}) }
     }) }))
     const text = JSON.stringify({ version: 2, projects })
     if (!this.profileRecoveryRequired) this.writing = this.writing.catch(() => {}).then(() => writeFileAtomic(this.file, text))
@@ -215,17 +227,22 @@ export class ProjectToolService {
     if (this.stopping) throw new Error('App is closing')
     const project = this.project(profileId)
     if (action.type === 'add') {
-      if (!['new', 'browser', 'git'].includes(action.kind)) throw new Error('Unknown tool type')
+      if (!['new', 'browser', 'git'].includes(action.kind) && !isTerminalKind(action.kind)) throw new Error('Unknown tool type')
       if (action.kind === 'git' && !this.options.project(profileId)?.path) throw new Error('Git requires a project folder')
       let tab = action.kind === 'git' ? project.tabs.find(tab => tab.kind === 'git') : undefined
       if (!tab) {
         tab = { id: randomUUID(), kind: action.kind, title: action.kind === 'new' ? 'New tab' : action.kind === 'git' ? 'Git' : 'Browser' }
+        if (isTerminalKind(action.kind)) {
+          tab.terminal = terminalLaunch(action.kind, action.terminal ?? {}, this.options.project(profileId)?.path ?? undefined).config
+          tab.title = this.terminalTitle(action.kind, tab.terminal)
+        }
         if (action.url) { tab.url = parseBrowserAddress(action.url).href }
         this.ensurePage(project, tab)
         project.tabs.push(tab)
       }
       if (action.replaceId && project.tabs.find(entry => entry.id === action.replaceId)?.kind === 'new') removeToolTab(project, action.replaceId)
       project.activeId = tab.id; project.visible = true
+      if (isTerminalKind(tab.kind)) { this.save(); await this.startTerminal(profileId, tab.id) }
     } else if (action.type === 'visible') {
       project.visible = action.visible && project.tabs.length > 0
       const selected = project.tabs.find(tab => tab.id === project.activeId)
@@ -240,6 +257,7 @@ export class ProjectToolService {
       if (action.type === 'select') {
         this.ensurePage(project, tab); project.activeId = tab.id; project.visible = true
       } else if (action.type === 'close') {
+        this.terminals.close(profileId, tab.id)
         if (tab.pageId !== undefined) {
           const group = this.groups.get(profileId)
           if (group && !await group.browser.closePage(tab.pageId)) return this.state()
@@ -263,6 +281,123 @@ export class ProjectToolService {
     if (action.type === 'add' && action.kind === 'browser') await group?.browser.ready
     return this.state()
   }
+  private terminalTitle(kind: string, config: TerminalConfig): string {
+    return kind === 'ssh' ? `SSH: ${config.host}` : kind === 'wsl' ? `WSL${config.distro ? `: ${config.distro}` : ''}` : 'Local terminal'
+  }
+  private async terminalEnvironment(profileId: string): Promise<NodeJS.ProcessEnv> {
+    let pending = this.terminalBridges.get(profileId)
+    if (!pending) {
+      pending = (async () => {
+        const env = await prepareBrowserSessionEnvironment(join(this.options.userData, 'terminal-helpers', randomUUID()), 'tab-1', { ...process.env }, message => this.options.error(message))
+        const endpoint = env.COPILOT_DESKTOP_TERMINAL_STATE!, token = randomBytes(32).toString('hex')
+        const server = createServer((request, response) => {
+          const port = (server.address() as { port: number }).port
+          if (request.url !== '/terminal' || request.headers.origin || request.headers.host !== `127.0.0.1:${port}` || !constantTimeTokenEqual(request.headers.authorization ?? '', `Bearer ${token}`)) {
+            response.writeHead(403); response.end(); return
+          }
+          void this.serveTerminal(request, response, profileId, () => {
+            if (this.stopping || (this.options.currentProject ? this.options.currentProject() : this.shownProject) !== profileId || !this.options.project(profileId)) throw new Error('Activate this terminal’s project first')
+          })
+        })
+        server.requestTimeout = 15000
+        await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+        try { await writeFileAtomic(endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token })) }
+        catch (error) { server.close(); throw error }
+        // A tool shell is not an agent session; do not inherit browser authority or instruction directories.
+        delete env.COPILOT_DESKTOP_BROWSER_STATE; delete env.COPILOT_DESKTOP_BROWSER_HELPER; delete env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        if (process.platform === 'win32') env.WSLENV = [env.WSLENV, 'COPILOT_DESKTOP_TERMINAL_STATE', 'COPILOT_DESKTOP_TERMINAL_WINDOWS_HELPER', 'COPILOT_DESKTOP_TERMINAL_HELPER/p'].filter(Boolean).join(':')
+        return { server, endpoint, env }
+      })()
+      this.terminalBridges.set(profileId, pending)
+      void pending.catch(() => { if (this.terminalBridges.get(profileId) === pending) this.terminalBridges.delete(profileId) })
+    }
+    return (await pending).env
+  }
+  private async stopTerminalBridge(profileId: string): Promise<void> {
+    const pending = this.terminalBridges.get(profileId); this.terminalBridges.delete(profileId)
+    if (!pending) return
+    try { const bridge = await pending; bridge.server.closeAllConnections(); bridge.server.close(); await rm(bridge.endpoint, { force: true }) }
+    catch (error) { this.options.error(error) }
+  }
+  private async startTerminal(profileId: string, id: string): Promise<unknown> {
+    const running = this.terminalStarts.get(id); if (running) return running
+    const pending = (async () => {
+      const env = await this.terminalEnvironment(profileId)
+      const tab = this.projects.get(profileId)?.tabs.find(tab => tab.id === id)
+      if (this.stopping || !tab || !isTerminalKind(tab.kind)) throw new Error('Terminal tab closed')
+      const terminalEnv = tab.kind === 'wsl' ? { ...env, COPILOT_DESKTOP_TERMINAL_HELPER: env.COPILOT_DESKTOP_TERMINAL_WSL_HELPER } : env
+      return this.terminals.start(profileId, id, tab.kind, tab.terminal ?? {}, this.options.project(profileId)?.path ?? null, terminalEnv)
+    })()
+    this.terminalStarts.set(id, pending)
+    try { return await pending } finally { this.terminalStarts.delete(id) }
+  }
+  /** The renderer and authenticated helper share the same ownership and input checks. */
+  async terminalAction(profileId: string, request: unknown): Promise<unknown> {
+    if (this.stopping || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Invalid terminal request')
+    const value = request as Record<string, unknown>, project = this.project(profileId)
+    if (value.action === 'list') return project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => {
+      try { const { output: _output, ...state } = this.terminals.read(profileId, tab.id); return { ...tab, ...state } }
+      catch { return { ...tab, status: 'disconnected' } }
+    })
+    if (value.action === 'create') {
+      if (typeof value.kind !== 'string' || !isTerminalKind(value.kind)) throw new Error('Use local, wsl, or ssh')
+      // Remember this operation's ID even if another request changes the selected tab during startup.
+      const before = new Set(project.tabs.map(tab => tab.id))
+      const operation = this.action(profileId, { type: 'add', kind: value.kind, terminal: (value.config ?? {}) as TerminalConfig })
+      const created = project.tabs.find(tab => !before.has(tab.id))
+      await operation
+      if (!created || !project.tabs.includes(created)) throw new Error('Terminal closed during startup')
+      return { ...created, ...this.terminals.read(profileId, created.id) }
+    }
+    if (typeof value.id !== 'string') throw new Error('A terminal ID is required')
+    const tab = project.tabs.find(tab => tab.id === value.id && isTerminalKind(tab.kind))
+    if (!tab) throw new Error('Terminal does not belong to this project')
+    if (value.action === 'start') return this.startTerminal(profileId, tab.id)
+    if (value.action === 'restart') {
+      if (this.terminalStarts.has(tab.id)) throw new Error('Terminal is still starting; wait before reconnecting')
+      this.terminals.close(profileId, tab.id); return this.startTerminal(profileId, tab.id)
+    }
+    if (value.action === 'read') {
+      if (value.cursor !== undefined && (typeof value.cursor !== 'number' || !Number.isSafeInteger(value.cursor) || value.cursor < 0)) throw new Error('Invalid output cursor')
+      try {
+        if (value.generation !== undefined) {
+          if (typeof value.generation !== 'string') throw new Error('Invalid terminal generation')
+          const snapshot = this.terminals.read(profileId, tab.id)
+          if (snapshot.generation !== value.generation) return snapshot
+        }
+        return this.terminals.read(profileId, tab.id, value.cursor as number | undefined)
+      }
+      catch (error) {
+        if (error instanceof Error && error.message === 'Terminal is not connected in this project') return { id: tab.id, generation: '', status: 'disconnected', output: '', cursor: 0, start: 0 }
+        throw error
+      }
+    }
+    if (value.action === 'close') { await this.action(profileId, { type: 'close', id: tab.id }); return { closed: true } }
+    if (value.action === 'resize') this.terminals.resize(profileId, tab.id, value.cols as number, value.rows as number)
+    else if (value.action === 'interrupt') this.terminals.write(profileId, tab.id, '\x03')
+    else if (value.action === 'write') {
+      if (typeof value.text !== 'string' || value.text.length > 64000) throw new Error('Input must be a string of at most 64000 characters')
+      this.terminals.write(profileId, tab.id, value.text)
+    } else throw new Error('Unknown terminal action')
+    return { ok: true }
+  }
+  private async serveTerminal(request: IncomingMessage, response: ServerResponse, profileId: string, authorize: () => void): Promise<void> {
+    try {
+      if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
+      authorize()
+      const chunks: Buffer[] = []; let size = 0
+      for await (const chunk of request) { size += chunk.length; if (size > 131072) throw new Error('Request exceeds 128 KiB'); chunks.push(Buffer.from(chunk)) }
+      // Session changes while an HTTP body arrives must revoke the pending operation.
+      authorize()
+      const result = await this.terminalAction(profileId, JSON.parse(Buffer.concat(chunks).toString('utf8')))
+      authorize()
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result))
+    } catch (error) {
+      if (!response.headersSent) response.writeHead(409, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ message: error instanceof Error ? error.message : 'Terminal request failed' }))
+    }
+  }
   async startBridge(sessionId: string, profileId: string, endpoint: string): Promise<void> {
     await this.stopBridge(sessionId)
     const token = randomBytes(32).toString('hex')
@@ -273,6 +408,14 @@ export class ProjectToolService {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { fail(403, 'Forbidden'); return }
       if (!constantTimeTokenEqual(request.headers.authorization ?? '', `Bearer ${token}`)) { fail(401, 'Unauthorized'); return }
       this.refreshConnections()
+      if (request.url === '/terminal') {
+        void this.serveTerminal(request, response, profileId, () => {
+          this.refreshConnections()
+          if (this.bridges.get(sessionId) !== bridge || !bridge.connected) throw new Error('Terminal control follows the current session. Activate this session in its project.')
+          const session = this.options.session(sessionId)
+          if (session?.sideChat || session?.remote || session?.sessionPermissionPreset === 'read-only') throw new Error('Terminal control is unavailable to read-only, side-chat, or remote sessions')
+        }); return
+      }
       if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it to use the browser.'); return }
       const group = this.groups.get(profileId), revision = bridge.revision
       if (!bridge.connected) { fail(409, 'Browser control follows the current session. Activate this session in its project to use the browser.'); return }
@@ -300,13 +443,19 @@ export class ProjectToolService {
     this.options.changed()
   }
   async removeProject(id: string): Promise<void> {
+    // Revoke pending starts before the first await; helper setup can complete during bridge shutdown.
+    this.projects.delete(id)
+    this.terminals.closeProject(id)
+    await this.stopTerminalBridge(id)
     const group = this.groups.get(id); this.groups.delete(id)
     for (const [sessionId, bridge] of this.bridges) if (bridge.profileId === id) await this.stopBridge(sessionId)
     if (group) await group.browser.dispose()
-    this.projects.delete(id); this.save()
+    this.save()
   }
   async dispose(): Promise<void> {
     this.stopping = true
+    this.terminals.dispose()
+    await Promise.all([...this.terminalBridges.keys()].map(id => this.stopTerminalBridge(id)))
     await this.writing.catch(this.options.error)
     await Promise.all([...this.bridges.keys()].map(id => this.stopBridge(id)))
     await Promise.all([...this.groups.values()].map(group => group.browser.dispose()))
