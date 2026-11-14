@@ -9,7 +9,8 @@ import { SessionWindow } from './components/SessionWindow.js'
 import { BrowserOnlyWindow } from './components/BrowserWorkspace.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { GitPanel } from './components/GitPanel.js'
-import { GIT_PANEL_DEFAULT_WIDTH, ProjectDock } from './components/ProjectDock.js'
+import { WorkspaceToolDock } from './components/WorkspaceToolDock.js'
+import { readToolDockPreferences, TOOL_DOCK_KEY } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
@@ -29,17 +30,6 @@ const EMPTY_STATE: DesktopState = {
   maxSessionTabs: 20,
   recentLogs: [],
   error: null,
-}
-
-function readStoredGitOpen(): boolean {
-  try { return localStorage.getItem('git-panel-open') === 'true' } catch { return false }
-}
-
-function readStoredGitWidth(): number {
-  try {
-    const value = Number(localStorage.getItem('git-panel-width'))
-    return Number.isFinite(value) && value > 0 ? value : GIT_PANEL_DEFAULT_WIDTH
-  } catch { return GIT_PANEL_DEFAULT_WIDTH }
 }
 
 type InputDialog =
@@ -67,8 +57,22 @@ export function App(): JSX.Element {
   const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(false)
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const [history, setHistory] = useState<{ entries: SessionHistoryEntry[] | null; loadError: string | null; pendingSessionId: string | null; openError: string | null } | null>(null)
-  const [gitOpen, setGitOpen] = useState(readStoredGitOpen)
-  const [gitWidth, setGitWidth] = useState(readStoredGitWidth)
+  const [dock, setDock] = useState(() => readToolDockPreferences(localStorage))
+  const [browserChoice, setBrowserChoice] = useState<string | null>(null)
+  const gitOpen = dock.open && dock.tool === 'git'
+  const previousDockOpen = useRef(dock.open)
+  useEffect(() => {
+    if (previousDockOpen.current && !dock.open) requestAnimationFrame(() => document.querySelector<HTMLElement>('.session-pane-focused .xterm-helper-textarea')?.focus())
+    previousDockOpen.current = dock.open
+  }, [dock.open])
+  useEffect(() => { try { localStorage.setItem(TOOL_DOCK_KEY, JSON.stringify(dock)) } catch { /* In-memory preferences still work. */ } }, [dock])
+  const previousBrowserPopouts = useRef(state.browserPoppedOutTabIds ?? [])
+  useEffect(() => {
+    const current = state.browserPoppedOutTabIds ?? []
+    const returned = previousBrowserPopouts.current.find(id => !current.includes(id) && state.tabs.some(tab => tab.id === id) && !(state.poppedOutTabIds ?? []).includes(id))
+    previousBrowserPopouts.current = current
+    if (returned) { setBrowserChoice(returned); setDock(prefs => ({ ...prefs, open: true, tool: 'browser' })) }
+  }, [state.browserPoppedOutTabIds, state.poppedOutTabIds, state.tabs])
   // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
   const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)
@@ -121,16 +125,16 @@ export function App(): JSX.Element {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
   }
-  const toggleGit = useCallback((): void => {
-    setGitOpen((open) => {
-      const next = !open
-      try { localStorage.setItem('git-panel-open', String(next)) } catch { /* Keep the in-memory state. */ }
-      return next
-    })
+  const closeTools = useCallback((): void => {
+    setDock(prefs => ({ ...prefs, open: false }))
   }, [])
-  const changeGitWidth = (width: number): void => {
-    setGitWidth(width)
-    try { localStorage.setItem('git-panel-width', String(Math.round(width))) } catch { /* Keep the in-memory width. */ }
+  const toggleGit = useCallback((): void => {
+    setDock(prefs => ({ ...prefs, open: !(prefs.open && prefs.tool === 'git'), tool: 'git' }))
+  }, [])
+  const openBrowser = (tabId: string): void => {
+    if ((state.browserPoppedOutTabIds ?? []).includes(tabId)) { handleOperation(window.copilotDesktop.popOutBrowser(tabId)); return }
+    setBrowserChoice(tabId)
+    setDock(prefs => ({ ...prefs, open: true, tool: 'browser' }))
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
@@ -463,13 +467,19 @@ export function App(): JSX.Element {
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} />
-          <ProjectDock open={gitOpen && !generalActive} width={gitWidth} onWidthChange={changeGitWidth}
-            panel={({ takeover }) => <GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} takeover={takeover} onClose={toggleGit}
+          <WorkspaceToolDock prefs={dock} onChange={setDock} onClose={closeTools}
+            tabs={state.tabs} activeTabId={state.activeTabId} profileId={state.activeProfileId!} gitAvailable={!generalActive}
+            browserChoice={browserChoice} onBrowserChoice={setBrowserChoice}
+            onActivate={id => handleOperation(window.copilotDesktop.activateTab(id))}
+            browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []} poppedOutTabIds={state.poppedOutTabIds ?? []}
+            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}
+            onError={error => setOperationError(errorMessage(error))}
+            git={<GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} embedded active={gitOpen && !generalActive} onClose={closeTools}
               promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}
               worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
+            browserOpenId={dock.open && dock.tool === 'browser' ? browserChoice ?? state.activeTabId : null} onOpenBrowser={openBrowser}
             gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
-            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
             desktopControlAllowed={state.desktopControlAllowed === true}
@@ -482,7 +492,7 @@ export function App(): JSX.Element {
             onShowLog={(tabId) => showLog(tabId)}
             onCreate={() => openNewSession()}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
-          </ProjectDock>
+          </WorkspaceToolDock>
           </>
         )}
       </main>

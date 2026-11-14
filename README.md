@@ -194,6 +194,19 @@ runs for a new, a restarted and a resumed tab.
 
 ## Session windows
 
+The main window has three areas: projects and sessions on the left, the CLI in the center, and a resizable tools panel on
+the right. **Browser** and **Git** share that panel as tabs. Opening either tool selects its tab; **Ctrl+Shift+G** selects
+Git or collapses the panel when Git is already shown. The panel remembers its width, selected tool and open state.
+Switching tools or collapsing preserves browser pages and fields, and the current project's Git draft and diff selection.
+Changing projects still resets the Git panel's unsaved UI state.
+
+Browser normally follows the main session. Its **Session** selector can choose the side chat without changing the browser
+whenever keyboard focus moves. Narrow windows show **Back to CLI** when tools take over; if two terminals cannot fit,
+use the main/side session buttons to choose the visible terminal. Both processes keep running. Hiding Browser stops
+Testing mode and element picking and leaves an explanation when you return; it does not close the pages or resume a test.
+
+Run `pnpm tool-dock:check` for the isolated lifecycle and layout check.
+
 For the browser pane, native Local Overrides, authenticated ticket reading and CLI console/network commands,
 see [web app debugging](docs/browser-debug.md).
 

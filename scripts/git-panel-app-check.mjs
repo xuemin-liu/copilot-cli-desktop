@@ -78,12 +78,14 @@ if (!process.versions.electron) {
     const until = async (code, label) => {
       const end = Date.now() + 25_000
       while (Date.now() < end) { if (await ui(code)) return; await delay(50) }
-      throw new Error(`Timed out: ${label}\n--- page text ---\n${(await ui('document.body.innerText.slice(0, 800)')).trim()}`)
+      await writeFile(join(out, 'failure.png'), (await main.webContents.capturePage()).toPNG())
+      throw new Error(`Timed out: ${label}\n--- panel text ---\n${await ui('document.querySelector(".workspace-tools")?.innerText')}\n--- page text ---\n${(await ui('document.body.innerText.slice(0, 800)')).trim()}`)
     }
     const click = async selector => {
       const point = await ui(`(() => {
         const element = document.querySelector(${JSON.stringify(selector)});
         if (!element) throw new Error('Missing click target: ' + ${JSON.stringify(selector)});
+        element.scrollIntoView({ block: 'nearest' });
         const rect = element.getBoundingClientRect();
         return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
       })()`)
@@ -96,7 +98,7 @@ if (!process.versions.electron) {
 
     // A real session starts in the workspace, and the header carries the Git toggle.
     await until('!!document.querySelector(".session-git-toggle") && !!document.querySelector(".xterm")', 'session header and terminal')
-    assert.equal(await ui('!!document.querySelector(".git-panel")'), false, 'the panel starts closed')
+    assert.equal(await ui('!!document.querySelector(".git-panel")?.getBoundingClientRect().width'), false, 'the panel starts closed')
     assert.equal(await ui('document.querySelector(".session-git-toggle").getAttribute("aria-pressed")'), 'false')
     // The same terminal element must survive every open, close and takeover below: a remounted xterm would lose the session view.
     await ui('window.__xterm = document.querySelector(".xterm"); window.__inserted = []; window.addEventListener("copilot-desktop:insert-prompt", event => window.__inserted.push(event.detail))')
@@ -107,7 +109,7 @@ if (!process.versions.electron) {
     await until('!!document.querySelector(".git-repo-selected")', 'panel opened with repositories')
     assert.deepEqual(await ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)'), ['alpha', 'beta'])
     assert.equal(await ui('document.querySelector(".session-git-toggle").getAttribute("aria-pressed")'), 'true')
-    assert.equal(await ui('localStorage.getItem("git-panel-open")'), 'true')
+    assert.equal(await ui('String(JSON.parse(localStorage.getItem("workspace-tool-dock-v1")).open)'), 'true')
     const widths = await ui('({ panel: document.querySelector(".git-panel").getBoundingClientRect().width, main: document.querySelector(".project-dock-main").getBoundingClientRect().width })')
     assert.ok(widths.panel >= 320 && widths.main >= 480, JSON.stringify(widths))
     assert.equal(await sameTerminal(), true)
@@ -185,18 +187,44 @@ if (!process.versions.electron) {
     assert.equal(await sameTerminal(), true)
     results.lineComments = true
 
+    // Switching tools/collapsing retains the actual Git panel, selection and an unsubmitted commit draft.
+    await ui('window.__git = document.querySelector(".git-panel"); window.__diff = document.querySelector(".git-diff-lines")')
+    await click('[aria-label="Stage a.txt"]')
+    await until('!!document.querySelector(".git-commit textarea")', 'commit box after staging')
+    await until('[...document.querySelectorAll(".git-repo")].every(e => !e.disabled)', 'staging finished')
+    await ui('document.querySelector(".git-commit textarea").focus()')
+    await ui('(() => { const e=document.querySelector(".git-commit textarea"); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(e, "keep this draft across tool switches"); e.dispatchEvent(new Event("input", { bubbles: true })) })()')
+    await until('document.querySelector(".git-commit textarea").value.includes("keep this draft")', 'draft entered')
+    await click('[data-tool="browser"]')
+    await until('!!document.querySelector(".browser-panel")', 'browser tab opened')
+    assert.equal(await ui('document.querySelector(".git-panel") === window.__git'), true)
+    assert.equal(await ui('document.querySelector(".git-panel").getBoundingClientRect().width'), 0)
+    await click('[data-tool="git"]')
+    await until('document.querySelector(".git-panel").getBoundingClientRect().width > 0', 'Git tab restored')
+    assert.equal(await ui('document.querySelector(".git-commit textarea").value'), 'keep this draft across tool switches')
+    assert.equal(await sameTerminal(), true)
+    results.retainedTools = true
+
+    // A write finishing while Git is hidden must still release its busy state.
+    await click('[aria-label="Stage b.txt"]')
+    await click('[data-tool="browser"]')
+    await until('[...document.querySelectorAll(".git-repo")].every(e => !e.disabled)', 'hidden staging finished')
+    await click('[data-tool="git"]')
+    await until('document.querySelector(".git-panel").getBoundingClientRect().width > 0', 'Git after background staging')
+
     // Ctrl+Shift+G with the terminal focused toggles the panel and the terminal never sees ^G.
     await ui('document.querySelector(".xterm-helper-textarea").focus()')
     assert.equal(await ui('document.activeElement.classList.contains("xterm-helper-textarea")'), true, 'the terminal has focus')
     press('G', ['control', 'shift'])
-    await until('!document.querySelector(".git-panel")', 'shortcut closes the panel')
+    await until('!document.querySelector(".git-panel")?.getBoundingClientRect().width', 'shortcut closes the panel')
     assert.equal(await ui('document.querySelector(".session-git-toggle").getAttribute("aria-pressed")'), 'false')
     press('G', ['control', 'shift'])
-    await until('!!document.querySelector(".git-repo-selected")', 'shortcut opens the panel again')
+    await until('document.querySelector(".git-panel").getBoundingClientRect().width > 0', 'shortcut opens the panel again')
     assert.equal(await sameTerminal(), true)
     results.shortcutWithTerminalFocused = true
 
     // The open state and the chosen repository survive a reload.
+    await ui('document.querySelectorAll("[data-pick]").forEach(e => e.removeAttribute("data-pick"))')
     await ui('[...document.querySelectorAll(".git-repo")].find(element => element.innerText.includes("beta")).setAttribute("data-pick", "")')
     await click('[data-pick]')
     await until('/beta/.test(document.querySelector(".git-repo-selected")?.innerText || "")', 'beta selected')
@@ -204,6 +232,7 @@ if (!process.versions.electron) {
     await until('!!document.querySelector(".git-repo-selected")', 'panel restored after reload')
     assert.match(await ui('document.querySelector(".git-repo-selected").innerText'), /beta/)
     results.persistence = true
+    await writeFile(join(out, 'tabbed-git.png'), (await main.webContents.capturePage()).toPNG())
 
     // A window too narrow for both gives the panel the whole area; the session stays mounted and comes back on close.
     await until('!!document.querySelector(".xterm")', 'terminal after reload')
@@ -212,8 +241,8 @@ if (!process.versions.electron) {
     await until('getComputedStyle(document.querySelector(".project-dock-main")).display === "none"', 'panel takes over a narrow window')
     assert.equal(await ui('document.querySelector(".git-panel").getBoundingClientRect().width > 500'), true)
     assert.equal(await sameTerminal(), true, 'the terminal stays mounted while hidden')
-    await click('button[aria-label="Close Git panel and return to the session"]')
-    await until('!document.querySelector(".git-panel") && getComputedStyle(document.querySelector(".project-dock-main")).display !== "none"', 'the session returns')
+    await click('button[aria-label="Back to CLI"]')
+    await until('!document.querySelector(".git-panel")?.getBoundingClientRect().width && getComputedStyle(document.querySelector(".project-dock-main")).display !== "none"', 'the session returns')
     assert.equal(await sameTerminal(), true)
     results.narrowTakeover = true
 

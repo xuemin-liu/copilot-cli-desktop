@@ -1,11 +1,11 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionCliLabel } from '../../main/session-cli.js'
 import { SessionTerminal } from './SessionTerminal.js'
-import { BrowserWorkspace } from './BrowserWorkspace.js'
-import { GitBranchIcon, SideChatIcon } from './Icons.js'
+import { terminalLayout } from '../tool-dock-state.js'
+import { BrowserIcon, GitBranchIcon, SideChatIcon } from './Icons.js'
 import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
 import type { DesktopControlTabView } from '../../main/types.js'
 
@@ -22,7 +22,9 @@ interface SessionWorkspaceProps {
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
   browserPoppedOutTabIds?: string[]
-  obscured?: boolean
+  /** Browser controls select a session in the shared tools dock. */
+  browserOpenId?: string | null
+  onOpenBrowser?: (tabId: string) => void
   /** Git panel toggle in the main session's header. Omitted where the panel is not available. */
   gitOpen?: boolean
   onToggleGit?: () => void
@@ -39,7 +41,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
@@ -49,6 +51,21 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
     return next
   })
   const areaRef = useRef<HTMLDivElement>(null)
+  const [available, setAvailable] = useState(0)
+  useEffect(() => {
+    const element = areaRef.current
+    if (!element) return
+    const measure = (): void => {
+      const width = Math.round(element.getBoundingClientRect().width)
+      if (width > 0) setAvailable(width)
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    measure()
+    return () => observer.disconnect()
+  }, [])
+  const layout = terminalLayout(available, side !== null, split)
+  const showSplit = side !== null && !layout.single
   const dragging = useRef<number | null>(null)
   const updateSplit = (value: number): void => {
     const next = Math.min(75, Math.max(25, value))
@@ -57,8 +74,11 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
   }
 
   return (
-    <div ref={areaRef} className={`terminal-area${side ? ' terminal-area-split' : ''}`}
-      style={{ gridTemplateColumns: side ? `minmax(0, ${split}fr) 6px minmax(0, ${100 - split}fr)` : 'minmax(0, 1fr)' }}>
+    <div ref={areaRef} className={`terminal-area${showSplit ? ' terminal-area-split' : ''}`}
+      style={{ gridTemplateColumns: showSplit ? `minmax(0, ${layout.split}fr) 6px minmax(0, ${100 - layout.split}fr)` : 'minmax(0, 1fr)', gridTemplateRows: side && layout.single ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)' }}>
+      {side && layout.single && <nav className="compact-session-switch" aria-label="Visible terminal">
+        {[main, side].map(tab => tab && <button type="button" key={tab.id} aria-pressed={tab.id === activeTabId} onClick={() => onActivate(tab.id)}>{tab.sideChat ? 'Side chat: ' : ''}{tab.title}</button>)}
+      </nav>}
       {tabs.length === 0 && (
         <div className="empty-state">
           <p>No sessions are open.</p>
@@ -68,16 +88,16 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
       {/* Keep every terminal under the same keyed parent. Docking, focusing,
           hiding, and closing a neighbor must not remount another xterm. */}
       {tabs.map((tab) => {
-        const visible = tab.id === main?.id || tab.id === side?.id
+        const visible = layout.single && side ? tab.id === activeTabId : tab.id === main?.id || tab.id === side?.id
         const focused = tab.id === activeTabId
         const busy = tab.status === 'starting' || tab.status === 'stopping'
         return (
           <section key={tab.id} className={`session-pane${visible ? ' session-pane-visible' : ''}${focused ? ' session-pane-focused' : ''}`}
-            style={{ gridColumn: tab.id === side?.id ? 3 : 1 }}
+            style={{ gridColumn: showSplit && tab.id === side?.id ? 3 : 1, gridRow: side && layout.single ? 2 : 1 }}
             aria-label={`${tab.sideChat ? 'Side chat' : 'Main session'}: ${tab.title}`}
             onFocusCapture={() => { if (!focused) onActivate(tab.id) }}
             onPointerDown={() => { if (!focused) onActivate(tab.id) }}>
-            <BrowserWorkspace tabId={tab.id} active={visible && !poppedOutTabIds.includes(tab.id) && tab.status !== 'dormant'} obscured={obscured} poppedOut={browserPoppedOutTabIds.includes(tab.id)} renderHeader={browserToggle => <><header className="session-pane-header">
+            <header className="session-pane-header">
               <span className="session-pane-title" title={tab.title}>{tab.title}
                 {tab.cli && <span className="session-cli-chip" title={`This tab runs ${sessionCliLabel(tab.cli)}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{sessionCliLabel(tab.cli)}</span>}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
@@ -86,7 +106,8 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
-              {browserToggle}
+              {onOpenBrowser && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label={browserPoppedOutTabIds.includes(tab.id) ? 'Show browser window' : 'Open browser'}
+                title="Browser" disabled={tab.status === 'dormant'} onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
               {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />
               )}
@@ -109,7 +130,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
             </header>
             {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
-            )}</>}>
+            )}
             {/* A popped-out session shows its terminal and its stopped notice in its own window only. */}
             {poppedOutTabIds.includes(tab.id) ? (
               <div className="session-terminal">
@@ -118,13 +139,12 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 </div>
               </div>
             ) : <SessionTerminal tab={tab} active={visible} focused={focused} onRestart={() => onRestart(tab.id)} onShowLog={() => onShowLog(tab.id)} />}
-            </BrowserWorkspace>
           </section>
         )
       })}
-      {side && (
+      {showSplit && (
         <div className="side-chat-divider" role="separator" aria-label="Resize side chat" aria-orientation="vertical"
-          aria-valuenow={Math.round(split)} aria-valuemin={25} aria-valuemax={75} tabIndex={0}
+          aria-valuenow={Math.round(layout.split)} aria-valuemin={25} aria-valuemax={75} tabIndex={0}
           onPointerDown={(event) => {
             event.preventDefault()
             dragging.current = event.pointerId

@@ -39,6 +39,10 @@ export interface GitPanelProps {
   worktreeSessions?: readonly WorktreeSession[]
   /** True when the panel is replacing the session area because the window is narrow. */
   takeover?: boolean
+  /** A retained hidden panel cannot supply a cursor selection to the CLI. */
+  active?: boolean
+  /** The shared dock owns close/back navigation. */
+  embedded?: boolean
   onClose(): void
   /** How text reaches a prompt box. Defaults to the app's own prompt insertion. */
   insert?: (tabId: string, text: string) => void
@@ -262,7 +266,7 @@ function EntryGroup({ title, entries, codeOf, staged, selection, marked, multipl
   )
 }
 
-export function GitPanel({ profileId, promptTarget, takeover = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
+export function GitPanel({ profileId, promptTarget, takeover = false, active = true, embedded = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
@@ -369,7 +373,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
   }, [diff?.value.text])
   // Answer synchronously at submission time. Unmounting/closing the panel removes the provider.
   useLayoutEffect(() => {
-    if (!activeCursor || !repo || !selection || !diff || !promptTarget || !ready || statusError) return
+    if (!active || !activeCursor || !repo || !selection || !diff || !promptTarget || !ready || statusError) return
     const text = composeGitCursorContext({ folder: repo.folder, path: selection.path, staged: selection.staged,
       diffText: diff.value.text, ...activeCursor })
     const id = cursor!.id
@@ -384,7 +388,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
     }
     window.addEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
     return () => window.removeEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
-  }, [activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, statusError])
+  }, [active, activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, statusError])
   const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
   const commentKey = commentTarget ? bucketKey(commentTarget) : null
   const activeComments = commentKey ? comments.get(commentKey) ?? null : null
@@ -738,9 +742,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, onClose, i
         <h2>Git</h2>
         <span className="git-panel-sub">{view ? `${view.repos.length} repositor${view.repos.length === 1 ? 'y' : 'ies'}` : 'Loading…'}</span>
         <button type="button" className="icon-button" aria-label="Rescan repositories" title="Rescan this folder for repositories and refresh" disabled={busy} onClick={rescan}>↻</button>
-        <button type="button" className="icon-button" aria-label={takeover ? 'Close Git panel and return to the session' : 'Close Git panel'}
-          title={takeover ? 'Back to the session' : 'Close (Ctrl+Shift+G)'} onClick={onClose}>×</button>
+        {!embedded && <button type="button" className="icon-button" aria-label={takeover ? 'Close Git panel and return to the session' : 'Close Git panel'}
+          title={takeover ? 'Back to the session' : 'Close (Ctrl+Shift+G)'} onClick={onClose}>×</button>}
       </header>
+      {embedded && <p className="git-prompt-target">Prompt: {promptTarget?.title ?? 'No available session'}{promptTarget?.taskBlocker ? ` — ${promptTarget.taskBlocker}` : ''}</p>}
 
       {error && <p className="git-message git-message-error" role="alert">{error}</p>}
       {!view && !error && <p className="git-message" role="status">Looking for repositories…</p>}

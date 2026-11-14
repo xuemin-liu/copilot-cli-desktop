@@ -1381,6 +1381,24 @@ button:disabled {
 .project-dock-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; grid-column: 1; }
 .project-dock-panel { min-width: 0; min-height: 0; display: flex; }
 .project-dock > .side-chat-divider { grid-row: 1; }
+.workspace-tools { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; background: #10151e; }
+.workspace-tools-header { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid #303640; }
+.workspace-tools-header [role="tablist"] { display: flex; gap: 4px; flex: 1; }
+.workspace-tools-header [role="tab"][aria-selected="true"] { background: #263b5b; border-color: #4f88ff; }
+.workspace-tools-header button { padding: 4px 8px; }
+.workspace-tool-content { display: flex; flex: 1; min-height: 0; min-width: 0; flex-direction: column; }
+.workspace-tool-content[hidden] { display: none; }
+.workspace-tool-content > .browser-panel { flex: 1; }
+.workspace-browser-context { display: flex; gap: 4px; align-items: center; padding: 6px 8px; border-bottom: 1px solid #252a33; }
+.workspace-browser-context label { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 0; font-size: 12px; }
+.workspace-browser-context select { min-width: 0; flex: 1; width: 0; }
+.workspace-browser-context button { padding: 3px 7px; }
+.tool-empty, .git-prompt-target { margin: 0; padding: 8px 10px; color: #a5b1c3; font-size: 12px; overflow-wrap: anywhere; }
+.compact-session-switch { display: flex; gap: 4px; padding: 4px; min-width: 0; grid-row: 1; }
+.compact-session-switch button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compact-session-switch button[aria-pressed="true"] { border-color: #4f88ff; }
+.workspace-tools .browser-toolbar { flex-wrap: wrap; }
+.workspace-tools .browser-toolbar input { flex-basis: 100px; }
 .session-git-toggle[aria-pressed="true"] { background: #1f3358; color: #9db9f5; }
 
 .git-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scrollbar-width: thin; background: #10151e; color: #e6edf3; font-size: 12px; border-left: 1px solid #252a33; }

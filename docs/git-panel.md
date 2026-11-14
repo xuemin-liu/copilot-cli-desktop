@@ -6,7 +6,11 @@ to Copilot, including a failed pull for Copilot to merge and resolve. Fetch, pul
 Copilot). See the [plan](git-panel-plan.md) for what comes next.
 
 Open it from the Git icon in the session header, or with **Ctrl+Shift+G** (the key is handled before the terminal or the
-debug browser sees it). Close it the same way. Its width and open state are remembered.
+debug browser sees it). In the main window, Git shares the right tools panel with Browser. The shortcut selects Git from
+another tool, or collapses the panel when Git is already shown. The panel remembers its width, selected tab and open state.
+Switching tools and collapsing retain the current project's unsubmitted commit message, file selection and scroll position.
+Changing projects resets that UI state. The prompt target is labelled above the repository list. General workspaces show
+a disabled Git tab with an explanation.
 
 ## What it shows
 
