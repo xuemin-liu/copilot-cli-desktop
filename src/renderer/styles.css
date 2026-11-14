@@ -631,10 +631,9 @@ button:disabled {
 .browser-overrides-on { color: #20c9a6; }
 .browser-overrides-on::before, .browser-overrides-warning::before { content: '●'; margin-right: 5px; }
 .browser-overrides-warning { color: #ffb84d; }
-.browser-testing { display: flex; flex-shrink: 0; gap: 8px; align-items: center; padding: 5px 8px; font-size: 11px; color: #929baa; }
-.browser-testing button { flex-shrink: 0; }
-.browser-testing span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-testing button[aria-pressed="true"] { color: #ffcc80; border-color: #ffcc80; }
+.browser-footer-status { display: flex; height: 28px; gap: 8px; align-items: center; }
+.browser-footer-status span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-footer-status button { flex-shrink: 0; color: #ffcc80; border-color: #ffcc80; }
 .browser-test-report { max-height: 180px; overflow: auto; }
 
 .terminal-pane {

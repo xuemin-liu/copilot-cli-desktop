@@ -30,7 +30,6 @@ const api = {
   },
   browserAction: async (id: string, action: string) => {
     const state = browser(id)
-    if (action === 'testing:on') state.testing = { enabled: true, running: true, step: 1, total: 3, label: 'Testing', report: null }
     if (action === 'testing:off') state.testing = { enabled: false, running: false, step: 0, total: 0, label: '', report: null }
     states.set(id, state)
     return browser(id)
@@ -64,7 +63,7 @@ function Fixture() {
   const primary = dormant ? { ...main, status: 'dormant' as const, processId: null } : main
   const tabs = pair ? [primary, side, other] : [primary, other]
   Object.assign(window, { dockTest: { calls, states, gitMounts, prefs, setPrefs, setActive, setPair, setObscured, setProfile, setPopouts,
-    setDormant, pick: (id: string, value: string) => picked(id, value) } })
+    setDormant, startTest: () => { const state = browser(active); state.testing = { enabled: true, running: true, step: 1, total: 3, label: 'Testing', report: null }; states.set(active, state) }, pick: (id: string, value: string) => picked(id, value) } })
   return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(value => ({ ...value, open: false }))}
     tabs={tabs} activeTabId={active} profileId={profile} gitAvailable={profile !== 'general'} git={<GitProbe />}
     browserPoppedOutTabIds={popouts} poppedOutTabIds={[]}

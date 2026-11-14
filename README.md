@@ -56,7 +56,7 @@ handle, only input/output/resize events.
   can review or host too: tell one "join meeting K7QF" or "start a meeting". See [Review meetings](#review-meetings).
 - **Debug browser** opens your web app beside the terminal, with native Chromium
   DevTools and Local Overrides. Console and network activity are also available
-  through `copilot-desktop browser` commands, without an MCP server. Testing mode
+  through `copilot-desktop browser` commands, without an MCP server. Automated testing is available immediately and
   lets the assistant run user-described web-app workflows and check expected results,
   with step reports and screenshots.
 - **Desktop control** (Windows, off by default) lets a session see the screen and use the mouse
@@ -196,7 +196,7 @@ runs for a new, a restarted and a resumed tab.
 
 The main window has three areas: projects and sessions on the left, the CLI in the center, and an optional resizable tools panel on the right. **New tab** opens a launcher; choose **Browser** or **Git**. **+** adds another tab, including another independent browser page. Every tab has a close button; closing the last one removes the panel. **Hide tabs** returns the space to the CLI while preserving all tabs, and **Show tabs** restores them.
 
-Tabs belong to the project. Changing CLI focus does not change the selected browser or Git repository. Project switching retains browser pages, forms, and Git drafts. **Ctrl+Shift+G** opens/focuses Git or hides the panel when Git is already selected. Narrow windows use the same **Hide tabs** control to return to the CLI. Hiding a browser stops Testing mode and picking without closing its page.
+Tabs belong to the project. Changing CLI focus does not change the selected browser or Git repository. Project switching retains browser pages, forms, and Git drafts. **Ctrl+Shift+G** opens/focuses Git or hides the panel when Git is already selected. Narrow windows use the same **Hide tabs** control to return to the CLI. Hiding a browser stops a running test and picking without closing its page.
 
 Browsers work without a CLI session. Browser control automatically follows the current running Copilot session and selected Browser tab in that project; no session picker or reconnect step is needed. Switching sessions transfers control without moving or reopening pages. Resume reconnects automatically. Closing a CLI or a browser tab keeps project logins; removing the workspace removes its separate profile at the next startup. Existing session browser profiles are not merged into project profiles; separate profiles require signing in again after this upgrade.
 

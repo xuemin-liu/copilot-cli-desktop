@@ -13,7 +13,7 @@ Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
 Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, without closing project pages or signing out. Restart/Resume reconnects the current session automatically. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
 
-Switching tabs or hiding retains typed addresses, find text, collected elements and notes. Hiding stops Testing mode and picking; tests never resume automatically. App startup does not restore a neutral launcher or any CLI browser connection. Upgrades from session-owned browsers start with no open tool tabs and new separate project profiles; old session cookies are not merged.
+Switching tabs or hiding retains typed addresses, find text, collected elements and notes. Hiding stops a running test and picking; tests never resume automatically. App startup does not restore a neutral launcher or any CLI browser connection. Upgrades from session-owned browsers start with no open tool tabs and new separate project profiles; old session cookies are not merged.
 
 Select **DevTools / Overrides**, then **Sources → Overrides** in the embedded
 DevTools. Select the folder you already use for Chrome Local Overrides and enable
@@ -185,7 +185,7 @@ access and grants the signed-in user, SYSTEM and Administrators only; the only
 documented caller of the helper and `control.json` is that session's own shell,
 running as the same user. It accepts no browser Origin requests and exposes
 no arbitrary JavaScript, CDP, storage, credential or file-write routes. Test plans
-can navigate to HTTP/HTTPS pages only while Testing mode is enabled.
+bind navigation to the selected HTTP/HTTPS page’s origin for each run. No enable toggle is required.
 Constrained browser reading actions use the same authenticated transport. It is independent of the background CLI
 daemon; `copilot-desktop start` is not required. Desktop assigns the endpoint
 path to its session's `COPILOT_DESKTOP_BROWSER_STATE` environment variable;
@@ -207,7 +207,7 @@ dialog is open the assistant's reads fail at once with a message that says a dia
 you, instead of timing out. `prompt()` is not supported by the Electron browser engine, so pages
 that call it receive no answer.
 
-In Testing mode a step that triggers a dialog declares it, for example
+In an automated test a step that triggers a dialog declares it, for example
 `{ "action": "click", "selector": "#delete", "dialog": { "accept": true, "message": "Delete item" } }`.
 `dialog` is accepted on `click`, `doubleClick`, `press`, `fill`, `select` and `navigate`; `message`
 must be contained in the dialog's text. The dialog is answered during that step (it may open up to
@@ -571,11 +571,10 @@ transparent input controls, private tooltips and sensitive-value assertion guard
 through the production helper, with evidence under `test-results/browser-discovery/`.
 
 1. Open the web app in the session browser and select the page to test.
-2. Enable **Testing mode** below the browser views.
-3. Tell the session assistant the steps, inputs, and expected results. For example:
+2. Tell the session assistant the steps, inputs, and expected results. For example:
    “Search for ITEM-42, open its details with a double-click, and verify that the
    title is ITEM-42 details, the preview has loaded, and no error banner appears.”
-4. The assistant inspects the page, creates and runs a test plan, checks your
+3. The assistant inspects the page, creates and runs a test plan, checks your
    expectations, and reports passed, failed, and skipped checks with evidence.
 
 This works with general web apps. There is no viewer-specific workflow. Existing
@@ -584,17 +583,17 @@ local CLI session starts; start a new CLI session after updating Desktop to load
 the new guidance. You provide the test description; the assistant prepares the
 structured plan. A user does not need to write selectors or JSON manually.
 
-Testing mode authorizes the described test's interactions without a confirmation
-per step. **Stop testing** cancels the run and disables further tests. Selecting,
-creating, or closing the active page also cancels and resets Testing mode; re-enable
-it on the new page to test there. Hiding the pane or selecting another browser
-view also stops the run and resets Testing mode. Navigating within the selected page preserves
-Testing mode for the same HTTP(S) origin. Navigation and input are bound to the
-origin where Testing mode was enabled; other destinations and cross-origin frame
-inputs fail. Main-page navigation and redirects outside that origin are blocked
-during a run; embedded third-party frames may load and redirect for read-only
-inspection. To test another site, stop testing, open it yourself and enable
-Testing mode there. A manual navigation to another origin disables Testing mode.
+Tests are ready automatically on the current visible HTTP(S) page. The user's
+request defines the test's scope; there is no enable toggle or confirmation per
+step. Progress and **Stop test** appear in the existing footer during a run.
+Stopping cancels that run; it never restarts automatically. Selecting, creating,
+or closing the active page, hiding the pane, or selecting another browser view
+also stops the run. A later requested test can start without enabling anything.
+Each run binds navigation and input to its starting page and HTTP(S) origin;
+other destinations and cross-origin frame inputs fail. Main-page navigation and
+redirects outside that origin are blocked during a run; embedded third-party
+frames may load and redirect for read-only inspection. To test another site,
+open the intended site and start a separate test there.
 A popup that opens as a tab changes the selected page and stops the old run; a popup window
 leaves the selected page and the run alone.
 A run stops at its first failed step. Test actions may change the app's data; a

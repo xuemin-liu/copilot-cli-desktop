@@ -22,7 +22,7 @@ export class BrowserTestNetwork {
   constructor(rules: TestNetworkFailure[], private readonly origin: string, private readonly frames: Set<string>, private readonly send: Send, private readonly active: () => boolean = () => true) {
     const now = Date.now()
     this.rules = rules.map(rule => {
-      if (new URL(rule.urlPattern.replaceAll('*', 'wildcard')).origin !== origin) throw new Error('Network failure rules must stay within the Testing mode origin.')
+      if (new URL(rule.urlPattern.replaceAll('*', 'wildcard')).origin !== origin) throw new Error('Network failure rules must stay within the test run’s origin.')
       return { ...rule, remaining: rule.maxRequests, expires: now + rule.durationMs }
     })
   }
