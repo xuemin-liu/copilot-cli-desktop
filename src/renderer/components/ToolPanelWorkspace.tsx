@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
-import { panelButtonLabel, type ProjectTools, type ToolsAction, type ToolsState, type ToolTabKind } from '../../main/tool-tabs.js'
+import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
@@ -26,14 +26,7 @@ export function ToolPanelWorkspace({ children, desktop, tools, obscured, act }: 
   const project = tools.projects.find(project => project.profileId === desktop.activeProfileId)
   const { side } = visibleSessionTabs({ tabs: desktop.tabs, activeTabId: desktop.activeTabId })
   const visible = Boolean(project?.visible && project.tabs.length)
-  const add = (): void => { if (desktop.activeProfileId) act(desktop.activeProfileId, { type: 'add', kind: 'new' }) }
   return <div className="tool-panel-workspace">
-    <div className="tool-panel-commandbar">
-      <button type="button" aria-label={panelButtonLabel(project)} aria-expanded={visible} onClick={() => {
-        if (!project?.tabs.length) add()
-        else act(project.profileId, { type: 'visible', visible: !visible })
-      }}>{visible ? '▥' : '+'} {panelButtonLabel(project)}</button>
-    </div>
     <ProjectDock open={visible} width={project?.width ?? 420} twoTerminals={Boolean(side)}
       onWidthChange={width => { if (project) act(project.profileId, { type: 'width', width }) }}
       panel={({ takeover }) => <>

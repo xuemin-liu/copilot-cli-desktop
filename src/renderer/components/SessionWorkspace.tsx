@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { JSX } from 'react'
+import type { JSX, ReactNode } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionCliLabel } from '../../main/session-cli.js'
@@ -19,6 +19,8 @@ interface SessionWorkspaceProps {
   onRestart: (tabId: string) => void
   onShowLog: (tabId: string) => void
   onCreate: () => void
+  /** Project tools live in the existing session toolbar; also available with no sessions. */
+  toolsControl?: ReactNode
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
   browserPoppedOutTabIds?: string[]
@@ -41,7 +43,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
@@ -83,6 +85,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
         <div className="empty-state">
           <p>No sessions are open.</p>
           <button type="button" onClick={onCreate}>Start a session</button>
+          {toolsControl}
         </div>
       )}
       {/* Keep every terminal under the same keyed parent. Docking, focusing,
@@ -102,6 +105,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 {tab.cli && <span className="session-cli-chip" title={`This tab runs ${sessionCliLabel(tab.cli)}${tab.cliVersion ? ` ${tab.cliVersion}` : ''}`}>{sessionCliLabel(tab.cli)}</span>}
                 {tab.worktree && <span className="session-worktree-chip" title={`Worktree ${tab.worktree.path}`}>⎇ {tab.worktree.branch ?? tab.worktree.name}</span>}
               </span>
+              {toolsControl}
               {onToggleGit && !tab.sideChat && (
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
