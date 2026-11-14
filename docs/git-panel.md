@@ -7,7 +7,7 @@ Copilot). See the [plan](git-panel-plan.md) for what comes next.
 
 Open **New tab → Git**, the Git icon in a session header, or **Ctrl+Shift+G**. There is one Git tab per project; adding it again focuses the existing tab. The shortcut selects Git or hides the panel when Git is already shown. **Hide tabs** preserves its state; its individual close button removes the tab. Reopening recovers the project's draft.
 
-Project switching retains the repository selection, commit draft, and diff selection. CLI focus never retargets the repository. Choose **Send to** explicitly before attaching context to a CLI prompt. General workspaces explain why Git is unavailable in the launcher and do not create a disabled Git tab.
+Project switching retains the repository selection, commit draft, and diff selection. CLI focus never retargets the repository. Git prompt actions automatically use the currently selected session; there is no destination picker. Open or resume a session in this window to use those actions. General workspaces explain why Git is unavailable in the launcher and do not create a disabled Git tab.
 
 ## What it shows
 

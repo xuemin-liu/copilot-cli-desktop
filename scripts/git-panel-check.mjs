@@ -9,7 +9,8 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const cursorOnly = process.argv.includes('--cursor-context')
-const artifacts = resolve(cursorOnly ? 'test-results/git-cursor-context' : 'test-results/git-panel')
+const activeSession = process.argv.includes('--active-session')
+const artifacts = resolve(activeSession ? 'test-results/git-active-session' : cursorOnly ? 'test-results/git-cursor-context' : 'test-results/git-panel')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const PROFILE = '0123456789abcdef'
 
@@ -21,6 +22,7 @@ if (!process.versions.electron) {
     import { createRoot } from 'react-dom/client';
     import { useState } from 'react';
     import { GitPanel } from './src/renderer/components/GitPanel';
+    import { ToolPanelWorkspace } from './src/renderer/components/ToolPanelWorkspace';
     import { TerminalPane } from './src/renderer/components/TerminalPane';
     import { readGitCursorContext, requestGitCursorContext } from './src/renderer/git-cursor-context';
     import './src/renderer/styles.css';
@@ -32,8 +34,19 @@ if (!process.versions.electron) {
       const [open, setOpen] = useState(true);
       const [target, setTarget] = useState('tab-1');
       const [terminal, setTerminal] = useState(false);
+      const [availability, setAvailability] = useState('running');
+      const [tool, setTool] = useState('git');
       window.__setTarget = setTarget;
+      window.__setAvailability = setAvailability;
+      window.__setTool = setTool;
       window.__showTerminal = () => setTerminal(true);
+      if (${activeSession}) return <ToolPanelWorkspace
+        desktop={{activeProfileId:'${PROFILE}', activeTabId:target, profiles:[{id:'${PROFILE}',name:'Project',path:null}],
+          tabs:['tab-1','tab-2','other-project'].map(id=>({id,title:id,status:id===target && availability==='dormant'?'dormant':'running',workspaceProfileId:id==='other-project'?'other':'${PROFILE}'})),
+          poppedOutTabIds:availability==='popped'?[target]:[]}}
+        tools={{projects:[{profileId:'${PROFILE}',browserProfileId:'profile',overrides:'shared',visible:true,width:600,activeId:tool,
+          tabs:[{id:'git',kind:'git',title:'Git'},{id:'browser',kind:'browser',title:'Browser',resource:'tool:browser',pageId:1}]}],connections:[]}}
+        obscured={false} act={()=>{}}><div data-active-session={target ?? ''}>CLI</div></ToolPanelWorkspace>;
       return open
         ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
             {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
@@ -45,13 +58,13 @@ if (!process.versions.electron) {
   const directory = await mkdtemp(join(tmpdir(), 'git-panel-check-'))
   const env = { ...process.env, GIT_PANEL_CHECK_DIR: directory, GIT_PANEL_CHECK_ARTIFACTS: artifacts }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...(cursorOnly ? ['--cursor-context'] : [])], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...(cursorOnly ? ['--cursor-context'] : []), ...(activeSession ? ['--active-session'] : [])], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 300_000)
   try {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Git panel check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log(cursorOnly ? 'Git cursor context: native pointer, terminal Enter, preload IPC, target isolation and invalidation passed.'
+    console.log(activeSession ? 'Project tools: current-session prompt delivery, session switching, no destination UI and unavailable-session guards passed.' : cursorOnly ? 'Git cursor context: native pointer, terminal Enter, preload IPC, target isolation and invalidation passed.'
       : 'Git panel: repositories, changes, diffs, history, trust review, add-to-prompt, live refresh and teardown all work in Electron.')
   } finally {
     clearTimeout(timer)
@@ -145,7 +158,17 @@ if (!process.versions.electron) {
       terminalWrites.push({ tabId, data, context })
       return { gitCursorContextAttached: acceptCursorContext && data === '\r' && context !== undefined }
     })
-    window = new BrowserWindow({ width: cursorOnly ? 1_000 : 460, height: 900, show: false, webPreferences: {
+    if (activeSession) {
+      const browser = { activePageId:1, pages:[{id:1,title:'Browser',url:'http://localhost/'}],url:'http://localhost/',view:'page',zoomFactor:1,
+        loading:false,canGoBack:false,canGoForward:false,devtools:false,error:null,history:[],sitePermissions:[],network:[],
+        console:[{id:1,pageId:1,timestamp:'now',level:'error',message:'fixture error',source:'fixture',line:1}],
+        recordingConsole:true,recordingNetwork:true,preserveConsole:true,preserveNetwork:true }
+      ipcMain.handle('desktop:browser-state', () => browser)
+      ipcMain.handle('desktop:browser-open', () => browser)
+      ipcMain.handle('desktop:browser-bounds', () => undefined)
+      ipcMain.handle('desktop:browser-action', () => browser)
+    }
+    window = new BrowserWindow({ width: activeSession ? 1200 : cursorOnly ? 1_000 : 460, height: 900, show: false, webPreferences: {
       preload: join(process.cwd(), 'dist', 'src', 'preload', 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } })
     registerGitIpc({ ipcMain, service: () => service, assertTrustedSender: () => undefined, isMainWindowSender: event => event.sender.id === window.webContents.id })
     await window.loadFile(join(out, 'index.html'))
@@ -206,6 +229,51 @@ ${point.missing}`)
     await until('!!document.querySelector(".git-group")', 'file groups')
     assert.deepEqual(await ui('[...document.querySelectorAll(".git-group h3")].map(element => element.textContent)'), ['Staged (1)', 'Changes (1)', 'Untracked (1)'])
     results.groups = true
+
+    if (activeSession) {
+      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"],.git-prompt-target,.tool-context').length`), 0, 'Git has no destination row')
+      await ui(`window.originalGit=document.querySelector('.git-panel');document.querySelector('[aria-label="Commit message"]').focus();true`)
+      window.webContents.insertText('keep draft')
+      await clickByText('button', 'Draft with Copilot')
+      await until('window.__inserted.length===1', 'first session receives Git context')
+      assert.equal(await ui('window.__inserted[0].tabId'), 'tab-1')
+      await ui('window.__setTarget("tab-2")')
+      await until(`document.querySelector('[data-active-session]').dataset.activeSession==='tab-2'`, 'target follows current session')
+      await clickByText('button', 'Draft with Copilot')
+      await until('window.__inserted.length===2', 'second session receives Git context')
+      assert.equal(await ui('window.__inserted[1].tabId'), 'tab-2')
+      assert.equal(await ui('document.querySelector(".git-panel")===window.originalGit'), true)
+      assert.equal(await ui(`document.querySelector('[aria-label="Commit message"]').value`), 'keep draft')
+      assert.match(await text('.git-repo-selected'), /alpha/)
+      for (const mode of ['dormant','popped']) {
+        await ui(`window.__setAvailability(${JSON.stringify(mode)})`)
+        await until('[...document.querySelectorAll("button")].some(b=>b.innerText==="Draft with Copilot" && b.disabled)', mode + ' active session cannot receive context')
+      }
+      await ui('window.__setAvailability("running");window.__setTarget("other-project")')
+      await until('[...document.querySelectorAll("button")].some(b=>b.innerText==="Draft with Copilot" && b.disabled)', 'no cross-project fallback')
+      await ui('window.__setTarget("tab-2");window.__setTool("browser")')
+      await until(`!!document.querySelector('.browser-panel') && !document.querySelector('[aria-label="Add console errors to the prompt"]').disabled`, 'browser context ready')
+      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"]').length`), 0)
+      await click('[aria-label="Add console errors to the prompt"]')
+      await until('window.__inserted.length===3', 'browser context uses current session')
+      assert.equal(await ui('window.__inserted[2].tabId'), 'tab-2')
+      await ui('window.__setTarget("tab-1")')
+      await until(`document.querySelector('[data-active-session]').dataset.activeSession==='tab-1'`, 'first session selected again')
+      await click('[aria-label="Add console errors to the prompt"]')
+      await until('window.__inserted.length===4', 'browser target follows session switch')
+      assert.equal(await ui('window.__inserted[3].tabId'), 'tab-1')
+      await ui('window.__setTarget(null)')
+      await until(`document.querySelector('[data-active-session]').dataset.activeSession===''`, 'no current session')
+      await click('[aria-label="Add console errors to the prompt"]')
+      await until('document.body.innerText.includes("Open or resume a session")', 'no-session guidance')
+      assert.equal(await ui('window.__inserted.length'), 4)
+      await ui('window.__setTool("git")')
+      await screenshot('git-current-session.png')
+      await service.dispose()
+      await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, activeSession: true, noPicker: true, retainedGit: true, unavailableGuards: true }, null, 2))
+      app.quit()
+      return
+    }
 
     // 3. A diff appears for a clicked file, coloured by line kind.
     await clickByText('.git-entry', 'a.txt')

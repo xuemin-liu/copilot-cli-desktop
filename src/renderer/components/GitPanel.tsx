@@ -745,7 +745,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
         {!embedded && <button type="button" className="icon-button" aria-label={takeover ? 'Close Git panel and return to the session' : 'Close Git panel'}
           title={takeover ? 'Back to the session' : 'Close (Ctrl+Shift+G)'} onClick={onClose}>×</button>}
       </header>
-      {embedded && <p className="git-prompt-target">Prompt: {promptTarget?.title ?? 'No available session'}{promptTarget?.taskBlocker ? ` — ${promptTarget.taskBlocker}` : ''}</p>}
 
       {error && <p className="git-message git-message-error" role="alert">{error}</p>}
       {!view && !error && <p className="git-message" role="status">Looking for repositories…</p>}

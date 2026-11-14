@@ -1393,7 +1393,7 @@ button:disabled {
 .workspace-browser-context label { display: flex; gap: 6px; align-items: center; flex: 1; min-width: 0; font-size: 12px; }
 .workspace-browser-context select { min-width: 0; flex: 1; width: 0; }
 .workspace-browser-context button { padding: 3px 7px; }
-.tool-empty, .git-prompt-target { margin: 0; padding: 8px 10px; color: #a5b1c3; font-size: 12px; overflow-wrap: anywhere; }
+.tool-empty { margin: 0; padding: 8px 10px; color: #a5b1c3; font-size: 12px; overflow-wrap: anywhere; }
 .compact-session-switch { display: flex; gap: 4px; padding: 4px; min-width: 0; grid-row: 1; }
 .compact-session-switch button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compact-session-switch button[aria-pressed="true"] { border-color: #4f88ff; }
