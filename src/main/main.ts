@@ -5292,6 +5292,10 @@ ipcMain.handle('desktop:git-resolve', (event, profileId: unknown, repoId: unknow
     || !isSessionTabId(tabId) || typeof text !== 'string' || text.trim() === '') throw new Error('Invalid session task')
   // Only the window that shows the session's terminal may type into it, as for its keystrokes.
   if (!ownsSessionTerminal(event, tabId)) return { result: 'refused', message: 'This session is open in another window.' }
+  if (tabId !== tabsState.activeTabId || profileId !== desktopConfig.activeProfileId
+    || tabsState.tabs.find(tab => tab.id === tabId)?.workspaceProfileId !== profileId) {
+    return { result: 'refused', message: 'The current session changed. Try the task again in the current session.' }
+  }
   const service = gitServiceInstance()
   if (!service) return { result: 'refused', message: 'The Git panel has stopped.' }
   const folder = service.repoFolder(event.sender.id, profileId, repoId)

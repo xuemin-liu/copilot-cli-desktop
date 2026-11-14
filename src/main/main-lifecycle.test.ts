@@ -690,6 +690,16 @@ test('captured browser export contains only the selected page and respects cance
 }))
 
 
+test('Git task delivery refuses a session that is no longer current', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  const first=(await harness.createMain()).activeTabId!;
+  await harness.createMain();
+  const result=await harness.request<any>('desktop:git-resolve',profile.id,'repo-1',first,'Resolve the conflicts');
+  assert.equal(result.result,'refused');
+  assert.match(result.message,/current session changed/);
+  assert.deepEqual(harness.spawns[0]!.written,[]);
+}))
+
 test('project browser survives CLI focus, restart and close while session bridges are isolated', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);harness.createTestWindow();
   const first=(await harness.createMain()).activeTabId!;

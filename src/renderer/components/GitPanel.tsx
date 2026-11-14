@@ -55,9 +55,10 @@ export interface GitPanelProps {
 export type TaskDelivery = { result: 'sent' } | { result: 'pasted'; message: string } | { result: 'refused'; message: string }
 
 /** Main claims the repository, then types the task and presses Enter only at a safe moment; otherwise it is pasted for the person to send. */
-async function sendOrPaste(profileId: string, repoId: string, tabId: string, text: string, insert: (tabId: string, text: string) => void): Promise<TaskDelivery> {
+async function sendOrPaste(profileId: string, repoId: string, tabId: string, text: string, insert: (tabId: string, text: string) => void, currentTarget: () => string | undefined): Promise<TaskDelivery> {
   const outcome = await window.copilotDesktop.gitResolve(profileId, repoId, tabId, text)
   if (outcome.result !== 'busy') return outcome
+  if (currentTarget() !== tabId) return { result: 'refused', message: 'The current session changed. Try the task again in the current session.' }
   insert(tabId, text)
   return { result: 'pasted', message: outcome.message }
 }
@@ -267,6 +268,11 @@ function EntryGroup({ title, entries, codeOf, staged, selection, marked, multipl
 }
 
 export function GitPanel({ profileId, promptTarget, takeover = false, active = true, embedded = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
+  const currentPromptTarget = useRef(promptTarget)
+  useLayoutEffect(() => {
+    currentPromptTarget.current = promptTarget
+    return () => { currentPromptTarget.current = null }
+  }, [promptTarget])
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
@@ -509,8 +515,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
   const addToPrompt = (): void => {
     if (!repo || !selection || !selectedEntry || !diff || diff.key !== diffKey || !promptTarget) return
-    const target = promptTarget
     const send = (value: GitDiff): void => {
+      const target = currentPromptTarget.current
+      if (!target) { setActionError('Open or resume a session in this project to add Git context.'); return }
       insert(target.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: value }))
       setNotice(`Added to the prompt box of “${target.title}”. Review it and press Enter to send.`)
     }
@@ -540,8 +547,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     setActionError(null)
     Promise.all(read.map(entry => window.copilotDesktop.gitDiff(profileId, repo.id, entry.id, true).then(value => ({ path: entry.path, diff: value }))))
       .then(parts => {
-        insert(promptTarget.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts, omitted, listTruncated: currentStatus.truncated }))
-        setNotice(`Asked “${promptTarget.title}” to draft a commit message. Review the prompt and press Enter to send.`)
+        const target = currentPromptTarget.current
+        if (!target) { setActionError('Open or resume a session in this project to add Git context.'); return }
+        insert(target.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts, omitted, listTruncated: currentStatus.truncated }))
+        setNotice(`Asked “${target.title}” to draft a commit message. Review the prompt and press Enter to send.`)
       })
       .catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setWorking(false))
   }
@@ -719,7 +728,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       output: failure?.output ?? '', blocked: failure?.reason === 'local-changes' ? filesInTheWay(failure.output) : [], conflicted: currentStatus.conflicted.map(entry => entry.path),
     })
     const owner = repo.id
-    const deliver = sendTask ?? ((repoId: string, tabId: string, task: string) => sendOrPaste(profileId, repoId, tabId, task, insert))
+    const deliver = sendTask ?? ((repoId: string, tabId: string, task: string) => sendOrPaste(profileId, repoId, tabId, task, insert, () => currentPromptTarget.current?.id))
     // One request at a time, until main's answer (and its claim) is in: a second click must not hand the task over twice.
     if (resolveInFlight.current) return
     resolveInFlight.current = true

@@ -56,7 +56,6 @@ function GitProbe() {
 function Fixture() {
   const [prefs, setPrefs] = useState<ToolDockPreferences>({ open: true, tool: 'browser', width: 420 })
   const [active, setActive] = useState('main')
-  const [choice, setChoice] = useState<string | null>(null)
   const [pair, setPair] = useState(false)
   const [obscured, setObscured] = useState(false)
   const [profile, setProfile] = useState('project')
@@ -68,7 +67,7 @@ function Fixture() {
     setDormant, pick: (id: string, value: string) => picked(id, value) } })
   return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(value => ({ ...value, open: false }))}
     tabs={tabs} activeTabId={active} profileId={profile} gitAvailable={profile !== 'general'} git={<GitProbe />}
-    browserChoice={choice} onBrowserChoice={setChoice} onActivate={setActive} browserPoppedOutTabIds={popouts} poppedOutTabIds={[]}
+    browserPoppedOutTabIds={popouts} poppedOutTabIds={[]}
     obscured={obscured} onError={error => { throw error }}>
     <SessionWorkspace tabs={tabs} activeTabId={active} canOpenTab onActivate={setActive} onFork={() => {}} onClose={() => {}}
       onRestart={() => {}} onShowLog={() => {}} onCreate={() => {}} />
