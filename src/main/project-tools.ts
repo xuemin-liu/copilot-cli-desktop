@@ -138,10 +138,12 @@ export class ProjectToolService {
     const project = this.projects.get(profileId), group = this.groups.get(profileId)
     if (!project || !group) return
     const pages = group.browser.pageList()
+    let removed = false
     for (const tab of [...project.tabs]) {
       if (tab.pageId !== undefined && !pages.some(page => page.id === tab.pageId)) {
         for (const bridge of this.bridges.values()) if (bridge.profileId === profileId && bridge.pageId === tab.pageId) { bridge.pageId = null; bridge.revision++ }
         removeToolTab(project, tab.id)
+        removed = true
       }
     }
     for (const page of pages) {
@@ -154,6 +156,10 @@ export class ProjectToolService {
       const selected = project.tabs.find(tab => tab.id === project.activeId)
       if (selected?.pageId !== undefined) group.browser.selectUiPage(selected.pageId)
       if (!project.visible || this.shownProject !== profileId || selected?.kind !== 'browser') group.browser.setBounds(null)
+    }
+    if (removed && project.visible && this.shownProject === profileId) {
+      const selected = project.tabs.find(tab => tab.id === project.activeId)
+      if (selected) { try { this.ensurePage(project, selected) } catch (error) { this.options.error(error) } }
     }
     this.save()
   }
@@ -236,6 +242,7 @@ export class ProjectToolService {
       }
     }
     const selected = project.tabs.find(tab => tab.id === project.activeId)
+    if (action.type === 'close' && project.visible && this.shownProject === profileId && selected) this.ensurePage(project, selected)
     const group = this.groups.get(profileId)
     if (project.visible && selected?.pageId !== undefined && group?.browser.hasPage(selected.pageId)) group.browser.selectUiPage(selected.pageId)
     else group?.browser.setBounds(null)

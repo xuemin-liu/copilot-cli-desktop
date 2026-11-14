@@ -90,6 +90,13 @@ export class BrowserReader {
   private readonly closeGuards = new Map<number, { confirm(): Promise<boolean>; cancelled(): void; failed(error: unknown): void }>()
   async closePage(id: number, confirm: () => Promise<boolean>): Promise<boolean> {
     const page = this.page(String(id))
+    // A never-navigated WebContents has no renderer document to enable CDP on or edits to guard.
+    if (!page.contents.getURL() && !page.contents.isLoading()) {
+      return new Promise<boolean>(resolve => {
+        page.contents.once('destroyed', () => resolve(true))
+        page.contents.close({ waitForBeforeUnload: false })
+      })
+    }
     await this.attach(page)
     return new Promise<boolean>((resolve, reject) => {
       let settled = false
