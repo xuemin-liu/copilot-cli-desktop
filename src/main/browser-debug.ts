@@ -264,7 +264,7 @@ export class BrowserDebug {
       if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser closed while opening')
       complete(current)
     })().catch(error => {
-      page.error = `Could not apply shared browser settings: ${sanitizedText(String(error))}`
+      page.error = `Could not apply shared browser settings: ${sanitizedText(String(error))}. Close this project's Browser tabs and open a new one to retry.`
       throw error
     }).finally(() => { page.priming = false; this.preparingPreferences = false; if (!this.disposed) { this.layout(); this.changed() } })
     void this.preferencesWork.catch(() => {})

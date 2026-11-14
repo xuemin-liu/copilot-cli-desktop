@@ -251,8 +251,10 @@ export class ProjectToolService {
     const group = this.groups.get(profileId)
     if (project.visible && selected?.pageId !== undefined && group?.browser.hasPage(selected.pageId)) group.browser.selectUiPage(selected.pageId)
     else group?.browser.setBounds(null)
-    await group?.browser.ready
     this.save()
+    // Browser initialization must not block independent tools or prevent closing a failed page.
+    // Keep failed browser navigation gated until its group is closed and explicitly reopened.
+    if (action.type === 'add' && action.kind === 'browser') await group?.browser.ready
     return this.state()
   }
   private connect(project: ProjectTools, tab: ToolTab, sessionId: string): void {

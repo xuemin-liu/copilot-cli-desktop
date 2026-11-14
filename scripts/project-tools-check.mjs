@@ -65,6 +65,31 @@ if (!process.versions.electron) {
     assert.equal(preferences.enabled, false)
     assert.equal((await contents(sharedTab).session.cookies.get({ url, name: 'mode-switch' }))[0].value, 'kept')
     assert.equal(JSON.parse(await readFile(join(options.userData, 'browser-devtools.json'), 'utf8')).private.includes(profileId), false)
+    // A failed settings write keeps private preferences excluded without poisoning unrelated tools.
+    await tools.action('p2', { type: 'close', id: sharedTab.id })
+    await tools.action('p2', { type: 'overrides', mode: 'private' })
+    await tools.action('p2', { type: 'add', kind: 'browser' })
+    await tools.action('p2', { type: 'close', id: p2().tabs[0].id })
+    await tools.action('p2', { type: 'overrides', mode: 'shared' })
+    const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
+    const initializePreferences = BrowserDebug.prototype.initializePreferences
+    BrowserDebug.prototype.initializePreferences = function(values, complete) {
+      return initializePreferences.call(this, values, () => { throw new Error('fixture settings write failed') })
+    }
+    try { await assert.rejects(tools.action('p2', { type: 'add', kind: 'browser' }), /fixture settings write failed/) }
+    finally { BrowserDebug.prototype.initializePreferences = initializePreferences }
+    const failedTab = p2().tabs[0]
+    assert.match(failedTab.error, /Close this project's Browser tabs/)
+    assert.ok(JSON.parse(await readFile(join(options.userData, 'browser-devtools.json'), 'utf8')).private.includes(profileId))
+    await assert.rejects(tools.resource(failedTab.resource).browser.navigate(url), /fixture settings write failed/)
+    await tools.action('p2', { type: 'add', kind: 'git' })
+    assert.equal(p2().tabs.find(tab => tab.id === p2().activeId).kind, 'git')
+    await tools.action('p2', { type: 'visible', visible: false })
+    assert.equal(p2().visible, false)
+    await tools.action('p2', { type: 'select', id: failedTab.id })
+    await tools.action('p2', { type: 'close', id: failedTab.id })
+    await tools.action('p2', { type: 'add', kind: 'browser' })
+    assert.equal(JSON.parse(await readFile(join(options.userData, 'browser-devtools.json'), 'utf8')).private.includes(profileId), false)
     await tools.removeProject('p2')
     tools.showProject('p1')
     assert.equal(state().tabs.length, 0)
