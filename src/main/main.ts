@@ -269,6 +269,7 @@ function projectTools(): ProjectToolService {
     userData: app.getPath('userData'), owner: () => mainWindow,
     project: id => desktopConfig.profiles.find(profile => profile.id === id),
     session: id => tabsState.tabs.find(tab => tab.id === id),
+    currentSession: () => tabsState.tabs.find(tab => tab.id === tabsState.activeTabId && tab.workspaceProfileId === desktopConfig.activeProfileId)?.id ?? null,
     defaults: () => ({ shared: desktopConfig.browserProfile === 'shared', overrides: desktopConfig.browserOverrides }),
     browserOptions: () => ({ history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(), reportError: logBrowserError,
       onAppShortcut: name => { if (name === 'git-toggle') { toggleGitPanel(); return true } return false } }),
@@ -953,6 +954,7 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
+  projectToolService?.refreshConnections()
   const visible = visibleSessionTabs(tabsState)
   for (const [tabId, browser] of sessionBrowsers) {
     if (!sessionWindows.has(tabId) && !browserWindows.has(tabId) && tabId !== visible.main?.id && tabId !== visible.side?.id) browser.setBounds(null)
@@ -4718,8 +4720,8 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
   await activateProfile(tab.workspaceProfileId)
-  await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser',
-    ...(projectTools().canConnect(tabId, tab.workspaceProfileId) ? { sessionId: tabId } : {}) })
+  activateSessionTab(tab.id)
+  await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser' })
   if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
 })
 

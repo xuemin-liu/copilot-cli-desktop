@@ -23,13 +23,11 @@ export interface ProjectTools {
 export interface BrowserConnection { sessionId: string; profileId: string; pageId: number | null }
 export interface ToolsState { projects: ProjectTools[]; connections: BrowserConnection[]; recent?: string[] }
 export type ToolsAction =
-  | { type: 'add'; kind: ToolTabKind; replaceId?: string; url?: string; sessionId?: string }
+  | { type: 'add'; kind: ToolTabKind; replaceId?: string; url?: string }
   | { type: 'select' | 'close' | 'pop-out' | 'return'; id: string }
   | { type: 'visible'; visible: boolean }
   | { type: 'width'; width: number }
   | { type: 'overrides'; mode: 'shared' | 'private' }
-  | { type: 'disconnect'; sessionId: string }
-  | { type: 'connect'; id: string; sessionId: string | null }
 
 export function removeToolTab(project: ProjectTools, id: string): void {
   const index = project.tabs.findIndex(tab => tab.id === id)

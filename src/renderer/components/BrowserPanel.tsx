@@ -311,7 +311,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
         : !state.url && <p className="browser-hint">Enter your web app URL above.</p>)}
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
-    <footer className="browser-footer">{state.loading ? 'Loading…' : independent ? 'Connect a session to share this project’s browser activity.' : 'This session’s browser activity is available to Copilot CLI.'}
+    <footer className="browser-footer">{state.loading ? 'Loading…' : independent ? 'Browser control automatically follows the current session.' : 'This session’s browser activity is available to Copilot CLI.'}
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>
         <p>{state.testing.report.description}</p><p>Expected: {state.testing.report.expected}</p>
         <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.outcome?.replaceAll('-', ' ') ?? step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>

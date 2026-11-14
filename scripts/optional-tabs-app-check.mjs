@@ -63,6 +63,7 @@ if (!process.versions.electron) {
     await type('[aria-label="New browser URL"]', `${address}/Browser-A`)
     await ui('document.querySelector(".tool-launcher form").requestSubmit()')
     await until('document.querySelectorAll(".tool-tab").length===1 && !!document.querySelector(".browser-panel")', 'browser A tab')
+    assert.equal(await ui(`document.querySelectorAll('[aria-label="Connect browser to session"], [aria-label="Prompt destination"], .browser-connection').length`), 0, 'browser has no session picker or connection controls')
     const a = (await current()).tabs[0]
     await until(`document.querySelector('[aria-label="Web app URL"]')?.value.includes('Browser-A')`, 'browser A loaded')
     await click('.workspace-tools-header > [aria-label="New tab"]')

@@ -1591,7 +1591,7 @@ test('opening a History session in a project startup has not listed yet keeps th
 test('unloading a CLI revokes its bridge but retains project browser pages', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);profile.defaultResumeMode='new';harness.createTestWindow();
   const id=(await harness.createMain()).activeTabId!;
-  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser',sessionId:id});
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
   const resource=tools.projects[0].tabs[0].resource;
   await harness.request('desktop:unload-tab',id);
   assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
@@ -1599,6 +1599,28 @@ test('unloading a CLI revokes its bridge but retains project browser pages', asy
   await harness.request('desktop:restart-tab',id);
   await harness.request('desktop:browser-state',resource);
   assert.equal(harness.browserConfigs.length,1);
+}))
+
+test('project browser control follows current session and reconnects after Resume', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  const first=(await harness.createMain()).activeTabId!;
+  const opened=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
+  const page=opened.projects[0].tabs[0];
+  assert.deepEqual(opened.connections.map((entry:any)=>entry.sessionId),[first]);
+  const second=(await harness.createMain()).activeTabId!;
+  let tools=await harness.request<any>('desktop:tools-state');
+  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[second]);
+  assert.equal(tools.connections[0].pageId,page.pageId);
+  await harness.request('desktop:activate-tab',first);
+  tools=await harness.request<any>('desktop:tools-state');
+  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[first]);
+  await harness.request('desktop:unload-tab',first);
+  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
+  await harness.request('desktop:restart-tab',first);
+  tools=await harness.request<any>('desktop:tools-state');
+  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[first]);
+  assert.equal(tools.projects[0].tabs[0].resource,page.resource);
+  assert.equal(harness.browserConfigs.length,1,'session changes retain the native browser group');
 }))
 
 

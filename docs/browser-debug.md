@@ -1,8 +1,8 @@
 # Debug browser and Local Overrides
 
-Choose **New tab → Browser**, enter an address, or use **Open browser** in a CLI header to create a browser and connect that session. Browsing also works with no CLI running. Browser pages and Git share one top-level tab strip; **+** opens another launcher. Close any individual tab, including the last. **Hide tabs** retains pages; **Show tabs** restores them.
+Choose **New tab → Browser**, enter an address, or use **Open browser** in a CLI header to create a browser for the current session. Browsing also works with no CLI running. Browser pages and Git share one top-level tab strip; **+** opens another launcher. Close any individual tab, including the last. **Hide tabs** retains pages; **Show tabs** restores them.
 
-Pages belong to a project and share its cookies, storage, Local Overrides and capture group. Separate profiles are the default; Settings can share cookies across projects. The cap is 32 live pages across all projects, including popups and hidden projects. CLI focus never changes the selected page. Each connected CLI has an independent page cursor; a closed cursor stays empty until explicitly selected again.
+Pages belong to a project and share its cookies, storage, Local Overrides and capture group. Separate profiles are the default; Settings can share cookies across projects. The cap is 32 live pages across all projects, including popups and hidden projects. CLI focus never changes the selected page. The current running CLI connects automatically. Switching sessions or selecting a Browser tab updates its target; CLI page selection remains independent until the user changes session or page. Inactive sessions cannot control the browser. A closed CLI-selected cursor stays empty until the CLI selects a page or the user changes the selected Browser tab.
 
 Bare public domains use HTTPS; development, private and loopback hosts use HTTP. Explicit HTTP/HTTPS takes precedence. **Reload** uses the cache; **Shift+click**, **Ctrl+Shift+R**, or **Ctrl+F5** bypasses it. Links and `window.open()` create top-level Browser tabs while preserving their opener. **Open in window** detaches one page; **Return to panel** keeps the same page and form state. Popups may open windows from a detached opener. Closing asks before discarding unsaved page changes; Cancel retains the page.
 
@@ -11,7 +11,7 @@ Zoom is remembered per site (host name, as in Chrome) for every session's browse
 kept across restarts; returning a site to 100% forgets it.
 Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
-Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, without closing project pages or signing out. Restart/Resume requires explicit reconnection. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
+Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, without closing project pages or signing out. Restart/Resume reconnects the current session automatically. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
 
 Switching tabs or hiding retains typed addresses, find text, collected elements and notes. Hiding stops Testing mode and picking; tests never resume automatically. App startup does not restore a neutral launcher or any CLI browser connection. Upgrades from session-owned browsers start with no open tool tabs and new separate project profiles; old session cookies are not merged.
 
@@ -137,7 +137,7 @@ instructions and a session-specific helper automatically. Ask **"Find any
 exceptions in the browser console"** or **"Inspect failed network requests"** in
 the terminal. Copilot can run the read-only helper through its existing shell tool;
 no third-party MCP, Node installation, or desktop CLI installation is required.
-Open a Browser tab, load the web app, and choose **Connect to session** first.
+Open a Browser tab and load the web app. Browser control automatically uses the current running session in that project.
 
 To read the same data directly from a shell inheriting that session's environment:
 

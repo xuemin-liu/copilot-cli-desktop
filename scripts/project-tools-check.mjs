@@ -28,11 +28,12 @@ if (!process.versions.electron) {
     win = new BrowserWindow({ show: false, width: 1200, height: 800 })
     await win.loadURL('about:blank')
     const sessions = new Map([['s1', { workspaceProfileId: 'p1', status: 'running' }], ['s2', { workspaceProfileId: 'p1', status: 'running' }]])
+    let currentSession = null
     let confirm = false, confirmations = 0
     const errors = []
     const options = { userData: app.getPath('userData'), owner: () => win,
       project: id => ['p1', 'p2'].includes(id) ? { name: id, path: out } : undefined,
-      session: id => sessions.get(id), defaults: () => ({ shared: false, overrides: 'private' }),
+      session: id => sessions.get(id), currentSession: () => currentSession, defaults: () => ({ shared: false, overrides: 'private' }),
       browserOptions: () => ({ confirmLeave: async () => { confirmations++; return confirm } }), changed: () => {}, error: error => errors.push(String(error)) }
     tools = new ProjectToolService(options)
     const state = () => tools.state().projects.find(project => project.profileId === 'p1')
@@ -121,18 +122,42 @@ if (!process.versions.electron) {
         return { status: response.status, body: await response.json() }
       }
     }
-    const s1 = await bridge('s1'), s2 = await bridge('s2')
+    const s1 = await bridge('s1'); let s2 = await bridge('s2')
     assert.equal((await s1('/status')).status, 409)
-    await action({ type: 'connect', id: a.id, sessionId: 's1' })
-    await action({ type: 'connect', id: b.id, sessionId: 's2' })
+    currentSession = 's1'; tools.refreshConnections()
     assert.equal((await s1('/status')).body.activePageId, a.pageId)
-    assert.equal((await s2('/status')).body.activePageId, b.pageId)
+    assert.equal((await s2('/status')).status, 409)
     await action({ type: 'select', id: b.id })
-    assert.equal((await s1('/status')).body.activePageId, a.pageId)
+    assert.equal((await s1('/status')).body.activePageId, b.pageId)
+    currentSession = 's2'; tools.refreshConnections()
+    assert.equal((await s1('/status')).status, 409)
+    assert.equal((await s2('/status')).body.activePageId, b.pageId)
     assert.equal((await s2(`/read/select?arg=${a.pageId}`)).status, 200)
     assert.equal(state().activeId, b.id)
-    assert.equal((await s1('/status')).body.activePageId, a.pageId)
+    tools.refreshConnections()
     assert.equal((await s2('/status')).body.activePageId, a.pageId)
+    // Revocation is checked at async command boundaries, even before a renderer/state event arrives.
+    const group = tools.resource(b.resource).browser, serve = group.serveControl
+    let cursor
+    group.serveControl = function(request, response, options) { cursor = options.cursor; return serve.call(this, request, response, options) }
+    await s2('/status'); group.serveControl = serve
+    currentSession = 's1'
+    assert.throws(() => cursor.validate(), /Current session/)
+    currentSession = 's2'; tools.refreshConnections()
+    // Restart publishes a new endpoint and reconnects the current session automatically.
+    await tools.stopBridge('s2')
+    const resumed = await bridge('s2')
+    assert.equal((await resumed('/status')).body.activePageId, b.pageId)
+    sessions.get('s2').status = 'completed'
+    assert.equal((await resumed('/status')).status, 409)
+    sessions.get('s2').status = 'running'
+    assert.equal((await resumed('/status')).body.activePageId, b.pageId)
+    sessions.get('s2').workspaceProfileId = 'p2'
+    assert.equal((await resumed('/status')).status, 409)
+    sessions.get('s2').workspaceProfileId = 'p1'
+    assert.equal((await resumed('/status')).body.activePageId, b.pageId)
+    s2 = resumed
+    await s2(`/read/select?arg=${a.pageId}`)
     await contents(a).session.cookies.set({ url, name: 'project', value: 'survives-session' })
     await tools.stopBridge('s1'); sessions.delete('s1')
     assert.equal((await contents(a).session.cookies.get({ url, name: 'project' }))[0].value, 'survives-session')
@@ -165,11 +190,9 @@ if (!process.versions.electron) {
     await action({ type: 'close', id: state().tabs[0].id })
     assert.equal(state().visible, false)
     await action({ type: 'add', kind: 'browser', url: `${url}/reopened` })
-    assert.equal(tools.state().connections.find(entry => entry.sessionId === 's2').pageId, null)
     const reopened = state().tabs[0]
+    assert.equal(tools.state().connections.find(entry => entry.sessionId === 's2').pageId, reopened.pageId)
     assert.notEqual(reopened.id, b.id)
-    assert.equal((await s2('/status')).status, 409)
-    assert.equal((await s2(`/read/select?arg=${reopened.pageId}`)).status, 200)
     assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
     // Switching projects hides native pages and keeps cookies isolated in separate-profile mode.
     await tools.action('p2', { type: 'add', kind: 'browser', url: `${url}/other-project` })
@@ -197,8 +220,8 @@ if (!process.versions.electron) {
     assert.equal(state().tabs.length, 1)
     await tools.removeProject('p2')
     assert.equal(contents(other), undefined)
-    // An explicitly disconnected empty cursor is revocable without inventing a replacement page.
-    await action({ type: 'disconnect', sessionId: 's2' })
+    // No active session means no connection; it does not create or discard pages.
+    currentSession = null; tools.refreshConnections()
     assert.equal((await s2('/status')).status, 409)
     // Restart restores descriptors, not resources or launchers.
     await action({ type: 'add', kind: 'browser', url: `${url}/saved-neighbor` })
