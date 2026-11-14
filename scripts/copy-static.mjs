@@ -1,4 +1,4 @@
-import { cp, mkdir } from 'node:fs/promises'
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 
@@ -18,5 +18,11 @@ await copyIfExists('src/preload/preload.cjs', 'dist/src/preload/preload.cjs')
 await copyIfExists('src/preload/settings-preload.cjs', 'dist/src/preload/settings-preload.cjs')
 await copyIfExists('node_modules/@xterm/xterm/css/xterm.css', 'dist/src/renderer/xterm.css')
 await copyIfExists('build/icon.png', 'dist/build/icon.png')
+await copyIfExists('vendor/myterminal/electron/local-terminal.js', 'dist/vendor/myterminal/electron/local-terminal.js')
+await copyIfExists('vendor/myterminal/electron/security-utils.js', 'dist/vendor/myterminal/electron/security-utils.js')
+await copyIfExists('vendor/myterminal/package.json', 'dist/vendor/myterminal/package.json')
+const terminalCss = await readFile('vendor/myterminal/src/index.css', 'utf8')
+const variables = terminalCss.match(/:root\s*\{([^}]+)\}/)?.[1] ?? ''
+await writeFile('dist/src/renderer/myterminal.css', `.myterminal-embedded {${variables}}\n@scope (.myterminal-embedded) {\n${terminalCss}\n}\n`)
 
 console.log('[copy-static] Static assets copied to dist/.')

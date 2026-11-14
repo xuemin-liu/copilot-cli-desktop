@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import type { PtyLike } from './pty-backend.js'
+import { spawnMyTerminal } from './myterminal-backend.js'
 
 test('SSH uses argument boundaries, native config, and validates host/options', () => {
   assert.deepEqual(terminalLaunch('ssh', { host: 'my-server', username: 'alice', port: 2222, identityFile: '/keys/my key' }, '/work', 'linux').args,
@@ -48,4 +49,22 @@ test('closing a terminal forces termination even if its shell ignores graceful s
   manager.close('p1', 't1')
   assert.deepEqual(signals, ['SIGKILL'])
   assert.equal(pty.disposed, 1)
+})
+
+test('MyTerminal resolves Windows PowerShell even with System32 missing from PATH', { skip: process.platform !== 'win32' }, async () => {
+  const before = process.env.Path, upper = process.env.PATH
+  try {
+    process.env.Path = ''; process.env.PATH = ''
+    let executable = ''
+    await spawnMyTerminal((file, _args, options) => {
+      executable = file
+      assert.equal(options.cwd, '/project')
+      assert.equal(options.env.COPILOT_DESKTOP_TERMINAL_HELPER, 'helper')
+      return mockPty()
+    }, 'powershell.exe', [], { cwd: '/project', env: { COPILOT_DESKTOP_TERMINAL_HELPER: 'helper' }, cols: 80, rows: 24 })
+    assert.match(executable, /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i)
+  } finally {
+    if (before === undefined) delete process.env.Path; else process.env.Path = before
+    if (upper === undefined) delete process.env.PATH; else process.env.PATH = upper
+  }
 })

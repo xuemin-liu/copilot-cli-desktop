@@ -1380,7 +1380,7 @@ button:disabled {
 .project-dock-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; grid-column: 1; }
 .project-dock-panel { min-width: 0; min-height: 0; display: flex; }
 .project-dock > .side-chat-divider { grid-row: 1; }
-.workspace-tools { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; background: #10151e; }
+.workspace-tools { position:relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; background: #10151e; }
 .workspace-tools-header { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid #303640; }
 .workspace-tools-header [role="tablist"] { display: flex; gap: 4px; flex: 1; }
 .workspace-tools-header [role="tab"][aria-selected="true"] { background: #263b5b; border-color: #4f88ff; }
@@ -1657,7 +1657,10 @@ button:disabled {
 .tool-browser-host, .tool-git-host { display:flex; flex:1; min-height:0; min-width:0; }
 .tool-browser-host > .browser-panel, .tool-git-host > .git-panel { flex:1; }
 .tool-terminal-host { display:flex; flex:1; min-height:0; min-width:0; }
-.tool-terminal-host[hidden] { display:none; }
+/* MyTerminal 0dd8c2b: inactive panes retain measurable width; never refit to zero columns. */
+.tool-terminal-host[hidden] { display:flex; position:absolute; inset:40px 0 0; visibility:hidden; pointer-events:none; }
+.myterminal-embedded .terminal-toolbar { flex-wrap:wrap; height:auto; min-height:32px; }
+.myterminal-embedded .terminal-toolbar-actions { flex-wrap:wrap; }
 .tool-terminal-panel { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
 .tool-terminal-screen { flex:1; min-height:0; min-width:0; overflow:hidden; background:#0b1020; padding:6px; }
 .tool-terminal-screen .xterm { height:100%; }

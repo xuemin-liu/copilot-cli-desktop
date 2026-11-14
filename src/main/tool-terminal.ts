@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { spawnNodePty } from './node-pty-backend.js'
+import { spawnMyTerminal } from './myterminal-backend.js'
 import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { TerminalConfig, TerminalKind } from './tool-tabs.js'
 
@@ -19,7 +20,7 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
     if (typeof value !== 'string' || value.length > 4096 || !pattern.test(value)) throw new Error(`Invalid ${name}`)
     return value
   }
-  if (kind === 'local') return { file: platform === 'win32' ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : process.env.SHELL || '/bin/bash', args: platform === 'win32' ? ['-NoLogo'] : [], cwd, config: {} }
+  if (kind === 'local') return { file: platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash', args: platform === 'win32' ? ['-NoLogo'] : [], cwd, config: {} }
   if (kind === 'wsl') {
     if (platform !== 'win32') throw new Error('WSL terminals are available on Windows')
     const distro = field(config.distro, 'WSL distribution', /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
@@ -48,7 +49,7 @@ export class ToolTerminals {
     const runtime: Runtime = { profileId, state: { id, generation: randomUUID(), status: 'starting', output: '', cursor: 0, start: 0 }, closed: false, abort: new AbortController() }
     this.runtimes.set(id, runtime)
     try {
-      const pty = await this.spawn(launch.file, launch.args, { cwd: launch.cwd, env, cols: 80, rows: 24, signal: runtime.abort.signal })
+      const pty = await spawnMyTerminal(this.spawn, launch.file, launch.args, { cwd: launch.cwd, env, cols: 80, rows: 24, signal: runtime.abort.signal })
       if (runtime.closed) { pty.kill('SIGKILL'); pty.dispose?.(); throw new Error('Terminal closed during startup') }
       runtime.pty = pty; runtime.state.status = 'running'
       if (pty.pid !== undefined) runtime.state.pid = pty.pid

@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/xuemin-liu/MyTerminal",
+  "revision": "3de4e4a2ac2e83100306020f92499368b9d90cb4",
+  "files": {
+    "package.json": "772343f5092bc61c1b6a1d1486f962755fd1057441f976ac09972b7287edfd1e",
+    "src/index.css": "6acb928fa4bdefcb0a7a562a0121efa26861a0163c4a0f84cbd9dcae531f7d9b",
+    "electron/local-terminal.js": "dd7d0497bf5b323db743b70fd5cd11bd685ae9ca8b5bbb7e67f9f8ecdcc9d723",
+    "electron/security-utils.js": "600a3e2d0a3fdd2a73cb1510417cec1b53f1f3271e1f01e0df0a85fb46d9eace",
+    "electron/ipc/sessions.js": "1ee01c35cbf864b54d98d158dbe6a19697efd79ca682430b5bfaf13005ac39c9",
+    "src/components/AiBar.jsx": "d6a7009b72e2509283d59de68d8fd65d9b0a90a448a394e7029138ed571645ea",
+    "src/components/FileEditor.jsx": "500959f48c5a5305efe28020fcc655486904fa09f30c60dc10a61d1d467c9465",
+    "src/components/SftpPanel.jsx": "1a9074d62b1485a65743ce5a77f81cd7f9bb005ffa0949a975eff97f738dead4",
+    "src/components/SnippetPanel.jsx": "05b1a9d3bf888379fe87130d1fb201fcf3bb753e9b8380fb13c3add8947d4b1d",
+    "src/components/SplitTerminalPane.jsx": "734dc21a2baf89d826268291290f215fabbdf835ba1b3c6000be1b869f9b47ee",
+    "src/components/TerminalTab.jsx": "869b29945712901ed0144df6d141cb385a6bcc260c73af65e26ea137f1a0ea54",
+    "src/components/TunnelPanel.jsx": "57d2e32939d07fd5622228eac6d33261e54d84438eba1297575cc5804b8aa7bf",
+    "src/utils/terminalChannels.js": "f525d843da72598e65ebaa0a2ac26244f60d4484c7c47c3cdd5d99547f7ac6c8",
+    "src/utils/terminalClipboardUtils.js": "7844de4dc256f459cf5def226475517c9ef81a63917a269e88eff6c8024195d1",
+    "src/utils/terminalSessionUtils.js": "6f9d80918f58d07ed7c6b4a85a0d8b5404585f3a594910a8f795660fac535c2a",
+    "src/utils/terminalUtils.js": "5256aa1ae13e871f10117161ba7e1877aa64bf4efb19d1012458437f60546f10",
+    "src/store/useSessionStore.js": "6314a1e201ada6a2a64182b08a1a5da354c42858ededae8cd38a65858fddaa3c",
+    "tests/ipcValidation.test.js": "c91b075ed911ee0a1fa21d64571de0744cdc3b62a6645727ca5ddd3b51db0da3",
+    "tests/securityUtils.test.js": "f4dd9fd015a11c768c58da5ca2f3ce11f28bf23294abfa589134b2ca9577f7a0",
+    "tests/sessionSecurity.test.js": "1db751a5126f366f6747291a2fe27b3a51d9236cc604dea1ec6bbe6a5c9805a9",
+    "tests/terminalClipboardUtils.test.js": "25543c129e006475bcd74e29bc425bbc6d37c6dc869cb951019bcb29ae0205b5",
+    "tests/terminalSessionUtils.test.js": "5d5cbea2ce12d315b6d595ef2a0bcea79336a2bb79a8034374bf5e9fdd3ce12b",
+    "tests/terminalUtils.test.js": "d481a1a1993b7c614c687b0944f15289991f38ca45c04f681f4470fcaf56628a"
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "name": "my-terminal",
+  "version": "1.0.0",
+  "description": "MobaXterm-like desktop terminal manager",
+  "main": "out/main/main.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "cross-env NODE_OPTIONS=--no-deprecation electron-vite build && cross-env NODE_OPTIONS=--no-deprecation electron-builder",
+    "dist:win": "cross-env NODE_OPTIONS=--no-deprecation electron-vite build && cross-env NODE_OPTIONS=--no-deprecation electron-builder --win --dir",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "rebuild": "electron-rebuild -f -w node-pty",
+    "export-backup": "node scripts/export-backup.js"
+  },
+  "build": {
+    "appId": "com.myterminal.app",
+    "productName": "MyTerminal",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "npmArgs": [
+      "--loglevel",
+      "error"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ]
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron-store": "^8.2.0",
+    "lucide-react": "^0.469.0",
+    "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ssh2": "^1.16.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "@eslint/js": "^10.0.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^10.1.0",
+    "electron": "^40.10.6",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "eslint": "^10.1.0",
+    "eslint-plugin-react": "^7.37.5",
+    "vite": "^5.4.11",
+    "vitest": "^4.1.2"
+  }
+}
