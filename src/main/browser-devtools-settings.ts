@@ -5,7 +5,8 @@ import { renameWithRetry } from './atomic-file.js'
 import { normalizeBrowserProfileId } from './browser-profile.js'
 
 /** DevTools settings by name, with the JSON-encoded values DevTools saves. */
-type Snapshot = Record<string, string>
+export type DevtoolsPreferences = Record<string, string>
+type Snapshot = DevtoolsPreferences
 /** `private`: browser profiles whose sessions keep DevTools settings, Local Overrides included, to themselves. */
 interface Store { values: Snapshot; seen: Record<string, Snapshot>; private: string[] }
 
@@ -135,4 +136,65 @@ export function shareDevtoolsSettings(userData: string, profileId?: string, opti
     store.seen[id] = { ...store.values }
   }
   writeJsonAtomic(storeFile, store)
+}
+
+/** Mark privacy independently of one-time Chromium partition initialization. A transition to shared stays excluded
+ * from collection until the new group's live frontend has replaced the old private preferences. */
+export function prepareProjectDevtoolsSettings(userData: string, profileId: string, privateMode: boolean, initialized: boolean): Snapshot | null {
+  const id = normalizeBrowserProfileId(profileId)
+  if (!id) throw new Error('Invalid browser profile')
+  const file = join(userData, STORE_FILE), store = loadStore(file)
+  if (privateMode) {
+    if (!store.private.includes(id)) store.private.push(id)
+    delete store.seen[id]
+    writeJsonAtomic(file, store)
+    return null
+  }
+  if (store.private.includes(id)) {
+    collect(store, partitions(userData))
+    writeJsonAtomic(file, store)
+    return { ...store.values }
+  }
+  if (!initialized) shareDevtoolsSettings(userData, id)
+  return null
+}
+
+/** Called only after native preference write/readback and cache refresh succeeded. Preserve cookies and other prefs. */
+export function completeProjectDevtoolsSharing(userData: string, profileId: string, values: Snapshot): void {
+  const id = normalizeBrowserProfileId(profileId)
+  if (!id) throw new Error('Invalid browser profile')
+  const found = partitions(userData)
+  const prefsFile = join(found.get(id) ?? join(userData, 'Partitions', encodeURIComponent(`browser-debug:${id}`)), 'Preferences')
+  const prefs = readJson(prefsFile) ?? {}
+  if (!isRecord(prefs)) throw new Error('Browser preferences are not an object')
+  applySnapshot(prefs, values)
+  writeJsonAtomic(prefsFile, prefs)
+  const storeFile = join(userData, STORE_FILE), store = loadStore(storeFile)
+  store.seen[id] = { ...values }
+  store.private = store.private.filter(candidate => candidate !== id)
+  writeJsonAtomic(storeFile, store)
+}
+
+/** Fixed code runs only in the trusted bundled DevTools frontend. Keep its local folder storage untouched. */
+export function replaceDevtoolsPreferencesScript(values: Snapshot): string {
+  return `(async () => {
+    const C = await import('devtools://devtools/bundled/core/common/common.js');
+    for (let i = 0; !C.Settings.Settings.hasInstance(); i++) {
+      if (i > 200) throw new Error('DevTools settings did not initialize');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    const H = await import('devtools://devtools/bundled/core/host/host.js');
+    const host = H.InspectorFrontendHost.InspectorFrontendHostInstance;
+    const values = ${JSON.stringify(values)};
+    const before = await new Promise(resolve => host.getPreferences(resolve));
+    for (const key of Object.keys(before)) if (!Object.hasOwn(values, key)) host.removePreference(key);
+    for (const [key, value] of Object.entries(values)) host.setPreference(key, value);
+    await new Promise(resolve => host.getPreferences(resolve));
+    const settings = C.Settings.Settings.instance();
+    for (const storage of [settings.globalStorage, settings.syncedStorage])
+      await Promise.all([...new Set([...storage.keys(), ...Object.keys(values)])].map(key => storage.forceGet(key)));
+    await Promise.all([...settings.getRegistry().values()].filter(setting =>
+      setting.storage === settings.globalStorage || setting.storage === settings.syncedStorage).map(setting => setting.forceGet()));
+    return await new Promise(resolve => host.getPreferences(resolve));
+  })()`
 }

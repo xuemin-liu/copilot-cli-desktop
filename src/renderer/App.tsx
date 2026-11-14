@@ -128,7 +128,7 @@ export function App(): JSX.Element {
     actOnTools(state.activeProfileId, gitOpen ? { type: 'visible', visible: false } : { type: 'add', kind: 'git' })
   }, [state.activeProfileId, actOnTools, gitOpen])
   const openBrowser = (tabId: string): void => {
-    if (state.activeProfileId) actOnTools(state.activeProfileId, { type: 'add', kind: 'browser', sessionId: tabId })
+    void window.copilotDesktop.showBrowserInMain(tabId).catch(error => setOperationError(errorMessage(error)))
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {

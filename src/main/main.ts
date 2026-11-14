@@ -4718,7 +4718,8 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
   await activateProfile(tab.workspaceProfileId)
-  await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser', sessionId: tabId })
+  await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser',
+    ...(projectTools().canConnect(tabId, tab.workspaceProfileId) ? { sessionId: tabId } : {}) })
   if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
 })
 

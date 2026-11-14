@@ -39,6 +39,33 @@ if (!process.versions.electron) {
     const action = value => tools.action('p1', value)
     const until = async (test, name) => { const deadline = Date.now() + 15_000; while (Date.now() < deadline) { if (await test()) return; await delay(30) } throw new Error(`Timed out: ${name}`) }
     const contents = tab => webContents.fromId(tab.pageId)
+    // Change ownership modes in the same Chromium session without importing private settings or losing cookies.
+    const p2 = () => tools.state().projects.find(project => project.profileId === 'p2')
+    await tools.action('p2', { type: 'overrides', mode: 'shared' })
+    await tools.action('p2', { type: 'add', kind: 'browser' })
+    await tools.action('p2', { type: 'close', id: p2().tabs[0].id })
+    await tools.action('p2', { type: 'overrides', mode: 'private' })
+    await tools.action('p2', { type: 'add', kind: 'browser', url: `${url}/private-settings` })
+    const privateTab = p2().tabs[0], profileId = p2().browserProfileId
+    await until(() => contents(privateTab)?.getURL().endsWith('/private-settings') && !contents(privateTab).isLoading(), 'private page loaded')
+    const privateBrowser = tools.resource(privateTab.resource).browser
+    privateBrowser.action('view:devtools')
+    const privateFrontend = privateBrowser.pages.get(privateTab.pageId).tools.webContents
+    await until(async () => !privateFrontend.isLoading() && await privateFrontend.executeJavaScript(`(async()=>{const C=await import('devtools://devtools/bundled/core/common/common.js');return C.Settings.Settings.hasInstance()})()`), 'private frontend ready')
+    await privateFrontend.executeJavaScript(`(async()=>{const C=await import('devtools://devtools/bundled/core/common/common.js');const s=C.Settings.Settings.instance();s.createSetting('private-transition-key','default').set('private');s.moduleSetting('persistence-network-overrides-enabled').set(true)})()`)
+    await contents(privateTab).session.cookies.set({ url, name: 'mode-switch', value: 'kept' })
+    assert.ok(JSON.parse(await readFile(join(options.userData, 'browser-devtools.json'), 'utf8')).private.includes(profileId))
+    await tools.action('p2', { type: 'close', id: privateTab.id })
+    await tools.action('p2', { type: 'overrides', mode: 'shared' })
+    await tools.action('p2', { type: 'add', kind: 'browser', url: `${url}/shared-settings` })
+    const sharedTab = p2().tabs[0], sharedBrowser = tools.resource(sharedTab.resource).browser
+    const sharedFrontend = sharedBrowser.pages.get(sharedTab.pageId).tools.webContents
+    const preferences = await sharedFrontend.executeJavaScript(`(async()=>{const H=await import('devtools://devtools/bundled/core/host/host.js');const C=await import('devtools://devtools/bundled/core/common/common.js');return {raw:await new Promise(r=>H.InspectorFrontendHost.InspectorFrontendHostInstance.getPreferences(r)),enabled:C.Settings.Settings.instance().moduleSetting('persistence-network-overrides-enabled').get()}})()`)
+    assert.equal(preferences.raw['private-transition-key'], undefined)
+    assert.equal(preferences.enabled, false)
+    assert.equal((await contents(sharedTab).session.cookies.get({ url, name: 'mode-switch' }))[0].value, 'kept')
+    assert.equal(JSON.parse(await readFile(join(options.userData, 'browser-devtools.json'), 'utf8')).private.includes(profileId), false)
+    await tools.removeProject('p2')
     tools.showProject('p1')
     assert.equal(state().tabs.length, 0)
     assert.equal(state().visible, false)

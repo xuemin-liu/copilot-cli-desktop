@@ -9,7 +9,7 @@ import type { BrowserCursor } from './browser-reader.js'
 import type { BrowserBounds } from './browser-debug-types.js'
 import { browserProfilePaths, normalizeBrowserProfileId, SHARED_BROWSER_PROFILE_ID } from './browser-profile.js'
 import { writeFileAtomic } from './atomic-file.js'
-import { shareDevtoolsSettings } from './browser-devtools-settings.js'
+import { prepareProjectDevtoolsSettings, completeProjectDevtoolsSharing } from './browser-devtools-settings.js'
 import { parseBrowserAddress } from './browser-url.js'
 import { restorableUrl } from './browser-privacy.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
@@ -69,6 +69,10 @@ export class ProjectToolService {
   private width(value: unknown): number { return typeof value === 'number' && Number.isFinite(value) ? Math.max(320, Math.min(2400, value)) : 420 }
   profileIds(): string[] { return [...this.projects.values()].map(project => project.browserProfileId) }
   hasPartition(partition: string): boolean { return [...this.groups.values()].some(group => group.browser.partition === partition) }
+  canConnect(sessionId: string, profileId: string): boolean {
+    const bridge = this.bridges.get(sessionId), session = this.options.session(sessionId)
+    return bridge?.profileId === profileId && session?.workspaceProfileId === profileId && liveSession(session.status)
+  }
   private project(id: string, width?: number): ProjectTools {
     if (!this.options.project(id)) throw new Error('Workspace no longer exists')
     let project = this.projects.get(id)
@@ -111,11 +115,9 @@ export class ProjectToolService {
       const partitionId = this.options.defaults().shared ? SHARED_BROWSER_PROFILE_ID : project.browserProfileId
       const partition = browserProfilePaths(this.options.userData, partitionId).partition
       // Mark private page preferences before Chromium loads them so startup collection cannot leak them into shared settings.
-      if (!this.initializedPartitions.has(partition)) {
-        try { shareDevtoolsSettings(this.options.userData, partitionId, { private: partitionId !== SHARED_BROWSER_PROFILE_ID && project.overrides === 'private' }) }
-        catch (error) { this.options.error(error) }
-        this.initializedPartitions.add(partition)
-      }
+      const sharedPreferences = prepareProjectDevtoolsSettings(this.options.userData, partitionId,
+        partitionId !== SHARED_BROWSER_PROFILE_ID && project.overrides === 'private', this.initializedPartitions.has(partition))
+      this.initializedPartitions.add(partition)
       const browser = new BrowserDebug(owner, profile.settings, { ...this.options.browserOptions(), partition,
         ...(project.overrides === 'private' ? { devtoolsPartition: profile.devtoolsPartition } : {}),
         projectMode: true, tabId: `project:${project.profileId}`, canCreatePage: () => this.limit(),
@@ -129,10 +131,12 @@ export class ProjectToolService {
       group = { browser, generation: randomUUID() }
       this.groups.set(project.profileId, group)
       tab.pageId = browser.pageList()[0]!.id
+      if (sharedPreferences) browser.initializePreferences(sharedPreferences,
+        values => completeProjectDevtoolsSharing(this.options.userData, partitionId, values))
     } else tab.pageId = group.browser.createPage()
     tab.resource = `tool:${tab.id}`
     group.browser.selectUiPage(tab.pageId)
-    if (tab.url) void group.browser.navigate(tab.url).catch(this.options.error)
+    if (tab.url) void group.browser.navigatePage(tab.pageId, tab.url).catch(this.options.error)
   }
   private reconcile(profileId: string): void {
     if (this.stopping) return
@@ -247,6 +251,7 @@ export class ProjectToolService {
     const group = this.groups.get(profileId)
     if (project.visible && selected?.pageId !== undefined && group?.browser.hasPage(selected.pageId)) group.browser.selectUiPage(selected.pageId)
     else group?.browser.setBounds(null)
+    await group?.browser.ready
     this.save()
     return this.state()
   }

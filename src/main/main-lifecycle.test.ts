@@ -3107,4 +3107,9 @@ test('natural CLI exit revokes its browser bridge while keeping project pages', 
   await assert.rejects(access(endpoint));
   await harness.request('desktop:browser-state',resource);
   assert.equal(harness.browserConfigs.length,1);
+  await harness.request('desktop:pop-out-tab',id);
+  await harness.requestIn(id,'desktop:browser-show-main',id);
+  const after=await harness.request<any>('desktop:tools-state');
+  assert.equal(after.connections.length,0);
+  assert.equal(after.projects[0].tabs.length,2,'completed CLI can open an unbound browser');
 }))

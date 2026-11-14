@@ -16,6 +16,7 @@ import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './
 import { BrowserReader, type BrowserCursor } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
 import { MAX_TEST_BYTES } from './browser-test-plan.js'
+import { replaceDevtoolsPreferencesScript, type DevtoolsPreferences } from './browser-devtools-settings.js'
 
 /** A plan sent as form data, with its test inputs. */
 const MAX_TEST_FORM_BYTES = 2 * MAX_TEST_BYTES + 64 * 1024
@@ -97,6 +98,8 @@ const ACTIVATION_MS = 5000
 export class BrowserDebug {
   private readonly pages = new Map<number, BrowserPage>()
   private activePageId = 0
+  private preferencesWork: Promise<void> | null = null
+  private preparingPreferences = false
   private storage!: Session
   private readonly projectMode: boolean
   private readonly changed: () => void
@@ -247,6 +250,25 @@ export class BrowserDebug {
   }
 
   get pageCount(): number { return this.pages.size }
+  get ready(): Promise<void> { return this.preferencesWork ?? Promise.resolve() }
+  initializePreferences(values: DevtoolsPreferences, complete: (values: DevtoolsPreferences) => void): void {
+    const page = this.firstTab
+    if (!page) throw new Error('Browser page closed')
+    this.preparingPreferences = true
+    this.preferencesWork = (async () => {
+      page.priming = true
+      if (!page.contents.getURL()) await page.contents.loadURL('about:blank')
+      if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser closed while opening')
+      const tools = this.ensureDevtools(page)
+      const current = await tools.executeJavaScript(replaceDevtoolsPreferencesScript(values)) as DevtoolsPreferences
+      if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser closed while opening')
+      complete(current)
+    })().catch(error => {
+      page.error = `Could not apply shared browser settings: ${sanitizedText(String(error))}`
+      throw error
+    }).finally(() => { page.priming = false; this.preparingPreferences = false; if (!this.disposed) { this.layout(); this.changed() } })
+    void this.preferencesWork.catch(() => {})
+  }
   pageList(): BrowserDebugState['pages'] {
     return [...this.pages].filter(([, page]) => !page.contents.isDestroyed()).map(([id, page]) => ({ id,
       title: page.contents.getTitle().slice(0, 160) || 'New browser', url: shownUrl(page),
@@ -818,7 +840,7 @@ export class BrowserDebug {
     if (contents && !contents.isDestroyed()) {
       const page = this.activePage
       this.state.url = shownUrl(page)
-      this.state.loading = page.loading
+      this.state.loading = page.loading || this.preparingPreferences
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
       const failed = page.error ? undefined : this.failedPopupWindow()
       this.state.error = page.error ?? failed?.error ?? null
@@ -926,8 +948,14 @@ export class BrowserDebug {
   }
 
   async navigate(url: string): Promise<BrowserDebugState> {
+    return this.navigatePage(this.activePageId, url)
+  }
+  async navigatePage(id: number, url: string): Promise<BrowserDebugState> {
     const target = parseBrowserAddress(url).href
-    const page = this.activePage
+    const page = this.pages.get(id)
+    if (!page) throw new Error('Browser page closed')
+    await this.ready
+    if (this.disposed || page.contents.isDestroyed()) throw new Error('Browser page closed')
     page.error = null
     page.lastUrl = target
     try { await this.load(page, target) }
@@ -1096,6 +1124,7 @@ export class BrowserDebug {
   get picking(): boolean { return this.reader.picking }
 
   action(action: string): BrowserDebugState {
+    if (this.preparingPreferences) throw new Error('The browser is still opening. Try again in a moment.')
     if (action === 'testing:on' || action === 'testing:off') {
       if (this.disposed) throw new Error('Browser has closed')
       if (action === 'testing:on') this.showView('page')
@@ -1232,7 +1261,7 @@ export class BrowserDebug {
 
   private layout(): void {
     if (this.disposed || this.owner.isDestroyed()) return
-    const b = this.bounds
+    const b = this.preparingPreferences ? null : this.bounds
     for (const [id, page] of this.pages) {
       // A popup window shows its page itself; only its DevTools shows in the browser.
       if (!page.attached && b) {
