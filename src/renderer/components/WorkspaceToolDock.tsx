@@ -3,7 +3,6 @@ import type { JSX, ReactNode } from 'react'
 import type { DesktopSessionTab } from '../../main/types.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import type { ToolDockPreferences, WorkspaceTool } from '../tool-dock-state.js'
-import { terminalLayout } from '../tool-dock-state.js'
 import { BrowserPanel } from './BrowserPanel.js'
 import { ProjectDock } from './ProjectDock.js'
 
@@ -24,9 +23,6 @@ export interface WorkspaceToolDockProps {
   profileId: string
   gitAvailable: boolean
   git: ReactNode
-  browserChoice: string | null
-  onBrowserChoice(id: string): void
-  onActivate(id: string): void
   browserPoppedOutTabIds: string[]
   poppedOutTabIds: string[]
   obscured: boolean
@@ -43,15 +39,12 @@ export function WorkspaceToolDock(props: WorkspaceToolDockProps): JSX.Element {
   </ProjectDock>
 }
 
-function WorkspaceTools({ prefs, onChange, onClose, tabs, activeTabId, profileId, gitAvailable, git, browserChoice, onBrowserChoice,
-  onActivate, browserPoppedOutTabIds, poppedOutTabIds, obscured, onError, main, side, takeover, mainWidth }: WorkspaceToolDockProps & {
+function WorkspaceTools({ prefs, onChange, onClose, tabs, activeTabId, profileId, gitAvailable, git,
+  browserPoppedOutTabIds, poppedOutTabIds, obscured, onError, takeover }: WorkspaceToolDockProps & {
     main: DesktopSessionTab | null; side: DesktopSessionTab | null; takeover: boolean; mainWidth: number
   }): JSX.Element {
   const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
-  const single = terminalLayout(mainWidth, side !== null, 50).single
-  const pair = [main, side].filter((tab): tab is DesktopSessionTab => tab !== null)
-  const target = single ? pair.find(tab => tab.id === activeTabId) ?? main
-    : pair.find(tab => tab.id === browserChoice) ?? main
+  const target = tabs.find(tab => tab.id === activeTabId) ?? null
   const popped = target !== null && browserPoppedOutTabIds.includes(target.id)
   const sessionElsewhere = target !== null && poppedOutTabIds.includes(target.id)
   const browserShown = prefs.open && prefs.tool === 'browser'
@@ -60,9 +53,6 @@ function WorkspaceTools({ prefs, onChange, onClose, tabs, activeTabId, profileId
     if (!enabled || !target) return
     setVisited(previous => previous.has(target.id) ? previous : new Set([...previous, target.id]))
   }, [enabled, target?.id])
-  useEffect(() => {
-    if (main && !pair.some(tab => tab.id === browserChoice)) onBrowserChoice(main.id)
-  }, [main?.id, side?.id]) // A focus change within the pair must not change the browser.
   const select = (tool: WorkspaceTool): void => onChange({ ...prefs, open: true, tool })
   const tools: WorkspaceTool[] = gitAvailable ? ['browser', 'git'] : ['browser']
   const request = (operation: Promise<unknown>): void => { void operation.catch(onError) }
@@ -86,13 +76,6 @@ function WorkspaceTools({ prefs, onChange, onClose, tabs, activeTabId, profileId
     </header>
     <div id="workspace-panel-browser" className="workspace-tool-content" role="tabpanel" aria-labelledby="workspace-tool-browser" hidden={!browserShown}>
       <div className="workspace-browser-context">
-        <label>Session <select aria-label="Browser session" value={target?.id ?? ''} disabled={!target} onChange={event => {
-          onBrowserChoice(event.target.value)
-          if (single) onActivate(event.target.value)
-        }}>
-          {!target && <option value="">No session</option>}
-          {pair.map(tab => <option key={tab.id} value={tab.id}>{tab.sideChat ? 'Side chat: ' : ''}{tab.title}</option>)}
-        </select></label>
         {target && !sessionElsewhere && target.status !== 'dormant' && <>
           <button type="button" aria-label={popped ? 'Show browser window' : 'Open browser in new window'}
             onClick={() => request(window.copilotDesktop.popOutBrowser(target.id))}>{popped ? 'Show window' : '⧉'}</button>

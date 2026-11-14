@@ -45,11 +45,10 @@ if (!process.versions.electron) {
       window.setBrowserActive = active => setActiveTabId(active ? 'tab-1' : 'tab-2');
       const tabs = [{ id: 'tab-1', title: 'First session', status: 'running' }, { id: 'tab-2', title: 'Second session', status: 'running' }];
       const [prefs, setPrefs] = useState({open:false,width:560,tool:'browser'});
-      const [choice, setChoice] = useState(null);
-      const openBrowser = id => { setChoice(id); setPrefs(p => ({...p,open:true,tool:'browser'})); };
+      const openBrowser = id => { setActiveTabId(id); setPrefs(p => ({...p,open:true,tool:'browser'})); };
       return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(p=>({...p,open:false}))}
         tabs={tabs} activeTabId={activeTabId} profileId="fixture" gitAvailable={false} git={null}
-        browserChoice={choice} onBrowserChoice={setChoice} onActivate={setActiveTabId} browserPoppedOutTabIds={[]} poppedOutTabIds={[]}
+        browserPoppedOutTabIds={[]} poppedOutTabIds={[]}
         obscured={obscured} onError={error => {throw error}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} canOpenTab={false}
         onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} /></WorkspaceToolDock>;
     }

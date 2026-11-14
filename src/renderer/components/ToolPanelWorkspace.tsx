@@ -43,7 +43,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const [gitUsed, setGitUsed] = useState(project.tabs.some(tab => tab.kind === 'git'))
   useEffect(() => { if (project.tabs.some(tab => tab.kind === 'git')) setGitUsed(true) }, [project.tabs])
   const sessions = desktop.tabs.filter(tab => tab.workspaceProfileId === project.profileId)
-  const prompt = sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id))
+  const prompt = desktop.activeProfileId === project.profileId ? sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id)) : undefined
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
   const [address, setAddress] = useState('')

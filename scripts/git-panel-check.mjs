@@ -36,17 +36,19 @@ if (!process.versions.electron) {
       const [terminal, setTerminal] = useState(false);
       const [availability, setAvailability] = useState('running');
       const [tool, setTool] = useState('git');
+      const [profile, setProfile] = useState('${PROFILE}');
+      window.__setProfile = setProfile;
       window.__setTarget = setTarget;
       window.__setAvailability = setAvailability;
       window.__setTool = setTool;
       window.__showTerminal = () => setTerminal(true);
       if (${activeSession}) return <ToolPanelWorkspace
-        desktop={{activeProfileId:'${PROFILE}', activeTabId:target, profiles:[{id:'${PROFILE}',name:'Project',path:null}],
-          tabs:['tab-1','tab-2','other-project'].map(id=>({id,title:id,status:id===target && availability==='dormant'?'dormant':'running',workspaceProfileId:id==='other-project'?'other':'${PROFILE}'})),
+        desktop={{activeProfileId:profile, activeTabId:target, profiles:[{id:'${PROFILE}',name:'Project',path:null}],
+          tabs:['tab-1','tab-2','other-project'].map(id=>({id,title:id,status:id===target && availability!=='popped'?availability:'running',workspaceProfileId:id==='other-project'?'other':'${PROFILE}'})),
           poppedOutTabIds:availability==='popped'?[target]:[]}}
         tools={{projects:[{profileId:'${PROFILE}',browserProfileId:'profile',overrides:'shared',visible:true,width:600,activeId:tool,
           tabs:[{id:'git',kind:'git',title:'Git'},{id:'browser',kind:'browser',title:'Browser',resource:'tool:browser',pageId:1}]}],connections:[]}}
-        obscured={false} act={()=>{}}><div data-active-session={target ?? ''}>CLI</div></ToolPanelWorkspace>;
+        obscured={false} act={()=>{}}><div data-active-session={target ?? ''} data-active-profile={profile}>CLI</div></ToolPanelWorkspace>;
       return open
         ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
             {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
@@ -151,6 +153,14 @@ if (!process.versions.electron) {
       debounceMs: 20, fallbackMs: 120_000,
     })
     const terminalWrites = []
+    let releaseContext, contextWaiting = false, contextGate = null
+    const holdContext = () => {
+      contextWaiting = false
+      contextGate = new Promise(resolve => { releaseContext = () => { contextGate = null; resolve() } })
+    }
+    const waitContext = async () => { if (contextGate) { contextWaiting = true; await contextGate } }
+    const originalDiff = service.getDiff.bind(service)
+    service.getDiff = async (...args) => { const result = await originalDiff(...args); await waitContext(); return result }
     let acceptCursorContext = true
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\x1b[?2004h> ' }))
     ipcMain.handle('desktop:resize-tab', () => undefined)
@@ -167,6 +177,8 @@ if (!process.versions.electron) {
       ipcMain.handle('desktop:browser-open', () => browser)
       ipcMain.handle('desktop:browser-bounds', () => undefined)
       ipcMain.handle('desktop:browser-action', () => browser)
+      ipcMain.handle('desktop:browser-screenshot', async () => { await waitContext(); return { redacted: false } })
+      ipcMain.handle('desktop:browser-pick', async () => { await waitContext(); return 'Selected element' })
     }
     window = new BrowserWindow({ width: activeSession ? 1200 : cursorOnly ? 1_000 : 460, height: 900, show: false, webPreferences: {
       preload: join(process.cwd(), 'dist', 'src', 'preload', 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } })
@@ -231,7 +243,12 @@ ${point.missing}`)
     results.groups = true
 
     if (activeSession) {
-      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"],.git-prompt-target,.tool-context').length`), 0, 'Git has no destination row')
+      const waitForContext = async () => {
+        const deadline = Date.now() + 12000
+        while (!contextWaiting && Date.now() < deadline) await delay(20)
+        assert.ok(contextWaiting, 'context request reached explicit test barrier')
+      }
+      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"],[aria-label="Browser session"],[aria-label="Connect browser to session"],.git-prompt-target,.tool-context').length`), 0, 'Git has no destination row')
       await ui(`window.originalGit=document.querySelector('.git-panel');document.querySelector('[aria-label="Commit message"]').focus();true`)
       window.webContents.insertText('keep draft')
       await clickByText('button', 'Draft with Copilot')
@@ -242,10 +259,28 @@ ${point.missing}`)
       await clickByText('button', 'Draft with Copilot')
       await until('window.__inserted.length===2', 'second session receives Git context')
       assert.equal(await ui('window.__inserted[1].tabId'), 'tab-2')
+      holdContext()
+      await clickByText('button', 'Draft with Copilot')
+      await waitForContext()
+      await ui('window.__setTarget("tab-1")')
+      await until(`document.querySelector('[data-active-session]').dataset.activeSession==='tab-1'`, 'switch during Git draft')
+      releaseContext()
+      await until('window.__inserted.length===3', 'delayed Git context delivered')
+      assert.equal(await ui('window.__inserted[2].tabId'), 'tab-1', 'delayed Git draft uses current session')
+      await ui('window.__inserted.pop();window.__setTarget("tab-2")')
       assert.equal(await ui('document.querySelector(".git-panel")===window.originalGit'), true)
       assert.equal(await ui(`document.querySelector('[aria-label="Commit message"]').value`), 'keep draft')
       assert.match(await text('.git-repo-selected'), /alpha/)
-      for (const mode of ['dormant','popped']) {
+      holdContext()
+      await clickByText('button', 'Draft with Copilot')
+      await waitForContext()
+      await ui('window.__setProfile("other")')
+      await until(`document.querySelector('[data-active-profile]').dataset.activeProfile==='other'`, 'project changed with old session still present')
+      releaseContext()
+      await until('document.body.textContent.includes("Open or resume a session in this project")', 'old project cannot deliver delayed context')
+      assert.equal(await ui('window.__inserted.length'), 2)
+      await ui(`window.__setProfile('${PROFILE}')`)
+      for (const mode of ['dormant','completed','crashed','popped']) {
         await ui(`window.__setAvailability(${JSON.stringify(mode)})`)
         await until('[...document.querySelectorAll("button")].some(b=>b.innerText==="Draft with Copilot" && b.disabled)', mode + ' active session cannot receive context')
       }
@@ -253,7 +288,7 @@ ${point.missing}`)
       await until('[...document.querySelectorAll("button")].some(b=>b.innerText==="Draft with Copilot" && b.disabled)', 'no cross-project fallback')
       await ui('window.__setTarget("tab-2");window.__setTool("browser")')
       await until(`!!document.querySelector('.browser-panel') && !document.querySelector('[aria-label="Add console errors to the prompt"]').disabled`, 'browser context ready')
-      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"]').length`), 0)
+      assert.equal(await ui(`document.querySelectorAll('[aria-label="Prompt destination"],[aria-label="Browser session"],[aria-label="Connect browser to session"]').length`), 0)
       await click('[aria-label="Add console errors to the prompt"]')
       await until('window.__inserted.length===3', 'browser context uses current session')
       assert.equal(await ui('window.__inserted[2].tabId'), 'tab-2')
@@ -262,8 +297,26 @@ ${point.missing}`)
       await click('[aria-label="Add console errors to the prompt"]')
       await until('window.__inserted.length===4', 'browser target follows session switch')
       assert.equal(await ui('window.__inserted[3].tabId'), 'tab-1')
+      for (const label of ['Attach screenshot to the prompt', 'Select element to add to the prompt']) {
+        holdContext()
+        await click(`[aria-label="${label}"]`)
+        await waitForContext()
+        await ui('window.__setTarget("tab-2")')
+        await until(`document.querySelector('[data-active-session]').dataset.activeSession==='tab-2'`, 'switch during Browser context request')
+        releaseContext()
+        await until('window.__inserted.length===5', 'delayed Browser context delivered')
+        assert.equal(await ui('window.__inserted[4].tabId'), 'tab-2', 'delayed Browser context uses current session')
+        await ui('window.__inserted.pop();window.__setTarget("tab-1")')
+        await until(`document.querySelector('[data-active-session]').dataset.activeSession==='tab-1'`, 'restore first session')
+      }
+      holdContext()
+      await click('[aria-label="Attach screenshot to the prompt"]')
+      await waitForContext()
       await ui('window.__setTarget(null)')
       await until(`document.querySelector('[data-active-session]').dataset.activeSession===''`, 'no current session')
+      releaseContext()
+      await until('document.body.innerText.includes("Open or resume a session")', 'delayed screenshot cannot use closed session')
+      assert.equal(await ui('window.__inserted.length'), 4)
       await click('[aria-label="Add console errors to the prompt"]')
       await until('document.body.innerText.includes("Open or resume a session")', 'no-session guidance')
       assert.equal(await ui('window.__inserted.length'), 4)
