@@ -22,7 +22,6 @@ interface SessionWorkspaceProps {
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
   browserPoppedOutTabIds?: string[]
-  obscured?: boolean
   /** Browser controls select a session in the shared tools dock. */
   browserOpenId?: string | null
   onOpenBrowser?: (tabId: string) => void
@@ -42,7 +41,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], obscured = false, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())

@@ -5,8 +5,8 @@ import { errorMessage } from '../errors.js'
 import { BrowserIcon } from './Icons.js'
 import { BrowserPanel } from './BrowserPanel.js'
 
-export function BrowserWorkspace({ children, tabId, active = true, obscured = false, poppedOut = false, renderHeader }: {
-  children: ReactNode; tabId: string; active?: boolean; obscured?: boolean;
+export function BrowserWorkspace({ children, tabId, active = true, unloaded = false, obscured = false, poppedOut = false, renderHeader }: {
+  children: ReactNode; tabId: string; active?: boolean; unloaded?: boolean; obscured?: boolean;
   /** The browser is in its own window, so the terminal keeps the whole width here. */
   poppedOut?: boolean;
   renderHeader?: (browserToggle: ReactNode) => ReactNode;
@@ -46,7 +46,7 @@ export function BrowserWorkspace({ children, tabId, active = true, obscured = fa
         onPointerUp={event => { dragging.current = null; event.currentTarget.releasePointerCapture(event.pointerId) }}
         onLostPointerCapture={() => { dragging.current = null }}
         onKeyDown={event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); changeSplit(event.key === 'Home' ? 25 : event.key === 'End' ? 75 : split + (event.key === 'ArrowLeft' ? -2 : 2)) } }} />
-        <BrowserPanel tabId={tabId} active={active} obscured={obscured} /></>}
+        <BrowserPanel tabId={tabId} active={active} unloaded={unloaded} obscured={obscured} /></>}
     </div>
   </div>
 }
@@ -58,6 +58,6 @@ export function BrowserOnlyWindow({ tab, onReturn }: { tab: DesktopSessionTab; o
       <span className="session-pane-title" title={tab.title}><BrowserIcon /> {tab.title}</span>
       <button type="button" onClick={onReturn} title="Show the browser beside the session's terminal again (Ctrl+W)">Return browser to session</button>
     </header>
-    <BrowserPanel tabId={tab.id} active={tab.status !== 'dormant'} obscured={false} detached />
+    <BrowserPanel tabId={tab.id} active={tab.status !== 'dormant'} unloaded={tab.status === 'dormant'} obscured={false} detached />
   </main>
 }

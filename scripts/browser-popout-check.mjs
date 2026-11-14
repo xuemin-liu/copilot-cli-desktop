@@ -1,7 +1,7 @@
 // Production Electron + live CLI: a session's browser alone moves to its own window and back, with the same pages.
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { app, BrowserWindow } from 'electron'
 import { ui } from './check-helpers.mjs'
@@ -127,7 +127,27 @@ export async function runBrowserPopoutCheck() {
     await until(() => sessionWindow.isDestroyed(), 'session returned')
     await until(mainBrowserShown, 'browser beside the main terminal after the session returns')
 
-    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, checks: ['page view moves window', 'same page', 'single owner', 'full-width terminal', 'duplicate focuses', 'prompt insert relay', 'return button', 'bring-back button', 'native close', 'Ctrl+W in header', 'native Ctrl+W in focused page', 'session pop-out keeps browser window'] }, null, 2))
+    // Unload destroys BrowserDebug but keeps its renderer host; Resume must open the replacement, including its CLI endpoint.
+    const sessionRoot = join(app.getPath('userData'), 'browser-sessions')
+    const endpointCandidates = (await readdir(sessionRoot)).map(launch => join(sessionRoot, launch, source.id, 'control.json'))
+    const exists = path => access(path).then(() => true, () => false)
+    let endpoint
+    for (const path of endpointCandidates) { if (await exists(path)) { endpoint = path; break } }
+    assert.ok(endpoint, 'the original browser control endpoint exists')
+    await ui(main, 'window.__retainedBrowser = document.querySelector(".workspace-tools .browser-panel"); true')
+    await ui(main, `window.copilotDesktop.unloadTab(${id})`)
+    await until(async () => (await state()).tabs.find(tab => tab.id === source.id)?.status === 'dormant', 'session unloaded')
+    assert.equal(await exists(endpoint), false, 'unload removes the old browser endpoint')
+    await ui(main, `window.copilotDesktop.restartTab(${id})`)
+    await until(async () => (await ui(main, `window.copilotDesktop.browserState(${id})`)).url === pageUrl, 'resume restores saved browser URL')
+    await until(() => exists(endpoint), 'resume starts browser control endpoint')
+    await until(async () => {
+      const restored = main.contentView.children.find(view => view.webContents?.getURL() === pageUrl)
+      return restored && !restored.webContents.isLoading() && await restored.webContents.executeJavaScript('document.body.innerText.includes("browser-popout-page")')
+    }, 'resumed browser finishes loading its saved page')
+    assert.equal(await ui(main, 'document.querySelector(".workspace-tools .browser-panel") === window.__retainedBrowser'), true, 'resume retains the browser UI host')
+
+    await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, sourceSessionId: source.lastSessionId, checks: ['page view moves window', 'same page', 'single owner', 'retained dock width', 'duplicate focuses', 'prompt insert relay', 'return button', 'bring-back button', 'native close', 'Ctrl+W in header', 'native Ctrl+W in focused page', 'session pop-out keeps browser window', 'unload/resume restores page and control endpoint'] }, null, 2))
     console.log('[browser-popout] PASS: browser moves to its own window and back, same pages')
   } catch (error) {
     for (const [index, window] of BrowserWindow.getAllWindows().entries()) await screenshot(window, `failure-${index}`).catch(() => {})

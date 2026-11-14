@@ -104,7 +104,7 @@ function WorkspaceTools({ prefs, onChange, onClose, tabs, activeTabId, profileId
         : popped ? <p className="tool-empty">This browser is open in another window.</p>
         : target.status === 'dormant' ? <p className="tool-empty">Start this session to use Browser.</p> : null}
       {tabs.filter(tab => visited.has(tab.id) || enabled && tab.id === target?.id).map(tab =>
-        <BrowserPanel key={tab.id} tabId={tab.id} sessionTitle={tab.title} active={enabled && tab.id === target?.id} obscured={obscured} />)}
+        <BrowserPanel key={tab.id} tabId={tab.id} sessionTitle={tab.title} unloaded={tab.status === 'dormant'} active={enabled && tab.id === target?.id} obscured={obscured} />)}
     </div>
     <div id="workspace-panel-git" className="workspace-tool-content" role="tabpanel" aria-labelledby="workspace-tool-git" hidden={!prefs.open || prefs.tool !== 'git'}>
       {gitAvailable ? <RetainedTool key={profileId} shown={prefs.open && prefs.tool === 'git'}>{git}</RetainedTool>

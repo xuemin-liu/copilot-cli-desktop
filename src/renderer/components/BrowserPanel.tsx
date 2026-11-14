@@ -47,7 +47,7 @@ function CertificateWarning({ warning, popup, banner, answer }: { warning: Brows
   </section>
 }
 
-export function BrowserPanel({ tabId, obscured, active, detached = false, sessionTitle = 'Browser' }: { tabId: string; obscured: boolean; active: boolean; detached?: boolean; sessionTitle?: string }): JSX.Element {
+export function BrowserPanel({ tabId, obscured, active, unloaded = false, detached = false, sessionTitle = 'Browser' }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; detached?: boolean; sessionTitle?: string }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -90,6 +90,9 @@ export function BrowserPanel({ tabId, obscured, active, detached = false, sessio
     }).catch(error => setError(errorMessage(error)))
   }
   useEffect(() => {
+    // Unload frees the main-process BrowserDebug while retaining this panel's fields.
+    // Resume must open its replacement to restore the saved page and CLI endpoint.
+    if (unloaded) { initialized.current = null; setReady(false); return }
     if (!active) return
     setError(null)
     let disposed = false
@@ -100,14 +103,15 @@ export function BrowserPanel({ tabId, obscured, active, detached = false, sessio
       if (!disposed) timer = setTimeout(() => { void poll() }, 1000)
     }
     // Opening belongs to the session lifetime, polling to the visible tool lifetime.
-    if (!initialized.current) initialized.current = window.copilotDesktop.browserOpen(tabId).catch(error => {
-      initialized.current = null
-      throw error
-    })
+    if (!initialized.current) {
+      const opening = window.copilotDesktop.browserOpen(tabId)
+      initialized.current = opening
+      void opening.catch(() => { if (initialized.current === opening) initialized.current = null })
+    }
     void initialized.current.then(() => { if (!disposed) { setReady(true); void poll() } })
       .catch(error => { if (!disposed) setError(errorMessage(error)) })
     return () => { disposed = true; clearTimeout(timer) }
-  }, [tabId, active])
+  }, [tabId, active, unloaded])
   useLayoutEffect(() => {
     if (wasVisible.current && !surfaceVisible) {
       const current = latest.current

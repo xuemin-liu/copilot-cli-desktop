@@ -61,9 +61,11 @@ function Fixture() {
   const [obscured, setObscured] = useState(false)
   const [profile, setProfile] = useState('project')
   const [popouts, setPopouts] = useState<string[]>([])
-  const tabs = pair ? [main, side, other] : [main, other]
+  const [dormant, setDormant] = useState(false)
+  const primary = dormant ? { ...main, status: 'dormant' as const, processId: null } : main
+  const tabs = pair ? [primary, side, other] : [primary, other]
   Object.assign(window, { dockTest: { calls, states, gitMounts, prefs, setPrefs, setActive, setPair, setObscured, setProfile, setPopouts,
-    pick: (id: string, value: string) => picked(id, value) } })
+    setDormant, pick: (id: string, value: string) => picked(id, value) } })
   return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(value => ({ ...value, open: false }))}
     tabs={tabs} activeTabId={active} profileId={profile} gitAvailable={profile !== 'general'} git={<GitProbe />}
     browserChoice={choice} onBrowserChoice={setChoice} onActivate={setActive} browserPoppedOutTabIds={popouts} poppedOutTabIds={[]}

@@ -20,7 +20,7 @@ export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, 
   const showDesktop = desktopControl !== undefined && !tab.sideChat && !tab.remote && !tab.cli && (desktopControl.allowed || desktopControl.view?.enabled === true)
   const status = tab.status === 'running' ? (tab.activity === 'working' ? 'Working' : tab.activity === 'idle' ? 'Idle' : 'Open') : tab.status === 'dormant' ? 'Not running' : tab.status
   return <main className="session-window" aria-label={`Session window: ${tab.title}`}>
-    <BrowserWorkspace tabId={tab.id} active={tab.status !== 'dormant'} poppedOut={browserPoppedOut} renderHeader={browserToggle => <><header className="session-pane-header">
+    <BrowserWorkspace tabId={tab.id} active={tab.status !== 'dormant'} unloaded={tab.status === 'dormant'} poppedOut={browserPoppedOut} renderHeader={browserToggle => <><header className="session-pane-header">
       <span className="session-pane-title" title={tab.title}>{tab.title}</span>
       {browserToggle}
       {showDesktop && <DesktopControlToggle view={desktopControl!.view} open={desktopPanel} onToggle={() => setDesktopPanel(open => !open)} />}

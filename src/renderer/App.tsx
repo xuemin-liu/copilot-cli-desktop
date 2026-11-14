@@ -480,7 +480,6 @@ export function App(): JSX.Element {
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
             browserOpenId={dock.open && dock.tool === 'browser' ? browserChoice ?? state.activeTabId : null} onOpenBrowser={openBrowser}
             gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
-            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
             desktopControlAllowed={state.desktopControlAllowed === true}

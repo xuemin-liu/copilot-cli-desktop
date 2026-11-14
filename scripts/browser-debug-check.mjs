@@ -50,7 +50,7 @@ if (!process.versions.electron) {
       return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(p=>({...p,open:false}))}
         tabs={tabs} activeTabId={activeTabId} profileId="fixture" gitAvailable={false} git={null}
         browserChoice={choice} onBrowserChoice={setChoice} onActivate={setActiveTabId} browserPoppedOutTabIds={[]} poppedOutTabIds={[]}
-        obscured={obscured} onError={error => {throw error}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} obscured={obscured} canOpenTab={false}
+        obscured={obscured} onError={error => {throw error}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} canOpenTab={false}
         onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} /></WorkspaceToolDock>;
     }
     createRoot(document.getElementById('root')).render(<Fixture />);
@@ -357,14 +357,14 @@ if (!process.versions.electron) {
         assert.equal(browser.snapshot.network.find(entry => entry.url.endsWith('/child-page')).pageId, childId)
         assert.ok((await browserCommand(['console'])).some(entry => entry.message === 'child page exception'))
         assert.ok(!second.snapshot.console.some(entry => entry.message === 'child page exception'))
-        await until(() => ui('document.querySelectorAll(".workspace-tools .browser-pages [role=tab]").length === 2'), 'page strip')
+        await until(() => ui('document.querySelectorAll(".workspace-tools .browser-panel:not([style*=none]) .browser-pages [role=tab]").length === 2'), 'page strip')
         await until(() => child.getVisible() && !source.getVisible(), 'only selected page visible')
         await writeFile(join(artifacts, 'page-tabs.png'), (await capture(window.webContents, 'browser pages')).toPNG())
         browser.action('devtools')
         const childTools = await until(() => childContents.devToolsWebContents, 'child DevTools')
         await until(() => childTools.executeJavaScript('Boolean(globalThis.DevToolsAPI)'), 'child DevTools ready')
         console.log('New-page check: opener, storage, telemetry and page strip passed.')
-        await ui('document.querySelector(".workspace-tools .browser-pages [role=tab]").click()')
+        await ui('document.querySelector(".workspace-tools .browser-panel:not([style*=none]) .browser-pages [role=tab]").click()')
         await until(() => browser.view === source && source.getVisible() && !child.getVisible(), 'select source page')
         // A POST form targeting _blank must keep its body and method.
         await source.webContents.executeJavaScript(`
