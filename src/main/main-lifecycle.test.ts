@@ -693,14 +693,14 @@ test('captured browser export contains only the selected page and respects cance
 test('project browser survives CLI focus, restart and close while session bridges are isolated', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);harness.createTestWindow();
   const first=(await harness.createMain()).activeTabId!;
-  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser',sessionId:first});
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
   const resource=tools.projects[0].tabs[0].resource;
   await harness.request('desktop:browser-navigate',resource,'https://first.example/');
   const second=(await harness.createMain()).activeTabId!;
   assert.notEqual(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[1]!.env.COPILOT_DESKTOP_BROWSER_STATE);
   await harness.request('desktop:activate-tab',first);await harness.request('desktop:restart-tab',first);
   assert.equal(harness.spawns[2]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE);
-  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0,'restart requires reconnect');
+  assert.deepEqual((await harness.request<any>('desktop:tools-state')).connections.map((connection:any)=>connection.sessionId),[first],'restart automatically reconnects the current session');
   await harness.request('desktop:close-tab',first);await harness.request('desktop:close-tab',second);
   assert.equal((await harness.request<any>('desktop:browser-state',resource)).url,'https://first.example/');
   assert.equal(harness.browserConfigs.length,1);
