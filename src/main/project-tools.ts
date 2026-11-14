@@ -17,12 +17,13 @@ import { removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAct
 
 interface Group { browser: BrowserDebug; generation: string }
 const liveSession = (status: string | undefined): boolean => status === 'running' || status === 'approval-needed'
-interface Bridge { server: Server; token: string; endpoint: string; profileId: string; connected: boolean; pageId: number | null; revision: number }
+interface Bridge { server: Server; token: string; endpoint: string; profileId: string; connected: boolean; pageId: number | null; uiPageId: number | null; revision: number }
 interface Options {
   userData: string
   owner(): BrowserWindow | null
   project(id: string): { name: string; path: string | null } | undefined
   session(id: string): { workspaceProfileId: string; status: string } | undefined
+  currentSession(): string | null
   defaults(): { shared: boolean; overrides: 'shared' | 'private' }
   browserOptions(): Partial<NonNullable<ConstructorParameters<typeof BrowserDebug>[2]>>
   changed(): void
@@ -69,10 +70,25 @@ export class ProjectToolService {
   private width(value: unknown): number { return typeof value === 'number' && Number.isFinite(value) ? Math.max(320, Math.min(2400, value)) : 420 }
   profileIds(): string[] { return [...this.projects.values()].map(project => project.browserProfileId) }
   hasPartition(partition: string): boolean { return [...this.groups.values()].some(group => group.browser.partition === partition) }
-  canConnect(sessionId: string, profileId: string): boolean {
-    const bridge = this.bridges.get(sessionId), session = this.options.session(sessionId)
-    return bridge?.profileId === profileId && session?.workspaceProfileId === profileId && liveSession(session.status)
+  /** Follow focus without opening pages or resetting a CLI-selected cursor on unrelated state updates. */
+  private syncConnections(): boolean {
+    const current = this.options.currentSession()
+    let changed = false
+    for (const [id, bridge] of this.bridges) {
+      const session = this.options.session(id)
+      const connected = id === current && session?.workspaceProfileId === bridge.profileId && liveSession(session.status)
+      const project = this.projects.get(bridge.profileId), group = this.groups.get(bridge.profileId)
+      const selected = project?.tabs.find(tab => tab.id === project.activeId && tab.kind === 'browser')?.pageId
+        ?? group?.browser.uiPageId
+      const pageId = connected && selected !== undefined && group?.browser.hasPage(selected) ? selected : null
+      if (bridge.connected !== connected || bridge.uiPageId !== pageId) {
+        bridge.connected = connected; bridge.pageId = pageId; bridge.uiPageId = pageId; bridge.revision++
+        changed = true
+      }
+    }
+    return changed
   }
+  refreshConnections(): void { if (this.syncConnections()) this.options.changed() }
   private project(id: string, width?: number): ProjectTools {
     if (!this.options.project(id)) throw new Error('Workspace no longer exists')
     let project = this.projects.get(id)
@@ -84,6 +100,7 @@ export class ProjectToolService {
     return project
   }
   state(): ToolsState {
+    this.syncConnections()
     const connections: BrowserConnection[] = [...this.bridges].filter(([, bridge]) => bridge.connected)
       .map(([sessionId, bridge]) => ({ sessionId, profileId: bridge.profileId, pageId: bridge.pageId }))
     return structuredClone({ projects: [...this.projects.values()], connections, recent: this.options.browserOptions().history?.list() ?? [] })
@@ -200,7 +217,6 @@ export class ProjectToolService {
     if (action.type === 'add') {
       if (!['new', 'browser', 'git'].includes(action.kind)) throw new Error('Unknown tool type')
       if (action.kind === 'git' && !this.options.project(profileId)?.path) throw new Error('Git requires a project folder')
-      if (action.sessionId) this.requireBridge(project, action.sessionId)
       let tab = action.kind === 'git' ? project.tabs.find(tab => tab.kind === 'git') : undefined
       if (!tab) {
         tab = { id: randomUUID(), kind: action.kind, title: action.kind === 'new' ? 'New tab' : action.kind === 'git' ? 'Git' : 'Browser' }
@@ -210,18 +226,12 @@ export class ProjectToolService {
       }
       if (action.replaceId && project.tabs.find(entry => entry.id === action.replaceId)?.kind === 'new') removeToolTab(project, action.replaceId)
       project.activeId = tab.id; project.visible = true
-      if (action.sessionId && tab.kind === 'browser') this.connect(project, tab, action.sessionId)
     } else if (action.type === 'visible') {
       project.visible = action.visible && project.tabs.length > 0
       const selected = project.tabs.find(tab => tab.id === project.activeId)
       if (project.visible && selected) this.ensurePage(project, selected)
       if (!project.visible) this.groups.get(profileId)?.browser.setBounds(null)
     } else if (action.type === 'width') project.width = this.width(action.width)
-    else if (action.type === 'disconnect') {
-      const bridge = this.bridges.get(action.sessionId)
-      if (bridge?.profileId !== profileId) throw new Error('Session does not belong to this project')
-      bridge.connected = false; bridge.pageId = null; bridge.revision++
-    }
     else if (action.type === 'overrides') {
       if (!['private', 'shared'].includes(action.mode)) throw new Error('Invalid overrides mode')
       project.overrides = action.mode
@@ -235,10 +245,6 @@ export class ProjectToolService {
           if (group && !await group.browser.closePage(tab.pageId)) return this.state()
         }
         removeToolTab(project, tab.id)
-      } else if (action.type === 'connect') {
-        if (action.sessionId === null) {
-          for (const bridge of this.bridges.values()) if (bridge.profileId === profileId && bridge.pageId === tab.pageId) { bridge.connected = false; bridge.pageId = null; bridge.revision++ }
-        } else this.connect(project, tab, action.sessionId)
       } else if (tab.resource) {
         const { browser } = this.resource(tab.resource)
         if (action.type === 'pop-out') browser.popOutPage(tab.pageId!)
@@ -257,33 +263,24 @@ export class ProjectToolService {
     if (action.type === 'add' && action.kind === 'browser') await group?.browser.ready
     return this.state()
   }
-  private connect(project: ProjectTools, tab: ToolTab, sessionId: string): void {
-    const bridge = this.requireBridge(project, sessionId)
-    if (tab.pageId === undefined) throw new Error('Open this Browser tab before connecting')
-    bridge.connected = true; bridge.pageId = tab.pageId; bridge.revision++
-  }
-  private requireBridge(project: ProjectTools, sessionId: string): Bridge {
-    const session = this.options.session(sessionId), bridge = this.bridges.get(sessionId)
-    if (!session || session.workspaceProfileId !== project.profileId || !liveSession(session.status) || !bridge || bridge.profileId !== project.profileId) throw new Error('Choose a running CLI session in this project; reconnect after Resume.')
-    return bridge
-  }
   async startBridge(sessionId: string, profileId: string, endpoint: string): Promise<void> {
     await this.stopBridge(sessionId)
     const token = randomBytes(32).toString('hex')
-    const bridge: Bridge = { server: null as unknown as Server, token, endpoint, profileId, connected: false, pageId: null, revision: 0 }
+    const bridge: Bridge = { server: null as unknown as Server, token, endpoint, profileId, connected: false, pageId: null, uiPageId: null, revision: 0 }
     const server = createServer((request, response) => {
       const fail = (status: number, message: string): void => { if (!response.headersSent) response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ message })) }
       const port = (server.address() as { port: number }).port
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { fail(403, 'Forbidden'); return }
       if (!constantTimeTokenEqual(request.headers.authorization ?? '', `Bearer ${token}`)) { fail(401, 'Unauthorized'); return }
-      if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it and reconnect.'); return }
+      this.refreshConnections()
+      if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it to use the browser.'); return }
       const group = this.groups.get(profileId), revision = bridge.revision
-      if (!bridge.connected) { fail(409, 'No browser connected. Open a Browser tab and choose Connect to session; reconnect after Resume.'); return }
+      if (!bridge.connected) { fail(409, 'Browser control follows the current session. Activate this session in its project to use the browser.'); return }
       if (!group) { fail(409, 'No browser pages open. Add a Browser tab, then run tabs and select a page ID.'); return }
       const cursor: BrowserCursor = {
         active: () => bridge.pageId ?? 0,
         select: id => { if (!group.browser.hasPage(id)) throw new Error('Browser page closed'); bridge.pageId = id; this.options.changed() },
-        validate: () => { if (!liveSession(this.options.session(sessionId)?.status) || this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) throw new Error('Browser connection changed; reconnect or retry the command.') },
+        validate: () => { this.refreshConnections(); if (!liveSession(this.options.session(sessionId)?.status) || this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) throw new Error('Current session or browser page changed; retry from the active session.') },
       }
       try { group.browser.serveControl(request, response, { port, token, cursor }) }
       catch (error) { fail(409, error instanceof Error ? error.message : 'Browser unavailable') }
@@ -293,6 +290,7 @@ export class ProjectToolService {
     this.bridges.set(sessionId, bridge)
     try { await writeFileAtomic(endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token })) }
     catch (error) { await this.stopBridge(sessionId); throw error }
+    this.refreshConnections()
   }
   async stopBridge(sessionId: string): Promise<void> {
     const bridge = this.bridges.get(sessionId); if (!bridge) return

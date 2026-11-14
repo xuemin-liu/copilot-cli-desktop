@@ -72,7 +72,7 @@ if [ "$read_command" -eq 0 ] && [ "$command" != test ]; then
   fi
 fi
 state=$COPILOT_DESKTOP_BROWSER_STATE
-if [ -z "$state" ] || [ ! -f "$state" ]; then fail "$prefix""Open a Browser tab and connect it to this session; reconnect after Resume."; fi
+if [ -z "$state" ] || [ ! -f "$state" ]; then fail "$prefix""Open or resume this session to use its browser helper."; fi
 control=$(cat "$state")
 pid=$(printf '%s' "$control" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 port=$(printf '%s' "$control" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
@@ -133,7 +133,7 @@ $ErrorActionPreference = 'Stop'
 if ($null -eq $Arguments) { $Arguments = @() }
 try {
   if (!$env:COPILOT_DESKTOP_BROWSER_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_BROWSER_STATE)) {
-    throw 'Open a Browser tab and connect it to this session; reconnect after Resume.'
+    throw 'Open or resume this session to use its browser helper.'
   }
   if ($Command -eq 'test') {
     if ($Arguments.Count -ne 1) { throw 'Usage: browser.ps1 test <absolute-plan.json> [-OutputPath new-report.json]' }
@@ -231,7 +231,7 @@ try {
 
 const WINDOWS_BROWSER_INSTRUCTIONS = `# This session's desktop debug browser
 
-The user may connect this CLI session to this project's browser pages through a Browser tab's Connect to session menu. No browser is required. Your connection has its own page cursor, independent of the visible panel tab and of other CLI sessions.
+Browser control automatically follows the current CLI session in its project. No browser is required. Activating this session or selecting a Browser tab targets the currently selected browser page. Your CLI select command can choose another page without changing the visible tab; unrelated state updates preserve that cursor.
 When asked to read the browser console, find exceptions, or inspect network activity,
 use the existing shell tool to run these read-only commands BEFORE claiming browser
 access is unavailable or asking the user to paste/export logs:
@@ -260,7 +260,7 @@ For exception requests, examine console entries with level "error" and messages
 containing Error, Exception, Uncaught, or unhandled rejection. Report the actual
 message, source, and line, with any applicable capture limitations. For network requests,
 report failed HTTP statuses and error fields. Do not fabricate browser observations.
-If disconnected, ask the user to open a Browser tab and connect it to this session. After the cursor page closes, run tabs and select a page explicitly; there is no fallback. Resume requires reconnecting. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
+If this session is inactive, ask the user to activate it in its project. Open a Browser tab if none exists. Resume reconnects automatically. After a CLI-selected page closes, run tabs and select a page explicitly; user page selection or reopening a Browser tab updates the target automatically. Switching to another session revokes this session's browser access. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
 restricted read/search-only sessions cannot run these commands. A remote connected
 session may run tools on a different computer and cannot use this local endpoint.
 No browser automation extension, third-party MCP, Node installation, or globally

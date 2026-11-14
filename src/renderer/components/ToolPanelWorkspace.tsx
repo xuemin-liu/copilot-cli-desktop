@@ -87,17 +87,9 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
         onClick={() => action({ type: 'add', kind: 'browser', replaceId: selected.id, url })}>{url}</button>)}</div>}
     </div>}
     {selected?.kind === 'browser' && <div className="tool-context">
-        <label>Connect to session <select aria-label="Connect browser to session" value="" onChange={event => { if (event.target.value) action({ type: 'connect', id: selected.id, sessionId: event.target.value }) }}>
-          <option value="">Choose a CLI session</option>
-          {sessions.filter(tab => !tab.remote && !tab.cli && !['dormant', 'completed', 'crashed'].includes(tab.status)).map(tab => <option key={tab.id} value={tab.id}>{tab.title}</option>)}
-        </select></label>
-        {tools.connections.filter(connection => connection.profileId === project.profileId).map(connection => <span className="browser-connection" key={connection.sessionId}>
-          {sessions.find(tab => tab.id === connection.sessionId)?.title ?? connection.sessionId}: {connection.pageId === null ? 'connected; select a page after reopening' : `page ${connection.pageId}`}
-          <button type="button" aria-label={`Disconnect ${sessions.find(tab => tab.id === connection.sessionId)?.title ?? connection.sessionId}`} onClick={() => action({ type: 'disconnect', sessionId: connection.sessionId })}>Disconnect</button>
-        </span>)}
         <button type="button" onClick={() => action({ type: selected.detached ? 'return' : 'pop-out', id: selected.id })}>{selected.detached ? 'Return to panel' : 'Open in window'}</button>
         <details><summary>Browser settings</summary>
-          <p>Connecting a CLI gives it access to all browser pages in this project. Resume requires reconnecting.</p>
+          <p>The current session automatically uses this project's browser pages.</p>
           <label>Local Overrides for this project <select aria-label="Project Local Overrides" value={project.overrides} onChange={event => action({ type: 'overrides', mode: event.target.value as 'shared' | 'private' })}>
             <option value="shared">Shared settings</option><option value="private">Private project settings</option>
           </select></label><p>Applies after all project browser tabs close and a browser is opened again.</p>

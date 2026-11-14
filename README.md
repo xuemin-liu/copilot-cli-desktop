@@ -198,7 +198,7 @@ The main window has three areas: projects and sessions on the left, the CLI in t
 
 Tabs belong to the project. Changing CLI focus does not change the selected browser or Git repository. Project switching retains browser pages, forms, and Git drafts. **Ctrl+Shift+G** opens/focuses Git or hides the panel when Git is already selected. Narrow windows use the same **Hide tabs** control to return to the CLI. Hiding a browser stops Testing mode and picking without closing its page.
 
-Browsers work without a CLI session. To let a running Copilot session use the browser helper, choose **Connect to session** in a Browser tab. Connections cover that project's pages, but each session selects its own page independently. Resume requires reconnecting. Closing a CLI or a browser tab keeps project logins; removing the workspace removes its separate profile at the next startup. Existing session browser profiles are not merged into project profiles; separate profiles require signing in again after this upgrade.
+Browsers work without a CLI session. Browser control automatically follows the current running Copilot session and selected Browser tab in that project; no session picker or reconnect step is needed. Switching sessions transfers control without moving or reopening pages. Resume reconnects automatically. Closing a CLI or a browser tab keeps project logins; removing the workspace removes its separate profile at the next startup. Existing session browser profiles are not merged into project profiles; separate profiles require signing in again after this upgrade.
 
 Run `pnpm project-tools:check` for the native lifecycle and real-app layout checks.
 
