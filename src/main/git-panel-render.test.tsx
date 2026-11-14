@@ -72,11 +72,13 @@ test('a long diff renders a bounded number of lines and says so', () => {
   assert.match(renderToStaticMarkup(<GitDiffView diff={diff('+a', { truncated: true })} />), /larger than the panel reads/)
 })
 
-test('the dock keeps the session area mounted and adds the panel only when open', () => {
+test('the dock keeps both hosts mounted when collapsed and leaves the session visible', () => {
   const render = (open: boolean): string => renderToStaticMarkup(
     <ProjectDock open={open} width={420} onWidthChange={() => undefined} panel={() => <aside id="panel">panel</aside>}><div id="session">session</div></ProjectDock>)
   assert.match(render(false), /id="session"/)
-  assert.doesNotMatch(render(false), /id="panel"/)
+  assert.match(render(false), /id="panel"/)
+  assert.match(render(false), /class="project-dock-panel" style="display:none/)
+  assert.doesNotMatch(render(false), /class="project-dock-main" style="display:none/)
   assert.match(render(true), /id="session"/)
   assert.match(render(true), /id="panel"/)
 })

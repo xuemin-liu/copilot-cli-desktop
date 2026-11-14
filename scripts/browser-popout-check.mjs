@@ -32,7 +32,7 @@ export async function runBrowserPopoutCheck() {
     }
   }, key)
   const click = (window, selector) => ui(window, `setTimeout(() => document.querySelector(${JSON.stringify(selector)}).click(), 50); true`)
-  const mainBrowserShown = () => ui(main, `document.querySelector('.session-pane-visible .browser-panel') !== null`)
+  const mainBrowserShown = () => ui(main, `Boolean(document.querySelector('.workspace-tools .browser-panel')?.getBoundingClientRect().width)`)
   const pageViews = window => window.contentView.children.length
   try {
     await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: false }))
@@ -45,20 +45,22 @@ export async function runBrowserPopoutCheck() {
     await until(async () => (await ui(main, `window.copilotDesktop.browserState(${id})`)).url === pageUrl, 'page loaded')
     const mainViewsDocked = pageViews(main)
     assert.ok(mainViewsDocked >= 1, 'the page view is in the main window')
-    const terminalWidth = () => ui(main, `document.querySelector('.session-pane-visible .browser-terminal-workspace').getBoundingClientRect().width`)
+    const terminalWidth = () => ui(main, `document.querySelector('.session-pane-visible .session-terminal').getBoundingClientRect().width`)
     const splitWidth = await terminalWidth()
 
     const popOut = async how => {
-      if (how === 'button') await click(main, '.session-pane-visible button[title="Open browser in new window"]')
+      if (how === 'button') await click(main, '.workspace-tools button[aria-label="Open browser in new window"]')
       else await ui(main, `window.copilotDesktop.popOutBrowser(${id})`)
       const window = await windowFor(source.id, 'windowBrowserId')
       await until(() => ui(window, `document.querySelector('.browser-only-window .browser-panel') !== null`), 'browser window panel')
       await until(async () => !(await mainBrowserShown()), 'main pane gives the browser up')
+      await until(() => pageViews(window) >= 1, 'native page attached to browser window')
       return window
     }
     const returned = async (window, label) => {
       await until(() => window.isDestroyed(), label)
       await until(mainBrowserShown, `${label}: browser beside terminal again`)
+      await until(() => pageViews(main) === mainViewsDocked, `${label}: native page returned`)
       assert.equal(pageViews(main), mainViewsDocked, `${label}: page view back in the main window`)
       assert.equal((await ui(main, `window.copilotDesktop.browserState(${id})`)).url, pageUrl, `${label}: same page`)
       assert.deepEqual((await state()).browserPoppedOutTabIds, [])
@@ -71,7 +73,7 @@ export async function runBrowserPopoutCheck() {
     assert.ok(pageViews(main) < mainViewsDocked, 'page view left the main window')
     assert.equal((await ui(popout, `window.copilotDesktop.browserState(${id})`)).url, pageUrl, 'same page in the browser window')
     await assert.rejects(ui(main, `window.copilotDesktop.browserState(${id})`), /owning session window/, 'only the browser window drives the browser')
-    await until(async () => await terminalWidth() > splitWidth + 100, 'terminal takes the full width')
+    assert.equal(await terminalWidth(), splitWidth, 'the shared dock retains its width while the browser is popped out')
     assert.ok(await ui(main, `document.querySelector('.session-pane-visible .xterm-screen') !== null`), 'terminal stays in the main window')
     // Duplicate requests focus the same window.
     await ui(main, `window.copilotDesktop.popOutBrowser(${id})`)
@@ -88,7 +90,7 @@ export async function runBrowserPopoutCheck() {
     await returned(popout, 'return button in browser window')
 
     const second = await popOut('api')
-    await click(main, '.session-pane-visible button[title="Bring browser back to this window"]')
+    await click(main, '.workspace-tools button[aria-label="Bring browser back to this window"]')
     await returned(second, 'bring-back button in session')
 
     const third = await popOut('api')

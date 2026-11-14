@@ -33,6 +33,7 @@ if (!process.versions.electron) {
   await build({ stdin: { contents: `
     import { createRoot } from 'react-dom/client';
     import { useState } from 'react';
+    import { WorkspaceToolDock } from './src/renderer/components/WorkspaceToolDock';
     import { SessionWorkspace } from './src/renderer/components/SessionWorkspace';
     import './src/renderer/styles.css';
     window.unhandled = [];
@@ -43,8 +44,14 @@ if (!process.versions.electron) {
       const [activeTabId, setActiveTabId] = useState('tab-1');
       window.setBrowserActive = active => setActiveTabId(active ? 'tab-1' : 'tab-2');
       const tabs = [{ id: 'tab-1', title: 'First session', status: 'running' }, { id: 'tab-2', title: 'Second session', status: 'running' }];
-      return <SessionWorkspace tabs={tabs} activeTabId={activeTabId} obscured={obscured} canOpenTab={false}
-        onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} />;
+      const [prefs, setPrefs] = useState({open:false,width:560,tool:'browser'});
+      const [choice, setChoice] = useState(null);
+      const openBrowser = id => { setChoice(id); setPrefs(p => ({...p,open:true,tool:'browser'})); };
+      return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(p=>({...p,open:false}))}
+        tabs={tabs} activeTabId={activeTabId} profileId="fixture" gitAvailable={false} git={null}
+        browserChoice={choice} onBrowserChoice={setChoice} onActivate={setActiveTabId} browserPoppedOutTabIds={[]} poppedOutTabIds={[]}
+        obscured={obscured} onError={error => {throw error}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} obscured={obscured} canOpenTab={false}
+        onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} /></WorkspaceToolDock>;
     }
     createRoot(document.getElementById('root')).render(<Fixture />);
   `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic',
@@ -313,7 +320,7 @@ if (!process.versions.electron) {
         assert.ok((await readConsole(firstEnv)).some(entry => entry.message.includes('inactive session exception')))
         await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
         await until(() => second.view.getVisible(), 'second session own browser')
-        await until(() => ui(`document.querySelector('.session-pane-visible [aria-label="Web app URL"]').value === ${JSON.stringify(`${url}second-session`)}`), 'second session own address')
+        await until(() => ui(`document.querySelector('.workspace-tools .browser-panel:not([style*="none"]) [aria-label="Web app URL"]').value === ${JSON.stringify(`${url}second-session`)}`), 'second session own address')
         await writeFile(join(artifacts, 'session-header.png'), (await capture(window.webContents, 'session header')).toPNG())
         await ui('window.setBrowserActive(true)')
         await until(() => browser.view.getVisible(), 'restored session browser')
@@ -350,14 +357,14 @@ if (!process.versions.electron) {
         assert.equal(browser.snapshot.network.find(entry => entry.url.endsWith('/child-page')).pageId, childId)
         assert.ok((await browserCommand(['console'])).some(entry => entry.message === 'child page exception'))
         assert.ok(!second.snapshot.console.some(entry => entry.message === 'child page exception'))
-        await until(() => ui('document.querySelectorAll(".session-pane-visible .browser-pages [role=tab]").length === 2'), 'page strip')
+        await until(() => ui('document.querySelectorAll(".workspace-tools .browser-pages [role=tab]").length === 2'), 'page strip')
         await until(() => child.getVisible() && !source.getVisible(), 'only selected page visible')
         await writeFile(join(artifacts, 'page-tabs.png'), (await capture(window.webContents, 'browser pages')).toPNG())
         browser.action('devtools')
         const childTools = await until(() => childContents.devToolsWebContents, 'child DevTools')
         await until(() => childTools.executeJavaScript('Boolean(globalThis.DevToolsAPI)'), 'child DevTools ready')
         console.log('New-page check: opener, storage, telemetry and page strip passed.')
-        await ui('document.querySelector(".session-pane-visible .browser-pages [role=tab]").click()')
+        await ui('document.querySelector(".workspace-tools .browser-pages [role=tab]").click()')
         await until(() => browser.view === source && source.getVisible() && !child.getVisible(), 'select source page')
         // A POST form targeting _blank must keep its body and method.
         await source.webContents.executeJavaScript(`
@@ -700,7 +707,7 @@ if (!process.versions.electron) {
       assert.ok(!(await ui('document.querySelector(".browser-network").textContent')).includes('/api.json'))
       await until(() => ui(`document.querySelector('[aria-label="Web app URL"]').value === ${JSON.stringify(url)}`), 'activity address and capture state refreshed')
       await writeFile(join(artifacts, 'activity-network.png'), (await capture(window.webContents, 'filtered activity network')).toPNG())
-      await ui('document.querySelector(".session-pane-visible .session-browser-toggle").click()')
+      await ui('document.querySelector(".workspace-tools-close").click()')
       await delay(300)
       assert.equal(browser.view.getVisible(), false)
       assert.deepEqual(await ui('window.unhandled'), [])

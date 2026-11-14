@@ -1,6 +1,6 @@
 # Debug browser and Local Overrides
 
-Select the **Open browser** button (window icon) in the terminal session's header, then enter a hostname
+Select the **Open browser** button (window icon) in the terminal session's header, or **Browser** in the right tools panel, then enter a hostname
 or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
 addresses and development hosts (single-label names, `.localhost`, `.local`,
 `.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
@@ -39,8 +39,11 @@ query strings, fragments, and SPA route changes are not saved. Authentication
 callback URLs do not replace the saved page. Address-bar suggestions come from one
 browsing history shared by every session's browser and kept across restarts and
 session closes; like the saved page, it stores only the origin and path of pages
-without sensitive query parameters or fragments. The pane starts hidden in a new
-session. Switching terminal tabs preserves each session's browser. Pop-out and
+without sensitive query parameters or fragments. The main window remembers whether the shared tools panel is open and
+which tool it shows. Browser follows the main session unless its **Session** selector explicitly selects the side chat;
+on a narrow single-terminal layout it follows the displayed terminal. Switching tool tabs preserves typed addresses,
+find text, collected elements and notes. Hiding the browser stops Testing mode and element picking; an interruption
+notice remains when you return, and Testing must be enabled again explicitly. Switching terminal tabs preserves each session's browser. Pop-out and
 docking move the same browser page with its terminal.
 Explicitly closing a terminal session clears its browser credentials, storage and
 cache and removes its saved page and diagnostic helper files. With the shared browser

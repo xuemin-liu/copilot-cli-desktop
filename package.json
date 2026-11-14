@@ -31,6 +31,7 @@
     "git:check": "node scripts/git-ipc-check.mjs",
     "git-panel:check": "node scripts/git-panel-check.mjs",
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
+    "tool-dock:check": "node scripts/tool-dock-check.mjs",
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",
     "other-cli:check": "npm run build && node scripts/other-cli-tabs-check.mjs",
