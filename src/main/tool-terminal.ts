@@ -20,7 +20,7 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
     if (typeof value !== 'string' || value.length > 4096 || !pattern.test(value)) throw new Error(`Invalid ${name}`)
     return value
   }
-  if (kind === 'local') return { file: platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash', args: platform === 'win32' ? ['-NoLogo'] : [], cwd, config: {} }
+  if (kind === 'local') return { file: platform === 'win32' ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : process.env.SHELL || '/bin/bash', args: platform === 'win32' ? ['-NoLogo'] : [], cwd, config: {} }
   if (kind === 'wsl') {
     if (platform !== 'win32') throw new Error('WSL terminals are available on Windows')
     const distro = field(config.distro, 'WSL distribution', /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)

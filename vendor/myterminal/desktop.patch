@@ -173,8 +173,13 @@
      const term = new Terminal({
        theme: {
          background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-@@ -260,7 +265,7 @@
+@@ -258,9 +263,12 @@
+     term.loadAddon(fitAddon)
+     term.loadAddon(new WebLinksAddon())
      term.loadAddon(searchAddon)
++    // A font zoom changes the grid without resizing its container. Keep the PTY
++    // synchronized for every xterm fit, including the upstream zoom shortcuts.
++    const gridResizeDisposer = term.onResize(({ cols, rows }) => resizeTerminalChannel(tab, cols, rows, tab.channelId, api))
      const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
        term,
 -      (text) => window.electronAPI.clipboard.writeText(text),
@@ -182,7 +187,7 @@
        { enabled: settings.osc52ClipboardEnabled === true }
      )
  
-@@ -269,7 +274,8 @@
+@@ -269,7 +277,8 @@
      searchAddonRef.current = searchAddon
  
      term.open(termRef.current)
@@ -192,7 +197,7 @@
  
      // Track pane focus so tab activation can restore it to the right terminal
      const handleTermFocus = () => { focusedPaneRef.current = 'main' }
-@@ -294,13 +300,13 @@
+@@ -294,13 +303,13 @@
      term.attachCustomKeyEventHandler((e) => {
        if (e.type !== 'keydown') return true
        if (e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -208,7 +213,7 @@
            if (isLinux && !!term.getSelection()) {
              setCtrlCDialog({ hasSelection: true })
              return false
-@@ -317,7 +323,8 @@
+@@ -317,7 +326,8 @@
  
      // Reconnect logic
      const scheduleReconnect = () => {
@@ -218,7 +223,7 @@
        // Guard: cancel any in-progress timer before starting a new one so that
        // multiple close/error events don't create parallel countdown loops.
        clearInterval(reconnectTimerRef.current)
-@@ -342,32 +349,32 @@
+@@ -342,32 +352,32 @@
      const autoStartLogging = () => {
        if (settings.loggingEnabled && !loggingRef.current) {
          const logDir = settings.logDirectory || ''
@@ -258,7 +263,7 @@
            if (result?.error) {
              setError(result.error)
              term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
-@@ -379,8 +386,8 @@
+@@ -379,8 +389,8 @@
            clearTimeout(reconnectTimerRef.current)
            setReconnectCountdown(null)
            autoStartLogging()
@@ -269,7 +274,7 @@
          })
        }
      }
-@@ -418,14 +425,14 @@
+@@ -418,14 +428,14 @@
  
      // SSH/local data → terminal
      let cwdTimer = null
@@ -286,7 +291,7 @@
          }
        }
  
-@@ -437,7 +444,7 @@
+@@ -437,7 +447,7 @@
  
        // Session logging — fire-and-forget
        if (loggingRef.current) {
@@ -295,7 +300,7 @@
        }
  
        const plain = stripAnsi(data)
-@@ -460,18 +467,18 @@
+@@ -460,18 +470,18 @@
        }
      })
  
@@ -317,7 +322,7 @@
        if (channelId === tab.channelId) {
          setError(message)
          term.write('\r\n\x1b[31mError: ' + message + '\x1b[0m\r\n')
-@@ -487,7 +494,7 @@
+@@ -487,12 +497,13 @@
          if (width === 0 || height === 0) return
          fitAddon.fit()
          const { cols, rows } = term
@@ -326,7 +331,13 @@
        } catch (_) {}
      })
      if (termRef.current) resizeObs.observe(termRef.current.parentElement)
-@@ -504,10 +511,11 @@
+ 
+     cleanupRef.current = [
++      () => gridResizeDisposer.dispose(),
+       () => inputDisposer.dispose(),
+       () => scrollDisposer.dispose(),
+       () => term.textarea?.removeEventListener('focus', handleTermFocus),
+@@ -504,10 +515,11 @@
        () => clearInterval(reconnectTimerRef.current),
        () => {
          isMountedRef.current = false
@@ -342,7 +353,7 @@
          term.dispose()
        },
      ]
-@@ -526,7 +534,7 @@
+@@ -526,7 +538,7 @@
          const term = terminalInstanceRef.current
          if (term) {
            const { cols, rows } = term
@@ -351,7 +362,7 @@
          }
        } catch (_) {}
      })
-@@ -573,32 +581,32 @@
+@@ -573,32 +585,32 @@
    const handleSavePreset = async () => {
      if (!filterText.trim() || customPresets.length >= 10) return
      const newPreset = { id: crypto.randomUUID(), label: filterText.trim().slice(0, 24), pattern: filterText.trim(), color: '#8b949e' }
@@ -390,7 +401,7 @@
      if (content?.error) {
        // Show error to user for binary/size rejections
        if (terminalInstanceRef.current) {
-@@ -611,7 +619,7 @@
+@@ -611,7 +623,7 @@
  
    const handleSaveFile = async () => {
      if (!editingFile) return
@@ -399,7 +410,7 @@
      if (result?.error) return
      setEditingFile((prev) => prev ? { ...prev, original: prev.content } : null)
    }
-@@ -653,9 +661,10 @@
+@@ -653,9 +665,10 @@
          )}
  
          <div className="terminal-toolbar-actions">
@@ -412,7 +423,7 @@
            <button className={`icon-btn ${showSearch ? 'active' : ''}`} onClick={() => setShowSearch((v) => !v)} title="Search terminal (Ctrl+Shift+F)">
              <Search size={16} />
            </button>
-@@ -665,16 +674,16 @@
+@@ -665,16 +678,16 @@
            <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
              <Highlighter size={16} />
            </button>
@@ -436,7 +447,7 @@
              <>
                <button
                  className={`icon-btn ${showTunnels ? 'active' : ''}`}
-@@ -709,7 +718,7 @@
+@@ -709,7 +722,7 @@
            osHint={
              tab.wslDistro
                ? `Linux (WSL: ${tab.wslDistro})`

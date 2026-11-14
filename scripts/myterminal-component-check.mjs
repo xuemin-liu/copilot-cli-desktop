@@ -33,7 +33,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, clipboard } = await import('electron')
   app.setPath('userData', join(out, `profile-${Date.now()}`))
   await app.whenReady()
-  const win = new BrowserWindow({ width: 700, height: 500, show: true, webPreferences: { contextIsolation: true, nodeIntegration: false } })
+  const win = new BrowserWindow({ width: 700, height: 500, show: true, webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
   const prior = await clipboard.readText()
   try {
     await win.loadFile(join(out, 'index.html'))
@@ -59,6 +59,12 @@ if (!process.versions.electron) {
     assert.equal(await ui('fixture.term.cols'), cols, 'hidden container cannot collapse terminal columns')
     await ui(`document.getElementById('root').style.display=''`); await delay(100)
     assert.ok((await ui('fixture.sizes')).every(size => size.cols > 2), 'no zero-size PTY resize')
+    await delay(150)
+    const beforeZoom = await ui('fixture.term.cols')
+    await ui(`fixture.sizes.length=0; document.querySelector('.xterm').dispatchEvent(new WheelEvent('wheel',{ctrlKey:true,deltaY:-100,bubbles:true,cancelable:true}))`)
+    for (let attempt = 0; attempt < 100 && await ui('fixture.term.cols') === beforeZoom; attempt++) await delay(25)
+    assert.notEqual(await ui('fixture.term.cols'), beforeZoom, 'font zoom changes the rendered grid')
+    assert.deepEqual(await ui('fixture.sizes.at(-1)'), await ui('({cols:fixture.term.cols,rows:fixture.term.rows})'), 'font zoom synchronizes PTY dimensions')
     console.log('MyTerminal component regression check passed: question marks, bracketed paste, focus, OSC52, hidden resize.')
     await clipboard.writeText(prior); app.exit(0)
   } catch (error) { console.error(error); await clipboard.writeText(prior); app.exit(1) }

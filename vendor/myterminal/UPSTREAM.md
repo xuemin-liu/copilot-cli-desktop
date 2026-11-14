@@ -17,7 +17,7 @@ original hashes before running the imported tests.
 
 | Upstream commit | Behavior used here |
 | --- | --- |
-| b75f5c9 | Windows shell discovery when System32 is absent from PATH, including PATHEXT |
+| b75f5c9 | Shell resolver retained, including absolute-path passthrough; desktop uses absolute system paths |
 | 0dd8c2b | Keep hidden terminal dimensions; skip zero-size fitting and refit after activation |
 | 28fef6e | Restore focus to the terminal or its open search/filter overlay after switching |
 | 3cb9372 | Restore focus after context-menu and dialog actions |
@@ -44,10 +44,15 @@ silently start another shell. The upstream SSH reconnect loop is retained for st
 - The local manager accepts trusted main-process launch/cwd/environment/spawn hooks. Renderer
   spawn options still pass through the unchanged upstream validator. It also accepts an explicit
   termination signal and forwards exit metadata to the desktop adapter.
+  Windows PowerShell, WSL and OpenSSH launches keep their absolute system paths, so an executable
+  earlier on PATH cannot replace them. The original resolver remains available in the source.
 - The desktop keeps its process watchdog, cancellation, project isolation and CLI helper injection.
   These hooks are not exposed as arbitrary renderer-selected executables or IPC channels.
 - Styles are scoped to `.myterminal-embedded`; the original global application layout cannot
   restyle this app. Inactive terminal panes retain their width, following upstream's layout fix.
+- The adapter patch forwards xterm grid-resize events to the PTY and disposes that subscription.
+  Review reproduced an upstream font-zoom gap: changing the font resized the grid without
+  changing the parent box, so ResizeObserver alone left the shell at its old dimensions.
 - MyTerminal's independent session picker, AI-provider UI, SFTP, tunnels, split panes, snippets
   and disk logging are not exposed in this host. Their component dependencies remain in the
   source snapshot to keep upstream imports and defaults intact. The desktop supplies its

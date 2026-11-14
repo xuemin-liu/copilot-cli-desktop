@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import type { PtyLike } from './pty-backend.js'
 import { spawnMyTerminal } from './myterminal-backend.js'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 test('SSH uses argument boundaries, native config, and validates host/options', () => {
   assert.deepEqual(terminalLaunch('ssh', { host: 'my-server', username: 'alice', port: 2222, identityFile: '/keys/my key' }, '/work', 'linux').args,
@@ -51,20 +54,28 @@ test('closing a terminal forces termination even if its shell ignores graceful s
   assert.equal(pty.disposed, 1)
 })
 
-test('MyTerminal resolves Windows PowerShell even with System32 missing from PATH', { skip: process.platform !== 'win32' }, async () => {
+test('desktop PowerShell launch bypasses PATH shadowing and works without System32 in PATH', { skip: process.platform !== 'win32' }, async () => {
   const before = process.env.Path, upper = process.env.PATH
+  const directory = await mkdtemp(join(tmpdir(), 'myterminal-path-'))
   try {
-    process.env.Path = ''; process.env.PATH = ''
-    let executable = ''
-    await spawnMyTerminal((file, _args, options) => {
-      executable = file
-      assert.equal(options.cwd, '/project')
-      assert.equal(options.env.COPILOT_DESKTOP_TERMINAL_HELPER, 'helper')
-      return mockPty()
-    }, 'powershell.exe', [], { cwd: '/project', env: { COPILOT_DESKTOP_TERMINAL_HELPER: 'helper' }, cols: 80, rows: 24 })
-    assert.match(executable, /[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i)
+    await writeFile(join(directory, 'powershell.exe'), 'must never be executed')
+    const trusted = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    for (const path of [directory, '']) {
+      process.env.Path = path; process.env.PATH = path
+      const launch = terminalLaunch('local', {}, '/project')
+      let executable = ''
+      await spawnMyTerminal((file, _args, options) => {
+        executable = file
+        assert.equal(options.cwd, '/project')
+        assert.equal(options.env.COPILOT_DESKTOP_TERMINAL_HELPER, 'helper')
+        return mockPty()
+      }, launch.file, launch.args, { cwd: '/project', env: { COPILOT_DESKTOP_TERMINAL_HELPER: 'helper' }, cols: 80, rows: 24 })
+      assert.equal(executable, trusted)
+    }
   } finally {
     if (before === undefined) delete process.env.Path; else process.env.Path = before
     if (upper === undefined) delete process.env.PATH; else process.env.PATH = upper
+    assert.ok(resolve(directory).startsWith(join(tmpdir(), 'myterminal-path-')))
+    await rm(directory, { recursive: true, force: true })
   }
 })

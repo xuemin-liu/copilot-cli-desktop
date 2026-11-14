@@ -263,6 +263,9 @@ export default function TerminalTab({ tab, isActive, host }) {
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon())
     term.loadAddon(searchAddon)
+    // A font zoom changes the grid without resizing its container. Keep the PTY
+    // synchronized for every xterm fit, including the upstream zoom shortcuts.
+    const gridResizeDisposer = term.onResize(({ cols, rows }) => resizeTerminalChannel(tab, cols, rows, tab.channelId, api))
     const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
       term,
       (text) => api.clipboard.writeText(text),
@@ -500,6 +503,7 @@ export default function TerminalTab({ tab, isActive, host }) {
     if (termRef.current) resizeObs.observe(termRef.current.parentElement)
 
     cleanupRef.current = [
+      () => gridResizeDisposer.dispose(),
       () => inputDisposer.dispose(),
       () => scrollDisposer.dispose(),
       () => term.textarea?.removeEventListener('focus', handleTermFocus),
