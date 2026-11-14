@@ -285,7 +285,8 @@ export class BrowserDebug {
   private controlState(pageId: number): BrowserDebugState {
     const page = this.pages.get(pageId)
     if (!page) throw new Error('Page closed; run tabs, then select a page ID.')
-    return { ...this.snapshot, activePageId: pageId, url: shownUrl(page), loading: page.loading,
+    const { errorPageId: _errorPageId, ...snapshot } = this.snapshot
+    return { ...snapshot, activePageId: pageId, url: shownUrl(page), loading: page.loading,
       canGoBack: page.contents.navigationHistory.canGoBack(), canGoForward: page.contents.navigationHistory.canGoForward(),
       zoomFactor: page.contents.getZoomFactor(), error: page.error, testing: this.reader.testState }
   }
@@ -1389,7 +1390,7 @@ export class BrowserDebug {
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
-        const scoped = this.controlState(pageId)
+        const scoped = cursor ? this.controlState(pageId) : this.snapshot
         const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
         send(200, { ...state, url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
