@@ -60,7 +60,7 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
     terminated = true
     // The caller commonly kills and then disposes; never ask ConPTY to terminate twice.
     if (process.platform !== 'win32' && child.pid > 1) signalProcessGroup(child.pid, (signal ?? 'SIGHUP') as NodeJS.Signals)
-    else child.kill(signal)
+    else child.kill(process.platform === 'win32' ? undefined : signal)
   }
   return {
     pid: child.pid,

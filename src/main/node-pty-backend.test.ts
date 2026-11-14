@@ -36,6 +36,6 @@ test('PTY shutdown preserves POSIX signal escalation and avoids duplicate ConPTY
     const fixture = await import(pathToFileURL(outfile).href)
     const pty = await fixture.spawnNodePty('shell', [], { cwd: '.', env: {}, cols: 80, rows: 24 })
     pty.kill('SIGTERM'); pty.kill('SIGKILL'); pty.dispose(); pty.dispose()
-    assert.deepEqual(fixture.signals, platform === 'linux' ? ['SIGTERM', 'SIGKILL'] : ['SIGTERM'])
+    assert.deepEqual(fixture.signals, platform === 'linux' ? ['SIGTERM', 'SIGKILL'] : [undefined])
   }
 })

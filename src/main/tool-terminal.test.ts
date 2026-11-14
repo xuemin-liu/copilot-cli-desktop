@@ -39,3 +39,13 @@ test('closing a tab during asynchronous spawn cannot leak the eventual process',
   await assert.rejects(pending, /closed during startup/)
   assert.equal(pty.kills, 1); assert.equal(pty.disposed, 1)
 })
+
+test('closing a terminal forces termination even if its shell ignores graceful signals', async () => {
+  const pty = mockPty(), signals: (string | undefined)[] = []
+  pty.kill = signal => { signals.push(signal) }
+  const manager = new ToolTerminals(() => pty)
+  await manager.start('p1', 't1', 'local', {}, '/work', {})
+  manager.close('p1', 't1')
+  assert.deepEqual(signals, ['SIGKILL'])
+  assert.equal(pty.disposed, 1)
+})

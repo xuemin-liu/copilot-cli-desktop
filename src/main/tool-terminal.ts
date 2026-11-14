@@ -49,7 +49,7 @@ export class ToolTerminals {
     this.runtimes.set(id, runtime)
     try {
       const pty = await this.spawn(launch.file, launch.args, { cwd: launch.cwd, env, cols: 80, rows: 24, signal: runtime.abort.signal })
-      if (runtime.closed) { pty.kill(); pty.dispose?.(); throw new Error('Terminal closed during startup') }
+      if (runtime.closed) { pty.kill('SIGKILL'); pty.dispose?.(); throw new Error('Terminal closed during startup') }
       runtime.pty = pty; runtime.state.status = 'running'
       if (pty.pid !== undefined) runtime.state.pid = pty.pid
       pty.onData(data => {
@@ -90,7 +90,8 @@ export class ToolTerminals {
     const runtime = this.runtimes.get(id)
     if (!runtime || runtime.profileId !== profileId) return
     runtime.closed = true; runtime.abort.abort(); this.runtimes.delete(id)
-    try { runtime.pty?.kill() } finally { runtime.pty?.dispose?.() }
+    // Close means terminate; Ctrl+C is the separate interrupt action. A shell trapping HUP/TERM must not survive its tab.
+    try { runtime.pty?.kill('SIGKILL') } finally { runtime.pty?.dispose?.() }
   }
   closeProject(profileId: string): void { for (const [id, runtime] of this.runtimes) if (runtime.profileId === profileId) this.close(profileId, id) }
   dispose(): void { for (const [id, runtime] of this.runtimes) this.close(runtime.profileId, id) }

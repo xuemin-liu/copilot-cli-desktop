@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
-import { readBrowserControl, browserControlPath } from './browser-control.js'
+import { readBrowserControl, browserControlPath, type BrowserControlState } from './browser-control.js'
 
 export async function terminalCommand(args: string[]): Promise<unknown> {
   const [action = 'list', id, cursor, ...extra] = args
@@ -13,7 +13,9 @@ export async function terminalCommand(args: string[]): Promise<unknown> {
     if (cursor !== undefined && !/^\d+$/.test(cursor)) throw new Error('Invalid output cursor')
     body = { action, id, cursor: Number(cursor ?? 0) }
   } else throw new Error('Usage: terminal list|read <id> [cursor]|interrupt <id>|close <id>|request <absolute-request.json>')
-  const control = await readBrowserControl(process.env.COPILOT_DESKTOP_TERMINAL_STATE || browserControlPath())
+  let control: BrowserControlState
+  try { control = await readBrowserControl(process.env.COPILOT_DESKTOP_TERMINAL_STATE || browserControlPath()) }
+  catch { throw new Error('Terminal control is unavailable. Open or resume a desktop session, or use the helper from a terminal in the active project.') }
   let response: Response
   try {
     response = await fetch(`http://127.0.0.1:${control.port}/terminal`, { method: 'POST',
