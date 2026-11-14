@@ -42,9 +42,8 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const profile = desktop.profiles.find(profile => profile.id === project.profileId)
   const [gitUsed, setGitUsed] = useState(project.tabs.some(tab => tab.kind === 'git'))
   useEffect(() => { if (project.tabs.some(tab => tab.kind === 'git')) setGitUsed(true) }, [project.tabs])
-  const [promptId, setPromptId] = useState('')
   const sessions = desktop.tabs.filter(tab => tab.workspaceProfileId === project.profileId)
-  const prompt = sessions.find(tab => tab.id === promptId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id))
+  const prompt = sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id))
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
   const [address, setAddress] = useState('')
@@ -87,12 +86,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
       {!!tools.recent?.length && <div className="tool-recents"><h3>Recent pages</h3>{tools.recent.slice(0, 8).map(url => <button key={url} type="button" title={url}
         onClick={() => action({ type: 'add', kind: 'browser', replaceId: selected.id, url })}>{url}</button>)}</div>}
     </div>}
-    {selected && selected.kind !== 'new' && <div className="tool-context">
-      <label>Send to <select aria-label="Prompt destination" value={prompt?.id ?? ''} onChange={event => setPromptId(event.target.value)}>
-        <option value="">Choose a session</option>
-        {sessions.map(tab => <option key={tab.id} value={tab.id} disabled={['dormant', 'completed', 'crashed'].includes(tab.status) || (desktop.poppedOutTabIds ?? []).includes(tab.id)}>{tab.title}</option>)}
-      </select></label>
-      {selected.kind === 'browser' && <>
+    {selected?.kind === 'browser' && <div className="tool-context">
         <label>Connect to session <select aria-label="Connect browser to session" value="" onChange={event => { if (event.target.value) action({ type: 'connect', id: selected.id, sessionId: event.target.value }) }}>
           <option value="">Choose a CLI session</option>
           {sessions.filter(tab => !tab.remote && !tab.cli && !['dormant', 'completed', 'crashed'].includes(tab.status)).map(tab => <option key={tab.id} value={tab.id}>{tab.title}</option>)}
@@ -108,7 +102,6 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
             <option value="shared">Shared settings</option><option value="private">Private project settings</option>
           </select></label><p>Applies after all project browser tabs close and a browser is opened again.</p>
         </details>
-      </>}
     </div>}
     {project.tabs.filter(tab => tab.kind === 'browser' && tab.resource).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-browser-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
       <BrowserPanel tabId={tab.resource!} sessionTitle={tab.title} independent promptTargetId={prompt?.id ?? null}

@@ -153,7 +153,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
   }), [tabId])
   // In its own window the browser has no terminal beside it, so main pastes in the window that shows the session.
   const toPrompt = (detail: { text: string } | { image: true }, done: string): void => {
-    if (independent && !promptTargetId) { setError('Choose a prompt destination first.'); return }
+    if (independent && !promptTargetId) { setError('Open or resume a session in this window to attach browser context.'); return }
     const destination = independent ? promptTargetId! : tabId
     if (!detached) {
       if ('image' in detail) attachClipboardImage(destination)
