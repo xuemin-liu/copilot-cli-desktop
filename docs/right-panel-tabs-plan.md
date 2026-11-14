@@ -1,6 +1,6 @@
 # Optional right-panel tabs
 
-Status: agreed after four rounds in meeting 27AC; implementation in progress. This supersedes the fixed Browser/Git interaction shipped in v0.1.93. The user authorized implementation, PR/fix-pr, merge, branch cleanup, and release after meeting agreement. Not every Codex behavior has been verified.
+Status: agreed after four rounds in meeting 27AC; implemented and independently reviewed in PR #193 for v0.1.94. This supersedes the fixed Browser/Git interaction shipped in v0.1.93. The user authorized implementation, PR/fix-pr, merge, branch cleanup, and release after meeting agreement. Not every Codex behavior has been verified.
 
 ## Problem and required behavior
 
