@@ -9,7 +9,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 if (!process.versions.electron) {
   await mkdir(out, { recursive: true })
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 180_000)
   try { assert.equal(await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }), 0) }
   finally { clearTimeout(timer) }
@@ -53,6 +53,7 @@ if (!process.versions.electron) {
     await until('document.querySelector(".session-pane")', 'initial CLI tab')
     await ui('(async()=>{for(const tab of (await window.copilotDesktop.getState()).tabs) await window.copilotDesktop.unloadTab(tab.id)})()')
     const current = async () => (await state()).projects.find(project => project.profileId === p1.id)
+    if (!process.argv.includes('--terminal-only')) {
     await until('document.querySelector(".session-tools-toggle")?.innerText.includes("New tab")', 'empty optional panel')
     assert.equal((await current()).tabs.length, 0)
     assert.equal(await ui('document.querySelectorAll(".tool-panel-commandbar").length'), 0)
@@ -113,6 +114,7 @@ if (!process.versions.electron) {
     await click(`[data-tab-id="${gitId}"] + .tool-tab-close`)
     await until('document.querySelector(".session-tools-toggle")?.innerText.includes("New tab")', 'last tab closes panel')
     assert.equal((await current()).tabs.length, 0)
+    }
     // Terminal types use the same optional tab lifecycle and real main-process PTYs.
     await click('.session-tools-toggle')
     await until('document.querySelector(".tool-launcher")', 'terminal launcher')

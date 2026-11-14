@@ -19,15 +19,21 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
   const emit = (event: keyof typeof listeners, value = ''): void => { for (const listener of listeners[event]) listener(id, value) }
   const connect = async (): Promise<{ error?: string }> => {
     if (connecting || stopped || !active) return {}
+    const requestEpoch = epoch
     connecting = true
     try {
       const state = await call({ action: 'read' }) as Snapshot
+      if (stopped || !active || requestEpoch !== epoch) return {}
       if (state.status !== 'running' && state.status !== 'starting') {
         const started = await call({ action: state.status === 'disconnected' ? 'start' : 'restart' }) as Snapshot
+        if (stopped || !active || requestEpoch !== epoch) return {}
         if (started.status === 'error') return { error: started.error ?? 'Terminal failed' }
       }
       return {}
-    } catch (error) { report(error); return { error: error instanceof Error ? error.message : String(error) } }
+    } catch (error) {
+      if (stopped || !active || requestEpoch !== epoch) return {}
+      report(error); return { error: error instanceof Error ? error.message : String(error) }
+    }
     finally { connecting = false }
   }
   const poll = async (): Promise<void> => {
@@ -63,7 +69,8 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     const requestEpoch = epoch
     try {
       const state = await call({ action: 'read' }) as Snapshot
-      return state.status === 'error' ? { error: state.error ?? 'Terminal failed' } : {}
+      if (stopped || !active || requestEpoch !== epoch) return {}
+      return !['running', 'starting'].includes(state.status) ? { error: state.error ?? `Terminal ${state.status}` } : {}
     } catch (error) { if (requestEpoch !== epoch || !active) return {}; report(error); return { error: String(error) } }
   }
   const presetKey = 'myterminal.filter-presets'
