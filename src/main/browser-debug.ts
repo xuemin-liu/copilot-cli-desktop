@@ -332,7 +332,7 @@ export class BrowserDebug {
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0, certificateFailure: null, certificateWarning: null }
     this.pages.set(contents.id, page)
     this.reader.add(contents)
-    if (activate) { this.endFind(); this.reader.setTesting(false); this.activePageId = contents.id; this.state.view = 'page' }
+    if (activate) { this.endFind(); this.reader.stopTest(); this.activePageId = contents.id; this.state.view = 'page' }
     if (window) this.showInWindow(page, window)
     contents.setWindowOpenHandler(details => {
       if (this.disposed) return { action: 'deny' }
@@ -573,7 +573,7 @@ export class BrowserDebug {
   private selectPage(id: number, focus = false): void {
     const page = this.pages.get(id)
     if (!page) throw new Error('Unknown browser page')
-    if (id !== this.activePageId) { this.endFind(); this.reader.setTesting(false); this.reader.cancelPick() }
+    if (id !== this.activePageId) { this.endFind(); this.reader.stopTest(); this.reader.cancelPick() }
     this.activePageId = id
     this.showView(page.viewMode ?? 'page')
     if (focus && page.window && !page.window.isDestroyed()) {
@@ -1129,8 +1129,8 @@ export class BrowserDebug {
     if (this.preparingPreferences) throw new Error('The browser is still opening. Try again in a moment.')
     if (action === 'testing:on' || action === 'testing:off') {
       if (this.disposed) throw new Error('Browser has closed')
-      if (action === 'testing:on') this.showView('page')
-      this.reader.setTesting(action === 'testing:on')
+      // Keep the old enable action harmless for older callers; tests now start automatically.
+      if (action === 'testing:off') this.reader.stopTest()
       return this.snapshot
     }
     if (action === 'new-page') {
@@ -1202,7 +1202,7 @@ export class BrowserDebug {
   }
 
   private showView(view: BrowserViewMode): void {
-    if (view !== 'page') { this.reader.setTesting(false); this.reader.cancelPick() }
+    if (view !== 'page') { this.reader.stopTest(); this.reader.cancelPick() }
     this.state.view = view
     const page = this.activePage
     page.viewMode = view
@@ -1248,7 +1248,7 @@ export class BrowserDebug {
   }
 
   setBounds(bounds: BrowserBounds | null): void {
-    if (!bounds) { this.reader.setTesting(false); this.reader.cancelPick() }
+    if (!bounds) { this.reader.stopTest(); this.reader.cancelPick() }
     this.bounds = bounds
     this.layout()
   }
@@ -1309,7 +1309,7 @@ export class BrowserDebug {
       this.addPage(new WebContentsView({ webPreferences: { session: storage,
         sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), this.activePageId === id)
     } else if (this.activePageId === id) {
-      this.endFind(); this.reader.setTesting(false)
+      this.endFind(); this.reader.stopTest()
       this.activePageId = page.window && page.opener !== null && this.pages.has(page.opener) ? page.opener : firstTab.contents.id
       this.showView('page')
     }

@@ -228,8 +228,8 @@ test('the PowerShell test helper reports missing pane guidance and keeps evidenc
     assert.equal(JSON.parse(evidence).screenshots[0].imageBase64, undefined)
     assert.ok(!evidence.includes('Zml4dHVyZQ'), 'a preserved payload never holds base64 images')
     // A rejected request the desktop had not started leaves no evidence at all.
-    reply = { status: 400, body: JSON.stringify({ message: 'Enable Testing mode in the selected browser page first.' }) }
-    assert.match(await failure(['test', plan, '-OutputPath', join(root, 'rejected.json')]), /^Browser test failed\. Enable Testing mode/)
+    reply = { status: 400, body: JSON.stringify({ message: 'Show the selected browser page before starting a test.' }) }
+    assert.match(await failure(['test', plan, '-OutputPath', join(root, 'rejected.json')]), /^Browser test failed\. Show the selected browser page/)
     assert.deepEqual(await reserved('rejected'), [])
     // A run the desktop had started keeps its report so the next step is inspection, not a rerun.
     reply = { status: 400, body: JSON.stringify({ message: 'Stopped: the page changed.\n\nInspect Last test.', executionStarted: true }) }

@@ -121,7 +121,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
   useLayoutEffect(() => {
     if (wasVisible.current && !surfaceVisible) {
       const current = latest.current
-      const stopped = [current.state.testing?.enabled || current.state.testing?.running ? 'Testing stopped' : '', current.picking ? 'Element picking stopped' : ''].filter(Boolean)
+      const stopped = [current.state.testing?.running ? 'Testing stopped' : '', current.picking ? 'Element picking stopped' : ''].filter(Boolean)
       if (stopped.length) setHiddenNotice(`${current.sessionTitle}: ${stopped.join('; ')} because the browser was hidden.`)
     }
     wasVisible.current = surfaceVisible
@@ -229,8 +229,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
     popup={certificate.pageId === state.activePageId ? undefined : state.pages.find(page => page.id === certificate.pageId)?.title ?? 'Another page'}
     answer={kind => run(window.copilotDesktop.browserAction(tabId, `certificate-${kind}:${certificate.id}`))} />
   const pageError = certificate?.pageId === (state.errorPageId ?? state.activePageId) ? null : state.error && shownError(state)
-  const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}`
-    : state.testing?.enabled ? 'Describe the steps and expected results to the assistant.' : 'Enable to let the assistant run your test in this page.'
+  const testingMessage = state.testing?.running ? `Step ${state.testing.step}/${state.testing.total}: ${state.testing.label}` : ''
   return <aside className="browser-panel" aria-label="Debug browser" style={{ display: active ? undefined : 'none' }}
     onKeyDown={event => { if (isShortcutModifier(event) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); openFind() } }}>
     {hiddenNotice && <p className="browser-notice" role="status">{hiddenNotice} <button type="button" aria-label="Dismiss browser interruption notice" onClick={() => setHiddenNotice(null)}>Dismiss</button></p>}
@@ -268,12 +267,6 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
         onClick={() => run(window.copilotDesktop.browserAction(tabId, `view:${name}`))}>
         {name === 'page' ? 'Page' : name === 'console' ? 'Console' : name === 'network' ? 'Network' : name === 'devtools' ? 'DevTools / Overrides' : `Activity (${state.console.length + state.network.length})`}
       </button>)}
-    </div>
-    <div className="browser-testing">
-      <button type="button" aria-pressed={state.testing?.enabled ?? false}
-        onClick={() => { if (!state.testing?.enabled) setHiddenNotice(null); run(window.copilotDesktop.browserAction(tabId, `testing:${state.testing?.enabled ? 'off' : 'on'}`)) }}>
-        {state.testing?.enabled ? 'Stop testing' : 'Testing mode'}</button>
-      <span role="status" title={testingMessage}>{testingMessage}</span>
     </div>
     {state.dialog && <div className="browser-dialog" role="alertdialog" aria-label="Page dialog">
       <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : state.dialog.pageId === state.activePageId ? 'This page says'
@@ -317,7 +310,10 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
         : !state.url && <p className="browser-hint">Enter your web app URL above.</p>)}
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
-    <footer className="browser-footer">{state.loading ? 'Loading…' : independent ? 'Browser control automatically follows the current session.' : 'This session’s browser activity is available to Copilot CLI.'}
+    <footer className="browser-footer"><div className="browser-footer-status">
+      <span role="status" title={testingMessage}>{testingMessage || (state.loading ? 'Loading…' : independent ? 'Browser control automatically follows the current session.' : 'This session’s browser activity is available to Copilot CLI.')}</span>
+      {state.testing?.running && <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'testing:off'))}>Stop test</button>}
+    </div>
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>
         <p>{state.testing.report.description}</p><p>Expected: {state.testing.report.expected}</p>
         <ol>{state.testing.report.steps.map((step, index) => <li key={index}>{step.outcome?.replaceAll('-', ' ') ?? step.status}: {step.label}{step.reason ? ` — ${step.reason}` : ''}</li>)}</ol>

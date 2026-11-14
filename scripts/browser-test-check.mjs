@@ -265,13 +265,14 @@ if (!process.versions.electron) {
     try {
       browser.setBounds({ x: 0, y: 0, width: 1000, height: 700 }); window.showInactive()
       await browser.open(); await second.open(); await browser.navigate(url)
-      await assert.rejects(execute([visible('#login')]), /Testing mode/)
-      browser.action('testing:on')
+      assert.equal(browser.snapshot.testing.enabled, true, 'HTTP page is ready without opt-in')
+      assert.ok((await browserCommand(['test-targets'])).targets.length > 0, 'test discovery needs no opt-in')
+      assert.equal((await execute([visible('#login')])).status, 'passed', 'first test needs no enable action')
       if (viewerOnly) {
         await checkViewerDrag()
         await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, viewerOverlayMeasurement: true, directSvgInputSurface: true,
           partiallyVisibleDragSurface: true, dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
-          testingModeRequired: true, installedPowerShell: false }, null, 2))
+          automaticTesting: true, installedPowerShell: false }, null, 2))
         console.log('Viewer drag acceptance check passed: native measurement, cropped viewport, obstruction diagnostics and pointer release.')
         return
       }
@@ -410,7 +411,6 @@ if (!process.versions.electron) {
         assert.ok(cancelledState.events.some(event => ['pointerup', 'pointercancel', 'lostpointercapture'].includes(event.type) && event.trusted && event.buttons === 0), 'cancellation clears native button/capture state')
         assert.equal(writes, 0)
         if (switchPage) browser.action(`select-page:${pageId}`)
-        browser.action('testing:on')
       }
       await browser.view.webContents.executeJavaScript('document.querySelector("#drag-canvas").remove();document.querySelector("#drag-status").remove()')
       const waiting = plan([step('waitFor', 'Waiting to cancel', { selector: '#never', condition: 'visible' }), step('click', 'Must not write', { selector: '#write' }), visible('#title')])
@@ -420,22 +420,22 @@ if (!process.versions.electron) {
       assert.deepEqual(browser.snapshot.testing.report, lastCompleted, 'starting a run preserves the completed report and viewport layout')
       browser.action('testing:off')
       assert.equal((await (await pending).json()).status, 'cancelled'); assert.equal(writes, 0)
-      browser.action('testing:on'); pending = request(waiting)
+      pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for hide'); browser.setBounds(null)
       assert.equal((await (await pending).json()).status, 'cancelled'); assert.equal(browser.snapshot.testing.enabled, false)
+      await assert.rejects(execute([visible('#title')]), /Show the selected browser page/)
       browser.setBounds({ x: 0, y: 0, width: 1000, height: 700 })
-      browser.action('testing:on'); pending = request(waiting)
+      pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for switch'); const oldPage = browser.snapshot.activePageId; browser.action('new-page')
       assert.equal((await (await pending).json()).status, 'cancelled'); assert.equal(browser.snapshot.testing.enabled, false)
-      browser.action(`select-page:${oldPage}`); browser.action('testing:on')
+      await assert.rejects(execute([visible('body')]), /Open an HTTP or HTTPS page/)
+      browser.action(`select-page:${oldPage}`)
       const disconnected = new AbortController(); pending = request(waiting, disconnected.signal).catch(() => null)
       await until(() => browser.snapshot.testing.running, 'test started for disconnect'); disconnected.abort(); await pending
       await until(() => !browser.snapshot.testing.running, 'disconnected test stops'); assert.equal(writes, 0)
-      browser.action('testing:on')
       pending = request(plan([step('navigate', 'Navigation to cancel', { url: url + 'never-load' }), visible('#title')]))
       await until(() => navigationWaiting, 'navigation started'); browser.action('testing:off')
       assert.equal((await (await pending).json()).status, 'cancelled')
-      browser.action('testing:on')
       const embedded = await execute([step('navigate', 'Open app with third-party frame', { url: url + 'frames' }), visible('h1')])
       assert.equal(embedded.status, 'passed', JSON.stringify(embedded))
       const frames = (await browserCommand(['frames'])).frames
@@ -496,11 +496,9 @@ if (!process.versions.electron) {
       assert.equal((await request({ ...plan([visible('#title')]), script: 'alert(1)' })).status, 400)
       assert.equal((await fetch(testRoute, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: ' '.repeat(131073) })).status, 413)
       await browser.navigate(foreignUrl)
-      assert.equal(browser.snapshot.testing.enabled, false, 'manual origin changes revoke the grant')
-      await assert.rejects(execute([visible('#q')]), /Testing mode/)
-      browser.action('testing:on')
+      assert.equal(browser.snapshot.testing.enabled, true, 'new site is ready for a fresh run automatically')
       assert.equal((await execute([step('fill', 'Explicitly chosen site', { selector: '#q', value: 'user-test-input' }), visible('#q')])).status, 'passed')
-      await until(() => receivedValues.includes('user-test-input'), 'explicit user origin grant permits input')
+      await until(() => receivedValues.includes('user-test-input'), 'new test binds to the newly selected site')
       assert.ok(!receivedValues.includes('unrelated-env-secret-value-123'))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, workflow: true, nativeInput: true, nativeDoubleClick: true,
         screenshots: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,

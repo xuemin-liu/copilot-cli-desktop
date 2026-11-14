@@ -120,14 +120,16 @@ export class BrowserReader {
   private selectId(id: number): void { const cursor = this.cursor.getStore(); if (cursor) { cursor.validate(); cursor.select(id) } else this.options.select(id) }
   constructor(private readonly options: BrowserReaderOptions) {}
 
-  get testState(): BrowserTestState { return structuredClone({ enabled: this.testPageId === this.activeId(), ...this.testProgress }) }
+  get testState(): BrowserTestState {
+    const id = this.activeId(), page = this.readers.get(id)
+    const enabled = Boolean(page && !page.contents.isDestroyed() && this.options.visible(id) && this.httpOrigin(page.contents.getURL()))
+    return structuredClone({ enabled, ...this.testProgress })
+  }
 
-  setTesting(enabled: boolean): void {
-    const origin = enabled ? this.httpOrigin(this.page().contents.getURL()) : null
-    if (enabled && !origin) throw new Error('Open an HTTP or HTTPS page before enabling Testing mode.')
+  stopTest(): void {
     this.testAbort?.abort()
-    this.testPageId = enabled ? this.activeId() : null
-    this.testOrigin = origin
+    this.testPageId = null
+    this.testOrigin = null
     this.testBlocked = false
   }
 
@@ -136,16 +138,18 @@ export class BrowserReader {
   }
 
   private checkTestOrigin(url: string): void {
-    if (!this.testOrigin || this.httpOrigin(url) !== this.testOrigin) throw new Error('Test destination is outside the enabled origin. Stop testing, open that site yourself and enable Testing mode there.')
+    if (!this.testOrigin || this.httpOrigin(url) !== this.testOrigin) throw new Error('Test destination is outside this run’s origin. Open the intended site and start a new test there.')
   }
 
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
     const plan = validateBrowserTestPlan(value)
     const page = this.page()
-    if (this.testPageId !== page.contents.id) throw new Error('Enable Testing mode in the selected browser page first.')
-    this.checkTestOrigin(page.contents.getURL())
-    const origin = this.testOrigin!
+    const origin = this.httpOrigin(page.contents.getURL())
+    if (!origin) throw new Error('Open an HTTP or HTTPS page before starting a test.')
+    if (!this.options.visible(page.contents.id)) throw new Error('Show the selected browser page before starting a test.')
     if (this.busy) throw new Error('Another browser inspection or test is in progress.')
+    this.testPageId = page.contents.id
+    this.testOrigin = origin
     this.testBlocked = false
     this.testUnexpectedDialog = null
     this.busy = true
@@ -198,6 +202,7 @@ export class BrowserReader {
       if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
       this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
+      this.testPageId = null; this.testOrigin = null
     }
   }
 
@@ -225,7 +230,7 @@ export class BrowserReader {
     contents.on('will-frame-navigate', event => restrictNavigation(event, event.url))
     contents.on('will-redirect', (event, url) => restrictNavigation(event, url))
     contents.on('did-navigate', (_event, url) => {
-      if (this.testPageId === contents.id && this.httpOrigin(url) !== this.testOrigin) this.setTesting(false)
+      if (this.testPageId === contents.id && this.httpOrigin(url) !== this.testOrigin) this.stopTest()
     })
     contents.on('did-finish-load', () => { void this.attach(page).catch(() => {}) })
     contents.once('destroyed', () => {
@@ -888,7 +893,6 @@ export class BrowserReader {
   private async run(command: string, args: string[], signal?: AbortSignal, testScreenshot = false): Promise<unknown> {
     if (command === 'test-targets') {
       const page = this.page()
-      if (this.testPageId !== page.contents.id) throw new Error('Enable Testing mode before inspecting test targets.')
       const frames = await this.frames(page, signal)
       const frame = frames.find(frame => frame.id === (args[0] ?? frames[0]?.id))
       if (!frame) throw new Error('Test frame is unavailable.')
@@ -1001,7 +1005,7 @@ export class BrowserReader {
 
   dispose(): void {
     this.cancelPick()
-    this.setTesting(false)
+    this.stopTest()
     this.disposed = true
     this.clear()
     for (const page of this.readers.values()) if (!page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()

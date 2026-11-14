@@ -54,6 +54,7 @@ export interface BrowserTestReport {
   evidence?: Record<string, unknown>
 }
 export interface BrowserTestState {
+  /** Compatibility field: the current HTTP(S) page is visible and ready for a new test; no opt-in is required. */
   enabled: boolean; running: boolean; step: number; total: number; label: string; report: Omit<BrowserTestReport, 'screenshots'> | null
   runId?: string
   currentAction?: { id: string; action: string; delivery: TestDelivery } | null

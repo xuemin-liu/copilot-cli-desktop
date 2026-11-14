@@ -151,7 +151,7 @@ if (!process.versions.electron) {
     ipcMain.handle('desktop:copy-text', (event, text) => { trusted(event); copied.push(text) })
     ipcMain.handle('desktop:browser-export', (event, tabId, kind) => { trusted(event); assert.ok(['console', 'network'].includes(kind)); return writeFile(join(artifacts, `export-${kind}.json`), JSON.stringify(forTab(tabId).snapshot[kind])) })
     ipcMain.handle('desktop:browser-bounds', (event, tabId, bounds) => { trusted(event); forTab(tabId).setBounds(bounds) })
-    const ui = code => window.webContents.executeJavaScript(code)
+    const ui = code => window.webContents.executeJavaScript(code).catch(error => { throw new Error(`${error}\nScript: ${code}`) })
     try {
       window.showInactive()
       await window.loadFile(join(artifacts, 'index.html'))
@@ -210,8 +210,8 @@ if (!process.versions.electron) {
         assert.equal(cachedScriptRequests.length, requests)
         await browser.navigate(url)
       }
-      await ui('document.querySelector(".browser-testing button").click()')
-      await until(() => browser.snapshot.testing.enabled, 'testing mode UI enables selected page')
+      assert.equal(await ui('document.querySelectorAll(".browser-testing").length'), 0, 'no manual testing mode row')
+      assert.equal(browser.snapshot.testing.enabled, true, 'testing ready automatically')
       const testingHeight = browser.view.getBounds().height
       const testPlan = join(artifacts, `ui-test-${Date.now()}.json`)
       await writeFile(testPlan, JSON.stringify({ description: 'Check this browser page', expected: 'The page body is visible', steps: [
@@ -219,13 +219,17 @@ if (!process.versions.electron) {
         { action: 'assert', label: 'Page body visible', selector: 'body', condition: 'visible' },
       ] }))
       const testResult = browserCommand(['test', testPlan])
-      await until(() => ui('document.querySelector(".browser-testing span").textContent.includes("Long progress label")'), 'running step in renderer')
+      await until(() => ui('document.querySelector(".browser-footer-status span").textContent.includes("Long progress label")'), 'running step in renderer')
       assert.equal(browser.view.getBounds().height, testingHeight, 'progress labels must not resize the page during test input')
       await browser.view.webContents.executeJavaScript('document.body.insertAdjacentHTML("beforeend", "<div id=ui-test-ready>Ready</div>")')
       assert.equal((await testResult).status, 'passed')
       await until(() => ui('document.querySelector(".browser-test-report summary")?.textContent === "Last test: passed"'), 'test outcome in renderer')
-      await ui('document.querySelector(".browser-testing button").click()')
-      await until(() => !browser.snapshot.testing.enabled, 'stop testing UI disables selected page')
+      await browser.view.webContents.executeJavaScript('document.querySelector("#ui-test-ready").remove()')
+      const cancelledTest = browserCommand(['test', testPlan])
+      await until(() => ui('document.querySelector(".browser-footer-status button")?.textContent === "Stop test"'), 'running test exposes Stop')
+      await ui('document.querySelector(".browser-footer-status button").click()')
+      assert.equal((await cancelledTest).status, 'cancelled')
+      await until(() => ui('!document.querySelector(".browser-footer-status button")'), 'Stop disappears when idle')
       // Manually added pages keep the original alive, share only this session's storage,
       // and make CLI reads follow the page selected by the user.
       {
@@ -434,6 +438,7 @@ if (!process.versions.electron) {
         await browser.navigate(url)
       }
       await assert.rejects(browser.navigate('file:///C:/Windows/win.ini'), /HTTP or HTTPS/)
+      await until(() => browser.snapshot.network.find(entry => entry.url.endsWith('/api.json'))?.status === 200, 'API response headers received')
       const network = await browserCommand(['network'])
       const api = network.find(entry => entry.url.endsWith('/api.json'))
       assert.ok(api)
