@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit",
     "start": "npm run build && electron .",
     "dev": "npm run start",
-    "test": "npm run build && node --test \"dist/src/**/*.test.js\"",
+    "test": "npm run build && npm run myterminal:check && node --test \"dist/src/**/*.test.js\"",
     "smoke": "npm run build && node dist/scripts/smoke.js",
     "fork:smoke": "npm run build && node dist/scripts/fork-smoke.js",
     "usage:check": "npm run build && node scripts/usage-electron-check.mjs",
@@ -32,7 +32,7 @@
     "git-panel:check": "node scripts/git-panel-check.mjs",
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
     "project-tools:check": "npm run build && node scripts/project-tools-check.mjs && node scripts/optional-tabs-app-check.mjs",
-    "terminal-tools:check": "npm run build && node scripts/tool-terminal-check.mjs && node scripts/optional-tabs-app-check.mjs",
+    "terminal-tools:check": "npm run build && node scripts/myterminal-component-check.mjs && node scripts/tool-terminal-check.mjs && node scripts/optional-tabs-app-check.mjs --terminal-only",
     "tool-dock:check": "node scripts/tool-dock-check.mjs",
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",
@@ -56,21 +56,25 @@
     "activity:check": "npm run build && node scripts/electron-side-chat-check.mjs --activity",
     "popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --popout",
     "browser-popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --browser-popout",
-    "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs && node scripts/browser-devtools-share-check.mjs && node scripts/browser-overrides-status-check.mjs && node scripts/browser-popup-overrides-check.mjs && node scripts/browser-popup-navigation-check.mjs && node scripts/browser-popup-navigation-check.mjs --no-overrides && node scripts/browser-popup-navigation-check.mjs --overrides-failure && node scripts/browser-overrides-private-check.mjs && node scripts/browser-profile-share-check.mjs && node scripts/browser-reader-check.mjs && node scripts/browser-pick-check.mjs && node scripts/browser-basics-check.mjs && node scripts/browser-dialog-check.mjs && node scripts/browser-context-check.mjs && node scripts/browser-permissions-check.mjs && node scripts/browser-test-check.mjs && node scripts/browser-discovery-check.mjs && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25"
+    "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs && node scripts/browser-devtools-share-check.mjs && node scripts/browser-overrides-status-check.mjs && node scripts/browser-popup-overrides-check.mjs && node scripts/browser-popup-navigation-check.mjs && node scripts/browser-popup-navigation-check.mjs --no-overrides && node scripts/browser-popup-navigation-check.mjs --overrides-failure && node scripts/browser-overrides-private-check.mjs && node scripts/browser-profile-share-check.mjs && node scripts/browser-reader-check.mjs && node scripts/browser-pick-check.mjs && node scripts/browser-basics-check.mjs && node scripts/browser-dialog-check.mjs && node scripts/browser-context-check.mjs && node scripts/browser-permissions-check.mjs && node scripts/browser-test-check.mjs && node scripts/browser-discovery-check.mjs && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25",
+    "myterminal:check": "node scripts/check-myterminal.mjs && vitest run --config vitest.myterminal.config.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-search": "0.16.0",
     "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-web-links": "0.12.0",
     "electron-updater": "6.8.11",
     "jsonc-parser": "3.3.1",
     "koffi": "3.3.7",
+    "lucide-react": "0.469.0",
     "node-pty": "1.1.0",
     "proper-lockfile": "4.1.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "yauzl": "3.4.0",
-    "yazl": "3.3.1"
+    "yazl": "3.3.1",
+    "zustand": "5.0.3"
   },
   "devDependencies": {
     "@electron/asar": "4.3.1",
@@ -85,7 +89,8 @@
     "electron": "45.2.3",
     "electron-builder": "26.18.0",
     "esbuild": "0.28.2",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "vitest": "4.1.2"
   },
   "engines": {
     "node": ">=24.0.0"

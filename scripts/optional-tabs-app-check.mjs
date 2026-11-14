@@ -9,7 +9,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 if (!process.versions.electron) {
   await mkdir(out, { recursive: true })
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { env, stdio: 'inherit', windowsHide: true })
   const timer = setTimeout(() => child.kill(), 180_000)
   try { assert.equal(await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }), 0) }
   finally { clearTimeout(timer) }
@@ -53,6 +53,7 @@ if (!process.versions.electron) {
     await until('document.querySelector(".session-pane")', 'initial CLI tab')
     await ui('(async()=>{for(const tab of (await window.copilotDesktop.getState()).tabs) await window.copilotDesktop.unloadTab(tab.id)})()')
     const current = async () => (await state()).projects.find(project => project.profileId === p1.id)
+    if (!process.argv.includes('--terminal-only')) {
     await until('document.querySelector(".session-tools-toggle")?.innerText.includes("New tab")', 'empty optional panel')
     assert.equal((await current()).tabs.length, 0)
     assert.equal(await ui('document.querySelectorAll(".tool-panel-commandbar").length'), 0)
@@ -113,6 +114,7 @@ if (!process.versions.electron) {
     await click(`[data-tab-id="${gitId}"] + .tool-tab-close`)
     await until('document.querySelector(".session-tools-toggle")?.innerText.includes("New tab")', 'last tab closes panel')
     assert.equal((await current()).tabs.length, 0)
+    }
     // Terminal types use the same optional tab lifecycle and real main-process PTYs.
     await click('.session-tools-toggle')
     await until('document.querySelector(".tool-launcher")', 'terminal launcher')
@@ -121,12 +123,25 @@ if (!process.versions.electron) {
     await until(`document.querySelector('[aria-label="SSH host"]')`, 'SSH connection form')
     assert.equal(await ui('document.querySelectorAll("input[type=password]").length'), 0, 'SSH credentials remain in native SSH')
     await ui('[...document.querySelectorAll(".tool-launcher-types button")].find(button=>button.innerText.startsWith("Local terminal")).click()')
-    await until('document.querySelector(".tool-terminal-footer")?.innerText.includes("Connected")', 'local terminal started')
+    await until('document.querySelector(".myterminal-embedded .terminal-status")?.innerText.includes("Connected")', 'local terminal started')
     const terminalTab = (await current()).tabs.find(tab => tab.kind === 'local')
     const terminalCall = request => ui(`window.copilotDesktop.toolTerminal(${JSON.stringify(p1.id)},${JSON.stringify({ id: terminalTab.id, ...request })})`)
     const original = await terminalCall({ action: 'read' })
     await terminalCall({ action: 'write', text: process.platform === 'win32' ? "Write-Output ('PANEL_' + 'TERMINAL')\r" : "printf 'PANEL_%s\\n' TERMINAL\r" })
     await until('document.querySelector(".tool-terminal-screen")?.innerText.includes("PANEL_TERMINAL")', 'native terminal output rendered')
+    assert.ok(await ui('Boolean(document.querySelector(".myterminal-embedded .terminal-tab-root"))'), 'uses the imported MyTerminal component')
+    const firstHost = `#tool-content-${terminalTab.id}`
+    await click(`${firstHost} button[title="Search terminal (Ctrl+Shift+F)"]`)
+    await until(`document.activeElement === document.querySelector('${firstHost} .search-input')`, 'MyTerminal search autofocus')
+    await type(`${firstHost} .search-input`, 'PANEL')
+    const secondTerminal = await ui(`window.copilotDesktop.toolTerminal(${JSON.stringify(p1.id)},{action:'create',kind:'local'})`)
+    await until(`document.activeElement === document.querySelector('#tool-content-${secondTerminal.id} .xterm-helper-textarea')`, 'new terminal receives keyboard focus')
+    await click(`[data-tab-id="${terminalTab.id}"]`)
+    await until(`document.activeElement === document.querySelector('${firstHost} .search-input')`, 'MyTerminal restores search focus after tab switch')
+    assert.equal(await ui(`document.querySelector('${firstHost} .search-input').value`), 'PANEL')
+    await ui(`document.querySelector('${firstHost} .search-bar button:last-child').click()`)
+    await until(`document.activeElement === document.querySelector('${firstHost} .xterm-helper-textarea')`, 'closing search restores terminal focus')
+    await click(`[data-tab-id="${secondTerminal.id}"] + .tool-tab-close`)
     await click('.session-tools-toggle')
     await until('document.querySelector(".session-tools-toggle")?.innerText.includes("Show tabs")', 'terminal panel hidden')
     await click('.session-tools-toggle')
@@ -134,7 +149,7 @@ if (!process.versions.electron) {
     assert.equal((await terminalCall({ action: 'read' })).pid, original.pid, 'hide/show preserves terminal process')
     await ui(`window.copilotDesktop.activateProfile(${JSON.stringify(p2.id)})`)
     await ui(`window.copilotDesktop.activateProfile(${JSON.stringify(p1.id)})`)
-    await until('document.querySelector(".tool-terminal-footer")?.innerText.includes("Connected")', 'terminal survives project switch')
+    await until('document.querySelector(".myterminal-embedded .terminal-status")?.innerText.includes("Connected")', 'terminal survives project switch')
     assert.equal((await terminalCall({ action: 'read' })).pid, original.pid)
     await terminalCall({ action: 'restart' })
     await terminalCall({ action: 'write', text: process.platform === 'win32' ? "Write-Output ('NEW_' + 'SHELL')\r" : "printf 'NEW_%s\\n' SHELL\r" })

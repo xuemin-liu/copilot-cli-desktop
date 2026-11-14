@@ -131,7 +131,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
         onClose={() => { if (selected) action({ type: 'close', id: selected.id }) }} />
     </div>}
     {project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-terminal-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
-      <ToolTerminalPanel profileId={project.profileId} id={tab.id} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
+      <ToolTerminalPanel profileId={project.profileId} tab={tab} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
     </div>)}
   </aside>
 }

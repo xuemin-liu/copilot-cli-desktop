@@ -1,7 +1,8 @@
 # Workspace terminals
 
 Use **New tab** in the session toolbar or **+** in the right panel to choose Browser, Git, Local terminal,
-WSL terminal (Windows), or SSH. Terminal tabs have search, an interrupt button, and **Add to prompt** for the
+WSL terminal (Windows), or SSH. Terminal tabs use MyTerminal's search, filtering, colorization,
+font zoom, context-menu paste, and focus handling, plus **Add to prompt** for the
 selection or recent output. No destination session needs to be selected.
 
 Local terminals open PowerShell on Windows or the configured shell on macOS/Linux in the project folder.
@@ -14,6 +15,10 @@ terminates its PTY; quitting stops all terminals. Saved tabs return disconnected
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes
 can exist at once. This integration brings terminal access into the existing panel; MyTerminal's SFTP, tunnel,
 split-pane, and saved-connection interfaces are not included.
+
+The implementation reuses MyTerminal's `TerminalTab.jsx`, terminal utilities, and local process manager
+from revision `3de4e4a`. The imported source, original tests, history notes and small adapter patch are
+tracked in [vendor/myterminal](../vendor/myterminal/UPSTREAM.md). SSH continues to use native OpenSSH.
 
 ## CLI and shell access
 
