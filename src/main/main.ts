@@ -270,6 +270,7 @@ function projectTools(): ProjectToolService {
     project: id => desktopConfig.profiles.find(profile => profile.id === id),
     session: id => tabsState.tabs.find(tab => tab.id === id),
     currentSession: () => tabsState.tabs.find(tab => tab.id === tabsState.activeTabId && tab.workspaceProfileId === desktopConfig.activeProfileId)?.id ?? null,
+    currentProject: () => desktopConfig.activeProfileId ?? null,
     defaults: () => ({ shared: desktopConfig.browserProfile === 'shared', overrides: desktopConfig.browserOverrides }),
     browserOptions: () => ({ history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(), reportError: logBrowserError,
       onAppShortcut: name => { if (name === 'git-toggle') { toggleGitPanel(); return true } return false } }),
@@ -4714,6 +4715,11 @@ ipcMain.handle('desktop:tools-action', async (event, profileId: unknown, action:
   assertTrustedIpcSender(event)
   if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || !action || typeof action !== 'object' || typeof (action as { type?: unknown }).type !== 'string') throw new Error('Invalid tools request')
   return projectTools().action(profileId, action as ToolsAction)
+})
+ipcMain.handle('desktop:tool-terminal', (event, profileId: unknown, request: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || profileId !== desktopConfig.activeProfileId) throw new Error('Terminal controls belong to the current project in the main window')
+  return projectTools().terminalAction(profileId, request)
 })
 ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import { writeFileAtomic } from './atomic-file.js'
 import { isSessionTabId } from './external-targets.js'
 import { BROWSER_TEST_HELPER } from './browser-test-helper.js'
+import { TERMINAL_HELPER_PS, TERMINAL_HELPER_SH, TERMINAL_HELPER_WSL, terminalInstructions } from './terminal-helper.js'
 
 export function browserSessionPaths(root: string, tabId: string): { directory: string; endpoint: string; settings: string; helper: string } {
   if (!isSessionTabId(tabId)) throw new Error('Invalid browser session')
@@ -554,10 +555,17 @@ export async function prepareBrowserSessionEnvironment(root: string, tabId: stri
     await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
   } else await writeFileAtomic(paths.helper, BROWSER_HELPER_SH)
   await writeFileAtomic(join(paths.directory, '.github', 'instructions', 'browser.instructions.md'), BROWSER_INSTRUCTIONS)
+  const terminalHelper = join(paths.directory, process.platform === 'win32' ? 'terminal.ps1' : 'terminal.sh')
+  await writeFileAtomic(terminalHelper, process.platform === 'win32' ? TERMINAL_HELPER_PS : TERMINAL_HELPER_SH)
+  if (process.platform === 'win32') await writeFileAtomic(join(paths.directory, 'terminal-wsl.sh'), TERMINAL_HELPER_WSL)
+  await writeFileAtomic(join(paths.directory, '.github', 'instructions', 'terminal.instructions.md'), terminalInstructions())
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
   return { ...environment,
     COPILOT_DESKTOP_BROWSER_STATE: paths.endpoint,
     COPILOT_DESKTOP_BROWSER_HELPER: paths.helper,
+    COPILOT_DESKTOP_TERMINAL_HELPER: terminalHelper,
+    ...(process.platform === 'win32' ? { COPILOT_DESKTOP_TERMINAL_WINDOWS_HELPER: terminalHelper, COPILOT_DESKTOP_TERMINAL_WSL_HELPER: join(paths.directory, 'terminal-wsl.sh') } : {}),
+    COPILOT_DESKTOP_TERMINAL_STATE: paths.endpoint,
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS: [...new Set([...existing, paths.directory])].join(','),
   }
 }

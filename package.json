@@ -32,6 +32,7 @@
     "git-panel:check": "node scripts/git-panel-check.mjs",
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
     "project-tools:check": "npm run build && node scripts/project-tools-check.mjs && node scripts/optional-tabs-app-check.mjs",
+    "terminal-tools:check": "npm run build && node scripts/tool-terminal-check.mjs && node scripts/optional-tabs-app-check.mjs",
     "tool-dock:check": "node scripts/tool-dock-check.mjs",
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",
@@ -59,6 +60,7 @@
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
     "@xterm/addon-serialize": "0.14.0",
     "electron-updater": "6.8.11",
     "jsonc-parser": "3.3.1",

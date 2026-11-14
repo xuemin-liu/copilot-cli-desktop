@@ -54,6 +54,14 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
     watchdog?.release()
   })
   let disposed = false
+  let terminated = false
+  const stop = (signal?: string): void => {
+    if (exited || (terminated && process.platform === 'win32')) return
+    terminated = true
+    // The caller commonly kills and then disposes; never ask ConPTY to terminate twice.
+    if (process.platform !== 'win32' && child.pid > 1) signalProcessGroup(child.pid, (signal ?? 'SIGHUP') as NodeJS.Signals)
+    else child.kill(signal)
+  }
   return {
     pid: child.pid,
     onData: (listener) => child.onData(listener),
@@ -66,17 +74,13 @@ export async function spawnNodePty(file: string, args: string[], options: SpawnO
         // Resizing a pty that has already exited throws; ignore.
       }
     },
-    kill: (signal) => {
-      // Outside Windows the session leads its own process group: signal the group so the commands it started stop too.
-      if (process.platform !== 'win32' && !exited && child.pid > 1) signalProcessGroup(child.pid, (signal ?? 'SIGHUP') as NodeJS.Signals)
-      else child.kill(signal)
-    },
+    kill: stop,
     dispose: () => {
       if (disposed) return
       disposed = true
       watchdog?.release()
-      if (!exited) {
-        try { child.kill() } catch { /* The process may already have exited. */ }
+      if (!exited && !terminated) {
+        try { stop() } catch { /* The process may already have exited. */ }
       }
     },
   }

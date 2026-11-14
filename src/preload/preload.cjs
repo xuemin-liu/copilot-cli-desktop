@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   getState: () => ipcRenderer.invoke('desktop:get-state'),
   toolsState: (width) => ipcRenderer.invoke('desktop:tools-state', width),
   toolsAction: (profileId, action) => ipcRenderer.invoke('desktop:tools-action', profileId, action),
+  toolTerminal: (profileId, request) => ipcRenderer.invoke('desktop:tool-terminal', profileId, request),
   showBrowserInMain: (tabId) => ipcRenderer.invoke('desktop:browser-show-main', tabId),
   onToolsChanged: (listener) => { const handler = (_event, state) => listener(state); ipcRenderer.on('desktop:tools-changed', handler); return () => ipcRenderer.removeListener('desktop:tools-changed', handler) },
   browserOpen: (tabId) => ipcRenderer.invoke('desktop:browser-open', tabId),

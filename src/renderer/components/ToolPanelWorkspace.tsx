@@ -2,17 +2,22 @@ import { useEffect, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
+import { isTerminalKind } from '../../main/tool-tabs.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
 import { BrowserPanel } from './BrowserPanel.js'
 import { GitPanel } from './GitPanel.js'
-import { isShortcutModifier } from '../platform.js'
+import { isShortcutModifier, isWindows } from '../platform.js'
+import { ToolTerminalPanel } from './ToolTerminalPanel.js'
 
 /** Adding another tool requires an adapter here, not a permanent slot in the layout. */
 export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new'>; label: string; description: string }[] = [
   { kind: 'browser', label: 'Browser', description: 'Open a web page in a new tab' },
   { kind: 'git', label: 'Git', description: 'Changes, commits, branches and worktrees' },
+  { kind: 'local', label: 'Local terminal', description: 'Open a shell in this project folder' },
+  ...(isWindows ? [{ kind: 'wsl' as const, label: 'WSL terminal', description: 'Open a Linux shell in Windows Subsystem for Linux' }] : []),
+  { kind: 'ssh', label: 'SSH', description: 'Connect to a remote host using OpenSSH' },
 ]
 interface Props {
   children: ReactNode
@@ -47,6 +52,9 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
   const [address, setAddress] = useState('')
+  const [connection, setConnection] = useState<'wsl' | 'ssh' | null>(null)
+  const [host, setHost] = useState(''), [username, setUsername] = useState(''), [port, setPort] = useState(''), [identityFile, setIdentityFile] = useState(''), [distro, setDistro] = useState('')
+  useEffect(() => { setConnection(null) }, [selected?.id])
   return <aside className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
     if (isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation()
@@ -81,7 +89,25 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
       </form>
       <div className="tool-launcher-types">{TOOL_TYPES.map(type => <button type="button" key={type.kind} disabled={type.kind === 'git' && Boolean(profile?.general)}
         title={type.kind === 'git' && profile?.general ? 'Git requires a project folder' : type.description}
-        onClick={() => action({ type: 'add', kind: type.kind, replaceId: selected.id })}><strong>{type.label}</strong><span>{type.description}</span></button>)}</div>
+        onClick={() => {
+          if (type.kind === 'ssh' || type.kind === 'wsl') setConnection(type.kind)
+          else action({ type: 'add', kind: type.kind, replaceId: selected.id })
+        }}><strong>{type.label}</strong><span>{type.description}</span></button>)}</div>
+      {connection && <form className="tool-connection-form" aria-label={connection === 'ssh' ? 'SSH connection' : 'WSL connection'} onSubmit={event => {
+        event.preventDefault()
+        action({ type: 'add', kind: connection, replaceId: selected.id, terminal: connection === 'wsl' ? { ...(distro.trim() ? { distro: distro.trim() } : {}) }
+          : { host: host.trim(), ...(username.trim() ? { username: username.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}) } })
+      }}>
+        <h3>{connection === 'ssh' ? 'SSH connection' : 'WSL terminal'}</h3>
+        {connection === 'ssh' ? <>
+          <label>Host or SSH config alias<input autoFocus required aria-label="SSH host" value={host} onChange={event => setHost(event.target.value)} placeholder="server.example.com" /></label>
+          <label>User (optional)<input aria-label="SSH user" value={username} onChange={event => setUsername(event.target.value)} /></label>
+          <label>Port (optional)<input aria-label="SSH port" type="number" min="1" max="65535" value={port} onChange={event => setPort(event.target.value)} /></label>
+          <label>Identity file (optional)<input aria-label="SSH identity file" value={identityFile} onChange={event => setIdentityFile(event.target.value)} /></label>
+          <p>Uses your SSH configuration and keys. Password and host verification prompts appear in the terminal.</p>
+        </> : <label>Distribution (optional)<input autoFocus aria-label="WSL distribution" placeholder="Default distribution" value={distro} onChange={event => setDistro(event.target.value)} /></label>}
+        <div><button type="submit">Connect</button><button type="button" onClick={() => setConnection(null)}>Cancel</button></div>
+      </form>}
       {profile?.general && <p>Git is available in project workspaces.</p>}
       {!!tools.recent?.length && <div className="tool-recents"><h3>Recent pages</h3>{tools.recent.slice(0, 8).map(url => <button key={url} type="button" title={url}
         onClick={() => action({ type: 'add', kind: 'browser', replaceId: selected.id, url })}>{url}</button>)}</div>}
@@ -104,5 +130,8 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
         worktreeSessions={sessions.flatMap(tab => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])}
         onClose={() => { if (selected) action({ type: 'close', id: selected.id }) }} />
     </div>}
+    {project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-terminal-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
+      <ToolTerminalPanel profileId={project.profileId} id={tab.id} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
+    </div>)}
   </aside>
 }
