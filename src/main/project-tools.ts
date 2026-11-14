@@ -79,7 +79,7 @@ export class ProjectToolService {
       const connected = id === current && session?.workspaceProfileId === bridge.profileId && liveSession(session.status)
       const project = this.projects.get(bridge.profileId), group = this.groups.get(bridge.profileId)
       const selected = project?.tabs.find(tab => tab.id === project.activeId && tab.kind === 'browser')?.pageId
-        ?? group?.browser.snapshot.activePageId
+        ?? group?.browser.uiPageId
       const pageId = connected && selected !== undefined && group?.browser.hasPage(selected) ? selected : null
       if (bridge.connected !== connected || bridge.uiPageId !== pageId) {
         bridge.connected = connected; bridge.pageId = pageId; bridge.uiPageId = pageId; bridge.revision++

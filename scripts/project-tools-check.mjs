@@ -129,6 +129,22 @@ if (!process.versions.electron) {
     assert.equal((await s2('/status')).status, 409)
     await action({ type: 'select', id: b.id })
     assert.equal((await s1('/status')).body.activePageId, b.pageId)
+    // Non-browser panel selections must not recurse through reader cursor validation.
+    for (const kind of ['git', 'new']) {
+      await action({ type: 'add', kind })
+      const selected = state().activeId
+      const status = await s1('/status')
+      assert.equal(status.status, 200)
+      assert.equal(status.body.activePageId, b.pageId)
+      assert.equal((await s1('/read/tabs')).status, 200)
+      assert.equal(state().activeId, selected)
+      if (kind === 'new') await action({ type: 'close', id: selected })
+    }
+    await action({ type: 'select', id: b.id })
+    await action({ type: 'visible', visible: false })
+    assert.equal((await s1('/status')).status, 200)
+    assert.equal(state().visible, false)
+    await action({ type: 'visible', visible: true })
     currentSession = 's2'; tools.refreshConnections()
     assert.equal((await s1('/status')).status, 409)
     assert.equal((await s2('/status')).body.activePageId, b.pageId)

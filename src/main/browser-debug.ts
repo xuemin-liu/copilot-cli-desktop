@@ -275,6 +275,8 @@ export class BrowserDebug {
       ...(page.window ? { window: true } : {}), ...(page.error ? { error: page.error } : {}) }))
   }
   hasPage(id: number): boolean { return this.pages.has(id) && !this.pages.get(id)!.contents.isDestroyed() }
+  /** Read UI selection without refreshing reader state or validating a command cursor. */
+  get uiPageId(): number { return this.activePageId }
   selectUiPage(id: number): void { if (this.activePageId !== id) { this.selectPage(id); this.changed() } }
   createPage(): number {
     const limit = this.canCreatePage(); if (limit) throw new Error(limit)
