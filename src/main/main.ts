@@ -1817,6 +1817,9 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (status === 'approval-needed') promptDrafts.get(id)?.suppressContext()
     tabsState = setTabStatus(tabsState, id, status)
     tabsState = setTabProcessId(tabsState, id, session.processId)
+    if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed')) {
+      void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
+    }
     // A session whose process ended cannot answer: it leaves its meeting (closing it, for a host). Not while the app quits:
     // its meetings are saved as they stand and go on after the next start.
     if (managedTabs.get(id)?.session === session && (status === 'completed' || status === 'crashed') && !shuttingDown()) forgetMeetingSession(id)
@@ -1858,6 +1861,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
+    if (managedTabs.get(id)?.session === session) void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
     usageService?.noteSourceChanged()
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)

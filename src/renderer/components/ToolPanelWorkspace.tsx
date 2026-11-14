@@ -84,7 +84,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     {selected?.kind === 'new' && <div id={`tool-content-${selected.id}`} role="tabpanel" className="tool-launcher">
       <h2>New tab</h2>
       <form onSubmit={event => { event.preventDefault(); action({ type: 'add', kind: 'browser', replaceId: selected.id, ...(address.trim() ? { url: address.trim() } : {}) }); setAddress('') }}>
-        <input aria-label="New browser URL" placeholder="Search or enter a URL" value={address} onChange={event => setAddress(event.target.value)} />
+        <input aria-label="New browser URL" placeholder="localhost:3000 or example.com" value={address} onChange={event => setAddress(event.target.value)} />
         <button type="submit">Open browser</button>
       </form>
       <div className="tool-launcher-types">{TOOL_TYPES.map(type => <button type="button" key={type.kind} disabled={type.kind === 'git' && Boolean(profile?.general)}

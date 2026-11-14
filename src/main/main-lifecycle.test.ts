@@ -103,7 +103,7 @@ interface Harness {
   blockBrowserDispose(work: Promise<void>, started: () => void): void
   request<T = DesktopState>(name: string, ...args: unknown[]): Promise<T>
   cleanup(): Promise<void>
-  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; cols: number; rows: number; worktreeTimeoutMinutes?: number; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void }[]
+  spawns: { args: string[]; cwd: string; env: NodeJS.ProcessEnv; cols: number; rows: number; worktreeTimeoutMinutes?: number; stopped: boolean; written: string[]; resized: number[][]; emitData(data: string): void; emitExit(): void }[]
 }
 
 /** Exercise the unchanged main.ts lifecycle functions and registered IPC
@@ -215,7 +215,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           const work = nextSpawn; nextSpawn = null; if (work) await work();
           const exits = new Set();
           const dataListeners = new Set();
-          const record = { args, cwd: options.cwd, env: options.env, cols: options.cols, rows: options.rows, worktreeTimeoutMinutes: options.worktreeTimeoutMinutes, stopped: false, written: [], resized: [], emitData(data) { for (const fn of dataListeners) fn(data); } };
+          const record = { args, cwd: options.cwd, env: options.env, cols: options.cols, rows: options.rows, worktreeTimeoutMinutes: options.worktreeTimeoutMinutes, stopped: false, written: [], resized: [], emitExit() { for (const fn of exits) fn({exitCode:0}); }, emitData(data) { for (const fn of dataListeners) fn(data); } };
           spawns.push(record);
           return { pid: undefined, onData(fn) { dataListeners.add(fn); }, onExit(fn) { exits.add(fn); }, write(data) { record.written.push(data); }, resize(cols, rows) { record.resized.push([cols, rows]); },
             kill() { record.stopped = true; for (const fn of exits) fn({ exitCode: 0 }); } };
@@ -3090,4 +3090,21 @@ test('a production attention broadcast reads task history once even with notific
   h.configure({...DEFAULT_DESKTOP_CONFIG,notifications:false,profiles:[profile],activeProfileId:profile.id},capabilities)
   assert.equal(h.workflowBroadcastReads(false),1,'the ordinary snapshot is the baseline read')
   assert.equal(h.workflowBroadcastReads(true),1,'attention shares that snapshot instead of decoding it again')
+}))
+
+
+test('natural CLI exit revokes its browser bridge while keeping project pages', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  const id=(await harness.createMain()).activeTabId!;
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser',sessionId:id});
+  const resource=tools.projects[0].tabs[0].resource;
+  const endpoint=harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE!;
+  await access(endpoint);harness.spawns[0]!.emitExit();
+  for(let attempt=0;attempt<100 && (await harness.request<any>('desktop:get-state')).tabs.find((tab:any)=>tab.id===id).status==='running';attempt++) await pause(10);
+  assert.equal((await harness.request<any>('desktop:get-state')).tabs.find((tab:any)=>tab.id===id).status,'completed');
+  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
+  for(let attempt=0;attempt<100 && await access(endpoint).then(()=>true,()=>false);attempt++) await pause(10);
+  await assert.rejects(access(endpoint));
+  await harness.request('desktop:browser-state',resource);
+  assert.equal(harness.browserConfigs.length,1);
 }))

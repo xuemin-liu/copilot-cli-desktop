@@ -16,6 +16,7 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab } from './tool-tabs.js'
 
 interface Group { browser: BrowserDebug; generation: string }
+const liveSession = (status: string | undefined): boolean => status === 'running' || status === 'approval-needed'
 interface Bridge { server: Server; token: string; endpoint: string; profileId: string; connected: boolean; pageId: number | null; revision: number }
 interface Options {
   userData: string
@@ -256,7 +257,7 @@ export class ProjectToolService {
   }
   private requireBridge(project: ProjectTools, sessionId: string): Bridge {
     const session = this.options.session(sessionId), bridge = this.bridges.get(sessionId)
-    if (!session || session.workspaceProfileId !== project.profileId || session.status !== 'running' || !bridge || bridge.profileId !== project.profileId) throw new Error('Choose a running CLI session in this project; reconnect after Resume.')
+    if (!session || session.workspaceProfileId !== project.profileId || !liveSession(session.status) || !bridge || bridge.profileId !== project.profileId) throw new Error('Choose a running CLI session in this project; reconnect after Resume.')
     return bridge
   }
   async startBridge(sessionId: string, profileId: string, endpoint: string): Promise<void> {
@@ -268,13 +269,14 @@ export class ProjectToolService {
       const port = (server.address() as { port: number }).port
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { fail(403, 'Forbidden'); return }
       if (!constantTimeTokenEqual(request.headers.authorization ?? '', `Bearer ${token}`)) { fail(401, 'Unauthorized'); return }
+      if (!liveSession(this.options.session(sessionId)?.status)) { fail(409, 'CLI session is not running; resume it and reconnect.'); return }
       const group = this.groups.get(profileId), revision = bridge.revision
       if (!bridge.connected) { fail(409, 'No browser connected. Open a Browser tab and choose Connect to session; reconnect after Resume.'); return }
       if (!group) { fail(409, 'No browser pages open. Add a Browser tab, then run tabs and select a page ID.'); return }
       const cursor: BrowserCursor = {
         active: () => bridge.pageId ?? 0,
         select: id => { if (!group.browser.hasPage(id)) throw new Error('Browser page closed'); bridge.pageId = id; this.options.changed() },
-        validate: () => { if (this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) throw new Error('Browser connection changed; reconnect or retry the command.') },
+        validate: () => { if (!liveSession(this.options.session(sessionId)?.status) || this.bridges.get(sessionId) !== bridge || !bridge.connected || bridge.revision !== revision || this.groups.get(profileId) !== group) throw new Error('Browser connection changed; reconnect or retry the command.') },
       }
       try { group.browser.serveControl(request, response, { port, token, cursor }) }
       catch (error) { fail(409, error instanceof Error ? error.message : 'Browser unavailable') }

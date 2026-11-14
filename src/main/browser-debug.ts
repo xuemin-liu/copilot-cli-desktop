@@ -515,6 +515,7 @@ export class BrowserDebug {
       view.setBounds({ x: 0, y: 0, width, height })
     }
     window.contentView.addChildView(view)
+    view.setVisible(true)
     fit()
     window.on('resize', fit)
     // Closing the window asks the page first, so a beforeunload guard can keep unsaved edits; the window goes once the page

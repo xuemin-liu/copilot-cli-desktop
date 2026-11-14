@@ -130,8 +130,12 @@ if (!process.versions.electron) {
     await action({ type: 'select', id: reopened.id })
     await until(() => contents(reopened)?.getURL().endsWith('/reopened') && !contents(reopened).isLoading(), 'reopened loaded')
     await contents(reopened).executeJavaScript('document.querySelector("#value").value="popout draft"')
+    const browser = tools.resource(reopened.resource).browser
+    await browser.action('view:console')
+    assert.equal(browser.view.getVisible(), false)
     await action({ type: 'pop-out', id: reopened.id })
     await until(() => state().tabs.find(tab => tab.id === reopened.id)?.detached, 'popped out')
+    assert.equal(browser.view.getVisible(), true, 'a popped-out page is visible even when Console was selected')
     await action({ type: 'return', id: reopened.id })
     assert.equal(await contents(reopened).executeJavaScript('document.querySelector("#value").value'), 'popout draft')
     // The cap is global, including hidden projects; failure must not create an extra tab.
