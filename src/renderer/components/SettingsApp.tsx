@@ -850,7 +850,7 @@ export function SettingsApp(): JSX.Element | null {
       </section>
 
       <section>
-        <h2>Session browser</h2>
+        <h2>Project browsers</h2>
         <label className="settings-row settings-row-select">
           Cookies, logins and site storage
           <select
@@ -859,40 +859,38 @@ export function SettingsApp(): JSX.Element | null {
               browserProfile: event.target.value as DesktopSettingsSnapshot['browserProfile'],
             })}
           >
-            <option value="separate">Separate for each session</option>
-            <option value="shared">Shared by all sessions, like Chrome</option>
+            <option value="separate">Separate for each project</option>
+            <option value="shared">Shared by all projects, like Chrome</option>
           </select>
         </label>
         <p className="settings-disclaimer">
-          Separate keeps each session signed in on its own and clears its data when the session closes. Shared lets
-          every session use the same logins, including the Copilot agent in each session, and keeps them when a session
-          closes. Browsers already open keep their current profile until their session closes or the app restarts.
+          Separate gives each project its own cookies and site storage. Closing tabs or CLI sessions keeps your logins.
+          Removing a workspace removes its private browser data; adding it again starts fresh. Shared uses one profile
+          across projects. Open browsers keep their profile until all their project's pages close or the app restarts.
           History, site permissions and zoom are shared either way.
         </p>
         <label className="settings-row settings-row-select">
-          DevTools settings and Local Overrides for new sessions
+          Default Local Overrides for new project browsers
           <select
             value={snapshot.browserOverrides}
             onChange={(event) => updatePreference({
               browserOverrides: event.target.value as DesktopSettingsSnapshot['browserOverrides'],
             })}
           >
-            <option value="shared">Shared by all sessions</option>
-            <option value="private">Separate for each session</option>
+            <option value="shared">Shared settings</option>
+            <option value="private">Separate for each project</option>
           </select>
         </label>
         <p className="settings-disclaimer">
-          Shared gives every session's DevTools the same Local Overrides folder, on/off switch and other DevTools settings, like
-          one Chrome profile. Separate starts a session's DevTools with defaults and keeps its overrides folder and settings to
-          that session; they are removed after it closes. This is the default in the new-session dialog, where each session can
-          choose. Sessions already open keep what they started with. With shared cookies and logins, the Local Overrides
-          on/off switch is shared too; the folder stays per session.
+          Each project remembers its Local Overrides choice in Browser settings. Private keeps that project's DevTools
+          settings and folders separate. Shared uses common defaults. Changes to a project's choice apply after all its
+          browser tabs close and a new Browser opens. With shared cookies, the overrides switch is also shared.
         </p>
         <div className="settings-actions">
           <button
             type="button"
             onClick={() => {
-              if (!window.confirm('Sign every session out of the shared browser profile and remove its cookies, site storage and cache?')) return
+              if (!window.confirm('Sign every project out of the shared browser profile and remove its cookies, site storage and cache?')) return
               void window.copilotDesktopSettings.clearSharedBrowserData()
                 .then(() => notify('Cleared shared browser data.'), (error: unknown) => notifyError(error, 'Could not clear shared browser data'))
             }}

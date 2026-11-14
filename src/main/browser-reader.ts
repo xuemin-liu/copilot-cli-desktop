@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomBytes } from 'node:crypto'
 import { dialog, nativeImage } from 'electron'
 import type { BaseWindow, WebContents } from 'electron'
@@ -48,6 +49,11 @@ interface PageReader {
   capture: 'starting' | 'ready' | 'unavailable'
   requests: Map<string, { requestId: string; sessionId?: string; resourceType: string; response: ResponseRecord }>
 }
+export interface BrowserCursor {
+  active(): number
+  select(id: number): void
+  validate(): void
+}
 export interface BrowserReaderOptions {
   pages: () => WebContents[]
   active: () => number
@@ -81,15 +87,39 @@ export class BrowserReader {
   private pickAbort: AbortController | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
+  private readonly closeGuards = new Map<number, { confirm(): Promise<boolean>; cancelled(): void; failed(error: unknown): void }>()
+  async closePage(id: number, confirm: () => Promise<boolean>): Promise<boolean> {
+    const page = this.page(String(id))
+    await this.attach(page)
+    return new Promise<boolean>((resolve, reject) => {
+      let settled = false
+      const finish = (value: boolean): void => {
+        if (settled) return; settled = true
+        this.closeGuards.delete(id); page.contents.off('destroyed', destroyed); resolve(value)
+      }
+      const destroyed = (): void => finish(true)
+      const failed = (error: unknown): void => { if (settled) return; settled = true; this.closeGuards.delete(id); page.contents.off('destroyed', destroyed); reject(error) }
+      this.closeGuards.set(id, { confirm, cancelled: () => finish(false), failed })
+      page.contents.once('destroyed', destroyed)
+      void this.command(page, 'Page.close').catch(error => {
+        if (page.contents.isDestroyed()) finish(true)
+        else failed(error)
+      })
+    })
+  }
+  private readonly cursor = new AsyncLocalStorage<BrowserCursor>()
+  withCursor<T>(cursor: BrowserCursor, action: () => T): T { return this.cursor.run(cursor, action) }
+  private activeId(): number { this.cursor.getStore()?.validate(); return this.cursor.getStore()?.active() ?? this.options.active() }
+  private selectId(id: number): void { const cursor = this.cursor.getStore(); if (cursor) { cursor.validate(); cursor.select(id) } else this.options.select(id) }
   constructor(private readonly options: BrowserReaderOptions) {}
 
-  get testState(): BrowserTestState { return structuredClone({ enabled: this.testPageId === this.options.active(), ...this.testProgress }) }
+  get testState(): BrowserTestState { return structuredClone({ enabled: this.testPageId === this.activeId(), ...this.testProgress }) }
 
   setTesting(enabled: boolean): void {
     const origin = enabled ? this.httpOrigin(this.page().contents.getURL()) : null
     if (enabled && !origin) throw new Error('Open an HTTP or HTTPS page before enabling Testing mode.')
     this.testAbort?.abort()
-    this.testPageId = enabled ? this.options.active() : null
+    this.testPageId = enabled ? this.activeId() : null
     this.testOrigin = origin
     this.testBlocked = false
   }
@@ -116,7 +146,7 @@ export class BrowserReader {
     // Keep the last completed report so polling cannot resize the viewport when
     // a new run starts. The running-step indicator describes the current test.
     this.testProgress = { running: true, step: 0, total: plan.steps.length, label: '', report: this.testProgress.report, lastCompletedAction: this.testProgress.lastCompletedAction ?? null }
-    const active = (): boolean => !this.disposed && !page.contents.isDestroyed() && this.options.active() === page.contents.id && this.testPageId === page.contents.id
+    const active = (): boolean => !this.disposed && !page.contents.isDestroyed() && this.activeId() === page.contents.id && this.testPageId === page.contents.id
     let executionStarted = false
     try {
       const frames = await this.frames(page, this.testAbort.signal)
@@ -207,6 +237,7 @@ export class BrowserReader {
   }
 
   private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
+    this.cursor.getStore()?.validate()
     if (signal?.aborted) throw new Error('Test stopped.')
     const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') || method === 'Page.reload' || method === 'Page.navigate'))
     if (delivery) {
@@ -223,6 +254,7 @@ export class BrowserReader {
         this.testDelivery = this.testInputUncertain ? 'uncertain' : 'partial'
         if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = this.testDelivery
       }
+      this.cursor.getStore()?.validate()
       return result
     } catch (error) { if (delivery) this.testInputUncertain = true; throw error }
     finally { if (timer) clearTimeout(timer) }
@@ -312,6 +344,20 @@ export class BrowserReader {
     const type = String(params.type ?? 'alert')
     const raw = String(params.message ?? '')
     const message = sanitizedText(raw).slice(0, 500)
+    const close = type === 'beforeunload' ? this.closeGuards.get(page.contents.id) : undefined
+    if (close) {
+      try {
+      const accept = await close.confirm().catch(() => false)
+      if (page.contents.isDestroyed()) return
+      await this.command(page, 'Page.handleJavaScriptDialog', { accept }, sessionId)
+      if (!accept) {
+        // The renderer must finish cancelling before another close can be sent.
+        await this.command(page, 'Runtime.evaluate', { expression: 'void 0', returnByValue: true }, sessionId)
+        close.cancelled()
+      }
+      } catch (error) { close.failed(error) }
+      return
+    }
     const testing = this.testAbort !== null && this.testPageId === page.contents.id
     const rule = page.dialogRule
     if (!testing && !rule) {
@@ -329,7 +375,7 @@ export class BrowserReader {
 
   /** The selected page when a dialog holds it, else another page a dialog holds: no waiting dialog stays out of sight. */
   private dialogPage(): PageReader | undefined {
-    const active = this.readers.get(this.options.active())
+    const active = this.readers.get(this.activeId())
     if (active?.dialog) return active
     const pages = this.options.pages()
     return [...this.readers.values()].find(page => page.dialog && pages.includes(page.contents))
@@ -368,7 +414,7 @@ export class BrowserReader {
 
   private page(id?: string): PageReader {
     if (id !== undefined && !/^[1-9]\d*$/.test(id)) throw new Error('Invalid browser page ID.')
-    const page = this.readers.get(id === undefined ? this.options.active() : Number(id))
+    const page = this.readers.get(id === undefined ? this.activeId() : Number(id))
     if (!page || page.contents.isDestroyed() || !this.options.pages().includes(page.contents)) throw new Error('Page is unavailable in this session.')
     return page
   }
@@ -465,7 +511,7 @@ export class BrowserReader {
     const buttons = { left: 1, middle: 4, right: 2 }[button]
     const check = (): void => {
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
-      if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
+      if (signal.aborted || this.disposed || page.contents.isDestroyed() || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id) throw new Error('Test stopped or the selected page changed.')
       if (!['assert', 'waitFor', 'discover'].includes(step.action) && (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isDestroyed()
         || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible())) throw new Error('Show the selected page to run test interactions.')
       if (this.testBlocked) throw new Error('Test navigation outside the enabled origin was blocked.')
@@ -659,7 +705,7 @@ export class BrowserReader {
         check(); stable(await targetPoint(false, path.at(-1), false, waypoint(path.length - 1))); completed = true
       } finally {
         if (pressed && !page.contents.isDestroyed()) {
-          const stopped = !completed || signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
+          const stopped = !completed || signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id
           const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button, buttons: 0, modifiers, clickCount: 1,
             x: stopped ? -1 : last.x, y: stopped ? -1 : last.y }, undefined, 1000)
           if (stopped) await release.catch(() => {})
@@ -681,7 +727,7 @@ export class BrowserReader {
         finally {
           if (!page.contents.isDestroyed()) {
             const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code, modifiers }, undefined, 1000)
-            if (signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id) await release.catch(() => {})
+            if (signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id) await release.catch(() => {})
             else await release
           }
         }
@@ -725,7 +771,7 @@ export class BrowserReader {
         stable(await targetPoint(false, step.point, false)); releaseOnTarget = true
       }
       finally {
-        const stopped = !releaseOnTarget || signal.aborted || this.disposed || this.options.active() !== page.contents.id || this.testPageId !== page.contents.id
+        const stopped = !releaseOnTarget || signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id
         if (!page.contents.isDestroyed()) {
           const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button, buttons: 0, modifiers, clickCount: count,
             x: stopped ? -1 : point.x, y: stopped ? -1 : point.y }, undefined, 1000)
@@ -741,6 +787,7 @@ export class BrowserReader {
    * for it. Only the desktop window can start this; the assistant's control server cannot.
    * With `onElement` the overlay stays on and every click is reported (up to ten) until it is cancelled or idle. */
   async pick(onElement?: (text: string) => void): Promise<string | null> {
+    this.cursor.getStore()?.validate()
     if (this.disposed) throw new Error('Browser session has closed.')
     if (this.busy || this.pickAbort) throw new Error('Another browser inspection, test or element selection is in progress.')
     const page = this.page()
@@ -774,7 +821,7 @@ export class BrowserReader {
       let count = 0
       while (true) {
         const backendNodeId = await next()
-        if (backendNodeId === null || abort.signal.aborted || this.disposed || page.contents.isDestroyed() || this.options.active() !== pageId) return null
+        if (backendNodeId === null || abort.signal.aborted || this.disposed || page.contents.isDestroyed() || this.activeId() !== pageId) return null
         if (!onElement) return await this.describePicked(page, backendNodeId)
         // In a multi-selection one stale element must not end the others.
         const text = await this.describePicked(page, backendNodeId).catch(() => null)
@@ -816,6 +863,7 @@ export class BrowserReader {
   get picking(): boolean { return this.pickAbort !== null }
 
   async read(command: string, args: string[], signal?: AbortSignal): Promise<unknown> {
+    this.cursor.getStore()?.validate()
     if (this.disposed) throw new Error('Browser session has closed.')
     if (this.busy) throw new Error('Another browser inspection or approval is in progress. Retry after it finishes.')
     this.busy = true
@@ -840,7 +888,7 @@ export class BrowserReader {
       return this.discoverTargets(page, frame.id, signal)
     }
     if (command === 'tabs') return { tabs: this.options.pages().map(contents => ({ id: contents.id,
-      url: readableUrl(contents.getURL()), active: contents.id === this.options.active(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
+      url: readableUrl(contents.getURL()), active: contents.id === this.activeId(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
     if (command === 'responses') {
       const pageId = this.page(args[0]).contents.id
       return { recording: this.options.recording(), limit: MAX_RESPONSES, timestamp: new Date().toISOString(),
@@ -850,11 +898,11 @@ export class BrowserReader {
     }
     if (command === 'response') {
       const record = this.responses.get(args[0]!)
-      if (!record) return { state: 'unavailable', reason: 'Response not captured, no longer retained, or belongs to another session.' }
+      if (!record || this.cursor.getStore() && record.pageId !== this.activeId()) return { state: 'unavailable', reason: 'Response not captured, no longer retained, or belongs to another page.' }
       return structuredClone(record)
     }
     const page = this.page(args[0])
-    if (command === 'select') { this.options.select(page.contents.id); return { pageId: page.contents.id, state: 'selected' } }
+    if (command === 'select') { this.selectId(page.contents.id); return { pageId: page.contents.id, state: 'selected' } }
     const frames = await this.frames(page, signal)
     if (command === 'frames') return { pageId: page.contents.id, frames: frames.map(frame => ({ id: frame.id,
       parentId: frame.parentId ?? null, url: readableUrl(frame.url) })), loading: page.contents.isLoading(), timestamp: new Date().toISOString(),
@@ -881,6 +929,7 @@ export class BrowserReader {
       return { ...metadata, ...await this.evaluate(page, frameId, 'scroll', { amount, snapshotId: args[3], nodeId: args[4] }) }
     }
     if (command === 'activate') {
+      if (!this.options.visible(page.contents.id)) throw new Error(`Show browser page ${page.contents.id} before requesting an interaction.`)
       const control = await this.evaluate(page, frameId, 'describe', { snapshotId: args[2], nodeId: args[3] }) as Params
       const filtered = redactBrowserValue(control).value as Params
       const label = String(filtered.name).replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, ' ').trim().slice(0, 200)
@@ -898,6 +947,7 @@ export class BrowserReader {
         ...(signal ? { signal } : {}),
       })).response === 1
       if (!approved || signal?.aborted || this.disposed) return { ...metadata, state: 'denied', reason: 'User did not approve the interaction, or the request was cancelled.' }
+      if (!this.options.visible(page.contents.id)) throw new Error(`Show browser page ${page.contents.id} before requesting an interaction.`)
       return { ...metadata, ...await this.evaluate(page, frameId, 'activate', { snapshotId: args[2], nodeId: args[3] }) }
     }
     if (command === 'screenshot') {

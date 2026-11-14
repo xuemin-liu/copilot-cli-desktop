@@ -125,8 +125,15 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         let disposeWork, disposeStarted;
         export function blockBrowserDispose(work, started) { disposeWork = work; disposeStarted = started; }
         export class BrowserDebug {
-          constructor(owner, settings, options) { browserConfigs.push({ settings, options }); }
-          snapshot = { url: '', console: [], network: [] };
+          constructor(owner, settings, options) { this.options=options; browserConfigs.push({ settings, options }); }
+          pages = [{id:12,title:"Browser",url:""}];
+          get pageCount(){return this.pages.length;}
+          pageList(){return this.pages;}
+          hasPage(id){return this.pages.some(p=>p.id===id);}
+          selectUiPage(id){this.snapshot.activePageId=id;}
+          createPage(){const id=this.pages.length+12;this.pages.push({id,title:"Browser",url:""});return id;}
+          async closePage(id){this.pages=this.pages.filter(p=>p.id!==id);this.options.changed?.();return true;}
+          snapshot = { activePageId:12, url: '', console: [], network: [] };
           async open() { return this.snapshot; }
           async navigate(url) { this.snapshot.url = url; return this.snapshot; }
           action() { return this.snapshot; }
@@ -367,7 +374,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -397,7 +404,7 @@ test('worktree timeout settings validate and persist, and new sessions and resta
   const first = await harness.createMain()
   assert.equal(harness.spawns[0]!.worktreeTimeoutMinutes, 10)
   for (const value of [0, -1, 1.5, 1441, '25', null]) {
-    await assert.rejects(harness.requestSettings('desktop-settings:update-preferences', { worktreeTimeoutMinutes: value }), /Invalid desktop preferences/)
+    await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { worktreeTimeoutMinutes: value }), /Invalid desktop preferences/)
   }
   const saved = await harness.requestSettings('desktop-settings:update-preferences', { worktreeTimeoutMinutes: 25 }) as { worktreeTimeoutMinutes: number }
   assert.equal(saved.worktreeTimeoutMinutes, 25)
@@ -645,85 +652,60 @@ for (const kind of ['post', 'add-dir'] as const) test(`automatic meeting ${kind}
   assert.equal((await harness.request('desktop:get-state')).tabs.find(candidate => candidate.id === tab.id)?.lastSessionId, a)
 }))
 
-test('production browser IPC validates session ownership, frames, bounds and shutdown', async () => fixture(async (harness, directory) => {
-  configure(harness, directory)
-  harness.createTestWindow()
-  const tab = (await harness.createMain()).activeTabId!
-  await harness.request('desktop:browser-open', tab)
-  for (const channel of ['open', 'state', 'navigate', 'action', 'bounds', 'export']) {
-    await assert.rejects(harness.requestWithFrame(`desktop:browser-${channel}`, 'https://untrusted.test'), /untrusted renderer/)
-    await assert.rejects(async () => harness.requestSettings(`desktop:browser-${channel}`), /untrusted renderer/)
+test('project browser IPC validates ownership, frames, bounds and closed resources', async () => fixture(async (harness, directory) => {
+  const {profile}=configure(harness,directory); harness.createTestWindow();
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
+  const tab=tools.projects[0].tabs[0].resource;
+  await harness.request('desktop:tools-state');
+  for (const channel of ['open','state','navigate','action','bounds','export']) {
+    await assert.rejects(async () => harness.requestWithFrame(`desktop:browser-${channel}`,'https://untrusted.test'), /untrusted renderer/);
+    await assert.rejects(async () => harness.requestSettings(`desktop:browser-${channel}`), /untrusted renderer/);
   }
-  await assert.rejects(async () => harness.request('desktop:browser-open', 'tab-999'), /Unknown browser session/)
-  await harness.request('desktop:browser-bounds', tab, { x: 5, y: 10, width: 500, height: 600 })
-  assert.deepEqual(harness.browserBounds(), { x: 5, y: 10, width: 500, height: 600 })
-  await harness.request('desktop:pop-out-tab', tab)
-  await harness.requestIn(tab, 'desktop:browser-state', tab)
-  await assert.rejects(async () => harness.request('desktop:browser-state', tab), /owning session window/)
-  for (const bounds of [{ x: -1, y: 0, width: 1, height: 1 }, { x: 0, y: 0, width: Infinity, height: 1 },
-    { x: 0, y: 0, width: 20001, height: 1 }, {}, 'bad']) {
-    await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-bounds', tab, bounds), /Invalid browser bounds/)
-  }
-  await harness.requestIn(tab, 'desktop:browser-bounds', tab, null)
-  assert.equal(harness.browserBounds(), null)
-  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-navigate', tab, 123), /Invalid browser URL/)
-  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-navigate', tab, 'x'.repeat(8193)), /Invalid browser URL/)
-  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-action', tab, {}), /Invalid browser action/)
-  harness.beginQuit()
-  await assert.rejects(async () => harness.requestIn(tab, 'desktop:browser-state', tab), /owning session window/)
+  await assert.rejects(async () => harness.request('desktop:browser-open','tab-999'), /closed/);
+  await harness.request('desktop:browser-bounds',tab,{x:5,y:10,width:500,height:600});
+  assert.deepEqual(harness.browserBounds(),{x:5,y:10,width:500,height:600});
+  for(const bounds of [{x:-1,y:0,width:1,height:1},{x:0,y:0,width:Infinity,height:1},{x:0,y:0,width:20001,height:1},{},'bad'])
+    await assert.rejects(async () => harness.request('desktop:browser-bounds',tab,bounds),/Invalid browser bounds/);
+  await assert.rejects(async () => harness.request('desktop:browser-navigate',tab,123),/Invalid browser URL/);
+  await assert.rejects(async () => harness.request('desktop:browser-action',tab,{}),/Invalid browser action/);
+  const session=(await harness.createMain()).activeTabId!; await harness.request('desktop:pop-out-tab',session);
+  await assert.rejects(async () => harness.requestIn(session,'desktop:browser-state',tab),/main window/);
+  await harness.request('desktop:tools-action',profile.id,{type:'close',id:tools.projects[0].tabs[0].id});
+  await assert.rejects(async () => harness.request('desktop:browser-state',tab),/closed/);
 }))
 
-test('captured browser log export uses the owning session snapshot and respects cancellation', async () => fixture(async (harness, directory) => {
-  configure(harness, directory)
-  harness.createTestWindow()
-  const tab = (await harness.createMain()).activeTabId!
-  // Seed the native browser stub; rendering/capture/redaction are checked in real Electron.
-  const browser = await harness.request<any>('desktop:browser-open', tab)
-  browser.console.push({ pageId: 12, message: 'exception token=[redacted]' })
-  browser.network.push({ pageId: 12, url: 'http://localhost/api?token=[redacted]' })
-  const path = join(directory, 'browser-log.json')
-  harness.configureBrowserExportDialog({ canceled: false, filePath: path })
-  await harness.request('desktop:browser-export', tab, 'console')
-  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.console)
-  await assert.rejects(harness.request('desktop:browser-export', tab, '../secret'), /Invalid browser export/)
-  await harness.request('desktop:pop-out-tab', tab)
-  await assert.rejects(harness.request('desktop:browser-export', tab, 'network'), /owning session window/)
-  await harness.requestIn(tab, 'desktop:browser-export', tab, 'network')
-  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.network)
-  harness.configureBrowserExportDialog({ canceled: true, filePath: path })
-  await harness.requestIn(tab, 'desktop:browser-export', tab, 'console')
-  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), browser.network, 'cancel does not overwrite an existing log')
+
+test('captured browser export contains only the selected page and respects cancellation', async () => fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
+  const tab=tools.projects[0].tabs[0].resource;
+  const browser=await harness.request<any>('desktop:browser-open',tab);
+  browser.console.push({pageId:12,message:'selected'},{pageId:99,message:'other'});
+  const path=join(directory,'browser-log.json');harness.configureBrowserExportDialog({canceled:false,filePath:path});
+  await harness.request('desktop:browser-export',tab,'console');
+  assert.deepEqual(JSON.parse(await readFile(path,'utf8')),[browser.console[0]]);
+  await assert.rejects(async () => harness.request('desktop:browser-export',tab,'../secret'),/Invalid browser export/);
+  harness.configureBrowserExportDialog({canceled:true,filePath:path});await harness.request('desktop:browser-export',tab,'network');
+  assert.deepEqual(JSON.parse(await readFile(path,'utf8')),[browser.console[0]]);
 }))
 
-test('browser IPC and CLI environments stay tied to their session through switches, restart and close', async () => fixture(async (harness, directory) => {
-  configure(harness, directory)
-  harness.createTestWindow()
-  const first = (await harness.createMain()).activeTabId!
-  await harness.request('desktop:browser-open', first)
-  await harness.request('desktop:browser-navigate', first, 'https://first.example/')
-  const second = (await harness.createMain()).activeTabId!
-  await harness.request('desktop:browser-open', second)
-  await harness.request('desktop:browser-navigate', second, 'https://second.example/')
-  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/')
-  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', second)).url, 'https://second.example/')
-  assert.notEqual(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE, harness.spawns[1]!.env.COPILOT_DESKTOP_BROWSER_STATE)
-  assert.ok(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_HELPER)
-  await harness.request('desktop:activate-tab', first)
-  await harness.request('desktop:restart-tab', first)
-  assert.equal(harness.spawns[2]!.env.COPILOT_DESKTOP_BROWSER_STATE, harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE)
-  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/')
-  let finishDispose!: () => void
-  let disposeStarted!: () => void
-  const disposing = new Promise<void>(accept => { disposeStarted = accept })
-  harness.blockBrowserDispose(new Promise<void>(accept => { finishDispose = accept }), disposeStarted)
-  const closing = harness.request('desktop:close-tab', first)
-  await disposing
-  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', first)).url, 'https://first.example/', 'polling during close must not recreate a browser')
-  finishDispose()
-  await closing
-  await assert.rejects(async () => harness.request('desktop:browser-state', first), /Unknown browser session/)
-  assert.equal((await harness.request<{ url: string }>('desktop:browser-state', second)).url, 'https://second.example/')
+
+test('project browser survives CLI focus, restart and close while session bridges are isolated', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  const first=(await harness.createMain()).activeTabId!;
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser',sessionId:first});
+  const resource=tools.projects[0].tabs[0].resource;
+  await harness.request('desktop:browser-navigate',resource,'https://first.example/');
+  const second=(await harness.createMain()).activeTabId!;
+  assert.notEqual(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[1]!.env.COPILOT_DESKTOP_BROWSER_STATE);
+  await harness.request('desktop:activate-tab',first);await harness.request('desktop:restart-tab',first);
+  assert.equal(harness.spawns[2]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE);
+  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0,'restart requires reconnect');
+  await harness.request('desktop:close-tab',first);await harness.request('desktop:close-tab',second);
+  assert.equal((await harness.request<any>('desktop:browser-state',resource)).url,'https://first.example/');
+  assert.equal(harness.browserConfigs.length,1);
 }))
+
 
 test('pop-out transfers terminal ownership, focuses one window, and docks without stopping the CLI', async () => fixture(async (harness, directory) => {
   const profile = createWorkspaceProfile(directory)
@@ -1034,7 +1016,7 @@ test('an unavailable usage worker cannot permanently block desktop updates', asy
 
 test('a live collector failure still prevents update installation', async () => fixture(async (harness) => {
   harness.configureUpdate(async () => { throw new Error('source collection failed') }, () => assert.fail('installer must not start'))
-  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /source collection failed/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:install-update'), /source collection failed/)
   assert.equal(harness.updateBusy(), false)
 }))
 
@@ -1090,10 +1072,10 @@ test('updater errors during a flush retain the install interlock until preparati
   const began = new Promise<void>((resolve) => { entered = resolve })
   const pending = new Promise<void>((resolve) => { finish = resolve })
   harness.configureUpdate(async () => { entered(); await pending }, () => assert.fail('installer must not start'))
-  const installing = assert.rejects(harness.requestSettings('desktop-settings:install-update'), /failed while preparing/)
+  const installing = assert.rejects(async () => harness.requestSettings('desktop-settings:install-update'), /failed while preparing/)
   await began; harness.updateError()
   assert.equal(harness.updateBusy(), true)
-  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:install-update'), /already in progress/)
   finish(); await installing
   assert.equal(harness.updateBusy(), false)
 }))
@@ -1114,7 +1096,7 @@ test('a stuck pre-install flush returns an error without launching an unprotecte
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let installed = false
   harness.configureUpdate(() => new Promise(() => {}), () => { installed = true })
-  const installing = assert.rejects(harness.requestSettings('desktop-settings:install-update'), /deadline/)
+  const installing = assert.rejects(async () => harness.requestSettings('desktop-settings:install-update'), /deadline/)
   await new Promise<void>((resolve) => setImmediate(resolve))
   t.mock.timers.tick(30_001)
   await installing
@@ -1127,8 +1109,8 @@ test('check and download requests cannot interfere with update preparation', asy
   const pending = new Promise<void>((resolve) => { finish = resolve })
   harness.configureUpdate(() => pending, () => {})
   const installing = harness.requestSettings('desktop-settings:install-update')
-  await assert.rejects(harness.requestSettings('desktop-settings:check-for-updates'), /already in progress/)
-  await assert.rejects(harness.requestSettings('desktop-settings:download-update'), /already in progress/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:check-for-updates'), /already in progress/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:download-update'), /already in progress/)
   finish(); await installing
 }))
 
@@ -1144,7 +1126,7 @@ test('an updater quit dismisses the close prompt and cannot be mistaken for a fa
   assert.equal(harness.updateBusy(), true)
   await harness.waitForQuit()
   assert.equal(harness.beginQuit(), false)
-  await assert.rejects(harness.requestSettings('desktop-settings:install-update'), /already in progress/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:install-update'), /already in progress/)
 }))
 
 test('usage failures neither block CLI maintenance nor misreport a successful CLI update', async () => fixture(async (harness) => {
@@ -1200,10 +1182,7 @@ test('browser profile identity persists with restored tabs, CLI restarts, and le
   assert.ok(opened.tabs.every(tab => typeof tab.browserProfileId === 'string'))
   harness.createTestWindow()
   await harness.request('desktop:restart-tab', opened.tabs[0]!.id)
-  await harness.request('desktop:browser-open', opened.tabs[0]!.id)
-  assert.equal(harness.browserConfigs[0]!.settings, join(directory, 'browser-profiles', SOURCE, 'settings.json'))
-  assert.equal(harness.browserConfigs[0]!.options.partition, `persist:browser-debug:${SOURCE}`)
-  assert.notEqual(harness.browserConfigs[0]!.options.endpointPath, harness.browserConfigs[0]!.settings)
+  assert.equal(harness.browserConfigs.length, 0, 'restoring or restarting CLI tabs does not open browsers')
   const restarted = await harness.request('desktop:restart-tab', opened.tabs[0]!.id)
   assert.deepEqual(restarted.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
   await harness.flushConfig()
@@ -1211,7 +1190,7 @@ test('browser profile identity persists with restored tabs, CLI restarts, and le
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
 }))
 
-test('explicit close removes profile settings and helper files even when browser disposal rejects', async () => fixture(async (harness, directory) => {
+test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {
   configure(harness, directory)
   harness.createTestWindow()
   const opened = await harness.createMain()
@@ -1219,18 +1198,16 @@ test('explicit close removes profile settings and helper files even when browser
   const profile = join(directory, 'browser-profiles', tab.browserProfileId!)
   await mkdir(profile, { recursive: true })
   await writeFile(join(profile, 'settings.json'), 'saved-page')
-  await harness.request('desktop:browser-open', tab.id)
+  await mkdir(join(directory, 'Partitions', encodeURIComponent(`browser-debug:${tab.browserProfileId}`)), { recursive: true })
   const helper = harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_HELPER!
   await access(helper)
-  let rejectDispose!: (error: Error) => void
-  harness.blockBrowserDispose(new Promise<void>((_accept, reject) => { rejectDispose = reject }), () => rejectDispose(new Error('flush failed')))
   const closed = await harness.request('desktop:close-tab', tab.id)
   assert.equal(closed.tabs.length, 0)
   await assert.rejects(access(profile))
   await assert.rejects(access(helper))
   assert.deepEqual(harness.browserStorageClears.map(entry => entry.operation), ['closeAllConnections', 'clearData', 'clearCache', 'clearAuthCache'])
   assert.ok(harness.browserStorageClears.every(entry => entry.partition === `persist:browser-debug:${tab.browserProfileId}`))
-  await assert.rejects(async () => harness.request('desktop:browser-state', tab.id), /Unknown browser session/)
+  await assert.rejects(async () => harness.request('desktop:browser-state', tab.id), /closed/)
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
   assert.deepEqual(saved.profiles[0]!.tabs, [])
@@ -1261,7 +1238,7 @@ test('failed capability detection does not stop a running session during restart
     const opened = await harness.createMain()
     profile.launch.model = 'gpt-5.3-codex'
     capabilities.probeFailed = true
-    await assert.rejects(harness.request('desktop:restart-tab', opened.activeTabId), /Could not determine Copilot CLI capabilities/)
+    await assert.rejects(async () => harness.request('desktop:restart-tab', opened.activeTabId), /Could not determine Copilot CLI capabilities/)
     assert.equal(harness.spawns.length, 1)
     assert.equal(harness.spawns[0]!.stopped, false)
   })
@@ -1314,7 +1291,7 @@ test('restart IPC reapplies side-chat restrictions after profile escalation, bef
     assert.equal(restarted.tabs.find((tab) => tab.id === sideId)?.sessionPermissionPreset, 'read-only')
     assert.equal(restarted.tabs.find((tab) => tab.id === sideId)?.lastSessionId, FORK)
     capabilities.toolAllowlist = false
-    await assert.rejects(harness.request('desktop:restart-tab', sideId), /tool allowlists/)
+    await assert.rejects(async () => harness.request('desktop:restart-tab', sideId), /tool allowlists/)
     assert.equal(harness.spawns.length, 3)
     assert.equal(harness.spawns[2]!.stopped, false)
   })
@@ -1344,7 +1321,7 @@ test('duplicate fork IPC reports existing side chat instead of ignoring UUID/tit
     const main = await harness.createMain()
     const opened = await harness.createSide(profile, main.activeTabId!)
     await harness.request('desktop:activate-tab', main.activeTabId)
-    await assert.rejects(harness.request('desktop:fork-side-chat', main.activeTabId, SOURCE, 'Different title'), /already has a side chat/)
+    await assert.rejects(async () => harness.request('desktop:fork-side-chat', main.activeTabId, SOURCE, 'Different title'), /already has a side chat/)
     const after = await harness.request('desktop:get-state')
     assert.equal(after.activeTabId, main.activeTabId)
     assert.deepEqual(after.tabs.map((tab) => [tab.id, tab.title, tab.lastSessionId]), opened.tabs.map((tab) => [tab.id, tab.title, tab.lastSessionId]))
@@ -1452,19 +1429,15 @@ test('a restart starts only the tab that was on screen, and every other tab wait
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => [tab.lastSessionId, tab.active ?? false]), [[SOURCE, false], [FORK, true]])
 }))
 
-test('a stopped tab that was never started cannot open a browser until it is resumed', async () => fixture(async (harness, directory) => {
-  const { profile } = configure(harness, directory)
-  profile.tabs = [{ title: 'Stopped', lastSessionId: SOURCE }, { title: 'Shown', lastSessionId: FORK, active: true }]
-  await harness.restore()
-  const stopped = (await harness.request('desktop:get-state')).tabs[0]!
-  assert.equal(stopped.status, 'dormant')
-  harness.createTestWindow()
-  await assert.rejects(async () => harness.request('desktop:browser-state', stopped.id), /not running/)
-  assert.equal(harness.browserConfigs.length, 0)
-  await harness.request('desktop:restart-tab', stopped.id)
-  await harness.request('desktop:browser-state', stopped.id)
-  assert.equal(harness.browserConfigs.length, 1)
+test('dormant CLI tabs never create browsers when polled or resumed', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);profile.tabs=[{title:'Stopped',lastSessionId:SOURCE},{title:'Shown',lastSessionId:FORK,active:true}];
+  await harness.restore();const stopped=(await harness.request('desktop:get-state')).tabs[0]!;harness.createTestWindow();
+  await assert.rejects(async () => harness.request('desktop:browser-state',stopped.id),/closed/);
+  await harness.request('desktop:restart-tab',stopped.id);
+  await assert.rejects(async () => harness.request('desktop:browser-state',stopped.id),/closed/);
+  assert.equal(harness.browserConfigs.length,0);
 }))
+
 
 test('saved tabs that are never shown never start, and closing one starts nothing', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
@@ -1615,28 +1588,19 @@ test('opening a History session in a project startup has not listed yet keeps th
   assert.equal(after.tabs.filter((tab) => tab.lastSessionId === savedThere).length, 1, 'startup does not list it twice')
 }))
 
-test('an unloaded session\'s browser stays closed, also while it unloads, until Resume', async () => fixture(async (harness, directory) => {
-  const { profile } = configure(harness, directory)
-  profile.defaultResumeMode = 'new'
-  const tabId = (await harness.createMain()).activeTabId!
-  harness.createTestWindow()
-  await harness.request('desktop:browser-open', tabId)
-  assert.equal(harness.browserConfigs.length, 1)
-  let release!: () => void, disposing!: () => void
-  const disposeStarted = new Promise<void>((resolve) => { disposing = resolve })
-  harness.blockBrowserDispose(new Promise<void>((resolve) => { release = resolve }), disposing)
-  const unloading = harness.request('desktop:unload-tab', tabId)
-  await disposeStarted
-  // The panel on screen keeps polling its browser's state.
-  await assert.rejects(async () => harness.request('desktop:browser-state', tabId), /closing/)
-  release()
-  await unloading
-  await assert.rejects(async () => harness.request('desktop:browser-state', tabId), /not running/)
-  assert.equal(harness.browserConfigs.length, 1, 'no browser is created while unloading or unloaded')
-  await harness.request('desktop:restart-tab', tabId)
-  await harness.request('desktop:browser-state', tabId)
-  assert.equal(harness.browserConfigs.length, 2, 'Resume makes the browser available again')
+test('unloading a CLI revokes its bridge but retains project browser pages', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);profile.defaultResumeMode='new';harness.createTestWindow();
+  const id=(await harness.createMain()).activeTabId!;
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser',sessionId:id});
+  const resource=tools.projects[0].tabs[0].resource;
+  await harness.request('desktop:unload-tab',id);
+  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
+  await harness.request('desktop:browser-state',resource);
+  await harness.request('desktop:restart-tab',id);
+  await harness.request('desktop:browser-state',resource);
+  assert.equal(harness.browserConfigs.length,1);
 }))
+
 
 test('restoration links a saved side chat even when its parent follows it in the saved list', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
@@ -2430,40 +2394,15 @@ test('a restored tab starts in its existing worktree, or in the project folder o
   assert.equal(tabs.find((tab) => tab.title === 'Gone')?.launchWorktreePath, undefined)
 }))
 
-test('a session can keep Local Overrides to itself: its browser runs DevTools in its own partition, out of the shared settings', async () => {
-  await fixture(async (harness, directory) => {
-    const { profile, capabilities } = configure(harness, directory)
-    profile.defaultResumeMode = 'new'
-    const opened = await harness.createMain()
-    harness.createTestWindow()
-    assert.equal(opened.newSessionPrivateOverrides, false, 'shared by default')
-    assert.equal(opened.tabs[0]!.privateOverrides, undefined)
-    // Chosen in the new-session dialog.
-    await harness.request('desktop:create-tab', null, profile.id, 'Own overrides', { sharedOverrides: false })
-    const own = (await harness.request('desktop:get-state')).tabs.at(-1)!
-    assert.equal(own.privateOverrides, true)
-    await harness.request('desktop:browser-open', opened.tabs[0]!.id)
-    await harness.request('desktop:browser-open', own.id)
-    assert.equal(harness.browserConfigs[0]!.options.devtoolsPartition, undefined, 'the shared one uses the default session')
-    assert.equal(harness.browserConfigs[1]!.options.devtoolsPartition, `persist:browser-devtools:${own.browserProfileId}`)
-    const store = JSON.parse(await readFile(join(directory, 'browser-devtools.json'), 'utf8'))
-    assert.deepEqual(store.private, [own.browserProfileId], 'its page partition stays out of the shared DevTools settings')
-    // The Settings default applies to sessions started without a choice, and only to new ones.
-    harness.configure({ ...DEFAULT_DESKTOP_CONFIG, profiles: [profile], activeProfileId: profile.id, browserOverrides: 'private' }, capabilities)
-    const after = await harness.request('desktop:get-state')
-    assert.equal(after.newSessionPrivateOverrides, true)
-    assert.equal(after.tabs[0]!.privateOverrides, undefined, 'an open session keeps what it started with')
-    await harness.request('desktop:create-tab', null, profile.id, 'Default now private')
-    assert.equal((await harness.request('desktop:get-state')).tabs.at(-1)!.privateOverrides, true)
-    await harness.request('desktop:create-tab', null, profile.id, 'Shared anyway', { sharedOverrides: true })
-    assert.equal((await harness.request('desktop:get-state')).tabs.at(-1)!.privateOverrides, undefined)
-    // Saved with the tab.
-    await harness.flushConfig()
-    const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
-    assert.equal(saved.browserOverrides, 'private')
-    assert.deepEqual(saved.profiles[0]!.tabs.map((tab) => tab.privateOverrides === true), [false, true, true, false])
-  })
-})
+test('project Local Overrides are separate from legacy CLI tab preferences', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory);harness.createTestWindow();
+  await harness.request('desktop:tools-action',profile.id,{type:'overrides',mode:'private'});
+  const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
+  assert.equal(harness.browserConfigs[0]!.options.devtoolsPartition,`persist:browser-devtools:${tools.projects[0].browserProfileId}`);
+  await harness.createMain();await harness.createMain();
+  assert.equal(harness.browserConfigs.length,1,'CLI launches do not create browser groups');
+}))
+
 
 test('a fan-out starts sessions one after another in their own worktrees, each only after the previous one reported its folder', async () => {
   await fixture(async (harness, directory) => {
@@ -2747,7 +2686,7 @@ test('closing a worktree session removes its worktree and branch when nothing is
 
     // Keep: never touched.
     await harness.requestSettings('desktop-settings:update-preferences', { worktreeCleanup: 'keep' })
-    await assert.rejects(harness.requestSettings('desktop-settings:update-preferences', { worktreeCleanup: 'always' }), /Invalid desktop preferences/)
+    await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { worktreeCleanup: 'always' }), /Invalid desktop preferences/)
     const kept = await startWorktreeSession(harness, directory, git.path)
     await harness.request('desktop:close-tab', kept.tabId)
     await harness.worktreeCleanups()
@@ -2768,13 +2707,13 @@ test('a workspace with a session open or still starting cannot be removed, and o
   harness.blockSpawnPlanWhen((candidate) => candidate.id === second.id, new Promise<void>((resolve) => { release = resolve }))
   const starting = harness.request('desktop:create-tab', null, second.id)
   await new Promise((resolve) => setImmediate(resolve))
-  await assert.rejects(harness.request('desktop:remove-profile', second.id), /A session is starting in second/)
+  await assert.rejects(async () => harness.request('desktop:remove-profile', second.id), /A session is starting in second/)
   release()
   const started = await starting
   const tab = started.tabs.find((candidate) => candidate.workspaceProfileId === second.id)!
   assert.ok(started.profiles.some((profile) => profile.id === second.id))
-  await assert.rejects(harness.request('desktop:remove-profile', second.id), /Close the session open in second/)
-  await assert.rejects(harness.requestSettings('desktop-settings:remove-workspace-profile', second.id), /Close the session open in second/)
+  await assert.rejects(async () => harness.request('desktop:remove-profile', second.id), /Close the session open in second/)
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:remove-workspace-profile', second.id), /Close the session open in second/)
 
   await harness.request('desktop:close-tab', tab.id)
   const removed = await harness.request('desktop:remove-profile', second.id)

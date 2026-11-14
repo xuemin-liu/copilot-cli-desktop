@@ -8,15 +8,14 @@ import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
 import { BrowserOnlyWindow } from './components/BrowserWorkspace.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
-import { GitPanel } from './components/GitPanel.js'
-import { WorkspaceToolDock } from './components/WorkspaceToolDock.js'
-import { readToolDockPreferences, TOOL_DOCK_KEY } from './tool-dock-state.js'
+import { ToolPanelWorkspace } from './components/ToolPanelWorkspace.js'
+import type { ToolsAction, ToolsState } from '../main/tool-tabs.js'
+import { readToolDockPreferences } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
-import { sessionTaskBlocker } from '../main/session-task.js'
 import { sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
 
@@ -57,22 +56,23 @@ export function App(): JSX.Element {
   const [sidebarProjectsOpen, setSidebarProjectsOpen] = useState(false)
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const [history, setHistory] = useState<{ entries: SessionHistoryEntry[] | null; loadError: string | null; pendingSessionId: string | null; openError: string | null } | null>(null)
-  const [dock, setDock] = useState(() => readToolDockPreferences(localStorage))
-  const [browserChoice, setBrowserChoice] = useState<string | null>(null)
-  const gitOpen = dock.open && dock.tool === 'git'
-  const previousDockOpen = useRef(dock.open)
+  const [tools, setTools] = useState<ToolsState>({ projects: [], connections: [] })
+  const projectPanel = tools.projects.find(project => project.profileId === state.activeProfileId)
+  const dockOpen = Boolean(projectPanel?.visible && projectPanel.tabs.length)
+  const gitOpen = dockOpen && projectPanel?.tabs.find(tab => tab.id === projectPanel.activeId)?.kind === 'git'
+  const previousDockOpen = useRef(dockOpen)
   useEffect(() => {
-    if (previousDockOpen.current && !dock.open) requestAnimationFrame(() => document.querySelector<HTMLElement>('.session-pane-focused .xterm-helper-textarea')?.focus())
-    previousDockOpen.current = dock.open
-  }, [dock.open])
-  useEffect(() => { try { localStorage.setItem(TOOL_DOCK_KEY, JSON.stringify(dock)) } catch { /* In-memory preferences still work. */ } }, [dock])
-  const previousBrowserPopouts = useRef(state.browserPoppedOutTabIds ?? [])
+    if (previousDockOpen.current && !dockOpen) requestAnimationFrame(() => document.querySelector<HTMLElement>('.session-pane-focused .xterm-helper-textarea')?.focus())
+    previousDockOpen.current = dockOpen
+  }, [dockOpen])
+  useEffect(() => window.copilotDesktop.onToolsChanged(next => { if (next) setTools(next) }), [])
   useEffect(() => {
-    const current = state.browserPoppedOutTabIds ?? []
-    const returned = previousBrowserPopouts.current.find(id => !current.includes(id) && state.tabs.some(tab => tab.id === id) && !(state.poppedOutTabIds ?? []).includes(id))
-    previousBrowserPopouts.current = current
-    if (returned) { setBrowserChoice(returned); setDock(prefs => ({ ...prefs, open: true, tool: 'browser' })) }
-  }, [state.browserPoppedOutTabIds, state.poppedOutTabIds, state.tabs])
+    if (!state.activeProfileId || state.windowSessionId || state.windowBrowserId) return
+    void window.copilotDesktop.toolsState(readToolDockPreferences(localStorage).width).then(setTools).catch(error => setOperationError(errorMessage(error)))
+  }, [state.activeProfileId, state.windowSessionId, state.windowBrowserId])
+  const actOnTools = useCallback((profileId: string, action: ToolsAction): void => {
+    void window.copilotDesktop.toolsAction(profileId, action).then(setTools).catch(error => setOperationError(errorMessage(error)))
+  }, [])
   // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
   const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)
@@ -116,8 +116,6 @@ export function App(): JSX.Element {
     return () => { stale = true }
   }, [newSessionOpen])
   const newSessionCliMissing = sessionClis?.find((choice) => choice.cli === newSessionCli && choice.error !== null) ?? null
-  const newSessionSharedOverrides = inputDialog?.kind === 'new-session'
-    && (inputDialog.sharedOverrides ?? !state.newSessionPrivateOverrides)
   const showLog = (tabId: string): void => {
     void window.copilotDesktop.showSessionLog(tabId).catch((error: unknown) => setOperationError(errorMessage(error)))
   }
@@ -125,16 +123,12 @@ export function App(): JSX.Element {
     setOperationError(null)
     void operation.catch((error: unknown) => setOperationError(errorMessage(error)))
   }
-  const closeTools = useCallback((): void => {
-    setDock(prefs => ({ ...prefs, open: false }))
-  }, [])
   const toggleGit = useCallback((): void => {
-    setDock(prefs => ({ ...prefs, open: !(prefs.open && prefs.tool === 'git'), tool: 'git' }))
-  }, [])
+    if (!state.activeProfileId) return
+    actOnTools(state.activeProfileId, gitOpen ? { type: 'visible', visible: false } : { type: 'add', kind: 'git' })
+  }, [state.activeProfileId, actOnTools, gitOpen])
   const openBrowser = (tabId: string): void => {
-    if ((state.browserPoppedOutTabIds ?? []).includes(tabId)) { handleOperation(window.copilotDesktop.popOutBrowser(tabId)); return }
-    setBrowserChoice(tabId)
-    setDock(prefs => ({ ...prefs, open: true, tool: 'browser' }))
+    if (state.activeProfileId) actOnTools(state.activeProfileId, { type: 'add', kind: 'browser', sessionId: tabId })
   }
   /** Every way to start a fresh session asks for its name first; an open dialog is left as it is. */
   const openNewSession = (profileId: string | null = null, attachments = false): void => {
@@ -349,15 +343,7 @@ export function App(): JSX.Element {
       onShowLog={() => showLog(tab.id)} /> : <div className="loading-screen">Returning session…</div>
   }
 
-  // "Add to prompt" fills the active session's prompt box, unless that session lives in another window.
-  const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? null
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId) ?? null
-  const promptTarget = activeTab && !(state.poppedOutTabIds ?? []).includes(activeTab.id) && activeTab.status !== 'dormant' && activeTab.status !== 'completed' && activeTab.status !== 'crashed'
-    ? {
-        id: activeTab.id, title: activeTab.title, cwd: activeTab.sessionCwd ?? activeProfile?.path ?? null,
-        taskBlocker: sessionTaskBlocker({ cli: activeTab.cli, status: activeTab.status, preset: activeTab.sessionPermissionPreset, sideChat: activeTab.sideChat === true, remote: activeTab.remote }),
-      }
-    : null
 
   const viewMode = desktopViewMode(loading, state.resolution, state.tabs.length > 0)
   const generalActive = activeProfile?.general === true
@@ -467,18 +453,10 @@ export function App(): JSX.Element {
           <>
           {operationError && <OperationError message={operationError} onDismiss={() => setOperationError(null)} />}
           <MeetingBar meetings={state.meetings ?? []} tabs={state.tabs} activeTabId={state.activeTabId} onError={setOperationError} toolsUrl={state.meetingToolsUrl ?? null} />
-          <WorkspaceToolDock prefs={dock} onChange={setDock} onClose={closeTools}
-            tabs={state.tabs} activeTabId={state.activeTabId} profileId={state.activeProfileId!} gitAvailable={!generalActive}
-            browserChoice={browserChoice} onBrowserChoice={setBrowserChoice}
-            onActivate={id => handleOperation(window.copilotDesktop.activateTab(id))}
-            browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []} poppedOutTabIds={state.poppedOutTabIds ?? []}
-            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}
-            onError={error => setOperationError(errorMessage(error))}
-            git={<GitPanel key={state.activeProfileId} profileId={state.activeProfileId!} embedded active={gitOpen && !generalActive} onClose={closeTools}
-              promptTarget={promptTarget} sessionWorktreePath={activeTab?.worktree?.path ?? null}
-              worktreeSessions={state.tabs.flatMap((tab) => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])} />}>
+          <ToolPanelWorkspace desktop={state} tools={tools} act={actOnTools}
+            obscured={inputDialog !== null || history !== null || sidebarProjectsOpen || fanOutNotice !== null}>
           <SessionWorkspace tabs={state.tabs} activeTabId={state.activeTabId} canOpenTab={canOpenTab}
-            browserOpenId={dock.open && dock.tool === 'browser' ? browserChoice ?? state.activeTabId : null} onOpenBrowser={openBrowser}
+            browserOpenId={null} onOpenBrowser={openBrowser}
             gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
             browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
@@ -492,7 +470,7 @@ export function App(): JSX.Element {
             onShowLog={(tabId) => showLog(tabId)}
             onCreate={() => openNewSession()}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
-          </WorkspaceToolDock>
+          </ToolPanelWorkspace>
           </>
         )}
       </main>
@@ -602,13 +580,6 @@ export function App(): JSX.Element {
                   })}
                 </select>
               </>
-            )}
-            {inputDialog.kind === 'new-session' && newSessionDefault !== null && (
-              <label className="input-dialog-check" title="Unticked, this session's browser starts DevTools with defaults and keeps its Local Overrides folder and settings to itself.">
-                <input type="checkbox" name="shared-overrides" checked={newSessionSharedOverrides} disabled={inputDialog.pending}
-                  onChange={(event) => setInputDialog({ ...inputDialog, sharedOverrides: event.target.checked, error: null })} />
-                Use the shared Local Overrides and DevTools settings
-              </label>
             )}
             {inputDialog.kind === 'new-session' && newSessionDefault !== null && newSessionOther && (
               <p className="fork-hint">

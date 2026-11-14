@@ -4,7 +4,6 @@ import type { DesktopControlTabView, DesktopSessionTab } from '../../main/types.
 import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel.js'
 import { SessionTerminal } from './SessionTerminal.js'
 import { OperationError } from './OperationError.js'
-import { BrowserWorkspace } from './BrowserWorkspace.js'
 
 export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, onRestart, onShowLog, onDismissError, desktopControl }: {
   tab: DesktopSessionTab
@@ -16,13 +15,14 @@ export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, 
   onShowLog: () => void
   onDismissError?: () => void
 }): JSX.Element {
+  const [browserError, setBrowserError] = useState<string | null>(null)
   const [desktopPanel, setDesktopPanel] = useState(false)
   const showDesktop = desktopControl !== undefined && !tab.sideChat && !tab.remote && !tab.cli && (desktopControl.allowed || desktopControl.view?.enabled === true)
   const status = tab.status === 'running' ? (tab.activity === 'working' ? 'Working' : tab.activity === 'idle' ? 'Idle' : 'Open') : tab.status === 'dormant' ? 'Not running' : tab.status
   return <main className="session-window" aria-label={`Session window: ${tab.title}`}>
-    <BrowserWorkspace tabId={tab.id} active={tab.status !== 'dormant'} unloaded={tab.status === 'dormant'} poppedOut={browserPoppedOut} renderHeader={browserToggle => <><header className="session-pane-header">
+    <header className="session-pane-header">
       <span className="session-pane-title" title={tab.title}>{tab.title}</span>
-      {browserToggle}
+      <button type="button" onClick={() => { void window.copilotDesktop.showBrowserInMain(tab.id).catch(error => setBrowserError(String(error))) }}>Show browser in main window</button>
       {showDesktop && <DesktopControlToggle view={desktopControl!.view} open={desktopPanel} onToggle={() => setDesktopPanel(open => !open)} />}
       <span role="status">{status}</span>
       {tab.sideChat && <span className="side-chat-badge" title={tab.permissionWarning ?? undefined}>Read/search only</span>}
@@ -30,9 +30,10 @@ export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, 
         disabled={tab.status === 'starting' || tab.status === 'stopping'} onClick={onRestart}>↻</button>}
       <button type="button" onClick={onReturn} title="Return without stopping the session (Ctrl+W)">Return to main window</button>
     </header>
-    {showDesktop && desktopPanel && <DesktopControlPanel tab={tab} allowed={desktopControl!.allowed} ready={desktopControl!.ready} view={desktopControl!.view} />}</>}>
+    {showDesktop && desktopPanel && <DesktopControlPanel tab={tab} allowed={desktopControl!.allowed} ready={desktopControl!.ready} view={desktopControl!.view} />}
+    {browserError && <OperationError message={browserError} onDismiss={() => setBrowserError(null)} />}
     {error && <OperationError message={error} {...(onDismissError ? { onDismiss: onDismissError } : {})} />}
     <SessionTerminal tab={tab} active onRestart={onRestart} onShowLog={onShowLog} />
-    </BrowserWorkspace>
+
   </main>
 }

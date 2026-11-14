@@ -149,7 +149,7 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
     await run('test', plan)
     assert.match(seen.at(-1)!.form!.get('output')!, /plan\.report-[0-9a-f]{16}\.json$/)
     await rm(paths.endpoint)
-    await assert.rejects(run('console'), /Open the Browser pane for this session/)
+    await assert.rejects(run('console'), /Open a Browser tab and connect it to this session/)
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -216,7 +216,7 @@ test('the PowerShell test helper reports missing pane guidance and keeps evidenc
     const reserved = async (base: string) => (await readdir(root)).filter(name => name.startsWith(base))
     // The pane check comes before the hand-off, so a missing pane names the pane.
     const report = join(root, 'missing.json')
-    assert.match(await failure(['test', plan, '-OutputPath', report], { ...env, COPILOT_DESKTOP_BROWSER_STATE: '' }), /^Browser diagnostics failed: Open the Browser pane for this session first\.\r?\n$/)
+    assert.match(await failure(['test', plan, '-OutputPath', report], { ...env, COPILOT_DESKTOP_BROWSER_STATE: '' }), /^Browser diagnostics failed: Open a Browser tab and connect it to this session; reconnect after Resume\.\r?\n$/)
     assert.deepEqual(await reserved('missing'), [], 'a missing pane reserves nothing')
     await writeFile(paths.endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token: 'e'.repeat(64) }))
     // A payload that arrived but failed validation keeps its evidence, minus the base64 images.
@@ -324,7 +324,7 @@ test('the installed-app PowerShell helper reads only its assigned session withou
       assert.equal(result.stderr, '')
       assert.ok(!result.stdout.includes(token))
       await rm(paths.endpoint)
-      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 60000 }), /Open the Browser pane for this session/)
+      await assert.rejects(exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', paths.helper, 'console'], { env, windowsHide: true, timeout: 60000 }), /Open a Browser tab and connect it to this session/)
     }
   } finally {
     for (const server of servers) { server.closeAllConnections(); server.close() }

@@ -1,56 +1,19 @@
 # Debug browser and Local Overrides
 
-Select the **Open browser** button (window icon) in the terminal session's header, or **Browser** in the right tools panel, then enter a hostname
-or HTTP/HTTPS URL. Bare public domains use HTTPS; loopback, private/link-local
-addresses and development hosts (single-label names, `.localhost`, `.local`,
-`.test`, `.internal`) use HTTP. Ports 443 and 8443 default to HTTPS, and explicit
-HTTP/HTTPS always takes precedence. Each terminal session has its own browser pages,
-DevTools and console/network capture and, by default, its own cookie/storage partition,
-separate from other terminal sessions, the desktop shell, and your installed Chrome
-(see [Sharing between sessions](#sharing-between-sessions)). Drag the divider
-to resize it. The **Reload** button does a normal reload, which can keep serving cached
-scripts and styles; **Shift+click** it (or press **Ctrl+Shift+R** or **Ctrl+F5** while the
-page has focus) for a hard reload that bypasses the cache and applies your latest changes. Use **+ (New page)** in the page strip to open another page in the
-same session, then enter its address. New pages share the session's login and
-storage, keep other pages open, and are selected automatically. Up to 32 pages
-can be open in one session. Links with `target="_blank"`, JavaScript `window.open()` and forms
-targeting a new page open browser page tabs inside the same terminal. While the browser is popped out
-into its own window, a page that asks for a window of its own (`window.open()` with a features string
-such as `width=500,height=600`, or a **Shift+click** on a link) opens in a separate popup window sized as
-it asked, as in Chrome, while the browser keeps showing the page that opened it. Beside the terminal in
-the main window, those pages open as tabs too. Like Chrome's popup blocker, a page gets a window only within a few
-seconds of a click or key press in it, one window per input. A page asking on its own, from a load script
-for example, gets tabs instead. A popup window always stays whole on the screen its opener is on,
-wherever the page asked to place it. Popup windows count toward the 32 pages and appear in the page
-strip marked ⧉. **Ctrl+W** closes one, and so does the page calling `window.close()` or closing the
-browser. Closing a popup window (its ✕ or Ctrl+W) asks the page first: a page with unsaved changes gets a
-**Leave site?** question on that window, and **Cancel** keeps it open. All pages share that terminal's login/storage and console/network capture. Select or close pages
-using the page strip; navigation controls and DevTools apply to the selected page. Selecting a popup
-window brings it forward, and shows its DevTools, Console and Network in the browser. **F12** in a popup
-window selects it and opens DevTools there.
+Choose **New tab → Browser**, enter an address, or use **Open browser** in a CLI header to create a browser and connect that session. Browsing also works with no CLI running. Browser pages and Git share one top-level tab strip; **+** opens another launcher. Close any individual tab, including the last. **Hide tabs** retains pages; **Show tabs** restores them.
+
+Pages belong to a project and share its cookies, storage, Local Overrides and capture group. Separate profiles are the default; Settings can share cookies across projects. The cap is 32 live pages across all projects, including popups and hidden projects. CLI focus never changes the selected page. Each connected CLI has an independent page cursor; a closed cursor stays empty until explicitly selected again.
+
+Bare public domains use HTTPS; development, private and loopback hosts use HTTP. Explicit HTTP/HTTPS takes precedence. **Reload** uses the cache; **Shift+click**, **Ctrl+Shift+R**, or **Ctrl+F5** bypasses it. Links and `window.open()` create top-level Browser tabs while preserving their opener. **Open in window** detaches one page; **Return to panel** keeps the same page and form state. Popups may open windows from a detached opener. Closing asks before discarding unsaved page changes; Cancel retains the page.
+
 The address toolbar shows the selected page's actual browser zoom percentage.
 Zoom is remembered per site (host name, as in Chrome) for every session's browser and
 kept across restarts; returning a site to 100% forgets it.
 Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
-Restored terminal sessions retain their browser cookies, local storage,
-and last successful top-level page's origin and path across app restarts;
-query strings, fragments, and SPA route changes are not saved. Authentication
-callback URLs do not replace the saved page. Address-bar suggestions come from one
-browsing history shared by every session's browser and kept across restarts and
-session closes; like the saved page, it stores only the origin and path of pages
-without sensitive query parameters or fragments. The main window remembers whether the shared tools panel is open and
-which tool it shows. Browser follows the main session unless its **Session** selector explicitly selects the side chat;
-on a narrow single-terminal layout it follows the displayed terminal. Switching tool tabs preserves typed addresses,
-find text, collected elements and notes. Hiding the browser stops Testing mode and element picking; an interruption
-notice remains when you return, and Testing must be enabled again explicitly. Switching terminal tabs preserves each session's browser. Pop-out and
-docking move the same browser page with its terminal.
-Explicitly closing a terminal session clears its browser credentials, storage and
-cache and removes its saved page and diagnostic helper files. With the shared browser
-profile, closing a session keeps the shared cookies and storage for the other sessions. App quit preserves
-restorable profiles. Startup removes orphaned profiles/partitions and old helper
-directories; Chromium's open partition files are removed after the previous
-process exits.
+Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, without closing project pages or signing out. Restart/Resume requires explicit reconnection. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
+
+Switching tabs or hiding retains typed addresses, find text, collected elements and notes. Hiding stops Testing mode and picking; tests never resume automatically. App startup does not restore a neutral launcher or any CLI browser connection. Upgrades from session-owned browsers start with no open tool tabs and new separate project profiles; old session cookies are not merged.
 
 Select **DevTools / Overrides**, then **Sources → Overrides** in the embedded
 DevTools. Select the folder you already use for Chrome Local Overrides and enable
@@ -62,16 +25,7 @@ session's browser: a session opened later starts with the settings other session
 saved (Chromium saves them a few seconds after a change), and settings from a closed
 session are kept. Console history is shared too.
 
-A session can instead keep DevTools settings and Local Overrides to itself: untick **Use the shared Local
-Overrides and DevTools settings** in the new-session dialog. The box starts from **Settings → Session browser →
-DevTools settings and Local Overrides for new sessions** (shared by default). Such a session's DevTools starts with
-defaults and runs in a partition of its own (`browser-devtools:<id>`), so the overrides folder it selects stays its
-own. Its Local Overrides switch and other DevTools settings stay out of the shared ones, while it runs and after it
-closes. Shared sessions never see its folder or switch, and it never sees theirs. Its DevTools data is cleared when
-it closes and its partition is removed at the next start. The footer then reads **Local Overrides (this session
-only)**. With **Cookies, logins and site storage** shared by all sessions, every session's pages use one partition,
-so the switch is shared too and only the folder stays per session. Sessions keep the choice they started with,
-including after a restart.
+Choose **Browser settings → Local Overrides for this project** for private or shared settings. New projects use the default in **Settings → Project browsers**. Private DevTools folders stay in the project's own partition. A changed choice applies after all its browser pages close and a new Browser opens. With shared cookies, the overrides switch is also shared; private folders remain separate.
 
 The browser footer shows whether Local Overrides applies to the selected page: **on** with the overrides
 folder (green), **off**, or a warning when it is enabled but no folder is selected, or when the page's
@@ -183,7 +137,7 @@ instructions and a session-specific helper automatically. Ask **"Find any
 exceptions in the browser console"** or **"Inspect failed network requests"** in
 the terminal. Copilot can run the read-only helper through its existing shell tool;
 no third-party MCP, Node installation, or desktop CLI installation is required.
-Open that terminal session's Browser pane and load the web app first.
+Open a Browser tab, load the web app, and choose **Connect to session** first.
 
 To read the same data directly from a shell inheriting that session's environment:
 
