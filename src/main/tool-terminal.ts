@@ -8,7 +8,7 @@ import type { TerminalConfig, TerminalKind } from './tool-tabs.js'
 
 export interface TerminalSnapshot {
   id: string; generation: string; status: 'starting' | 'running' | 'exited' | 'error'; output: string; cursor: number; start: number
-  pid?: number; exitCode?: number; error?: string
+  pid?: number; exitCode?: number; error?: string; splitId?: string
 }
 interface Runtime { profileId: string; state: TerminalSnapshot; pty?: PtyLike; closed: boolean; abort: AbortController }
 const MAX_OUTPUT = 512 * 1024
@@ -27,6 +27,11 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
     return { file: join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wsl.exe'), args: [...(distro ? ['--distribution', distro] : []), '--cd', cwd], cwd, config: distro ? { distro } : {} }
   }
   if (kind !== 'ssh') throw new Error('Unknown terminal type')
+  if (config.transport === 'managed') {
+    const connectionId = field(config.connectionId, 'SSH connection ID', /^[a-zA-Z0-9_-]+$/)
+    if (!connectionId) throw new Error('Choose a saved SSH connection')
+    return { file: '', args: [], cwd, config: { transport: 'managed', connectionId, ...(typeof config.host === 'string' ? { host: config.host.slice(0, 256) } : {}) } }
+  }
   const host = field(config.host, 'SSH host', /^[a-zA-Z0-9][a-zA-Z0-9._:\[\]-]*$/)
   if (!host) throw new Error('Enter an SSH host or SSH config alias')
   const username = field(config.username, 'SSH user', /^[a-zA-Z0-9_][a-zA-Z0-9_.@\\-]*$/)
@@ -41,7 +46,12 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
 /** PTYs belong to tool IDs, never to the selected tab. Output is bounded and addressed by an absolute cursor. */
 export class ToolTerminals {
   private readonly runtimes = new Map<string, Runtime>()
-  constructor(private readonly spawn: SpawnPtyFn = spawnNodePty) {}
+  constructor(private readonly spawn: SpawnPtyFn = spawnNodePty, private readonly hooks?: {
+    managed(profileId: string, id: string, config: TerminalConfig, signal: AbortSignal): Promise<PtyLike>
+    started(profileId: string, id: string): void
+    output(profileId: string, id: string, data: string): void
+    closed(profileId: string, id: string): void
+  }) {}
   async start(profileId: string, id: string, kind: TerminalKind, config: TerminalConfig, cwd: string | null, env: NodeJS.ProcessEnv): Promise<TerminalSnapshot> {
     if (this.runtimes.has(id)) return this.read(profileId, id)
     if (this.runtimes.size >= 32) throw new Error('Close a terminal tab before opening more (32 maximum)')
@@ -49,17 +59,21 @@ export class ToolTerminals {
     const runtime: Runtime = { profileId, state: { id, generation: randomUUID(), status: 'starting', output: '', cursor: 0, start: 0 }, closed: false, abort: new AbortController() }
     this.runtimes.set(id, runtime)
     try {
-      const pty = await spawnMyTerminal(this.spawn, launch.file, launch.args, { cwd: launch.cwd, env, cols: 80, rows: 24, signal: runtime.abort.signal })
+      const pty = kind === 'ssh' && config.transport === 'managed'
+        ? await this.hooks!.managed(profileId, id, config, runtime.abort.signal)
+        : await spawnMyTerminal(this.spawn, launch.file, launch.args, { cwd: launch.cwd, env, cols: 80, rows: 24, signal: runtime.abort.signal })
       if (runtime.closed) { pty.kill('SIGKILL'); pty.dispose?.(); throw new Error('Terminal closed during startup') }
       runtime.pty = pty; runtime.state.status = 'running'
       if (pty.pid !== undefined) runtime.state.pid = pty.pid
+      this.hooks?.started(profileId, id)
       pty.onData(data => {
         if (runtime.closed) return
+        this.hooks?.output(profileId, id, data)
         runtime.state.output = (runtime.state.output + data).slice(-MAX_OUTPUT)
         runtime.state.cursor += data.length
         runtime.state.start = runtime.state.cursor - runtime.state.output.length
       })
-      pty.onExit(event => { if (!runtime.closed) { runtime.state.status = 'exited'; runtime.state.exitCode = event.exitCode; pty.dispose?.() } })
+      pty.onExit(event => { if (!runtime.closed) { runtime.state.status = 'exited'; runtime.state.exitCode = event.exitCode; this.hooks?.closed(profileId, id); pty.dispose?.() } })
     } catch (error) {
       if (runtime.closed) throw error
       runtime.state.status = 'error'; runtime.state.error = error instanceof Error ? error.message : String(error)
@@ -91,6 +105,7 @@ export class ToolTerminals {
     const runtime = this.runtimes.get(id)
     if (!runtime || runtime.profileId !== profileId) return
     runtime.closed = true; runtime.abort.abort(); this.runtimes.delete(id)
+    this.hooks?.closed(profileId, id)
     // Close means terminate; Ctrl+C is the separate interrupt action. A shell trapping HUP/TERM must not survive its tab.
     try { runtime.pty?.kill('SIGKILL') } finally { runtime.pty?.dispose?.() }
   }

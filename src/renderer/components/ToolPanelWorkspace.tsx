@@ -10,6 +10,7 @@ import { BrowserPanel } from './BrowserPanel.js'
 import { GitPanel } from './GitPanel.js'
 import { isShortcutModifier, isWindows } from '../platform.js'
 import { ToolTerminalPanel } from './ToolTerminalPanel.js'
+import { MyTerminalConnections } from './MyTerminalConnections.js'
 
 /** Adding another tool requires an adapter here, not a permanent slot in the layout. */
 export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new'>; label: string; description: string }[] = [
@@ -17,7 +18,7 @@ export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new'>; label: st
   { kind: 'git', label: 'Git', description: 'Changes, commits, branches and worktrees' },
   { kind: 'local', label: 'Local terminal', description: 'Open a shell in this project folder' },
   ...(isWindows ? [{ kind: 'wsl' as const, label: 'WSL terminal', description: 'Open a Linux shell in Windows Subsystem for Linux' }] : []),
-  { kind: 'ssh', label: 'SSH', description: 'Connect to a remote host using OpenSSH' },
+  { kind: 'ssh', label: 'SSH', description: 'Saved connections, SFTP and tunnels, or OpenSSH' },
 ]
 interface Props {
   children: ReactNode
@@ -93,12 +94,13 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
           if (type.kind === 'ssh' || type.kind === 'wsl') setConnection(type.kind)
           else action({ type: 'add', kind: type.kind, replaceId: selected.id })
         }}><strong>{type.label}</strong><span>{type.description}</span></button>)}</div>
+      {connection === 'ssh' && <MyTerminalConnections profileId={project.profileId} connect={terminal => action({ type: 'add', kind: 'ssh', replaceId: selected.id, terminal })} />}
       {connection && <form className="tool-connection-form" aria-label={connection === 'ssh' ? 'SSH connection' : 'WSL connection'} onSubmit={event => {
         event.preventDefault()
         action({ type: 'add', kind: connection, replaceId: selected.id, terminal: connection === 'wsl' ? { ...(distro.trim() ? { distro: distro.trim() } : {}) }
           : { host: host.trim(), ...(username.trim() ? { username: username.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}) } })
       }}>
-        <h3>{connection === 'ssh' ? 'SSH connection' : 'WSL terminal'}</h3>
+        <h3>{connection === 'ssh' ? 'OpenSSH (native)' : 'WSL terminal'}</h3>
         {connection === 'ssh' ? <>
           <label>Host or SSH config alias<input autoFocus required aria-label="SSH host" value={host} onChange={event => setHost(event.target.value)} placeholder="server.example.com" /></label>
           <label>User (optional)<input aria-label="SSH user" value={username} onChange={event => setUsername(event.target.value)} /></label>

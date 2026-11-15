@@ -1,4 +1,4 @@
-const { ipcMain, dialog } = require('electron')
+const electron = require('electron')
 const path = require('path')
 const fs = require('fs')
 
@@ -25,7 +25,7 @@ function mergeExistingSensitiveFields(session, existingEncrypted, decryptSession
   return merged
 }
 
-function registerSessionHandlers(store, { encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow }) {
+function registerSessionHandlers(store, { ipcMain = electron.ipcMain, dialog = electron.dialog, encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow }) {
   const redactSession = makeSessionRedactor(decryptSession, SENSITIVE_FIELDS)
   const redactSessions = (sessions) => sessions.map(redactSession)
 

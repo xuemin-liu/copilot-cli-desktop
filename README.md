@@ -61,7 +61,9 @@ handle, only input/output/resize events.
   with step reports and screenshots.
 - **Workspace terminal tabs** share the optional right panel with Browser and Git. Choose **New tab → Local terminal,
   WSL terminal (Windows), or SSH**. Open several terminals, close them individually, or hide the panel while they keep
-  running. Local/WSL shells start in the project folder; SSH uses OpenSSH configuration and keys. The current Copilot
+  running. Local/WSL shells start in the project folder. MyTerminal's saved SSH connections support jump hosts,
+  SFTP and remote editing, and local/remote/SOCKS forwarding; native OpenSSH remains available for config aliases.
+  Terminal tabs also reuse MyTerminal's snippets, split panes, settings, backup/import and disk logging. The current Copilot
   session and local/WSL shells can list terminals, read output, and send input through the project terminal helper.
   **Add to prompt** always targets the current session. See [workspace terminals](docs/workspace-terminals.md).
 - **Desktop control** (Windows, off by default) lets a session see the screen and use the mouse

@@ -4721,6 +4721,16 @@ ipcMain.handle('desktop:tool-terminal', (event, profileId: unknown, request: unk
   if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || profileId !== desktopConfig.activeProfileId) throw new Error('Terminal controls belong to the current project in the main window')
   return projectTools().terminalAction(profileId, request)
 })
+ipcMain.handle('desktop:myterminal', (event, profileId: unknown, method: unknown, args: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || profileId !== desktopConfig.activeProfileId || typeof method !== 'string' || !Array.isArray(args)) throw new Error('Terminal features belong to the current project')
+  return projectTools().terminalFeature(profileId, method, args)
+})
+ipcMain.handle('desktop:myterminal-drop', (event, profileId: unknown, paths: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || profileId !== desktopConfig.activeProfileId || !Array.isArray(paths) || paths.length > 1000 || !paths.every(path => typeof path === 'string')) throw new Error('Invalid terminal file drop')
+  projectTools().terminalDrop(profileId, paths)
+})
 ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')

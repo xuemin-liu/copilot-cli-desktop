@@ -9,6 +9,7 @@ function stripSensitiveConfig(config) {
   return safeConfig
 }
 
+export function createSessionStore(api, persistWorkspace = true) {
 const useSessionStore = create((set, get) => ({
   sessions: [],
   tabs: [],
@@ -33,11 +34,11 @@ const useSessionStore = create((set, get) => ({
     const serializedTabs = tabs.map(({ id, sessionId, label, config, channelId, color, isLocal, wslDistro }) => ({
       id, sessionId, label, config: stripSensitiveConfig(config), channelId, color, isLocal, wslDistro,
     }))
-    window.electronAPI.workspace.set({ tabs: serializedTabs, activeTabId })
+    api.workspace.set({ tabs: serializedTabs, activeTabId })
   },
 
   loadWorkspace: async () => {
-    const ws = await window.electronAPI.workspace.get()
+    const ws = await api.workspace.get()
     if (!ws || !Array.isArray(ws.tabs) || ws.tabs.length === 0) return
     const { sessions } = get()
     // Restore tabs with full shape (fill in defaults for split pane fields)
@@ -55,44 +56,44 @@ const useSessionStore = create((set, get) => ({
   // ── Session actions ──────────────────────────────────────────────────────────
 
   loadSessions: async () => {
-    const sessions = await window.electronAPI.sessions.getAll()
-    const snippets = await window.electronAPI.snippets.getAll()
-    const settings = await window.electronAPI.settings.get()
+    const sessions = await api.sessions.getAll()
+    const snippets = await api.snippets.getAll()
+    const settings = await api.settings.get()
     set({ sessions, snippets, settings })
   },
 
   addSession: async (session) => {
-    const saved = await window.electronAPI.sessions.save(session)
+    const saved = await api.sessions.save(session)
     set({ sessions: saved })
   },
 
   updateSession: async (session) => {
-    const saved = await window.electronAPI.sessions.save(session)
+    const saved = await api.sessions.save(session)
     set({ sessions: saved })
   },
 
   deleteSession: async (id) => {
-    const saved = await window.electronAPI.sessions.delete(id)
+    const saved = await api.sessions.delete(id)
     set({ sessions: saved })
   },
 
   exportSessions: async () => {
     const { sessions } = get()
-    return await window.electronAPI.sessions.export(sessions)
+    return await api.sessions.export(sessions)
   },
 
   importSessions: async () => {
-    const result = await window.electronAPI.sessions.import()
+    const result = await api.sessions.import()
     if (Array.isArray(result)) set({ sessions: result })
     return result
   },
 
   exportBackup: async (options) => {
-    return await window.electronAPI.backup.export(options)
+    return await api.backup.export(options)
   },
 
   importBackup: async () => {
-    const result = await window.electronAPI.backup.import()
+    const result = await api.backup.import()
     if (result?.success) {
       // Refresh sessions / snippets / settings so the UI reflects merged data.
       // SFTP favorites, filter presets and tunnel configs load lazily per-panel
@@ -105,7 +106,7 @@ const useSessionStore = create((set, get) => ({
   // ── Snippet actions ──────────────────────────────────────────────────────────
 
   addSnippet: async (snippet) => {
-    const saved = await window.electronAPI.snippets.save({
+    const saved = await api.snippets.save({
       ...snippet,
       id: snippet.id || crypto.randomUUID(),
     })
@@ -113,14 +114,14 @@ const useSessionStore = create((set, get) => ({
   },
 
   deleteSnippet: async (id) => {
-    const saved = await window.electronAPI.snippets.delete(id)
+    const saved = await api.snippets.delete(id)
     set({ snippets: saved })
   },
 
   // ── Settings ────────────────────────────────────────────────────────────────
 
   updateSettings: async (patch) => {
-    const saved = await window.electronAPI.settings.set(patch)
+    const saved = await api.settings.set(patch)
     set({ settings: saved })
   },
 
@@ -247,7 +248,7 @@ const useSessionStore = create((set, get) => ({
 // Auto-save workspace when tabs or activeTabId change
 let prevTabs = null
 let prevActiveTabId = null
-useSessionStore.subscribe((state) => {
+if (persistWorkspace) useSessionStore.subscribe((state) => {
   if (state.tabs !== prevTabs || state.activeTabId !== prevActiveTabId) {
     prevTabs = state.tabs
     prevActiveTabId = state.activeTabId
@@ -255,4 +256,8 @@ useSessionStore.subscribe((state) => {
   }
 })
 
+return useSessionStore
+}
+
+const useSessionStore = createSessionStore(globalThis.window?.electronAPI)
 export default useSessionStore

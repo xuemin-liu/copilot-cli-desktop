@@ -2,8 +2,10 @@ import React, { useState } from 'react'
 import { Plus, Trash2, Play, X } from 'lucide-react'
 import useSessionStore from '../store/useSessionStore'
 
-export default function SnippetPanel({ onInsert, onClose }) {
-  const { snippets, addSnippet, deleteSnippet } = useSessionStore()
+export default function SnippetPanel({ host, onInsert, onClose }) {
+  const api = host?.api || window.electronAPI
+  const sessionStore = host?.store || useSessionStore
+  const { snippets, addSnippet, deleteSnippet } = sessionStore()
   const [newName, setNewName] = useState('')
   const [newCmd, setNewCmd] = useState('')
   const [adding, setAdding] = useState(false)

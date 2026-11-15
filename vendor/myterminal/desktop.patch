@@ -98,9 +98,687 @@
      } catch (_) {}
      this.processes.delete(channelId)
    }
+--- a/electron/main.js
++++ b/electron/main.js
+@@ -1,18 +1,12 @@
+-const { app, BrowserWindow, ipcMain, dialog, Notification, safeStorage, clipboard } = require('electron')
++// Desktop adapter: project-owned registrations; no second app window or AI provider.
++const fs = require('fs')
+ const path = require('path')
+-const fs = require('fs')
+-const Store = require('electron-store')
+-const Anthropic = require('@anthropic-ai/sdk').default
+-const sshManager = require('./ssh-manager')
+-const localTerminalManager = require('./local-terminal')
+-const tunnelManager = require('./tunnel-manager')
++const { createLocalPathAuthorizer, createOneTimeTokenAuthorizer } = require('./security-utils')
+ const registerSessionHandlers = require('./ipc/sessions')
+ const registerLoggingHandlers = require('./ipc/logging')
+ const registerTunnelHandlers = require('./ipc/tunnels')
+ const registerBackupHandlers = require('./ipc/backup')
+-const { createLocalPathAuthorizer, createOneTimeTokenAuthorizer } = require('./security-utils')
+-
+-const store = new Store({ name: 'sessions' })
++module.exports = function registerServices({ ipcMain, dialog, Notification, safeStorage, clipboard, store, sshManager, tunnelManager, mainWindow }) {
+ const localPathAuthorizer = createLocalPathAuthorizer()
+ const dropPathTokens = createOneTimeTokenAuthorizer()
+ 
+@@ -31,19 +25,21 @@
+ 
+ function encryptField(value) {
+   if (!value || typeof value !== 'string') return value
+-  if (!safeStorage.isEncryptionAvailable()) return value
++  if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === 'basic_text') throw new Error('OS credential storage is unavailable')
+   try { return Buffer.from(safeStorage.encryptString(value)).toString('base64') }
+-  catch { return value }
++  catch { throw new Error('Unable to protect or unlock saved credentials') }
+ }
+ 
+ function decryptField(value) {
+   if (!value || typeof value !== 'string') return value
+-  if (!safeStorage.isEncryptionAvailable()) return value
++  if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === 'basic_text') throw new Error('OS credential storage is unavailable')
+   try { return safeStorage.decryptString(Buffer.from(value, 'base64')) }
+-  catch { return value } // plaintext fallback (migration from old format)
++  catch { throw new Error('Unable to protect or unlock saved credentials') } // plaintext fallback (migration from old format)
+ }
+ 
+ function encryptSession(session) {
++  if (!session || typeof session !== 'object' || typeof session.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(session.id) || typeof session.host !== 'string' || typeof session.username !== 'string') throw new Error('Invalid SSH connection')
++  for (const port of ['port', 'jumpPort']) if (session[port] != null && (!Number.isInteger(session[port]) || session[port] < 1 || session[port] > 65535)) throw new Error('Invalid SSH port')
+   const enc = { ...session }
+   for (const field of SENSITIVE_FIELDS) if (enc[field]) enc[field] = encryptField(enc[field])
+   return enc
+@@ -84,113 +80,6 @@
+     localPathAuthorizer.authorize(filePath, access, { recursive })
+   }
+ }
+-
+-let mainWindow
+-let anthropicClient = null
+-let anthropicCachedKey = null
+-
+-function createWindow() {
+-  mainWindow = new BrowserWindow({
+-    width: 1280,
+-    height: 800,
+-    minWidth: 800,
+-    minHeight: 600,
+-    backgroundColor: '#0d1117',
+-    frame: false,
+-    titleBarStyle: 'hidden',
+-    icon: path.join(app.getAppPath(), 'build/icon.ico'),
+-    webPreferences: {
+-      preload: path.join(__dirname, '../preload/preload.js'),
+-      contextIsolation: true,
+-      nodeIntegration: false,
+-      sandbox: true,
+-    },
+-  })
+-
+-  sshManager.setWindow(mainWindow)
+-  localTerminalManager.setWindow(mainWindow)
+-  tunnelManager.setWindow(mainWindow)
+-
+-  if (process.env['ELECTRON_RENDERER_URL']) {
+-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+-    // mainWindow.webContents.openDevTools()
+-  } else {
+-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+-  }
+-
+-  mainWindow.on('closed', () => {
+-    sshManager.disconnectAll()
+-    localTerminalManager.disconnectAll()
+-    tunnelManager.stopAll()
+-    mainWindow = null
+-  })
+-}
+-
+-app.whenReady().then(() => {
+-  createWindow()
+-  app.on('activate', () => {
+-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+-  })
+-})
+-
+-app.on('window-all-closed', () => {
+-  sshManager.disconnectAll()
+-  localTerminalManager.disconnectAll()
+-  tunnelManager.stopAll()
+-  if (process.platform !== 'darwin') app.quit()
+-})
+-
+-// ── SSH IPC ────────────────────────────────────────────────────────────────────
+-
+-ipcMain.handle('ssh:connect', async (_event, channelId, config) => {
+-  try {
+-    assertString(channelId, 'channelId')
+-    assertPlainObject(config, 'config')
+-    const resolvedConfig = resolveSavedSessionConfig(config)
+-    assertString(resolvedConfig.host, 'config.host')
+-    assertString(resolvedConfig.username, 'config.username')
+-    return await sshManager.connect(channelId, resolvedConfig)
+-  } catch (err) { return { error: err.message } }
+-})
+-ipcMain.on('ssh:write', (_event, channelId, data) => {
+-  if (typeof channelId !== 'string' || typeof data !== 'string') return
+-  sshManager.write(channelId, data)
+-})
+-ipcMain.on('ssh:resize', (_event, channelId, cols, rows) => {
+-  if (typeof channelId !== 'string') return
+-  if (!Number.isInteger(cols) || !Number.isInteger(rows)) return
+-  if (cols < 1 || cols > 1000 || rows < 1 || rows > 500) return
+-  sshManager.resize(channelId, cols, rows)
+-})
+-ipcMain.handle('ssh:disconnect', (_event, channelId) => {
+-  tunnelManager.stopByChannel(channelId)
+-  sshManager.disconnect(channelId)
+-})
+-ipcMain.handle('ssh:ping', async (_event, channelId) => {
+-  try { return await sshManager.ping(channelId) }
+-  catch { return -1 }
+-})
+-
+-// ── Local terminal IPC ─────────────────────────────────────────────────────────
+-
+-ipcMain.handle('local:spawn', async (_event, channelId, options) => {
+-  try {
+-    assertString(channelId, 'channelId')
+-    return await localTerminalManager.spawn(channelId, options)
+-  }
+-  catch (err) { return { error: err.message } }
+-})
+-ipcMain.on('local:write', (_event, channelId, data) => {
+-  if (typeof channelId !== 'string' || typeof data !== 'string') return
+-  localTerminalManager.write(channelId, data)
+-})
+-ipcMain.on('local:resize', (_event, channelId, cols, rows) => {
+-  if (typeof channelId !== 'string') return
+-  if (!Number.isInteger(cols) || !Number.isInteger(rows)) return
+-  if (cols < 1 || cols > 1000 || rows < 1 || rows > 500) return
+-  localTerminalManager.resize(channelId, cols, rows)
+-})
+-ipcMain.handle('local:disconnect', (_event, channelId) => localTerminalManager.disconnect(channelId))
+ 
+ // ── SFTP IPC ───────────────────────────────────────────────────────────────────
+ 
+@@ -323,14 +212,27 @@
+   loggingEnabled: false,
+   logDirectory: '',
+ }
+-
+-registerSessionHandlers(store, { encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow })
+-registerTunnelHandlers(store, { sshManager, tunnelManager, assertString, assertPlainObject })
+-registerLoggingHandlers({ getMainWindow })
+-registerBackupHandlers(store, { encryptSession, decryptSession, encryptField, decryptField, SENSITIVE_FIELDS, DEFAULT_SETTINGS, getMainWindow })
++function sanitizeSettings(value) {
++  const clean = {}
++  for (const [key, fallback] of Object.entries(DEFAULT_SETTINGS)) {
++    const input = value?.[key]
++    if (typeof input !== typeof fallback) continue
++    if (key === 'defaultFontSize' && (!Number.isInteger(input) || input < 8 || input > 32)) continue
++    if (key === 'defaultScrollback' && (!Number.isInteger(input) || input < 1000 || input > 100000)) continue
++    if (key === 'keepaliveInterval' && (!Number.isInteger(input) || input < 1000 || input > 300000)) continue
++    if (key === 'logDirectory' && (input.length > 4096 || input.includes('\0'))) continue
++    clean[key] = input
++  }
++  return clean
++}
++
++registerSessionHandlers(store, { ipcMain, dialog, encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow })
++registerTunnelHandlers(store, { ipcMain, sshManager, tunnelManager, assertString, assertPlainObject })
++const logging = registerLoggingHandlers({ ipcMain, dialog, getMainWindow })
++registerBackupHandlers(store, { ipcMain, dialog, encryptSession, decryptSession, encryptField, decryptField, SENSITIVE_FIELDS, DEFAULT_SETTINGS, getMainWindow, sanitizeSettings })
+ 
+ ipcMain.handle('settings:get', () => {
+-  return { ...DEFAULT_SETTINGS, ...store.get('settings-prefs', {}) }
++  return { ...DEFAULT_SETTINGS, ...sanitizeSettings(store.get('settings-prefs', {})) }
+ })
+ 
+ ipcMain.handle('settings:set', (_event, newSettings) => {
+@@ -344,7 +246,7 @@
+     if (key in newSettings) sanitized[key] = newSettings[key]
+   }
+   const current = { ...DEFAULT_SETTINGS, ...store.get('settings-prefs', {}) }
+-  const merged = { ...current, ...sanitized }
++  const merged = { ...DEFAULT_SETTINGS, ...sanitizeSettings(current), ...sanitizeSettings(sanitized) }
+   store.set('settings-prefs', merged)
+   return merged
+ })
+@@ -459,74 +361,6 @@
+   clipboard.writeText(text)
+ })
+ 
+-// ── Window controls ────────────────────────────────────────────────────────────
+-
+-ipcMain.on('window:minimize', () => mainWindow?.minimize())
+-ipcMain.on('window:maximize', () => {
+-  if (mainWindow?.isMaximized()) mainWindow.unmaximize()
+-  else mainWindow?.maximize()
+-})
+-ipcMain.on('window:close', () => mainWindow?.close())
+-
+-// ── AI assistant ───────────────────────────────────────────────────────────────
+-
+-ipcMain.handle('ai:setKey', (_event, key) => {
+-  store.set('settings.anthropicApiKey', encryptField(key))
+-  anthropicClient = null
+-  anthropicCachedKey = null
+-  return { success: true }
+-})
+-
+-ipcMain.handle('ai:getKeyStatus', () => {
+-  const raw = store.get('settings.anthropicApiKey', '')
+-  if (!raw) return ''
+-  const key = decryptField(raw)
+-  return '••••' + key.slice(-4)
+-})
+-
+-ipcMain.handle('ai:complete', async (_event, { query, context, os }) => {
+-  const raw = store.get('settings.anthropicApiKey', '')
+-  const apiKey = raw ? decryptField(raw) : ''
+-  if (!apiKey) return { error: 'NO_KEY' }
+-
+-  if (apiKey !== anthropicCachedKey) {
+-    anthropicClient = new Anthropic({ apiKey })
+-    anthropicCachedKey = apiKey
+-  }
+-  const client = anthropicClient
+-  const userMessage = context
+-    ? `Terminal output:\n\`\`\`\n${context.slice(0, 6000)}\n\`\`\`\n\nUser request: ${query}`
+-    : query
+-
+-  try {
+-    const response = await client.messages.create({
+-      model: 'claude-haiku-4-5',
+-      max_tokens: 1024,
+-      system: `You are a terminal assistant. Convert requests into shell commands whenever possible.
+-
+-Rules:
+-- DEFAULT to generating a shell command (CMD:) unless the request is purely theoretical with no actionable command.
+-- NEVER ask clarifying questions. Pick the most useful command and return it.
+-- If the request is ambiguous between a command and a question, always choose CMD:.
+-- For "is X running / killed / stopped" → generate a command to check, e.g.: pgrep -l X && echo running || echo "not running"
+-- For "kill X" or "stop X" → generate the kill command.
+-- For "check/verify X" → generate a command that checks it.
+-- Only use TXT: for pure explanations with no possible shell equivalent (e.g. "what is TCP?").
+-- Target OS: ${os || 'Linux'}.
+-
+-Reply format — start with exactly one of:
+-CMD:<shell command only, no explanation>
+-TXT:<plain text answer, no markdown>`,
+-      messages: [{ role: 'user', content: userMessage }],
+-    })
+-
+-    const raw = response.content[0].text.trim()
+-    if (raw.startsWith('CMD:')) return { type: 'command', value: raw.slice(4).trim() }
+-    if (raw.startsWith('TXT:')) return { type: 'text', value: raw.slice(4).trim() }
+-    const text = raw.trim()
+-    const isCommand = !text.includes('\n') && text.split(' ').length <= 8
+-    return { type: isCommand ? 'command' : 'text', value: text }
+-  } catch (err) {
+-    return { error: err.message }
+-  }
+-})
++
++return { resolveSavedSessionConfig, logging }
++}
+--- a/electron/ssh-manager.js
++++ b/electron/ssh-manager.js
+@@ -5,6 +5,7 @@
+ class SshManager {
+   constructor() {
+     this.connections = new Map()
++    this.pending = new Map()
+     this.mainWindow = null
+   }
+ 
+@@ -18,11 +19,35 @@
+     }
+   }
+ 
+-  connect(channelId, config) {
+-    if (config.jumpHost && config.jumpHost.trim()) {
+-      return this._connectViaJump(channelId, config)
+-    }
+-    return this._connectDirect(channelId, config)
++  async connect(channelId, config) {
++    this.disconnect(channelId)
++    const abort = new AbortController()
++    this.pending.set(channelId, abort)
++    const cancel = () => abort.abort()
++    config.signal?.addEventListener('abort', cancel, { once: true })
++    if (config.signal?.aborted) cancel()
++    const scoped = { ...config, signal: abort.signal }
++    let onAbort
++    try {
++      const canceled = new Promise((_, reject) => {
++        onAbort = () => reject(new Error('SSH connection canceled'))
++        abort.signal.addEventListener('abort', onAbort, { once: true })
++        if (abort.signal.aborted) onAbort()
++      })
++      return await Promise.race([canceled, config.jumpHost?.trim() ? this._connectViaJump(channelId, scoped) : this._connectDirect(channelId, scoped)])
++    } catch (error) { abort.abort(); throw error }
++    finally {
++      abort.signal.removeEventListener('abort', onAbort)
++      config.signal?.removeEventListener('abort', cancel)
++      if (this.pending.get(channelId) === abort) this.pending.delete(channelId)
++    }
++  }
++
++  _watchClient(client, config) {
++    const cancel = () => client.destroy()
++    config.signal?.addEventListener('abort', cancel, { once: true })
++    client.once('close', () => config.signal?.removeEventListener('abort', cancel))
++    if (config.signal?.aborted) { cancel(); throw new Error('SSH connection canceled') }
+   }
+ 
+   // Async so key files are read without blocking the main process
+@@ -33,6 +58,7 @@
+       username: config.username,
+       keepaliveInterval: config.keepaliveInterval || 10000,
+       keepaliveCountMax: 3,
++      hostVerifier: config.hostVerifier,
+     }
+     if (config.authType === 'key' && config.keyPath) {
+       connConfig.privateKey = await fs.promises.readFile(config.keyPath)
+@@ -43,28 +69,30 @@
+     return connConfig
+   }
+ 
+-  _openShell(channelId, client, jumpClient) {
++  _openShell(channelId, client, jumpClient, config) {
+     return new Promise((resolve, reject) => {
+       client.shell({ term: 'xterm-256color', rows: 24, cols: 80 }, (err, stream) => {
+-        if (err) {
++        if (err || config?.signal?.aborted) {
+           client.end()
+           if (jumpClient) jumpClient.end()
+-          reject(err)
++          reject(err || new Error('SSH connection canceled'))
+           return
+         }
+ 
+         this.connections.set(channelId, { client, jumpClient: jumpClient || null, stream, sftp: null })
+ 
+         stream.on('data', (data) => {
+-          this._emit('ssh:data', channelId, data.toString('utf8'))
++          if (this.connections.get(channelId)?.client === client) this._emit('ssh:data', channelId, data.toString('utf8'))
+         })
+         stream.stderr.on('data', (data) => {
+-          this._emit('ssh:data', channelId, data.toString('utf8'))
++          if (this.connections.get(channelId)?.client === client) this._emit('ssh:data', channelId, data.toString('utf8'))
+         })
+         stream.on('close', () => {
+-          this.connections.delete(channelId)
++          const current = this.connections.get(channelId)?.client === client
++          if (current) this.connections.delete(channelId)
++          try { client.end() } catch (_) {}
+           if (jumpClient) try { jumpClient.end() } catch (_) {}
+-          this._emit('ssh:close', channelId)
++          if (current) this._emit('ssh:close', channelId)
+         })
+ 
+         resolve({ channelId })
+@@ -78,13 +106,15 @@
+     const connConfig = await this._buildConnConfig(config)
+     return new Promise((resolve, reject) => {
+       const client = new Client()
++      this._watchClient(client, config)
+ 
+       client.on('ready', () => {
+-        this._openShell(channelId, client, null).then(resolve).catch(reject)
++        this._openShell(channelId, client, null, config).then(resolve).catch(reject)
+       })
+       client.on('error', (err) => {
+-        this.connections.delete(channelId)
+-        this._emit('ssh:error', channelId, err.message)
++        const current = this.connections.get(channelId)?.client === client || this.pending.get(channelId)?.signal === config.signal
++        if (this.connections.get(channelId)?.client === client) this.connections.delete(channelId)
++        if (current) this._emit('ssh:error', channelId, err.message)
+         reject(err)
+       })
+ 
+@@ -100,6 +130,7 @@
+       username: config.jumpUsername || '',
+       keepaliveInterval: config.keepaliveInterval || 10000,
+       keepaliveCountMax: 3,
++      hostVerifier: config.jumpHostVerifier,
+     }
+     if (config.jumpAuthType === 'key' && config.jumpKeyPath) {
+       jumpConfig.privateKey = await fs.promises.readFile(config.jumpKeyPath)
+@@ -108,7 +139,7 @@
+       jumpConfig.password = config.jumpPassword || ''
+     }
+ 
+-    const innerConfig = { username: config.username }
++    const innerConfig = { username: config.username, hostVerifier: config.hostVerifier, keepaliveInterval: config.keepaliveInterval || 10000, keepaliveCountMax: 3 }
+     if (config.authType === 'key' && config.keyPath) {
+       innerConfig.privateKey = await fs.promises.readFile(config.keyPath)
+       if (config.passphrase) innerConfig.passphrase = config.passphrase
+@@ -118,19 +149,23 @@
+ 
+     return new Promise((resolve, reject) => {
+       const jumpClient = new Client()
++      this._watchClient(jumpClient, config)
+ 
+       jumpClient.on('ready', () => {
+         jumpClient.forwardOut('127.0.0.1', 0, config.host, config.port || 22, (err, stream) => {
+           if (err) { jumpClient.end(); reject(err); return }
++          if (config.signal?.aborted) { stream.destroy(); jumpClient.destroy(); reject(new Error('SSH connection canceled')); return }
+ 
+           const client = new Client()
++          this._watchClient(client, config)
+           client.on('ready', () => {
+-            this._openShell(channelId, client, jumpClient).then(resolve).catch(reject)
++            this._openShell(channelId, client, jumpClient, config).then(resolve).catch(reject)
+           })
+           client.on('error', (err) => {
+-            this.connections.delete(channelId)
++            const current = this.connections.get(channelId)?.client === client || this.pending.get(channelId)?.signal === config.signal
++            if (this.connections.get(channelId)?.client === client) this.connections.delete(channelId)
+             try { jumpClient.end() } catch (_) {}
+-            this._emit('ssh:error', channelId, err.message)
++            if (current) this._emit('ssh:error', channelId, err.message)
+             reject(err)
+           })
+ 
+@@ -139,7 +174,7 @@
+       })
+ 
+       jumpClient.on('error', (err) => {
+-        this._emit('ssh:error', channelId, `Jump host error: ${err.message}`)
++        if (this.pending.get(channelId)?.signal === config.signal || this.connections.get(channelId)?.jumpClient === jumpClient) this._emit('ssh:error', channelId, `Jump host error: ${err.message}`)
+         reject(err)
+       })
+ 
+@@ -158,6 +193,7 @@
+   }
+ 
+   disconnect(channelId) {
++    this.pending.get(channelId)?.abort()
+     const conn = this.connections.get(channelId)
+     if (conn) {
+       try { if (conn.sftp) conn.sftp.end() } catch (_) {}
+@@ -177,6 +213,7 @@
+       if (conn.sftp) return resolve(conn.sftp)
+       conn.client.sftp((err, sftp) => {
+         if (err) return reject(err)
++        if (this.connections.get(channelId) !== conn) { sftp.end(); return reject(new Error('SSH connection closed')) }
+         conn.sftp = sftp
+         resolve(sftp)
+       })
+--- a/electron/tunnel-manager.js
++++ b/electron/tunnel-manager.js
+@@ -22,9 +22,12 @@
+       const connections = new Set()
+       const server = net.createServer((socket) => {
+         connections.add(socket)
++        socket.on('error', () => socket.destroy())
+         socket.on('close', () => connections.delete(socket))
+         sshClient.forwardOut('127.0.0.1', config.localPort, config.remoteHost, config.remotePort, (err, stream) => {
+           if (err) { socket.end(); return }
++          if (socket.destroyed) { stream.destroy(); return }
++          stream.on('error', () => socket.destroy())
+           socket.pipe(stream).pipe(socket)
+           stream.on('close', () => socket.end())
+           socket.on('close', () => stream.end())
+@@ -49,9 +52,12 @@
+ 
+         const connections = new Set()
+         const onTcpConnection = (details, accept) => {
++          if (details.destPort !== config.remotePort || details.destIP !== remoteBindAddress) return
+           const stream = accept()
+           const socket = net.connect(config.localPort, config.localHost || '127.0.0.1')
+           connections.add(socket)
++          socket.on('error', () => { socket.destroy(); stream.destroy() })
++          stream.on('error', () => socket.destroy())
+           socket.on('close', () => connections.delete(socket))
+           socket.pipe(stream).pipe(socket)
+           stream.on('close', () => socket.end())
+@@ -78,13 +84,30 @@
+       const connections = new Set()
+       const server = net.createServer((socket) => {
+         connections.add(socket)
++        socket.on('error', () => socket.destroy())
+         socket.on('close', () => connections.delete(socket))
+-        socket.once('data', (data) => {
++        // TCP may fragment or coalesce SOCKS messages. Retain incomplete frames.
++        let buffer = Buffer.alloc(0), greeting = false
++        const read = data => {
++          buffer = Buffer.concat([buffer, data])
++          if (buffer.length > 65536) { socket.destroy(); return }
++          if (!greeting) {
++          if (buffer.length < 2 || buffer.length < 2 + buffer[1]) return
++          const data = buffer.subarray(0, 2 + buffer[1])
++          buffer = buffer.subarray(data.length)
+           // SOCKS5 greeting
+           if (data[0] !== 0x05) { socket.end(); return }
++          if (!data.subarray(2).includes(0)) { socket.end(Buffer.from([5, 255])); return }
+           socket.write(Buffer.from([0x05, 0x00])) // no auth
+-
+-          socket.once('data', (req) => {
++          greeting = true
++          }
++            if (buffer.length < 5) return
++            const length = buffer[3] === 1 ? 10 : buffer[3] === 3 ? 7 + buffer[4] : 0
++            if (!length) { socket.end(); return }
++            if (buffer.length < length) return
++            const req = buffer.subarray(0, length), payload = buffer.subarray(length)
++            socket.removeListener('data', read)
++            socket.pause()
+             if (req[0] !== 0x05 || req[1] !== 0x01) { socket.end(); return }
+             const atyp = req[3]
+             let host, port
+@@ -104,14 +127,18 @@
+                 socket.end()
+                 return
+               }
++              if (socket.destroyed) { stream.destroy(); return }
++              stream.on('error', () => socket.destroy())
+               const reply = Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+               socket.write(reply)
++              if (payload.length) stream.write(payload)
+               socket.pipe(stream).pipe(socket)
++              socket.resume()
+               stream.on('close', () => socket.end())
+               socket.on('close', () => stream.end())
+             })
+-          })
+-        })
++        }
++        socket.on('data', read)
+       })
+ 
+       server.on('error', (err) => reject(err))
+@@ -128,8 +155,8 @@
+     if (!tunnel) return
+     if (tunnel.server) {
+       tunnel.server.close()
+-      if (tunnel.connections) tunnel.connections.forEach((s) => { try { s.end() } catch (_) {} })
+     }
++    if (tunnel.connections) tunnel.connections.forEach((s) => { try { s.destroy() } catch (_) {} })
+     if (tunnel.type === 'remote' && tunnel.sshClient && tunnel.onTcpConnection) {
+       tunnel.sshClient.removeListener('tcp connection', tunnel.onTcpConnection)
+       try { tunnel.sshClient.unforwardIn(tunnel.config.remoteBindAddress || '127.0.0.1', tunnel.config.remotePort) } catch (_) {}
+--- a/electron/ipc/sessions.js
++++ b/electron/ipc/sessions.js
+@@ -1,4 +1,4 @@
+-const { ipcMain, dialog } = require('electron')
++const electron = require('electron')
+ const path = require('path')
+ const fs = require('fs')
+ 
+@@ -25,7 +25,7 @@
+   return merged
+ }
+ 
+-function registerSessionHandlers(store, { encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow }) {
++function registerSessionHandlers(store, { ipcMain = electron.ipcMain, dialog = electron.dialog, encryptSession, decryptSession, SENSITIVE_FIELDS, getMainWindow }) {
+   const redactSession = makeSessionRedactor(decryptSession, SENSITIVE_FIELDS)
+   const redactSessions = (sessions) => sessions.map(redactSession)
+ 
+--- a/electron/ipc/logging.js
++++ b/electron/ipc/logging.js
+@@ -1,35 +1,41 @@
+-const { ipcMain, dialog } = require('electron')
++const electron = require('electron')
+ const path = require('path')
+ const fs = require('fs')
+ 
+-module.exports = function registerLoggingHandlers({ getMainWindow }) {
++module.exports = function registerLoggingHandlers({ ipcMain = electron.ipcMain, dialog = electron.dialog, getMainWindow }) {
+   const logStreams = new Map()
++  const errors = new Map()
+ 
+   ipcMain.handle('logging:start', (_event, channelId, logDir) => {
+     if (typeof channelId !== 'string') return { error: 'Invalid channelId' }
+     if (logDir != null && typeof logDir !== 'string') return { error: 'Invalid logDir' }
+-    if (logStreams.has(channelId)) return { error: 'Already logging' }
++    if (logStreams.has(channelId)) return { success: true, filePath: logStreams.get(channelId).filePath }
+     const os = require('os')
+     const dir = logDir || path.join(os.homedir(), 'MyTerminal-logs')
+     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+     const filePath = path.join(dir, `session-${timestamp}-${channelId.slice(0, 8)}.log`)
+     const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' })
++    stream.on('error', (error) => { errors.set(channelId, error.message); logStreams.delete(channelId) })
++    errors.delete(channelId)
+     logStreams.set(channelId, { stream, filePath })
+     return { success: true, filePath }
+   })
+ 
+-  ipcMain.on('logging:write', (_event, channelId, data) => {
++  const write = (channelId, data) => {
+     if (typeof channelId !== 'string' || typeof data !== 'string') return
+     const entry = logStreams.get(channelId)
+     if (entry) entry.stream.write(data)
+-  })
++  }
++  ipcMain.on('logging:write', (_event, channelId, data) => write(channelId, data))
+ 
+-  ipcMain.handle('logging:stop', (_event, channelId) => {
++  const stop = (channelId) => {
+     const entry = logStreams.get(channelId)
+     if (entry) { entry.stream.end(); logStreams.delete(channelId) }
+     return { success: true }
+-  })
++  }
++  ipcMain.handle('logging:stop', (_event, channelId) => stop(channelId))
++  ipcMain.handle('logging:status', (_event, channelId) => ({ logging: logStreams.has(channelId), error: errors.get(channelId) }))
+ 
+   ipcMain.handle('logging:export', async (_event, content) => {
+     const result = await dialog.showSaveDialog(getMainWindow(), {
+@@ -41,4 +47,5 @@
+     fs.writeFileSync(result.filePath, content, 'utf8')
+     return { success: true }
+   })
++  return { write, stop, dispose: () => { for (const id of logStreams.keys()) stop(id) } }
+ }
+--- a/electron/ipc/tunnels.js
++++ b/electron/ipc/tunnels.js
+@@ -1,4 +1,4 @@
+-const { ipcMain } = require('electron')
++const electron = require('electron')
+ const { normalizeRemoteBindAddress } = require('../security-utils')
+ 
+ function normalizePort(value, name) {
+@@ -33,7 +33,7 @@
+   return normalized
+ }
+ 
+-module.exports = function registerTunnelHandlers(store, { sshManager, tunnelManager, assertString, assertPlainObject }) {
++module.exports = function registerTunnelHandlers(store, { ipcMain = electron.ipcMain, sshManager, tunnelManager, assertString, assertPlainObject }) {
+   ipcMain.handle('tunnel:start', async (_event, channelId, tunnelId, tunnelConfig) => {
+     try {
+       assertString(channelId, 'channelId')
+--- a/electron/ipc/backup.js
++++ b/electron/ipc/backup.js
+@@ -1,9 +1,9 @@
+-const { ipcMain, dialog } = require('electron')
++const electron = require('electron')
+ const fs = require('fs')
+ 
+ const BACKUP_VERSION = 1
+ 
+-module.exports = function registerBackupHandlers(store, { encryptSession, decryptSession, encryptField, decryptField, SENSITIVE_FIELDS, DEFAULT_SETTINGS, getMainWindow }) {
++module.exports = function registerBackupHandlers(store, { ipcMain = electron.ipcMain, dialog = electron.dialog, encryptSession, decryptSession, encryptField, decryptField, SENSITIVE_FIELDS, DEFAULT_SETTINGS, getMainWindow, sanitizeSettings = value => value }) {
+   ipcMain.handle('backup:export', async (_event, options) => {
+     const includeCredentials = !!(options && options.includeCredentials)
+ 
+@@ -155,7 +155,7 @@
+         if (key in data.settingsPrefs) sanitized[key] = data.settingsPrefs[key]
+       }
+       const current = store.get('settings-prefs', {})
+-      const merged = { ...current, ...sanitized }
++      const merged = { ...sanitizeSettings(current), ...sanitizeSettings(sanitized) }
+       store.set('settings-prefs', merged)
+       summary.settingsPrefs = Object.keys(sanitized).length
+     }
 --- a/src/components/TerminalTab.jsx
 +++ b/src/components/TerminalTab.jsx
-@@ -21,8 +21,12 @@
+@@ -21,8 +21,14 @@
  import { resizeTerminalChannel, writeToBroadcastTargets, writeToTerminalChannel } from '../utils/terminalChannels'
  import { registerOsc52ClipboardHandler, updateOscSequenceState } from '../utils/terminalClipboardUtils'
  
@@ -112,24 +790,62 @@
 +  const sessionStore = host?.store || useSessionStore
 +  const { addSplitPane, removeSplitPane, settings } = sessionStore()
 +  const standalone = !host
++  const remoteTools = !tab.isLocal && (standalone || host?.remoteTools)
++  const extraTools = standalone || host?.features
  
    const termRef = useRef(null)
    const terminalInstanceRef = useRef(null)
-@@ -132,11 +136,11 @@
+@@ -75,7 +81,8 @@
+   const pendingLineRef = useRef('')
+   const reconnectTimerRef = useRef(null)
+   const isMountedRef = useRef(true)
+-  const reconnectAttemptRef = useRef(0)
++  const localReconnectAttemptRef = useRef(0)
++  const reconnectAttemptRef = host?.reconnectAttempts || localReconnectAttemptRef
+   const isRegexModeRef = useRef(false)
+   const lastBellRef = useRef(0)
+   const stickyCmdRef = useRef(null)
+@@ -107,6 +114,22 @@
+     }
+   }, [fontSize])
+ 
++  useEffect(() => { setFontSize(settings.defaultFontSize || 14) }, [settings.defaultFontSize])
++  useEffect(() => { setColorize(settings.colorizeByDefault) }, [settings.colorizeByDefault])
++  useEffect(() => {
++    if (terminalInstanceRef.current) terminalInstanceRef.current.options.scrollback = settings.defaultScrollback || 10000
++  }, [settings.defaultScrollback])
++  const settingsRef = useRef(settings)
++  settingsRef.current = settings
++  useEffect(() => {
++    if (!host?.backgroundLogging || !isActive) return
++    let disposed = false
++    const update = () => api.logging.status(tab.channelId).then(result => { if (!disposed) { setLogging(result.logging); if (result.error) setError(result.error) } }).catch(error => { if (!disposed && host.isActive()) setError(error.message) })
++    void update()
++    const timer = setInterval(update, 1000)
++    return () => { disposed = true; clearInterval(timer) }
++  }, [isActive, tab.channelId])
++
+   // Auto-focus search input
+   useEffect(() => {
+     if (showSearch) setTimeout(() => searchInputRef.current?.focus(), 50)
+@@ -132,21 +155,21 @@
  
    // Latency polling for SSH connections
    useEffect(() => {
 -    if (tab.isLocal || !connected) { setLatency(null); return }
-+    if (!standalone || tab.isLocal || !connected) { setLatency(null); return }
++    if (!remoteTools || !connected || !isActive) { setLatency(null); return }
      let active = true
      const poll = async () => {
        if (!active) return
 -      const ms = await window.electronAPI.ssh.ping(tab.channelId)
-+      const ms = await api.ssh.ping(tab.channelId)
++      const ms = await api.ssh.ping(tab.channelId).catch(() => -1)
        if (active) setLatency(ms >= 0 ? ms : null)
      }
      poll()
-@@ -146,7 +150,7 @@
+     const timer = setInterval(poll, 30000)
+     return () => { active = false; clearInterval(timer) }
+-  }, [tab.isLocal, connected, tab.channelId])
++  }, [tab.isLocal, connected, tab.channelId, isActive])
  
    // Load custom presets on mount
    useEffect(() => {
@@ -138,7 +854,7 @@
    }, [])
  
    // Keyboard shortcuts — fallback for when xterm does NOT have focus (e.g. toolbar, search bar)
-@@ -157,7 +161,7 @@
+@@ -157,7 +180,7 @@
        // Skip if xterm textarea has focus — attachCustomKeyEventHandler handles it there
        if (document.activeElement?.classList.contains('xterm-helper-textarea')) return
        if (e.ctrlKey && e.shiftKey && e.key === 'F') { e.preventDefault(); setShowSearch((v) => !v) }
@@ -147,7 +863,7 @@
        if (e.ctrlKey && !e.shiftKey && e.key === 'f') { e.preventDefault(); setShowFilter((v) => !v) }
        if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); setFontSize((s) => Math.min(32, s + 1)) }
        if (e.ctrlKey && e.key === '-') { e.preventDefault(); setFontSize((s) => Math.max(8, s - 1)) }
-@@ -216,14 +220,14 @@
+@@ -216,14 +239,14 @@
  
    // Helper: write to the right channel type
    const writeToChannel = (data, channelId = tab.channelId) => {
@@ -165,7 +881,7 @@
      } else {
        writeToChannel(data)
      }
-@@ -234,6 +238,7 @@
+@@ -234,6 +257,7 @@
      isMountedRef.current = true
      reconnectAttemptRef.current = 0
  
@@ -173,7 +889,7 @@
      const term = new Terminal({
        theme: {
          background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-@@ -258,9 +263,12 @@
+@@ -258,10 +282,13 @@
      term.loadAddon(fitAddon)
      term.loadAddon(new WebLinksAddon())
      term.loadAddon(searchAddon)
@@ -183,11 +899,13 @@
      const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
        term,
 -      (text) => window.electronAPI.clipboard.writeText(text),
+-      { enabled: settings.osc52ClipboardEnabled === true }
 +      (text) => api.clipboard.writeText(text),
-       { enabled: settings.osc52ClipboardEnabled === true }
++      { enabled: () => settingsRef.current.osc52ClipboardEnabled === true }
      )
  
-@@ -269,7 +277,8 @@
+     terminalInstanceRef.current = term
+@@ -269,7 +296,8 @@
      searchAddonRef.current = searchAddon
  
      term.open(termRef.current)
@@ -197,7 +915,7 @@
  
      // Track pane focus so tab activation can restore it to the right terminal
      const handleTermFocus = () => { focusedPaneRef.current = 'main' }
-@@ -294,13 +303,13 @@
+@@ -294,13 +322,13 @@
      term.attachCustomKeyEventHandler((e) => {
        if (e.type !== 'keydown') return true
        if (e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -213,17 +931,30 @@
            if (isLinux && !!term.getSelection()) {
              setCtrlCDialog({ hasSelection: true })
              return false
-@@ -317,7 +326,8 @@
+@@ -317,7 +345,8 @@
  
      // Reconnect logic
      const scheduleReconnect = () => {
 -      if (!isMountedRef.current || tab.isLocal) return
-+      // Native OpenSSH owns authentication and logout. Desktop reconnect is explicit.
-+      if (!isMountedRef.current || tab.isLocal || host) return
++      // Managed SSH reuses MyTerminal's bounded retry policy. Native shells reconnect explicitly.
++      if (!isMountedRef.current || tab.isLocal || (host && (!host.remoteTools || !host.isActive()))) return
        // Guard: cancel any in-progress timer before starting a new one so that
        // multiple close/error events don't create parallel countdown loops.
        clearInterval(reconnectTimerRef.current)
-@@ -342,32 +352,32 @@
+@@ -331,10 +360,10 @@
+       let remaining = Math.min(30, attempt * 5)
+       setReconnectCountdown(remaining)
+       const tick = setInterval(() => {
+-        if (!isMountedRef.current) { clearInterval(tick); return }
++        if (!isMountedRef.current || (host && !host.isActive())) { clearInterval(tick); setReconnectCountdown(null); return }
+         remaining--
+         setReconnectCountdown(remaining > 0 ? remaining : null)
+-        if (remaining <= 0) { clearInterval(tick); connectSSH() }
++        if (remaining <= 0) { clearInterval(tick); if (host) void host.connect(); else connectSSH() }
+       }, 1000)
+       reconnectTimerRef.current = tick
+     }
+@@ -342,32 +371,32 @@
      const autoStartLogging = () => {
        if (settings.loggingEnabled && !loggingRef.current) {
          const logDir = settings.logDirectory || ''
@@ -263,7 +994,7 @@
            if (result?.error) {
              setError(result.error)
              term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
-@@ -379,8 +389,8 @@
+@@ -379,8 +408,8 @@
            clearTimeout(reconnectTimerRef.current)
            setReconnectCountdown(null)
            autoStartLogging()
@@ -274,7 +1005,7 @@
          })
        }
      }
-@@ -418,14 +428,14 @@
+@@ -418,14 +447,14 @@
  
      // SSH/local data → terminal
      let cwdTimer = null
@@ -291,16 +1022,18 @@
          }
        }
  
-@@ -437,7 +447,7 @@
+@@ -436,8 +465,8 @@
+       term.write(shouldColorize ? colorizeOutput(data) : data)
  
        // Session logging — fire-and-forget
-       if (loggingRef.current) {
+-      if (loggingRef.current) {
 -        window.electronAPI.logging.write(tab.channelId, stripAnsi(data))
++      if (loggingRef.current && !host?.backgroundLogging) {
 +        api.logging.write(tab.channelId, stripAnsi(data))
        }
  
        const plain = stripAnsi(data)
-@@ -460,18 +470,18 @@
+@@ -460,18 +489,18 @@
        }
      })
  
@@ -322,7 +1055,7 @@
        if (channelId === tab.channelId) {
          setError(message)
          term.write('\r\n\x1b[31mError: ' + message + '\x1b[0m\r\n')
-@@ -487,12 +497,13 @@
+@@ -487,12 +516,13 @@
          if (width === 0 || height === 0) return
          fitAddon.fit()
          const { cols, rows } = term
@@ -337,7 +1070,7 @@
        () => inputDisposer.dispose(),
        () => scrollDisposer.dispose(),
        () => term.textarea?.removeEventListener('focus', handleTermFocus),
-@@ -504,10 +515,11 @@
+@@ -504,10 +534,11 @@
        () => clearInterval(reconnectTimerRef.current),
        () => {
          isMountedRef.current = false
@@ -345,7 +1078,7 @@
 -        window.electronAPI.tunnel.stopByChannel(tab.channelId)
 -        if (tab.isLocal) window.electronAPI.local.disconnect(tab.channelId)
 -        else window.electronAPI.ssh.disconnect(tab.channelId)
-+        if (loggingRef.current) api.logging.stop(tab.channelId)
++        if (loggingRef.current && !host?.backgroundLogging) api.logging.stop(tab.channelId)
 +        api.tunnel.stopByChannel(tab.channelId)
 +        if (tab.isLocal) api.local.disconnect(tab.channelId)
 +        else api.ssh.disconnect(tab.channelId)
@@ -353,7 +1086,7 @@
          term.dispose()
        },
      ]
-@@ -526,7 +538,7 @@
+@@ -526,7 +557,7 @@
          const term = terminalInstanceRef.current
          if (term) {
            const { cols, rows } = term
@@ -362,7 +1095,7 @@
          }
        } catch (_) {}
      })
-@@ -573,32 +585,32 @@
+@@ -573,32 +604,34 @@
    const handleSavePreset = async () => {
      if (!filterText.trim() || customPresets.length >= 10) return
      const newPreset = { id: crypto.randomUUID(), label: filterText.trim().slice(0, 24), pattern: filterText.trim(), color: '#8b949e' }
@@ -377,6 +1110,7 @@
    }
  
    const toggleLogging = async () => {
++    try {
      if (logging) {
 -      await window.electronAPI.logging.stop(tab.channelId)
 +      await api.logging.stop(tab.channelId)
@@ -387,6 +1121,7 @@
 +      const result = await api.logging.start(tab.channelId, logDir)
        if (result?.success) setLogging(true)
      }
++    } catch (error) { setError(error.message) }
    }
  
    const handleExport = async () => {
@@ -401,7 +1136,7 @@
      if (content?.error) {
        // Show error to user for binary/size rejections
        if (terminalInstanceRef.current) {
-@@ -611,7 +623,7 @@
+@@ -611,7 +644,7 @@
  
    const handleSaveFile = async () => {
      if (!editingFile) return
@@ -410,7 +1145,7 @@
      if (result?.error) return
      setEditingFile((prev) => prev ? { ...prev, original: prev.content } : null)
    }
-@@ -653,9 +665,10 @@
+@@ -653,9 +686,10 @@
          )}
  
          <div className="terminal-toolbar-actions">
@@ -423,31 +1158,54 @@
            <button className={`icon-btn ${showSearch ? 'active' : ''}`} onClick={() => setShowSearch((v) => !v)} title="Search terminal (Ctrl+Shift+F)">
              <Search size={16} />
            </button>
-@@ -665,16 +678,16 @@
+@@ -665,16 +699,25 @@
            <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
              <Highlighter size={16} />
            </button>
 -          <button className={`icon-btn ${logging ? 'active' : ''}`} onClick={toggleLogging} title={logging ? 'Stop logging' : 'Start logging'}>
-+          {standalone && <button className={`icon-btn ${logging ? 'active' : ''}`} onClick={toggleLogging} title={logging ? 'Stop logging' : 'Start logging'}>
++          {extraTools && <button className={`icon-btn ${logging ? 'active' : ''}`} onClick={toggleLogging} title={logging ? 'Stop logging' : 'Start logging'}>
              <FileText size={16} />
 -          </button>
 -          <button className="icon-btn" onClick={handleExport} title="Export terminal output">
 +          </button>}
-+          {standalone && <button className="icon-btn" onClick={handleExport} title="Export terminal output">
++          {extraTools && <button className="icon-btn" onClick={handleExport} title="Export terminal output">
              <Download size={16} />
 -          </button>
 -          <button className={`icon-btn ${showSnippets ? 'active' : ''}`} onClick={() => setShowSnippets((v) => !v)} title="Snippets">
 +          </button>}
-+          {standalone && <button className={`icon-btn ${showSnippets ? 'active' : ''}`} onClick={() => setShowSnippets((v) => !v)} title="Snippets">
++          {extraTools && <button className={`icon-btn ${showSnippets ? 'active' : ''}`} onClick={() => setShowSnippets((v) => !v)} title="Snippets">
              <Code2 size={16} />
 -          </button>
 -          {!tab.isLocal && (
 +          </button>}
-+          {standalone && !tab.isLocal && (
++          {extraTools && (<>
++              <button
++                className={`icon-btn ${tab.splitChannelId ? 'active' : ''}`}
++                onClick={() => tab.splitChannelId ? removeSplitPane(tab.id) : addSplitPane(tab.id)}
++                title="Split pane"
++              >
++                <SplitSquareHorizontal size={16} />
++              </button>
++          </>)}
++          {remoteTools && (
              <>
                <button
                  className={`icon-btn ${showTunnels ? 'active' : ''}`}
-@@ -709,7 +722,7 @@
+@@ -682,13 +725,6 @@
+                 title="Port forwarding"
+               >
+                 <Network size={16} />
+-              </button>
+-              <button
+-                className={`icon-btn ${tab.splitChannelId ? 'active' : ''}`}
+-                onClick={() => tab.splitChannelId ? removeSplitPane(tab.id) : addSplitPane(tab.id)}
+-                title="Split pane"
+-              >
+-                <SplitSquareHorizontal size={16} />
+               </button>
+               <button className={`icon-btn ${showSftp ? 'active' : ''}`} onClick={() => setShowSftp((v) => !v)} title="Toggle SFTP panel">
+                 <PanelRight size={16} />
+@@ -709,7 +745,7 @@
            osHint={
              tab.wslDistro
                ? `Linux (WSL: ${tab.wslDistro})`
@@ -456,6 +1214,580 @@
            }
          />
        )}
+@@ -739,7 +775,7 @@
+ 
+       {/* Snippets panel */}
+       {showSnippets && (
+-        <SnippetPanel
++        <SnippetPanel host={host}
+           onInsert={(cmd) => { writeToChannel(cmd + '\r'); focusTerminal() }}
+           onClose={() => setShowSnippets(false)}
+         />
+@@ -747,7 +783,7 @@
+ 
+       {/* Tunnel panel */}
+       {showTunnels && !tab.isLocal && connected && (
+-        <TunnelPanel
++        <TunnelPanel host={host}
+           channelId={tab.channelId}
+           sessionId={tab.sessionId || tab.channelId}
+           onClose={() => setShowTunnels(false)}
+@@ -893,7 +929,7 @@
+               }}
+             />
+             <div className="terminal-wrapper" style={{ flex: 1 }}>
+-              <SplitTerminalPane
++              <SplitTerminalPane host={host}
+                 key={tab.splitChannelId}
+                 channelId={tab.splitChannelId}
+                 config={tab.splitConfig}
+@@ -924,7 +960,7 @@
+                 window.addEventListener('mouseup', onUp)
+               }}
+             />
+-            <SftpPanel
++            <SftpPanel host={host}
+               channelId={tab.channelId}
+               cwd={cwd}
+               width={sftpWidth}
+@@ -937,7 +973,7 @@
+ 
+       {/* Remote file editor overlay */}
+       {editingFile && (
+-        <FileEditor
++        <FileEditor host={host}
+           editingFile={editingFile}
+           textareaRef={editorTextareaRef}
+           onSave={handleSaveFile}
+--- a/src/components/SftpPanel.jsx
++++ b/src/components/SftpPanel.jsx
+@@ -1,3 +1,4 @@
++import useSessionStore from '../store/useSessionStore'
+ import React, { useState, useEffect, useRef } from 'react'
+ import {
+   Folder, File, ChevronUp, ArrowLeft, ArrowRight, RefreshCw, Upload, Download,
+@@ -19,7 +20,9 @@
+   return new Date(mtime * 1000).toLocaleDateString()
+ }
+ 
+-export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default', onEditFile }) {
++export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'default', onEditFile }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
+   const [path, setPath] = useState('/')
+   const [items, setItems] = useState([])
+   const [loading, setLoading] = useState(false)
+@@ -50,7 +53,7 @@
+     setError(null)
+     setSelectedNames(new Set())
+     setAnchorName(null)
+-    const result = await window.electronAPI.sftp.list(channelId, dir)
++    const result = await api.sftp.list(channelId, dir)
+     if (requestId !== loadRequestRef.current) return
+     setLoading(false)
+     if (result?.error) { setError(result.error); return }
+@@ -68,7 +71,7 @@
+       // Single-quote the path so spaces and most metacharacters are safe.
+       // Escape any literal single-quotes inside the path (bash: 'it'\''s' trick).
+       const safeDir = dir.replace(/'/g, "'\\''")
+-      window.electronAPI.ssh.write(channelId, `cd '${safeDir}'\r`)
++      api.ssh.write(channelId, `cd '${safeDir}'\r`)
+     }
+   }
+ 
+@@ -93,14 +96,14 @@
+   useEffect(() => {
+     loadDir('/')
+     // Resolve home directory via SFTP realpath('.')
+-    window.electronAPI.sftp.realpath(channelId, '.').then((result) => {
++    api.sftp.realpath(channelId, '.').then((result) => {
+       if (result && !result.error) setSftpHome(result)
+     })
+   }, [channelId])
+ 
+   // Load favorites from electron-store (persistent, survives app restarts)
+   useEffect(() => {
+-    window.electronAPI.favorites.get(sessionKey).then(setFavorites)
++    api.favorites.get(sessionKey).then(setFavorites)
+   }, [sessionKey])
+ 
+   // Auto-navigate when terminal cwd changes
+@@ -148,14 +151,14 @@
+       updated = [...favorites, path]
+     }
+     setFavorites(updated)
+-    window.electronAPI.favorites.set(sessionKey, updated)
++    api.favorites.set(sessionKey, updated)
+   }
+ 
+   const removeFavorite = (fav, e) => {
+     e.stopPropagation()
+     const updated = favorites.filter(f => f !== fav)
+     setFavorites(updated)
+-    window.electronAPI.favorites.set(sessionKey, updated)
++    api.favorites.set(sessionKey, updated)
+   }
+ 
+   const goToFavorite = (fav) => {
+@@ -187,17 +190,17 @@
+     // recreate each selected file/folder inside it.
+     if (selectedItems.length === 1 && selectedItems[0].type !== 'd') {
+       const only = selectedItems[0]
+-      const result = await window.electronAPI.dialog.saveFile({
++      const result = await api.dialog.saveFile({
+         defaultPath: only.name,
+         securityScope: 'sftp-download-file',
+       })
+       if (result.canceled) return
+-      const res = await window.electronAPI.sftp.download(channelId, joinPath(path, only.name), result.filePath)
++      const res = await api.sftp.download(channelId, joinPath(path, only.name), result.filePath)
+       if (res?.error) setError(res.error)
+       return
+     }
+ 
+-    const pick = await window.electronAPI.dialog.openFile({
++    const pick = await api.dialog.openFile({
+       title: selectedItems.length === 1
+         ? `Download "${selectedItems[0].name}" to…`
+         : `Download ${selectedItems.length} items to…`,
+@@ -215,8 +218,8 @@
+       const remotePath = joinPath(path, item.name)
+       const target = trimmed + sep + item.name
+       const res = item.type === 'd'
+-        ? await window.electronAPI.sftp.downloadDir(channelId, remotePath, target)
+-        : await window.electronAPI.sftp.download(channelId, remotePath, target)
++        ? await api.sftp.downloadDir(channelId, remotePath, target)
++        : await api.sftp.download(channelId, remotePath, target)
+       if (res?.error) failures.push(`${item.name}: ${res.error}`)
+     }
+     setLoading(false)
+@@ -224,14 +227,14 @@
+   }
+ 
+   const handleUpload = async () => {
+-    const result = await window.electronAPI.dialog.openFile({
++    const result = await api.dialog.openFile({
+       properties: ['openFile', 'multiSelections'],
+       securityScope: 'sftp-upload',
+     })
+     if (result.canceled) return
+     for (const localPath of result.filePaths) {
+       const name = localPath.replace(/\\/g, '/').split('/').pop()
+-      const res = await window.electronAPI.sftp.upload(channelId, localPath, joinPath(path, name))
++      const res = await api.sftp.upload(channelId, localPath, joinPath(path, name))
+       if (res?.error) { setError(res.error); return }
+     }
+     loadDir(path)
+@@ -240,7 +243,7 @@
+   const handleMkdir = async () => {
+     const name = prompt('New folder name:')
+     if (!name) return
+-    const res = await window.electronAPI.sftp.mkdir(channelId, joinPath(path, name))
++    const res = await api.sftp.mkdir(channelId, joinPath(path, name))
+     if (res?.error) { setError(res.error); return }
+     loadDir(path)
+   }
+@@ -253,7 +256,7 @@
+     if (!confirm(msg)) return
+     const failures = []
+     for (const item of selectedItems) {
+-      const res = await window.electronAPI.sftp.delete(channelId, joinPath(path, item.name))
++      const res = await api.sftp.delete(channelId, joinPath(path, item.name))
+       if (res?.error) failures.push(`${item.name}: ${res.error}`)
+     }
+     if (failures.length) setError(failures.join('\n'))
+@@ -270,7 +273,7 @@
+ 
+   const commitRename = async () => {
+     if (!renaming || !renameValue || renameValue === renaming.name) { setRenaming(null); return }
+-    const res = await window.electronAPI.sftp.rename(channelId, joinPath(path, renaming.name), joinPath(path, renameValue))
++    const res = await api.sftp.rename(channelId, joinPath(path, renaming.name), joinPath(path, renameValue))
+     if (res?.error) setError(res.error)
+     setRenaming(null)
+     loadDir(path)
+@@ -280,17 +283,17 @@
+     e.preventDefault()
+     // The preload capture-phase listener has already resolved the native file
+     // paths via webUtils.getPathForFile and stashed them.  Retrieve them now.
+-    const localPaths = window.electronAPI.getDropPaths()
++    const localPaths = await api.getDropPaths()
+     if (!localPaths.length) return
+     const errors = []
+     for (const localPath of localPaths) {
+       if (!localPath) continue
+       const name = localPath.replace(/\\/g, '/').split('/').pop()
+-      const isDir = await window.electronAPI.fs.isDirectory(localPath)
++      const isDir = await api.fs.isDirectory(localPath)
+       const remoteDest = joinPath(path, name)
+       const res = isDir
+-        ? await window.electronAPI.sftp.uploadDir(channelId, localPath, remoteDest)
+-        : await window.electronAPI.sftp.upload(channelId, localPath, remoteDest)
++        ? await api.sftp.uploadDir(channelId, localPath, remoteDest)
++        : await api.sftp.upload(channelId, localPath, remoteDest)
+       if (res?.error) errors.push(`${name}: ${res.error}`)
+     }
+     if (errors.length) setError(errors.join('\n'))
+@@ -386,13 +389,13 @@
+   const ctxCopyPath = () => {
+     if (!ctxMenu?.item) return
+     const fullPath = joinPath(path, ctxMenu.item.name)
+-    window.electronAPI.clipboard.writeText(fullPath)
++    api.clipboard.writeText(fullPath)
+     closeCtxMenu()
+   }
+ 
+   const ctxCopyName = () => {
+     if (!ctxMenu?.item) return
+-    window.electronAPI.clipboard.writeText(ctxMenu.item.name)
++    api.clipboard.writeText(ctxMenu.item.name)
+     closeCtxMenu()
+   }
+ 
+@@ -444,7 +447,7 @@
+   }
+ 
+   const ctxCopyDirPath = () => {
+-    window.electronAPI.clipboard.writeText(path)
++    api.clipboard.writeText(path)
+     closeCtxMenu()
+   }
+ 
+--- a/src/components/SnippetPanel.jsx
++++ b/src/components/SnippetPanel.jsx
+@@ -2,8 +2,10 @@
+ import { Plus, Trash2, Play, X } from 'lucide-react'
+ import useSessionStore from '../store/useSessionStore'
+ 
+-export default function SnippetPanel({ onInsert, onClose }) {
+-  const { snippets, addSnippet, deleteSnippet } = useSessionStore()
++export default function SnippetPanel({ host, onInsert, onClose }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
++  const { snippets, addSnippet, deleteSnippet } = sessionStore()
+   const [newName, setNewName] = useState('')
+   const [newCmd, setNewCmd] = useState('')
+   const [adding, setAdding] = useState(false)
+--- a/src/components/SplitTerminalPane.jsx
++++ b/src/components/SplitTerminalPane.jsx
+@@ -18,18 +18,20 @@
+ 
+ const MAX_RECONNECT = 5
+ 
+-export default function SplitTerminalPane({ channelId, config, onClose, termInstanceRef, onFocused }) {
++export default function SplitTerminalPane({ host, channelId, config, onClose, termInstanceRef, onFocused }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
+   const termRef = useRef(null)
+-  const osc52ClipboardEnabled = useSessionStore((state) => state.settings.osc52ClipboardEnabled === true)
++  const osc52ClipboardEnabled = sessionStore((state) => state.settings.osc52ClipboardEnabled === true)
+ 
+   useEffect(() => {
+     const term = new Terminal({
+       theme: TERMINAL_THEME,
+       fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
+-      fontSize: 14,
++      fontSize: sessionStore.getState().settings.defaultFontSize || 14,
+       lineHeight: 1.2,
+       cursorBlink: true,
+-      scrollback: 5000,
++      scrollback: sessionStore.getState().settings.defaultScrollback || 10000,
+       allowProposedApi: true,
+     })
+ 
+@@ -38,11 +40,11 @@
+     term.loadAddon(new WebLinksAddon())
+     const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
+       term,
+-      (text) => window.electronAPI.clipboard.writeText(text),
++      (text) => api.clipboard.writeText(text),
+       { enabled: osc52ClipboardEnabled }
+     )
+     term.open(termRef.current)
+-    fitAddon.fit()
++    if (termRef.current?.clientWidth && termRef.current?.clientHeight) fitAddon.fit()
+ 
+     // Let the parent focus this pane and know when the user last focused it
+     if (termInstanceRef) termInstanceRef.current = term
+@@ -56,7 +58,7 @@
+     const connect = () => {
+       if (!isMounted) return
+       term.write('\r\n\x1b[90mConnecting split pane to ' + config.host + '...\x1b[0m\r\n')
+-      window.electronAPI.ssh.connect(channelId, config).then((result) => {
++      api.ssh.connect(channelId, config).then((result) => {
+         if (!isMounted) return
+         if (result?.error) {
+           term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
+@@ -65,12 +67,12 @@
+         }
+         attempt = 0
+         fitAddon.fit()
+-        window.electronAPI.ssh.resize(channelId, term.cols, term.rows)
++        api.ssh.resize(channelId, term.cols, term.rows)
+       })
+     }
+ 
+     const scheduleReconnect = () => {
+-      if (!isMounted) return
++      if (!isMounted || host) return
+       clearInterval(reconnectTimer)
+       reconnectTimer = null
+       attempt++
+@@ -88,28 +90,30 @@
+     }
+ 
+     const inputDisposer = term.onData((data) => {
+-      window.electronAPI.ssh.write(channelId, data)
++      api.ssh.write(channelId, data)
+     })
+ 
+-    const removeData = window.electronAPI.ssh.onData((cid, data) => {
++    const removeData = api.ssh.onData((cid, data) => {
+       if (cid === channelId) term.write(data)
+     })
+-    const removeClose = window.electronAPI.ssh.onClose((cid) => {
++    const removeClose = api.ssh.onClose((cid) => {
+       if (cid === channelId) {
+         term.write('\r\n\x1b[90m[Split pane disconnected]\x1b[0m\r\n')
+         scheduleReconnect()
+       }
+     })
+-    const removeError = window.electronAPI.ssh.onError((cid, msg) => {
++    const removeError = api.ssh.onError((cid, msg) => {
+       if (cid === channelId) term.write('\r\n\x1b[31mError: ' + msg + '\x1b[0m\r\n')
+     })
+ 
+     const resizeObs = new ResizeObserver(() => {
+       try {
++        if (!termRef.current?.clientWidth || !termRef.current?.clientHeight) return
+         fitAddon.fit()
+-        window.electronAPI.ssh.resize(channelId, term.cols, term.rows)
++        api.ssh.resize(channelId, term.cols, term.rows)
+       } catch (_) {}
+     })
++    const gridDisposer = term.onResize(({ cols, rows }) => api.ssh.resize(channelId, cols, rows))
+     if (termRef.current) resizeObs.observe(termRef.current.parentElement)
+ 
+     connect()
+@@ -120,10 +124,11 @@
+       term.textarea?.removeEventListener('focus', handleFocus)
+       if (termInstanceRef) termInstanceRef.current = null
+       inputDisposer.dispose()
++      gridDisposer.dispose()
+       osc52ClipboardDisposer?.dispose()
+       removeData(); removeClose(); removeError()
+       resizeObs.disconnect()
+-      window.electronAPI.ssh.disconnect(channelId)
++      api.ssh.disconnect(channelId)
+       term.dispose()
+     }
+   }, [channelId, osc52ClipboardEnabled])
+--- a/src/components/TunnelPanel.jsx
++++ b/src/components/TunnelPanel.jsx
+@@ -1,3 +1,4 @@
++import useSessionStore from '../store/useSessionStore'
+ import React, { useState, useEffect } from 'react'
+ import { Plus, X, Play, Square } from 'lucide-react'
+ 
+@@ -7,7 +8,9 @@
+   { value: 'dynamic', label: 'Dynamic (D)' },
+ ]
+ 
+-export default function TunnelPanel({ channelId, sessionId, onClose }) {
++export default function TunnelPanel({ host, channelId, sessionId, onClose }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
+   const [tunnels, setTunnels] = useState([]) // { id, type, config, running }
+   const [form, setForm] = useState({ type: 'local', localPort: '', remoteHost: 'localhost', remotePort: '', localHost: '127.0.0.1' })
+   const [error, setError] = useState(null)
+@@ -15,8 +18,8 @@
+   useEffect(() => {
+     if (!sessionId) return
+     Promise.all([
+-      window.electronAPI.tunnel.getConfigs(sessionId),
+-      window.electronAPI.tunnel.list(),
++      api.tunnel.getConfigs(sessionId),
++      api.tunnel.list(),
+     ]).then(([configs, activeTunnels]) => {
+       const activeIds = new Set(activeTunnels.map((t) => t.id))
+       setTunnels((configs || []).map((c) => ({ ...c, running: activeIds.has(c.id) })))
+@@ -26,7 +29,7 @@
+   const saveConfigs = (list) => {
+     if (sessionId) {
+       const toSave = list.map(({ id, type, config }) => ({ id, type, config }))
+-      window.electronAPI.tunnel.setConfigs(sessionId, toSave)
++      api.tunnel.setConfigs(sessionId, toSave)
+     }
+   }
+ 
+@@ -42,7 +45,7 @@
+ 
+   const removeTunnel = async (id) => {
+     const t = tunnels.find((x) => x.id === id)
+-    if (t?.running) await window.electronAPI.tunnel.stop(id)
++    if (t?.running) await api.tunnel.stop(id)
+     const updated = tunnels.filter((x) => x.id !== id)
+     setTunnels(updated)
+     saveConfigs(updated)
+@@ -53,10 +56,10 @@
+     if (!t) return
+     setError(null)
+     if (t.running) {
+-      await window.electronAPI.tunnel.stop(id)
++      await api.tunnel.stop(id)
+       setTunnels((prev) => prev.map((x) => x.id === id ? { ...x, running: false } : x))
+     } else {
+-      const result = await window.electronAPI.tunnel.start(channelId, id, { type: t.type, ...t.config })
++      const result = await api.tunnel.start(channelId, id, { type: t.type, ...t.config })
+       if (result?.error) { setError(result.error); return }
+       setTunnels((prev) => prev.map((x) => x.id === id ? { ...x, running: true } : x))
+     }
+--- a/src/components/FileEditor.jsx
++++ b/src/components/FileEditor.jsx
+@@ -1,6 +1,9 @@
++import useSessionStore from '../store/useSessionStore'
+ import React from 'react'
+ 
+-export default function FileEditor({ editingFile, onSave, onClose, onChange, textareaRef }) {
++export default function FileEditor({ host, editingFile, onSave, onClose, onChange, textareaRef }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
+   return (
+     <div className="file-editor-overlay">
+       <div className="file-editor-header">
+--- a/src/components/SettingsDialog.jsx
++++ b/src/components/SettingsDialog.jsx
+@@ -2,8 +2,10 @@
+ import { X, Download, Upload } from 'lucide-react'
+ import useSessionStore from '../store/useSessionStore'
+ 
+-export default function SettingsDialog({ onClose }) {
+-  const { settings, updateSettings, exportBackup, importBackup } = useSessionStore()
++export default function SettingsDialog({ host, onClose }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
++  const { settings, updateSettings, exportBackup, importBackup } = sessionStore()
+   const [local, setLocal] = useState({ ...settings })
+   const [backupStatus, setBackupStatus] = useState('')
+   const [credPrompt, setCredPrompt] = useState(false)
+@@ -41,10 +43,10 @@
+     if (result?.error) { setBackupStatus('Import failed: ' + result.error); return }
+     // importBackup refreshes the global store; resync local state so that
+     // clicking Save afterward doesn't overwrite the just-imported preferences.
+-    setLocal({ ...useSessionStore.getState().settings })
++    setLocal({ ...sessionStore.getState().settings })
+     const s = result?.summary || {}
+     const parts = []
+-    if (s.sessions) parts.push(`${s.sessions} sessions`)
++    if (s.sessions) parts.push(`${s.sessions} connections`)
+     if (s.snippets) parts.push(`${s.snippets} snippets`)
+     if (s.sftpFavorites) parts.push(`${s.sftpFavorites} favorites`)
+     if (s.filterPresets) parts.push(`${s.filterPresets} filter presets`)
+@@ -59,8 +61,8 @@
+   }
+ 
+   const handleSave = async () => {
+-    await updateSettings(local)
+-    onClose()
++    try { await updateSettings(local); onClose() }
++    catch (error) { setBackupStatus(error.message) }
+   }
+ 
+   return (
+@@ -148,7 +150,7 @@
+               <button
+                 className="browse-btn"
+                 onClick={async () => {
+-                  const result = await window.electronAPI.dialog.openFile({ properties: ['openDirectory'] })
++                  const result = await api.dialog.openFile({ properties: ['openDirectory'] })
+                   if (!result.canceled && result.filePaths[0]) handleChange('logDirectory', result.filePaths[0])
+                 }}
+               >
+@@ -168,7 +170,7 @@
+               </button>
+             </div>
+             <div className="form-hint">
+-              Exports sessions, snippets, SFTP favorites, filter presets, tunnel configs, and preferences. You'll be asked whether to include SSH passwords / passphrases and the AI API key (default: exclude, for safety).
++              Exports SSH connections, snippets, SFTP favorites, filter presets, tunnel configs, and preferences. You'll be asked whether to include SSH passwords / passphrases (default: exclude, for safety).
+             </div>
+             {backupStatus && <div className="form-hint" style={{ marginTop: 6 }}>{backupStatus}</div>}
+           </div>
+@@ -188,13 +190,13 @@
+             </div>
+             <div className="dialog-body">
+               <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
+-                Include SSH passwords / key passphrases and the AI API key in the backup?
++                Include SSH passwords / key passphrases in the backup?
+               </p>
+               <div className="form-hint" style={{ marginTop: 10 }}>
+                 <strong>Include:</strong> migration is one click — sessions connect right away on the destination. The file contains plaintext credentials and must be guarded like a password manager export.
+               </div>
+               <div className="form-hint" style={{ marginTop: 6 }}>
+-                <strong>Exclude:</strong> safer — backup file has no secrets. You re-enter passwords and the AI key on the destination.
++                <strong>Exclude:</strong> safer — backup file has no secrets. You re-enter passwords on the destination.
+               </div>
+             </div>
+             <div className="dialog-footer">
+--- a/src/components/SessionDialog.jsx
++++ b/src/components/SessionDialog.jsx
+@@ -11,9 +11,12 @@
+   jumpAuthType: 'password', jumpPassword: '', jumpKeyPath: '', jumpPassphrase: '',
+ }
+ 
+-export default function SessionDialog({ session, onClose }) {
+-  const { addSession, updateSession, openTab } = useSessionStore()
++export default function SessionDialog({ host, session, onClose }) {
++  const api = host?.api || window.electronAPI
++  const sessionStore = host?.store || useSessionStore
++  const { addSession, updateSession, openTab } = sessionStore()
+   const [form, setForm] = useState(DEFAULT_FORM)
++  const [error, setError] = useState('')
+ 
+   useEffect(() => {
+     if (session) {
+@@ -79,21 +82,25 @@
+   }
+ 
+   const handleSave = async () => {
++    try {
+     if (!form.host || !form.username) return
+     const data = buildData()
+     if (session) await updateSession(data)
+     else await addSession(data)
+     onClose()
+-  }
+-
+-  const handleConnect = () => {
++    } catch (error) { setError(error.message) }
++  }
++
++  const handleConnect = async () => {
++    try {
+     if (!form.host || !form.username) return
+-    openTab(buildData())
++    await openTab(buildData())
+     onClose()
++    } catch (error) { setError(error.message) }
+   }
+ 
+   const browseKeyFile = async (field) => {
+-    const result = await window.electronAPI.dialog.openFile({
++    const result = await api.dialog.openFile({
+       title: 'Select Private Key File',
+       properties: ['openFile'],
+     })
+@@ -104,10 +111,11 @@
+     <div className="dialog-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+       <div className="dialog">
+         <div className="dialog-header">
+-          <h2>{session ? 'Edit Session' : 'New Session'}</h2>
++          <h2>{session ? 'Edit SSH connection' : 'New SSH connection'}</h2>
+           <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+         </div>
+         <div className="dialog-body">
++          {error && <p role="alert">{error}</p>}
+           <div className="form-group">
+             <label>Name (optional)</label>
+             <input type="text" placeholder="My Server" value={form.name}
 --- a/src/utils/terminalChannels.js
 +++ b/src/utils/terminalChannels.js
 @@ -1,13 +1,13 @@
@@ -480,3 +1812,144 @@
 +export function writeToBroadcastTargets(tabs, data, api = window.electronAPI) {
 +  tabs.forEach((tab) => writeToTerminalChannel(tab, data, tab.channelId, api))
  }
+--- a/src/utils/terminalClipboardUtils.js
++++ b/src/utils/terminalClipboardUtils.js
+@@ -47,13 +47,13 @@
+ 
+ export function registerOsc52ClipboardHandler(term, writeText, options = {}) {
+   if (!term?.parser?.registerOscHandler || typeof writeText !== 'function') return null
+-  const enabled = options.enabled === true
++  const enabled = () => typeof options.enabled === 'function' ? options.enabled() === true : options.enabled === true
+   const maxBytes = Number.isInteger(options.maxBytes) && options.maxBytes > 0
+     ? options.maxBytes
+     : OSC52_MAX_BYTES
+ 
+   return term.parser.registerOscHandler(52, (data) => {
+-    if (!enabled) return true
++    if (!enabled()) return true
+     const text = decodeOsc52Payload(data)
+     if (text == null) return false
+     if (utf8ByteLength(text) > maxBytes) return true
+--- a/src/store/useSessionStore.js
++++ b/src/store/useSessionStore.js
+@@ -9,6 +9,7 @@
+   return safeConfig
+ }
+ 
++export function createSessionStore(api, persistWorkspace = true) {
+ const useSessionStore = create((set, get) => ({
+   sessions: [],
+   tabs: [],
+@@ -33,11 +34,11 @@
+     const serializedTabs = tabs.map(({ id, sessionId, label, config, channelId, color, isLocal, wslDistro }) => ({
+       id, sessionId, label, config: stripSensitiveConfig(config), channelId, color, isLocal, wslDistro,
+     }))
+-    window.electronAPI.workspace.set({ tabs: serializedTabs, activeTabId })
++    api.workspace.set({ tabs: serializedTabs, activeTabId })
+   },
+ 
+   loadWorkspace: async () => {
+-    const ws = await window.electronAPI.workspace.get()
++    const ws = await api.workspace.get()
+     if (!ws || !Array.isArray(ws.tabs) || ws.tabs.length === 0) return
+     const { sessions } = get()
+     // Restore tabs with full shape (fill in defaults for split pane fields)
+@@ -55,44 +56,44 @@
+   // ── Session actions ──────────────────────────────────────────────────────────
+ 
+   loadSessions: async () => {
+-    const sessions = await window.electronAPI.sessions.getAll()
+-    const snippets = await window.electronAPI.snippets.getAll()
+-    const settings = await window.electronAPI.settings.get()
++    const sessions = await api.sessions.getAll()
++    const snippets = await api.snippets.getAll()
++    const settings = await api.settings.get()
+     set({ sessions, snippets, settings })
+   },
+ 
+   addSession: async (session) => {
+-    const saved = await window.electronAPI.sessions.save(session)
++    const saved = await api.sessions.save(session)
+     set({ sessions: saved })
+   },
+ 
+   updateSession: async (session) => {
+-    const saved = await window.electronAPI.sessions.save(session)
++    const saved = await api.sessions.save(session)
+     set({ sessions: saved })
+   },
+ 
+   deleteSession: async (id) => {
+-    const saved = await window.electronAPI.sessions.delete(id)
++    const saved = await api.sessions.delete(id)
+     set({ sessions: saved })
+   },
+ 
+   exportSessions: async () => {
+     const { sessions } = get()
+-    return await window.electronAPI.sessions.export(sessions)
++    return await api.sessions.export(sessions)
+   },
+ 
+   importSessions: async () => {
+-    const result = await window.electronAPI.sessions.import()
++    const result = await api.sessions.import()
+     if (Array.isArray(result)) set({ sessions: result })
+     return result
+   },
+ 
+   exportBackup: async (options) => {
+-    return await window.electronAPI.backup.export(options)
++    return await api.backup.export(options)
+   },
+ 
+   importBackup: async () => {
+-    const result = await window.electronAPI.backup.import()
++    const result = await api.backup.import()
+     if (result?.success) {
+       // Refresh sessions / snippets / settings so the UI reflects merged data.
+       // SFTP favorites, filter presets and tunnel configs load lazily per-panel
+@@ -105,7 +106,7 @@
+   // ── Snippet actions ──────────────────────────────────────────────────────────
+ 
+   addSnippet: async (snippet) => {
+-    const saved = await window.electronAPI.snippets.save({
++    const saved = await api.snippets.save({
+       ...snippet,
+       id: snippet.id || crypto.randomUUID(),
+     })
+@@ -113,14 +114,14 @@
+   },
+ 
+   deleteSnippet: async (id) => {
+-    const saved = await window.electronAPI.snippets.delete(id)
++    const saved = await api.snippets.delete(id)
+     set({ snippets: saved })
+   },
+ 
+   // ── Settings ────────────────────────────────────────────────────────────────
+ 
+   updateSettings: async (patch) => {
+-    const saved = await window.electronAPI.settings.set(patch)
++    const saved = await api.settings.set(patch)
+     set({ settings: saved })
+   },
+ 
+@@ -247,7 +248,7 @@
+ // Auto-save workspace when tabs or activeTabId change
+ let prevTabs = null
+ let prevActiveTabId = null
+-useSessionStore.subscribe((state) => {
++if (persistWorkspace) useSessionStore.subscribe((state) => {
+   if (state.tabs !== prevTabs || state.activeTabId !== prevActiveTabId) {
+     prevTabs = state.tabs
+     prevActiveTabId = state.activeTabId
+@@ -255,4 +256,8 @@
+   }
+ })
+ 
++return useSessionStore
++}
++
++const useSessionStore = createSessionStore(globalThis.window?.electronAPI)
+ export default useSessionStore

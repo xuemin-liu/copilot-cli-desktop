@@ -1,8 +1,10 @@
 minimumReleaseAgeExclude:
   - '@types/react-dom@19.2.5'
 allowBuilds:
+  cpu-features: false
   electron: true
   electron-winstaller: true
   esbuild: true
   koffi: false
   node-pty: true
+  ssh2: false

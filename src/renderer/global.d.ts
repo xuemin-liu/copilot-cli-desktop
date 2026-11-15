@@ -32,6 +32,8 @@ export interface CopilotDesktopBridge {
   toolsState(initialWidth?: number): Promise<import('../main/tool-tabs.js').ToolsState>
   toolsAction(profileId: string, action: import('../main/tool-tabs.js').ToolsAction): Promise<import('../main/tool-tabs.js').ToolsState>
   toolTerminal(profileId: string, request: Record<string, unknown>): Promise<unknown>
+  myTerminal(profileId: string, method: string, args: unknown[]): Promise<unknown>
+  myTerminalDrop(profileId: string): Promise<string[]>
   onToolsChanged(listener: (state: import('../main/tool-tabs.js').ToolsState) => void): () => void
   showBrowserInMain(tabId: string): Promise<void>
   browserOpen(tabId: string): Promise<BrowserDebugState>

@@ -1,3 +1,4 @@
+import useSessionStore from '../store/useSessionStore'
 import React, { useState, useEffect } from 'react'
 import { Plus, X, Play, Square } from 'lucide-react'
 
@@ -7,7 +8,9 @@ const TYPES = [
   { value: 'dynamic', label: 'Dynamic (D)' },
 ]
 
-export default function TunnelPanel({ channelId, sessionId, onClose }) {
+export default function TunnelPanel({ host, channelId, sessionId, onClose }) {
+  const api = host?.api || window.electronAPI
+  const sessionStore = host?.store || useSessionStore
   const [tunnels, setTunnels] = useState([]) // { id, type, config, running }
   const [form, setForm] = useState({ type: 'local', localPort: '', remoteHost: 'localhost', remotePort: '', localHost: '127.0.0.1' })
   const [error, setError] = useState(null)
@@ -15,8 +18,8 @@ export default function TunnelPanel({ channelId, sessionId, onClose }) {
   useEffect(() => {
     if (!sessionId) return
     Promise.all([
-      window.electronAPI.tunnel.getConfigs(sessionId),
-      window.electronAPI.tunnel.list(),
+      api.tunnel.getConfigs(sessionId),
+      api.tunnel.list(),
     ]).then(([configs, activeTunnels]) => {
       const activeIds = new Set(activeTunnels.map((t) => t.id))
       setTunnels((configs || []).map((c) => ({ ...c, running: activeIds.has(c.id) })))
@@ -26,7 +29,7 @@ export default function TunnelPanel({ channelId, sessionId, onClose }) {
   const saveConfigs = (list) => {
     if (sessionId) {
       const toSave = list.map(({ id, type, config }) => ({ id, type, config }))
-      window.electronAPI.tunnel.setConfigs(sessionId, toSave)
+      api.tunnel.setConfigs(sessionId, toSave)
     }
   }
 
@@ -42,7 +45,7 @@ export default function TunnelPanel({ channelId, sessionId, onClose }) {
 
   const removeTunnel = async (id) => {
     const t = tunnels.find((x) => x.id === id)
-    if (t?.running) await window.electronAPI.tunnel.stop(id)
+    if (t?.running) await api.tunnel.stop(id)
     const updated = tunnels.filter((x) => x.id !== id)
     setTunnels(updated)
     saveConfigs(updated)
@@ -53,10 +56,10 @@ export default function TunnelPanel({ channelId, sessionId, onClose }) {
     if (!t) return
     setError(null)
     if (t.running) {
-      await window.electronAPI.tunnel.stop(id)
+      await api.tunnel.stop(id)
       setTunnels((prev) => prev.map((x) => x.id === id ? { ...x, running: false } : x))
     } else {
-      const result = await window.electronAPI.tunnel.start(channelId, id, { type: t.type, ...t.config })
+      const result = await api.tunnel.start(channelId, id, { type: t.type, ...t.config })
       if (result?.error) { setError(result.error); return }
       setTunnels((prev) => prev.map((x) => x.id === id ? { ...x, running: true } : x))
     }

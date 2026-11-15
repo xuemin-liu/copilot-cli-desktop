@@ -25,15 +25,13 @@ original hashes before running the imported tests.
 | fa885d7 | Literal question marks reach the shell without AI interception |
 | faab1d6 | OSC52 decoding and protection from colorization across output chunks |
 | 3de4e4a | Clipboard opt-in and size limit; validation of local spawn options |
-| 70cbaa7 | Active-tab shortcuts; bounded reconnect remains available in standalone mode |
+| 70cbaa7 | Active-tab shortcuts; bounded reconnect for managed SSH |
 | d5ba572 | Shared output-line buffering and chunk-safe working-directory detection |
 
-The SSH manager's keepalive, jump-host, SFTP and double-close history was also inspected.
-That manager is **not** used: this app retains native OpenSSH for existing config aliases,
-keys, passwords and host verification. Its PTY still uses the reused local-terminal manager
-and MyTerminal renderer. Do not claim that the full MyTerminal application was merged.
-Native OpenSSH reconnect remains explicit so a logout or authentication failure cannot
-silently start another shell. The upstream SSH reconnect loop is retained for standalone use.
+The SSH manager's keepalive, jump-host, SFTP and double-close history was also inspected and
+its implementation is now used for managed SSH connections. Native OpenSSH remains available
+for existing config aliases. Its reconnect remains explicit; managed SSH reuses the bounded
+countdown while active. This is a source integration into desktop tabs, not a second application window.
 
 ## Adapter boundary
 
@@ -53,10 +51,17 @@ silently start another shell. The upstream SSH reconnect loop is retained for st
 - The adapter patch forwards xterm grid-resize events to the PTY and disposes that subscription.
   Review reproduced an upstream font-zoom gap: changing the font resized the grid without
   changing the parent box, so ResizeObserver alone left the shell at its old dimensions.
-- MyTerminal's independent session picker, AI-provider UI, SFTP, tunnels, split panes, snippets
-  and disk logging are not exposed in this host. Their component dependencies remain in the
-  source snapshot to keep upstream imports and defaults intact. The desktop supplies its
-  current-session **Add to prompt** action. OSC52 remains disabled by default, as upstream requires.
+- MyTerminal's SSH/tunnel managers, SFTP/editor, split pane, snippet, settings and connection dialogs,
+  backup/logging registrars and Zustand actions are reused. `electron/main.js` is adapted into a
+  project-owned registrar with injected dependencies; its standalone app/window and AI lifecycle are removed.
+  `services.cjs` limits operations and channel ownership, verifies host fingerprints and connects process
+  output to the upstream logging handler. No second CLI session picker or AI provider is exposed.
+- `project-store.mjs` creates one upstream store per desktop project. The desktop remains the authority
+  for terminal tab and split-channel lifetimes. Native and managed SSH both use the same CLI read/write bridge.
+- Downstream fixes add pending-SSH cancellation, transport cleanup, late-SFTP cleanup, live settings,
+  background logs, scoped tunnel IDs, fragmented SOCKS framing and remote forwarding destination checks.
+  Saved credentials fail closed when OS encryption is unavailable. The supplied desktop action remains
+  current-session **Add to prompt**. OSC52 stays disabled by default.
 
 ## Updating the snapshot
 
@@ -66,6 +71,8 @@ The importer reads committed files and applies `desktop.patch`; conflicts must b
 explicitly. Inspect the intervening history, refresh the patch and verify original hashes.
 Run `npm run myterminal:check`, the native terminal bridge check, the component regression
 check, and the full-app tab-switching check. Keep new integration logic in adapters.
+After changing imported files, run `python scripts/update-myterminal-patch.py PATH_TO_MYTERMINAL`
+to record their exact differences against the pinned revision, then verify the snapshot again.
 
 No standalone upstream license file was present at this revision. The user's own source is
 retained with its repository, authorship and exact revision identified here.

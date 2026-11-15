@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
@@ -16,6 +16,7 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { isTerminalKind, removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import { prepareBrowserSessionEnvironment } from './browser-session.js'
+import MyTerminalServices from '../../vendor/myterminal/services.cjs'
 
 interface Group { browser: BrowserDebug; generation: string }
 const liveSession = (status: string | undefined): boolean => status === 'running' || status === 'approval-needed'
@@ -38,7 +39,14 @@ export class ProjectToolService {
   private readonly projects = new Map<string, ProjectTools>()
   private readonly groups = new Map<string, Group>()
   private readonly bridges = new Map<string, Bridge>()
-  private readonly terminals = new ToolTerminals()
+  private readonly terminalServices = new Map<string, MyTerminalServices>()
+  private readonly splits = new Map<string, { profileId: string; parentId: string; tab: ToolTab }>()
+  private readonly terminals = new ToolTerminals(undefined, {
+    managed: (profileId, id, config, signal) => this.myTerminal(profileId).spawn(id, config.connectionId!, signal),
+    started: (profileId, id) => { void this.myTerminal(profileId).started(id)?.catch(this.options.error) },
+    output: (profileId, id, data) => this.terminalServices.get(profileId)?.output(id, data),
+    closed: (profileId, id) => this.terminalServices.get(profileId)?.closed(id),
+  })
   private readonly terminalBridges = new Map<string, Promise<{ server: Server; endpoint: string; env: NodeJS.ProcessEnv }>>()
   private readonly terminalStarts = new Map<string, Promise<unknown>>()
   private writing = Promise.resolve()
@@ -257,6 +265,7 @@ export class ProjectToolService {
       if (action.type === 'select') {
         this.ensurePage(project, tab); project.activeId = tab.id; project.visible = true
       } else if (action.type === 'close') {
+        this.closeSplit(profileId, tab.id)
         this.terminals.close(profileId, tab.id)
         if (tab.pageId !== undefined) {
           const group = this.groups.get(profileId)
@@ -283,6 +292,29 @@ export class ProjectToolService {
   }
   private terminalTitle(kind: string, config: TerminalConfig): string {
     return kind === 'ssh' ? `SSH: ${config.host}` : kind === 'wsl' ? `WSL${config.distro ? `: ${config.distro}` : ''}` : 'Local terminal'
+  }
+  private myTerminal(profileId: string): MyTerminalServices {
+    if (this.stopping || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
+    let services = this.terminalServices.get(profileId)
+    if (!services) {
+      const directory = join(this.options.userData, 'myterminal', createHash('sha256').update(profileId).digest('hex').slice(0, 24))
+      services = new MyTerminalServices(directory, this.options.owner)
+      this.terminalServices.set(profileId, services)
+    }
+    return services
+  }
+  private terminalTab(profileId: string, id: string): ToolTab | undefined {
+    return this.projects.get(profileId)?.tabs.find(tab => tab.id === id && isTerminalKind(tab.kind))
+      ?? (this.splits.get(id)?.profileId === profileId ? this.splits.get(id)?.tab : undefined)
+  }
+  async terminalFeature(profileId: string, method: string, args: unknown[]): Promise<unknown> {
+    return this.myTerminal(profileId).invoke(method, args, id => Boolean(this.terminalTab(profileId, id)))
+  }
+  terminalDrop(profileId: string, paths: string[]): void { this.myTerminal(profileId).authorizeDrop(paths) }
+  private closeSplit(profileId: string, parentId: string): void {
+    for (const [id, child] of this.splits) if (child.profileId === profileId && child.parentId === parentId) {
+      this.splits.delete(id); this.terminals.close(profileId, id)
+    }
   }
   private async terminalEnvironment(profileId: string): Promise<NodeJS.ProcessEnv> {
     let pending = this.terminalBridges.get(profileId)
@@ -323,7 +355,7 @@ export class ProjectToolService {
     const running = this.terminalStarts.get(id); if (running) return running
     const pending = (async () => {
       const env = await this.terminalEnvironment(profileId)
-      const tab = this.projects.get(profileId)?.tabs.find(tab => tab.id === id)
+      const tab = this.terminalTab(profileId, id)
       if (this.stopping || !tab || !isTerminalKind(tab.kind)) throw new Error('Terminal tab closed')
       const terminalEnv = tab.kind === 'wsl' ? { ...env, COPILOT_DESKTOP_TERMINAL_HELPER: env.COPILOT_DESKTOP_TERMINAL_WSL_HELPER } : env
       return this.terminals.start(profileId, id, tab.kind, tab.terminal ?? {}, this.options.project(profileId)?.path ?? null, terminalEnv)
@@ -336,7 +368,7 @@ export class ProjectToolService {
     if (this.stopping || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Invalid terminal request')
     const value = request as Record<string, unknown>, project = this.project(profileId)
-    if (value.action === 'list') return project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => {
+    if (value.action === 'list') return [...project.tabs.filter(tab => isTerminalKind(tab.kind)), ...[...this.splits.values()].filter(child => child.profileId === profileId).map(child => ({ ...child.tab, parentId: child.parentId }))].map(tab => {
       try { const { output: _output, ...state } = this.terminals.read(profileId, tab.id); return { ...tab, ...state } }
       catch { return { ...tab, status: 'disconnected' } }
     })
@@ -351,8 +383,18 @@ export class ProjectToolService {
       return { ...created, ...this.terminals.read(profileId, created.id) }
     }
     if (typeof value.id !== 'string') throw new Error('A terminal ID is required')
-    const tab = project.tabs.find(tab => tab.id === value.id && isTerminalKind(tab.kind))
+    const tab = this.terminalTab(profileId, value.id)
     if (!tab) throw new Error('Terminal does not belong to this project')
+    if (value.action === 'split') {
+      if (this.splits.has(tab.id)) throw new Error('This pane is already a split')
+      const existing = [...this.splits.values()].find(child => child.parentId === tab.id)
+      if (existing) return { id: existing.tab.id }
+      const child = { ...tab, id: randomUUID(), title: `${tab.title} (split)` }
+      this.splits.set(child.id, { profileId, parentId: tab.id, tab: child })
+      await this.startTerminal(profileId, child.id)
+      return { id: child.id }
+    }
+    if (value.action === 'unsplit') { this.closeSplit(profileId, tab.id); return { closed: true } }
     if (value.action === 'start') return this.startTerminal(profileId, tab.id)
     if (value.action === 'restart') {
       if (this.terminalStarts.has(tab.id)) throw new Error('Terminal is still starting; wait before reconnecting')
@@ -366,14 +408,19 @@ export class ProjectToolService {
           const snapshot = this.terminals.read(profileId, tab.id)
           if (snapshot.generation !== value.generation) return snapshot
         }
-        return this.terminals.read(profileId, tab.id, value.cursor as number | undefined)
+        const splitId = [...this.splits.values()].find(child => child.parentId === tab.id)?.tab.id
+        return { ...this.terminals.read(profileId, tab.id, value.cursor as number | undefined), ...(splitId ? { splitId } : {}) }
       }
       catch (error) {
         if (error instanceof Error && error.message === 'Terminal is not connected in this project') return { id: tab.id, generation: '', status: 'disconnected', output: '', cursor: 0, start: 0 }
         throw error
       }
     }
-    if (value.action === 'close') { await this.action(profileId, { type: 'close', id: tab.id }); return { closed: true } }
+    if (value.action === 'close') {
+      if (this.splits.has(tab.id)) { this.splits.delete(tab.id); this.terminals.close(profileId, tab.id) }
+      else await this.action(profileId, { type: 'close', id: tab.id })
+      return { closed: true }
+    }
     if (value.action === 'resize') this.terminals.resize(profileId, tab.id, value.cols as number, value.rows as number)
     else if (value.action === 'interrupt') this.terminals.write(profileId, tab.id, '\x03')
     else if (value.action === 'write') {
@@ -445,7 +492,9 @@ export class ProjectToolService {
   async removeProject(id: string): Promise<void> {
     // Revoke pending starts before the first await; helper setup can complete during bridge shutdown.
     this.projects.delete(id)
+    for (const [key, child] of this.splits) if (child.profileId === id) this.splits.delete(key)
     this.terminals.closeProject(id)
+    this.terminalServices.get(id)?.dispose(); this.terminalServices.delete(id)
     await this.stopTerminalBridge(id)
     const group = this.groups.get(id); this.groups.delete(id)
     for (const [sessionId, bridge] of this.bridges) if (bridge.profileId === id) await this.stopBridge(sessionId)
@@ -455,6 +504,8 @@ export class ProjectToolService {
   async dispose(): Promise<void> {
     this.stopping = true
     this.terminals.dispose()
+    for (const service of this.terminalServices.values()) service.dispose()
+    this.terminalServices.clear(); this.splits.clear()
     await Promise.all([...this.terminalBridges.keys()].map(id => this.stopTerminalBridge(id)))
     await this.writing.catch(this.options.error)
     await Promise.all([...this.bridges.keys()].map(id => this.stopBridge(id)))
