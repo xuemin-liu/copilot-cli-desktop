@@ -253,3 +253,53 @@ test('mount replays buffered history before queued live chunks, including an in-
     else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
   }
 })
+
+test('parent and split replay need no quiet interval and reject an obsolete transport baseline', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  const previous = globalThis.window
+  type State = import('./tool-terminal.js').TerminalSnapshot
+  const tick = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+  try {
+    for (const channel of ['parent', 'child']) for (const obsolete of [false, true]) {
+      let push!: (profile: string, state: State) => void, finish!: (state: State) => void
+      let baselineRequested!: () => void
+      const requested = new Promise<void>(resolve => { baselineRequested = resolve })
+      let first = true, live = false
+      const received: string[] = []
+      const frame = (id: string, output: string, generation = 'g', start = 0): State => ({ id, generation, status: 'running', output, start, cursor: start + output.length, splitId: 'child' })
+      Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+        onToolTerminalOutput: (fn: typeof push) => { push = fn; return () => {} },
+        toolTerminal: async (_profile: string, request: { id: string; cursor?: number }) => {
+          if (request.id === channel && request.cursor !== undefined && first) {
+            first = false; baselineRequested(); return new Promise(resolve => { finish = resolve })
+          }
+          return frame(request.id, live ? (obsolete ? 'NEW' : 'HISTORYLIVE') : 'HISTORY', obsolete && live ? 'new' : 'g')
+        },
+      } } })
+      const host = createMyTerminalHost('p', 'parent', () => {}, message => assert.fail(message))
+      try {
+        host.onTerminal({} as import('@xterm/xterm').Terminal)
+        host.api.ssh.onData((id: string, value: string) => { if (id === channel) received.push(value) })
+        if (channel === 'child') await host.api.ssh.connect('child')
+        host.start(); await requested
+        live = true
+        push('p', obsolete ? frame(channel, 'NEW', 'new') : frame(channel, 'LIVE', 'g', 7))
+        finish(frame(channel, 'HISTORY'))
+        await tick(); await tick()
+        if (obsolete) {
+          assert.equal(received.join(''), '', 'an obsolete baseline cannot switch back from queued new transport output')
+          await new Promise(resolve => setTimeout(resolve, 250))
+          assert.equal(received.join(''), 'NEW')
+        } else {
+          assert.equal(received.join(''), 'HISTORYLIVE', 'same-generation output must render immediately despite a concurrent push')
+          push('p', frame(channel, 'MORE', 'g', 11))
+          assert.equal(received.join(''), 'HISTORYLIVEMORE', 'subsequent chunks stream without a polling pause')
+        }
+      } finally { host.stop() }
+    }
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+  }
+})

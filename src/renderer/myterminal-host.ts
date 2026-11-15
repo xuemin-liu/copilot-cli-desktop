@@ -10,11 +10,12 @@ type Listener = (id: string, value: string) => void
  * Terminal input, paste, focus, filtering and reconnect remain in MyTerminal. */
 export function createMyTerminalHost(profileId: string, id: string, changed: (state: Snapshot) => void, failed: (message: string) => void) {
   let active = false, stopped = false, cursor = 0, generation = '', status = '', connecting = false
-  let epoch = 0, initialized = false
+  let epoch = 0, topologyRevision = 0, initialized = false
   const reconnectAttempts = { current: 0 }
   let timer: ReturnType<typeof setTimeout> | undefined
   let unsubscribeOutput: (() => void) | undefined
   const revisions = new Map<string, number>()
+  const latestOutput = new Map<string, Snapshot>()
   const pendingOutput = new Map<string, Snapshot[]>()
   let terminal: Terminal | null = null
   const project = typeof window.copilotDesktop.myTerminal === 'function' ? projectTerminal(profileId) : null
@@ -76,27 +77,36 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     if (channel === id) initialized = true
     else if (child) child.initialized = true
   }
+  const currentRead = (next: Snapshot, revision: number | undefined, channel: string): Snapshot | null => {
+    const latest = latestOutput.get(channel)
+    // Output arriving during this read can supersede its transport, not just its cursor.
+    if (revision !== revisions.get(channel) && latest && latest.generation !== next.generation) return null
+    if (latest && latest.generation === next.generation && latest.cursor > next.cursor) return { ...next, status: latest.status }
+    return next
+  }
   const poll = async (): Promise<void> => {
     try {
       if (connecting || stopped) return
-      const revision = revisions.get(id)
-      const next = await call({ action: 'read', cursor, generation }) as Snapshot
+      const revision = revisions.get(id), topology = topologyRevision
+      const response = await call({ action: 'read', cursor, generation }) as Snapshot
       if (stopped) return
-      if (revision === revisions.get(id)) {
-        changed(next)
+      const next = currentRead(response, revision, id)
+      if (next) {
+        if (topology === topologyRevision) changed(next)
         replay(next)
       }
       for (const [channel, prior] of children) {
         const childRevision = revisions.get(channel)
-        let child: Snapshot
-        try { child = await call({ action: 'read', cursor: prior.cursor, generation: prior.generation }, channel) as Snapshot }
+        let response: Snapshot
+        try { response = await call({ action: 'read', cursor: prior.cursor, generation: prior.generation }, channel) as Snapshot }
         catch (error) {
           const latest = await call({ action: 'read' }) as Snapshot
-          if (latest.splitId !== channel) { children.delete(channel); continue }
+          if (latest.splitId !== channel) { children.delete(channel); pendingOutput.delete(channel); continue }
           throw error
         }
-        if (stopped || !children.has(channel)) return
-        if (childRevision === revisions.get(channel)) replay(child, channel)
+        if (stopped || children.get(channel) !== prior) continue
+        const child = currentRead(response, childRevision, channel)
+        if (child) replay(child, channel)
       }
     } catch (error) { if (!stopped && active) report(error) }
     finally { if (!stopped) timer = setTimeout(() => { void poll() }, 200) }
@@ -119,7 +129,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
   const disconnect = (channel?: string): void => {
     if (channel && channel !== id) {
       children.delete(channel); pendingOutput.delete(channel)
-      revisions.set(id, (revisions.get(id) ?? 0) + 1)
+      topologyRevision++
     }
   }
   const attach = async (channel = id): Promise<{ error?: string }> => {
@@ -129,7 +139,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     if (child) {
       children.set(channel, child)
       // A parent read captured before this attachment cannot remove the new pane from React.
-      revisions.set(id, (revisions.get(id) ?? 0) + 1)
+      topologyRevision++
     }
     try {
       const state = await call({ action: 'read' }, channel) as Snapshot
@@ -168,6 +178,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
       unsubscribeOutput = window.copilotDesktop.onToolTerminalOutput?.((profile, next) => {
         if (stopped || profile !== profileId || (next.id !== id && !children.has(next.id))) return
         revisions.set(next.id, (revisions.get(next.id) ?? 0) + 1)
+        latestOutput.set(next.id, next)
         if (next.id === id ? !initialized : !children.get(next.id)?.initialized) {
           if (next.id === id && !terminal) changed(next)
           const queued = pendingOutput.get(next.id) ?? []; queued.push(next); pendingOutput.set(next.id, queued)
