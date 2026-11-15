@@ -31,6 +31,7 @@ export interface TabExitPayload {
 export interface CopilotDesktopBridge {
   toolsState(initialWidth?: number): Promise<import('../main/tool-tabs.js').ToolsState>
   toolsAction(profileId: string, action: import('../main/tool-tabs.js').ToolsAction): Promise<import('../main/tool-tabs.js').ToolsState>
+  onToolTerminalOutput(listener: (profileId: string, state: import('../main/tool-terminal.js').TerminalSnapshot) => void): () => void
   toolTerminal(profileId: string, request: Record<string, unknown>): Promise<unknown>
   myTerminal(profileId: string, method: string, args: unknown[]): Promise<unknown>
   myTerminalDrop(profileId: string): Promise<string[]>
@@ -142,6 +143,7 @@ export interface CopilotDesktopBridge {
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>
+  readClipboardText(): Promise<string>
   copyText(text: string): Promise<void>
   showTerminalContextMenu(text: string): Promise<void>
   openExternalUrl(url: string): Promise<void>

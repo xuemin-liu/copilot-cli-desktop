@@ -99,3 +99,10 @@ test('desktop PowerShell launch bypasses PATH shadowing and works without System
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('managed descriptors retain only public connection metadata across persistence', () => {
+  const input = { transport: 'managed' as const, connectionId: 'saved', name: 'Named server', host: 'localhost', port: 2222, username: 'tester', password: 'must-not-persist', identityFile: 'private-key' }
+  const expected = { transport: 'managed', connectionId: 'saved', name: 'Named server', host: 'localhost', port: 2222, username: 'tester' }
+  assert.deepEqual(terminalLaunch('ssh', input).config, expected)
+  assert.deepEqual(terminalLaunch('ssh', JSON.parse(JSON.stringify(expected))).config, expected)
+})

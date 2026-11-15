@@ -79,7 +79,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const [host, setHost] = useState(''), [username, setUsername] = useState(''), [port, setPort] = useState(''), [identityFile, setIdentityFile] = useState(''), [distro, setDistro] = useState('')
   useEffect(() => { setConnection(null) }, [selected?.id])
   return <aside className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
-    if (isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
+    if (!(event.target instanceof Element && event.target.closest('.tool-terminal-panel, input, textarea, [contenteditable="true"]')) && isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation()
       if (event.key.toLowerCase() === 't') action({ type: 'add', kind: 'new' })
       else if (project.activeId) action({ type: 'close', id: project.activeId })

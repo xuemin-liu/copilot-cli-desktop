@@ -49,10 +49,11 @@ export class ProjectToolService {
     managed: (profileId, id, config, signal) => this.myTerminal(profileId).spawn(id, config.connectionId!, signal),
     started: (profileId, id) => { this.terminalLifecycles.get(id)?.retry.connected(); void this.myTerminal(profileId).started(id)?.catch(this.options.error) },
     output: (profileId, id, data) => { this.terminalServices.get(profileId)?.output(id, data); this.terminalLifecycles.get(id)?.bell(data) },
+    streamed: (profileId, state) => { const owner = this.options.owner(); if (owner && !owner.isDestroyed()) owner.webContents.send('desktop:tool-terminal-output', profileId, state) },
     closed: (profileId, id, unexpected) => {
       this.terminalServices.get(profileId)?.closed(id)
       const lifecycle = this.terminalLifecycles.get(id)
-      if (unexpected && this.terminalTab(profileId, id)?.terminal?.transport === 'managed' && !this.splits.has(id)) lifecycle?.retry.schedule()
+      if (unexpected && this.terminalTab(profileId, id)?.terminal?.transport === 'managed') lifecycle?.retry.schedule()
       else { lifecycle?.retry.dispose(); this.terminalLifecycles.delete(id) }
     },
   })
@@ -260,6 +261,7 @@ export class ProjectToolService {
         tab = { id: randomUUID(), kind: action.kind, title: action.kind === 'new' ? 'New tab' : action.kind === 'git' ? 'Git' : 'Browser' }
         if (isTerminalKind(action.kind)) {
           tab.terminal = terminalLaunch(action.kind, action.terminal ?? {}, this.options.project(profileId)?.path ?? undefined).config
+          if (tab.terminal.transport === 'managed') Object.assign(tab.terminal, this.myTerminal(profileId).connectionMetadata(tab.terminal.connectionId!))
           tab.title = this.terminalTitle(action.kind, tab.terminal)
         }
         if (action.url) { tab.url = parseBrowserAddress(action.url).href }
@@ -331,7 +333,8 @@ export class ProjectToolService {
     return this.state()
   }
   private terminalTitle(kind: string, config: TerminalConfig): string {
-    return kind === 'ssh' ? `SSH: ${config.host}` : kind === 'wsl' ? `WSL${config.distro ? `: ${config.distro}` : ''}` : 'Local terminal'
+    // MyTerminal's saved/temporary session label, without copying credentials into tabs.
+    return kind === 'ssh' ? config.name || `${config.username ? config.username + '@' : ''}${config.host}${config.port && config.port !== 22 ? ':' + config.port : ''}` : kind === 'wsl' ? `WSL${config.distro ? `: ${config.distro}` : ''}` : 'Local terminal'
   }
   private myTerminal(profileId: string): MyTerminalServices {
     if (this.stopping || this.removedProjects.has(profileId) || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
@@ -410,6 +413,11 @@ export class ProjectToolService {
       const env = await this.terminalEnvironment(profileId)
       const tab = this.terminalTab(profileId, id)
       if (this.stopping || !tab || !isTerminalKind(tab.kind)) throw new Error('Terminal tab closed')
+      if (tab.terminal?.transport === 'managed') {
+        Object.assign(tab.terminal, this.myTerminal(profileId).connectionMetadata(tab.terminal.connectionId!))
+        tab.title = this.terminalTitle(tab.kind, tab.terminal)
+        this.save()
+      }
       if (!this.terminalLifecycles.has(id)) {
         const retry = createReconnectController({ connect: () => {
           // Only restart a live managed connection that this lifecycle still owns.
@@ -485,13 +493,14 @@ export class ProjectToolService {
     if (value.action === 'read') {
       if (value.cursor !== undefined && (typeof value.cursor !== 'number' || !Number.isSafeInteger(value.cursor) || value.cursor < 0)) throw new Error('Invalid output cursor')
       try {
+        let cursor = value.cursor as number | undefined
         if (value.generation !== undefined) {
           if (typeof value.generation !== 'string') throw new Error('Invalid terminal generation')
           const snapshot = this.terminals.read(profileId, tab.id)
-          if (snapshot.generation !== value.generation) return snapshot
+          if (snapshot.generation !== value.generation) cursor = 0
         }
         const splitId = [...this.splits.values()].find(child => child.parentId === tab.id)?.tab.id
-        return { ...this.terminals.read(profileId, tab.id, value.cursor as number | undefined), reconnectCountdown: this.terminalLifecycles.get(tab.id)?.retry.remaining ?? null, reconnectExhausted: this.terminalLifecycles.get(tab.id)?.retry.exhausted ?? false, ...(splitId ? { splitId } : {}) }
+        return { ...this.terminals.read(profileId, tab.id, cursor), reconnectCountdown: this.terminalLifecycles.get(tab.id)?.retry.remaining ?? null, reconnectExhausted: this.terminalLifecycles.get(tab.id)?.retry.exhausted ?? false, ...(splitId ? { splitId } : {}) }
       }
       catch (error) {
         if (error instanceof Error && error.message === 'Terminal is not connected in this project') return { id: tab.id, generation: '', status: 'disconnected', output: '', cursor: 0, start: 0 }

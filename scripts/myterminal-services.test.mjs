@@ -158,3 +158,13 @@ test('recursive SFTP transfers cannot continue through a replacement connection'
     }
   } finally { await f.close() }
 })
+
+test('background logging uses the original MyTerminal ANSI cleanup for OSC, CSI and charset escapes', async () => {
+  const f = await fixture()
+  try {
+    const started = await f.invoke('logging:start', 'terminal', f.directory)
+    f.service.output('terminal', 'plain\x1b]0;title\x07\x1b[31mred\x1b[0m\x1b(B\n')
+    await f.service.dispose()
+    assert.equal(await readFile(started.filePath, 'utf8'), 'plainred\n')
+  } finally { await f.close() }
+})

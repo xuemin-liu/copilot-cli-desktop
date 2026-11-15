@@ -23,6 +23,7 @@ await copyIfExists('vendor/myterminal/channels.mjs', 'dist/vendor/myterminal/cha
 await copyIfExists('vendor/myterminal/lifecycle.cjs', 'dist/vendor/myterminal/lifecycle.cjs')
 await copyIfExists('vendor/myterminal/src/package.json', 'dist/vendor/myterminal/src/package.json')
 await copyIfExists('vendor/myterminal/src/utils/terminalChannels.js', 'dist/vendor/myterminal/src/utils/terminalChannels.js')
+await copyIfExists('vendor/myterminal/src/utils/terminalUtils.js', 'dist/vendor/myterminal/src/utils/terminalUtils.js')
 await copyIfExists('vendor/myterminal/services.cjs', 'dist/vendor/myterminal/services.cjs')
 await copyIfExists('vendor/myterminal/package.json', 'dist/vendor/myterminal/package.json')
 const terminalCss = await readFile('vendor/myterminal/src/index.css', 'utf8')

@@ -11,11 +11,12 @@ import { SettingsDialog } from '../../../vendor/myterminal/desktop-renderer.mjs'
 export function ToolTerminalPanel({ profileId, tab, active, promptTargetId }: { profileId: string; tab: ToolTab; active: boolean; promptTargetId: string | null }): JSX.Element {
   const [state, setState] = useState<Snapshot | null>(null), [error, setError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const host = useMemo(() => createMyTerminalHost(profileId, tab.id, setState, setError), [profileId, tab.id])
+  const [attached, setAttached] = useState(false)
+  const host = useMemo(() => createMyTerminalHost(profileId, tab.id, next => { setState(next); if (next.generation) setAttached(true) }, setError), [profileId, tab.id])
   host.setActive(active)
   useEffect(() => { host.start(); return () => host.stop() }, [host])
   const descriptor = useMemo(() => ({ id: tab.id, channelId: tab.id, sessionId: tab.terminal?.connectionId, label: tab.label || tab.title, isLocal: tab.kind !== 'ssh',
-    splitChannelId: state?.splitId, splitConfig: state?.splitId ? { ...tab.terminal, host: tab.title } : null,
+    splitChannelId: state?.splitId, splitConfig: state?.splitId ? { ...tab.terminal } : null,
     wslDistro: tab.kind === 'wsl' ? tab.terminal?.distro || 'Default' : null, config: tab.terminal ?? {} }), [tab.id, tab.kind, tab.title, tab.label, tab.terminal, state?.splitId])
   const addToPrompt = (): void => {
     const terminal = host.getTerminal(); if (!terminal || !promptTargetId) return
@@ -29,8 +30,8 @@ export function ToolTerminalPanel({ profileId, tab, active, promptTargetId }: { 
     if (!insertIntoPrompt(promptTargetId, `Terminal ${tab.id}:\n${text.slice(-11000)}`)) setError('The current session is unavailable')
   }
   return <section className="tool-terminal-panel myterminal-embedded" aria-label="Terminal">
-    {state && !['disconnected', 'starting'].includes(state.status) && <div className="tool-terminal-screen">
-      <TerminalTab key={state.generation} tab={descriptor} isActive={active} host={{ ...host, reconnectCountdown: state.reconnectCountdown, remoteTools: tab.terminal?.transport === 'managed', toolbar: <>
+    {attached && <div className="tool-terminal-screen">
+      <TerminalTab tab={descriptor} isActive={active} host={{ ...host, status: state?.status, generation: state?.generation, reconnectCountdown: state?.reconnectCountdown, remoteTools: tab.terminal?.transport === 'managed', toolbar: <>
         <button type="button" title="Terminal settings and backup" onClick={() => setSettingsOpen(true)}>⚙</button>
         <button type="button" title="Add selected text, or recent output, to the current session" disabled={!promptTargetId} onClick={addToPrompt}>Add to prompt</button></> }} />
     </div>}
