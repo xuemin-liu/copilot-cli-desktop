@@ -210,7 +210,8 @@ if (!process.versions.electron) {
     assert.equal(tools.state().connections.find(entry => entry.sessionId === 's2').pageId, reopened.pageId)
     assert.notEqual(reopened.id, b.id)
     assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
-    // p2 was removed above; a new workspace identity is required.
+    // Keep these browser checks independent of the known same-ID workspace re-add bug:
+    // https://github.com/xuemin-liu/copilot-cli-desktop/pull/201#discussion_r4576653988
     // Switching projects hides native pages and keeps cookies isolated in separate-profile mode.
     await tools.action('p3', { type: 'add', kind: 'browser', url: `${url}/other-project` })
     const other = tools.state().projects.find(project => project.profileId === 'p3').tabs[0]
