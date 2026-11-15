@@ -32,7 +32,7 @@ if (!process.versions.electron) {
     let confirm = false, confirmations = 0
     const errors = []
     const options = { userData: app.getPath('userData'), owner: () => win,
-      project: id => ['p1', 'p2'].includes(id) ? { name: id, path: out } : undefined,
+      project: id => ['p1', 'p2', 'p3'].includes(id) ? { name: id, path: out } : undefined,
       session: id => sessions.get(id), currentSession: () => currentSession, defaults: () => ({ shared: false, overrides: 'private' }),
       browserOptions: () => ({ confirmLeave: async () => { confirmations++; return confirm } }), changed: () => {}, error: error => errors.push(String(error)) }
     tools = new ProjectToolService(options)
@@ -210,13 +210,14 @@ if (!process.versions.electron) {
     assert.equal(tools.state().connections.find(entry => entry.sessionId === 's2').pageId, reopened.pageId)
     assert.notEqual(reopened.id, b.id)
     assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
+    // p2 was removed above; a new workspace identity is required.
     // Switching projects hides native pages and keeps cookies isolated in separate-profile mode.
-    await tools.action('p2', { type: 'add', kind: 'browser', url: `${url}/other-project` })
-    const other = tools.state().projects.find(project => project.profileId === 'p2').tabs[0]
+    await tools.action('p3', { type: 'add', kind: 'browser', url: `${url}/other-project` })
+    const other = tools.state().projects.find(project => project.profileId === 'p3').tabs[0]
     await until(() => contents(other)?.getURL().endsWith('/other-project') && !contents(other).isLoading(), 'other project loaded')
     assert.equal((await contents(other).session.cookies.get({ url, name: 'project' })).length, 0)
     assert.equal((await contents(reopened).session.cookies.get({ url, name: 'project' }))[0].value, 'survives-session')
-    tools.showProject('p2'); tools.showProject('p1')
+    tools.showProject('p3'); tools.showProject('p1')
     // Pop-out/return reuse the same native page and its form state.
     await action({ type: 'select', id: reopened.id })
     await until(() => contents(reopened)?.getURL().endsWith('/reopened') && !contents(reopened).isLoading(), 'reopened loaded')
@@ -224,17 +225,19 @@ if (!process.versions.electron) {
     const browser = tools.resource(reopened.resource).browser
     await browser.action('view:console')
     assert.equal(browser.view.getVisible(), false)
-    await action({ type: 'pop-out', id: reopened.id })
+    const popped = await action({ type: 'pop-out', id: reopened.id })
+    assert.equal(popped.projects.find(project => project.profileId === 'p1').tabs.find(tab => tab.id === reopened.id).detached, true, 'pop-out reply reflects native window ownership')
     await until(() => state().tabs.find(tab => tab.id === reopened.id)?.detached, 'popped out')
     assert.equal(browser.view.getVisible(), true, 'a popped-out page is visible even when Console was selected')
-    await action({ type: 'return', id: reopened.id })
+    const returned = await action({ type: 'return', id: reopened.id })
+    assert.equal(returned.projects.find(project => project.profileId === 'p1').tabs.find(tab => tab.id === reopened.id).detached, false, 'return reply reflects panel ownership')
     assert.equal(await contents(reopened).executeJavaScript('document.querySelector("#value").value'), 'popout draft')
     // The cap is global, including hidden projects; failure must not create an extra tab.
     while (tools.state().projects.flatMap(project => project.tabs).filter(tab => tab.pageId !== undefined).length < 32)
-      await tools.action('p2', { type: 'add', kind: 'browser' })
-    await assert.rejects(action({ type: 'add', kind: 'browser' }), /32 browser pages.*p1: 1, p2: 31/)
+      await tools.action('p3', { type: 'add', kind: 'browser' })
+    await assert.rejects(action({ type: 'add', kind: 'browser' }), /32 browser pages.*p1: 1, p3: 31/)
     assert.equal(state().tabs.length, 1)
-    await tools.removeProject('p2')
+    await tools.removeProject('p3')
     assert.equal(contents(other), undefined)
     // No active session means no connection; it does not create or discard pages.
     currentSession = null; tools.refreshConnections()

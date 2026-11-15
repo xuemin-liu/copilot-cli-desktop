@@ -319,6 +319,9 @@ export class ProjectToolService {
         if (action.type === 'pop-out') browser.popOutPage(tab.pageId!)
         else if (action.type === 'return') browser.returnPage(tab.pageId!)
         else throw new Error('Unknown tab action')
+        // Browser change notifications are queued. Refresh now so the IPC reply
+        // cannot overwrite a newer notification with the old window ownership.
+        this.reconcile(profileId)
       }
     }
     const selected = project.tabs.find(tab => tab.id === project.activeId)
