@@ -4718,7 +4718,7 @@ ipcMain.handle('desktop:tools-action', async (event, profileId: unknown, action:
 })
 ipcMain.handle('desktop:tool-terminal', (event, profileId: unknown, request: unknown) => {
   assertTrustedIpcSender(event)
-  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || (profileId !== desktopConfig.activeProfileId && (request as { action?: unknown } | null)?.action !== 'read')) throw new Error('Terminal controls belong to the current project in the main window')
+  if (event.sender !== mainWindow?.webContents || typeof profileId !== 'string' || (profileId !== desktopConfig.activeProfileId && !['read', 'resize'].includes(String((request as { action?: unknown } | null)?.action)))) throw new Error('Terminal controls belong to the current project in the main window')
   return projectTools().terminalAction(profileId, request)
 })
 ipcMain.handle('desktop:myterminal', (event, profileId: unknown, method: unknown, args: unknown) => {

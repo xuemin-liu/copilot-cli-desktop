@@ -30,16 +30,16 @@ export async function fixture() {
     showOpenDialog: async () => ({ canceled: !openPaths, filePaths: openPaths }),
   }, safeStorage: { isEncryptionAvailable: () => available, encryptString: value => Buffer.from('encrypted:' + value), decryptString: value => { const text = value.toString(); if (!text.startsWith('encrypted:')) throw new Error('bad cipher'); return text.slice(10) } } }
   const service = new Services(directory, () => null, { Store, electron })
-  const clients = new Set(), shells = new Set(), forwards = new Set()
+  const clients = new Set(), shells = new Set(), forwards = new Set(), grids = new Map()
   const server = new Server({ hostKeys: [key] }, client => {
     clients.add(client); client.on('error', () => {}); client.on('close', () => clients.delete(client))
     client.on('authentication', ctx => ctx.username === 'tester' && ctx.password === 'secret' ? ctx.accept() : ctx.reject())
     client.on('ready', () => {
       client.on('session', accept => {
-        const session = accept()
-        session.on('pty', accept => accept?.())
-        session.on('window-change', accept => accept?.())
-        session.on('shell', accept => { const stream = accept(); shells.add(stream); stream.on('close', () => shells.delete(stream)); stream.on('error', () => {}); stream.write('SSH_READY\r\n'); stream.on('data', data => stream.write(data)) })
+        const session = accept(), grid = { cols: 80, rows: 24 }
+        session.on('pty', (accept, _reject, info) => { Object.assign(grid, { cols: info.cols, rows: info.rows }); accept?.() })
+        session.on('window-change', (accept, _reject, info) => { Object.assign(grid, { cols: info.cols, rows: info.rows }); accept?.() })
+        session.on('shell', accept => { const stream = accept(); shells.add(stream); grids.set(stream, grid); stream.on('close', () => { shells.delete(stream); grids.delete(stream) }); stream.on('error', () => {}); stream.write('SSH_READY\r\n'); stream.on('data', data => stream.write(data)) })
         session.on('exec', accept => { const stream = accept(); stream.end('pong\n') })
         session.on('sftp', accept => {
           const sftp = accept(), handles = new Map(); let count = 0
@@ -78,7 +78,7 @@ export async function fixture() {
   const port = await listen(server)
   const invoke = (method, ...args) => service.invoke(method, args, id => ['terminal', 'second', 'jump'].includes(id))
   await invoke('sessions:save', { id: 'saved', host: '127.0.0.1', port, username: 'tester', password: 'secret', authType: 'password' })
-  return { directory, data, files, directories, service, invoke, port, get clients() { return clients.size }, get shells() { return shells.size },
+  return { directory, data, files, directories, service, invoke, port, get grids() { return [...grids.values()] }, get clients() { return clients.size }, get shells() { return shells.size },
     broadcast(text) { for (const shell of shells) shell.write(text) },
     disconnect() { for (const client of clients) client.end() },
     get trusted() { return trusted }, set available(value) { available = value }, set savePath(value) { savePath = value }, set openPaths(value) { openPaths = value },

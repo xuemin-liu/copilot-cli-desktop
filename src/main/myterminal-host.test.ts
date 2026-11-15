@@ -158,3 +158,64 @@ test('hidden panes consume pushed output beyond the replay cap and deduplicate r
     else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
   }
 })
+
+test('a parent read begun before split attachment cannot detach its output or publish stale pane metadata', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  const previous = globalThis.window
+  type State = import('./tool-terminal.js').TerminalSnapshot
+  try {
+    for (const pushParent of [false, true]) {
+      let push!: (profile: string, state: State) => void, finishRead!: (state: State) => void, first = true
+      const received: string[] = [], changes: State[] = []
+      const state = (id: string, output = '', splitId?: string): State => ({ id, generation: 'g', status: 'running', output, cursor: output.length, start: 0, ...(splitId ? { splitId } : {}) })
+      Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+        onToolTerminalOutput: (fn: typeof push) => { push = fn; return () => {} },
+        toolTerminal: async (_profile: string, request: { id: string }) => {
+          if (request.id === 'parent' && first) { first = false; return new Promise(resolve => { finishRead = resolve }) }
+          return state(request.id, '', 'child')
+        },
+      } } })
+      const host = createMyTerminalHost('p', 'parent', next => changes.push(next as State), message => assert.fail(message))
+      try {
+        host.onTerminal({} as import('@xterm/xterm').Terminal); host.setActive(true)
+        host.api.ssh.onData((id: string, value: string) => { if (id === 'child') received.push(value) })
+        host.start()
+        await host.api.ssh.connect('child')
+        if (pushParent) push('p', state('parent', 'fresh'))
+        finishRead(state('parent')) // This old snapshot has no splitId.
+        await new Promise(resolve => setTimeout(resolve, 250))
+        push('p', state('child', 'SPLIT_OUTPUT'))
+        assert.deepEqual(received, ['SPLIT_OUTPUT'])
+        assert.ok(changes.length > 0 && changes.every(next => next.splitId === 'child'))
+      } finally { host.stop() }
+    }
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+  }
+})
+
+test('hidden transport reconnect can restore its grid but cannot send terminal input', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  const previous = globalThis.window
+  const commands: object[] = []
+  Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+    toolTerminal: async (_profile: string, request: { action: string }) => {
+      if (request.action !== 'read') commands.push(request)
+      return { status: 'running' }
+    },
+  } } })
+  const host = createMyTerminalHost('p', 'parent', () => {}, message => assert.fail(message))
+  try {
+    await host.api.ssh.connect('child')
+    host.api.ssh.resize('child', 59, 15)
+    host.api.ssh.write('child', 'must not execute')
+    assert.deepEqual(commands, [{ action: 'resize', cols: 59, rows: 15, id: 'child' }])
+  } finally {
+    host.stop()
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+  }
+})

@@ -78,7 +78,6 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
         changed(next)
         consume(next)
       }
-      for (const channel of children.keys()) if (channel !== next.splitId) { children.delete(channel); pendingOutput.delete(channel) }
       for (const [channel, prior] of children) {
         const childRevision = revisions.get(channel)
         let child: Snapshot
@@ -95,7 +94,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     finally { if (!stopped) timer = setTimeout(() => { void poll() }, 200) }
   }
   const send = (request: Record<string, unknown>, channel = id): void => {
-    if (!active) return
+    if (!active && request.action !== 'resize') return
     const requestEpoch = epoch
     void call(request, channel).catch(error => {
       if (!active || requestEpoch !== epoch) return
@@ -109,12 +108,21 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     if (channelStatus === 'running') send({ action: 'resize', cols, rows }, channel)
   }
   // Detaching a view does not close a project-owned process. Closing its tab does.
-  const disconnect = (channel?: string): void => { if (channel && channel !== id) children.delete(channel) }
+  const disconnect = (channel?: string): void => {
+    if (channel && channel !== id) {
+      children.delete(channel); pendingOutput.delete(channel)
+      revisions.set(id, (revisions.get(id) ?? 0) + 1)
+    }
+  }
   const attach = async (channel = id): Promise<{ error?: string }> => {
     const requestEpoch = epoch
     // View attachment survives hide/show. Authority for each poll is still checked independently.
     const child = channel === id ? undefined : { cursor: 0, generation: '', status: '' }
-    if (child) children.set(channel, child)
+    if (child) {
+      children.set(channel, child)
+      // A parent read captured before this attachment cannot remove the new pane from React.
+      revisions.set(id, (revisions.get(id) ?? 0) + 1)
+    }
     try {
       const state = await call({ action: 'read' }, channel) as Snapshot
       if (stopped) return {}
