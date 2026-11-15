@@ -1,3 +1,5 @@
+export { default as ConnectionSidebar } from './src/components/Sidebar.jsx'
+export { default as WorkspaceTabBar } from './src/components/TabBar.jsx'
 export { projectTerminal } from './project-store.mjs'
 export { default as SettingsDialog } from './src/components/SettingsDialog.jsx'
 export { default as SessionDialog } from './src/components/SessionDialog.jsx'

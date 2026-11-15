@@ -14,9 +14,9 @@ export function ToolTerminalPanel({ profileId, tab, active, promptTargetId }: { 
   const host = useMemo(() => createMyTerminalHost(profileId, tab.id, setState, setError), [profileId, tab.id])
   host.setActive(active)
   useEffect(() => { host.start(); return () => host.stop() }, [host])
-  const descriptor = useMemo(() => ({ id: tab.id, channelId: tab.id, sessionId: tab.terminal?.connectionId, label: tab.title, isLocal: tab.kind !== 'ssh',
+  const descriptor = useMemo(() => ({ id: tab.id, channelId: tab.id, sessionId: tab.terminal?.connectionId, label: tab.label || tab.title, isLocal: tab.kind !== 'ssh',
     splitChannelId: state?.splitId, splitConfig: state?.splitId ? { ...tab.terminal, host: tab.title } : null,
-    wslDistro: tab.kind === 'wsl' ? tab.terminal?.distro || 'Default' : null, config: tab.terminal ?? {} }), [tab.id, tab.kind, tab.title, tab.terminal, state?.splitId])
+    wslDistro: tab.kind === 'wsl' ? tab.terminal?.distro || 'Default' : null, config: tab.terminal ?? {} }), [tab.id, tab.kind, tab.title, tab.label, tab.terminal, state?.splitId])
   const addToPrompt = (): void => {
     const terminal = host.getTerminal(); if (!terminal || !promptTargetId) return
     let text = terminal.getSelection()

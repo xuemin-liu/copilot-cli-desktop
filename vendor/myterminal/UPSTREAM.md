@@ -58,6 +58,12 @@ countdown while active. This is a source integration into desktop tabs, not a se
   output to the upstream logging handler. No second CLI session picker or AI provider is exposed.
 - `project-store.mjs` creates one upstream store per desktop project. The desktop remains the authority
   for terminal tab and split-channel lifetimes. Native and managed SSH both use the same CLI read/write bridge.
+- The original `TabBar.jsx` and `Sidebar.jsx` supply tab dragging, naming, colors, connection search,
+  grouping, copy and export controls. Host adapters connect their actions to desktop tab IDs and project stores.
+  The original WSL discovery handler is exposed with an absolute Windows executable path and hidden process.
+  Broadcast routing reuses `terminalChannels.js`; the main process restricts targets to connected terminal tabs
+  in the shown project and resets broadcast on hide/project switch. Temporary SSH configurations use the existing
+  encryption and connection resolver in memory; only explicit Save connection writes them to the project store.
 - Downstream fixes add pending-SSH cancellation, transport cleanup, late-SFTP cleanup, live settings,
   background logs, scoped tunnel IDs, fragmented SOCKS framing and remote forwarding destination checks.
   Saved credentials fail closed when OS encryption is unavailable. The supplied desktop action remains

@@ -30,7 +30,7 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
   if (config.transport === 'managed') {
     const connectionId = field(config.connectionId, 'SSH connection ID', /^[a-zA-Z0-9_-]+$/)
     if (!connectionId) throw new Error('Choose a saved SSH connection')
-    return { file: '', args: [], cwd, config: { transport: 'managed', connectionId, ...(typeof config.host === 'string' ? { host: config.host.slice(0, 256) } : {}) } }
+    return { file: '', args: [], cwd, config: { transport: 'managed', connectionId, ...(config.temporary === true ? { temporary: true } : {}), ...(typeof config.host === 'string' ? { host: config.host.slice(0, 256) } : {}) } }
   }
   const host = field(config.host, 'SSH host', /^[a-zA-Z0-9][a-zA-Z0-9._:\[\]-]*$/)
   if (!host) throw new Error('Enter an SSH host or SSH config alias')

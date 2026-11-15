@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
@@ -10,6 +10,7 @@ import { BrowserPanel } from './BrowserPanel.js'
 import { GitPanel } from './GitPanel.js'
 import { isShortcutModifier, isWindows } from '../platform.js'
 import { ToolTerminalPanel } from './ToolTerminalPanel.js'
+import { projectTerminal, WorkspaceTabBar } from '../../../vendor/myterminal/desktop-renderer.mjs'
 import { MyTerminalConnections } from './MyTerminalConnections.js'
 
 /** Adding another tool requires an adapter here, not a permanent slot in the layout. */
@@ -52,8 +53,29 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const prompt = desktop.activeProfileId === project.profileId ? sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id)) : undefined
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
+  const terminalProject = useMemo(() => projectTerminal(project.profileId), [project.profileId])
+  const [tabMenuOpen, setTabMenuOpen] = useState(false)
+  const [distros, setDistros] = useState<string[]>([])
+  useEffect(() => {
+    terminalProject.store.setState({ activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast) })
+  }, [terminalProject, project.activeId, project.broadcast])
+  const tabState = {
+    tabs: project.tabs.map(tab => ({ id: tab.id, label: tab.label || tab.title, color: tab.color, terminal: isTerminalKind(tab.kind),
+      isLocal: tab.kind !== 'ssh', config: tab.terminal?.temporary ? tab.terminal : null, sessionId: tab.terminal?.temporary ? null : tab.terminal?.connectionId })),
+    activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast),
+    setActiveTab: (id: string) => action({ type: 'select', id }), closeTab: (id: string) => action({ type: 'close', id }),
+    updateTab: (id: string, patch: {label?: string; color?: string | null}) => action({ type: 'metadata', id, ...patch }),
+    reorderTabs: (from: number, to: number) => { const first = project.tabs[from], last = project.tabs[to]; if (first && last) action({ type: 'reorder', id: first.id, beforeId: last.id }) },
+    toggleBroadcast: () => action({ type: 'broadcast', enabled: !project.broadcast }),
+  }
   const [address, setAddress] = useState('')
   const [connection, setConnection] = useState<'wsl' | 'ssh' | null>(null)
+  useEffect(() => {
+    if (!isWindows || !shown || connection !== 'wsl') return
+    let canceled = false
+    void terminalProject.api.wsl.getDistros().then((values: string[]) => { if (!canceled) setDistros(values) }).catch(() => { if (!canceled) setDistros([]) })
+    return () => { canceled = true }
+  }, [terminalProject, shown, connection])
   const [host, setHost] = useState(''), [username, setUsername] = useState(''), [port, setPort] = useState(''), [identityFile, setIdentityFile] = useState(''), [distro, setDistro] = useState('')
   useEffect(() => { setConnection(null) }, [selected?.id])
   return <aside className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
@@ -63,25 +85,12 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
       else if (project.activeId) action({ type: 'close', id: project.activeId })
     }
   }}>
-    <header className="workspace-tools-header">
-      <div role="tablist" aria-label="Workspace tabs" className="tool-tab-strip" onKeyDown={event => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-        event.preventDefault()
-        const index = project.tabs.findIndex(tab => tab.id === project.activeId)
-        const next = event.key === 'Home' ? project.tabs[0] : event.key === 'End' ? project.tabs.at(-1)
-          : project.tabs[(index + (event.key === 'ArrowLeft' ? -1 : 1) + project.tabs.length) % project.tabs.length]
-        if (next) { action({ type: 'select', id: next.id }); event.currentTarget.querySelector<HTMLButtonElement>(`[data-tab-id="${next.id}"]`)?.focus() }
-      }}>
-        {project.tabs.map(tab => <div className={`tool-tab${tab.id === project.activeId ? ' tool-tab-selected' : ''}`} key={tab.id}>
-          <button type="button" role="tab" data-tab-id={tab.id} aria-selected={tab.id === project.activeId} aria-controls={`tool-content-${tab.id}`}
-            tabIndex={tab.id === project.activeId ? 0 : -1} title={tab.error || tab.url || tab.title} onClick={() => action({ type: 'select', id: tab.id })}>
-            {tab.error ? '⚠ ' : tab.kind === 'browser' ? '◎ ' : tab.kind === 'git' ? '⑂ ' : ''}{tab.title}</button>
-          <button type="button" className="tool-tab-close" aria-label={`Close ${tab.title} tab`} onClick={() => action({ type: 'close', id: tab.id })}>×</button>
-        </div>)}
-      </div>
-      <button type="button" aria-label="New tab" title="New tab" onClick={() => action({ type: 'add', kind: 'new' })}>+</button>
-      <button type="button" aria-label="Hide tabs" title={takeover ? 'Hide tabs and return to CLI' : 'Hide tabs'} onClick={() => action({ type: 'visible', visible: false })}>▥</button>
-    </header>
+    <div className="myterminal-embedded workspace-tabbar-host">
+      <WorkspaceTabBar host={{ ...terminalProject, tabState, active: shown, onMenu: setTabMenuOpen,
+        saveConnection: async (id: string) => { await window.copilotDesktop.toolsAction(project.profileId, { type: 'save-connection', id }); await terminalProject.load() },
+        toolbar: <><button type="button" aria-label="New tab" title="New tab" onClick={() => action({ type: 'add', kind: 'new' })}>+</button>
+          <button type="button" aria-label="Hide tabs" title={takeover ? 'Hide tabs and return to CLI' : 'Hide tabs'} onClick={() => action({ type: 'visible', visible: false })}>▥</button></> }} />
+    </div>
     {selected?.kind === 'new' && <div id={`tool-content-${selected.id}`} role="tabpanel" className="tool-launcher">
       <h2>New tab</h2>
       <form onSubmit={event => { event.preventDefault(); action({ type: 'add', kind: 'browser', replaceId: selected.id, ...(address.trim() ? { url: address.trim() } : {}) }); setAddress('') }}>
@@ -107,7 +116,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
           <label>Port (optional)<input aria-label="SSH port" type="number" min="1" max="65535" value={port} onChange={event => setPort(event.target.value)} /></label>
           <label>Identity file (optional)<input aria-label="SSH identity file" value={identityFile} onChange={event => setIdentityFile(event.target.value)} /></label>
           <p>Uses your SSH configuration and keys. Password and host verification prompts appear in the terminal.</p>
-        </> : <label>Distribution (optional)<input autoFocus aria-label="WSL distribution" placeholder="Default distribution" value={distro} onChange={event => setDistro(event.target.value)} /></label>}
+        </> : <label>Distribution (optional)<input autoFocus list={`wsl-distros-${project.profileId}`} aria-label="WSL distribution" placeholder="Default distribution" value={distro} onChange={event => setDistro(event.target.value)} /><datalist id={`wsl-distros-${project.profileId}`}>{distros.map(name => <option key={name} value={name} />)}</datalist></label>}
         <div><button type="submit">Connect</button><button type="button" onClick={() => setConnection(null)}>Cancel</button></div>
       </form>}
       {profile?.general && <p>Git is available in project workspaces.</p>}
@@ -125,7 +134,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     </div>}
     {project.tabs.filter(tab => tab.kind === 'browser' && tab.resource).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-browser-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
       <BrowserPanel tabId={tab.resource!} sessionTitle={tab.title} independent promptTargetId={prompt?.id ?? null}
-        active={shown && selected?.id === tab.id} obscured={obscured} />
+        active={shown && selected?.id === tab.id} obscured={obscured || tabMenuOpen} />
     </div>)}
     {gitUsed && <div className="tool-git-host" hidden={!shown || selected?.kind !== 'git'} role="tabpanel" id={selected?.kind === 'git' ? `tool-content-${selected.id}` : undefined}>
       <GitPanel profileId={project.profileId} embedded active={shown && selected?.kind === 'git'} promptTarget={promptTarget}

@@ -1,12 +1,14 @@
 /** Persistent panel IDs are independent of Chromium page IDs and CLI session IDs. */
 export type TerminalKind = 'local' | 'wsl' | 'ssh'
 export type ToolTabKind = 'new' | 'browser' | 'git' | TerminalKind
-export interface TerminalConfig { host?: string; username?: string; port?: number; identityFile?: string; distro?: string; connectionId?: string; transport?: 'native' | 'managed' }
+export interface TerminalConfig { host?: string; username?: string; port?: number; identityFile?: string; distro?: string; connectionId?: string; temporary?: boolean; transport?: 'native' | 'managed' }
 export const isTerminalKind = (kind: string): kind is TerminalKind => ['local', 'wsl', 'ssh'].includes(kind)
 export interface ToolTab {
   id: string
   kind: ToolTabKind
   title: string
+  label?: string
+  color?: string
   url?: string
   pageId?: number
   resource?: string
@@ -23,6 +25,7 @@ export interface ProjectTools {
   activeId: string | null
   visible: boolean
   width: number
+  broadcast?: boolean
 }
 export interface BrowserConnection { sessionId: string; profileId: string; pageId: number | null }
 export interface ToolsState { projects: ProjectTools[]; connections: BrowserConnection[]; recent?: string[] }
@@ -31,6 +34,10 @@ export type ToolsAction =
   | { type: 'select' | 'close' | 'pop-out' | 'return'; id: string }
   | { type: 'visible'; visible: boolean }
   | { type: 'width'; width: number }
+  | { type: 'metadata'; id: string; label?: string; color?: string | null }
+  | { type: 'reorder'; id: string; beforeId: string }
+  | { type: 'broadcast'; enabled: boolean }
+  | { type: 'save-connection'; id: string }
   | { type: 'overrides'; mode: 'shared' | 'private' }
 
 export function removeToolTab(project: ProjectTools, id: string): void {

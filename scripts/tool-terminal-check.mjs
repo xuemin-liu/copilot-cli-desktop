@@ -67,6 +67,26 @@ if (!process.versions.electron) {
       preset = 'read-only'; await call({ action: 'create', kind: 'local' }, 409); preset = 'default'
       const first = await call({ action: 'create', kind: 'local' }), second = await call({ action: 'create', kind: 'local' })
       assert.equal(first.status, 'running'); assert.equal(second.status, 'running'); assert.notEqual(first.pid, second.pid)
+      // Upstream broadcast routing reaches only connected parent terminals in the shown project.
+      await tools.action('p1', { type: 'select', id: first.id })
+      await tools.action('p1', { type: 'broadcast', enabled: true })
+      const broadcastCommand = process.platform === 'win32' ? "Write-Output ('BROADCAST_' + 'OK')\r" : "printf 'BROADCAST_%s\\n' OK\r"
+      assert.deepEqual((await call({ action: 'broadcast', id: first.id, text: broadcastCommand })).delivered.sort(), [first.id, second.id].sort())
+      for (const id of [first.id, second.id]) await until(async () => (await call({ action: 'read', id })).output.includes('BROADCAST_OK'), 'broadcast reaches both real shells')
+      await call({ action: 'broadcast', id: second.id, text: 'WRONG' }, 409)
+      await tools.action('p1', { type: 'visible', visible: false })
+      await call({ action: 'broadcast', id: first.id, text: 'WRONG' }, 409)
+      await tools.action('p1', { type: 'visible', visible: true })
+      assert.equal(tools.state().projects[0].broadcast, false)
+      await tools.action('p1', { type: 'broadcast', enabled: true }); tools.showProject('p2'); tools.showProject('p1')
+      assert.equal(tools.state().projects[0].broadcast, false)
+      await tools.action('p1', { type: 'metadata', id: first.id, label: 'Build shell', color: '#58a6ff' })
+      await tools.action('p1', { type: 'reorder', id: first.id, beforeId: second.id })
+      await tools.writing
+      const metadataRestored = new ProjectToolService(options)
+      const restoredProject = metadataRestored.state().projects.find(project => project.profileId === 'p1')
+      assert.equal(restoredProject.tabs[1].id, first.id); assert.equal(restoredProject.tabs[1].label, 'Build shell'); assert.equal(restoredProject.tabs[1].color, '#58a6ff')
+      assert.ok(!restoredProject.broadcast); await metadataRestored.dispose()
       const command = process.platform === 'win32' ? "Write-Output ('TERMINAL_' + 'ONE'); (Get-Location).Path\r" : "printf 'TERMINAL_%s\\n' ONE; pwd\r"
       await call({ action: 'write', id: first.id, text: command })
       await until(async () => (await call({ action: 'read', id: first.id })).output.includes('TERMINAL_ONE'), 'real PTY command output')
