@@ -302,7 +302,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
     </div>}
     {!error && !state.error && (picking && !selecting ? <p className="browser-notice" role="status">Click an element in the page. Press Esc to cancel.</p>
       : notice && <p className="browser-notice" role="status">{notice}</p>)}
-    <div className="browser-viewport" ref={viewport}>
+    <div className={`browser-viewport${state.view === 'page' && activePage?.window ? ' browser-viewport-detached' : ''}`} ref={viewport}>
       {certificateInPage && certificateNotice}
       {state.view === 'page' && !certificateInPage && (activePage?.window
         ? <p className="browser-hint">This page is open in its own window.{' '}
