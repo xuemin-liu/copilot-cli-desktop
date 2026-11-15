@@ -27,6 +27,8 @@ export default function TerminalTab({ tab, isActive, host }) {
   const sessionStore = host?.store || useSessionStore
   const { addSplitPane, removeSplitPane, settings } = sessionStore()
   const standalone = !host
+  const remoteTools = !tab.isLocal && (standalone || host?.remoteTools)
+  const extraTools = standalone || host?.features
 
   const termRef = useRef(null)
   const terminalInstanceRef = useRef(null)
@@ -79,7 +81,8 @@ export default function TerminalTab({ tab, isActive, host }) {
   const pendingLineRef = useRef('')
   const reconnectTimerRef = useRef(null)
   const isMountedRef = useRef(true)
-  const reconnectAttemptRef = useRef(0)
+  const localReconnectAttemptRef = useRef(0)
+  const reconnectAttemptRef = host?.reconnectAttempts || localReconnectAttemptRef
   const isRegexModeRef = useRef(false)
   const lastBellRef = useRef(0)
   const stickyCmdRef = useRef(null)
@@ -111,6 +114,22 @@ export default function TerminalTab({ tab, isActive, host }) {
     }
   }, [fontSize])
 
+  useEffect(() => { setFontSize(settings.defaultFontSize || 14) }, [settings.defaultFontSize])
+  useEffect(() => { setColorize(settings.colorizeByDefault) }, [settings.colorizeByDefault])
+  useEffect(() => {
+    if (terminalInstanceRef.current) terminalInstanceRef.current.options.scrollback = settings.defaultScrollback || 10000
+  }, [settings.defaultScrollback])
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  useEffect(() => {
+    if (!host?.backgroundLogging || !isActive) return
+    let disposed = false
+    const update = () => api.logging.status(tab.channelId).then(result => { if (!disposed) { setLogging(result.logging); if (result.error) setError(result.error) } }).catch(error => { if (!disposed && host.isActive()) setError(error.message) })
+    void update()
+    const timer = setInterval(update, 1000)
+    return () => { disposed = true; clearInterval(timer) }
+  }, [isActive, tab.channelId])
+
   // Auto-focus search input
   useEffect(() => {
     if (showSearch) setTimeout(() => searchInputRef.current?.focus(), 50)
@@ -136,17 +155,17 @@ export default function TerminalTab({ tab, isActive, host }) {
 
   // Latency polling for SSH connections
   useEffect(() => {
-    if (!standalone || tab.isLocal || !connected) { setLatency(null); return }
+    if (!remoteTools || !connected || !isActive) { setLatency(null); return }
     let active = true
     const poll = async () => {
       if (!active) return
-      const ms = await api.ssh.ping(tab.channelId)
+      const ms = await api.ssh.ping(tab.channelId).catch(() => -1)
       if (active) setLatency(ms >= 0 ? ms : null)
     }
     poll()
     const timer = setInterval(poll, 30000)
     return () => { active = false; clearInterval(timer) }
-  }, [tab.isLocal, connected, tab.channelId])
+  }, [tab.isLocal, connected, tab.channelId, isActive])
 
   // Load custom presets on mount
   useEffect(() => {
@@ -269,7 +288,7 @@ export default function TerminalTab({ tab, isActive, host }) {
     const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
       term,
       (text) => api.clipboard.writeText(text),
-      { enabled: settings.osc52ClipboardEnabled === true }
+      { enabled: () => settingsRef.current.osc52ClipboardEnabled === true }
     )
 
     terminalInstanceRef.current = term
@@ -326,8 +345,8 @@ export default function TerminalTab({ tab, isActive, host }) {
 
     // Reconnect logic
     const scheduleReconnect = () => {
-      // Native OpenSSH owns authentication and logout. Desktop reconnect is explicit.
-      if (!isMountedRef.current || tab.isLocal || host) return
+      // Managed SSH reuses MyTerminal's bounded retry policy. Native shells reconnect explicitly.
+      if (!isMountedRef.current || tab.isLocal || (host && (!host.remoteTools || !host.isActive()))) return
       // Guard: cancel any in-progress timer before starting a new one so that
       // multiple close/error events don't create parallel countdown loops.
       clearInterval(reconnectTimerRef.current)
@@ -341,10 +360,10 @@ export default function TerminalTab({ tab, isActive, host }) {
       let remaining = Math.min(30, attempt * 5)
       setReconnectCountdown(remaining)
       const tick = setInterval(() => {
-        if (!isMountedRef.current) { clearInterval(tick); return }
+        if (!isMountedRef.current || (host && !host.isActive())) { clearInterval(tick); setReconnectCountdown(null); return }
         remaining--
         setReconnectCountdown(remaining > 0 ? remaining : null)
-        if (remaining <= 0) { clearInterval(tick); connectSSH() }
+        if (remaining <= 0) { clearInterval(tick); if (host) void host.connect(); else connectSSH() }
       }, 1000)
       reconnectTimerRef.current = tick
     }
@@ -446,7 +465,7 @@ export default function TerminalTab({ tab, isActive, host }) {
       term.write(shouldColorize ? colorizeOutput(data) : data)
 
       // Session logging — fire-and-forget
-      if (loggingRef.current) {
+      if (loggingRef.current && !host?.backgroundLogging) {
         api.logging.write(tab.channelId, stripAnsi(data))
       }
 
@@ -515,7 +534,7 @@ export default function TerminalTab({ tab, isActive, host }) {
       () => clearInterval(reconnectTimerRef.current),
       () => {
         isMountedRef.current = false
-        if (loggingRef.current) api.logging.stop(tab.channelId)
+        if (loggingRef.current && !host?.backgroundLogging) api.logging.stop(tab.channelId)
         api.tunnel.stopByChannel(tab.channelId)
         if (tab.isLocal) api.local.disconnect(tab.channelId)
         else api.ssh.disconnect(tab.channelId)
@@ -594,6 +613,7 @@ export default function TerminalTab({ tab, isActive, host }) {
   }
 
   const toggleLogging = async () => {
+    try {
     if (logging) {
       await api.logging.stop(tab.channelId)
       setLogging(false)
@@ -602,6 +622,7 @@ export default function TerminalTab({ tab, isActive, host }) {
       const result = await api.logging.start(tab.channelId, logDir)
       if (result?.success) setLogging(true)
     }
+    } catch (error) { setError(error.message) }
   }
 
   const handleExport = async () => {
@@ -678,16 +699,25 @@ export default function TerminalTab({ tab, isActive, host }) {
           <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
             <Highlighter size={16} />
           </button>
-          {standalone && <button className={`icon-btn ${logging ? 'active' : ''}`} onClick={toggleLogging} title={logging ? 'Stop logging' : 'Start logging'}>
+          {extraTools && <button className={`icon-btn ${logging ? 'active' : ''}`} onClick={toggleLogging} title={logging ? 'Stop logging' : 'Start logging'}>
             <FileText size={16} />
           </button>}
-          {standalone && <button className="icon-btn" onClick={handleExport} title="Export terminal output">
+          {extraTools && <button className="icon-btn" onClick={handleExport} title="Export terminal output">
             <Download size={16} />
           </button>}
-          {standalone && <button className={`icon-btn ${showSnippets ? 'active' : ''}`} onClick={() => setShowSnippets((v) => !v)} title="Snippets">
+          {extraTools && <button className={`icon-btn ${showSnippets ? 'active' : ''}`} onClick={() => setShowSnippets((v) => !v)} title="Snippets">
             <Code2 size={16} />
           </button>}
-          {standalone && !tab.isLocal && (
+          {extraTools && (<>
+              <button
+                className={`icon-btn ${tab.splitChannelId ? 'active' : ''}`}
+                onClick={() => tab.splitChannelId ? removeSplitPane(tab.id) : addSplitPane(tab.id)}
+                title="Split pane"
+              >
+                <SplitSquareHorizontal size={16} />
+              </button>
+          </>)}
+          {remoteTools && (
             <>
               <button
                 className={`icon-btn ${showTunnels ? 'active' : ''}`}
@@ -695,13 +725,6 @@ export default function TerminalTab({ tab, isActive, host }) {
                 title="Port forwarding"
               >
                 <Network size={16} />
-              </button>
-              <button
-                className={`icon-btn ${tab.splitChannelId ? 'active' : ''}`}
-                onClick={() => tab.splitChannelId ? removeSplitPane(tab.id) : addSplitPane(tab.id)}
-                title="Split pane"
-              >
-                <SplitSquareHorizontal size={16} />
               </button>
               <button className={`icon-btn ${showSftp ? 'active' : ''}`} onClick={() => setShowSftp((v) => !v)} title="Toggle SFTP panel">
                 <PanelRight size={16} />
@@ -752,7 +775,7 @@ export default function TerminalTab({ tab, isActive, host }) {
 
       {/* Snippets panel */}
       {showSnippets && (
-        <SnippetPanel
+        <SnippetPanel host={host}
           onInsert={(cmd) => { writeToChannel(cmd + '\r'); focusTerminal() }}
           onClose={() => setShowSnippets(false)}
         />
@@ -760,7 +783,7 @@ export default function TerminalTab({ tab, isActive, host }) {
 
       {/* Tunnel panel */}
       {showTunnels && !tab.isLocal && connected && (
-        <TunnelPanel
+        <TunnelPanel host={host}
           channelId={tab.channelId}
           sessionId={tab.sessionId || tab.channelId}
           onClose={() => setShowTunnels(false)}
@@ -906,7 +929,7 @@ export default function TerminalTab({ tab, isActive, host }) {
               }}
             />
             <div className="terminal-wrapper" style={{ flex: 1 }}>
-              <SplitTerminalPane
+              <SplitTerminalPane host={host}
                 key={tab.splitChannelId}
                 channelId={tab.splitChannelId}
                 config={tab.splitConfig}
@@ -937,7 +960,7 @@ export default function TerminalTab({ tab, isActive, host }) {
                 window.addEventListener('mouseup', onUp)
               }}
             />
-            <SftpPanel
+            <SftpPanel host={host}
               channelId={tab.channelId}
               cwd={cwd}
               width={sftpWidth}
@@ -950,7 +973,7 @@ export default function TerminalTab({ tab, isActive, host }) {
 
       {/* Remote file editor overlay */}
       {editingFile && (
-        <FileEditor
+        <FileEditor host={host}
           editingFile={editingFile}
           textareaRef={editorTextareaRef}
           onSave={handleSaveFile}

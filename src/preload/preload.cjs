@@ -1,4 +1,16 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
+
+// MyTerminal preload's capture-phase File -> native path bridge. Paths cannot be supplied by renderer JavaScript.
+const terminalDropPaths = []
+window.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('drop', event => {
+    terminalDropPaths.length = 0
+    if (!event.isTrusted) return
+    for (const file of event.dataTransfer?.files || []) {
+      try { const path = webUtils.getPathForFile(file); if (path) terminalDropPaths.push(path) } catch { /* Not a native file. */ }
+    }
+  }, true)
+})
 
 contextBridge.exposeInMainWorld('copilotDesktop', {
   createTask: (tabId,title,replace) => ipcRenderer.invoke('desktop:task-create',tabId,title,replace),
@@ -15,6 +27,12 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   toolsState: (width) => ipcRenderer.invoke('desktop:tools-state', width),
   toolsAction: (profileId, action) => ipcRenderer.invoke('desktop:tools-action', profileId, action),
   toolTerminal: (profileId, request) => ipcRenderer.invoke('desktop:tool-terminal', profileId, request),
+  myTerminal: (profileId, method, args) => ipcRenderer.invoke('desktop:myterminal', profileId, method, args),
+  myTerminalDrop: async (profileId) => {
+    const paths = terminalDropPaths.splice(0)
+    if (paths.length) await ipcRenderer.invoke('desktop:myterminal-drop', profileId, paths)
+    return paths
+  },
   showBrowserInMain: (tabId) => ipcRenderer.invoke('desktop:browser-show-main', tabId),
   onToolsChanged: (listener) => { const handler = (_event, state) => listener(state); ipcRenderer.on('desktop:tools-changed', handler); return () => ipcRenderer.removeListener('desktop:tools-changed', handler) },
   browserOpen: (tabId) => ipcRenderer.invoke('desktop:browser-open', tabId),

@@ -1659,8 +1659,19 @@ button:disabled {
 .tool-terminal-host { display:flex; flex:1; min-height:0; min-width:0; }
 /* MyTerminal 0dd8c2b: inactive panes retain measurable width; never refit to zero columns. */
 .tool-terminal-host[hidden] { display:flex; position:absolute; inset:40px 0 0; visibility:hidden; pointer-events:none; }
-.myterminal-embedded .terminal-toolbar { flex-wrap:wrap; height:auto; min-height:32px; }
-.myterminal-embedded .terminal-toolbar-actions { flex-wrap:wrap; }
+.myterminal-embedded .terminal-toolbar { flex-wrap:nowrap; height:32px; min-height:32px; overflow-x:auto; }
+.myterminal-embedded .terminal-toolbar-actions { flex-wrap:nowrap; flex-shrink:0; }
+.myterminal-embedded .terminal-toolbar-actions > button:not(.icon-btn) { padding:3px 6px; white-space:nowrap; }
+.myterminal-embedded .terminal-tab-root { position:relative; min-width:0; }
+.myterminal-embedded .terminal-toolbar-info { flex-shrink:0; }
+.myterminal-embedded .dialog { max-width:calc(100vw - 32px); max-height:calc(100vh - 48px); }
+.myterminal-embedded .dialog-body { overflow-y:auto; }
+.myterminal-connections { padding:10px 0; border-bottom:1px solid var(--border); }
+.myterminal-connection-actions { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+.myterminal-connection-row { display:flex; gap:6px; margin-top:6px; }
+.myterminal-connection-row > button:first-child { flex:1; overflow:hidden; text-overflow:ellipsis; text-align:left; }
+.myterminal-embedded .sftp-new-folder { display:flex; gap:4px; padding:6px; }
+.myterminal-embedded .sftp-new-folder input { min-width:0; flex:1; }
 .tool-terminal-panel { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
 .tool-terminal-screen { flex:1; min-height:0; min-width:0; overflow:hidden; background:#0b1020; padding:6px; }
 .tool-terminal-screen .xterm { height:100%; }

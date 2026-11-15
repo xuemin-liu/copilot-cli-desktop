@@ -47,13 +47,13 @@ export function decodeOsc52Payload(data) {
 
 export function registerOsc52ClipboardHandler(term, writeText, options = {}) {
   if (!term?.parser?.registerOscHandler || typeof writeText !== 'function') return null
-  const enabled = options.enabled === true
+  const enabled = () => typeof options.enabled === 'function' ? options.enabled() === true : options.enabled === true
   const maxBytes = Number.isInteger(options.maxBytes) && options.maxBytes > 0
     ? options.maxBytes
     : OSC52_MAX_BYTES
 
   return term.parser.registerOscHandler(52, (data) => {
-    if (!enabled) return true
+    if (!enabled()) return true
     const text = decodeOsc52Payload(data)
     if (text == null) return false
     if (utf8ByteLength(text) > maxBytes) return true

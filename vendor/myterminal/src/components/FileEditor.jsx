@@ -1,6 +1,9 @@
+import useSessionStore from '../store/useSessionStore'
 import React from 'react'
 
-export default function FileEditor({ editingFile, onSave, onClose, onChange, textareaRef }) {
+export default function FileEditor({ host, editingFile, onSave, onClose, onChange, textareaRef }) {
+  const api = host?.api || window.electronAPI
+  const sessionStore = host?.store || useSessionStore
   return (
     <div className="file-editor-overlay">
       <div className="file-editor-header">

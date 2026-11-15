@@ -57,13 +57,14 @@
     "popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --popout",
     "browser-popout:check": "npm run build && node scripts/electron-side-chat-check.mjs --browser-popout",
     "browser:check": "npm run build && node scripts/browser-debug-check.mjs && node scripts/browser-persistence-check.mjs && node scripts/browser-devtools-share-check.mjs && node scripts/browser-overrides-status-check.mjs && node scripts/browser-popup-overrides-check.mjs && node scripts/browser-popup-navigation-check.mjs && node scripts/browser-popup-navigation-check.mjs --no-overrides && node scripts/browser-popup-navigation-check.mjs --overrides-failure && node scripts/browser-overrides-private-check.mjs && node scripts/browser-profile-share-check.mjs && node scripts/browser-reader-check.mjs && node scripts/browser-pick-check.mjs && node scripts/browser-basics-check.mjs && node scripts/browser-dialog-check.mjs && node scripts/browser-context-check.mjs && node scripts/browser-permissions-check.mjs && node scripts/browser-test-check.mjs && node scripts/browser-discovery-check.mjs && node scripts/browser-unattended-check.mjs && node scripts/browser-unattended-check.mjs --force-device-scale-factor=1.25",
-    "myterminal:check": "node scripts/check-myterminal.mjs && vitest run --config vitest.myterminal.config.mjs"
+    "myterminal:check": "node scripts/check-myterminal.mjs && vitest run --config vitest.myterminal.config.mjs && node --test --test-timeout=30000 scripts/myterminal-services.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-search": "0.16.0",
     "@xterm/addon-serialize": "0.14.0",
     "@xterm/addon-web-links": "0.12.0",
+    "electron-store": "8.2.0",
     "electron-updater": "6.8.11",
     "jsonc-parser": "3.3.1",
     "koffi": "3.3.7",
@@ -72,6 +73,7 @@
     "proper-lockfile": "4.1.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "ssh2": "1.17.0",
     "yauzl": "3.4.0",
     "yazl": "3.3.1",
     "zustand": "5.0.3"

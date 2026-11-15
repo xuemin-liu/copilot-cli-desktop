@@ -380,7 +380,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
       // The embedded MyTerminal source is CommonJS; keep Node built-in requires
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
-      banner: { js: "import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(import.meta.url);" },
+      banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
         builder.onResolve({ filter: /^(electron|electron-updater|\.\/(browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))

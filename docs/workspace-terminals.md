@@ -6,19 +6,34 @@ font zoom, context-menu paste, and focus handling, plus **Add to prompt** for th
 selection or recent output. No destination session needs to be selected.
 
 Local terminals open PowerShell on Windows or the configured shell on macOS/Linux in the project folder.
-WSL opens the default distribution or the distribution you enter. SSH asks for a host/config alias and optional
-user, port, and identity file. OpenSSH handles keys, host verification, passwords, and existing SSH configuration.
-No SSH passwords are saved by the app. WSL and OpenSSH must be installed to use those terminal types.
+WSL opens the default distribution or the distribution you enter. **SSH** offers saved MyTerminal connections
+with password/private-key authentication and optional jump hosts. Credentials use the OS credential store;
+the renderer receives presence flags, not saved passwords. New or changed host fingerprints require verification.
+The **OpenSSH (native)** form remains available for existing config aliases and native authentication prompts.
+WSL and native OpenSSH must be installed to use those options.
 
 Tabs belong to the project. Switching tabs/projects or hiding the panel preserves their processes. Closing a tab
 terminates its PTY; quitting stops all terminals. Saved tabs return disconnected after restart—**Connect** starts
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes
-can exist at once. This integration brings terminal access into the existing panel; MyTerminal's SFTP, tunnel,
-split-pane, and saved-connection interfaces are not included.
+can exist at once, including split panes. Managed SSH uses MyTerminal's bounded reconnect countdown while its tab
+is active. Native shells reconnect explicitly. Split panes close with their parent and are not restored on restart.
+
+The terminal toolbar includes **Snippets**, **Split pane**, **Start/stop logging**, **Export terminal output**,
+and **Settings & backup**. Settings and snippets are project-scoped. Logging runs in the main process, including
+while the panel is hidden, and stops when the process exits. The default log folder is inside that project's
+MyTerminal data folder. Settings can change the folder, font, scrollback, highlighting and OSC52 clipboard opt-in.
+Backup/import reuses MyTerminal's format and merge behavior; exports exclude credentials unless explicitly chosen.
+Removing a workspace deletes its saved terminal connections/preferences and default logs after closing their streams.
+Logs written to a custom folder outside the app's project data directory are kept.
+
+Managed SSH tabs also include **SFTP** with uploads/downloads, favorites and remote text editing, and
+**Port forwarding** for local, remote and SOCKS5 tunnels. Forwarding listeners bind to loopback. Closing the
+terminal stops its transfers and tunnels. These controls are unavailable on native OpenSSH tabs.
 
 The implementation reuses MyTerminal's `TerminalTab.jsx`, terminal utilities, and local process manager
-from revision `3de4e4a`. The imported source, original tests, history notes and small adapter patch are
-tracked in [vendor/myterminal](../vendor/myterminal/UPSTREAM.md). SSH continues to use native OpenSSH.
+from revision `3de4e4a`, plus its SSH/tunnel managers, service handlers, dialogs and project-specific store instances.
+The imported source, original tests, history notes and explicit adapter patch are
+tracked in [vendor/myterminal](../vendor/myterminal/UPSTREAM.md).
 
 ## CLI and shell access
 
@@ -58,7 +73,8 @@ Example request files:
 {"action":"write","id":"TERMINAL_ID","text":"pwd\r"}
 ```
 
-Other actions: `list`, `read` (optional `cursor` and `generation`), `interrupt`, `close`, `start`, `restart`.
+Other actions: `list`, `read` (optional `cursor` and `generation`), `interrupt`, `close`, `start`, `restart`,
+`split` and `unsplit` (parent terminal ID). `list` includes split channel IDs with their `parentId`.
 Terminal IDs are explicit: selecting another visible tab never redirects input. CLI access follows the active
 session and its project. Read-only, side-chat, and remote CLI sessions cannot use terminal control. Shell-helper
 access requires its own project to be active. An input request already accepted before switching may continue

@@ -272,7 +272,7 @@ function WorkspaceProfileEditor({
           onClick={() => {
             if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?
 
-Its folder and files are not changed. Add it again any time.`)) return
+Its project folder and files are not changed. Saved SSH connections, terminal preferences and default terminal logs for this workspace will be deleted. Logs in a custom folder are kept. Add the workspace again any time.`)) return
             setSaving(true)
             void onSave(
               window.copilotDesktopSettings.removeWorkspaceProfile(profile.id),

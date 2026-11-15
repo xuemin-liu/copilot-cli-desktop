@@ -1,3 +1,4 @@
+import useSessionStore from '../store/useSessionStore'
 import React, { useState, useEffect, useRef } from 'react'
 import {
   Folder, File, ChevronUp, ArrowLeft, ArrowRight, RefreshCw, Upload, Download,
@@ -19,11 +20,14 @@ function formatDate(mtime) {
   return new Date(mtime * 1000).toLocaleDateString()
 }
 
-export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default', onEditFile }) {
+export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'default', onEditFile }) {
+  const api = host?.api || window.electronAPI
+  const sessionStore = host?.store || useSessionStore
   const [path, setPath] = useState('/')
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [newFolderName, setNewFolderName] = useState(null)
   const [selectedNames, setSelectedNames] = useState(() => new Set())
   const [anchorName, setAnchorName] = useState(null)
   const [renaming, setRenaming] = useState(null)
@@ -50,7 +54,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
     setError(null)
     setSelectedNames(new Set())
     setAnchorName(null)
-    const result = await window.electronAPI.sftp.list(channelId, dir)
+    const result = await api.sftp.list(channelId, dir)
     if (requestId !== loadRequestRef.current) return
     setLoading(false)
     if (result?.error) { setError(result.error); return }
@@ -68,7 +72,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
       // Single-quote the path so spaces and most metacharacters are safe.
       // Escape any literal single-quotes inside the path (bash: 'it'\''s' trick).
       const safeDir = dir.replace(/'/g, "'\\''")
-      window.electronAPI.ssh.write(channelId, `cd '${safeDir}'\r`)
+      api.ssh.write(channelId, `cd '${safeDir}'\r`)
     }
   }
 
@@ -93,14 +97,14 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
   useEffect(() => {
     loadDir('/')
     // Resolve home directory via SFTP realpath('.')
-    window.electronAPI.sftp.realpath(channelId, '.').then((result) => {
+    api.sftp.realpath(channelId, '.').then((result) => {
       if (result && !result.error) setSftpHome(result)
     })
   }, [channelId])
 
   // Load favorites from electron-store (persistent, survives app restarts)
   useEffect(() => {
-    window.electronAPI.favorites.get(sessionKey).then(setFavorites)
+    api.favorites.get(sessionKey).then(setFavorites)
   }, [sessionKey])
 
   // Auto-navigate when terminal cwd changes
@@ -148,14 +152,14 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
       updated = [...favorites, path]
     }
     setFavorites(updated)
-    window.electronAPI.favorites.set(sessionKey, updated)
+    api.favorites.set(sessionKey, updated)
   }
 
   const removeFavorite = (fav, e) => {
     e.stopPropagation()
     const updated = favorites.filter(f => f !== fav)
     setFavorites(updated)
-    window.electronAPI.favorites.set(sessionKey, updated)
+    api.favorites.set(sessionKey, updated)
   }
 
   const goToFavorite = (fav) => {
@@ -187,17 +191,17 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
     // recreate each selected file/folder inside it.
     if (selectedItems.length === 1 && selectedItems[0].type !== 'd') {
       const only = selectedItems[0]
-      const result = await window.electronAPI.dialog.saveFile({
+      const result = await api.dialog.saveFile({
         defaultPath: only.name,
         securityScope: 'sftp-download-file',
       })
       if (result.canceled) return
-      const res = await window.electronAPI.sftp.download(channelId, joinPath(path, only.name), result.filePath)
+      const res = await api.sftp.download(channelId, joinPath(path, only.name), result.filePath)
       if (res?.error) setError(res.error)
       return
     }
 
-    const pick = await window.electronAPI.dialog.openFile({
+    const pick = await api.dialog.openFile({
       title: selectedItems.length === 1
         ? `Download "${selectedItems[0].name}" to…`
         : `Download ${selectedItems.length} items to…`,
@@ -215,8 +219,8 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
       const remotePath = joinPath(path, item.name)
       const target = trimmed + sep + item.name
       const res = item.type === 'd'
-        ? await window.electronAPI.sftp.downloadDir(channelId, remotePath, target)
-        : await window.electronAPI.sftp.download(channelId, remotePath, target)
+        ? await api.sftp.downloadDir(channelId, remotePath, target)
+        : await api.sftp.download(channelId, remotePath, target)
       if (res?.error) failures.push(`${item.name}: ${res.error}`)
     }
     setLoading(false)
@@ -224,25 +228,28 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
   }
 
   const handleUpload = async () => {
-    const result = await window.electronAPI.dialog.openFile({
+    const result = await api.dialog.openFile({
       properties: ['openFile', 'multiSelections'],
       securityScope: 'sftp-upload',
     })
     if (result.canceled) return
     for (const localPath of result.filePaths) {
       const name = localPath.replace(/\\/g, '/').split('/').pop()
-      const res = await window.electronAPI.sftp.upload(channelId, localPath, joinPath(path, name))
+      const res = await api.sftp.upload(channelId, localPath, joinPath(path, name))
       if (res?.error) { setError(res.error); return }
     }
     loadDir(path)
   }
 
   const handleMkdir = async () => {
-    const name = prompt('New folder name:')
-    if (!name) return
-    const res = await window.electronAPI.sftp.mkdir(channelId, joinPath(path, name))
-    if (res?.error) { setError(res.error); return }
-    loadDir(path)
+    const name = newFolderName?.trim()
+    if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) { setError('Enter a single folder name'); return }
+    try {
+      const res = await api.sftp.mkdir(channelId, joinPath(path, name))
+      if (res?.error) { setError(res.error); return }
+      setNewFolderName(null)
+      loadDir(path)
+    } catch (error) { setError(error.message) }
   }
 
   const handleDelete = async () => {
@@ -253,7 +260,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
     if (!confirm(msg)) return
     const failures = []
     for (const item of selectedItems) {
-      const res = await window.electronAPI.sftp.delete(channelId, joinPath(path, item.name))
+      const res = await api.sftp.delete(channelId, joinPath(path, item.name))
       if (res?.error) failures.push(`${item.name}: ${res.error}`)
     }
     if (failures.length) setError(failures.join('\n'))
@@ -270,7 +277,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
 
   const commitRename = async () => {
     if (!renaming || !renameValue || renameValue === renaming.name) { setRenaming(null); return }
-    const res = await window.electronAPI.sftp.rename(channelId, joinPath(path, renaming.name), joinPath(path, renameValue))
+    const res = await api.sftp.rename(channelId, joinPath(path, renaming.name), joinPath(path, renameValue))
     if (res?.error) setError(res.error)
     setRenaming(null)
     loadDir(path)
@@ -280,17 +287,17 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
     e.preventDefault()
     // The preload capture-phase listener has already resolved the native file
     // paths via webUtils.getPathForFile and stashed them.  Retrieve them now.
-    const localPaths = window.electronAPI.getDropPaths()
+    const localPaths = await api.getDropPaths()
     if (!localPaths.length) return
     const errors = []
     for (const localPath of localPaths) {
       if (!localPath) continue
       const name = localPath.replace(/\\/g, '/').split('/').pop()
-      const isDir = await window.electronAPI.fs.isDirectory(localPath)
+      const isDir = await api.fs.isDirectory(localPath)
       const remoteDest = joinPath(path, name)
       const res = isDir
-        ? await window.electronAPI.sftp.uploadDir(channelId, localPath, remoteDest)
-        : await window.electronAPI.sftp.upload(channelId, localPath, remoteDest)
+        ? await api.sftp.uploadDir(channelId, localPath, remoteDest)
+        : await api.sftp.upload(channelId, localPath, remoteDest)
       if (res?.error) errors.push(`${name}: ${res.error}`)
     }
     if (errors.length) setError(errors.join('\n'))
@@ -386,13 +393,13 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
   const ctxCopyPath = () => {
     if (!ctxMenu?.item) return
     const fullPath = joinPath(path, ctxMenu.item.name)
-    window.electronAPI.clipboard.writeText(fullPath)
+    api.clipboard.writeText(fullPath)
     closeCtxMenu()
   }
 
   const ctxCopyName = () => {
     if (!ctxMenu?.item) return
-    window.electronAPI.clipboard.writeText(ctxMenu.item.name)
+    api.clipboard.writeText(ctxMenu.item.name)
     closeCtxMenu()
   }
 
@@ -430,7 +437,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
 
   const ctxNewFolder = async () => {
     closeCtxMenu()
-    handleMkdir()
+    setNewFolderName('')
   }
 
   const ctxUpload = async () => {
@@ -444,7 +451,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
   }
 
   const ctxCopyDirPath = () => {
-    window.electronAPI.clipboard.writeText(path)
+    api.clipboard.writeText(path)
     closeCtxMenu()
   }
 
@@ -467,7 +474,7 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
         <button className="icon-btn" onClick={() => loadDir(path)} title="Refresh"><RefreshCw size={15} /></button>
         <button className="icon-btn" onClick={handleUpload} title="Upload"><Upload size={15} /></button>
         <button className="icon-btn" onClick={handleDownload} title="Download" disabled={selectedItems.length === 0}><Download size={15} /></button>
-        <button className="icon-btn" onClick={handleMkdir} title="New folder"><FolderPlus size={15} /></button>
+        <button className="icon-btn" onClick={() => setNewFolderName('')} title="New folder"><FolderPlus size={15} /></button>
         <button className="icon-btn" onClick={startRename} title="Rename" disabled={!singleSelected}><Edit2 size={15} /></button>
         <button className="icon-btn danger" onClick={handleDelete} title="Delete" disabled={selectedItems.length === 0}><Trash2 size={15} /></button>
       </div>
@@ -543,6 +550,11 @@ export default function SftpPanel({ channelId, cwd, width, sessionKey = 'default
       )}
 
       {error && <div className="sftp-error">{error}</div>}
+      {newFolderName !== null && <form className="sftp-new-folder" onSubmit={event => { event.preventDefault(); void handleMkdir() }}>
+        <input autoFocus aria-label="New folder name" value={newFolderName} onChange={event => setNewFolderName(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setNewFolderName(null) } }} />
+        <button type="submit">Create</button><button type="button" onClick={() => setNewFolderName(null)}>Cancel</button>
+      </form>}
 
       {loading ? (
         <div className="sftp-loading">Loading...</div>

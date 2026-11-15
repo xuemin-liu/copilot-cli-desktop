@@ -18,18 +18,20 @@ const TERMINAL_THEME = {
 
 const MAX_RECONNECT = 5
 
-export default function SplitTerminalPane({ channelId, config, onClose, termInstanceRef, onFocused }) {
+export default function SplitTerminalPane({ host, channelId, config, onClose, termInstanceRef, onFocused }) {
+  const api = host?.api || window.electronAPI
+  const sessionStore = host?.store || useSessionStore
   const termRef = useRef(null)
-  const osc52ClipboardEnabled = useSessionStore((state) => state.settings.osc52ClipboardEnabled === true)
+  const osc52ClipboardEnabled = sessionStore((state) => state.settings.osc52ClipboardEnabled === true)
 
   useEffect(() => {
     const term = new Terminal({
       theme: TERMINAL_THEME,
       fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
-      fontSize: 14,
+      fontSize: sessionStore.getState().settings.defaultFontSize || 14,
       lineHeight: 1.2,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: sessionStore.getState().settings.defaultScrollback || 10000,
       allowProposedApi: true,
     })
 
@@ -38,11 +40,11 @@ export default function SplitTerminalPane({ channelId, config, onClose, termInst
     term.loadAddon(new WebLinksAddon())
     const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
       term,
-      (text) => window.electronAPI.clipboard.writeText(text),
+      (text) => api.clipboard.writeText(text),
       { enabled: osc52ClipboardEnabled }
     )
     term.open(termRef.current)
-    fitAddon.fit()
+    if (termRef.current?.clientWidth && termRef.current?.clientHeight) fitAddon.fit()
 
     // Let the parent focus this pane and know when the user last focused it
     if (termInstanceRef) termInstanceRef.current = term
@@ -56,7 +58,7 @@ export default function SplitTerminalPane({ channelId, config, onClose, termInst
     const connect = () => {
       if (!isMounted) return
       term.write('\r\n\x1b[90mConnecting split pane to ' + config.host + '...\x1b[0m\r\n')
-      window.electronAPI.ssh.connect(channelId, config).then((result) => {
+      api.ssh.connect(channelId, config).then((result) => {
         if (!isMounted) return
         if (result?.error) {
           term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
@@ -65,12 +67,12 @@ export default function SplitTerminalPane({ channelId, config, onClose, termInst
         }
         attempt = 0
         fitAddon.fit()
-        window.electronAPI.ssh.resize(channelId, term.cols, term.rows)
+        api.ssh.resize(channelId, term.cols, term.rows)
       })
     }
 
     const scheduleReconnect = () => {
-      if (!isMounted) return
+      if (!isMounted || host) return
       clearInterval(reconnectTimer)
       reconnectTimer = null
       attempt++
@@ -88,28 +90,30 @@ export default function SplitTerminalPane({ channelId, config, onClose, termInst
     }
 
     const inputDisposer = term.onData((data) => {
-      window.electronAPI.ssh.write(channelId, data)
+      api.ssh.write(channelId, data)
     })
 
-    const removeData = window.electronAPI.ssh.onData((cid, data) => {
+    const removeData = api.ssh.onData((cid, data) => {
       if (cid === channelId) term.write(data)
     })
-    const removeClose = window.electronAPI.ssh.onClose((cid) => {
+    const removeClose = api.ssh.onClose((cid) => {
       if (cid === channelId) {
         term.write('\r\n\x1b[90m[Split pane disconnected]\x1b[0m\r\n')
         scheduleReconnect()
       }
     })
-    const removeError = window.electronAPI.ssh.onError((cid, msg) => {
+    const removeError = api.ssh.onError((cid, msg) => {
       if (cid === channelId) term.write('\r\n\x1b[31mError: ' + msg + '\x1b[0m\r\n')
     })
 
     const resizeObs = new ResizeObserver(() => {
       try {
+        if (!termRef.current?.clientWidth || !termRef.current?.clientHeight) return
         fitAddon.fit()
-        window.electronAPI.ssh.resize(channelId, term.cols, term.rows)
+        api.ssh.resize(channelId, term.cols, term.rows)
       } catch (_) {}
     })
+    const gridDisposer = term.onResize(({ cols, rows }) => api.ssh.resize(channelId, cols, rows))
     if (termRef.current) resizeObs.observe(termRef.current.parentElement)
 
     connect()
@@ -120,10 +124,11 @@ export default function SplitTerminalPane({ channelId, config, onClose, termInst
       term.textarea?.removeEventListener('focus', handleFocus)
       if (termInstanceRef) termInstanceRef.current = null
       inputDisposer.dispose()
+      gridDisposer.dispose()
       osc52ClipboardDisposer?.dispose()
       removeData(); removeClose(); removeError()
       resizeObs.disconnect()
-      window.electronAPI.ssh.disconnect(channelId)
+      api.ssh.disconnect(channelId)
       term.dispose()
     }
   }, [channelId, osc52ClipboardEnabled])
