@@ -24,8 +24,9 @@ if (!process.versions.electron) {
     const { terminalCommand } = await import('../dist/src/cli/terminal-control.js')
     const win = new BrowserWindow({ show: false })
     let current = 'tab-1', preset = 'default', tools
+    const projects = new Set(['p1', 'p2'])
     const errors = [], options = { userData: app.getPath('userData'), owner: () => win,
-      project: id => ['p1', 'p2'].includes(id) ? { name: id, path: out } : undefined,
+      project: id => projects.has(id) ? { name: id, path: out } : undefined,
       session: id => ['tab-1', 'tab-2'].includes(id) ? { workspaceProfileId: 'p1', status: 'running', sessionPermissionPreset: preset } : undefined,
       currentSession: () => current, defaults: () => ({ shared: false, overrides: 'private' }), browserOptions: () => ({}), changed() {}, error: error => errors.push(String(error)) }
     const until = async (test, label) => { const deadline = Date.now() + 20000; while (Date.now() < deadline) { if (await test()) return; await delay(50) } throw new Error(`Timed out: ${label}`) }
@@ -40,8 +41,13 @@ if (!process.versions.electron) {
       removal.terminals = { closeProject() {}, async start() { launches++; return {} }, dispose() {} }
       const creating = removal.terminalAction('p1', { action: 'create', kind: 'local' })
       const removing = removal.removeProject('p1')
+      await assert.rejects(removal.terminalAction('p1', { action: 'list' }), /Workspace no longer exists/)
+      await assert.rejects(removal.terminalFeature('p1', 'snippets:getAll', []), /Workspace no longer exists/)
       releaseEnvironment({}); await assert.rejects(creating, /closed/); await removing
-      assert.equal(launches, 0); await removal.dispose()
+      assert.equal(launches, 0)
+      assert.deepEqual(await removal.terminalAction('p1', { action: 'list' }), [])
+      assert.deepEqual(await removal.terminalFeature('p1', 'snippets:getAll', []), [])
+      await removal.dispose()
       // Restart must not kill the process whose initial spawn is still pending.
       const { ToolTerminals } = await import('../dist/src/main/tool-terminal.js')
       const starting = new ProjectToolService({ ...options, userData: join(out, `start-${Date.now()}`) })
@@ -131,10 +137,23 @@ if (!process.versions.electron) {
       await stat(join(dataDirectory, 'myterminal.json'))
       await tools.terminalFeature('p2', 'logging:stop', [foreign.id])
       const customLog = await tools.terminalFeature('p2', 'logging:start', [foreign.id, join(out, 'custom-logs')])
+      projects.delete('p2')
       await tools.removeProject('p2')
       await assert.rejects(stat(dataDirectory), { code: 'ENOENT' })
       await stat(customLog.filePath)
       await assert.rejects(tools.terminalFeature('p2', 'snippets:getAll', []), /Workspace no longer exists/)
+      await assert.rejects(tools.terminalAction('p2', { action: 'list' }), /Workspace no longer exists/)
+      projects.add('p2') // Re-adding the same folder reuses its workspace ID.
+      assert.deepEqual(await tools.terminalFeature('p2', 'snippets:getAll', []), [])
+      assert.deepEqual(await tools.terminalAction('p2', { action: 'list' }), [])
+      await assert.rejects(tools.terminalAction('p2', { action: 'read', id: foreign.id }), /does not belong/)
+      const readded = await tools.terminalAction('p2', { action: 'create', kind: 'local' })
+      assert.equal(readded.status, 'running'); assert.notEqual(readded.id, foreign.id)
+      await tools.terminalAction('p2', { action: 'write', id: readded.id, text: process.platform === 'win32' ? "Write-Output ('READDED_' + 'OK')\r" : "printf 'READDED_%s\\n' OK\r" })
+      await until(async () => (await tools.terminalAction('p2', { action: 'read', id: readded.id })).output.includes('READDED_OK'), 're-added workspace shell runs')
+      await tools.terminalFeature('p2', 'snippets:save', [{ id: 'fresh', name: 'fresh', command: 'echo fresh' }])
+      assert.equal((await tools.terminalFeature('p2', 'snippets:getAll', []))[0].id, 'fresh')
+      projects.delete('p2'); await tools.removeProject('p2')
       await tools.dispose()
       tools = new ProjectToolService(options)
       const restored = await tools.terminalAction('p1', { action: 'list' })
