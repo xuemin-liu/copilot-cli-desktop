@@ -87,16 +87,20 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
   }
   const write = (channel: string, text: string): void => send({ action: 'write', text }, channel)
   const resize = (channel: string, cols: number, rows: number): void => {
-    if (status === 'running') send({ action: 'resize', cols, rows }, channel)
+    const channelStatus = channel === id ? status : children.get(channel)?.status
+    if (channelStatus === 'running') send({ action: 'resize', cols, rows }, channel)
   }
   // Detaching a view does not close a project-owned process. Closing its tab does.
   const disconnect = (channel?: string): void => { if (channel && channel !== id) children.delete(channel) }
   const attach = async (channel = id): Promise<{ error?: string }> => {
     const requestEpoch = epoch
+    // View attachment survives hide/show. Authority for each poll is still checked independently.
+    const child = channel === id ? undefined : { cursor: 0, generation: '', status: '' }
+    if (child) children.set(channel, child)
     try {
       const state = await call({ action: 'read' }, channel) as Snapshot
       if (stopped || !active || requestEpoch !== epoch) return {}
-      if (channel !== id) children.set(channel, { cursor: 0, generation: '', status: '' })
+      if (child && children.get(channel) === child) child.status = state.status
       return !['running', 'starting'].includes(state.status) ? { error: state.error ?? `Terminal ${state.status}` } : {}
     } catch (error) { if (requestEpoch !== epoch || !active) return {}; report(error); return { error: String(error) } }
   }

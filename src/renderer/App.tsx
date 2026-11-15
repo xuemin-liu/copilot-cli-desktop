@@ -407,7 +407,7 @@ export function App(): JSX.Element {
         onSelectWorkspace={openAddWorkspace}
         onActivateProfile={(profileId) => void window.copilotDesktop.activateProfile(profileId)}
         onRemoveProfile={(profile) => {
-          if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?\n\nIts folder and files are not changed. Add it again any time.`)) return
+          if (!window.confirm(`Remove the workspace "${profile.name}" from Copilot CLI Desktop?\n\nIts project folder and files are not changed. Saved SSH connections, terminal preferences and default terminal logs for this workspace will be deleted. Logs in a custom folder are kept. Add the workspace again any time.`)) return
           handleOperation(window.copilotDesktop.removeProfile(profile.id))
         }}
         onActivateTab={(tabId) => void window.copilotDesktop.activateTab(tabId)}

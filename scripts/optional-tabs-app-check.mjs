@@ -217,6 +217,11 @@ if (!process.versions.electron) {
       const sshTab = (await current()).tabs.find(tab => tab.kind === 'ssh'), sshHost = `#tool-content-${sshTab.id}`
       await click(`${sshHost} button[title="Toggle SFTP panel"]`)
       await until(`document.querySelector('${sshHost} .sftp-panel')?.innerText.includes('sample.txt')`, 'reused SFTP file listing')
+      await click(`${sshHost} button[title="New folder"]`)
+      await type(`${sshHost} input[aria-label="New folder name"]`, 'desktop-folder')
+      await click(`${sshHost} .sftp-new-folder button[type=submit]`)
+      await until(`document.querySelector('${sshHost} .sftp-panel')?.innerText.includes('desktop-folder')`, 'SFTP folder created without unsupported prompt')
+      assert.ok(ssh.directories.has('/desktop-folder'))
       await ui(`[...document.querySelectorAll('${sshHost} .sftp-panel tbody tr')].find(row=>row.textContent.includes('sample.txt')).dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`)
       await until(`document.querySelector('${sshHost} .file-editor-textarea')?.value==='remote original'`, 'remote editor opens')
       await type(`${sshHost} .file-editor-textarea`, 'EDITED_IN_DESKTOP')

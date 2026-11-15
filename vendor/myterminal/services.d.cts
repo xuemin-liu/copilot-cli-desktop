@@ -8,6 +8,6 @@ declare class MyTerminalServices {
   started(id: string): Promise<unknown> | undefined
   output(id: string, data: string): void
   closed(id: string): void
-  dispose(): void
+  dispose(): Promise<void>
 }
 export = MyTerminalServices

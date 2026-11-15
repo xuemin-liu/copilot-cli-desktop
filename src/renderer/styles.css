@@ -1670,6 +1670,8 @@ button:disabled {
 .myterminal-connection-actions { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
 .myterminal-connection-row { display:flex; gap:6px; margin-top:6px; }
 .myterminal-connection-row > button:first-child { flex:1; overflow:hidden; text-overflow:ellipsis; text-align:left; }
+.myterminal-embedded .sftp-new-folder { display:flex; gap:4px; padding:6px; }
+.myterminal-embedded .sftp-new-folder input { min-width:0; flex:1; }
 .tool-terminal-panel { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
 .tool-terminal-screen { flex:1; min-height:0; min-width:0; overflow:hidden; background:#0b1020; padding:6px; }
 .tool-terminal-screen .xterm { height:100%; }

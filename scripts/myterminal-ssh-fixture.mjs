@@ -16,7 +16,7 @@ export const until = async predicate => { for (let i = 0; i < 200; i++) { if (aw
 
 export async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'myterminal-services-'))
-  const data = {}, files = new Map([['/sample.txt', Buffer.from('remote original')]])
+  const data = {}, files = new Map([['/sample.txt', Buffer.from('remote original')]]), directories = new Set()
   let savePath, openPaths, trusted = 0, available = true
   class Store {
     constructor() { this.path = join(directory, 'store.json') }
@@ -46,7 +46,8 @@ export async function fixture() {
           let directoryRead = false
           const attrs = size => ({ mode: 0o100644, uid: 0, gid: 0, size, atime: 0, mtime: 0 })
           sftp.on('OPENDIR', id => { directoryRead = false; sftp.handle(id, Buffer.from('directory')) })
-          sftp.on('READDIR', id => { if (directoryRead) { sftp.status(id, STATUS_CODE.EOF); return }; directoryRead = true; sftp.name(id, [...files].map(([name, data]) => ({ filename: name.slice(1), longname: name, attrs: attrs(data.length) }))) })
+          sftp.on('READDIR', id => { if (directoryRead) { sftp.status(id, STATUS_CODE.EOF); return }; directoryRead = true; sftp.name(id, [...files].map(([name, data]) => ({ filename: name.slice(1), longname: name, attrs: attrs(data.length) })).concat([...directories].map(name => ({ filename: name.slice(1), longname: name, attrs: { ...attrs(0), mode: 0o40755 } })))) })
+          sftp.on('MKDIR', (id, path) => { directories.add(path); sftp.status(id, STATUS_CODE.OK) })
           sftp.on('REALPATH', (id, path) => sftp.name(id, [{ filename: path === '.' ? '/' : path, longname: path, attrs: attrs(0) }]))
           sftp.on('OPEN', (id, path, flags) => { if (!files.has(path) && !(flags & 8)) { sftp.status(id, STATUS_CODE.NO_SUCH_FILE); return }; if (flags & 16 || !files.has(path)) files.set(path, Buffer.alloc(0)); const handle = Buffer.from(String(++count)); handles.set(handle.toString(), path); sftp.handle(id, handle) })
           sftp.on('CLOSE', (id, handle) => { handles.delete(handle.toString()); sftp.status(id, STATUS_CODE.OK) })
@@ -77,6 +78,6 @@ export async function fixture() {
   const port = await listen(server)
   const invoke = (method, ...args) => service.invoke(method, args, id => ['terminal', 'second', 'jump'].includes(id))
   await invoke('sessions:save', { id: 'saved', host: '127.0.0.1', port, username: 'tester', password: 'secret', authType: 'password' })
-  return { directory, data, files, service, invoke, port, get trusted() { return trusted }, set available(value) { available = value }, set savePath(value) { savePath = value }, set openPaths(value) { openPaths = value },
-    async close() { service.dispose(); for (const shell of shells) shell.destroy(); for (const client of clients) client.end(); for (const forwarding of forwards) forwarding.close(); await new Promise(resolve => server.close(resolve)) } }
+  return { directory, data, files, directories, service, invoke, port, get trusted() { return trusted }, set available(value) { available = value }, set savePath(value) { savePath = value }, set openPaths(value) { openPaths = value },
+    async close() { await service.dispose(); for (const shell of shells) shell.destroy(); for (const client of clients) client.end(); for (const forwarding of forwards) forwarding.close(); await new Promise(resolve => server.close(resolve)) } }
 }

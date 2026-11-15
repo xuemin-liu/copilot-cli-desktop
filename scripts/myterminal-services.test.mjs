@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import net from 'node:net'
 import { once } from 'node:events'
@@ -39,6 +39,15 @@ test('managed SSH reuses shells, host verification, SFTP editing/transfers, jump
     pty.write('BACKGROUND_LOG\r\n'); await until(() => output.includes('BACKGROUND_LOG'))
     assert.ok((await f.invoke('ssh:ping', 'terminal')) >= 0)
     assert.equal(await f.invoke('sftp:readFile', 'terminal', '/sample.txt'), 'remote original')
+    const unicode = '汉'.repeat(30000)
+    f.files.set('/unicode.txt', Buffer.from(unicode, 'utf8'))
+    const sftp = await f.service.ssh._getSftp('terminal'), createReadStream = sftp.createReadStream.bind(sftp)
+    sftp.createReadStream = (path, options) => createReadStream(path, { ...options, highWaterMark: 32768 })
+    const opened = await f.invoke('sftp:readFile', 'terminal', '/unicode.txt')
+    assert.equal(opened.length, unicode.length, 'UTF-8 characters split across transfer chunks remain intact')
+    assert.equal(opened, unicode)
+    await f.invoke('sftp:writeFile', 'terminal', '/unicode.txt', opened)
+    assert.equal(f.files.get('/unicode.txt').toString('utf8'), unicode)
     await f.invoke('sftp:writeFile', 'terminal', '/sample.txt', 'changed remotely')
     assert.equal(f.files.get('/sample.txt').toString(), 'changed remotely')
     const local = join(f.directory, 'download.txt')
@@ -101,4 +110,25 @@ test('canceling pending SSH cannot leave a connection behind', async () => {
     await assert.rejects(pending, /cancel/i)
     assert.equal(f.service.ssh.pending.size, 0); assert.equal(f.service.ssh.connections.size, 0)
   } finally { for (const socket of sockets) socket.destroy(); stalled.close(); await f.close() }
+})
+
+test('recursive SFTP transfers cannot continue through a replacement connection', async () => {
+  const f = await fixture()
+  try {
+    for (const direction of ['upload', 'download']) {
+      const local = join(f.directory, direction); await mkdir(local); await writeFile(join(local, 'file.txt'), 'original connection only')
+      let release, writes = 0
+      const old = { sftp: { mkdir: (_path, callback) => { release = callback }, readdir: (_path, callback) => { release = () => callback(null, [{ filename: 'file.txt', attrs: { isDirectory: () => false, size: 24, mode: 0o100644 } }]) } } }
+      f.service.ssh.connections.set('terminal', old)
+      const pending = direction === 'upload' ? f.service.ssh.sftpUploadDir('terminal', local, '/destination') : f.service.ssh.sftpDownloadDir('terminal', '/source', local)
+      await until(() => Boolean(release))
+      f.service.ssh.connections.set('terminal', { sftp: {
+        fastPut: (_from, _to, _options, callback) => { writes++; callback() },
+        fastGet: (_from, _to, _options, callback) => { writes++; callback() },
+      } })
+      release()
+      await assert.rejects(pending, /connection.*(changed|closed)/i)
+      assert.equal(writes, 0, `${direction} must not access a replacement server`)
+    }
+  } finally { await f.close() }
 })

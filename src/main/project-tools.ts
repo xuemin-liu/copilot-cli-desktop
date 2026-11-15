@@ -40,6 +40,7 @@ export class ProjectToolService {
   private readonly groups = new Map<string, Group>()
   private readonly bridges = new Map<string, Bridge>()
   private readonly terminalServices = new Map<string, MyTerminalServices>()
+  private readonly removedProjects = new Set<string>()
   private readonly splits = new Map<string, { profileId: string; parentId: string; tab: ToolTab }>()
   private readonly terminals = new ToolTerminals(undefined, {
     managed: (profileId, id, config, signal) => this.myTerminal(profileId).spawn(id, config.connectionId!, signal),
@@ -110,6 +111,7 @@ export class ProjectToolService {
   }
   refreshConnections(): void { if (this.syncConnections()) this.options.changed() }
   private project(id: string, width?: number): ProjectTools {
+    if (this.removedProjects.has(id)) throw new Error('Workspace no longer exists')
     if (!this.options.project(id)) throw new Error('Workspace no longer exists')
     let project = this.projects.get(id)
     if (!project) {
@@ -294,14 +296,17 @@ export class ProjectToolService {
     return kind === 'ssh' ? `SSH: ${config.host}` : kind === 'wsl' ? `WSL${config.distro ? `: ${config.distro}` : ''}` : 'Local terminal'
   }
   private myTerminal(profileId: string): MyTerminalServices {
-    if (this.stopping || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
+    if (this.stopping || this.removedProjects.has(profileId) || !this.options.project(profileId)) throw new Error('Workspace no longer exists')
     let services = this.terminalServices.get(profileId)
     if (!services) {
-      const directory = join(this.options.userData, 'myterminal', createHash('sha256').update(profileId).digest('hex').slice(0, 24))
+      const directory = this.terminalDataDirectory(profileId)
       services = new MyTerminalServices(directory, this.options.owner)
       this.terminalServices.set(profileId, services)
     }
     return services
+  }
+  private terminalDataDirectory(profileId: string): string {
+    return join(this.options.userData, 'myterminal', createHash('sha256').update(profileId).digest('hex').slice(0, 24))
   }
   private terminalTab(profileId: string, id: string): ToolTab | undefined {
     return this.projects.get(profileId)?.tabs.find(tab => tab.id === id && isTerminalKind(tab.kind))
@@ -492,9 +497,13 @@ export class ProjectToolService {
   async removeProject(id: string): Promise<void> {
     // Revoke pending starts before the first await; helper setup can complete during bridge shutdown.
     this.projects.delete(id)
+    this.removedProjects.add(id)
     for (const [key, child] of this.splits) if (child.profileId === id) this.splits.delete(key)
     this.terminals.closeProject(id)
-    this.terminalServices.get(id)?.dispose(); this.terminalServices.delete(id)
+    const services = this.terminalServices.get(id); this.terminalServices.delete(id)
+    await services?.dispose()
+    // Only the app-owned, hashed project directory is removed. Custom log destinations remain untouched.
+    await rm(this.terminalDataDirectory(id), { recursive: true, force: true })
     await this.stopTerminalBridge(id)
     const group = this.groups.get(id); this.groups.delete(id)
     for (const [sessionId, bridge] of this.bridges) if (bridge.profileId === id) await this.stopBridge(sessionId)
@@ -504,7 +513,7 @@ export class ProjectToolService {
   async dispose(): Promise<void> {
     this.stopping = true
     this.terminals.dispose()
-    for (const service of this.terminalServices.values()) service.dispose()
+    await Promise.all([...this.terminalServices.values()].map(service => service.dispose()))
     this.terminalServices.clear(); this.splits.clear()
     await Promise.all([...this.terminalBridges.keys()].map(id => this.stopTerminalBridge(id)))
     await this.writing.catch(this.options.error)

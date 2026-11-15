@@ -561,7 +561,16 @@
      const conn = this.connections.get(channelId)
      if (conn) {
        try { if (conn.sftp) conn.sftp.end() } catch (_) {}
-@@ -177,6 +213,7 @@
+@@ -170,21 +206,23 @@
+ 
+   // ── SFTP ─────────────────────────────────────────────────────────────────────
+ 
+-  _getSftp(channelId) {
++  _getSftp(channelId, expectedConnection) {
+     return new Promise((resolve, reject) => {
+       const conn = this.connections.get(channelId)
++      if (expectedConnection && conn !== expectedConnection) return reject(new Error('SSH connection changed during transfer'))
+       if (!conn) return reject(new Error('No connection for channelId: ' + channelId))
        if (conn.sftp) return resolve(conn.sftp)
        conn.client.sftp((err, sftp) => {
          if (err) return reject(err)
@@ -569,6 +578,95 @@
          conn.sftp = sftp
          resolve(sftp)
        })
+     })
+   }
+ 
+-  async sftpList(channelId, remotePath) {
+-    const sftp = await this._getSftp(channelId)
++  async sftpList(channelId, remotePath, connection) {
++    const sftp = await this._getSftp(channelId, connection)
+     return new Promise((resolve, reject) => {
+       sftp.readdir(remotePath, (err, list) => {
+         if (err) return reject(err)
+@@ -205,8 +243,8 @@
+     })
+   }
+ 
+-  async sftpDownload(channelId, remotePath, localPath) {
+-    const sftp = await this._getSftp(channelId)
++  async sftpDownload(channelId, remotePath, localPath, connection) {
++    const sftp = await this._getSftp(channelId, connection)
+     return new Promise((resolve, reject) => {
+       sftp.fastGet(remotePath, localPath, {}, (err) => {
+         if (err) return reject(err)
+@@ -215,8 +253,8 @@
+     })
+   }
+ 
+-  async sftpUpload(channelId, localPath, remotePath) {
+-    const sftp = await this._getSftp(channelId)
++  async sftpUpload(channelId, localPath, remotePath, connection) {
++    const sftp = await this._getSftp(channelId, connection)
+     return new Promise((resolve, reject) => {
+       sftp.fastPut(localPath, remotePath, {}, (err) => {
+         if (err) return reject(err)
+@@ -225,8 +263,8 @@
+     })
+   }
+ 
+-  async sftpUploadDir(channelId, localDir, remoteDir) {
+-    const sftp = await this._getSftp(channelId)
++  async sftpUploadDir(channelId, localDir, remoteDir, connection = this.connections.get(channelId)) {
++    const sftp = await this._getSftp(channelId, connection)
+     // Create remote directory (ignore "already exists" errors)
+     await new Promise((resolve) => {
+       sftp.mkdir(remoteDir, () => resolve())
+@@ -236,25 +274,25 @@
+       const localChild = require('path').join(localDir, entry.name)
+       const remoteChild = remoteDir + '/' + entry.name
+       if (entry.isDirectory()) {
+-        await this.sftpUploadDir(channelId, localChild, remoteChild)
++        await this.sftpUploadDir(channelId, localChild, remoteChild, connection)
+       } else {
+-        await this.sftpUpload(channelId, localChild, remoteChild)
++        await this.sftpUpload(channelId, localChild, remoteChild, connection)
+       }
+     }
+     return { success: true }
+   }
+ 
+-  async sftpDownloadDir(channelId, remoteDir, localDir) {
++  async sftpDownloadDir(channelId, remoteDir, localDir, connection = this.connections.get(channelId)) {
++    const entries = await this.sftpList(channelId, remoteDir, connection)
+     fs.mkdirSync(localDir, { recursive: true })
+-    const entries = await this.sftpList(channelId, remoteDir)
+     for (const entry of entries) {
+       if (entry.name === '.' || entry.name === '..') continue
+       const remoteChild = remoteDir.endsWith('/') ? remoteDir + entry.name : remoteDir + '/' + entry.name
+       const localChild = resolveContainedChild(localDir, entry.name)
+       if (entry.type === 'd') {
+-        await this.sftpDownloadDir(channelId, remoteChild, localChild)
++        await this.sftpDownloadDir(channelId, remoteChild, localChild, connection)
+       } else {
+-        await this.sftpDownload(channelId, remoteChild, localChild)
++        await this.sftpDownload(channelId, remoteChild, localChild, connection)
+       }
+     }
+     return { success: true }
+@@ -344,9 +382,10 @@
+           reject(new Error('File appears to be binary and cannot be edited as text'))
+           return
+         }
+-        chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+-      })
+-      stream.on('end', () => resolve(chunks.join('')))
++        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'))
++      })
++      // Decode after joining bounded byte chunks: UTF-8 characters may straddle a transfer boundary.
++      stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+       stream.on('error', reject)
+     })
+   }
 --- a/electron/tunnel-manager.js
 +++ b/electron/tunnel-manager.js
 @@ -22,9 +22,12 @@
@@ -681,7 +779,7 @@
  
 --- a/electron/ipc/logging.js
 +++ b/electron/ipc/logging.js
-@@ -1,35 +1,41 @@
+@@ -1,35 +1,45 @@
 -const { ipcMain, dialog } = require('electron')
 +const electron = require('electron')
  const path = require('path')
@@ -691,6 +789,7 @@
 +module.exports = function registerLoggingHandlers({ ipcMain = electron.ipcMain, dialog = electron.dialog, getMainWindow }) {
    const logStreams = new Map()
 +  const errors = new Map()
++  const closing = new Set()
  
    ipcMain.handle('logging:start', (_event, channelId, logDir) => {
      if (typeof channelId !== 'string') return { error: 'Invalid channelId' }
@@ -703,6 +802,9 @@
      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
      const filePath = path.join(dir, `session-${timestamp}-${channelId.slice(0, 8)}.log`)
      const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' })
++    const closed = new Promise(resolve => stream.once('close', resolve))
++    closing.add(closed)
++    void closed.then(() => closing.delete(closed))
 +    stream.on('error', (error) => { errors.set(channelId, error.message); logStreams.delete(channelId) })
 +    errors.delete(channelId)
      logStreams.set(channelId, { stream, filePath })
@@ -730,11 +832,11 @@
  
    ipcMain.handle('logging:export', async (_event, content) => {
      const result = await dialog.showSaveDialog(getMainWindow(), {
-@@ -41,4 +47,5 @@
+@@ -41,4 +51,5 @@
      fs.writeFileSync(result.filePath, content, 'utf8')
      return { success: true }
    })
-+  return { write, stop, dispose: () => { for (const id of logStreams.keys()) stop(id) } }
++  return { write, stop, dispose: async () => { for (const id of logStreams.keys()) stop(id); await Promise.all(closing) } }
  }
 --- a/electron/ipc/tunnels.js
 +++ b/electron/ipc/tunnels.js
@@ -1266,7 +1368,7 @@
  import React, { useState, useEffect, useRef } from 'react'
  import {
    Folder, File, ChevronUp, ArrowLeft, ArrowRight, RefreshCw, Upload, Download,
-@@ -19,7 +20,9 @@
+@@ -19,11 +20,14 @@
    return new Date(mtime * 1000).toLocaleDateString()
  }
  
@@ -1277,7 +1379,12 @@
    const [path, setPath] = useState('/')
    const [items, setItems] = useState([])
    const [loading, setLoading] = useState(false)
-@@ -50,7 +53,7 @@
+   const [error, setError] = useState(null)
++  const [newFolderName, setNewFolderName] = useState(null)
+   const [selectedNames, setSelectedNames] = useState(() => new Set())
+   const [anchorName, setAnchorName] = useState(null)
+   const [renaming, setRenaming] = useState(null)
+@@ -50,7 +54,7 @@
      setError(null)
      setSelectedNames(new Set())
      setAnchorName(null)
@@ -1286,7 +1393,7 @@
      if (requestId !== loadRequestRef.current) return
      setLoading(false)
      if (result?.error) { setError(result.error); return }
-@@ -68,7 +71,7 @@
+@@ -68,7 +72,7 @@
        // Single-quote the path so spaces and most metacharacters are safe.
        // Escape any literal single-quotes inside the path (bash: 'it'\''s' trick).
        const safeDir = dir.replace(/'/g, "'\\''")
@@ -1295,7 +1402,7 @@
      }
    }
  
-@@ -93,14 +96,14 @@
+@@ -93,14 +97,14 @@
    useEffect(() => {
      loadDir('/')
      // Resolve home directory via SFTP realpath('.')
@@ -1312,7 +1419,7 @@
    }, [sessionKey])
  
    // Auto-navigate when terminal cwd changes
-@@ -148,14 +151,14 @@
+@@ -148,14 +152,14 @@
        updated = [...favorites, path]
      }
      setFavorites(updated)
@@ -1329,7 +1436,7 @@
    }
  
    const goToFavorite = (fav) => {
-@@ -187,17 +190,17 @@
+@@ -187,17 +191,17 @@
      // recreate each selected file/folder inside it.
      if (selectedItems.length === 1 && selectedItems[0].type !== 'd') {
        const only = selectedItems[0]
@@ -1350,7 +1457,7 @@
        title: selectedItems.length === 1
          ? `Download "${selectedItems[0].name}" to…`
          : `Download ${selectedItems.length} items to…`,
-@@ -215,8 +218,8 @@
+@@ -215,8 +219,8 @@
        const remotePath = joinPath(path, item.name)
        const target = trimmed + sep + item.name
        const res = item.type === 'd'
@@ -1361,7 +1468,7 @@
        if (res?.error) failures.push(`${item.name}: ${res.error}`)
      }
      setLoading(false)
-@@ -224,14 +227,14 @@
+@@ -224,25 +228,28 @@
    }
  
    const handleUpload = async () => {
@@ -1378,16 +1485,26 @@
        if (res?.error) { setError(res.error); return }
      }
      loadDir(path)
-@@ -240,7 +243,7 @@
-   const handleMkdir = async () => {
-     const name = prompt('New folder name:')
-     if (!name) return
--    const res = await window.electronAPI.sftp.mkdir(channelId, joinPath(path, name))
-+    const res = await api.sftp.mkdir(channelId, joinPath(path, name))
-     if (res?.error) { setError(res.error); return }
-     loadDir(path)
    }
-@@ -253,7 +256,7 @@
+ 
+   const handleMkdir = async () => {
+-    const name = prompt('New folder name:')
+-    if (!name) return
+-    const res = await window.electronAPI.sftp.mkdir(channelId, joinPath(path, name))
+-    if (res?.error) { setError(res.error); return }
+-    loadDir(path)
++    const name = newFolderName?.trim()
++    if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) { setError('Enter a single folder name'); return }
++    try {
++      const res = await api.sftp.mkdir(channelId, joinPath(path, name))
++      if (res?.error) { setError(res.error); return }
++      setNewFolderName(null)
++      loadDir(path)
++    } catch (error) { setError(error.message) }
+   }
+ 
+   const handleDelete = async () => {
+@@ -253,7 +260,7 @@
      if (!confirm(msg)) return
      const failures = []
      for (const item of selectedItems) {
@@ -1396,7 +1513,7 @@
        if (res?.error) failures.push(`${item.name}: ${res.error}`)
      }
      if (failures.length) setError(failures.join('\n'))
-@@ -270,7 +273,7 @@
+@@ -270,7 +277,7 @@
  
    const commitRename = async () => {
      if (!renaming || !renameValue || renameValue === renaming.name) { setRenaming(null); return }
@@ -1405,7 +1522,7 @@
      if (res?.error) setError(res.error)
      setRenaming(null)
      loadDir(path)
-@@ -280,17 +283,17 @@
+@@ -280,17 +287,17 @@
      e.preventDefault()
      // The preload capture-phase listener has already resolved the native file
      // paths via webUtils.getPathForFile and stashed them.  Retrieve them now.
@@ -1427,7 +1544,7 @@
        if (res?.error) errors.push(`${name}: ${res.error}`)
      }
      if (errors.length) setError(errors.join('\n'))
-@@ -386,13 +389,13 @@
+@@ -386,13 +393,13 @@
    const ctxCopyPath = () => {
      if (!ctxMenu?.item) return
      const fullPath = joinPath(path, ctxMenu.item.name)
@@ -1443,7 +1560,16 @@
      closeCtxMenu()
    }
  
-@@ -444,7 +447,7 @@
+@@ -430,7 +437,7 @@
+ 
+   const ctxNewFolder = async () => {
+     closeCtxMenu()
+-    handleMkdir()
++    setNewFolderName('')
+   }
+ 
+   const ctxUpload = async () => {
+@@ -444,7 +451,7 @@
    }
  
    const ctxCopyDirPath = () => {
@@ -1452,6 +1578,27 @@
      closeCtxMenu()
    }
  
+@@ -467,7 +474,7 @@
+         <button className="icon-btn" onClick={() => loadDir(path)} title="Refresh"><RefreshCw size={15} /></button>
+         <button className="icon-btn" onClick={handleUpload} title="Upload"><Upload size={15} /></button>
+         <button className="icon-btn" onClick={handleDownload} title="Download" disabled={selectedItems.length === 0}><Download size={15} /></button>
+-        <button className="icon-btn" onClick={handleMkdir} title="New folder"><FolderPlus size={15} /></button>
++        <button className="icon-btn" onClick={() => setNewFolderName('')} title="New folder"><FolderPlus size={15} /></button>
+         <button className="icon-btn" onClick={startRename} title="Rename" disabled={!singleSelected}><Edit2 size={15} /></button>
+         <button className="icon-btn danger" onClick={handleDelete} title="Delete" disabled={selectedItems.length === 0}><Trash2 size={15} /></button>
+       </div>
+@@ -543,6 +550,11 @@
+       )}
+ 
+       {error && <div className="sftp-error">{error}</div>}
++      {newFolderName !== null && <form className="sftp-new-folder" onSubmit={event => { event.preventDefault(); void handleMkdir() }}>
++        <input autoFocus aria-label="New folder name" value={newFolderName} onChange={event => setNewFolderName(event.target.value)}
++          onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setNewFolderName(null) } }} />
++        <button type="submit">Create</button><button type="button" onClick={() => setNewFolderName(null)}>Cancel</button>
++      </form>}
+ 
+       {loading ? (
+         <div className="sftp-loading">Loading...</div>
 --- a/src/components/SnippetPanel.jsx
 +++ b/src/components/SnippetPanel.jsx
 @@ -2,8 +2,10 @@

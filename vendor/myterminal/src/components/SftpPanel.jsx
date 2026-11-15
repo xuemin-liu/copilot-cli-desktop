@@ -27,6 +27,7 @@ export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'd
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [newFolderName, setNewFolderName] = useState(null)
   const [selectedNames, setSelectedNames] = useState(() => new Set())
   const [anchorName, setAnchorName] = useState(null)
   const [renaming, setRenaming] = useState(null)
@@ -241,11 +242,14 @@ export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'd
   }
 
   const handleMkdir = async () => {
-    const name = prompt('New folder name:')
-    if (!name) return
-    const res = await api.sftp.mkdir(channelId, joinPath(path, name))
-    if (res?.error) { setError(res.error); return }
-    loadDir(path)
+    const name = newFolderName?.trim()
+    if (!name || name === '.' || name === '..' || /[\\/\0]/.test(name)) { setError('Enter a single folder name'); return }
+    try {
+      const res = await api.sftp.mkdir(channelId, joinPath(path, name))
+      if (res?.error) { setError(res.error); return }
+      setNewFolderName(null)
+      loadDir(path)
+    } catch (error) { setError(error.message) }
   }
 
   const handleDelete = async () => {
@@ -433,7 +437,7 @@ export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'd
 
   const ctxNewFolder = async () => {
     closeCtxMenu()
-    handleMkdir()
+    setNewFolderName('')
   }
 
   const ctxUpload = async () => {
@@ -470,7 +474,7 @@ export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'd
         <button className="icon-btn" onClick={() => loadDir(path)} title="Refresh"><RefreshCw size={15} /></button>
         <button className="icon-btn" onClick={handleUpload} title="Upload"><Upload size={15} /></button>
         <button className="icon-btn" onClick={handleDownload} title="Download" disabled={selectedItems.length === 0}><Download size={15} /></button>
-        <button className="icon-btn" onClick={handleMkdir} title="New folder"><FolderPlus size={15} /></button>
+        <button className="icon-btn" onClick={() => setNewFolderName('')} title="New folder"><FolderPlus size={15} /></button>
         <button className="icon-btn" onClick={startRename} title="Rename" disabled={!singleSelected}><Edit2 size={15} /></button>
         <button className="icon-btn danger" onClick={handleDelete} title="Delete" disabled={selectedItems.length === 0}><Trash2 size={15} /></button>
       </div>
@@ -546,6 +550,11 @@ export default function SftpPanel({ host, channelId, cwd, width, sessionKey = 'd
       )}
 
       {error && <div className="sftp-error">{error}</div>}
+      {newFolderName !== null && <form className="sftp-new-folder" onSubmit={event => { event.preventDefault(); void handleMkdir() }}>
+        <input autoFocus aria-label="New folder name" value={newFolderName} onChange={event => setNewFolderName(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setNewFolderName(null) } }} />
+        <button type="submit">Create</button><button type="button" onClick={() => setNewFolderName(null)}>Cancel</button>
+      </form>}
 
       {loading ? (
         <div className="sftp-loading">Loading...</div>

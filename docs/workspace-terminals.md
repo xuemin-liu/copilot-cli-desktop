@@ -23,6 +23,8 @@ and **Settings & backup**. Settings and snippets are project-scoped. Logging run
 while the panel is hidden, and stops when the process exits. The default log folder is inside that project's
 MyTerminal data folder. Settings can change the folder, font, scrollback, highlighting and OSC52 clipboard opt-in.
 Backup/import reuses MyTerminal's format and merge behavior; exports exclude credentials unless explicitly chosen.
+Removing a workspace deletes its saved terminal connections/preferences and default logs after closing their streams.
+Logs written to a custom folder outside the app's project data directory are kept.
 
 Managed SSH tabs also include **SFTP** with uploads/downloads, favorites and remote text editing, and
 **Port forwarding** for local, remote and SOCKS5 tunnels. Forwarding listeners bind to loopback. Closing the

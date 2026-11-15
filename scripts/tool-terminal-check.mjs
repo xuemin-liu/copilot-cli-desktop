@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { request as httpRequest } from 'node:http'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { mkdir, readFile, writeFile, stat } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const out = resolve('test-results/tool-terminal'), delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 if (!process.versions.electron) {
@@ -105,6 +105,16 @@ if (!process.versions.electron) {
         await call({ action: 'close', id: wsl.id })
         console.log('WSL Ubuntu terminal and helper check passed.')
       }
+      await tools.terminalFeature('p2', 'snippets:save', [{ id: 'retention', name: 'example', command: 'echo example' }])
+      const defaultLog = await tools.terminalFeature('p2', 'logging:start', [foreign.id, ''])
+      const dataDirectory = dirname(dirname(defaultLog.filePath))
+      await stat(join(dataDirectory, 'myterminal.json'))
+      await tools.terminalFeature('p2', 'logging:stop', [foreign.id])
+      const customLog = await tools.terminalFeature('p2', 'logging:start', [foreign.id, join(out, 'custom-logs')])
+      await tools.removeProject('p2')
+      await assert.rejects(stat(dataDirectory), { code: 'ENOENT' })
+      await stat(customLog.filePath)
+      await assert.rejects(tools.terminalFeature('p2', 'snippets:getAll', []), /Workspace no longer exists/)
       await tools.dispose()
       tools = new ProjectToolService(options)
       const restored = await tools.terminalAction('p1', { action: 'list' })

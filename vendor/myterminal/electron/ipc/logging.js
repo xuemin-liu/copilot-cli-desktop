@@ -5,6 +5,7 @@ const fs = require('fs')
 module.exports = function registerLoggingHandlers({ ipcMain = electron.ipcMain, dialog = electron.dialog, getMainWindow }) {
   const logStreams = new Map()
   const errors = new Map()
+  const closing = new Set()
 
   ipcMain.handle('logging:start', (_event, channelId, logDir) => {
     if (typeof channelId !== 'string') return { error: 'Invalid channelId' }
@@ -16,6 +17,9 @@ module.exports = function registerLoggingHandlers({ ipcMain = electron.ipcMain, 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
     const filePath = path.join(dir, `session-${timestamp}-${channelId.slice(0, 8)}.log`)
     const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' })
+    const closed = new Promise(resolve => stream.once('close', resolve))
+    closing.add(closed)
+    void closed.then(() => closing.delete(closed))
     stream.on('error', (error) => { errors.set(channelId, error.message); logStreams.delete(channelId) })
     errors.delete(channelId)
     logStreams.set(channelId, { stream, filePath })
@@ -47,5 +51,5 @@ module.exports = function registerLoggingHandlers({ ipcMain = electron.ipcMain, 
     fs.writeFileSync(result.filePath, content, 'utf8')
     return { success: true }
   })
-  return { write, stop, dispose: () => { for (const id of logStreams.keys()) stop(id) } }
+  return { write, stop, dispose: async () => { for (const id of logStreams.keys()) stop(id); await Promise.all(closing) } }
 }

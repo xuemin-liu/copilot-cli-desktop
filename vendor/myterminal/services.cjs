@@ -24,13 +24,14 @@ module.exports = class MyTerminalServices {
     const Store = dependencies.Store || require('electron-store')
     this.store = new Store({ cwd: directory, name: 'myterminal', accessPropertiesByDotNotation: false })
     // The original tunnel registrar uses dotted per-connection keys; translate into the same backup object.
-    const rawStore = this.store
+    const rawStore = this.store, service = this
     const store = {
       get(key, fallback) {
         if (key.startsWith('tunnel-configs.')) return rawStore.get('tunnel-configs', {})[key.slice(15)] || fallback
         return rawStore.get(key, fallback)
       },
       set(key, value) {
+        if (service.disposed) throw new Error('Terminal project closed')
         if (key.startsWith('tunnel-configs.')) { const all = rawStore.get('tunnel-configs', {}); all[key.slice(15)] = value; rawStore.set('tunnel-configs', all) }
         else rawStore.set(key, value)
       },
@@ -133,9 +134,10 @@ module.exports = class MyTerminalServices {
   }
   output(id, data) { this.services.logging.write(id, data.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')) }
   closed(id) { this.services.logging.stop(id); this.tunnels.stopByChannel(id) }
-  dispose() {
+  async dispose() {
     this.disposed = true
     for (const id of this.ssh.pending.keys()) this.ssh.disconnect(id)
-    this.ssh.disconnectAll(); this.tunnels.stopAll(); this.services.logging.dispose(); this.outputs.clear()
+    this.ssh.disconnectAll(); this.tunnels.stopAll(); this.outputs.clear()
+    await this.services.logging.dispose()
   }
 }

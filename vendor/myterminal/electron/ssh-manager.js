@@ -206,9 +206,10 @@ class SshManager {
 
   // ── SFTP ─────────────────────────────────────────────────────────────────────
 
-  _getSftp(channelId) {
+  _getSftp(channelId, expectedConnection) {
     return new Promise((resolve, reject) => {
       const conn = this.connections.get(channelId)
+      if (expectedConnection && conn !== expectedConnection) return reject(new Error('SSH connection changed during transfer'))
       if (!conn) return reject(new Error('No connection for channelId: ' + channelId))
       if (conn.sftp) return resolve(conn.sftp)
       conn.client.sftp((err, sftp) => {
@@ -220,8 +221,8 @@ class SshManager {
     })
   }
 
-  async sftpList(channelId, remotePath) {
-    const sftp = await this._getSftp(channelId)
+  async sftpList(channelId, remotePath, connection) {
+    const sftp = await this._getSftp(channelId, connection)
     return new Promise((resolve, reject) => {
       sftp.readdir(remotePath, (err, list) => {
         if (err) return reject(err)
@@ -242,8 +243,8 @@ class SshManager {
     })
   }
 
-  async sftpDownload(channelId, remotePath, localPath) {
-    const sftp = await this._getSftp(channelId)
+  async sftpDownload(channelId, remotePath, localPath, connection) {
+    const sftp = await this._getSftp(channelId, connection)
     return new Promise((resolve, reject) => {
       sftp.fastGet(remotePath, localPath, {}, (err) => {
         if (err) return reject(err)
@@ -252,8 +253,8 @@ class SshManager {
     })
   }
 
-  async sftpUpload(channelId, localPath, remotePath) {
-    const sftp = await this._getSftp(channelId)
+  async sftpUpload(channelId, localPath, remotePath, connection) {
+    const sftp = await this._getSftp(channelId, connection)
     return new Promise((resolve, reject) => {
       sftp.fastPut(localPath, remotePath, {}, (err) => {
         if (err) return reject(err)
@@ -262,8 +263,8 @@ class SshManager {
     })
   }
 
-  async sftpUploadDir(channelId, localDir, remoteDir) {
-    const sftp = await this._getSftp(channelId)
+  async sftpUploadDir(channelId, localDir, remoteDir, connection = this.connections.get(channelId)) {
+    const sftp = await this._getSftp(channelId, connection)
     // Create remote directory (ignore "already exists" errors)
     await new Promise((resolve) => {
       sftp.mkdir(remoteDir, () => resolve())
@@ -273,25 +274,25 @@ class SshManager {
       const localChild = require('path').join(localDir, entry.name)
       const remoteChild = remoteDir + '/' + entry.name
       if (entry.isDirectory()) {
-        await this.sftpUploadDir(channelId, localChild, remoteChild)
+        await this.sftpUploadDir(channelId, localChild, remoteChild, connection)
       } else {
-        await this.sftpUpload(channelId, localChild, remoteChild)
+        await this.sftpUpload(channelId, localChild, remoteChild, connection)
       }
     }
     return { success: true }
   }
 
-  async sftpDownloadDir(channelId, remoteDir, localDir) {
+  async sftpDownloadDir(channelId, remoteDir, localDir, connection = this.connections.get(channelId)) {
+    const entries = await this.sftpList(channelId, remoteDir, connection)
     fs.mkdirSync(localDir, { recursive: true })
-    const entries = await this.sftpList(channelId, remoteDir)
     for (const entry of entries) {
       if (entry.name === '.' || entry.name === '..') continue
       const remoteChild = remoteDir.endsWith('/') ? remoteDir + entry.name : remoteDir + '/' + entry.name
       const localChild = resolveContainedChild(localDir, entry.name)
       if (entry.type === 'd') {
-        await this.sftpDownloadDir(channelId, remoteChild, localChild)
+        await this.sftpDownloadDir(channelId, remoteChild, localChild, connection)
       } else {
-        await this.sftpDownload(channelId, remoteChild, localChild)
+        await this.sftpDownload(channelId, remoteChild, localChild, connection)
       }
     }
     return { success: true }
@@ -381,9 +382,10 @@ class SshManager {
           reject(new Error('File appears to be binary and cannot be edited as text'))
           return
         }
-        chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'))
       })
-      stream.on('end', () => resolve(chunks.join('')))
+      // Decode after joining bounded byte chunks: UTF-8 characters may straddle a transfer boundary.
+      stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
       stream.on('error', reject)
     })
   }
