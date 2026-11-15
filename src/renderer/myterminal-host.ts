@@ -3,7 +3,7 @@ import type { TerminalSnapshot } from '../main/tool-terminal.js'
 import { isMac, isWindows } from './platform.js'
 import { projectTerminal } from '../../vendor/myterminal/project-store.mjs'
 
-export type Snapshot = Omit<TerminalSnapshot, 'status'> & { status: TerminalSnapshot['status'] | 'disconnected' }
+export type Snapshot = Omit<TerminalSnapshot, 'status'> & { status: TerminalSnapshot['status'] | 'disconnected'; reconnectCountdown?: number | null; reconnectExhausted?: boolean }
 type Listener = (id: string, value: string) => void
 
 /** Translate the project-scoped bridge to MyTerminal's transport contract.
@@ -127,7 +127,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     list: async () => (await project.api.tunnel.list()).filter((item: { channelId: string }) => item.channelId === id).map((item: { id: string }) => ({ ...item, id: item.id.slice(id.length + 1) })),
     stopByChannel: disconnect,
   }
-  return { api, store, broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
+  return { api, store, backgroundLifecycle: true, cancelReconnect: () => send({ action: 'cancel-reconnect' }), broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
     setActive(value: boolean) { if (active !== value) { epoch++; if (value) void project?.load().catch(report) }; active = value }, connect,
     start() { stopped = false; void poll() },
     stop() { stopped = true; if (timer) clearTimeout(timer) },

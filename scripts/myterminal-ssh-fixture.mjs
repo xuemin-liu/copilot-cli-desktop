@@ -78,6 +78,9 @@ export async function fixture() {
   const port = await listen(server)
   const invoke = (method, ...args) => service.invoke(method, args, id => ['terminal', 'second', 'jump'].includes(id))
   await invoke('sessions:save', { id: 'saved', host: '127.0.0.1', port, username: 'tester', password: 'secret', authType: 'password' })
-  return { directory, data, files, directories, service, invoke, port, get trusted() { return trusted }, set available(value) { available = value }, set savePath(value) { savePath = value }, set openPaths(value) { openPaths = value },
+  return { directory, data, files, directories, service, invoke, port, get clients() { return clients.size }, get shells() { return shells.size },
+    broadcast(text) { for (const shell of shells) shell.write(text) },
+    disconnect() { for (const client of clients) client.end() },
+    get trusted() { return trusted }, set available(value) { available = value }, set savePath(value) { savePath = value }, set openPaths(value) { openPaths = value },
     async close() { await service.dispose(); for (const shell of shells) shell.destroy(); for (const client of clients) client.end(); for (const forwarding of forwards) forwarding.close(); await new Promise(resolve => server.close(resolve)) } }
 }

@@ -32,7 +32,7 @@
     "git-panel:check": "node scripts/git-panel-check.mjs",
     "git-panel-app:check": "node scripts/git-panel-app-check.mjs",
     "project-tools:check": "npm run build && node scripts/project-tools-check.mjs && node scripts/optional-tabs-app-check.mjs",
-    "terminal-tools:check": "npm run build && node scripts/myterminal-component-check.mjs && node scripts/tool-terminal-check.mjs && node scripts/optional-tabs-app-check.mjs --terminal-only",
+    "terminal-tools:check": "npm run build && node scripts/myterminal-component-check.mjs && node scripts/tool-terminal-check.mjs && node scripts/optional-tabs-app-check.mjs --terminal-only && node scripts/myterminal-background-app-check.mjs",
     "tool-dock:check": "node scripts/tool-dock-check.mjs",
     "session-switch:check": "node scripts/session-project-switch-check.mjs",
     "session-name:check": "node scripts/session-name-dialog-check.mjs",

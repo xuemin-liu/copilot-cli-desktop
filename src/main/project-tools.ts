@@ -18,6 +18,7 @@ import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import { prepareBrowserSessionEnvironment } from './browser-session.js'
 import { writeToBroadcastTargets } from '../../vendor/myterminal/channels.mjs'
 import MyTerminalServices from '../../vendor/myterminal/services.cjs'
+import { createBellNotifier, createReconnectController } from '../../vendor/myterminal/lifecycle.cjs'
 
 interface Group { browser: BrowserDebug; generation: string }
 const liveSession = (status: string | undefined): boolean => status === 'running' || status === 'approval-needed'
@@ -43,11 +44,17 @@ export class ProjectToolService {
   private readonly terminalServices = new Map<string, MyTerminalServices>()
   private readonly removedProjects = new Set<string>()
   private readonly splits = new Map<string, { profileId: string; parentId: string; tab: ToolTab }>()
+  private readonly terminalLifecycles = new Map<string, { bell(data: string): void; retry: ReturnType<typeof createReconnectController> }>()
   private readonly terminals = new ToolTerminals(undefined, {
     managed: (profileId, id, config, signal) => this.myTerminal(profileId).spawn(id, config.connectionId!, signal),
-    started: (profileId, id) => { void this.myTerminal(profileId).started(id)?.catch(this.options.error) },
-    output: (profileId, id, data) => this.terminalServices.get(profileId)?.output(id, data),
-    closed: (profileId, id) => this.terminalServices.get(profileId)?.closed(id),
+    started: (profileId, id) => { this.terminalLifecycles.get(id)?.retry.connected(); void this.myTerminal(profileId).started(id)?.catch(this.options.error) },
+    output: (profileId, id, data) => { this.terminalServices.get(profileId)?.output(id, data); this.terminalLifecycles.get(id)?.bell(data) },
+    closed: (profileId, id, unexpected) => {
+      this.terminalServices.get(profileId)?.closed(id)
+      const lifecycle = this.terminalLifecycles.get(id)
+      if (unexpected && this.terminalTab(profileId, id)?.terminal?.transport === 'managed' && !this.splits.has(id)) lifecycle?.retry.schedule()
+      else { lifecycle?.retry.dispose(); this.terminalLifecycles.delete(id) }
+    },
   })
   private readonly terminalBridges = new Map<string, Promise<{ server: Server; endpoint: string; env: NodeJS.ProcessEnv }>>()
   private readonly terminalStarts = new Map<string, Promise<unknown>>()
@@ -398,6 +405,23 @@ export class ProjectToolService {
       const env = await this.terminalEnvironment(profileId)
       const tab = this.terminalTab(profileId, id)
       if (this.stopping || !tab || !isTerminalKind(tab.kind)) throw new Error('Terminal tab closed')
+      if (!this.terminalLifecycles.has(id)) {
+        const retry = createReconnectController({ connect: () => {
+          // Only restart a live managed connection that this lifecycle still owns.
+          // Renderer/CLI commands retain their current-project authorization.
+          if (this.stopping || this.terminalLifecycles.get(id)?.retry !== retry || !this.terminalTab(profileId, id)) return
+          this.terminalLifecycles.delete(id)
+          this.terminals.close(profileId, id)
+          this.terminalLifecycles.set(id, lifecycle)
+          void this.startTerminal(profileId, id).catch(this.options.error)
+        } })
+        const lifecycle = { retry, bell: createBellNotifier({
+          focused: () => this.options.owner()?.isFocused() ?? false,
+          label: () => { const current = this.terminalTab(profileId, id); return current?.label || current?.title || 'Terminal' },
+          notify: (title, body) => { void this.terminalServices.get(profileId)?.invoke('notify:send', [title, body], () => false).catch(this.options.error) },
+        }) }
+        this.terminalLifecycles.set(id, lifecycle)
+      }
       const terminalEnv = tab.kind === 'wsl' ? { ...env, COPILOT_DESKTOP_TERMINAL_HELPER: env.COPILOT_DESKTOP_TERMINAL_WSL_HELPER } : env
       return this.terminals.start(profileId, id, tab.kind, tab.terminal ?? {}, this.options.project(profileId)?.path ?? null, terminalEnv)
     })()
@@ -448,6 +472,7 @@ export class ProjectToolService {
     }
     if (value.action === 'unsplit') { this.closeSplit(profileId, tab.id); return { closed: true } }
     if (value.action === 'start') return this.startTerminal(profileId, tab.id)
+    if (value.action === 'cancel-reconnect') { this.terminalLifecycles.get(tab.id)?.retry.cancel(); return { ok: true } }
     if (value.action === 'restart') {
       if (this.terminalStarts.has(tab.id)) throw new Error('Terminal is still starting; wait before reconnecting')
       this.terminals.close(profileId, tab.id); return this.startTerminal(profileId, tab.id)
@@ -461,7 +486,7 @@ export class ProjectToolService {
           if (snapshot.generation !== value.generation) return snapshot
         }
         const splitId = [...this.splits.values()].find(child => child.parentId === tab.id)?.tab.id
-        return { ...this.terminals.read(profileId, tab.id, value.cursor as number | undefined), ...(splitId ? { splitId } : {}) }
+        return { ...this.terminals.read(profileId, tab.id, value.cursor as number | undefined), reconnectCountdown: this.terminalLifecycles.get(tab.id)?.retry.remaining ?? null, reconnectExhausted: this.terminalLifecycles.get(tab.id)?.retry.exhausted ?? false, ...(splitId ? { splitId } : {}) }
       }
       catch (error) {
         if (error instanceof Error && error.message === 'Terminal is not connected in this project') return { id: tab.id, generation: '', status: 'disconnected', output: '', cursor: 0, start: 0 }
@@ -559,6 +584,8 @@ export class ProjectToolService {
   }
   async dispose(): Promise<void> {
     this.stopping = true
+    for (const lifecycle of this.terminalLifecycles.values()) lifecycle.retry.dispose()
+    this.terminalLifecycles.clear()
     this.terminals.dispose()
     await Promise.all([...this.terminalServices.values()].map(service => service.dispose()))
     this.terminalServices.clear(); this.splits.clear()

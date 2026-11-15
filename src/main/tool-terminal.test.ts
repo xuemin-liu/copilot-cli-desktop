@@ -22,6 +22,26 @@ function mockPty(): PtyLike & { data(text: string): void; exit(): void; writes: 
     onData(listener) { onData = listener }, onExit(listener) { onExit = listener }, data(text) { onData(text) }, exit() { onExit({ exitCode: 7 }) },
     write(text) { this.writes.push(text) }, resize() {}, kill() { this.kills++ }, dispose() { this.disposed++ } }
 }
+
+test('background lifecycle distinguishes transport failure from explicit close and cancelled startup', async () => {
+  const ended: boolean[] = [], pty = mockPty()
+  let spawn: () => Promise<PtyLike> = async () => { throw new Error('SSH unavailable') }
+  const manager = new ToolTerminals(undefined, { managed: () => spawn(), started() {}, output() {}, closed: (_profile, _id, unexpected) => ended.push(unexpected) })
+  const config = { transport: 'managed' as const, connectionId: 'saved' }
+  assert.equal((await manager.start('p', 't', 'ssh', config, '/work', {})).status, 'error')
+  assert.deepEqual(ended, [true], 'failed SSH startup schedules retry')
+  manager.close('p', 't'); assert.deepEqual(ended, [true, false])
+  spawn = async () => pty
+  await manager.start('p', 't', 'ssh', config, '/work', {})
+  pty.exit(); assert.equal(ended.at(-1), true)
+  manager.close('p', 't'); pty.exit(); assert.equal(ended.at(-1), false, 'late exit cannot schedule retry')
+  let release!: (pty: PtyLike) => void
+  spawn = () => new Promise(resolve => { release = resolve })
+  const pending = manager.start('p', 't', 'ssh', config, '/work', {})
+  manager.close('p', 't'); const count = ended.length; release(mockPty())
+  await assert.rejects(pending, /closed during startup/)
+  assert.equal(ended.length, count, 'cancelled startup never schedules another retry')
+})
 test('terminal output cursors, project ownership, exit, and close are independent of selected UI', async () => {
   const pty = mockPty(), manager = new ToolTerminals(() => pty)
   await manager.start('p1', 't1', 'local', {}, '/work', {})

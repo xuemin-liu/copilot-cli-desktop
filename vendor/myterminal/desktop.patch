@@ -889,7 +889,12 @@
      }
 --- a/src/components/TerminalTab.jsx
 +++ b/src/components/TerminalTab.jsx
-@@ -21,8 +21,14 @@
+@@ -1,3 +1,4 @@
++import { createBellNotifier, createReconnectController } from '../../lifecycle.cjs'
+ import React, { useEffect, useRef, useState } from 'react'
+ import { Terminal } from '@xterm/xterm'
+ import { FitAddon } from '@xterm/addon-fit'
+@@ -21,8 +22,14 @@
  import { resizeTerminalChannel, writeToBroadcastTargets, writeToTerminalChannel } from '../utils/terminalChannels'
  import { registerOsc52ClipboardHandler, updateOscSequenceState } from '../utils/terminalClipboardUtils'
  
@@ -906,7 +911,15 @@
  
    const termRef = useRef(null)
    const terminalInstanceRef = useRef(null)
-@@ -75,7 +81,8 @@
+@@ -54,6 +61,7 @@
+   const [wholeWord, setWholeWord] = useState(false)
+   const [fontSize, setFontSize] = useState(settings.defaultFontSize || 14)
+   const [reconnectCountdown, setReconnectCountdown] = useState(null)
++  useEffect(() => { if (host?.backgroundLifecycle) setReconnectCountdown(host.reconnectCountdown ?? null) }, [host?.reconnectCountdown])
+   const [showSnippets, setShowSnippets] = useState(false)
+   const [stickyCmd, setStickyCmd] = useState(null) // { text, line } or null
+   const [showStickyCmd, setShowStickyCmd] = useState(false)
+@@ -75,9 +83,9 @@
    const pendingLineRef = useRef('')
    const reconnectTimerRef = useRef(null)
    const isMountedRef = useRef(true)
@@ -914,9 +927,11 @@
 +  const localReconnectAttemptRef = useRef(0)
 +  const reconnectAttemptRef = host?.reconnectAttempts || localReconnectAttemptRef
    const isRegexModeRef = useRef(false)
-   const lastBellRef = useRef(0)
+-  const lastBellRef = useRef(0)
    const stickyCmdRef = useRef(null)
-@@ -107,6 +114,22 @@
+   const loggingRef = useRef(false)
+   const cwdRawBufferRef = useRef('')
+@@ -107,6 +115,22 @@
      }
    }, [fontSize])
  
@@ -939,7 +954,7 @@
    // Auto-focus search input
    useEffect(() => {
      if (showSearch) setTimeout(() => searchInputRef.current?.focus(), 50)
-@@ -132,21 +155,21 @@
+@@ -132,21 +156,21 @@
  
    // Latency polling for SSH connections
    useEffect(() => {
@@ -965,7 +980,7 @@
    }, [])
  
    // Keyboard shortcuts — fallback for when xterm does NOT have focus (e.g. toolbar, search bar)
-@@ -157,7 +180,7 @@
+@@ -157,7 +181,7 @@
        // Skip if xterm textarea has focus — attachCustomKeyEventHandler handles it there
        if (document.activeElement?.classList.contains('xterm-helper-textarea')) return
        if (e.ctrlKey && e.shiftKey && e.key === 'F') { e.preventDefault(); setShowSearch((v) => !v) }
@@ -974,7 +989,7 @@
        if (e.ctrlKey && !e.shiftKey && e.key === 'f') { e.preventDefault(); setShowFilter((v) => !v) }
        if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); setFontSize((s) => Math.min(32, s + 1)) }
        if (e.ctrlKey && e.key === '-') { e.preventDefault(); setFontSize((s) => Math.max(8, s - 1)) }
-@@ -216,14 +239,16 @@
+@@ -216,14 +240,16 @@
  
    // Helper: write to the right channel type
    const writeToChannel = (data, channelId = tab.channelId) => {
@@ -995,7 +1010,7 @@
      } else {
        writeToChannel(data)
      }
-@@ -234,6 +259,7 @@
+@@ -234,6 +260,7 @@
      isMountedRef.current = true
      reconnectAttemptRef.current = 0
  
@@ -1003,7 +1018,7 @@
      const term = new Terminal({
        theme: {
          background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-@@ -258,10 +284,13 @@
+@@ -258,10 +285,13 @@
      term.loadAddon(fitAddon)
      term.loadAddon(new WebLinksAddon())
      term.loadAddon(searchAddon)
@@ -1019,7 +1034,7 @@
      )
  
      terminalInstanceRef.current = term
-@@ -269,7 +298,8 @@
+@@ -269,7 +299,8 @@
      searchAddonRef.current = searchAddon
  
      term.open(termRef.current)
@@ -1029,7 +1044,7 @@
  
      // Track pane focus so tab activation can restore it to the right terminal
      const handleTermFocus = () => { focusedPaneRef.current = 'main' }
-@@ -294,13 +324,13 @@
+@@ -294,13 +325,13 @@
      term.attachCustomKeyEventHandler((e) => {
        if (e.type !== 'keydown') return true
        if (e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -1045,30 +1060,47 @@
            if (isLinux && !!term.getSelection()) {
              setCtrlCDialog({ hasSelection: true })
              return false
-@@ -317,7 +347,8 @@
+@@ -315,59 +346,50 @@
+       return true
+     })
  
-     // Reconnect logic
+-    // Reconnect logic
++    // Original policy shared with the desktop's process-owned background lifecycle.
++    const reconnect = createReconnectController({
++      attempts: reconnectAttemptRef,
++      changed: setReconnectCountdown,
++      exhausted: () => term.write('\r\n\x1b[31m[Max reconnect attempts reached]\x1b[0m\r\n'),
++      connect: () => { if (host) void host.connect(); else connectSSH() },
++    })
++    reconnectTimerRef.current = reconnect
      const scheduleReconnect = () => {
 -      if (!isMountedRef.current || tab.isLocal) return
-+      // Managed SSH reuses MyTerminal's bounded retry policy. Native shells reconnect explicitly.
-+      if (!isMountedRef.current || tab.isLocal || (host && (!host.remoteTools || !host.isActive()))) return
-       // Guard: cancel any in-progress timer before starting a new one so that
-       // multiple close/error events don't create parallel countdown loops.
-       clearInterval(reconnectTimerRef.current)
-@@ -331,10 +362,10 @@
-       let remaining = Math.min(30, attempt * 5)
-       setReconnectCountdown(remaining)
-       const tick = setInterval(() => {
+-      // Guard: cancel any in-progress timer before starting a new one so that
+-      // multiple close/error events don't create parallel countdown loops.
+-      clearInterval(reconnectTimerRef.current)
+-      reconnectTimerRef.current = null
+-      const attempt = reconnectAttemptRef.current + 1
+-      if (attempt > 5) {
+-        term.write('\r\n\x1b[31m[Max reconnect attempts reached]\x1b[0m\r\n')
+-        return
+-      }
+-      reconnectAttemptRef.current = attempt
+-      let remaining = Math.min(30, attempt * 5)
+-      setReconnectCountdown(remaining)
+-      const tick = setInterval(() => {
 -        if (!isMountedRef.current) { clearInterval(tick); return }
-+        if (!isMountedRef.current || (host && !host.isActive())) { clearInterval(tick); setReconnectCountdown(null); return }
-         remaining--
-         setReconnectCountdown(remaining > 0 ? remaining : null)
+-        remaining--
+-        setReconnectCountdown(remaining > 0 ? remaining : null)
 -        if (remaining <= 0) { clearInterval(tick); connectSSH() }
-+        if (remaining <= 0) { clearInterval(tick); if (host) void host.connect(); else connectSSH() }
-       }, 1000)
-       reconnectTimerRef.current = tick
-     }
-@@ -342,32 +373,32 @@
+-      }, 1000)
+-      reconnectTimerRef.current = tick
+-    }
++      if (!isMountedRef.current || tab.isLocal || host?.backgroundLifecycle || (host && !host.remoteTools)) return
++      reconnect.schedule()
++    }
++    const notifyBell = createBellNotifier({ focused: () => document.hasFocus(),
++      notify: (title, body) => api.notify.send(title, body), label: () => tab.label })
+ 
      const autoStartLogging = () => {
        if (settings.loggingEnabled && !loggingRef.current) {
          const logDir = settings.logDirectory || ''
@@ -1108,8 +1140,12 @@
            if (result?.error) {
              setError(result.error)
              term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
-@@ -379,8 +410,8 @@
-           clearTimeout(reconnectTimerRef.current)
+@@ -376,11 +398,11 @@
+           }
+           setConnected(true)
+           reconnectAttemptRef.current = 0
+-          clearTimeout(reconnectTimerRef.current)
++          reconnect.connected()
            setReconnectCountdown(null)
            autoStartLogging()
 -          fitAddon.fit()
@@ -1119,7 +1155,7 @@
          })
        }
      }
-@@ -418,14 +449,14 @@
+@@ -418,16 +440,10 @@
  
      // SSH/local data → terminal
      let cwdTimer = null
@@ -1127,16 +1163,18 @@
 +    const removeData = api.ssh.onData((channelId, data) => {
        if (channelId !== tab.channelId) return
  
-       if (data.includes('\x07') && !document.hasFocus()) {
-         const now = Date.now()
-         if (now - lastBellRef.current > 5000) {
-           lastBellRef.current = now
+-      if (data.includes('\x07') && !document.hasFocus()) {
+-        const now = Date.now()
+-        if (now - lastBellRef.current > 5000) {
+-          lastBellRef.current = now
 -          window.electronAPI.notify.send('Terminal Bell', `Activity in: ${tab.label}`)
-+          api.notify.send('Terminal Bell', `Activity in: ${tab.label}`)
-         }
-       }
+-        }
+-      }
++      if (!host?.backgroundLifecycle) notifyBell(data)
  
-@@ -436,8 +467,8 @@
+       const wasInsideOsc = oscSequenceActiveRef.current
+       oscSequenceActiveRef.current = updateOscSequenceState(wasInsideOsc, data)
+@@ -436,8 +452,8 @@
        term.write(shouldColorize ? colorizeOutput(data) : data)
  
        // Session logging — fire-and-forget
@@ -1147,7 +1185,7 @@
        }
  
        const plain = stripAnsi(data)
-@@ -460,18 +491,18 @@
+@@ -460,18 +476,18 @@
        }
      })
  
@@ -1169,7 +1207,7 @@
        if (channelId === tab.channelId) {
          setError(message)
          term.write('\r\n\x1b[31mError: ' + message + '\x1b[0m\r\n')
-@@ -487,12 +518,13 @@
+@@ -487,12 +503,13 @@
          if (width === 0 || height === 0) return
          fitAddon.fit()
          const { cols, rows } = term
@@ -1184,8 +1222,12 @@
        () => inputDisposer.dispose(),
        () => scrollDisposer.dispose(),
        () => term.textarea?.removeEventListener('focus', handleTermFocus),
-@@ -504,10 +536,11 @@
-       () => clearInterval(reconnectTimerRef.current),
+@@ -501,13 +518,14 @@
+       removeData, removeClose, removeError,
+       () => resizeObs.disconnect(),
+       () => { if (termContainer) termContainer.removeEventListener('wheel', handleWheel) },
+-      () => clearInterval(reconnectTimerRef.current),
++      () => reconnect.dispose(),
        () => {
          isMountedRef.current = false
 -        if (loggingRef.current) window.electronAPI.logging.stop(tab.channelId)
@@ -1200,7 +1242,7 @@
          term.dispose()
        },
      ]
-@@ -526,7 +559,7 @@
+@@ -526,7 +544,7 @@
          const term = terminalInstanceRef.current
          if (term) {
            const { cols, rows } = term
@@ -1209,7 +1251,7 @@
          }
        } catch (_) {}
      })
-@@ -573,32 +606,34 @@
+@@ -573,32 +591,34 @@
    const handleSavePreset = async () => {
      if (!filterText.trim() || customPresets.length >= 10) return
      const newPreset = { id: crypto.randomUUID(), label: filterText.trim().slice(0, 24), pattern: filterText.trim(), color: '#8b949e' }
@@ -1250,7 +1292,7 @@
      if (content?.error) {
        // Show error to user for binary/size rejections
        if (terminalInstanceRef.current) {
-@@ -611,7 +646,7 @@
+@@ -611,7 +631,7 @@
  
    const handleSaveFile = async () => {
      if (!editingFile) return
@@ -1259,7 +1301,13 @@
      if (result?.error) return
      setEditingFile((prev) => prev ? { ...prev, original: prev.content } : null)
    }
-@@ -653,9 +688,10 @@
+@@ -648,14 +668,15 @@
+         {reconnectCountdown !== null && (
+           <span className="reconnect-badge">
+             Reconnecting in {reconnectCountdown}s…
+-            <button onClick={() => { clearInterval(reconnectTimerRef.current); setReconnectCountdown(null) }}>Cancel</button>
++            <button onClick={() => { host?.backgroundLifecycle ? host.cancelReconnect() : reconnectTimerRef.current?.cancel(); setReconnectCountdown(null) }}>Cancel</button>
+           </span>
          )}
  
          <div className="terminal-toolbar-actions">
@@ -1272,7 +1320,7 @@
            <button className={`icon-btn ${showSearch ? 'active' : ''}`} onClick={() => setShowSearch((v) => !v)} title="Search terminal (Ctrl+Shift+F)">
              <Search size={16} />
            </button>
-@@ -665,16 +701,25 @@
+@@ -665,16 +686,25 @@
            <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
              <Highlighter size={16} />
            </button>
@@ -1305,7 +1353,7 @@
              <>
                <button
                  className={`icon-btn ${showTunnels ? 'active' : ''}`}
-@@ -682,13 +727,6 @@
+@@ -682,13 +712,6 @@
                  title="Port forwarding"
                >
                  <Network size={16} />
@@ -1319,7 +1367,7 @@
                </button>
                <button className={`icon-btn ${showSftp ? 'active' : ''}`} onClick={() => setShowSftp((v) => !v)} title="Toggle SFTP panel">
                  <PanelRight size={16} />
-@@ -709,7 +747,7 @@
+@@ -709,7 +732,7 @@
            osHint={
              tab.wslDistro
                ? `Linux (WSL: ${tab.wslDistro})`
@@ -1328,7 +1376,7 @@
            }
          />
        )}
-@@ -739,7 +777,7 @@
+@@ -739,7 +762,7 @@
  
        {/* Snippets panel */}
        {showSnippets && (
@@ -1337,7 +1385,7 @@
            onInsert={(cmd) => { writeToChannel(cmd + '\r'); focusTerminal() }}
            onClose={() => setShowSnippets(false)}
          />
-@@ -747,7 +785,7 @@
+@@ -747,7 +770,7 @@
  
        {/* Tunnel panel */}
        {showTunnels && !tab.isLocal && connected && (
@@ -1346,7 +1394,7 @@
            channelId={tab.channelId}
            sessionId={tab.sessionId || tab.channelId}
            onClose={() => setShowTunnels(false)}
-@@ -893,7 +931,7 @@
+@@ -893,7 +916,7 @@
                }}
              />
              <div className="terminal-wrapper" style={{ flex: 1 }}>
@@ -1355,7 +1403,7 @@
                  key={tab.splitChannelId}
                  channelId={tab.splitChannelId}
                  config={tab.splitConfig}
-@@ -924,7 +962,7 @@
+@@ -924,7 +947,7 @@
                  window.addEventListener('mouseup', onUp)
                }}
              />
@@ -1364,7 +1412,7 @@
                channelId={tab.channelId}
                cwd={cwd}
                width={sftpWidth}
-@@ -937,7 +975,7 @@
+@@ -937,7 +960,7 @@
  
        {/* Remote file editor overlay */}
        {editingFile && (
