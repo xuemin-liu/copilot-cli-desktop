@@ -543,7 +543,10 @@ export class BrowserDebug {
       if (this.onReturnToPanel) this.onReturnToPanel(contents.id)
       else {
         this.selectPage(contents.id); this.returnPage(contents.id)
-        if (!this.owner.isDestroyed()) { this.owner.restore(); this.owner.show(); this.owner.focus() }
+        if (!this.owner.isDestroyed()) {
+          if (this.owner.isMinimized()) this.owner.restore()
+          this.owner.show(); this.owner.focus()
+        }
       }
     }, this.reportError) : null
     const fit = (): void => {
