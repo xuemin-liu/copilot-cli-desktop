@@ -30,7 +30,13 @@ export function terminalLaunch(kind: TerminalKind, config: TerminalConfig = {}, 
   if (config.transport === 'managed') {
     const connectionId = field(config.connectionId, 'SSH connection ID', /^[a-zA-Z0-9_-]+$/)
     if (!connectionId) throw new Error('Choose a saved SSH connection')
-    return { file: '', args: [], cwd, config: { transport: 'managed', connectionId, ...(config.temporary === true ? { temporary: true } : {}), ...(typeof config.host === 'string' ? { host: config.host.slice(0, 256) } : {}) } }
+    const host = field(config.host, 'SSH host', /^[^\x00-\x1f\x7f]+$/)
+    const username = field(config.username, 'SSH user', /^[^\x00-\x1f\x7f]+$/)
+    const name = field(config.name, 'connection name', /^[^\x00-\x1f\x7f]+$/)
+    const port = config.port
+    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new Error('Invalid SSH port')
+    return { file: '', args: [], cwd, config: { transport: 'managed', connectionId, ...(config.temporary === true ? { temporary: true } : {}),
+      ...(host ? { host } : {}), ...(username ? { username } : {}), ...(name ? { name } : {}), ...(port ? { port } : {}) } }
   }
   const host = field(config.host, 'SSH host', /^[a-zA-Z0-9][a-zA-Z0-9._:\[\]-]*$/)
   if (!host) throw new Error('Enter an SSH host or SSH config alias')
@@ -50,6 +56,7 @@ export class ToolTerminals {
     managed(profileId: string, id: string, config: TerminalConfig, signal: AbortSignal): Promise<PtyLike>
     started(profileId: string, id: string): void
     output(profileId: string, id: string, data: string): void
+    streamed?(profileId: string, state: TerminalSnapshot): void
     closed(profileId: string, id: string, unexpected: boolean): void
   }) {}
   async start(profileId: string, id: string, kind: TerminalKind, config: TerminalConfig, cwd: string | null, env: NodeJS.ProcessEnv): Promise<TerminalSnapshot> {
@@ -72,6 +79,7 @@ export class ToolTerminals {
         runtime.state.output = (runtime.state.output + data).slice(-MAX_OUTPUT)
         runtime.state.cursor += data.length
         runtime.state.start = runtime.state.cursor - runtime.state.output.length
+        this.hooks?.streamed?.(profileId, { ...runtime.state, output: data, start: runtime.state.cursor - data.length })
       })
       pty.onExit(event => { if (!runtime.closed) { runtime.state.status = 'exited'; runtime.state.exitCode = event.exitCode; this.hooks?.closed(profileId, id, true); pty.dispose?.() } })
     } catch (error) {

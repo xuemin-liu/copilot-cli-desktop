@@ -15,7 +15,7 @@ if (!process.versions.electron) {
     const store=Object.assign(()=>({settings:{defaultFontSize:14,defaultScrollback:1000,colorizeByDefault:true,osc52ClipboardEnabled:true}}),{getState:()=>({broadcastMode:false})});
     const api={platform:'linux',local:{spawn:async()=>({}),write:(_id,text)=>writes.push(text),resize:(_id,cols,rows)=>sizes.push({cols,rows}),disconnect(){}},
       ssh:{onData:()=>()=>{},onClose:()=>()=>{},onError:()=>()=>{}},filterPresets:{getAll:async()=>[]},
-      clipboard:{writeText:text=>navigator.clipboard.writeText(text)},tunnel:{stopByChannel(){}},notify:{send(){}}};
+      clipboard:{writeText:text=>navigator.clipboard.writeText(text),readText:()=>navigator.clipboard.readText()},tunnel:{stopByChannel(){}},notify:{send(){}}};
     const host={api,store,isActive:()=>true,onTerminal:t=>{term=t}};
     createRoot(document.getElementById('root')).render(<TerminalTab tab={{id:'test',channelId:'test',isLocal:true,label:'test'}} isActive host={host}/>);
     window.fixture={writes,sizes,get term(){return term}};

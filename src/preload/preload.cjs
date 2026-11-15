@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   toolsState: (width) => ipcRenderer.invoke('desktop:tools-state', width),
   toolsAction: (profileId, action) => ipcRenderer.invoke('desktop:tools-action', profileId, action),
   toolTerminal: (profileId, request) => ipcRenderer.invoke('desktop:tool-terminal', profileId, request),
+  onToolTerminalOutput: listener => { const handler = (_event, profileId, state) => listener(profileId, state); ipcRenderer.on('desktop:tool-terminal-output', handler); return () => ipcRenderer.removeListener('desktop:tool-terminal-output', handler) },
   myTerminal: (profileId, method, args) => ipcRenderer.invoke('desktop:myterminal', profileId, method, args),
   myTerminalDrop: async (profileId) => {
     const paths = terminalDropPaths.splice(0)
@@ -150,6 +151,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   getTabSnapshot: (tabId) => ipcRenderer.invoke('desktop:get-tab-snapshot', tabId),
   openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
   showSessionLog: (tabId) => ipcRenderer.invoke('desktop:show-session-log', tabId),
+  readClipboardText: () => ipcRenderer.invoke('desktop:read-clipboard-text'),
   copyText: (text) => ipcRenderer.invoke('desktop:copy-text', text),
   showTerminalContextMenu: (text) => ipcRenderer.invoke('desktop:show-terminal-context-menu', text),
   openExternalUrl: (url) => ipcRenderer.invoke('desktop:open-external-url', url),

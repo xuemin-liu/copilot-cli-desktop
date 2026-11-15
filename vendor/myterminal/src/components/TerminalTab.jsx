@@ -39,6 +39,16 @@ export default function TerminalTab({ tab, isActive, host }) {
 
   // State
   const [connected, setConnected] = useState(false)
+  // A hosted reconnect replaces the transport, never this view or its unsaved editor.
+  useEffect(() => {
+    if (!host?.backgroundLifecycle) return
+    setConnected(host.status === 'running')
+    if (host.status === 'running') {
+      setError(null)
+      const term = terminalInstanceRef.current
+      if (term) resizeTerminalChannel(tab, term.cols, term.rows, tab.channelId, api)
+    }
+  }, [host?.status, host?.generation])
   const [error, setError] = useState(null)
   const [showSftp, setShowSftp] = useState(false)
   const [cwd, setCwd] = useState(null)
@@ -208,12 +218,12 @@ export default function TerminalTab({ tab, isActive, host }) {
   const focusTerminal = () => terminalInstanceRef.current?.focus()
   const handleCopy = () => {
     const sel = terminalInstanceRef.current?.getSelection()
-    if (sel) navigator.clipboard.writeText(sel)
+    if (sel) (host ? api.clipboard : navigator.clipboard).writeText(sel)
     setCtxMenu(null)
     focusTerminal()
   }
   const handlePaste = async () => {
-    const text = await navigator.clipboard.readText()
+    const text = await (host ? api.clipboard : navigator.clipboard).readText()
     if (text) terminalInstanceRef.current?.paste(text)
     setCtxMenu(null)
     focusTerminal()
@@ -228,7 +238,7 @@ export default function TerminalTab({ tab, isActive, host }) {
 
   const handleCtrlCCopy = () => {
     const sel = terminalInstanceRef.current?.getSelection()
-    if (sel) navigator.clipboard.writeText(sel)
+    if (sel) (host ? api.clipboard : navigator.clipboard).writeText(sel)
     setCtrlCDialog(null)
     focusTerminal()
   }
@@ -283,7 +293,7 @@ export default function TerminalTab({ tab, isActive, host }) {
     const fitAddon = new FitAddon()
     const searchAddon = new SearchAddon()
     term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon())
+    term.loadAddon(new WebLinksAddon(host?.openExternal ? (_event, uri) => host.openExternal(uri) : undefined))
     term.loadAddon(searchAddon)
     // A font zoom changes the grid without resizing its container. Keep the PTY
     // synchronized for every xterm fit, including the upstream zoom shortcuts.
@@ -645,7 +655,7 @@ export default function TerminalTab({ tab, isActive, host }) {
 
   const handleCopyMatches = () => {
     if (!filterLines.length) return
-    navigator.clipboard.writeText(filterLines.join('\n'))
+    (host ? api.clipboard : navigator.clipboard).writeText(filterLines.join('\n'))
     setCopyFeedback(true)
     setTimeout(() => setCopyFeedback(false), 1500)
   }

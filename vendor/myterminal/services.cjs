@@ -1,6 +1,7 @@
 // Desktop ownership adapter. Feature implementations remain in the pinned electron sources.
 const { createHash, randomUUID } = require('node:crypto')
 const path = require('node:path')
+const { stripAnsi } = require('./src/utils/terminalUtils.js')
 const registerServices = require('./electron/main')
 const SshManager = require('./electron/ssh-manager').constructor
 const TunnelManager = require('./electron/tunnel-manager').constructor
@@ -127,6 +128,12 @@ module.exports = class MyTerminalServices {
     this.temporary.set(id, encrypted)
     return { transport: 'managed', connectionId: id, host: encrypted.host, temporary: true }
   }
+  connectionMetadata(id) {
+    const config = this.temporary.get(id) || this.services.resolveSavedSessionConfig({ id })
+    if (!config?.host) return {}
+    // Only display metadata crosses the bridge; credentials stay in MyTerminal's store.
+    return { host: config.host, port: config.port || 22, username: config.username, name: config.name }
+  }
   forgetTemporary(id) { this.temporary.delete(id) }
   saveTemporary(id) {
     const config = this.temporary.get(id)
@@ -155,7 +162,7 @@ module.exports = class MyTerminalServices {
     const settings = this.store.get('settings-prefs', {})
     if (settings.loggingEnabled) return this.invoke('logging:start', [id, settings.logDirectory || ''], () => true)
   }
-  output(id, data) { this.services.logging.write(id, data.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')) }
+  output(id, data) { this.services.logging.write(id, stripAnsi(data)) }
   closed(id) { this.services.logging.stop(id); this.tunnels.stopByChannel(id) }
   async dispose() {
     this.disposed = true

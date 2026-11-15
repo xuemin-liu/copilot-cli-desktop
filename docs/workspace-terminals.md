@@ -29,7 +29,7 @@ Tabs belong to the project. Switching tabs/projects or hiding the panel preserve
 terminates its PTY; quitting stops all terminals. Saved tabs return disconnected after restart—**Connect** starts
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes
 can exist at once, including split panes. Managed SSH uses MyTerminal's bounded reconnect countdown even while
-its tab/panel is hidden or another project is active. The five-attempt policy resets after a successful connection;
+its tab/panel is hidden or another project is active. This includes SSH split panes. The five-attempt policy resets after a successful connection;
 Cancel or closing the tab stops a pending retry. Native shells reconnect explicitly. Terminal bells use MyTerminal's five-second notification cooldown while the app is unfocused, including hidden tabs and other projects. Split panes close with their parent and are not restored on restart.
 
 The terminal toolbar includes **Snippets**, **Split pane**, **Start/stop logging**, **Export terminal output**,
@@ -38,7 +38,14 @@ while the panel is hidden, and stops when the process exits. The default log fol
 MyTerminal data folder. Settings can change the folder, font, scrollback, highlighting and OSC52 clipboard opt-in.
 Backup/import reuses MyTerminal's format and merge behavior; exports exclude credentials unless explicitly chosen.
 Removing a workspace deletes its saved terminal connections/preferences and default logs after closing their streams.
-Logs written to a custom folder outside the app's project data directory are kept.
+Logs written to a custom folder outside the app's project data directory are kept. Log cleanup uses
+MyTerminal's original ANSI utility, including OSC and character-set sequences.
+
+Hidden terminals continue processing output through MyTerminal's terminal component, including scrollback,
+filters, working-directory detection and opt-in OSC52. The CLI's bounded replay buffer does not limit a mounted
+terminal's scrollback. Reconnect preserves terminal history, view settings and unsaved remote-file edits.
+Copy/paste uses the native clipboard bridge, and terminal web links use the app's external-link handler.
+Ctrl+T/Ctrl+W inside terminal panes remain terminal input instead of opening or closing panel tabs.
 
 Managed SSH tabs also include **SFTP** with uploads/downloads, favorites and remote text editing, and
 **Port forwarding** for local, remote and SOCKS5 tunnels. Forwarding listeners bind to loopback. Closing the

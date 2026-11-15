@@ -911,7 +911,24 @@
  
    const termRef = useRef(null)
    const terminalInstanceRef = useRef(null)
-@@ -54,6 +61,7 @@
+@@ -32,6 +39,16 @@
+ 
+   // State
+   const [connected, setConnected] = useState(false)
++  // A hosted reconnect replaces the transport, never this view or its unsaved editor.
++  useEffect(() => {
++    if (!host?.backgroundLifecycle) return
++    setConnected(host.status === 'running')
++    if (host.status === 'running') {
++      setError(null)
++      const term = terminalInstanceRef.current
++      if (term) resizeTerminalChannel(tab, term.cols, term.rows, tab.channelId, api)
++    }
++  }, [host?.status, host?.generation])
+   const [error, setError] = useState(null)
+   const [showSftp, setShowSftp] = useState(false)
+   const [cwd, setCwd] = useState(null)
+@@ -54,6 +71,7 @@
    const [wholeWord, setWholeWord] = useState(false)
    const [fontSize, setFontSize] = useState(settings.defaultFontSize || 14)
    const [reconnectCountdown, setReconnectCountdown] = useState(null)
@@ -919,7 +936,7 @@
    const [showSnippets, setShowSnippets] = useState(false)
    const [stickyCmd, setStickyCmd] = useState(null) // { text, line } or null
    const [showStickyCmd, setShowStickyCmd] = useState(false)
-@@ -75,9 +83,9 @@
+@@ -75,9 +93,9 @@
    const pendingLineRef = useRef('')
    const reconnectTimerRef = useRef(null)
    const isMountedRef = useRef(true)
@@ -931,7 +948,7 @@
    const stickyCmdRef = useRef(null)
    const loggingRef = useRef(false)
    const cwdRawBufferRef = useRef('')
-@@ -107,6 +115,22 @@
+@@ -107,6 +125,22 @@
      }
    }, [fontSize])
  
@@ -954,7 +971,7 @@
    // Auto-focus search input
    useEffect(() => {
      if (showSearch) setTimeout(() => searchInputRef.current?.focus(), 50)
-@@ -132,21 +156,21 @@
+@@ -132,21 +166,21 @@
  
    // Latency polling for SSH connections
    useEffect(() => {
@@ -980,7 +997,7 @@
    }, [])
  
    // Keyboard shortcuts — fallback for when xterm does NOT have focus (e.g. toolbar, search bar)
-@@ -157,7 +181,7 @@
+@@ -157,7 +191,7 @@
        // Skip if xterm textarea has focus — attachCustomKeyEventHandler handles it there
        if (document.activeElement?.classList.contains('xterm-helper-textarea')) return
        if (e.ctrlKey && e.shiftKey && e.key === 'F') { e.preventDefault(); setShowSearch((v) => !v) }
@@ -989,7 +1006,31 @@
        if (e.ctrlKey && !e.shiftKey && e.key === 'f') { e.preventDefault(); setShowFilter((v) => !v) }
        if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); setFontSize((s) => Math.min(32, s + 1)) }
        if (e.ctrlKey && e.key === '-') { e.preventDefault(); setFontSize((s) => Math.max(8, s - 1)) }
-@@ -216,14 +240,16 @@
+@@ -184,12 +218,12 @@
+   const focusTerminal = () => terminalInstanceRef.current?.focus()
+   const handleCopy = () => {
+     const sel = terminalInstanceRef.current?.getSelection()
+-    if (sel) navigator.clipboard.writeText(sel)
++    if (sel) (host ? api.clipboard : navigator.clipboard).writeText(sel)
+     setCtxMenu(null)
+     focusTerminal()
+   }
+   const handlePaste = async () => {
+-    const text = await navigator.clipboard.readText()
++    const text = await (host ? api.clipboard : navigator.clipboard).readText()
+     if (text) terminalInstanceRef.current?.paste(text)
+     setCtxMenu(null)
+     focusTerminal()
+@@ -204,7 +238,7 @@
+ 
+   const handleCtrlCCopy = () => {
+     const sel = terminalInstanceRef.current?.getSelection()
+-    if (sel) navigator.clipboard.writeText(sel)
++    if (sel) (host ? api.clipboard : navigator.clipboard).writeText(sel)
+     setCtrlCDialog(null)
+     focusTerminal()
+   }
+@@ -216,14 +250,16 @@
  
    // Helper: write to the right channel type
    const writeToChannel = (data, channelId = tab.channelId) => {
@@ -1010,7 +1051,7 @@
      } else {
        writeToChannel(data)
      }
-@@ -234,6 +260,7 @@
+@@ -234,6 +270,7 @@
      isMountedRef.current = true
      reconnectAttemptRef.current = 0
  
@@ -1018,9 +1059,12 @@
      const term = new Terminal({
        theme: {
          background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-@@ -258,10 +285,13 @@
+@@ -256,12 +293,15 @@
+     const fitAddon = new FitAddon()
+     const searchAddon = new SearchAddon()
      term.loadAddon(fitAddon)
-     term.loadAddon(new WebLinksAddon())
+-    term.loadAddon(new WebLinksAddon())
++    term.loadAddon(new WebLinksAddon(host?.openExternal ? (_event, uri) => host.openExternal(uri) : undefined))
      term.loadAddon(searchAddon)
 +    // A font zoom changes the grid without resizing its container. Keep the PTY
 +    // synchronized for every xterm fit, including the upstream zoom shortcuts.
@@ -1034,7 +1078,7 @@
      )
  
      terminalInstanceRef.current = term
-@@ -269,7 +299,8 @@
+@@ -269,7 +309,8 @@
      searchAddonRef.current = searchAddon
  
      term.open(termRef.current)
@@ -1044,7 +1088,7 @@
  
      // Track pane focus so tab activation can restore it to the right terminal
      const handleTermFocus = () => { focusedPaneRef.current = 'main' }
-@@ -294,13 +325,13 @@
+@@ -294,13 +335,13 @@
      term.attachCustomKeyEventHandler((e) => {
        if (e.type !== 'keydown') return true
        if (e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -1060,7 +1104,7 @@
            if (isLinux && !!term.getSelection()) {
              setCtrlCDialog({ hasSelection: true })
              return false
-@@ -315,59 +346,50 @@
+@@ -315,59 +356,50 @@
        return true
      })
  
@@ -1140,7 +1184,7 @@
            if (result?.error) {
              setError(result.error)
              term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
-@@ -376,11 +398,11 @@
+@@ -376,11 +408,11 @@
            }
            setConnected(true)
            reconnectAttemptRef.current = 0
@@ -1155,7 +1199,7 @@
          })
        }
      }
-@@ -418,16 +440,10 @@
+@@ -418,16 +450,10 @@
  
      // SSH/local data → terminal
      let cwdTimer = null
@@ -1174,7 +1218,7 @@
  
        const wasInsideOsc = oscSequenceActiveRef.current
        oscSequenceActiveRef.current = updateOscSequenceState(wasInsideOsc, data)
-@@ -436,8 +452,8 @@
+@@ -436,8 +462,8 @@
        term.write(shouldColorize ? colorizeOutput(data) : data)
  
        // Session logging — fire-and-forget
@@ -1185,7 +1229,7 @@
        }
  
        const plain = stripAnsi(data)
-@@ -460,18 +476,18 @@
+@@ -460,18 +486,18 @@
        }
      })
  
@@ -1207,7 +1251,7 @@
        if (channelId === tab.channelId) {
          setError(message)
          term.write('\r\n\x1b[31mError: ' + message + '\x1b[0m\r\n')
-@@ -487,12 +503,13 @@
+@@ -487,12 +513,13 @@
          if (width === 0 || height === 0) return
          fitAddon.fit()
          const { cols, rows } = term
@@ -1222,7 +1266,7 @@
        () => inputDisposer.dispose(),
        () => scrollDisposer.dispose(),
        () => term.textarea?.removeEventListener('focus', handleTermFocus),
-@@ -501,13 +518,14 @@
+@@ -501,13 +528,14 @@
        removeData, removeClose, removeError,
        () => resizeObs.disconnect(),
        () => { if (termContainer) termContainer.removeEventListener('wheel', handleWheel) },
@@ -1242,7 +1286,7 @@
          term.dispose()
        },
      ]
-@@ -526,7 +544,7 @@
+@@ -526,7 +554,7 @@
          const term = terminalInstanceRef.current
          if (term) {
            const { cols, rows } = term
@@ -1251,7 +1295,7 @@
          }
        } catch (_) {}
      })
-@@ -573,32 +591,34 @@
+@@ -573,32 +601,34 @@
    const handleSavePreset = async () => {
      if (!filterText.trim() || customPresets.length >= 10) return
      const newPreset = { id: crypto.randomUUID(), label: filterText.trim().slice(0, 24), pattern: filterText.trim(), color: '#8b949e' }
@@ -1292,7 +1336,7 @@
      if (content?.error) {
        // Show error to user for binary/size rejections
        if (terminalInstanceRef.current) {
-@@ -611,7 +631,7 @@
+@@ -611,7 +641,7 @@
  
    const handleSaveFile = async () => {
      if (!editingFile) return
@@ -1301,7 +1345,16 @@
      if (result?.error) return
      setEditingFile((prev) => prev ? { ...prev, original: prev.content } : null)
    }
-@@ -648,14 +668,15 @@
+@@ -625,7 +655,7 @@
+ 
+   const handleCopyMatches = () => {
+     if (!filterLines.length) return
+-    navigator.clipboard.writeText(filterLines.join('\n'))
++    (host ? api.clipboard : navigator.clipboard).writeText(filterLines.join('\n'))
+     setCopyFeedback(true)
+     setTimeout(() => setCopyFeedback(false), 1500)
+   }
+@@ -648,14 +678,15 @@
          {reconnectCountdown !== null && (
            <span className="reconnect-badge">
              Reconnecting in {reconnectCountdown}s…
@@ -1320,7 +1373,7 @@
            <button className={`icon-btn ${showSearch ? 'active' : ''}`} onClick={() => setShowSearch((v) => !v)} title="Search terminal (Ctrl+Shift+F)">
              <Search size={16} />
            </button>
-@@ -665,16 +686,25 @@
+@@ -665,16 +696,25 @@
            <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
              <Highlighter size={16} />
            </button>
@@ -1353,7 +1406,7 @@
              <>
                <button
                  className={`icon-btn ${showTunnels ? 'active' : ''}`}
-@@ -682,13 +712,6 @@
+@@ -682,13 +722,6 @@
                  title="Port forwarding"
                >
                  <Network size={16} />
@@ -1367,7 +1420,7 @@
                </button>
                <button className={`icon-btn ${showSftp ? 'active' : ''}`} onClick={() => setShowSftp((v) => !v)} title="Toggle SFTP panel">
                  <PanelRight size={16} />
-@@ -709,7 +732,7 @@
+@@ -709,7 +742,7 @@
            osHint={
              tab.wslDistro
                ? `Linux (WSL: ${tab.wslDistro})`
@@ -1376,7 +1429,7 @@
            }
          />
        )}
-@@ -739,7 +762,7 @@
+@@ -739,7 +772,7 @@
  
        {/* Snippets panel */}
        {showSnippets && (
@@ -1385,7 +1438,7 @@
            onInsert={(cmd) => { writeToChannel(cmd + '\r'); focusTerminal() }}
            onClose={() => setShowSnippets(false)}
          />
-@@ -747,7 +770,7 @@
+@@ -747,7 +780,7 @@
  
        {/* Tunnel panel */}
        {showTunnels && !tab.isLocal && connected && (
@@ -1394,7 +1447,7 @@
            channelId={tab.channelId}
            sessionId={tab.sessionId || tab.channelId}
            onClose={() => setShowTunnels(false)}
-@@ -893,7 +916,7 @@
+@@ -893,7 +926,7 @@
                }}
              />
              <div className="terminal-wrapper" style={{ flex: 1 }}>
@@ -1403,7 +1456,7 @@
                  key={tab.splitChannelId}
                  channelId={tab.splitChannelId}
                  config={tab.splitConfig}
-@@ -924,7 +947,7 @@
+@@ -924,7 +957,7 @@
                  window.addEventListener('mouseup', onUp)
                }}
              />
@@ -1412,7 +1465,7 @@
                channelId={tab.channelId}
                cwd={cwd}
                width={sftpWidth}
-@@ -937,7 +960,7 @@
+@@ -937,7 +970,7 @@
  
        {/* Remote file editor overlay */}
        {editingFile && (
@@ -1676,7 +1729,7 @@
    const [adding, setAdding] = useState(false)
 --- a/src/components/SplitTerminalPane.jsx
 +++ b/src/components/SplitTerminalPane.jsx
-@@ -18,18 +18,20 @@
+@@ -18,31 +18,33 @@
  
  const MAX_RECONNECT = 5
  
@@ -1701,8 +1754,10 @@
        allowProposedApi: true,
      })
  
-@@ -38,11 +40,11 @@
-     term.loadAddon(new WebLinksAddon())
+     const fitAddon = new FitAddon()
+     term.loadAddon(fitAddon)
+-    term.loadAddon(new WebLinksAddon())
++    term.loadAddon(new WebLinksAddon(host?.openExternal ? (_event, uri) => host.openExternal(uri) : undefined))
      const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
        term,
 -      (text) => window.electronAPI.clipboard.writeText(text),
@@ -1739,7 +1794,7 @@
        clearInterval(reconnectTimer)
        reconnectTimer = null
        attempt++
-@@ -88,28 +90,30 @@
+@@ -88,28 +90,33 @@
      }
  
      const inputDisposer = term.onData((data) => {
@@ -1759,6 +1814,9 @@
        }
      })
 -    const removeError = window.electronAPI.ssh.onError((cid, msg) => {
++    const removeReady = api.ssh.onReady?.((cid) => {
++      if (cid === channelId) api.ssh.resize(channelId, term.cols, term.rows)
++    })
 +    const removeError = api.ssh.onError((cid, msg) => {
        if (cid === channelId) term.write('\r\n\x1b[31mError: ' + msg + '\x1b[0m\r\n')
      })
@@ -1775,13 +1833,14 @@
      if (termRef.current) resizeObs.observe(termRef.current.parentElement)
  
      connect()
-@@ -120,10 +124,11 @@
+@@ -120,10 +127,11 @@
        term.textarea?.removeEventListener('focus', handleFocus)
        if (termInstanceRef) termInstanceRef.current = null
        inputDisposer.dispose()
 +      gridDisposer.dispose()
        osc52ClipboardDisposer?.dispose()
-       removeData(); removeClose(); removeError()
+-      removeData(); removeClose(); removeError()
++      removeData(); removeClose(); removeError(); removeReady?.()
        resizeObs.disconnect()
 -      window.electronAPI.ssh.disconnect(channelId)
 +      api.ssh.disconnect(channelId)

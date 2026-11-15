@@ -13,10 +13,13 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
   let epoch = 0
   const reconnectAttempts = { current: 0 }
   let timer: ReturnType<typeof setTimeout> | undefined
+  let unsubscribeOutput: (() => void) | undefined
+  const revisions = new Map<string, number>()
+  const pendingOutput = new Map<string, Snapshot[]>()
   let terminal: Terminal | null = null
   const project = typeof window.copilotDesktop.myTerminal === 'function' ? projectTerminal(profileId) : null
   const children = new Map<string, { cursor: number; generation: string; status: string }>()
-  const listeners = { data: new Set<Listener>(), close: new Set<Listener>(), error: new Set<Listener>() }
+  const listeners = { data: new Set<Listener>(), close: new Set<Listener>(), error: new Set<Listener>(), ready: new Set<Listener>() }
   const call = (request: Record<string, unknown>, channel = id): Promise<unknown> => window.copilotDesktop.toolTerminal(profileId, { ...request, id: channel })
   const report = (error: unknown): void => { if (!stopped) failed(error instanceof Error ? error.message : String(error)) }
   const subscribe = (event: keyof typeof listeners) => (listener: Listener) => { listeners[event].add(listener); return () => listeners[event].delete(listener) }
@@ -40,25 +43,44 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     }
     finally { connecting = false }
   }
+  // Reuse MyTerminal's onData path for every live pane, including hidden projects.
+  // Cursors deduplicate the initial replay and any poll racing a pushed chunk.
+  const consume = (next: Snapshot, channel = id): void => {
+    const prior = channel === id ? { cursor, generation, status } : children.get(channel)
+    if (!prior || (channel === id && !terminal)) return
+    const becameReady = next.status === 'running' && (next.generation !== prior.generation || prior.status !== 'running')
+    if (next.generation !== prior.generation) {
+      if (prior.generation) emit('data', '\r\n[Reconnected]\r\n', channel)
+      prior.generation = next.generation; prior.cursor = 0
+    }
+    if (next.cursor > prior.cursor) {
+      if (next.start > prior.cursor) emit('data', '\r\n[Older terminal output was discarded]\r\n', channel)
+      emit('data', next.output.slice(Math.max(0, prior.cursor - next.start)), channel)
+      prior.cursor = next.cursor
+    }
+    if (next.status !== prior.status && next.status === 'exited') emit('close', '', channel)
+    if (next.status !== prior.status && next.status === 'error') emit('error', next.error ?? 'Terminal failed', channel)
+    prior.status = next.status
+    if (channel === id) { cursor = prior.cursor; generation = prior.generation; status = prior.status }
+    if (becameReady) emit('ready', '', channel)
+  }
+  const flush = (channel: string): void => {
+    const queued = pendingOutput.get(channel); pendingOutput.delete(channel)
+    for (const next of queued ?? []) consume(next, channel)
+  }
   const poll = async (): Promise<void> => {
-    const requestEpoch = epoch
     try {
-      if (!active || connecting || stopped) return
+      if (connecting || stopped) return
+      const revision = revisions.get(id)
       const next = await call({ action: 'read', cursor, generation }) as Snapshot
-      if (stopped || !active || requestEpoch !== epoch) return
-      changed(next)
-      // Let React attach the view for a new process before replaying its output.
-      if (next.generation !== generation) { generation = next.generation; cursor = 0; status = next.status; return }
-      // Fast SSH banners can arrive during startup. Replay only after the view subscribes.
-      if (!terminal) return
-      if (next.start > cursor) { terminal?.reset(); terminal?.writeln('[Older terminal output was discarded]') }
-      if (next.output) emit('data', next.output)
-      cursor = next.cursor
-      if (next.status !== status && next.status === 'exited') emit('close')
-      if (next.status !== status && next.status === 'error') emit('error', next.error ?? 'Terminal failed')
-      status = next.status
-      for (const channel of children.keys()) if (channel !== next.splitId) children.delete(channel)
+      if (stopped) return
+      if (revision === revisions.get(id)) {
+        changed(next)
+        consume(next)
+      }
+      for (const channel of children.keys()) if (channel !== next.splitId) { children.delete(channel); pendingOutput.delete(channel) }
       for (const [channel, prior] of children) {
+        const childRevision = revisions.get(channel)
         let child: Snapshot
         try { child = await call({ action: 'read', cursor: prior.cursor, generation: prior.generation }, channel) as Snapshot }
         catch (error) {
@@ -66,14 +88,10 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
           if (latest.splitId !== channel) { children.delete(channel); continue }
           throw error
         }
-        if (!active || stopped || requestEpoch !== epoch || !children.has(channel)) return
-        if (prior.generation && child.generation !== prior.generation) emit('data', '\x1bc', channel)
-        if (child.output) emit('data', child.output, channel)
-        if (child.status !== prior.status && child.status === 'exited') emit('close', '', channel)
-        if (child.status !== prior.status && child.status === 'error') emit('error', child.error ?? 'Terminal failed', channel)
-        Object.assign(prior, { cursor: child.cursor, generation: child.generation, status: child.status })
+        if (stopped || !children.has(channel)) return
+        if (childRevision === revisions.get(channel)) consume(child, channel)
       }
-    } catch (error) { if (active && requestEpoch === epoch) report(error) }
+    } catch (error) { if (!stopped && active) report(error) }
     finally { if (!stopped) timer = setTimeout(() => { void poll() }, 200) }
   }
   const send = (request: Record<string, unknown>, channel = id): void => {
@@ -99,8 +117,8 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     if (child) children.set(channel, child)
     try {
       const state = await call({ action: 'read' }, channel) as Snapshot
-      if (stopped || !active || requestEpoch !== epoch) return {}
-      if (child && children.get(channel) === child) child.status = state.status
+      if (stopped) return {}
+      if (child && children.get(channel) === child) { child.status = state.status; flush(channel) }
       return !['running', 'starting'].includes(state.status) ? { error: state.error ?? `Terminal ${state.status}` } : {}
     } catch (error) { if (requestEpoch !== epoch || !active) return {}; report(error); return { error: String(error) } }
   }
@@ -114,8 +132,8 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
   const api = {
     platform: isWindows ? 'win32' : isMac ? 'darwin' : 'linux',
     local: { spawn: attach, write, resize, disconnect },
-    ssh: { connect: attach, write, resize, disconnect, onData: subscribe('data'), onClose: subscribe('close'), onError: subscribe('error'), ping: (channel: string) => window.copilotDesktop.myTerminal(profileId, 'ssh:ping', [channel]) },
-    clipboard: { writeText: (text: string) => navigator.clipboard.writeText(text) },
+    ssh: { connect: attach, write, resize, disconnect, onData: subscribe('data'), onClose: subscribe('close'), onError: subscribe('error'), onReady: subscribe('ready'), ping: (channel: string) => window.copilotDesktop.myTerminal(profileId, 'ssh:ping', [channel]) },
+    clipboard: { writeText: (text: string) => window.copilotDesktop.copyText(text), readText: () => window.copilotDesktop.readClipboardText() },
     filterPresets: { getAll: async () => presets(), save: async (preset: Record<string, unknown>) => savePresets([...presets().filter(p => p.id !== preset.id), preset].slice(-10)), delete: async (key: string) => savePresets(presets().filter(p => p.id !== key)) },
     tunnel: { stopByChannel: disconnect },
     notify: { send: (title: string, body: string) => { if (Notification.permission === 'granted') new Notification(title, { body }) } },
@@ -127,9 +145,20 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     list: async () => (await project.api.tunnel.list()).filter((item: { channelId: string }) => item.channelId === id).map((item: { id: string }) => ({ ...item, id: item.id.slice(id.length + 1) })),
     stopByChannel: disconnect,
   }
-  return { api, store, backgroundLifecycle: true, cancelReconnect: () => send({ action: 'cancel-reconnect' }), broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
+  return { api, store, openExternal: (url: string) => { void window.copilotDesktop.openExternalUrl(url).catch(report) }, backgroundLifecycle: true, cancelReconnect: () => send({ action: 'cancel-reconnect' }), broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term; if (term) queueMicrotask(() => flush(id)) }, getTerminal: () => terminal,
     setActive(value: boolean) { if (active !== value) { epoch++; if (value) void project?.load().catch(report) }; active = value }, connect,
-    start() { stopped = false; void poll() },
-    stop() { stopped = true; if (timer) clearTimeout(timer) },
+    start() {
+      stopped = false
+      unsubscribeOutput = window.copilotDesktop.onToolTerminalOutput?.((profile, next) => {
+        if (stopped || profile !== profileId || (next.id !== id && !children.has(next.id))) return
+        revisions.set(next.id, (revisions.get(next.id) ?? 0) + 1)
+        if (next.id === id && !terminal) {
+          changed(next)
+          const queued = pendingOutput.get(id) ?? []; queued.push(next); pendingOutput.set(id, queued)
+        } else consume(next, next.id)
+      })
+      void poll()
+    },
+    stop() { stopped = true; unsubscribeOutput?.(); pendingOutput.clear(); if (timer) clearTimeout(timer) },
   }
 }

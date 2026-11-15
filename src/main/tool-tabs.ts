@@ -1,7 +1,7 @@
 /** Persistent panel IDs are independent of Chromium page IDs and CLI session IDs. */
 export type TerminalKind = 'local' | 'wsl' | 'ssh'
 export type ToolTabKind = 'new' | 'browser' | 'git' | TerminalKind
-export interface TerminalConfig { host?: string; username?: string; port?: number; identityFile?: string; distro?: string; connectionId?: string; temporary?: boolean; transport?: 'native' | 'managed' }
+export interface TerminalConfig { name?: string; host?: string; username?: string; port?: number; identityFile?: string; distro?: string; connectionId?: string; temporary?: boolean; transport?: 'native' | 'managed' }
 export const isTerminalKind = (kind: string): kind is TerminalKind => ['local', 'wsl', 'ssh'].includes(kind)
 export interface ToolTab {
   id: string

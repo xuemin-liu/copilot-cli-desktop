@@ -37,7 +37,7 @@ export default function SplitTerminalPane({ host, channelId, config, onClose, te
 
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon())
+    term.loadAddon(new WebLinksAddon(host?.openExternal ? (_event, uri) => host.openExternal(uri) : undefined))
     const osc52ClipboardDisposer = registerOsc52ClipboardHandler(
       term,
       (text) => api.clipboard.writeText(text),
@@ -102,6 +102,9 @@ export default function SplitTerminalPane({ host, channelId, config, onClose, te
         scheduleReconnect()
       }
     })
+    const removeReady = api.ssh.onReady?.((cid) => {
+      if (cid === channelId) api.ssh.resize(channelId, term.cols, term.rows)
+    })
     const removeError = api.ssh.onError((cid, msg) => {
       if (cid === channelId) term.write('\r\n\x1b[31mError: ' + msg + '\x1b[0m\r\n')
     })
@@ -126,7 +129,7 @@ export default function SplitTerminalPane({ host, channelId, config, onClose, te
       inputDisposer.dispose()
       gridDisposer.dispose()
       osc52ClipboardDisposer?.dispose()
-      removeData(); removeClose(); removeError()
+      removeData(); removeClose(); removeError(); removeReady?.()
       resizeObs.disconnect()
       api.ssh.disconnect(channelId)
       term.dispose()

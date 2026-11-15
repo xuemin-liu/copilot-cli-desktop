@@ -4,6 +4,7 @@ declare class MyTerminalServices {
   constructor(directory: string, owner: () => BrowserWindow | null)
   invoke(method: string, args: unknown[], owns: (id: string) => boolean): Promise<unknown>
   createTemporary(config: unknown): import('../../src/main/tool-tabs.js').TerminalConfig
+  connectionMetadata(id: string): import('../../src/main/tool-tabs.js').TerminalConfig
   forgetTemporary(id: string): void
   saveTemporary(id: string): void
   authorizeDrop(paths: string[]): void

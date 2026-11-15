@@ -123,3 +123,38 @@ test('a retained split view keeps its output subscription across an in-flight ac
     else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
   }
 })
+
+test('hidden panes consume pushed output beyond the replay cap and deduplicate racing polls', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  const previous = globalThis.window
+  type State = import('./tool-terminal.js').TerminalSnapshot
+  let push!: (profile: string, state: State) => void, complete!: (state: State) => void
+  const received: string[] = [], errors: string[] = []
+  let unsubscribed = false
+  Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+    onToolTerminalOutput: (listener: typeof push) => { push = listener; return () => { unsubscribed = true } },
+    toolTerminal: () => new Promise(resolve => { complete = resolve }),
+  } } })
+  const host = createMyTerminalHost('p', 't', () => {}, message => errors.push(message))
+  const frame = (output: string, cursor: number, generation = 'first'): State => ({ id: 't', generation, status: 'running', output, start: cursor - output.length, cursor })
+  try {
+    host.api.ssh.onData((_id: string, value: string) => received.push(value))
+    host.onTerminal({} as import('@xterm/xterm').Terminal)
+    host.start() // Deliberately never activate the pane.
+    const text = 'EARLY_MARKER' + 'x'.repeat(600000)
+    push('p', frame(text, text.length))
+    complete(frame('stale snapshot', 14))
+    await new Promise(resolve => setTimeout(resolve, 250))
+    complete(frame(text.slice(-524288), text.length))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(received.join(''), text, 'live stream cannot be truncated or duplicated by replay')
+    push('p', frame('new process', 11, 'second'))
+    assert.equal(received.join(''), text + '\r\n[Reconnected]\r\nnew process', 'reconnect appends without clearing scrollback')
+    assert.deepEqual(errors, [])
+  } finally {
+    host.stop(); assert.equal(unsubscribed, true)
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+  }
+})

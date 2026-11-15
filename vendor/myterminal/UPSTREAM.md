@@ -76,6 +76,13 @@ and reset on successful connection. Live process ownership now drives these hand
 project switch does not stop them. Explicit cancellation, tab/project removal and shutdown do stop retries.
 The renderer suppresses its duplicate bell/retry handlers when the main process owns the lifecycle.
 
+The app parity adapter retains the original mounted `TerminalTab` across transport generations and streams
+output into its existing `onData` handlers even for hidden projects. SSH split channels use the same main-owned
+reconnect controller. Native clipboard and external-link callbacks replace browser APIs blocked by the desktop
+window policy. Logging now imports `stripAnsi` directly from the pinned `terminalUtils.js`; public saved-connection
+metadata supplies MyTerminal's original label and SFTP host/port bookmark key without exposing credentials.
+`scripts/myterminal-parity-app-check.mjs` exercises these paths in the real application with an isolated SSH server.
+
 ## Updating the snapshot
 
 This snapshot does not automatically track changes in the separate MyTerminal repository.
