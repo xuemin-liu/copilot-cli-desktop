@@ -31,7 +31,7 @@ original hashes before running the imported tests.
 The SSH manager's keepalive, jump-host, SFTP and double-close history was also inspected and
 its implementation is now used for managed SSH connections. Native OpenSSH remains available
 for existing config aliases. Its reconnect remains explicit; managed SSH reuses the bounded
-countdown while active. This is a source integration into desktop tabs, not a second application window.
+countdown for live background connections as well as active tabs. This is a source integration into desktop tabs, not a second application window.
 
 ## Adapter boundary
 
@@ -68,6 +68,13 @@ countdown while active. This is a source integration into desktop tabs, not a se
   background logs, scoped tunnel IDs, fragmented SOCKS framing and remote forwarding destination checks.
   Saved credentials fail closed when OS encryption is unavailable. The supplied desktop action remains
   current-session **Add to prompt**. OSC52 stays disabled by default.
+
+The bell handler and bounded reconnect countdown originally in `TerminalTab.jsx` are extracted into
+`lifecycle.cjs`, shared by that component and the desktop main process. The extraction retains the
+five-second per-terminal bell cooldown, focus gating, five attempts, increasing five-second retry delay,
+and reset on successful connection. Live process ownership now drives these handlers; a hidden view or
+project switch does not stop them. Explicit cancellation, tab/project removal and shutdown do stop retries.
+The renderer suppresses its duplicate bell/retry handlers when the main process owns the lifecycle.
 
 ## Updating the snapshot
 

@@ -28,8 +28,9 @@ restarting the app turns it off. CLI writes addressed to a terminal ID remain in
 Tabs belong to the project. Switching tabs/projects or hiding the panel preserves their processes. Closing a tab
 terminates its PTY; quitting stops all terminals. Saved tabs return disconnected after restart—**Connect** starts
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes
-can exist at once, including split panes. Managed SSH uses MyTerminal's bounded reconnect countdown while its tab
-is active. Native shells reconnect explicitly. Split panes close with their parent and are not restored on restart.
+can exist at once, including split panes. Managed SSH uses MyTerminal's bounded reconnect countdown even while
+its tab/panel is hidden or another project is active. The five-attempt policy resets after a successful connection;
+Cancel or closing the tab stops a pending retry. Native shells reconnect explicitly. Terminal bells use MyTerminal's five-second notification cooldown while the app is unfocused, including hidden tabs and other projects. Split panes close with their parent and are not restored on restart.
 
 The terminal toolbar includes **Snippets**, **Split pane**, **Start/stop logging**, **Export terminal output**,
 and **Settings & backup**. Settings and snippets are project-scoped. Logging runs in the main process, including

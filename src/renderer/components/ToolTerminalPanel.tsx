@@ -30,13 +30,14 @@ export function ToolTerminalPanel({ profileId, tab, active, promptTargetId }: { 
   }
   return <section className="tool-terminal-panel myterminal-embedded" aria-label="Terminal">
     {state && !['disconnected', 'starting'].includes(state.status) && <div className="tool-terminal-screen">
-      <TerminalTab key={state.generation} tab={descriptor} isActive={active} host={{ ...host, remoteTools: tab.terminal?.transport === 'managed', toolbar: <>
+      <TerminalTab key={state.generation} tab={descriptor} isActive={active} host={{ ...host, reconnectCountdown: state.reconnectCountdown, remoteTools: tab.terminal?.transport === 'managed', toolbar: <>
         <button type="button" title="Terminal settings and backup" onClick={() => setSettingsOpen(true)}>⚙</button>
         <button type="button" title="Add selected text, or recent output, to the current session" disabled={!promptTargetId} onClick={addToPrompt}>Add to prompt</button></> }} />
     </div>}
     {settingsOpen && active && <SettingsDialog host={host} onClose={() => setSettingsOpen(false)} />}
     {error && <div className="tool-terminal-error" role="alert">{error}<button type="button" aria-label="Dismiss terminal error" onClick={() => setError('')}>×</button></div>}
     {state?.status !== 'running' && <footer className="tool-terminal-footer">
+      {state?.reconnectExhausted && <span>Max reconnect attempts reached.</span>}
       <span>{state?.status === 'exited' ? `Exited (${state.exitCode})` : state?.status === 'error' ? state.error : state?.status === 'disconnected' ? 'Disconnected — connect to start this terminal' : 'Starting…'}</span>
       {state && ['disconnected', 'exited', 'error'].includes(state.status) && <button type="button" onClick={() => { setError(''); void host.connect() }}>{state.status === 'disconnected' ? 'Connect' : 'Reconnect'}</button>}
     </footer>}

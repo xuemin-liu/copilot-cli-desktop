@@ -1,3 +1,4 @@
+import { createBellNotifier, createReconnectController } from '../../lifecycle.cjs'
 import React, { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -60,6 +61,7 @@ export default function TerminalTab({ tab, isActive, host }) {
   const [wholeWord, setWholeWord] = useState(false)
   const [fontSize, setFontSize] = useState(settings.defaultFontSize || 14)
   const [reconnectCountdown, setReconnectCountdown] = useState(null)
+  useEffect(() => { if (host?.backgroundLifecycle) setReconnectCountdown(host.reconnectCountdown ?? null) }, [host?.reconnectCountdown])
   const [showSnippets, setShowSnippets] = useState(false)
   const [stickyCmd, setStickyCmd] = useState(null) // { text, line } or null
   const [showStickyCmd, setShowStickyCmd] = useState(false)
@@ -84,7 +86,6 @@ export default function TerminalTab({ tab, isActive, host }) {
   const localReconnectAttemptRef = useRef(0)
   const reconnectAttemptRef = host?.reconnectAttempts || localReconnectAttemptRef
   const isRegexModeRef = useRef(false)
-  const lastBellRef = useRef(0)
   const stickyCmdRef = useRef(null)
   const loggingRef = useRef(false)
   const cwdRawBufferRef = useRef('')
@@ -345,30 +346,20 @@ export default function TerminalTab({ tab, isActive, host }) {
       return true
     })
 
-    // Reconnect logic
+    // Original policy shared with the desktop's process-owned background lifecycle.
+    const reconnect = createReconnectController({
+      attempts: reconnectAttemptRef,
+      changed: setReconnectCountdown,
+      exhausted: () => term.write('\r\n\x1b[31m[Max reconnect attempts reached]\x1b[0m\r\n'),
+      connect: () => { if (host) void host.connect(); else connectSSH() },
+    })
+    reconnectTimerRef.current = reconnect
     const scheduleReconnect = () => {
-      // Managed SSH reuses MyTerminal's bounded retry policy. Native shells reconnect explicitly.
-      if (!isMountedRef.current || tab.isLocal || (host && (!host.remoteTools || !host.isActive()))) return
-      // Guard: cancel any in-progress timer before starting a new one so that
-      // multiple close/error events don't create parallel countdown loops.
-      clearInterval(reconnectTimerRef.current)
-      reconnectTimerRef.current = null
-      const attempt = reconnectAttemptRef.current + 1
-      if (attempt > 5) {
-        term.write('\r\n\x1b[31m[Max reconnect attempts reached]\x1b[0m\r\n')
-        return
-      }
-      reconnectAttemptRef.current = attempt
-      let remaining = Math.min(30, attempt * 5)
-      setReconnectCountdown(remaining)
-      const tick = setInterval(() => {
-        if (!isMountedRef.current || (host && !host.isActive())) { clearInterval(tick); setReconnectCountdown(null); return }
-        remaining--
-        setReconnectCountdown(remaining > 0 ? remaining : null)
-        if (remaining <= 0) { clearInterval(tick); if (host) void host.connect(); else connectSSH() }
-      }, 1000)
-      reconnectTimerRef.current = tick
+      if (!isMountedRef.current || tab.isLocal || host?.backgroundLifecycle || (host && !host.remoteTools)) return
+      reconnect.schedule()
     }
+    const notifyBell = createBellNotifier({ focused: () => document.hasFocus(),
+      notify: (title, body) => api.notify.send(title, body), label: () => tab.label })
 
     const autoStartLogging = () => {
       if (settings.loggingEnabled && !loggingRef.current) {
@@ -407,7 +398,7 @@ export default function TerminalTab({ tab, isActive, host }) {
           }
           setConnected(true)
           reconnectAttemptRef.current = 0
-          clearTimeout(reconnectTimerRef.current)
+          reconnect.connected()
           setReconnectCountdown(null)
           autoStartLogging()
           if (termRef.current?.clientWidth && termRef.current?.clientHeight) fitAddon.fit()
@@ -452,13 +443,7 @@ export default function TerminalTab({ tab, isActive, host }) {
     const removeData = api.ssh.onData((channelId, data) => {
       if (channelId !== tab.channelId) return
 
-      if (data.includes('\x07') && !document.hasFocus()) {
-        const now = Date.now()
-        if (now - lastBellRef.current > 5000) {
-          lastBellRef.current = now
-          api.notify.send('Terminal Bell', `Activity in: ${tab.label}`)
-        }
-      }
+      if (!host?.backgroundLifecycle) notifyBell(data)
 
       const wasInsideOsc = oscSequenceActiveRef.current
       oscSequenceActiveRef.current = updateOscSequenceState(wasInsideOsc, data)
@@ -533,7 +518,7 @@ export default function TerminalTab({ tab, isActive, host }) {
       removeData, removeClose, removeError,
       () => resizeObs.disconnect(),
       () => { if (termContainer) termContainer.removeEventListener('wheel', handleWheel) },
-      () => clearInterval(reconnectTimerRef.current),
+      () => reconnect.dispose(),
       () => {
         isMountedRef.current = false
         if (loggingRef.current && !host?.backgroundLogging) api.logging.stop(tab.channelId)
@@ -683,7 +668,7 @@ export default function TerminalTab({ tab, isActive, host }) {
         {reconnectCountdown !== null && (
           <span className="reconnect-badge">
             Reconnecting in {reconnectCountdown}s…
-            <button onClick={() => { clearInterval(reconnectTimerRef.current); setReconnectCountdown(null) }}>Cancel</button>
+            <button onClick={() => { host?.backgroundLifecycle ? host.cancelReconnect() : reconnectTimerRef.current?.cancel(); setReconnectCountdown(null) }}>Cancel</button>
           </span>
         )}
 

@@ -50,7 +50,7 @@ export class ToolTerminals {
     managed(profileId: string, id: string, config: TerminalConfig, signal: AbortSignal): Promise<PtyLike>
     started(profileId: string, id: string): void
     output(profileId: string, id: string, data: string): void
-    closed(profileId: string, id: string): void
+    closed(profileId: string, id: string, unexpected: boolean): void
   }) {}
   async start(profileId: string, id: string, kind: TerminalKind, config: TerminalConfig, cwd: string | null, env: NodeJS.ProcessEnv): Promise<TerminalSnapshot> {
     if (this.runtimes.has(id)) return this.read(profileId, id)
@@ -73,10 +73,11 @@ export class ToolTerminals {
         runtime.state.cursor += data.length
         runtime.state.start = runtime.state.cursor - runtime.state.output.length
       })
-      pty.onExit(event => { if (!runtime.closed) { runtime.state.status = 'exited'; runtime.state.exitCode = event.exitCode; this.hooks?.closed(profileId, id); pty.dispose?.() } })
+      pty.onExit(event => { if (!runtime.closed) { runtime.state.status = 'exited'; runtime.state.exitCode = event.exitCode; this.hooks?.closed(profileId, id, true); pty.dispose?.() } })
     } catch (error) {
       if (runtime.closed) throw error
       runtime.state.status = 'error'; runtime.state.error = error instanceof Error ? error.message : String(error)
+      this.hooks?.closed(profileId, id, true)
     }
     return this.read(profileId, id)
   }
@@ -105,7 +106,7 @@ export class ToolTerminals {
     const runtime = this.runtimes.get(id)
     if (!runtime || runtime.profileId !== profileId) return
     runtime.closed = true; runtime.abort.abort(); this.runtimes.delete(id)
-    this.hooks?.closed(profileId, id)
+    this.hooks?.closed(profileId, id, false)
     // Close means terminate; Ctrl+C is the separate interrupt action. A shell trapping HUP/TERM must not survive its tab.
     try { runtime.pty?.kill('SIGKILL') } finally { runtime.pty?.dispose?.() }
   }

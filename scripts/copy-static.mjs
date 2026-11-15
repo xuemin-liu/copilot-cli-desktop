@@ -20,6 +20,7 @@ await copyIfExists('node_modules/@xterm/xterm/css/xterm.css', 'dist/src/renderer
 await copyIfExists('build/icon.png', 'dist/build/icon.png')
 await copyIfExists('vendor/myterminal/electron', 'dist/vendor/myterminal/electron')
 await copyIfExists('vendor/myterminal/channels.mjs', 'dist/vendor/myterminal/channels.mjs')
+await copyIfExists('vendor/myterminal/lifecycle.cjs', 'dist/vendor/myterminal/lifecycle.cjs')
 await copyIfExists('vendor/myterminal/src/package.json', 'dist/vendor/myterminal/src/package.json')
 await copyIfExists('vendor/myterminal/src/utils/terminalChannels.js', 'dist/vendor/myterminal/src/utils/terminalChannels.js')
 await copyIfExists('vendor/myterminal/services.cjs', 'dist/vendor/myterminal/services.cjs')
