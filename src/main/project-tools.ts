@@ -83,7 +83,7 @@ export class ProjectToolService {
           }
         }
         for (const tab of tabs) {
-          const entry = candidate.tabs.find((entry: ToolTab) => entry.id === tab.id)
+          const entry = candidate.tabs.find((entry: ToolTab | null) => entry?.id === tab.id)
           if (typeof entry?.label === 'string') tab.label = entry.label.trim().slice(0, 128)
           if (typeof entry?.color === 'string' && /^#[0-9a-f]{6}$/i.test(entry.color)) tab.color = entry.color
         }
