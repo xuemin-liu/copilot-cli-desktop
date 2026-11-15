@@ -205,7 +205,10 @@ export class ProjectToolService {
     this.showProject(profileId)
     await this.action(profileId, { type: 'return', id: tab.id })
     const owner = this.options.owner()
-    if (owner && !owner.isDestroyed()) { owner.restore(); owner.show(); owner.focus() }
+    if (owner && !owner.isDestroyed()) {
+      if (owner.isMinimized()) owner.restore()
+      owner.show(); owner.focus()
+    }
   }
   private reconcile(profileId: string): void {
     if (this.stopping) return

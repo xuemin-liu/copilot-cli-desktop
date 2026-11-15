@@ -60,7 +60,7 @@ if (!process.versions.electron) {
       const loaded = Date.now() + 20_000
       while(page.isLoading() || !page.getURL().endsWith('/popout')) { assert.ok(Date.now() < loaded); await delay(30) }
       await page.executeJavaScript(`document.querySelector('#note').value='Preserve my page'`)
-      for(let cycle=0;cycle<3;cycle++) {
+      for(let cycle=0;cycle<4;cycle++) {
         await click('.tool-context button')
         await until('document.querySelector(".tool-context button")?.textContent==="Return to panel"', 'pop-out updates the button')
         await delay(150)
@@ -90,6 +90,23 @@ if (!process.versions.electron) {
           await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)}, {type:'add',kind:'git'})`)
           await ui(`window.copilotDesktop.activateProfile(${JSON.stringify(p2.id)})`)
         }
+        if (cycle === 1 || cycle === 3) {
+          win.maximize()
+          const maximized = Date.now() + 5000
+          while (!win.isMaximized()) { assert.ok(Date.now() < maximized); await delay(30) }
+        }
+        if (cycle === 2) {
+          win.unmaximize()
+          const normal = Date.now() + 5000
+          while (win.isMaximized()) { assert.ok(Date.now() < normal); await delay(30) }
+        }
+        await delay(100)
+        const mainBounds = win.getBounds()
+        if (cycle === 2 || cycle === 3) {
+          win.minimize()
+          const minimized = Date.now() + 5000
+          while (!win.isMinimized()) { assert.ok(Date.now() < minimized); await delay(30) }
+        }
         const point = await toolbar.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()')
         popup.focus(); toolbar.focus()
         toolbar.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
@@ -98,6 +115,9 @@ if (!process.versions.electron) {
         assert.equal((await ui('window.copilotDesktop.getState()')).activeProfileId, p1.id)
         assert.equal((await current()).activeId, tab.id)
         assert.equal((await current()).visible, true)
+        assert.equal(win.isMinimized(), false, 'return reveals a minimized main window')
+        assert.equal(win.isMaximized(), cycle === 1 || cycle === 3, 'return preserves maximized main window state')
+        assert.deepEqual(win.getBounds(), mainBounds, 'return preserves main window size and position')
         assert.ok(popup.isDestroyed()); assert.ok(toolbar.isDestroyed(), 'toolbar renderer is disposed on return')
         await until('document.querySelector(".browser-viewport") && !document.querySelector(".browser-viewport-detached")', 'returned page removes detached placeholder')
 
@@ -117,7 +137,7 @@ if (!process.versions.electron) {
       closing.close()
       const closed = Date.now() + 20_000
       while (!page.isDestroyed() || !closingToolbar.isDestroyed()) { assert.ok(Date.now() < closed, 'closing popup disposes page and toolbar'); await delay(30) }
-      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:3,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,darkPlaceholder:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true},null,2))
+      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:4,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,darkPlaceholder:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true,maximizedStatePreserved:true,minimizedWindowRestored:true},null,2))
       console.log('Browser pop-out button actual-app check passed:',directory)
     } finally {
       for(const tab of (await current()).tabs) await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'close',id:${JSON.stringify(tab.id)}})`)
