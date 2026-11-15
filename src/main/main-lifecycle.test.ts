@@ -25,6 +25,7 @@ const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   shellCalls: { action: string; target: string }[]
   createTestWindow(): void
+  flushToolPersistence(): Promise<boolean>
   /** Answer every native message box with this button, and collect what each one asked. */
   answerMessageBoxes(response: number, beforeAnswer?: () => void): { title: string; detail: string; buttons: string[] }[]
   /** Settles once every worktree cleanup started by a tab close has finished. */
@@ -270,6 +271,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const lifecycleTest = {
           shellCalls: shell.calls,
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
+          async flushToolPersistence() { await projectToolService?.writing; return projectToolService?.profileRecoveryRequired; },
           refreshAppMenu: installApplicationMenu,
           quitCalls: () => app.quitCalls,
           windowFor: (tabId) => tabId ? sessionWindows.get(tabId) : mainWindow,
@@ -2427,6 +2429,24 @@ test('a restored tab starts in its existing worktree, or in the project folder o
   assert.ok(sameFolderText(harness.spawns[1]!.cwd, feature), harness.spawns[1]!.cwd)
   const tabs = (await harness.request('desktop:get-state')).tabs
   assert.equal(tabs.find((tab) => tab.title === 'Gone')?.launchWorktreePath, undefined)
+}))
+
+test('saved tool tab metadata skips malformed entries while restoring valid tabs', async()=>fixture(async(harness,directory)=>{
+  const {profile}=configure(harness,directory)
+  const id='01234567-89ab-cdef-0123-456789abcdef'
+  await writeFile(join(directory,'workspace-tool-tabs-v2.json'),JSON.stringify({version:2,projects:[{
+    profileId:profile.id,browserProfileId:'01234567-89ab-4def-8123-456789abcdee',
+    tabs:[null,{id,kind:'local',label:'Build shell',color:'#58a6ff'}],activeId:id,visible:false,width:420,
+  }]}))
+  harness.createTestWindow()
+  const state=await harness.request<any>('desktop:tools-state')
+  assert.equal(state.projects.length,1)
+  assert.equal(state.projects[0].tabs.length,1)
+  assert.equal(state.projects[0].tabs[0].label,'Build shell')
+  assert.equal(state.projects[0].tabs[0].color,'#58a6ff')
+  await harness.request('desktop:tools-action',profile.id,{type:'metadata',id,label:'Renamed shell'})
+  assert.equal(await harness.flushToolPersistence(),false)
+  assert.ok((await readFile(join(directory,'workspace-tool-tabs-v2.json'),'utf8')).includes('Renamed shell'))
 }))
 
 test('project Local Overrides are separate from legacy CLI tab preferences', async()=>fixture(async(harness,directory)=>{
