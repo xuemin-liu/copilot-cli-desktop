@@ -600,6 +600,9 @@ export class ProjectToolService {
     const group = this.groups.get(id); this.groups.delete(id)
     for (const [sessionId, bridge] of this.bridges) if (bridge.profileId === id) await this.stopBridge(sessionId)
     if (group) await group.browser.dispose()
+    // The same folder receives the same ID when added again. Block it only until
+    // cleanup succeeds; removed tabs and closed bridges still revoke old work.
+    this.removedProjects.delete(id)
     this.save()
   }
   async dispose(): Promise<void> {
