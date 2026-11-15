@@ -2160,6 +2160,15 @@
        await store.loadSessions()
      }
    }
+@@ -85,7 +90,7 @@
+     if (!acc[key]) acc[key] = []
+     acc[key].push(s)
+     return acc
+-  }, {})
++  }, Object.create(null))
+   const groupKeys = Object.keys(grouped).sort((a, b) => {
+     if (!a) return 1
+     if (!b) return -1
 @@ -94,28 +99,28 @@
  
    const SessionItem = ({ s }) => (

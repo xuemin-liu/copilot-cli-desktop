@@ -90,7 +90,7 @@ export default function Sidebar({ host }) {
     if (!acc[key]) acc[key] = []
     acc[key].push(s)
     return acc
-  }, {})
+  }, Object.create(null))
   const groupKeys = Object.keys(grouped).sort((a, b) => {
     if (!a) return 1
     if (!b) return -1
