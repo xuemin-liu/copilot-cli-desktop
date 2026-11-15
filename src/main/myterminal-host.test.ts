@@ -219,3 +219,37 @@ test('hidden transport reconnect can restore its grid but cannot send terminal i
     else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
   }
 })
+
+test('mount replays buffered history before queued live chunks, including an in-flight first read', async () => {
+  const bundle = await build({ entryPoints: ['src/renderer/myterminal-host.ts'], bundle: true, platform: 'node', format: 'esm', write: false })
+  const { createMyTerminalHost } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0]!.contents).toString('base64')}`) as typeof import('../renderer/myterminal-host.js')
+  const previous = globalThis.window
+  type State = import('./tool-terminal.js').TerminalSnapshot
+  try {
+    for (const holdFirst of [false, true]) {
+      let push!: (profile: string, state: State) => void, finishFirst!: (state: State) => void, first = true, live = false
+      const received: string[] = []
+      const frame = (output: string, start = 0): State => ({ id: 't', generation: 'g', status: 'running', output, start, cursor: start + output.length })
+      Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: { copilotDesktop: {
+        onToolTerminalOutput: (fn: typeof push) => { push = fn; return () => {} },
+        toolTerminal: async () => {
+          if (first) { first = false; if (holdFirst) return new Promise(resolve => { finishFirst = resolve }) }
+          return frame(live ? 'HISTORY\r\nLIVE\r\n' : 'HISTORY\r\n')
+        },
+      } } })
+      const host = createMyTerminalHost('p', 't', () => {}, message => assert.fail(message))
+      try {
+        host.api.ssh.onData((_id: string, value: string) => received.push(value)); host.start()
+        await new Promise(resolve => setTimeout(resolve, 10))
+        live = true; push('p', frame('LIVE\r\n', 9))
+        host.onTerminal({} as import('@xterm/xterm').Terminal)
+        if (holdFirst) finishFirst(frame('HISTORY\r\n'))
+        await new Promise(resolve => setTimeout(resolve, 300))
+        assert.equal(received.join(''), 'HISTORY\r\nLIVE\r\n')
+      } finally { host.stop() }
+    }
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(globalThis, 'window')
+    else Object.defineProperty(globalThis, 'window', { configurable: true, writable: true, value: previous })
+  }
+})
