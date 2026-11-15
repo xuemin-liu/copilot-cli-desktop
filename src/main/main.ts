@@ -271,6 +271,7 @@ function projectTools(): ProjectToolService {
     session: id => tabsState.tabs.find(tab => tab.id === id),
     currentSession: () => tabsState.tabs.find(tab => tab.id === tabsState.activeTabId && tab.workspaceProfileId === desktopConfig.activeProfileId)?.id ?? null,
     currentProject: () => desktopConfig.activeProfileId ?? null,
+    activateProject: id => activateProfile(id),
     defaults: () => ({ shared: desktopConfig.browserProfile === 'shared', overrides: desktopConfig.browserOverrides }),
     browserOptions: () => ({ history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(), reportError: logBrowserError,
       onAppShortcut: name => { if (name === 'git-toggle') { toggleGitPanel(); return true } return false } }),

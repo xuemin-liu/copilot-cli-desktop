@@ -592,6 +592,8 @@ button:disabled {
 .browser-tabs button[aria-selected="true"], .browser-tabs button[aria-pressed="true"] { border-color: #4f88ff; color: #a9c9ff; }
 .browser-viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fff; }
 .browser-hint { text-align: center; color: #596477; margin-top: 50px; }
+.browser-viewport-detached { background: #0b0e14; }
+.browser-viewport-detached .browser-hint { color: #a9b6ca; }
 .browser-certificate { height: 100%; box-sizing: border-box; overflow: auto; padding: 32px 24px; color: #e6edf3; background: #0b0e14; font-size: 13px; overflow-wrap: anywhere; }
 .browser-certificate h2 { margin: 0 0 12px; color: #ff8c95; font-size: 18px; font-weight: 600; }
 .browser-certificate p { margin: 0 0 10px; max-width: 60ch; }

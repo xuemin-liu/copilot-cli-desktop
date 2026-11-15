@@ -30,6 +30,7 @@ interface Options {
   session(id: string): { workspaceProfileId: string; status: string; sideChat?: boolean; remote?: boolean; sessionPermissionPreset?: string | null } | undefined
   currentSession(): string | null
   currentProject?(): string | null
+  activateProject?(id: string): Promise<unknown>
   defaults(): { shared: boolean; overrides: 'shared' | 'private' }
   browserOptions(): Partial<NonNullable<ConstructorParameters<typeof BrowserDebug>[2]>>
   changed(): void
@@ -181,6 +182,7 @@ export class ProjectToolService {
           if (active?.resource && !owner.isDestroyed()) owner.webContents.send('desktop:browser-shortcut', active.resource, name)
         },
         onNewTab: () => { void this.action(project.profileId, { type: 'add', kind: 'new' }).catch(this.options.error) },
+        onReturnToPanel: pageId => { void this.returnBrowserToPanel(project.profileId, pageId).catch(this.options.error) },
         changed: () => this.reconcile(project.profileId), endpointPath: join(this.options.userData, 'unused-project-control', randomUUID()) })
       browser.setBounds(null)
       group = { browser, generation: randomUUID() }
@@ -192,6 +194,18 @@ export class ProjectToolService {
     tab.resource = `tool:${tab.id}`
     group.browser.selectUiPage(tab.pageId)
     if (tab.url) void group.browser.navigatePage(tab.pageId, tab.url).catch(this.options.error)
+  }
+  private async returnBrowserToPanel(profileId: string, pageId: number): Promise<void> {
+    await this.options.activateProject?.(profileId)
+    // Revalidate after activation: the workspace or page may have closed while awaiting it.
+    const project = this.projects.get(profileId)
+    const tab = project?.tabs.find(tab => tab.pageId === pageId)
+    if (this.stopping || !tab || !this.groups.get(profileId)?.browser.hasPage(pageId)) return
+    await this.action(profileId, { type: 'select', id: tab.id })
+    this.showProject(profileId)
+    await this.action(profileId, { type: 'return', id: tab.id })
+    const owner = this.options.owner()
+    if (owner && !owner.isDestroyed()) { owner.restore(); owner.show(); owner.focus() }
   }
   private reconcile(profileId: string): void {
     if (this.stopping) return

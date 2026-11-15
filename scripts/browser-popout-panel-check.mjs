@@ -14,7 +14,7 @@ if (!process.versions.electron) {
   try { assert.equal(await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }), 0) }
   finally { clearTimeout(timer) }
 } else {
-  const { app, BrowserWindow, webContents } = await import('electron')
+  const { app, BaseWindow, BrowserWindow, webContents } = await import('electron')
   const directory = join(out, `run-${Date.now()}`)
   app.setPath('userData', join(directory, 'userdata'))
   void run().catch(error => { console.error(error); app.exit(1) })
@@ -48,7 +48,6 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}\n${await ui('document.body.innerText')}`)
     }
     const click = selector => ui(`document.querySelector(${JSON.stringify(selector)}).click()`)
-    const type = (selector, value) => ui(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(element.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set.call(element,${JSON.stringify(value)}); element.dispatchEvent(new Event('input',{bubbles:true})); })()`)
     const state = () => ui('window.copilotDesktop.toolsState()')
     await until('document.querySelector(".session-pane")', 'initial CLI tab')
     await ui('(async()=>{for(const tab of (await window.copilotDesktop.getState()).tabs) await window.copilotDesktop.unloadTab(tab.id)})()')
@@ -58,7 +57,8 @@ if (!process.versions.electron) {
       await until('document.querySelector(".tool-context button")?.textContent==="Open in window"', 'initial open button')
       const tab=(await current()).tabs.find(t=>t.kind==='browser')
       const page=webContents.fromId(tab.pageId)
-      while(page.isLoading()) await delay(30)
+      const loaded = Date.now() + 20_000
+      while(page.isLoading() || !page.getURL().endsWith('/popout')) { assert.ok(Date.now() < loaded); await delay(30) }
       await page.executeJavaScript(`document.querySelector('#note').value='Preserve my page'`)
       for(let cycle=0;cycle<3;cycle++) {
         await click('.tool-context button')
@@ -66,8 +66,41 @@ if (!process.versions.electron) {
         await delay(150)
         assert.equal(await ui('document.querySelector(".tool-context button").textContent'),'Return to panel','label stays correct after the action reply')
         assert.equal(await page.executeJavaScript(`document.querySelector('#note').value`),'Preserve my page')
-        await click('.tool-context button')
-        await until('document.querySelector(".tool-context button")?.textContent==="Open in window"', 'return updates the button')
+        const popup = BaseWindow.getAllWindows().find(window => window.id !== win.id && window.contentView.children.some(view => view.webContents?.id === page.id))
+        assert.ok(popup, 'page is in its own window')
+        const toolbar = popup.contentView.children.find(view => view.webContents && view.webContents.id !== page.id)?.webContents
+        assert.ok(toolbar, 'popup has its own app-owned return toolbar')
+        await until('document.querySelector(".browser-viewport-detached")', 'detached placeholder appears')
+        assert.equal(await ui('getComputedStyle(document.querySelector(".browser-viewport-detached")).backgroundColor'), 'rgb(11, 14, 20)')
+        const ready = Date.now() + 20_000
+        while (toolbar.isLoading()) { assert.ok(Date.now() < ready); await delay(30) }
+        assert.equal(await toolbar.executeJavaScript('document.querySelector("button").textContent'), 'Return to panel')
+        assert.equal(await toolbar.executeJavaScript('typeof window.copilotDesktop'), 'undefined', 'remote browser controls receive no desktop bridge')
+        popup.setContentSize(760, 530)
+        await delay(100)
+        const bounds = popup.contentView.children.find(view => view.webContents?.id === page.id).getBounds()
+        const [popupWidth, popupHeight] = popup.getContentSize()
+        assert.deepEqual(bounds, { x: 0, y: 40, width: popupWidth, height: popupHeight - 40 }, 'toolbar reserves space without covering the page')
+        if (cycle === 0) {
+          await writeFile(join(directory, 'detached-panel.png'), (await win.webContents.capturePage()).toPNG())
+          await writeFile(join(directory, 'popup-toolbar.png'), (await toolbar.capturePage()).toPNG())
+        }
+        if (cycle === 1) await click('.session-tools-toggle')
+        if (cycle === 2) {
+          await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)}, {type:'add',kind:'git'})`)
+          await ui(`window.copilotDesktop.activateProfile(${JSON.stringify(p2.id)})`)
+        }
+        const point = await toolbar.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()')
+        popup.focus(); toolbar.focus()
+        toolbar.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        toolbar.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+        await until('document.querySelector(".tool-context button")?.textContent==="Open in window"', 'popup return button restores the panel')
+        assert.equal((await ui('window.copilotDesktop.getState()')).activeProfileId, p1.id)
+        assert.equal((await current()).activeId, tab.id)
+        assert.equal((await current()).visible, true)
+        assert.ok(popup.isDestroyed()); assert.ok(toolbar.isDestroyed(), 'toolbar renderer is disposed on return')
+        await until('document.querySelector(".browser-viewport") && !document.querySelector(".browser-viewport-detached")', 'returned page removes detached placeholder')
+
         assert.equal((await current()).tabs.find(t=>t.id===tab.id).detached,false)
         assert.equal(webContents.fromId(tab.pageId),page)
         assert.equal(await page.executeJavaScript(`document.querySelector('#note').value`),'Preserve my page')
@@ -78,7 +111,13 @@ if (!process.versions.electron) {
         const reply=await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:${JSON.stringify(type)},id:${JSON.stringify(tab.id)}})`)
         assert.equal(reply.projects.find(p=>p.profileId===p1.id).tabs.find(t=>t.id===tab.id).detached,type==='pop-out')
       }
-      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:3,pageStatePreserved:true,actionRepliesCurrent:true},null,2))
+      await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'pop-out',id:${JSON.stringify(tab.id)}})`)
+      const closing = BaseWindow.getAllWindows().find(window => window.id !== win.id && window.contentView.children.some(view => view.webContents?.id === page.id))
+      const closingToolbar = closing.contentView.children.find(view => view.webContents && view.webContents.id !== page.id).webContents
+      closing.close()
+      const closed = Date.now() + 20_000
+      while (!page.isDestroyed() || !closingToolbar.isDestroyed()) { assert.ok(Date.now() < closed, 'closing popup disposes page and toolbar'); await delay(30) }
+      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:3,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,darkPlaceholder:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true},null,2))
       console.log('Browser pop-out button actual-app check passed:',directory)
     } finally {
       for(const tab of (await current()).tabs) await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'close',id:${JSON.stringify(tab.id)}})`)

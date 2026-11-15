@@ -35,6 +35,7 @@ import { CertificateExceptions, certificateCanProceed, certificateHost, type Cer
 import { BrowserZoom, nextZoomFactor, zoomSite } from './browser-zoom.js'
 import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './browser-context-menu.js'
 import { BrowserHistory } from './browser-history.js'
+import { BROWSER_POPOUT_TOOLBAR_HEIGHT, createBrowserPopoutToolbar } from './browser-popout-toolbar.js'
 import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_LOADED_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, overridesFromPreferences, popupOverrideResponseScript, type OverridesSetting } from './browser-overrides.js'
 
 const MAX_ENTRIES = 300
@@ -136,6 +137,7 @@ export class BrowserDebug {
   /** Whether a page asking for a window gets one: only while the browser is in its own window. Beside the terminal,
    * popups stay tabs. */
   private readonly popupWindows: () => boolean
+  private readonly onReturnToPanel: ((pageId: number) => void) | undefined
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
@@ -151,9 +153,10 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void; onReturnToPanel?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
+    this.onReturnToPanel = options.onReturnToPanel
     this.onNewTab = options.onNewTab
     this.canCreatePage = options.canCreatePage ?? (() => null)
     this.popupWindows = options.popupWindows ?? (() => false)
@@ -294,14 +297,16 @@ export class BrowserDebug {
     const page = this.pages.get(id); if (!page) throw new Error('Browser page closed')
     if (page.window) { page.window.show(); page.window.focus(); return }
     this.detach(page)
-    page.window = new BaseWindow({ width: 1000, height: 750, title: page.contents.getTitle() || 'Browser' })
-    this.showInWindow(page, page.window)
+    page.window = new BaseWindow({ width: 1000, height: 750, minWidth: 280, minHeight: 180, backgroundColor: '#171b22', title: page.contents.getTitle() || 'Browser' })
+    page.window.setMenu(null)
+    this.showInWindow(page, page.window, true)
     this.changed()
   }
   returnPage(id: number): void {
     const page = this.pages.get(id); if (!page?.window) return
     const window = page.window
     window.contentView.removeChildView(page.view)
+    this.detach(page)
     page.window = null
     window.destroy()
     this.layout(); this.changed()
@@ -531,14 +536,25 @@ export class BrowserDebug {
   }
 
   /** The page fills its window, which follows its title and closes with it. */
-  private showInWindow(page: BrowserPage, window: BaseWindow): void {
+  private showInWindow(page: BrowserPage, window: BaseWindow, returnToPanel = false): void {
     const { contents, view } = page
+    const toolbar = returnToPanel ? createBrowserPopoutToolbar(() => {
+      if (page.window !== window || this.disposed) return
+      if (this.onReturnToPanel) this.onReturnToPanel(contents.id)
+      else {
+        this.selectPage(contents.id); this.returnPage(contents.id)
+        if (!this.owner.isDestroyed()) { this.owner.restore(); this.owner.show(); this.owner.focus() }
+      }
+    }, this.reportError) : null
     const fit = (): void => {
       if (window.isDestroyed()) return
       const [width = 0, height = 0] = window.getContentSize()
-      view.setBounds({ x: 0, y: 0, width, height })
+      const top = toolbar ? Math.min(BROWSER_POPOUT_TOOLBAR_HEIGHT, height) : 0
+      toolbar?.setBounds({ x: 0, y: 0, width, height: top })
+      view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) })
     }
     window.contentView.addChildView(view)
+    if (toolbar) window.contentView.addChildView(toolbar)
     view.setVisible(true)
     fit()
     window.on('resize', fit)
@@ -564,7 +580,10 @@ export class BrowserDebug {
         if (leave && !contents.isDestroyed()) contents.close()
       })
     })
-    window.on('closed', () => { if (page.window === window && !contents.isDestroyed()) contents.close() })
+    window.on('closed', () => {
+      if (toolbar && !toolbar.webContents.isDestroyed()) toolbar.webContents.close()
+      if (page.window === window && !contents.isDestroyed()) contents.close()
+    })
     contents.on('page-title-updated', (_event, title) => { if (!window.isDestroyed()) window.setTitle(title) })
     window.show()
   }
