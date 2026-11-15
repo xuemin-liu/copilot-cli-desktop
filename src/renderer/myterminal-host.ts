@@ -127,7 +127,7 @@ export function createMyTerminalHost(profileId: string, id: string, changed: (st
     list: async () => (await project.api.tunnel.list()).filter((item: { channelId: string }) => item.channelId === id).map((item: { id: string }) => ({ ...item, id: item.id.slice(id.length + 1) })),
     stopByChannel: disconnect,
   }
-  return { api, store, reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
+  return { api, store, broadcast: (text: string) => send({ action: 'broadcast', text }), reconnectAttempts, features: Boolean(project), backgroundLogging: Boolean(project), isActive: () => active, onTerminal: (term: Terminal | null) => { terminal = term }, getTerminal: () => terminal,
     setActive(value: boolean) { if (active !== value) { epoch++; if (value) void project?.load().catch(report) }; active = value }, connect,
     start() { stopped = false; void poll() },
     stop() { stopped = true; if (timer) clearTimeout(timer) },

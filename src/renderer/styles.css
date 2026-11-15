@@ -1667,6 +1667,20 @@ button:disabled {
 .myterminal-embedded .dialog { max-width:calc(100vw - 32px); max-height:calc(100vh - 48px); }
 .myterminal-embedded .dialog-body { overflow-y:auto; }
 .myterminal-connections { padding:10px 0; border-bottom:1px solid var(--border); }
+.myterminal-embedded .myterminal-connection-sidebar { width:100%; min-width:0; border:0; background:transparent; }
+.myterminal-embedded .myterminal-connection-sidebar .sidebar-header { flex-wrap:wrap; height:auto; padding:8px 0; }
+.myterminal-embedded .myterminal-connection-sidebar .session-info { display:flex; flex-direction:column; flex:1; min-width:0; text-align:left; }
+.myterminal-embedded .myterminal-connection-sidebar .session-list { max-height:340px; overflow:auto; }
+.workspace-tabbar-host { flex:none; min-width:0; }
+.workspace-tabbar-host .tabbar { min-width:0; height:auto; min-height:40px; padding:4px 6px; }
+.workspace-tabbar-host .tabbar-tabs { min-width:0; gap:3px; }
+.workspace-tabbar-host .tab { padding:0; min-width:0; max-width:240px; border-radius:5px; }
+.workspace-tabbar-host .tab > [role="tab"] { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.workspace-tabbar-host .tabbar-actions { flex:none; gap:3px; }
+.workspace-tabbar-host .tabbar-actions button { width:auto; min-width:28px; height:30px; white-space:nowrap; }
+.workspace-tabbar-host .broadcasting { border-bottom:2px solid #d29922; }
+.workspace-tabbar-host .broadcast-active { color:#d29922; gap:4px; }
+.workspace-tabbar-host .tab-ctx-menu { position:fixed; width:230px; z-index:1000; }
 .myterminal-connection-actions { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
 .myterminal-connection-row { display:flex; gap:6px; margin-top:6px; }
 .myterminal-connection-row > button:first-child { flex:1; overflow:hidden; text-overflow:ellipsis; text-align:left; }

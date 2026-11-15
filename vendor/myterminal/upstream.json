@@ -32,6 +32,8 @@
     "tests/sessionSecurity.test.js": "1db751a5126f366f6747291a2fe27b3a51d9236cc604dea1ec6bbe6a5c9805a9",
     "tests/terminalClipboardUtils.test.js": "25543c129e006475bcd74e29bc425bbc6d37c6dc869cb951019bcb29ae0205b5",
     "tests/terminalSessionUtils.test.js": "5d5cbea2ce12d315b6d595ef2a0bcea79336a2bb79a8034374bf5e9fdd3ce12b",
-    "tests/terminalUtils.test.js": "d481a1a1993b7c614c687b0944f15289991f38ca45c04f681f4470fcaf56628a"
+    "tests/terminalUtils.test.js": "d481a1a1993b7c614c687b0944f15289991f38ca45c04f681f4470fcaf56628a",
+    "src/components/Sidebar.jsx": "b7414cc305d6e30bb06bf91bc47f370da76775733b221a03993e365f3f9b4996",
+    "src/components/TabBar.jsx": "6ab52c592e6000e452e41750c54e17db8f210221dd6bf4deeed7755a14159584"
   }
 }

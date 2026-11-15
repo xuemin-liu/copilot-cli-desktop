@@ -306,6 +306,15 @@
    store.set('settings-prefs', merged)
    return merged
  })
+@@ -371,7 +273,7 @@
+   // blocks the main-process event loop.
+   const { execFile } = require('child_process')
+   return new Promise((resolve) => {
+-    execFile('wsl.exe', ['--list', '--quiet'], { encoding: 'buffer', timeout: 5000 }, (err, stdout) => {
++    execFile(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wsl.exe'), ['--list', '--quiet'], { encoding: 'buffer', timeout: 5000, windowsHide: true }, (err, stdout) => {
+       if (err) { resolve([]); return }
+       const distros = stdout
+         .toString('utf16le')
 @@ -459,74 +361,6 @@
    clipboard.writeText(text)
  })
@@ -382,7 +391,7 @@
 -  }
 -})
 +
-+return { resolveSavedSessionConfig, logging }
++return { resolveSavedSessionConfig, encryptSession, decryptSession, logging }
 +}
 --- a/electron/ssh-manager.js
 +++ b/electron/ssh-manager.js
@@ -965,7 +974,7 @@
        if (e.ctrlKey && !e.shiftKey && e.key === 'f') { e.preventDefault(); setShowFilter((v) => !v) }
        if (e.ctrlKey && (e.key === '=' || e.key === '+')) { e.preventDefault(); setFontSize((s) => Math.min(32, s + 1)) }
        if (e.ctrlKey && e.key === '-') { e.preventDefault(); setFontSize((s) => Math.max(8, s - 1)) }
-@@ -216,14 +239,14 @@
+@@ -216,14 +239,16 @@
  
    // Helper: write to the right channel type
    const writeToChannel = (data, channelId = tab.channelId) => {
@@ -976,14 +985,17 @@
    // Broadcast write
    const broadcastWrite = (data) => {
 -    const { broadcastMode, tabs } = useSessionStore.getState()
-+    const { broadcastMode, tabs } = sessionStore.getState()
-     if (broadcastMode) {
+-    if (broadcastMode) {
 -      writeToBroadcastTargets(tabs, data)
++    const { broadcastMode, tabs } = sessionStore.getState()
++    if (broadcastMode && host?.broadcast) {
++      host.broadcast(data)
++    } else if (broadcastMode) {
 +      writeToBroadcastTargets(tabs, data, api)
      } else {
        writeToChannel(data)
      }
-@@ -234,6 +257,7 @@
+@@ -234,6 +259,7 @@
      isMountedRef.current = true
      reconnectAttemptRef.current = 0
  
@@ -991,7 +1003,7 @@
      const term = new Terminal({
        theme: {
          background: '#0d1117', foreground: '#c9d1d9', cursor: '#58a6ff',
-@@ -258,10 +282,13 @@
+@@ -258,10 +284,13 @@
      term.loadAddon(fitAddon)
      term.loadAddon(new WebLinksAddon())
      term.loadAddon(searchAddon)
@@ -1007,7 +1019,7 @@
      )
  
      terminalInstanceRef.current = term
-@@ -269,7 +296,8 @@
+@@ -269,7 +298,8 @@
      searchAddonRef.current = searchAddon
  
      term.open(termRef.current)
@@ -1017,7 +1029,7 @@
  
      // Track pane focus so tab activation can restore it to the right terminal
      const handleTermFocus = () => { focusedPaneRef.current = 'main' }
-@@ -294,13 +322,13 @@
+@@ -294,13 +324,13 @@
      term.attachCustomKeyEventHandler((e) => {
        if (e.type !== 'keydown') return true
        if (e.ctrlKey && !e.shiftKey && !e.altKey) {
@@ -1033,7 +1045,7 @@
            if (isLinux && !!term.getSelection()) {
              setCtrlCDialog({ hasSelection: true })
              return false
-@@ -317,7 +345,8 @@
+@@ -317,7 +347,8 @@
  
      // Reconnect logic
      const scheduleReconnect = () => {
@@ -1043,7 +1055,7 @@
        // Guard: cancel any in-progress timer before starting a new one so that
        // multiple close/error events don't create parallel countdown loops.
        clearInterval(reconnectTimerRef.current)
-@@ -331,10 +360,10 @@
+@@ -331,10 +362,10 @@
        let remaining = Math.min(30, attempt * 5)
        setReconnectCountdown(remaining)
        const tick = setInterval(() => {
@@ -1056,7 +1068,7 @@
        }, 1000)
        reconnectTimerRef.current = tick
      }
-@@ -342,32 +371,32 @@
+@@ -342,32 +373,32 @@
      const autoStartLogging = () => {
        if (settings.loggingEnabled && !loggingRef.current) {
          const logDir = settings.logDirectory || ''
@@ -1096,7 +1108,7 @@
            if (result?.error) {
              setError(result.error)
              term.write('\r\n\x1b[31mError: ' + result.error + '\x1b[0m\r\n')
-@@ -379,8 +408,8 @@
+@@ -379,8 +410,8 @@
            clearTimeout(reconnectTimerRef.current)
            setReconnectCountdown(null)
            autoStartLogging()
@@ -1107,7 +1119,7 @@
          })
        }
      }
-@@ -418,14 +447,14 @@
+@@ -418,14 +449,14 @@
  
      // SSH/local data → terminal
      let cwdTimer = null
@@ -1124,7 +1136,7 @@
          }
        }
  
-@@ -436,8 +465,8 @@
+@@ -436,8 +467,8 @@
        term.write(shouldColorize ? colorizeOutput(data) : data)
  
        // Session logging — fire-and-forget
@@ -1135,7 +1147,7 @@
        }
  
        const plain = stripAnsi(data)
-@@ -460,18 +489,18 @@
+@@ -460,18 +491,18 @@
        }
      })
  
@@ -1157,7 +1169,7 @@
        if (channelId === tab.channelId) {
          setError(message)
          term.write('\r\n\x1b[31mError: ' + message + '\x1b[0m\r\n')
-@@ -487,12 +516,13 @@
+@@ -487,12 +518,13 @@
          if (width === 0 || height === 0) return
          fitAddon.fit()
          const { cols, rows } = term
@@ -1172,7 +1184,7 @@
        () => inputDisposer.dispose(),
        () => scrollDisposer.dispose(),
        () => term.textarea?.removeEventListener('focus', handleTermFocus),
-@@ -504,10 +534,11 @@
+@@ -504,10 +536,11 @@
        () => clearInterval(reconnectTimerRef.current),
        () => {
          isMountedRef.current = false
@@ -1188,7 +1200,7 @@
          term.dispose()
        },
      ]
-@@ -526,7 +557,7 @@
+@@ -526,7 +559,7 @@
          const term = terminalInstanceRef.current
          if (term) {
            const { cols, rows } = term
@@ -1197,7 +1209,7 @@
          }
        } catch (_) {}
      })
-@@ -573,32 +604,34 @@
+@@ -573,32 +606,34 @@
    const handleSavePreset = async () => {
      if (!filterText.trim() || customPresets.length >= 10) return
      const newPreset = { id: crypto.randomUUID(), label: filterText.trim().slice(0, 24), pattern: filterText.trim(), color: '#8b949e' }
@@ -1238,7 +1250,7 @@
      if (content?.error) {
        // Show error to user for binary/size rejections
        if (terminalInstanceRef.current) {
-@@ -611,7 +644,7 @@
+@@ -611,7 +646,7 @@
  
    const handleSaveFile = async () => {
      if (!editingFile) return
@@ -1247,7 +1259,7 @@
      if (result?.error) return
      setEditingFile((prev) => prev ? { ...prev, original: prev.content } : null)
    }
-@@ -653,9 +686,10 @@
+@@ -653,9 +688,10 @@
          )}
  
          <div className="terminal-toolbar-actions">
@@ -1260,7 +1272,7 @@
            <button className={`icon-btn ${showSearch ? 'active' : ''}`} onClick={() => setShowSearch((v) => !v)} title="Search terminal (Ctrl+Shift+F)">
              <Search size={16} />
            </button>
-@@ -665,16 +699,25 @@
+@@ -665,16 +701,25 @@
            <button className={`icon-btn ${colorize ? 'active' : ''}`} onClick={() => setColorize((v) => !v)} title="Toggle keyword colorization">
              <Highlighter size={16} />
            </button>
@@ -1293,7 +1305,7 @@
              <>
                <button
                  className={`icon-btn ${showTunnels ? 'active' : ''}`}
-@@ -682,13 +725,6 @@
+@@ -682,13 +727,6 @@
                  title="Port forwarding"
                >
                  <Network size={16} />
@@ -1307,7 +1319,7 @@
                </button>
                <button className={`icon-btn ${showSftp ? 'active' : ''}`} onClick={() => setShowSftp((v) => !v)} title="Toggle SFTP panel">
                  <PanelRight size={16} />
-@@ -709,7 +745,7 @@
+@@ -709,7 +747,7 @@
            osHint={
              tab.wslDistro
                ? `Linux (WSL: ${tab.wslDistro})`
@@ -1316,7 +1328,7 @@
            }
          />
        )}
-@@ -739,7 +775,7 @@
+@@ -739,7 +777,7 @@
  
        {/* Snippets panel */}
        {showSnippets && (
@@ -1325,7 +1337,7 @@
            onInsert={(cmd) => { writeToChannel(cmd + '\r'); focusTerminal() }}
            onClose={() => setShowSnippets(false)}
          />
-@@ -747,7 +783,7 @@
+@@ -747,7 +785,7 @@
  
        {/* Tunnel panel */}
        {showTunnels && !tab.isLocal && connected && (
@@ -1334,7 +1346,7 @@
            channelId={tab.channelId}
            sessionId={tab.sessionId || tab.channelId}
            onClose={() => setShowTunnels(false)}
-@@ -893,7 +929,7 @@
+@@ -893,7 +931,7 @@
                }}
              />
              <div className="terminal-wrapper" style={{ flex: 1 }}>
@@ -1343,7 +1355,7 @@
                  key={tab.splitChannelId}
                  channelId={tab.splitChannelId}
                  config={tab.splitConfig}
-@@ -924,7 +960,7 @@
+@@ -924,7 +962,7 @@
                  window.addEventListener('mouseup', onUp)
                }}
              />
@@ -1352,7 +1364,7 @@
                channelId={tab.channelId}
                cwd={cwd}
                width={sftpWidth}
-@@ -937,7 +973,7 @@
+@@ -937,7 +975,7 @@
  
        {/* Remote file editor overlay */}
        {editingFile && (
@@ -2100,3 +2112,262 @@
 +
 +const useSessionStore = createSessionStore(globalThis.window?.electronAPI)
  export default useSessionStore
+--- a/src/components/Sidebar.jsx
++++ b/src/components/Sidebar.jsx
+@@ -4,8 +4,13 @@
+ import SessionDialog from './SessionDialog'
+ import SettingsDialog from './SettingsDialog'
+ 
+-export default function Sidebar() {
+-  const { sessions, openTab, deleteSession, addSession, exportSessions, importSessions } = useSessionStore()
++export default function Sidebar({ host }) {
++  const sessionStore = host?.store ?? useSessionStore
++  const api = host?.api ?? window.electronAPI
++  const [error, setError] = useState('')
++  const run = fn => { setError(''); void Promise.resolve().then(fn).catch(e => setError(e.message)) }
++  const { sessions, openTab, deleteSession, addSession, exportSessions, importSessions } = sessionStore()
++  const connect = host?.openSaved ?? openTab
+   const [dialogOpen, setDialogOpen] = useState(false)
+   const [editSession, setEditSession] = useState(null)
+   const [contextMenu, setContextMenu] = useState(null)
+@@ -40,8 +45,8 @@
+     let candidate = `${baseName} (copy)`
+     let n = 2
+     while (existingNames.has(candidate)) candidate = `${baseName} (copy ${n++})`
+-    const copy = { ...src, id: crypto.randomUUID(), name: candidate }
+-    await addSession(copy)
++    if (host) { await api.sessions.duplicate(src.id, candidate); await host.load() }
++    else { const copy = { ...src, id: crypto.randomUUID(), name: candidate }; await addSession(copy) }
+     setContextMenu(null)
+   }
+ 
+@@ -56,14 +61,14 @@
+ 
+   const handleImport = async () => {
+     const result = await importSessions()
+-    if (result?.error) alert('Import failed: ' + result.error)
++    if (result?.error) setError('Import failed: ' + result.error)
+   }
+ 
+   const handleImportSshConfig = async () => {
+-    const result = await window.electronAPI.sshconfig.import()
+-    if (result?.error) { alert('SSH config import failed: ' + result.error); return }
++    const result = await api.sshconfig.import()
++    if (result?.error) { setError('SSH config import failed: ' + result.error); return }
+     if (result?.imported > 0) {
+-      const store = useSessionStore.getState()
++      const store = sessionStore.getState()
+       await store.loadSessions()
+     }
+   }
+@@ -94,28 +99,28 @@
+ 
+   const SessionItem = ({ s }) => (
+     <div
+-      className="session-item"
+-      onDoubleClick={() => openTab(s)}
++      className="session-item myterminal-connection-row"
+       onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, session: s }) }}
+       title={`${s.username}@${s.host}:${s.port || 22}`}
+     >
+       <Terminal size={14} className="session-icon" />
+-      <div className="session-info">
++      <button type="button" className="session-info" onClick={() => run(() => connect(s))}>
+         <span className="session-name">{s.name || s.host}</span>
+         <span className="session-host">{s.username}@{s.host}</span>
+-      </div>
++      </button>
+     </div>
+   )
+ 
+   return (
+-    <aside className="sidebar">
+-      <div className="sidebar-header">
+-        <span className="sidebar-title">Sessions</span>
++    <aside className="sidebar myterminal-connection-sidebar">
++      {error && <p role="alert">{error}</p>}
++      <div className="sidebar-header myterminal-connection-actions">
++        <span className="sidebar-title">SSH connections</span>
+         <button className="icon-btn" onClick={() => setShowSettings(true)} title="Settings"><Settings size={15} /></button>
+-        <button className="icon-btn" onClick={exportSessions} title="Export sessions"><Download size={15} /></button>
+-        <button className="icon-btn" onClick={handleImport} title="Import sessions"><Upload size={15} /></button>
+-        <button className="icon-btn" onClick={handleImportSshConfig} title="Import SSH Config"><FileUp size={15} /></button>
+-        <button className="icon-btn" onClick={() => { setEditSession(null); setDialogOpen(true) }} title="New Session">
++        <button className="icon-btn" onClick={() => run(exportSessions)} title="Export connections" aria-label="Export connections"><Download size={15} /></button>
++        <button className="icon-btn" onClick={() => run(handleImport)} title="Import sessions"><Upload size={15} /></button>
++        <button className="icon-btn" onClick={() => run(handleImportSshConfig)} title="Import SSH Config"><FileUp size={15} /></button>
++        <button className="icon-btn" onClick={() => { setEditSession(null); setDialogOpen(true) }} title="New SSH connection" aria-label="New SSH connection">
+           <Plus size={16} />
+         </button>
+       </div>
+@@ -123,7 +128,7 @@
+       <div className="sidebar-search">
+         <Search size={13} />
+         <input
+-          placeholder="Search sessions…"
++          aria-label="Search SSH connections" placeholder="Search connections…"
+           value={searchQuery}
+           onChange={(e) => setSearchQuery(e.target.value)}
+         />
+@@ -149,20 +154,20 @@
+       {contextMenu && (
+         <div ref={menuRef} className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
+           <button onClick={handleEdit}><Edit2 size={13} /> Edit</button>
+-          <button onClick={handleDuplicate}><Copy size={13} /> Save a copy</button>
+-          <button onClick={handleDelete} className="danger"><Trash2 size={13} /> Delete</button>
++          <button onClick={() => run(handleDuplicate)}><Copy size={13} /> Save a copy</button>
++          <button onClick={() => run(handleDelete)} className="danger"><Trash2 size={13} /> Delete</button>
+         </div>
+       )}
+ 
+       {dialogOpen && (
+-        <SessionDialog
++        <SessionDialog host={host}
+           session={editSession}
+           onClose={() => { setDialogOpen(false); setEditSession(null) }}
+         />
+       )}
+ 
+       {showSettings && (
+-        <SettingsDialog onClose={() => setShowSettings(false)} />
++        <SettingsDialog host={host} onClose={() => setShowSettings(false)} />
+       )}
+     </aside>
+   )
+--- a/src/components/TabBar.jsx
++++ b/src/components/TabBar.jsx
+@@ -5,8 +5,10 @@
+ 
+ const TAB_COLORS = ['#58a6ff', '#3fb950', '#d29922', '#ff7b72', '#bc8cff', '#39c5cf', '#f78166', null]
+ 
+-export default function TabBar() {
+-  const { tabs, activeTabId, setActiveTab, closeTab, updateTab, addSession, broadcastMode, toggleBroadcast, openLocalTab, openWslTab, reorderTabs } = useSessionStore()
++export default function TabBar({ host }) {
++  const { tabs, activeTabId, setActiveTab, closeTab, updateTab, addSession, broadcastMode, toggleBroadcast, openLocalTab, openWslTab, reorderTabs } = host ? { ...host.store(), ...host.tabState } : useSessionStore()
++  const api = host?.api ?? window.electronAPI
++  const [error, setError] = useState('')
+   const [quickConnect, setQuickConnect] = useState(false)
+   const [tabMenu, setTabMenu] = useState(null)
+   const [editLabel, setEditLabel] = useState('')
+@@ -18,8 +20,8 @@
+   const wslMenuRef = useRef(null)
+ 
+   useEffect(() => {
+-    if (window.electronAPI.platform === 'win32') {
+-      window.electronAPI.wsl.getDistros().then(setWslDistros)
++    if (!host && api.platform === 'win32') {
++      api.wsl.getDistros().then(setWslDistros)
+     }
+   }, [])
+ 
+@@ -41,6 +43,8 @@
+     return () => document.removeEventListener('mousedown', close)
+   }, [wslMenuPos])
+ 
++  useEffect(() => { host?.onMenu?.(Boolean(tabMenu)); return () => host?.onMenu?.(false) }, [Boolean(tabMenu)])
++  useEffect(() => { if (host && !host.active) setTabMenu(null) }, [host?.active])
+   const handleClose = (e, tabId) => {
+     e.stopPropagation()
+     closeTab(tabId)
+@@ -48,15 +52,18 @@
+ 
+   const openTabMenu = (e, tab) => {
+     e.preventDefault()
+-    setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, label: tab.label, color: tab.color, config: tab.config, sessionId: tab.sessionId, isLocal: tab.isLocal })
++    setError('')
++    setTabMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - 240)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - 240)), tabId: tab.id, label: tab.label, color: tab.color, config: tab.config, sessionId: tab.sessionId, isLocal: tab.isLocal })
+     setEditLabel(tab.label)
+   }
+ 
+   const handleSaveSession = async () => {
+     const { tabId, config } = tabMenu
+-    await addSession(config)
+-    updateTab(tabId, { sessionId: config.id })
+-    setTabMenu(null)
++    try {
++      if (host) await host.saveConnection(tabId)
++      else { await addSession(config); updateTab(tabId, { sessionId: config.id }) }
++      setTabMenu(null)
++    } catch (error) { setError(error.message) }
+   }
+ 
+   const applyLabel = () => {
+@@ -76,13 +83,18 @@
+   }
+ 
+   return (
+-    <div className={`tabbar ${broadcastMode ? 'broadcasting' : ''}`}>
+-      <div className="tabbar-tabs">
++    <div className={`tabbar workspace-tools-header ${broadcastMode ? 'broadcasting' : ''}`}>
++      <div className="tabbar-tabs tool-tab-strip" role="tablist" aria-label="Workspace tabs" onKeyDown={e => {
++        if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return
++        e.preventDefault()
++        const index = tabs.findIndex(t => t.id === activeTabId)
++        const next = e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs.at(-1) : tabs[(index + (e.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length]
++        if (next) { setActiveTab(next.id); e.currentTarget.querySelector(`[data-tab-id="${next.id}"]`)?.focus() }
++      }}>
+         {tabs.map((tab, idx) => (
+           <div
+             key={tab.id}
+-            className={`tab ${tab.id === activeTabId ? 'active' : ''}${dragIdx === idx ? ' dragging' : ''}${dragOverIdx === idx ? ' drag-over' : ''}`}
+-            onClick={() => setActiveTab(tab.id)}
++            className={`tab tool-tab ${tab.id === activeTabId ? 'active' : ''}${dragIdx === idx ? ' dragging' : ''}${dragOverIdx === idx ? ' drag-over' : ''}`}
+             onContextMenu={(e) => openTabMenu(e, tab)}
+             style={tab.color ? { borderBottom: `2px solid ${tab.color}` } : {}}
+             draggable
+@@ -92,9 +104,10 @@
+             onDragEnd={() => { setDragIdx(null); setDragOverIdx(null) }}
+           >
+             {tab.color && <span className="tab-color-dot" style={{ background: tab.color }} />}
+-            {tab.isLocal ? <Monitor size={13} className="tab-icon" /> : <Terminal size={13} className="tab-icon" />}
+-            <span className="tab-label">{tab.label}</span>
+-            <button className="tab-close" onClick={(e) => handleClose(e, tab.id)} title="Close tab">
++            <button type="button" role="tab" data-tab-id={tab.id} aria-selected={tab.id === activeTabId} aria-controls={`tool-content-${tab.id}`} tabIndex={tab.id === activeTabId ? 0 : -1} title={tab.label} onClick={() => setActiveTab(tab.id)}>
++              <span className="tab-label">{tab.label}</span>
++            </button>
++            <button className="tab-close tool-tab-close" aria-label={`Close ${tab.label} tab`} onClick={(e) => handleClose(e, tab.id)} title="Close tab">
+               <X size={12} />
+             </button>
+           </div>
+@@ -105,11 +118,14 @@
+         <button
+           className={`icon-btn ${broadcastMode ? 'active broadcast-active' : ''}`}
+           onClick={toggleBroadcast}
+-          title={broadcastMode ? 'Broadcast ON — click to disable' : 'Broadcast: send input to all tabs'}
++          aria-label="Broadcast terminal input" aria-pressed={broadcastMode}
++          disabled={host && !tabs.some(tab => tab.terminal)}
++          title={broadcastMode ? 'Broadcast ON — click to disable' : 'Broadcast: send input to all connected terminal tabs in this project'}
+         >
+-          <Radio size={15} />
++          <Radio size={15} />{broadcastMode && <span>Broadcast ON</span>}
+         </button>
+ 
++        {!host && <>
+         {/* WSL button — only shown on Windows with WSL distros available */}
+         {wslDistros.length > 0 && (
+           <>
+@@ -140,18 +156,21 @@
+         <button className="tab-new" onClick={() => setQuickConnect(true)} title="Quick connect">
+           <Plus size={16} />
+         </button>
++        </>}
++        {host?.toolbar}
+       </div>
+ 
+       {/* Tab right-click menu */}
+       {tabMenu && (
+-        <div ref={menuRef} className="context-menu tab-ctx-menu" style={{ top: tabMenu.y, left: tabMenu.x }}>
++        <div ref={menuRef} className="context-menu tab-ctx-menu" style={{ top: tabMenu.y, left: tabMenu.x }} onKeyDown={e => { e.stopPropagation(); if(e.key === 'Escape') setTabMenu(null) }}>
++          {error && <p role="alert">{error}</p>}
+           {!tabMenu.sessionId && !tabMenu.isLocal && tabMenu.config && (
+-            <button onClick={handleSaveSession}><Save size={13} /> Save Session</button>
++            <button onClick={handleSaveSession}><Save size={13} /> Save connection</button>
+           )}
+           <div className="ctx-section">
+             <div className="ctx-label">Rename</div>
+             <input
+-              className="ctx-input"
++              className="ctx-input" aria-label="Tab name" maxLength={128}
+               value={editLabel}
+               autoFocus
+               onChange={(e) => setEditLabel(e.target.value)}

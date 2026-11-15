@@ -16,6 +16,7 @@ import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { isTerminalKind, removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import { prepareBrowserSessionEnvironment } from './browser-session.js'
+import { writeToBroadcastTargets } from '../../vendor/myterminal/channels.mjs'
 import MyTerminalServices from '../../vendor/myterminal/services.cjs'
 
 interface Group { browser: BrowserDebug; generation: string }
@@ -69,7 +70,7 @@ export class ProjectToolService {
         for (const entry of candidate.tabs.slice(0, 128)) {
           if (!entry || typeof entry.id !== 'string' || !/^[a-f0-9-]{36}$/.test(entry.id) || tabs.some(tab => tab.id === entry.id)) continue
           if (entry.kind === 'git' && !tabs.some(tab => tab.kind === 'git')) tabs.push({ id: entry.id, kind: 'git', title: 'Git' })
-          if (isTerminalKind(entry.kind)) {
+          if (isTerminalKind(entry.kind) && !entry.terminal?.temporary) {
             try {
               const config = terminalLaunch(entry.kind, entry.terminal ?? {}, undefined, entry.kind === 'wsl' ? 'win32' : process.platform).config
               tabs.push({ id: entry.id, kind: entry.kind, title: this.terminalTitle(entry.kind, config), terminal: config })
@@ -80,6 +81,11 @@ export class ProjectToolService {
             try { url = typeof entry.url === 'string' ? restorableUrl(entry.url) : null } catch { /* Invalid saved URL. */ }
             tabs.push({ id: entry.id, kind: 'browser', title: 'Browser', ...(url ? { url } : {}) })
           }
+        }
+        for (const tab of tabs) {
+          const entry = candidate.tabs.find((entry: ToolTab) => entry.id === tab.id)
+          if (typeof entry?.label === 'string') tab.label = entry.label.trim().slice(0, 128)
+          if (typeof entry?.color === 'string' && /^#[0-9a-f]{6}$/i.test(entry.color)) tab.color = entry.color
         }
         this.projects.set(candidate.profileId, { profileId: candidate.profileId, browserProfileId, tabs,
           overrides: candidate.overrides === 'private' ? 'private' : 'shared',
@@ -129,10 +135,12 @@ export class ProjectToolService {
   }
   private save(): void {
     if (this.stopping) return
-    const projects = [...this.projects.values()].map(project => ({ ...project, tabs: project.tabs.filter(tab => tab.kind !== 'new').map(tab => {
+    const projects = [...this.projects.values()].map(project => ({ ...project, broadcast: false,
+      activeId: project.tabs.some(tab => tab.id === project.activeId && tab.kind !== 'new' && !tab.terminal?.temporary) ? project.activeId : null,
+      tabs: project.tabs.filter(tab => tab.kind !== 'new' && !tab.terminal?.temporary).map(tab => {
       let url: string | null = null
       try { url = tab.url ? restorableUrl(tab.url) : null } catch { /* Blank or invalid URL. */ }
-      return { id: tab.id, kind: tab.kind, ...(url ? { url } : {}), ...(tab.terminal ? { terminal: tab.terminal } : {}) }
+      return { id: tab.id, kind: tab.kind, ...(tab.label ? { label: tab.label } : {}), ...(tab.color ? { color: tab.color } : {}), ...(url ? { url } : {}), ...(tab.terminal ? { terminal: tab.terminal } : {}) }
     }) }))
     const text = JSON.stringify({ version: 2, projects })
     if (!this.profileRecoveryRequired) this.writing = this.writing.catch(() => {}).then(() => writeFileAtomic(this.file, text))
@@ -209,6 +217,7 @@ export class ProjectToolService {
   }
   /** Switch projects without destroying live pages; restore only the selected page. */
   showProject(profileId: string | null, initialWidth?: number): void {
+    if (this.shownProject !== profileId) for (const project of this.projects.values()) project.broadcast = false
     this.shownProject = profileId
     for (const [id, group] of this.groups) if (id !== profileId) group.browser.setBounds(null)
     if (!profileId) return
@@ -254,17 +263,38 @@ export class ProjectToolService {
       project.activeId = tab.id; project.visible = true
       if (isTerminalKind(tab.kind)) { this.save(); await this.startTerminal(profileId, tab.id) }
     } else if (action.type === 'visible') {
+      if (!action.visible) project.broadcast = false
       project.visible = action.visible && project.tabs.length > 0
       const selected = project.tabs.find(tab => tab.id === project.activeId)
       if (project.visible && selected) this.ensurePage(project, selected)
       if (!project.visible) this.groups.get(profileId)?.browser.setBounds(null)
+    } else if (action.type === 'broadcast') {
+      project.broadcast = action.enabled === true && project.visible && this.shownProject === profileId
+    } else if (action.type === 'reorder') {
+      const from = project.tabs.findIndex(tab => tab.id === action.id), to = project.tabs.findIndex(tab => tab.id === action.beforeId)
+      if (from < 0 || to < 0) throw new Error('Tab already closed')
+      const [tab] = project.tabs.splice(from, 1); project.tabs.splice(to, 0, tab!)
     } else if (action.type === 'width') project.width = this.width(action.width)
     else if (action.type === 'overrides') {
       if (!['private', 'shared'].includes(action.mode)) throw new Error('Invalid overrides mode')
       project.overrides = action.mode
     } else {
       const tab = project.tabs.find(tab => tab.id === action.id); if (!tab) throw new Error('Tab already closed')
-      if (action.type === 'select') {
+      if (action.type === 'metadata') {
+        if (action.label !== undefined) {
+          if (typeof action.label !== 'string' || action.label.length > 128) throw new Error('Tab name must be at most 128 characters')
+          tab.label = action.label.trim()
+        }
+        if (action.color !== undefined) {
+          if (action.color !== null && (typeof action.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(action.color))) throw new Error('Invalid tab color')
+          if (action.color === null) delete tab.color
+          else tab.color = action.color
+        }
+      } else if (action.type === 'save-connection') {
+        if (!tab.terminal?.temporary || !tab.terminal.connectionId) throw new Error('This connection is already saved')
+        this.myTerminal(profileId).saveTemporary(tab.terminal.connectionId)
+        delete tab.terminal.temporary
+      } else if (action.type === 'select') {
         this.ensurePage(project, tab); project.activeId = tab.id; project.visible = true
       } else if (action.type === 'close') {
         this.closeSplit(profileId, tab.id)
@@ -273,6 +303,7 @@ export class ProjectToolService {
           const group = this.groups.get(profileId)
           if (group && !await group.browser.closePage(tab.pageId)) return this.state()
         }
+        if (tab.terminal?.temporary && tab.terminal.connectionId) this.terminalServices.get(profileId)?.forgetTemporary(tab.terminal.connectionId)
         removeToolTab(project, tab.id)
       } else if (tab.resource) {
         const { browser } = this.resource(tab.resource)
@@ -313,6 +344,11 @@ export class ProjectToolService {
       ?? (this.splits.get(id)?.profileId === profileId ? this.splits.get(id)?.tab : undefined)
   }
   async terminalFeature(profileId: string, method: string, args: unknown[]): Promise<unknown> {
+    if (method === 'sessions:connectTemporary') {
+      const service = this.myTerminal(profileId), config = service.createTemporary(args[0])
+      try { return await this.action(profileId, { type: 'add', kind: 'ssh', terminal: config, ...(typeof args[1] === 'string' ? { replaceId: args[1] } : {}) }) }
+      catch (error) { if (!this.projects.get(profileId)?.tabs.some(tab => tab.terminal?.connectionId === config.connectionId)) service.forgetTemporary(config.connectionId!); throw error }
+    }
     return this.myTerminal(profileId).invoke(method, args, id => Boolean(this.terminalTab(profileId, id)))
   }
   terminalDrop(profileId: string, paths: string[]): void { this.myTerminal(profileId).authorizeDrop(paths) }
@@ -390,6 +426,17 @@ export class ProjectToolService {
     if (typeof value.id !== 'string') throw new Error('A terminal ID is required')
     const tab = this.terminalTab(profileId, value.id)
     if (!tab) throw new Error('Terminal does not belong to this project')
+    if (value.action === 'broadcast') {
+      if (!project.broadcast || !project.visible || this.shownProject !== profileId || project.activeId !== tab.id) throw new Error('Broadcast is not active for this terminal')
+      if (typeof value.text !== 'string' || value.text.length > 65536) throw new Error('Input must be at most 64 KiB')
+      const targets = project.tabs.filter(target => {
+        if (!isTerminalKind(target.kind)) return false
+        try { return this.terminals.read(profileId, target.id).status === 'running' } catch { return false }
+      }).map(target => ({ channelId: target.id, isLocal: target.kind !== 'ssh' }))
+      const write = (id: string, text: string): void => this.terminals.write(profileId, id, text)
+      writeToBroadcastTargets(targets, value.text, { local: { write }, ssh: { write } })
+      return { delivered: targets.map(target => target.channelId) }
+    }
     if (value.action === 'split') {
       if (this.splits.has(tab.id)) throw new Error('This pane is already a split')
       const existing = [...this.splits.values()].find(child => child.parentId === tab.id)

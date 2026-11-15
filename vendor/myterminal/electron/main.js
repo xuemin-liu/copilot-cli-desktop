@@ -273,7 +273,7 @@ ipcMain.handle('wsl:getDistros', () => {
   // blocks the main-process event loop.
   const { execFile } = require('child_process')
   return new Promise((resolve) => {
-    execFile('wsl.exe', ['--list', '--quiet'], { encoding: 'buffer', timeout: 5000 }, (err, stdout) => {
+    execFile(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wsl.exe'), ['--list', '--quiet'], { encoding: 'buffer', timeout: 5000, windowsHide: true }, (err, stdout) => {
       if (err) { resolve([]); return }
       const distros = stdout
         .toString('utf16le')
@@ -362,5 +362,5 @@ ipcMain.handle('clipboard:writeText', (_event, text) => {
 })
 
 
-return { resolveSavedSessionConfig, logging }
+return { resolveSavedSessionConfig, encryptSession, decryptSession, logging }
 }

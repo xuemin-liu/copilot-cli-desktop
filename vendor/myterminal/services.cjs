@@ -1,11 +1,12 @@
 // Desktop ownership adapter. Feature implementations remain in the pinned electron sources.
-const { createHash } = require('node:crypto')
+const { createHash, randomUUID } = require('node:crypto')
 const path = require('node:path')
 const registerServices = require('./electron/main')
 const SshManager = require('./electron/ssh-manager').constructor
 const TunnelManager = require('./electron/tunnel-manager').constructor
 
 const METHODS = new Set([
+  'wsl:getDistros', 'sessions:duplicate',
   'sessions:getAll', 'sessions:save', 'sessions:delete', 'sessions:import', 'sessions:export', 'sshconfig:import',
   'settings:get', 'settings:set', 'snippets:getAll', 'snippets:save', 'snippets:delete',
   'backup:import', 'backup:export', 'favorites:get', 'favorites:set',
@@ -41,6 +42,7 @@ module.exports = class MyTerminalServices {
     this.tunnels = new TunnelManager()
     this.handlers = new Map()
     this.outputs = new Map()
+    this.temporary = new Map()
     this.pendingTunnels = new Set()
     this.disposed = false
     this.owner = owner
@@ -65,6 +67,12 @@ module.exports = class MyTerminalServices {
     if (method === 'tunnel:stop') {
       const tunnel = this.tunnels.tunnels.get(args[0])
       if (tunnel && !owns(tunnel.channelId)) throw new Error('Tunnel does not belong to this terminal')
+    }
+    if (method === 'sessions:duplicate') {
+      const saved = this.services.resolveSavedSessionConfig({ id: args[0] })
+      if (!saved?.host) throw new Error('SSH connection no longer exists')
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 256) throw new Error('Invalid connection name')
+      return this.handlers.get('sessions:save')({}, { ...saved, id: randomUUID(), name: args[1] })
     }
     if (method === 'sessions:save') {
       const config = args[0]
@@ -111,8 +119,23 @@ module.exports = class MyTerminalServices {
       }, () => accept(false))
     }
   }
+  createTemporary(config) {
+    if (this.disposed) throw new Error('Terminal project closed')
+    const existing = this.services.resolveSavedSessionConfig({ id: config?.id })
+    const id = randomUUID()
+    const encrypted = this.services.encryptSession({ ...existing, ...config, id })
+    this.temporary.set(id, encrypted)
+    return { transport: 'managed', connectionId: id, host: encrypted.host, temporary: true }
+  }
+  forgetTemporary(id) { this.temporary.delete(id) }
+  saveTemporary(id) {
+    const config = this.temporary.get(id)
+    if (!config || this.disposed) throw new Error('Temporary connection no longer exists')
+    this.handlers.get('sessions:save')({}, this.services.decryptSession(config))
+    this.temporary.delete(id)
+  }
   async spawn(id, connectionId, signal) {
-    const config = this.services.resolveSavedSessionConfig({ id: connectionId })
+    const config = this.temporary.has(connectionId) ? this.services.decryptSession(this.temporary.get(connectionId)) : this.services.resolveSavedSessionConfig({ id: connectionId })
     if (!config?.host || !config.username) throw new Error('Saved SSH connection is missing; open SSH connections to edit it')
     let dataListener, exitListener, ended, buffer = ''
     const data = value => { if (dataListener) dataListener(value); else buffer = (buffer + value).slice(-524288) }
@@ -137,7 +160,7 @@ module.exports = class MyTerminalServices {
   async dispose() {
     this.disposed = true
     for (const id of this.ssh.pending.keys()) this.ssh.disconnect(id)
-    this.ssh.disconnectAll(); this.tunnels.stopAll(); this.outputs.clear()
+    this.ssh.disconnectAll(); this.tunnels.stopAll(); this.outputs.clear(); this.temporary.clear()
     await this.services.logging.dispose()
   }
 }

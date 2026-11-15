@@ -12,6 +12,19 @@ the renderer receives presence flags, not saved passwords. New or changed host f
 The **OpenSSH (native)** form remains available for existing config aliases and native authentication prompts.
 WSL and native OpenSSH must be installed to use those options.
 
+WSL offers the installed distributions as suggestions, with manual entry still available. Saved SSH connections
+reuse MyTerminal's searchable, collapsible groups and right-click Edit, Save a copy and Delete actions.
+The connection toolbar exports connections without credentials; Settings & backup provides the full backup.
+In the SSH dialog, **Connect** opens a temporary connection without saving it. Its credentials stay in memory
+for reconnect and split panes, and are discarded when the tab closes or the app quits. Right-click its tab and
+choose **Save connection** to retain it. Temporary tabs are not restored after restart.
+
+Drag side-panel tabs to reorder them. Right-click a tab to rename it or choose a color; these choices persist
+with saved tabs. The broadcast button sends terminal typing/paste to all connected parent terminal tabs in
+the current project, using MyTerminal's broadcast routing. Browser/Git tabs, disconnected terminals and split
+panes are excluded. **Broadcast ON** stays visible while enabled; hiding the panel, switching projects or
+restarting the app turns it off. CLI writes addressed to a terminal ID remain individual writes.
+
 Tabs belong to the project. Switching tabs/projects or hiding the panel preserves their processes. Closing a tab
 terminates its PTY; quitting stops all terminals. Saved tabs return disconnected after restart—**Connect** starts
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes

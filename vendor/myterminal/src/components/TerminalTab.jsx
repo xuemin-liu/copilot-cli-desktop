@@ -245,7 +245,9 @@ export default function TerminalTab({ tab, isActive, host }) {
   // Broadcast write
   const broadcastWrite = (data) => {
     const { broadcastMode, tabs } = sessionStore.getState()
-    if (broadcastMode) {
+    if (broadcastMode && host?.broadcast) {
+      host.broadcast(data)
+    } else if (broadcastMode) {
       writeToBroadcastTargets(tabs, data, api)
     } else {
       writeToChannel(data)

@@ -1,0 +1,1 @@
+export function writeToBroadcastTargets(tabs: {channelId: string; isLocal: boolean}[], data: string, api: {local: {write(id: string, text: string): void}; ssh: {write(id: string, text: string): void}}): void

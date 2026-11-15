@@ -28,6 +28,32 @@ test('reused services encrypt/redact connections, merge backups, scope snippets 
   } finally { await f.close() }
 })
 
+test('connection copies retain protected credentials and temporary SSH stays out of exports until saved', async () => {
+  const f = await fixture()
+  try {
+    const copy = (await f.invoke('sessions:duplicate', 'saved', 'Fixture (copy)')).find(item => item.id !== 'saved')
+    assert.equal(copy.name, 'Fixture (copy)'); assert.equal(copy.password, undefined); assert.equal(copy.hasPassword, true)
+    const pty = await f.service.spawn('second', copy.id, new AbortController().signal)
+    let output = ''; pty.onData(data => { output += data }); await until(() => output.includes('SSH_READY')); pty.kill()
+    const temporary = f.service.createTemporary({ id: 'saved', name: 'Temporary edited connection' })
+    assert.equal((await f.invoke('sessions:getAll')).length, 2)
+    assert.ok(!JSON.stringify(f.data).includes(temporary.connectionId))
+    const transient = await f.service.spawn('terminal', temporary.connectionId, new AbortController().signal)
+    output = ''; transient.onData(data => { output += data }); await until(() => output.includes('SSH_READY')); transient.kill()
+    f.savePath = join(f.directory, 'connections.json'); await f.invoke('sessions:export')
+    const exported = JSON.parse(await readFile(join(f.directory, 'connections.json'), 'utf8'))
+    assert.equal(exported.length, 2); assert.ok(exported.every(item => item.password === undefined))
+    f.service.saveTemporary(temporary.connectionId)
+    const saved = (await f.invoke('sessions:getAll')).find(item => item.id === temporary.connectionId)
+    assert.equal(saved.name, 'Temporary edited connection'); assert.equal(saved.hasPassword, true)
+    assert.equal(f.service.temporary.size, 0)
+    const abandoned = f.service.createTemporary({ id: 'saved' }); f.service.forgetTemporary(abandoned.connectionId)
+    await assert.rejects(f.service.spawn('terminal', abandoned.connectionId, new AbortController().signal), /missing/)
+    assert.ok(!JSON.stringify(f.data).includes('secret'))
+    assert.ok(Array.isArray(await f.invoke('wsl:getDistros')))
+  } finally { await f.close() }
+})
+
 test('managed SSH reuses shells, host verification, SFTP editing/transfers, jump hosts and logging', async () => {
   const f = await fixture()
   try {
