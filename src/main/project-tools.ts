@@ -13,7 +13,7 @@ import { prepareProjectDevtoolsSettings, completeProjectDevtoolsSharing } from '
 import { parseBrowserAddress } from './browser-url.js'
 import { restorableUrl } from './browser-privacy.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { isTerminalKind, removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
+import { dockedNeighbor, isTerminalKind, removeToolTab, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import { prepareBrowserSessionEnvironment } from './browser-session.js'
 import { writeToBroadcastTargets } from '../../vendor/myterminal/channels.mjs'
@@ -44,6 +44,9 @@ export class ProjectToolService {
   private readonly bridges = new Map<string, Bridge>()
   private readonly terminalServices = new Map<string, MyTerminalServices>()
   private readonly removedProjects = new Set<string>()
+  /** The browser page each project's agent follows: the page the user last chose or focused, docked or in its own window.
+   * It is separate from the panel's selected tab, so the panel moving to a neighbour never retargets the agent. */
+  private readonly focusPages = new Map<string, number>()
   private readonly splits = new Map<string, { profileId: string; parentId: string; tab: ToolTab }>()
   private readonly terminalLifecycles = new Map<string, { profileId: string; bell(data: string): void; retry: ReturnType<typeof createReconnectController> }>()
   private readonly terminals = new ToolTerminals(undefined, {
@@ -114,7 +117,9 @@ export class ProjectToolService {
       const session = this.options.session(id)
       const connected = id === current && session?.workspaceProfileId === bridge.profileId && liveSession(session.status)
       const project = this.projects.get(bridge.profileId), group = this.groups.get(bridge.profileId)
-      const selected = project?.tabs.find(tab => tab.id === project.activeId && tab.kind === 'browser')?.pageId
+      const focused = this.focusPages.get(bridge.profileId)
+      const selected = (focused !== undefined && group?.browser.hasPage(focused) ? focused : undefined)
+        ?? project?.tabs.find(tab => tab.id === project.activeId && tab.kind === 'browser')?.pageId
         ?? group?.browser.uiPageId
       const pageId = connected && selected !== undefined && group?.browser.hasPage(selected) ? selected : null
       if (bridge.connected !== connected || bridge.uiPageId !== pageId) {
@@ -125,6 +130,15 @@ export class ProjectToolService {
     return changed
   }
   refreshConnections(): void { if (this.syncConnections()) this.options.changed() }
+  /** Raise the window of the page this session's agent uses, if that page is in its own window. Returns whether it did. */
+  showSessionWindow(sessionId: string): boolean {
+    this.refreshConnections()
+    const bridge = this.bridges.get(sessionId), group = bridge && this.groups.get(bridge.profileId)
+    if (!bridge?.connected || !group || bridge.pageId === null || !group.browser.hasPage(bridge.pageId)) return false
+    if (!this.projects.get(bridge.profileId)?.tabs.find(tab => tab.pageId === bridge.pageId)?.detached) return false
+    group.browser.popOutPage(bridge.pageId)
+    return true
+  }
   private project(id: string, width?: number): ProjectTools {
     if (this.removedProjects.has(id)) throw new Error('Workspace no longer exists')
     if (!this.options.project(id)) throw new Error('Workspace no longer exists')
@@ -183,6 +197,7 @@ export class ProjectToolService {
         },
         onNewTab: () => { void this.action(project.profileId, { type: 'add', kind: 'new' }).catch(this.options.error) },
         onReturnToPanel: pageId => { void this.returnBrowserToPanel(project.profileId, pageId).catch(this.options.error) },
+        onPageFocus: pageId => { if (this.focusPages.get(project.profileId) !== pageId) { this.focusPages.set(project.profileId, pageId); this.refreshConnections() } },
         changed: () => this.reconcile(project.profileId), endpointPath: join(this.options.userData, 'unused-project-control', randomUUID()) })
       browser.setBounds(null)
       group = { browser, generation: randomUUID() }
@@ -201,9 +216,9 @@ export class ProjectToolService {
     const project = this.projects.get(profileId)
     const tab = project?.tabs.find(tab => tab.pageId === pageId)
     if (this.stopping || !tab || !this.groups.get(profileId)?.browser.hasPage(pageId)) return
-    await this.action(profileId, { type: 'select', id: tab.id })
-    this.showProject(profileId)
+    // Return docks, selects and shows the tab in one step; selecting a windowed tab only raises its window.
     await this.action(profileId, { type: 'return', id: tab.id })
+    this.showProject(profileId)
     const owner = this.options.owner()
     if (owner && !owner.isDestroyed()) {
       if (owner.isMinimized()) owner.restore()
@@ -228,13 +243,17 @@ export class ProjectToolService {
       if (!tab) { tab = { id: randomUUID(), kind: 'browser', title: page.title }; project.tabs.push(tab) }
       Object.assign(tab, { pageId: page.id, resource: `tool:${tab.id}`, title: page.title, url: page.url, detached: Boolean(page.window), error: page.error })
     }
-    if (!pages.length) { this.groups.delete(profileId); void group.browser.dispose().catch(this.options.error) }
+    // The panel never shows a page that lives in its own window: move to the nearest docked tab instead.
+    const activeIndex = project.tabs.findIndex(tab => tab.id === project.activeId)
+    const moved = activeIndex >= 0 && project.tabs[activeIndex]!.detached === true
+    if (moved) project.activeId = dockedNeighbor(project.tabs, activeIndex, project.activeId!)
+    if (!pages.length) { this.groups.delete(profileId); this.focusPages.delete(profileId); void group.browser.dispose().catch(this.options.error) }
     else {
       const selected = project.tabs.find(tab => tab.id === project.activeId)
       if (selected?.pageId !== undefined) group.browser.selectUiPage(selected.pageId)
       if (!project.visible || this.shownProject !== profileId || selected?.kind !== 'browser') group.browser.setBounds(null)
     }
-    if (removed && project.visible && this.shownProject === profileId) {
+    if ((removed || moved) && project.visible && this.shownProject === profileId) {
       const selected = project.tabs.find(tab => tab.id === project.activeId)
       if (selected) { try { this.ensurePage(project, selected) } catch (error) { this.options.error(error) } }
     }
@@ -299,6 +318,7 @@ export class ProjectToolService {
     } else if (action.type === 'reorder') {
       const from = project.tabs.findIndex(tab => tab.id === action.id), to = project.tabs.findIndex(tab => tab.id === action.beforeId)
       if (from < 0 || to < 0) throw new Error('Tab already closed')
+      if (project.tabs[from]!.detached || project.tabs[to]!.detached) throw new Error('That page is open in its own window')
       const [tab] = project.tabs.splice(from, 1); project.tabs.splice(to, 0, tab!)
     } else if (action.type === 'width') project.width = this.width(action.width)
     else if (action.type === 'overrides') {
@@ -321,7 +341,11 @@ export class ProjectToolService {
         this.myTerminal(profileId).saveTemporary(tab.terminal.connectionId)
         delete tab.terminal.temporary
       } else if (action.type === 'select') {
-        this.ensurePage(project, tab); project.activeId = tab.id; project.visible = true
+        // A page in its own window stays there: choosing it raises that window and leaves the panel as it is.
+        if (tab.detached && tab.resource) {
+          this.resource(tab.resource).browser.popOutPage(tab.pageId!)
+          this.focusPages.set(profileId, tab.pageId!)
+        } else { this.ensurePage(project, tab); project.activeId = tab.id; project.visible = true }
       } else if (action.type === 'close') {
         this.closeSplit(profileId, tab.id)
         this.closeTerminal(profileId, tab.id)
@@ -336,9 +360,13 @@ export class ProjectToolService {
         if (action.type === 'pop-out') browser.popOutPage(tab.pageId!)
         else if (action.type === 'return') browser.returnPage(tab.pageId!)
         else throw new Error('Unknown tab action')
+        // The agent stays on the page that moved, wherever the panel goes next.
+        this.focusPages.set(profileId, tab.pageId!)
         // Browser change notifications are queued. Refresh now so the IPC reply
         // cannot overwrite a newer notification with the old window ownership.
+        // After a pop-out this also moves the panel to the nearest docked tab.
         this.reconcile(profileId)
+        if (action.type === 'return') { project.activeId = tab.id; project.visible = true }
       }
     }
     const selected = project.tabs.find(tab => tab.id === project.activeId)
@@ -346,6 +374,9 @@ export class ProjectToolService {
     const group = this.groups.get(profileId)
     if (project.visible && selected?.pageId !== undefined && group?.browser.hasPage(selected.pageId)) group.browser.selectUiPage(selected.pageId)
     else group?.browser.setBounds(null)
+    // Choosing or adding a browser tab points the agent at it; other changes leave its page alone.
+    const chosen = action.type === 'select' ? action.id : action.type === 'add' ? project.activeId : null
+    if (chosen && selected?.id === chosen && selected.kind === 'browser' && selected.pageId !== undefined && !selected.detached) this.focusPages.set(profileId, selected.pageId)
     this.save()
     // Browser initialization must not block independent tools or prevent closing a failed page.
     // Keep failed browser navigation gated until its group is closed and explicitly reopened.
@@ -614,7 +645,7 @@ export class ProjectToolService {
     // Only the app-owned, hashed project directory is removed. Custom log destinations remain untouched.
     await rm(this.terminalDataDirectory(id), { recursive: true, force: true })
     await this.stopTerminalBridge(id)
-    const group = this.groups.get(id); this.groups.delete(id)
+    const group = this.groups.get(id); this.groups.delete(id); this.focusPages.delete(id)
     for (const [sessionId, bridge] of this.bridges) if (bridge.profileId === id) await this.stopBridge(sessionId)
     if (group) await group.browser.dispose()
     // The same folder receives the same ID when added again. Block it only until

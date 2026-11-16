@@ -22,7 +22,7 @@ export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, 
   return <main className="session-window" aria-label={`Session window: ${tab.title}`}>
     <header className="session-pane-header">
       <span className="session-pane-title" title={tab.title}>{tab.title}</span>
-      <button type="button" onClick={() => { void window.copilotDesktop.showBrowserInMain(tab.id).catch(error => setBrowserError(String(error))) }}>Show browser in main window</button>
+      <button type="button" onClick={() => { void window.copilotDesktop.showBrowserInMain(tab.id).catch(error => setBrowserError(String(error))) }} title="Bring this session's browser page forward">Show browser</button>
       {showDesktop && <DesktopControlToggle view={desktopControl!.view} open={desktopPanel} onToggle={() => setDesktopPanel(open => !open)} />}
       <span role="status">{status}</span>
       {tab.sideChat && <span className="side-chat-badge" title={tab.permissionWarning ?? undefined}>Read/search only</span>}

@@ -138,6 +138,8 @@ export class BrowserDebug {
    * popups stay tabs. */
   private readonly popupWindows: () => boolean
   private readonly onReturnToPanel: ((pageId: number) => void) | undefined
+  /** The user focused a page, in the panel or in its own window. */
+  private readonly onPageFocus: ((pageId: number) => void) | undefined
   private readonly history: BrowserHistory
   private findQuery = ''
   private findResult: { matches: number; active: number } | null = null
@@ -153,10 +155,11 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void; onReturnToPanel?: (pageId: number) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
     this.onReturnToPanel = options.onReturnToPanel
+    this.onPageFocus = options.onPageFocus
     this.onNewTab = options.onNewTab
     this.canCreatePage = options.canCreatePage ?? (() => null)
     this.popupWindows = options.popupWindows ?? (() => false)
@@ -295,7 +298,10 @@ export class BrowserDebug {
   }
   popOutPage(id: number): void {
     const page = this.pages.get(id); if (!page) throw new Error('Browser page closed')
-    if (page.window) { page.window.show(); page.window.focus(); return }
+    if (page.window) {
+      if (page.window.isMinimized()) page.window.restore()
+      page.window.show(); page.window.focus(); return
+    }
     this.detach(page)
     page.window = new BaseWindow({ width: 1000, height: 750, minWidth: 280, minHeight: 180, backgroundColor: '#171b22', title: page.contents.getTitle() || 'Browser' })
     page.window.setMenu(null)
@@ -483,6 +489,7 @@ export class BrowserDebug {
       if (this.activePageId === contents.id && this.findQuery && result.finalUpdate) this.findResult = { matches: result.matches, active: result.activeMatchOrdinal }
     })
     contents.on('context-menu', (_event, params) => { if ((this.activePageId === contents.id || page.window) && !this.disposed) this.showContextMenu(page, params) })
+    contents.on('focus', () => { if (!this.disposed && this.pages.has(contents.id)) this.onPageFocus?.(contents.id) })
     contents.on('console-message', details => {
       if (!this.state.recordingConsole) return
       this.state.console.push({ id: ++this.consoleSequence, pageId: contents.id, timestamp: new Date().toISOString(),
@@ -558,6 +565,7 @@ export class BrowserDebug {
     }
     window.contentView.addChildView(view)
     if (toolbar) window.contentView.addChildView(toolbar)
+    window.on('focus', () => { if (page.window === window && !this.disposed) this.onPageFocus?.(contents.id) })
     view.setVisible(true)
     fit()
     window.on('resize', fit)

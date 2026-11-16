@@ -58,7 +58,7 @@ export function App(): JSX.Element {
   const [history, setHistory] = useState<{ entries: SessionHistoryEntry[] | null; loadError: string | null; pendingSessionId: string | null; openError: string | null } | null>(null)
   const [tools, setTools] = useState<ToolsState>({ projects: [], connections: [] })
   const projectPanel = tools.projects.find(project => project.profileId === state.activeProfileId)
-  const dockOpen = Boolean(projectPanel?.visible && projectPanel.tabs.length)
+  const dockOpen = Boolean(projectPanel?.visible)
   const gitOpen = dockOpen && projectPanel?.tabs.find(tab => tab.id === projectPanel.activeId)?.kind === 'git'
   const previousDockOpen = useRef(dockOpen)
   useEffect(() => {
