@@ -33,7 +33,7 @@ if (!process.versions.electron) {
   await build({ stdin: { contents: `
     import { createRoot } from 'react-dom/client';
     import { useState } from 'react';
-    import { WorkspaceToolDock } from './src/renderer/components/WorkspaceToolDock';
+    import { BrowserPanel } from './src/renderer/components/BrowserPanel';
     import { SessionWorkspace } from './src/renderer/components/SessionWorkspace';
     import './src/renderer/styles.css';
     window.unhandled = [];
@@ -44,13 +44,21 @@ if (!process.versions.electron) {
       const [activeTabId, setActiveTabId] = useState('tab-1');
       window.setBrowserActive = active => setActiveTabId(active ? 'tab-1' : 'tab-2');
       const tabs = [{ id: 'tab-1', title: 'First session', status: 'running' }, { id: 'tab-2', title: 'Second session', status: 'running' }];
-      const [prefs, setPrefs] = useState({open:false,width:560,tool:'browser'});
-      const openBrowser = id => { setActiveTabId(id); setPrefs(p => ({...p,open:true,tool:'browser'})); };
-      return <WorkspaceToolDock prefs={prefs} onChange={setPrefs} onClose={() => setPrefs(p=>({...p,open:false}))}
-        tabs={tabs} activeTabId={activeTabId} profileId="fixture" gitAvailable={false} git={null}
-        browserPoppedOutTabIds={[]} poppedOutTabIds={[]}
-        obscured={obscured} onError={error => {throw error}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} canOpenTab={false}
-        onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} /></WorkspaceToolDock>;
+      // A plain frame around the session browsers: the panel shows the active session's browser beside its terminal,
+      // and keeps each browser mounted once used, so hiding or switching never discards its state.
+      const [open, setOpen] = useState(false);
+      const [visited, setVisited] = useState([]);
+      if (open && !visited.includes(activeTabId)) setVisited([...visited, activeTabId]);
+      const openBrowser = id => { setActiveTabId(id); setOpen(true); };
+      return <div style={{display:'flex',flex:1,minWidth:0,minHeight:0}}>
+        <div style={{display:'flex',flex:1,minWidth:0,minHeight:0}}><SessionWorkspace onOpenBrowser={openBrowser} tabs={tabs} activeTabId={activeTabId} canOpenTab={false}
+          onActivate={setActiveTabId} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} /></div>
+        <aside className="workspace-tools" aria-label="Workspace tools" hidden={!open} style={{flex:'0 0 560px',display:open ? 'flex' : 'none'}}>
+          <header className="workspace-tools-header"><button type="button" className="workspace-tools-close" aria-label="Collapse tools panel" onClick={() => setOpen(false)}>×</button></header>
+          <div className="workspace-tool-content">{tabs.filter(tab => visited.includes(tab.id)).map(tab =>
+            <BrowserPanel key={tab.id} tabId={tab.id} sessionTitle={tab.title} active={open && tab.id === activeTabId} obscured={obscured} />)}</div>
+        </aside>
+      </div>;
     }
     createRoot(document.getElementById('root')).render(<Fixture />);
   `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic',
