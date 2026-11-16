@@ -373,8 +373,9 @@ one element's bounds stop changing. Numeric values are checked without
 exporting the field value. Apps can publish state as data-* attributes to assert.
 Wait for stable before clicking a control that moves while layout settles. When a
 pointer target moves, the failed step's data.geometry gives the phase it was
-observed in (pre-press settling, after press, between double-click presses), the
-bounds before and after and the delivery state; it does not infer the cause.
+observed in (pre-press settling; pointer settling for hover; after press; between
+double-click presses), the bounds before and after and the delivery state; it
+does not infer the cause.
 Content assertions (numericValue/value/text/attribute) refuse private regions,
 aggregates containing private content, password inputs, and autocomplete fields
 for passwords, one-time codes or payment details. Use public state indicators.

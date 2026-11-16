@@ -624,7 +624,8 @@ and stop if the element is replaced or does not stabilize.
 
 When the target moves, the failed step's `data.geometry` names the phase in which
 the change was observed: `pre-press settling` (the pointer was moved over the target
-for 2 seconds and it never settled; no button press was sent), `after press` (the
+for 2 seconds and it never settled; no button press was sent), `pointer settling`
+(the same for `hover`, which sends no press), `after press` (the
 button was released away from the target, so no click fires), or
 `between double-click presses` (the first click was delivered, the second press
 was not sent). It also lists the changed fields, the point, target and input
