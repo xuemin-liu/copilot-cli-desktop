@@ -1,4 +1,4 @@
-import { dispatchPromptInsert, insertIntoPrompt } from './prompt-insert.js'
+import { insertIntoPrompt } from './prompt-insert.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent, JSX } from 'react'
 import type { DesktopState, FanOutResult, SessionHistoryEntry, SessionWorktreeInfo } from '../main/types.js'
@@ -6,7 +6,6 @@ import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
-import { BrowserOnlyWindow } from './components/BrowserWorkspace.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { ToolPanelWorkspace } from './components/ToolPanelWorkspace.js'
 import { panelButtonLabel, type ToolsAction, type ToolsState } from '../main/tool-tabs.js'
@@ -67,9 +66,9 @@ export function App(): JSX.Element {
   }, [dockOpen])
   useEffect(() => window.copilotDesktop.onToolsChanged(next => { if (next) setTools(next) }), [])
   useEffect(() => {
-    if (!state.activeProfileId || state.windowSessionId || state.windowBrowserId) return
+    if (!state.activeProfileId || state.windowSessionId) return
     void window.copilotDesktop.toolsState(readToolDockPreferences(localStorage).width).then(setTools).catch(error => setOperationError(errorMessage(error)))
-  }, [state.activeProfileId, state.windowSessionId, state.windowBrowserId])
+  }, [state.activeProfileId, state.windowSessionId])
   const actOnTools = useCallback((profileId: string, action: ToolsAction): void => {
     void window.copilotDesktop.toolsAction(profileId, action).then(setTools).catch(error => setOperationError(errorMessage(error)))
   }, [])
@@ -267,9 +266,6 @@ export function App(): JSX.Element {
     }
   }, [])
 
-  // A session's browser in its own window pastes into the prompt box here, where its terminal is.
-  useEffect(() => window.copilotDesktop.onInsertPromptRequest((detail) => dispatchPromptInsert(window, detail)), [])
-
   // Ctrl+Shift+G is handled in the main process, before the terminal sees it, and arrives here.
   useEffect(() => window.copilotDesktop.onGitToggle(() => { if (gitPanelAvailable.current) toggleGit() }), [toggleGit])
   // The File menu and the tray ask here, so their sessions are named in the same dialog.
@@ -293,14 +289,6 @@ export function App(): JSX.Element {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = isShortcutModifier(event)
       if (!modifier) return
-      if (state.windowBrowserId) {
-        if (event.key.toLowerCase() === 'w') {
-          event.preventDefault()
-          event.stopPropagation()
-          handleOperation(window.copilotDesktop.dockBrowser(state.windowBrowserId))
-        }
-        return
-      }
       if (state.windowSessionId) {
         if (event.key.toLowerCase() === 'w') {
           event.preventDefault()
@@ -322,20 +310,14 @@ export function App(): JSX.Element {
         void window.copilotDesktop.openSettings()
       }
     }
-    const capture = Boolean(state.windowSessionId || state.windowBrowserId)
+    const capture = Boolean(state.windowSessionId)
     window.addEventListener('keydown', handleKeyDown, capture)
     return () => window.removeEventListener('keydown', handleKeyDown, capture)
-  }, [canOpenTab, state.activeTabId, state.windowSessionId, state.windowBrowserId])
-
-  if (state.windowBrowserId) {
-    const tab = state.tabs.find(tab => tab.id === state.windowBrowserId)
-    return tab ? <BrowserOnlyWindow tab={tab} onReturn={() => handleOperation(window.copilotDesktop.dockBrowser(tab.id))} />
-      : <div className="loading-screen">Returning browser…</div>
-  }
+  }, [canOpenTab, state.activeTabId, state.windowSessionId])
 
   if (state.windowSessionId) {
     const tab = state.tabs.find(tab => tab.id === state.windowSessionId)
-    return tab ? <SessionWindow tab={tab} browserPoppedOut={(state.browserPoppedOutTabIds ?? []).includes(tab.id)} error={operationError}
+    return tab ? <SessionWindow tab={tab} error={operationError}
       desktopControl={{ allowed: state.desktopControlAllowed === true, ready: (state.desktopControlReadyTabIds ?? []).includes(tab.id), view: state.desktopControl?.[tab.id] }}
       onDismissError={() => setOperationError(null)}
       onReturn={() => handleOperation(window.copilotDesktop.dockTab(tab.id))}
@@ -464,7 +446,6 @@ export function App(): JSX.Element {
             browserOpenId={null} onOpenBrowser={openBrowser}
             gitOpen={gitOpen && !generalActive} {...(generalActive ? {} : { onToggleGit: toggleGit })}
             poppedOutTabIds={state.poppedOutTabIds ?? []}
-            browserPoppedOutTabIds={state.browserPoppedOutTabIds ?? []}
             desktopControlAllowed={state.desktopControlAllowed === true}
             desktopControlReadyTabIds={state.desktopControlReadyTabIds ?? []}
             desktopControl={state.desktopControl ?? {}}
