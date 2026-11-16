@@ -47,7 +47,7 @@ function CertificateWarning({ warning, popup, banner, answer }: { warning: Brows
   </section>
 }
 
-export function BrowserPanel({ tabId, obscured, active, unloaded = false, detached = false, sessionTitle = 'Browser', independent = false, promptTargetId = null }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; detached?: boolean; sessionTitle?: string; independent?: boolean; promptTargetId?: string | null }): JSX.Element {
+export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessionTitle = 'Browser', independent = false, promptTargetId = null }: { tabId: string; obscured: boolean; active: boolean; unloaded?: boolean; sessionTitle?: string; independent?: boolean; promptTargetId?: string | null }): JSX.Element {
   const [state, setState] = useState(EMPTY_BROWSER)
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -156,21 +156,13 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, detach
   useEffect(() => window.copilotDesktop.onBrowserPicked((id, text) => {
     if (id === tabId) setSelection(list => list.length >= MAX_PICKED_ELEMENTS ? list : [...list, text])
   }), [tabId])
-  // In its own window the browser has no terminal beside it, so main pastes in the window that shows the session.
   const toPrompt = (detail: { text: string } | { image: true }, done: string): void => {
     const currentTarget = promptDestination.current
     if (independent && !currentTarget) { setError('Open or resume a session in this window to attach browser context.'); return }
     const destination = independent ? currentTarget! : tabId
-    if (!detached) {
-      if ('image' in detail) attachClipboardImage(destination)
-      else insertIntoPrompt(destination, detail.text)
-      setNotice(done)
-      return
-    }
-    void window.copilotDesktop.browserInsertPrompt(tabId, detail).then(delivered => {
-      if (delivered) setNotice(done)
-      else setError('The session’s prompt box could not be reached. Open the session or bring the browser back, then try again.')
-    }).catch(error => setError(errorMessage(error)))
+    if ('image' in detail) attachClipboardImage(destination)
+    else insertIntoPrompt(destination, detail.text)
+    setNotice(done)
   }
   const selectElements = (): void => {
     setError(null); setNotice(null); setPicking(true); setSelecting(true)
