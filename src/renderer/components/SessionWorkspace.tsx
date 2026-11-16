@@ -23,7 +23,6 @@ interface SessionWorkspaceProps {
   toolsControl?: ReactNode
   poppedOutTabIds?: string[]
   onPopOut?: (tabId: string) => void
-  browserPoppedOutTabIds?: string[]
   /** Browser controls select a session in the shared tools dock. */
   browserOpenId?: string | null
   onOpenBrowser?: (tabId: string) => void
@@ -43,7 +42,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserPoppedOutTabIds = [], browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
@@ -110,7 +109,7 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 <button type="button" className="icon-button session-git-toggle" aria-pressed={gitOpen} aria-label={gitOpen ? 'Hide Git panel' : 'Show Git panel'}
                   title="Git (Ctrl+Shift+G)" onClick={onToggleGit}><GitBranchIcon /></button>
               )}
-              {onOpenBrowser && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label={browserPoppedOutTabIds.includes(tab.id) ? 'Show browser window' : 'Open browser'}
+              {onOpenBrowser && <button type="button" className="icon-button session-browser-toggle" aria-expanded={browserOpenId === tab.id} aria-label="Open browser"
                 title="Browser" onClick={() => onOpenBrowser(tab.id)}><BrowserIcon /></button>}
               {(desktopControlAllowed || desktopControl[tab.id]?.enabled) && !tab.sideChat && !tab.remote && !tab.cli && (
                 <DesktopControlToggle view={desktopControl[tab.id]} open={desktopPanels.has(tab.id)} onToggle={() => toggleDesktopPanel(tab.id)} />

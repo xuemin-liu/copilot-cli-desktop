@@ -5,9 +5,8 @@ import { DesktopControlPanel, DesktopControlToggle } from './DesktopControlPanel
 import { SessionTerminal } from './SessionTerminal.js'
 import { OperationError } from './OperationError.js'
 
-export function SessionWindow({ tab, browserPoppedOut = false, error, onReturn, onRestart, onShowLog, onDismissError, desktopControl }: {
+export function SessionWindow({ tab, error, onReturn, onRestart, onShowLog, onDismissError, desktopControl }: {
   tab: DesktopSessionTab
-  browserPoppedOut?: boolean
   desktopControl?: { allowed: boolean; ready: boolean; view: DesktopControlTabView | undefined }
   error: string | null
   onReturn: () => void

@@ -124,18 +124,10 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),
   dockTab: (tabId) => ipcRenderer.invoke('desktop:dock-tab', tabId),
-  popOutBrowser: (tabId) => ipcRenderer.invoke('desktop:pop-out-browser', tabId),
-  dockBrowser: (tabId) => ipcRenderer.invoke('desktop:dock-browser', tabId),
   desktopControlSet: (tabId, enabled) => ipcRenderer.invoke('desktop:desktop-control-set', tabId, enabled),
   desktopControlResume: (tabId) => ipcRenderer.invoke('desktop:desktop-control-resume', tabId),
   desktopControlRevoke: (tabId, key) => ipcRenderer.invoke('desktop:desktop-control-revoke', tabId, key),
   desktopControlFullScreen: (tabId, allowed) => ipcRenderer.invoke('desktop:desktop-control-full-screen', tabId, allowed),
-  browserInsertPrompt: (tabId, detail) => ipcRenderer.invoke('desktop:browser-insert-prompt', tabId, detail),
-  onInsertPromptRequest: (listener) => {
-    const handler = (_event, id, detail) => void ipcRenderer.invoke('desktop:insert-prompt-result', id, listener(detail) === true)
-    ipcRenderer.on('desktop:insert-prompt', handler)
-    return () => ipcRenderer.removeListener('desktop:insert-prompt', handler)
-  },
   renameTab: (tabId, title) => ipcRenderer.invoke('desktop:rename-tab', tabId, title),
   closeTab: (tabId) => ipcRenderer.invoke('desktop:close-tab', tabId),
   restartTab: (tabId) => ipcRenderer.invoke('desktop:restart-tab', tabId),
