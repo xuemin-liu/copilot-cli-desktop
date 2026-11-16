@@ -517,7 +517,7 @@ export class BrowserReader {
     }
   }
 
-  private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+  private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal, conditionKey = 'c1'): Promise<TestObservation> {
     const modifiers = (step.modifiers ?? []).reduce((mask, key) => mask | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[key]), 0)
     const button = step.button ?? 'left'
     const buttons = { left: 1, middle: 4, right: 2 }[button]
@@ -532,7 +532,7 @@ export class BrowserReader {
     check()
     if (['waitFor', 'assert'].includes(step.action) && step.all) {
       const results: { passed: boolean; reason?: string }[] = []
-      for (const condition of step.all) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal))
+      for (const [index, condition] of step.all.entries()) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal, `c${index + 1}`))
       return { passed: results.every(result => result.passed), reason: results.find(result => !result.passed)?.reason ?? 'Combined readiness conditions are not all satisfied.', data: { conditions: results.map(result => ({ passed: result.passed, reason: result.reason })) } }
     }
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'requestComplete') return {
@@ -562,7 +562,7 @@ export class BrowserReader {
         const cancelled = !loaded
         this.testDiagnostics.navigation = cancelled ? 'cancelled' : 'completed'
         if (!cancelled && step.all) {
-          while (!(await this.testStepAction(page, { action: 'waitFor', label: 'Reload application readiness', all: step.all }, signal)).passed) {
+          while (!(await this.testStepAction(page, { action: 'waitFor', label: 'Reload application readiness', all: step.all }, signal, 'readiness')).passed) {
             check()
             if (Date.now() >= end) { this.testDiagnostics.applicationReadiness = 'timed out'; throw new Error('Reload completed but application readiness timed out.') }
             await abortable(new Promise<void>(resolve => setTimeout(resolve, 100)), signal)
@@ -616,7 +616,9 @@ export class BrowserReader {
       return result
     }
     if (step.action === 'waitFor' || step.action === 'assert') {
-      try { const result = await evaluate('probe'); return { passed: Boolean(result.passed), ...(result.reason ? { reason: String(result.reason) } : {}) } }
+      // A stable condition keeps samples per run step and condition, across the runner's polls.
+      const stableArgs = step.condition === 'stable' ? { stableScope: this.testProgress.currentAction?.id ?? 'manual', stableKey: conditionKey } : {}
+      try { const result = await evaluate('probe', stableArgs); return { passed: Boolean(result.passed), ...(result.reason ? { reason: String(result.reason) } : {}) } }
       catch (error) { check(); if (page.contents.isLoading()) return { passed: false, reason: 'Page is still loading.' }; throw error }
     }
     if (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible()) throw new Error('Show the selected page to run test interactions.')
@@ -757,30 +759,49 @@ export class BrowserReader {
     }
     check()
     if (![point.x, point.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)) throw new Error('Target is outside the viewport.')
+    // Geometry failures report the phase in which the change was observed, never a cause:
+    // timing alone cannot tell a mousedown handler from a timer or an animation.
+    const geometry = ['x', 'y', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight', 'inputLeft', 'inputTop', 'inputWidth', 'inputHeight']
+    const round = (value: unknown): number => Math.round(Number(value) * 100) / 100
+    const bounds = (sample: Params): Params => ({ point: { x: round(sample.x), y: round(sample.y) },
+      target: { left: round(sample.targetLeft), top: round(sample.targetTop), width: round(sample.targetWidth), height: round(sample.targetHeight) },
+      input: { left: round(sample.inputLeft), top: round(sample.inputTop), width: round(sample.inputWidth), height: round(sample.inputHeight) } })
+    const changed = (before: Params, after: Params, keys = geometry): string[] => keys.filter(key => Math.abs(Number(after[key]) - Number(before[key])) >= 0.5)
+    const geometryFailure = (phase: string, before: Params, after: Params, keys: string[], extra: Params = {}): void => {
+      this.testDiagnostics.geometry = { phase, ...extra, changed: keys, before: bounds(before), after: bounds(after), delivery: this.testDelivery,
+        cause: 'not inferred; the phase says only when the change was observed' }
+    }
+    const settling = step.action === 'hover' ? 'pointer settling' : 'pre-press settling'
+    const first = point; let samples = 0
     const stableUntil = Date.now() + 2000
     while (true) {
       check()
       await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', modifiers, x: point.x, y: point.y }, undefined, 10000, signal)
       if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
-      const fresh = await targetPoint(false, step.point, false)
+      const fresh = await targetPoint(false, step.point, false); samples++
       if (Math.abs(fresh.x - point.x) < 0.5 && Math.abs(fresh.y - point.y) < 0.5) { point = fresh; break }
-      if (Date.now() >= stableUntil) throw new Error('Target did not stabilize after pointer movement.')
+      if (Date.now() >= stableUntil) {
+        geometryFailure(settling, first, fresh, changed(first, fresh), { samples, windowMs: 2000 })
+        throw new Error(`Target did not stabilize during ${settling}: it kept moving for 2 seconds of pointer movement over it.${step.action === 'hover' ? '' : ' No button press was sent.'} Changed: ${changed(first, fresh).join(', ') || 'point'}. See data.geometry; a stable condition before this step can wait for the layout to settle.`)
+      }
       point = fresh
     }
     if (step.action === 'hover') { check(); return { passed: true } }
-    const geometry = ['x', 'y', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight', 'inputLeft', 'inputTop', 'inputWidth', 'inputHeight']
-    const stable = (fresh: Params): void => {
-      if (geometry.some(key => Math.abs(Number(fresh[key]) - Number(point[key])) >= 0.5)) throw new Error('Target moved or geometry changed during the click/double-click.')
+    const stable = (fresh: Params, phase: 'after press' | 'between double-click presses', press: number): void => {
+      const keys = changed(point, fresh)
+      if (!keys.length) return
+      geometryFailure(phase, point, fresh, keys, { press, pressesSent: phase === 'after press' ? press : press - 1, released: phase === 'after press' ? 'away from the target' : 'on the target' })
+      throw new Error(`Target moved or geometry changed ${phase === 'after press' ? `after press ${press}` : 'between double-click presses'} of the ${step.action === 'doubleClick' ? 'double-click' : 'click'}. Changed: ${keys.join(', ')}. See data.geometry for the bounds before and after; the cause is not inferred, and the step is never retried automatically.`)
     }
     for (let count = 1; count <= (step.action === 'doubleClick' ? 2 : 1); count++) {
       if (count === 2) {
-        stable(await targetPoint(false, step.point, false))
+        stable(await targetPoint(false, step.point, false), 'between double-click presses', count)
       }
       check()
       let releaseOnTarget = false
       try {
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button, buttons, modifiers, clickCount: count, x: point.x, y: point.y }, undefined, 10000, signal)
-        stable(await targetPoint(false, step.point, false)); releaseOnTarget = true
+        stable(await targetPoint(false, step.point, false), 'after press', count); releaseOnTarget = true
       }
       finally {
         const stopped = !releaseOnTarget || signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id

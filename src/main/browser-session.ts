@@ -365,10 +365,16 @@ leave-page prompt. Old references are invalid even when reload is cancelled.
 Navigation completion alone is not application readiness.
 
 waitFor and assert accept all:[conditions] (1–10) instead of a single condition.
-Additional conditions: enabled; attribute with attribute data-test-*, aria-*,
+Additional conditions: enabled; attribute with attribute data-*, aria-*,
 role, title or class and string expected; numericValue with number expected and
-optional nonnegative tolerance (default zero). Numeric values are checked without
-exporting the field value.
+optional nonnegative tolerance (default zero); stable with optional stableMs
+(100-5000, default 500) and tolerance (0-50 CSS px, default 0.5), which waits until
+one element's bounds stop changing. Numeric values are checked without
+exporting the field value. Apps can publish state as data-* attributes to assert.
+Wait for stable before clicking a control that moves while layout settles. When a
+pointer target moves, the failed step's data.geometry gives the phase it was
+observed in (pre-press settling, after press, between double-click presses), the
+bounds before and after and the delivery state; it does not infer the cause.
 Content assertions (numericValue/value/text/attribute) refuse private regions,
 aggregates containing private content, password inputs, and autocomplete fields
 for passwords, one-time codes or payment details. Use public state indicators.

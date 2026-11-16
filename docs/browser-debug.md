@@ -490,8 +490,23 @@ for application readiness after navigation, supply `all`:
 `waitFor` and `assert` also accept `all` (1–10 conditions) instead of one condition.
 Every condition must hold in the same polling pass; observations across frames are
 sequential, not an atomic application snapshot. Additional conditions are `enabled`,
-`attribute` (public `data-test-*`, `aria-*`, `role`, `title`, `class`) and
-`numericValue` (`expected` number, optional nonnegative `tolerance`, default zero).
+`attribute` (public `data-*`, `aria-*`, `role`, `title`, `class`),
+`numericValue` (`expected` number, optional nonnegative `tolerance`, default zero)
+and `stable`. An application can publish its own state in `data-*` attributes
+(for example `data-grp="g"` on a link-group chip) and the plan can wait on or
+assert it directly, instead of encoding the value in a CSS selector.
+
+`stable` waits until one visible element's bounds (x, y, width, height) have stayed
+within `tolerance` CSS pixels (0–50, default 0.5) for `stableMs` milliseconds
+(100–5000, default 500). Samples are taken on the runner's normal polls and kept
+per run step and condition, also inside `all`. A replaced element, a new document
+or a hidden element starts the window again. The window must be shorter than the
+step's timeout. Use it before clicking a control that moves while the layout
+settles:
+
+```json
+{ "action": "waitFor", "selector": "#tool-link", "condition": "stable", "stableMs": 300 }
+```
 Numeric checks read visible field values or numeric element text without exporting
 the value. Content assertions (`numericValue`, `value`, `text`, `attribute`) refuse
 private regions, aggregates containing private content, password fields, and
@@ -605,7 +620,19 @@ single-choice select elements, keyboard keys, document/container scrolling, wait
 assertions, and screenshots. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
 are rejected. Pointer actions recheck the target after hover-driven layout changes
-and stop if the element is replaced or does not stabilize. Open shadow roots and
+and stop if the element is replaced or does not stabilize.
+
+When the target moves, the failed step's `data.geometry` names the phase in which
+the change was observed: `pre-press settling` (the pointer was moved over the target
+for 2 seconds and it never settled; no button press was sent), `after press` (the
+button was released away from the target, so no click fires), or
+`between double-click presses` (the first click was delivered, the second press
+was not sent). It also lists the changed fields, the point, target and input
+bounds before and after, and the delivery state. The phase says only when the change
+was seen, not what caused it: a mousedown handler, a timer and an animation all look
+the same. Such a step is never retried automatically. For layout that is still
+settling, add a `stable` wait before the step. For a target that moves in response
+to the press itself, assert the resulting state instead of clicking it twice. Open shadow roots and
 same-origin HTTP(S) frames support input; cross-origin frames support read-only
 inspection and assertions. Use current frame IDs from `frames`. Opaque/sandboxed
 frames and frames with non-HTTP(S) URLs cannot receive test input.

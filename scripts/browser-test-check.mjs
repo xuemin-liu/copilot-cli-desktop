@@ -398,6 +398,63 @@ if (!process.versions.electron) {
         if (mode === 'bounds') assert.equal(state.events.length, 0, 'invalid endpoint is rejected before pointer down')
         else assert.ok(state.events.some(event => ['pointerup', 'pointercancel', 'lostpointercapture'].includes(event.type) && event.trusted && event.buttons === 0), 'failed drag clears native button state')
       }
+      // Geometry phases: a target that keeps moving before the press, one that moves on
+      // mousedown, and one that moves between double-click presses. Each fails with the
+      // phase it was observed in, and none delivers the click it was supposed to.
+      const geometrySetup = mode => `(${function (mode) {
+        window.geometryFixture?.stop?.()
+        document.querySelector('#geo-target')?.remove()
+        const target = document.createElement('button'); target.id = 'geo-target'; target.textContent = 'Toolbar tool'; target.dataset.grp = 'g'
+        target.style.cssText = 'position:fixed;left:400px;top:200px;width:120px;height:40px;z-index:2000'
+        document.body.append(target)
+        const state = window.geometryFixture = { events: [], stop: null }
+        for (const type of ['pointerdown', 'click', 'dblclick']) target.addEventListener(type, event => {
+          state.events.push({ type, detail: event.detail, trusted: event.isTrusted })
+          if (type === 'pointerdown' && mode === 'mousedown') target.style.left = '420px'
+          if (type === 'click' && event.detail === 1 && mode === 'between') target.style.left = '420px'
+        })
+        // Moves 2px every frame, so two samples taken frames apart never see the same bounds.
+        let frame = 0; let handle = 0; let moving = mode === 'jitter' || mode === 'settles'
+        const move = () => { if (!moving) return; target.style.left = `${400 + (++frame * 2) % 300}px`; handle = requestAnimationFrame(move) }
+        if (moving) handle = requestAnimationFrame(move)
+        const end = mode === 'settles' ? setTimeout(() => { moving = false; cancelAnimationFrame(handle); target.style.left = '400px' }, 400) : 0
+        state.stop = () => { moving = false; cancelAnimationFrame(handle); clearTimeout(end) }
+        return true
+      }.toString()})(${JSON.stringify(mode)})`
+      const geometryEvents = () => browser.view.webContents.executeJavaScript('window.geometryFixture.events.map(event => event.type)')
+      const clickTool = step('click', 'Click the toolbar tool', { selector: '#geo-target' })
+      const toolGroup = step('assert', 'Tool is in link group g', { selector: '#geo-target', condition: 'attribute', attribute: 'data-grp', expected: 'g' })
+      await browser.view.webContents.executeJavaScript(geometrySetup('jitter'))
+      const jitter = await execute([clickTool, toolGroup])
+      assert.equal(jitter.status, 'failed', JSON.stringify(jitter)); assert.match(jitter.steps[0].reason, /pre-press settling.*No button press was sent/)
+      assert.equal(jitter.steps[0].data.geometry.phase, 'pre-press settling', JSON.stringify(jitter.steps[0]))
+      assert.ok(jitter.steps[0].data.geometry.before.target && jitter.steps[0].data.geometry.after.target)
+      assert.deepEqual(await geometryEvents(), [], 'no press reaches a target that never settles')
+      const neverStable = await execute([step('waitFor', 'Tool settles', { selector: '#geo-target', condition: 'stable', stableMs: 300, timeoutMs: 1500 }), toolGroup])
+      assert.equal(neverStable.status, 'failed', JSON.stringify(neverStable)); assert.match(neverStable.steps[0].reason, /changed|still for/)
+      await browser.view.webContents.executeJavaScript(geometrySetup('settles'))
+      const settled = await execute([step('waitFor', 'Tool settles', { selector: '#geo-target', condition: 'stable', stableMs: 300 }), clickTool, toolGroup])
+      assert.equal(settled.status, 'passed', JSON.stringify(settled))
+      assert.ok(settled.steps[0].durationMs >= 600, `stable waits for movement to stop and then the window (${settled.steps[0].durationMs} ms)`)
+      assert.deepEqual(await geometryEvents(), ['pointerdown', 'click'])
+      await browser.view.webContents.executeJavaScript(geometrySetup('mousedown'))
+      const pressMoved = await execute([clickTool, step('click', 'Must not write after a moved click', { selector: '#write' }), toolGroup])
+      assert.equal(pressMoved.status, 'failed', JSON.stringify(pressMoved)); assert.equal(pressMoved.steps[1].status, 'skipped')
+      assert.match(pressMoved.steps[0].reason, /Target moved or geometry changed after press 1 of the click/)
+      assert.equal(pressMoved.steps[0].delivery, 'partial')
+      assert.deepEqual({ phase: pressMoved.steps[0].data.geometry.phase, press: pressMoved.steps[0].data.geometry.press, released: pressMoved.steps[0].data.geometry.released },
+        { phase: 'after press', press: 1, released: 'away from the target' })
+      assert.equal(pressMoved.steps[0].data.geometry.after.target.left - pressMoved.steps[0].data.geometry.before.target.left, 20)
+      assert.deepEqual(await geometryEvents(), ['pointerdown'], 'a press that moved its target is released away from it, so no click fires')
+      await browser.view.webContents.executeJavaScript(geometrySetup('between'))
+      const betweenMoved = await execute([step('doubleClick', 'Double-click the tool', { selector: '#geo-target' }), toolGroup])
+      assert.equal(betweenMoved.status, 'failed', JSON.stringify(betweenMoved))
+      assert.match(betweenMoved.steps[0].reason, /between double-click presses of the double-click/)
+      assert.deepEqual({ phase: betweenMoved.steps[0].data.geometry.phase, pressesSent: betweenMoved.steps[0].data.geometry.pressesSent },
+        { phase: 'between double-click presses', pressesSent: 1 })
+      assert.ok(!(await geometryEvents()).includes('dblclick'), 'the second press is never sent after the target moved')
+      assert.equal(writes, 0)
+      await browser.view.webContents.executeJavaScript('window.geometryFixture.stop?.(); document.querySelector("#geo-target").remove()')
       for (const switchPage of [false, true]) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         const contents = browser.view.webContents; const pageId = browser.snapshot.activePageId
@@ -513,6 +570,7 @@ if (!process.versions.electron) {
         sameOriginFrameDrag: true, crossOriginDragBlocked: true, dragEndpointTolerance: 1,
         viewerOverlayMeasurement: true, directSvgInputSurface: true, partiallyVisibleDragSurface: true,
         dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
+        geometryPhaseDiagnostics: true, stableCondition: true, dataAttributeCondition: true,
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally {

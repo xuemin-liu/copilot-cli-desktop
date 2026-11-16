@@ -36,6 +36,21 @@ test('references, coordinate pointers, modifiers and combined public-state asser
   assert.throws(() => plan([{ ...assertion, all: [{ selector: '#ready', condition: 'visible' }] }]))
 })
 
+test('stable takes a target, a bounded window and tolerance, and must fit the step timeout; attribute accepts any data-* name', () => {
+  const stable = { action: 'waitFor', label: 'Toolbar settled', selector: '#tool', condition: 'stable' }
+  assert.ok(plan([stable, assertion]))
+  assert.ok(plan([{ ...stable, stableMs: 300, tolerance: 1 }, assertion]))
+  assert.ok(plan([{ action: 'assert', label: 'Settled', all: [{ selector: '#tool', condition: 'stable', stableMs: 200 }, { selector: '#chip', condition: 'attribute', attribute: 'data-grp', expected: 'g' }] }]))
+  for (const extra of [{ stableMs: 50 }, { stableMs: 6000 }, { stableMs: 250.5 }, { tolerance: 51 }, { tolerance: -1 }, { expected: 'x' }, { selector: undefined }, { stableMs: 2000, timeoutMs: 1000 }]) {
+    assert.throws(() => plan([{ ...stable, ...extra }, assertion]), /Invalid browser test/, JSON.stringify(extra))
+  }
+  assert.throws(() => plan([{ ...assertion, condition: 'stable', stableMs: 5000 }]), /shorter than the step timeout/)
+  assert.throws(() => plan([{ ...assertion, condition: 'visible', stableMs: 300 }]), /stableMs requires/)
+  assert.throws(() => plan([{ action: 'assert', label: 'Too long', timeoutMs: 1000, all: [{ selector: '#a', condition: 'stable', stableMs: 1000 }] }]), /shorter than the step timeout/)
+  for (const attribute of ['data-grp', 'data-test-ready', 'data-1', 'aria-pressed']) assert.ok(plan([{ ...assertion, condition: 'attribute', attribute, expected: 'x' }]), attribute)
+  for (const attribute of ['data-', 'data-Grp', 'data-a_b', 'value', 'onclick', `data-${'a'.repeat(65)}`]) assert.throws(() => plan([{ ...assertion, condition: 'attribute', attribute, expected: 'x' }]), /Invalid browser test/, attribute)
+})
+
 test('network failure simulation is explicit, bounded and cannot supply scripts, credentials, headers or response bodies', () => {
   const rule = { urlPattern: 'http://localhost:3000/api/*', method: 'POST', failure: 'http', status: 503, maxRequests: 1, durationMs: 1000 }
   assert.ok(plan([assertion], { allowNetworkFailures: true, networkFailures: [rule] }))
