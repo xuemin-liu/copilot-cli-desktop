@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
-import { isTerminalKind } from '../../main/tool-tabs.js'
+import { dockedReorder, isTerminalKind } from '../../main/tool-tabs.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
@@ -32,7 +32,8 @@ interface Props {
 export function ToolPanelWorkspace({ children, desktop, tools, obscured, act }: Props): JSX.Element {
   const project = tools.projects.find(project => project.profileId === desktop.activeProfileId)
   const { side } = visibleSessionTabs({ tabs: desktop.tabs, activeTabId: desktop.activeTabId })
-  const visible = Boolean(project?.visible && project.tabs.length)
+  // The panel can stay open with nothing docked, after its last tab moves to its own window.
+  const visible = Boolean(project?.visible)
   return <div className="tool-panel-workspace">
     <ProjectDock open={visible} width={project?.width ?? 420} twoTerminals={Boolean(side)}
       onWidthChange={width => { if (project) act(project.profileId, { type: 'width', width }) }}
@@ -60,12 +61,13 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     terminalProject.store.setState({ activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast) })
   }, [terminalProject, project.activeId, project.broadcast])
   const tabState = {
-    tabs: project.tabs.map(tab => ({ id: tab.id, label: tab.label || tab.title, color: tab.color, terminal: isTerminalKind(tab.kind),
+    // A page in its own window leaves the strip, as in Chrome; Return to panel in that window brings it back.
+    tabs: project.tabs.filter(tab => !tab.detached).map(tab => ({ id: tab.id, label: tab.label || tab.title, color: tab.color, terminal: isTerminalKind(tab.kind),
       isLocal: tab.kind !== 'ssh', config: tab.terminal?.temporary ? tab.terminal : null, sessionId: tab.terminal?.temporary ? null : tab.terminal?.connectionId })),
     activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast),
     setActiveTab: (id: string) => action({ type: 'select', id }), closeTab: (id: string) => action({ type: 'close', id }),
     updateTab: (id: string, patch: {label?: string; color?: string | null}) => action({ type: 'metadata', id, ...patch }),
-    reorderTabs: (from: number, to: number) => { const first = project.tabs[from], last = project.tabs[to]; if (first && last) action({ type: 'reorder', id: first.id, beforeId: last.id }) },
+    reorderTabs: (from: number, to: number) => { const move = dockedReorder(project.tabs, from, to); if (move) action({ type: 'reorder', ...move }) },
     toggleBroadcast: () => action({ type: 'broadcast', enabled: !project.broadcast }),
   }
   const [address, setAddress] = useState('')
@@ -91,6 +93,10 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
         toolbar: <><button type="button" aria-label="New tab" title="New tab" onClick={() => action({ type: 'add', kind: 'new' })}>+</button>
           <button type="button" aria-label="Hide tabs" title={takeover ? 'Hide tabs and return to CLI' : 'Hide tabs'} onClick={() => action({ type: 'visible', visible: false })}>▥</button></> }} />
     </div>
+    {!selected && <div className="tool-empty-panel" role="status">
+      <p>No tabs</p>
+      <button type="button" onClick={() => action({ type: 'add', kind: 'new' })}>New tab</button>
+    </div>}
     {selected?.kind === 'new' && <div id={`tool-content-${selected.id}`} role="tabpanel" className="tool-launcher">
       <h2>New tab</h2>
       <form onSubmit={event => { event.preventDefault(); action({ type: 'add', kind: 'browser', replaceId: selected.id, ...(address.trim() ? { url: address.trim() } : {}) }); setAddress('') }}>
@@ -124,7 +130,7 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
         onClick={() => action({ type: 'add', kind: 'browser', replaceId: selected.id, url })}>{url}</button>)}</div>}
     </div>}
     {selected?.kind === 'browser' && <div className="tool-context">
-        <button type="button" onClick={() => action({ type: selected.detached ? 'return' : 'pop-out', id: selected.id })}>{selected.detached ? 'Return to panel' : 'Open in window'}</button>
+        <button type="button" onClick={() => action({ type: 'pop-out', id: selected.id })}>Open in window</button>
         <details><summary>Browser settings</summary>
           <p>The current session automatically uses this project's browser pages.</p>
           <label>Local Overrides for this project <select aria-label="Project Local Overrides" value={project.overrides} onChange={event => action({ type: 'overrides', mode: event.target.value as 'shared' | 'private' })}>

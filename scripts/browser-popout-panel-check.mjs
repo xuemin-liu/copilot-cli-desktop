@@ -62,16 +62,29 @@ if (!process.versions.electron) {
       await page.executeJavaScript(`document.querySelector('#note').value='Preserve my page'`)
       for(let cycle=0;cycle<4;cycle++) {
         await click('.tool-context button')
-        await until('document.querySelector(".tool-context button")?.textContent==="Return to panel"', 'pop-out updates the button')
+        // Chrome model: the page leaves the strip and the panel moves to a docked tab, or stays open and blank.
+        await until('!document.querySelector(".workspace-tabbar-host").innerText.includes("/popout")', 'popped-out page leaves the strip')
         await delay(150)
-        assert.equal(await ui('document.querySelector(".tool-context button").textContent'),'Return to panel','label stays correct after the action reply')
+        assert.notEqual((await current()).activeId, tab.id, 'the panel never selects a windowed page')
+        assert.equal((await current()).tabs.find(t=>t.id===tab.id).detached, true)
+        if (cycle === 3) await until('document.querySelector(".tool-git-host:not([hidden])")', 'panel moves to the Git tab')
+        else await until('document.querySelector(".workspace-tools:not([hidden]) .tool-empty-panel")?.innerText.includes("No tabs")', 'nothing docked leaves a blank panel')
+        assert.equal(await ui('Boolean(document.querySelector(".tool-context"))'), false, 'no dead browser placeholder')
         assert.equal(await page.executeJavaScript(`document.querySelector('#note').value`),'Preserve my page')
         const popup = BaseWindow.getAllWindows().find(window => window.id !== win.id && window.contentView.children.some(view => view.webContents?.id === page.id))
         assert.ok(popup, 'page is in its own window')
         const toolbar = popup.contentView.children.find(view => view.webContents && view.webContents.id !== page.id)?.webContents
         assert.ok(toolbar, 'popup has its own app-owned return toolbar')
-        await until('document.querySelector(".browser-viewport-detached")', 'detached placeholder appears')
-        assert.equal(await ui('getComputedStyle(document.querySelector(".browser-viewport-detached")).backgroundColor'), 'rgb(11, 14, 20)')
+        if (cycle === 0) {
+          // Choosing a windowed page raises its window, restoring it when minimized, and leaves the panel alone.
+          popup.minimize()
+          const down = Date.now() + 5000
+          while (!popup.isMinimized()) { assert.ok(Date.now() < down); await delay(30) }
+          await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'select',id:${JSON.stringify(tab.id)}})`)
+          const up = Date.now() + 5000
+          while (popup.isMinimized()) { assert.ok(Date.now() < up, 'minimized window restored'); await delay(30) }
+          assert.equal((await current()).activeId, null)
+        }
         const ready = Date.now() + 20_000
         while (toolbar.isLoading()) { assert.ok(Date.now() < ready); await delay(30) }
         assert.equal(await toolbar.executeJavaScript('document.querySelector("button").textContent'), 'Return to panel')
@@ -111,7 +124,7 @@ if (!process.versions.electron) {
         popup.focus(); toolbar.focus()
         toolbar.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
         toolbar.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
-        await until('document.querySelector(".tool-context button")?.textContent==="Open in window"', 'popup return button restores the panel')
+        await until('document.querySelector(".tool-context button")?.textContent==="Open in window" && document.querySelector(".workspace-tabbar-host").innerText.includes("/popout")', 'popup return button restores the tab and panel')
         assert.equal((await ui('window.copilotDesktop.getState()')).activeProfileId, p1.id)
         assert.equal((await current()).activeId, tab.id)
         assert.equal((await current()).visible, true)
@@ -119,7 +132,7 @@ if (!process.versions.electron) {
         assert.equal(win.isMaximized(), cycle === 1 || cycle === 3, 'return preserves maximized main window state')
         assert.deepEqual(win.getBounds(), mainBounds, 'return preserves main window size and position')
         assert.ok(popup.isDestroyed()); assert.ok(toolbar.isDestroyed(), 'toolbar renderer is disposed on return')
-        await until('document.querySelector(".browser-viewport") && !document.querySelector(".browser-viewport-detached")', 'returned page removes detached placeholder')
+        await until('document.querySelector(".browser-viewport") && !document.querySelector(".workspace-tools:not([hidden]) .tool-empty-panel")', 'returned page fills the panel again')
 
         assert.equal((await current()).tabs.find(t=>t.id===tab.id).detached,false)
         assert.equal(webContents.fromId(tab.pageId),page)
@@ -137,7 +150,7 @@ if (!process.versions.electron) {
       closing.close()
       const closed = Date.now() + 20_000
       while (!page.isDestroyed() || !closingToolbar.isDestroyed()) { assert.ok(Date.now() < closed, 'closing popup disposes page and toolbar'); await delay(30) }
-      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:4,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,darkPlaceholder:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true,maximizedStatePreserved:true,minimizedWindowRestored:true},null,2))
+      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:4,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,leavesStrip:true,blankPanel:true,neighbourSelected:true,minimizedPopupRestored:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true,maximizedStatePreserved:true,minimizedWindowRestored:true},null,2))
       console.log('Browser pop-out button actual-app check passed:',directory)
     } finally {
       for(const tab of (await current()).tabs) await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'close',id:${JSON.stringify(tab.id)}})`)

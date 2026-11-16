@@ -549,10 +549,6 @@ button:disabled {
   background: #080b12;
 }
 
-.browser-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
-.browser-workspace-toolbar { display: flex; justify-content: flex-end; padding: 5px 10px; border-bottom: 1px solid #252a33; }
-.browser-workspace-toolbar button { padding: 4px 10px; font-size: 12px; }
-.browser-workspace-content { display: grid; flex: 1; min-height: 0; min-width: 0; }
 .browser-terminal-workspace { display: flex; min-height: 0; min-width: 0; }
 .browser-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #10151e; }
 .browser-toolbar { display: flex; gap: 4px; padding: 8px; }
@@ -1132,7 +1128,6 @@ button:disabled {
 .browser-only-window { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
 .browser-only-window > .browser-panel { flex: 1; }
 .browser-only-window .session-pane-title svg { vertical-align: -3px; margin-right: 4px; }
-.browser-workspace-error { min-width: 0; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ffb3bb; font-size: 11px; }
 .side-chat-divider { grid-column: 2; grid-row: 1; background: #292d35; cursor: col-resize; touch-action: none; }
 .side-chat-divider:hover, .side-chat-divider:focus-visible { background: #4f88ff; outline: none; }
 .session-operation-error { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; color: #ffb3bb; background: #3a1c28; overflow-wrap: anywhere; }
@@ -1650,6 +1645,8 @@ button:disabled {
 .tool-context details { width:100%; }
 .tool-context p { margin:5px 0; color:#a9b2c0; }
 .tool-launcher { padding:22px 18px; overflow:auto; }
+.tool-empty-panel { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#a5b1c3; font-size:13px; }
+.tool-empty-panel p { margin:0; }
 .tool-launcher h2 { font-size:17px; font-weight:500; margin:0 0 18px; }
 .tool-launcher form { display:flex; gap:6px; flex-wrap:wrap; }
 .tool-launcher input { min-width:100px; flex:1; padding:8px; border:1px solid #364153; border-radius:5px; background:#080b12; color:#e6edf3; }

@@ -4738,6 +4738,8 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
   await activateProfile(tab.workspaceProfileId)
   activateSessionTab(tab.id)
+  // The session's page is in its own window: bring that window forward instead of opening another page.
+  if (projectTools().showSessionWindow(tab.id)) return
   await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser' })
   if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
 })

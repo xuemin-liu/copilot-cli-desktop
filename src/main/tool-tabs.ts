@@ -12,6 +12,7 @@ export interface ToolTab {
   url?: string
   pageId?: number
   resource?: string
+  /** The page is in its own window: the strip hides this record and the panel never selects it. */
   detached?: boolean
   loading?: boolean
   error?: string
@@ -40,12 +41,29 @@ export type ToolsAction =
   | { type: 'save-connection'; id: string }
   | { type: 'overrides'; mode: 'shared' | 'private' }
 
+/** The tab the panel shows in place of tabs[index]: the nearest docked tab to the right, then to the left.
+ * A tab whose page is in its own window is never shown in the panel, so it is skipped, as is `skipId`. */
+export function dockedNeighbor(tabs: readonly ToolTab[], index: number, skipId?: string): string | null {
+  const shown = (tab: ToolTab | undefined): tab is ToolTab => tab !== undefined && !tab.detached && tab.id !== skipId
+  for (let i = Math.max(0, index); i < tabs.length; i++) if (shown(tabs[i])) return tabs[i]!.id
+  for (let i = Math.min(index, tabs.length) - 1; i >= 0; i--) if (shown(tabs[i])) return tabs[i]!.id
+  return null
+}
+
+/** The strip lists docked tabs only; its indexes are positions in that list, not in project.tabs. */
+export function dockedReorder(tabs: readonly ToolTab[], from: number, to: number): { id: string; beforeId: string } | null {
+  const docked = tabs.filter(tab => !tab.detached)
+  const first = docked[from], last = docked[to]
+  return first && last ? { id: first.id, beforeId: last.id } : null
+}
+
 export function removeToolTab(project: ProjectTools, id: string): void {
   const index = project.tabs.findIndex(tab => tab.id === id)
   if (index < 0) return
-  project.tabs.splice(index, 1)
-  if (project.activeId === id) project.activeId = project.tabs[index]?.id ?? project.tabs[index - 1]?.id ?? null
-  if (!project.tabs.length) project.visible = false
+  const [removed] = project.tabs.splice(index, 1)
+  if (project.activeId === id) project.activeId = dockedNeighbor(project.tabs, index)
+  // Closing the last docked tab hides the panel; a page closing in its own window leaves the panel as it is.
+  if (!removed!.detached && !project.tabs.some(tab => !tab.detached)) project.visible = false
 }
 
 export function panelButtonLabel(project: Pick<ProjectTools, 'tabs' | 'visible'> | undefined): string {
