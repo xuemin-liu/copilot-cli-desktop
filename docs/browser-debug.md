@@ -412,9 +412,9 @@ that a natural-language console question reports the live exception.
 
 ### Unattended testing contract
 
-Unattended means no manual application interaction after the user enables Testing
-mode for the described test. The desktop window and selected **Page** view must
-remain visible; minimized/background execution is unsupported. Origin restrictions
+Unattended means no manual application interaction after the user requests the
+described test; there is nothing to enable first. The desktop window and selected
+**Page** view must remain visible; minimized/background execution is unsupported. Origin restrictions
 still apply. The runner never exposes arbitrary JavaScript, browser storage,
 credentials, request replay, request bodies or custom response scripts.
 
