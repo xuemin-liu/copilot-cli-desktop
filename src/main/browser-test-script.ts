@@ -177,6 +177,23 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if (operation === 'probe') {
       if (args.condition === 'hidden') return { passed: matches.length === 0 }
       if (args.condition === 'count') return { passed: matches.length === args.expected }
+      if (args.condition === 'stable') {
+        // Samples live in this frame's isolated world, so a new document or frame starts
+        // over. One record per condition of the current step; another step clears them.
+        const scope = globalThis as typeof globalThis & { __desktopTestStable?: { scope: string; samples: Map<string, { element: Element; bounds: number[]; since: number }> } }
+        let state = scope.__desktopTestStable
+        if (!state || state.scope !== args.stableScope) state = scope.__desktopTestStable = { scope: String(args.stableScope), samples: new Map() }
+        const samples = state.samples; const key = String(args.stableKey)
+        if (matches.length !== 1) { samples.delete(key); return { passed: false, reason: matches.length ? 'Selector matches multiple visible elements.' : 'Expected element is not visible.' } }
+        const r = matches[0]!.getBoundingClientRect(); const bounds = [r.x, r.y, r.width, r.height]; const now = Date.now()
+        const previous = samples.get(key); const tolerance = args.tolerance ?? 0.5; const windowMs = args.stableMs ?? 500
+        if (!previous || previous.element !== matches[0] || previous.bounds.some((value, index) => Math.abs(value - bounds[index]!) > tolerance)) {
+          samples.set(key, { element: matches[0]!, bounds, since: now })
+          return { passed: false, reason: previous ? previous.element !== matches[0] ? 'Target was replaced; waiting for the new element to stay still.'
+            : `Target bounds changed; waiting for ${windowMs} ms without movement.` : `Waiting for ${windowMs} ms without movement.` }
+        }
+        return now - previous.since >= windowMs ? { passed: true } : { passed: false, reason: `Target has been still for ${now - previous.since} of ${windowMs} ms.` }
+      }
       if (matches.length !== 1) return { passed: false, reason: matches.length ? 'Selector matches multiple visible elements.' : 'Expected element is not visible.' }
       const target = matches[0]!
       if (['text', 'value', 'numericValue', 'attribute'].includes(args.condition)

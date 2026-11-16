@@ -11,10 +11,13 @@ export interface BrowserTestCondition {
   targetRef?: string
   text?: string
   frame?: string
-  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete'
+  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable'
   attribute?: string
   expected?: string | number | boolean
+  /** numericValue: allowed difference. stable: allowed bounds change in CSS pixels (default 0.5). */
   tolerance?: number
+  /** stable: how long the bounds must stay unchanged, in milliseconds (default 500). */
+  stableMs?: number
   request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
 }
 export interface BrowserTestStep extends BrowserTestCondition {
@@ -105,9 +108,9 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (url.search || url.hash || String(v.urlPattern).split('://')[1]?.split('/')[0]?.includes('*')) fail('request patterns need a literal origin and no query or fragment.')
     if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(String(v.method))) fail('unsupported request method.')
   }
-  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'request']
+  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'request']
   const condition = (v: Record<string, unknown>): void => {
-    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete'].includes(String(v.condition))) fail('unsupported condition.')
+    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable'].includes(String(v.condition))) fail('unsupported condition.')
     target(v, !['url', 'requestComplete'].includes(String(v.condition)))
     if (['url', 'requestComplete'].includes(String(v.condition)) && [v.selector, v.targetRef, v.text, v.frame].some(x => x !== undefined)) fail('this condition takes no target.')
     if (v.condition === 'requestComplete') {
@@ -116,9 +119,11 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (request.status !== undefined && (typeof request.status !== 'number' || !Number.isInteger(request.status) || request.status < 100 || request.status > 599)) fail('invalid request status.')
     } else if (v.request !== undefined) fail('request requires requestComplete.')
     if (v.condition === 'attribute') {
-      if (typeof v.attribute !== 'string' || !/^(data-test-[a-z0-9-]{1,64}|aria-[a-z-]{1,64}|role|title|class)$/.test(v.attribute)) fail('use a public data-test-*, aria-*, role, title or class attribute.')
+      if (typeof v.attribute !== 'string' || !/^(data-[a-z0-9][a-z0-9-]{0,63}|aria-[a-z-]{1,64}|role|title|class)$/.test(v.attribute)) fail('use a public data-*, aria-*, role, title or class attribute.')
     } else if (v.attribute !== undefined) fail('attribute requires the attribute condition.')
-    if (v.tolerance !== undefined && (v.condition !== 'numericValue' || typeof v.tolerance !== 'number' || !Number.isFinite(v.tolerance) || v.tolerance < 0 || v.tolerance > 1e12)) fail('invalid numeric tolerance.')
+    if (v.tolerance !== undefined && (!['numericValue', 'stable'].includes(String(v.condition)) || typeof v.tolerance !== 'number' || !Number.isFinite(v.tolerance) || v.tolerance < 0
+      || v.tolerance > (v.condition === 'stable' ? 50 : 1e12))) fail(v.condition === 'stable' ? 'stable tolerance must be within 0–50 CSS pixels.' : 'invalid numeric tolerance.')
+    if (v.stableMs !== undefined && (v.condition !== 'stable' || typeof v.stableMs !== 'number' || !Number.isInteger(v.stableMs) || v.stableMs < 100 || v.stableMs > 5000)) fail('stableMs requires the stable condition and must be within 100–5000 milliseconds.')
     if (['text', 'url', 'value', 'attribute'].includes(String(v.condition))) string(v.expected, 2000, ['value', 'attribute'].includes(String(v.condition)))
     else if (v.condition === 'numericValue') {
       if (typeof v.expected !== 'number' || !Number.isFinite(v.expected) || Math.abs(v.expected) > 1e12) fail('invalid expected number.')
@@ -194,6 +199,9 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
         if (!Array.isArray(step.all) || step.all.length < 1 || step.all.length > 10) fail('use 1–10 readiness conditions.')
         for (const rawCondition of step.all as unknown[]) { const c = object(rawCondition); fields(c, conditionFields); condition(c) }
       } else if (step.action !== 'reload') condition(step)
+      const stableWindow = Math.max(0, ...[step, ...(Array.isArray(step.all) ? step.all as Record<string, unknown>[] : [])]
+        .filter(c => c.condition === 'stable').map(c => Number(c.stableMs ?? 500)))
+      if (stableWindow && stableWindow >= Number(step.timeoutMs ?? (step.action === 'assert' ? 5000 : 30000))) fail('the stable window must be shorter than the step timeout.')
       if (step.action === 'assert') assertions++
     }
   }
