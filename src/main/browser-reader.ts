@@ -179,7 +179,8 @@ export class BrowserReader {
       const frames = await this.frames(page, this.testAbort.signal)
       page.testNetwork = new BrowserTestNetwork(plan.networkFailures ?? [], origin,
         new Set(frames.filter(frame => this.httpOrigin(frame.url) === origin).map(frame => frame.id)),
-        (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted)
+        (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted,
+        plan.networkConditions)
       await page.testNetwork.start()
       executionStarted = true
       const consoleStart = this.options.console?.mark()
@@ -202,7 +203,7 @@ export class BrowserReader {
       await page.testNetwork.stop()
       // If the transport cannot remove interception, detaching Chromium's
       // debugger removes Fetch interception rather than leaving a live rule.
-      if (page.testNetwork.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
+      if (!page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt, consoleStart),
         ...(plan.failOnConsoleError ? { consoleErrors: { failOnConsoleError: true, ignorePatterns: plan.consoleErrorIgnore?.length ?? 0,
           observed: 'every console message of the test page, including same-origin frames, while the run is open, recorded or not. Messages arrive asynchronously and are attributed to the step during which they arrive; workers and messages after the last step are not observed.' } } : {}),
@@ -220,7 +221,7 @@ export class BrowserReader {
       throw error
     } finally {
       await page.testNetwork?.stop()
-      if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
+      if (page.testNetwork && !page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
       this.testConsole?.dispose(); this.testConsole = null; this.visualSamples = null
       this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
@@ -620,7 +621,10 @@ export class BrowserReader {
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'consoleMessage') return {
       passed: this.testConsole?.matched(String(step.expected), step.level) ?? false, reason: `No ${step.level ? `${step.level} ` : ''}console message from this run matches the pattern.` }
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'requestComplete') return {
-      passed: page.testNetwork?.completed(step.request!) ?? false, reason: 'No matching request from this run has completed with the expected state/status.' }
+      passed: (page.testNetwork?.completed(step.request!) ?? 0) >= (step.request!.minCount ?? 1),
+      reason: step.request!.minCount ? `${page.testNetwork?.completed(step.request!) ?? 0} of ${step.request!.minCount} matching requests from this run have completed with the expected state/status.`
+        : 'No matching request from this run has completed with the expected state/status.',
+      ...(step.request!.minCount ? { data: { requests: { matched: page.testNetwork?.completed(step.request!) ?? 0, minCount: step.request!.minCount } } } : {}) }
     if (step.action === 'reload') {
       Object.assign(this.testDiagnostics, { navigation: 'pending', loading: page.contents.isLoading(), testingEnabled: this.testState.enabled,
         applicationReadiness: step.all ? 'waiting' : 'not requested' })

@@ -124,3 +124,25 @@ test('visualStable waits on one top-frame element or a region, with an image tol
   }
   assert.throws(() => plan([{ action: 'waitFor', selector: '#a', condition: 'stable', stableMs: 6000, timeoutMs: 10000 }, assertion]), /5000/, 'stable keeps its own window limit')
 })
+
+test('delay rules, a slow network and request counts are bounded and opt-in where they can break the page', () => {
+  const frames = { urlPattern: 'http://localhost:3000/dicomweb/*', method: 'GET' }
+  const delay = { ...frames, failure: 'delay', delayMs: 3000, maxRequests: 200, durationMs: 30000 }
+  const run = (extra: Record<string, unknown>, steps: unknown[] = [assertion]) => validateBrowserTestPlan({ description: 'Network', expected: 'Recovers', steps, ...extra })
+  assert.ok(run({ allowNetworkFailures: true, networkFailures: [delay] }))
+  for (const bad of [{ delayMs: 99 }, { delayMs: 30001 }, { delayMs: undefined }, { status: 503 }, { maxRequests: 201 }]) {
+    assert.throws(() => run({ allowNetworkFailures: true, networkFailures: [{ ...delay, ...bad }] }), /Invalid browser test/, JSON.stringify(bad))
+  }
+  assert.throws(() => run({ allowNetworkFailures: true, networkFailures: [{ ...frames, failure: 'transport', delayMs: 100, maxRequests: 1, durationMs: 1000 }] }), /delayMs/)
+  assert.throws(() => run({ allowNetworkFailures: true, networkFailures: [{ ...frames, failure: 'transport', maxRequests: 21, durationMs: 1000 }] }), /1–20/)
+  assert.throws(() => run({ networkFailures: [delay] }), /allowNetworkFailures/)
+  assert.ok(run({ networkConditions: { latencyMs: 200, downloadKbps: 2000, uploadKbps: 500 } }), 'a slow network needs no opt-in')
+  assert.ok(run({ allowNetworkFailures: true, networkConditions: { offline: true } }))
+  for (const conditions of [{}, { latencyMs: -1 }, { latencyMs: 10001 }, { latencyMs: 1.5 }, { downloadKbps: 15 }, { uploadKbps: 1000001 }, { offline: 'yes' }, { jitter: 5 }]) {
+    assert.throws(() => run({ networkConditions: conditions }), /Invalid browser test/, JSON.stringify(conditions))
+  }
+  assert.throws(() => run({ networkConditions: { offline: true } }), /allowNetworkFailures/)
+  const counted = (request: Record<string, unknown>) => run({}, [{ action: 'waitFor', condition: 'requestComplete', request: { ...frames, state: 'finished', ...request } }, assertion])
+  assert.ok(counted({ minCount: 120 })); assert.ok(counted({ minCount: 1000 }))
+  for (const minCount of [0, 1001, 2.5, '5']) assert.throws(() => counted({ minCount }), /minCount/, String(minCount))
+})
