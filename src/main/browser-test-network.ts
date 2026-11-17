@@ -45,9 +45,11 @@ export class BrowserTestNetwork {
     if (this.conditions) {
       // Kilobits per second to bytes per second; -1 leaves a direction unthrottled.
       const throughput = (kbps?: number): number => kbps === undefined ? -1 : kbps * 125
+      // Marked as possibly in effect before sending: a lost or late acknowledgement can still have applied it, so stop()
+      // always resets it, and detaching the debugger removes it if the reset fails too.
+      this.conditionsApplied = true; this.conditionsRemoved = false
       await this.send('Network.emulateNetworkConditions', { offline: this.conditions.offline === true, latency: this.conditions.latencyMs ?? 0,
         downloadThroughput: throughput(this.conditions.downloadKbps), uploadThroughput: throughput(this.conditions.uploadKbps) })
-      this.conditionsApplied = true; this.conditionsRemoved = false
     }
     if (!this.rules.length) return
     this.sessions.add(undefined)

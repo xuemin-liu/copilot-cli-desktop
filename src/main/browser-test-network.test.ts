@@ -125,3 +125,19 @@ test('requests are counted beyond the 100 the report lists', async () => {
   assert.equal((evidence.requests as unknown[]).length, 100); assert.equal(evidence.truncated, true)
   assert.match(String((evidence.requests as { url: string }[])[99]?.url), /frames\/149$/, 'the report keeps the latest requests')
 })
+
+test('network conditions whose acknowledgement is lost are still reset, or reported for detaching', async () => {
+  for (const resetFails of [false, true]) {
+    const calls: any[] = []; let emulations = 0
+    const network = new BrowserTestNetwork([], 'http://localhost:3000', new Set(['top']), async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'Network.emulateNetworkConditions' && (++emulations === 1 || resetFails)) throw new Error('Timed out waiting for the acknowledgement.')
+    }, () => true, { offline: true })
+    await assert.rejects(network.start(), /acknowledgement/)
+    assert.equal(network.cleanedUp(), false, 'an unacknowledged application may be in effect')
+    await network.stop()
+    assert.equal(calls.filter(call => call.method === 'Network.emulateNetworkConditions').length, 2, 'the run end resets it anyway')
+    assert.deepEqual(calls.at(-1).params, { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 })
+    assert.equal(network.cleanedUp(), !resetFails, resetFails ? 'a failed reset leaves it for the debugger detach' : 'a successful reset removes it')
+  }
+})
