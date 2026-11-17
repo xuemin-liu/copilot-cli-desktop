@@ -31,7 +31,8 @@ if (!process.versions.electron) {
     const p1 = createWorkspaceProfile(workspace), p2 = createWorkspaceProfile(directory)
     await writeDesktopConfig(join(directory, 'userdata', 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles: [p1, p2], activeProfileId: p1.id,
       closeBehavior: 'quit', trayEnabled: false, notifications: false, automaticUpdateChecks: false })
-    const server = createServer((request, response) => { response.setHeader('content-type', 'text/html'); response.end(`<title>${request.url}</title><body style="background:#eef2f6;padding:20px;font-family:sans-serif"><h1>${request.url}</h1><input id="note" placeholder="Your page state stays here"></body>`) })
+    const requests = []
+    const server = createServer((request, response) => { requests.push({ url: request.url, cacheControl: request.headers['cache-control'] ?? '' }); response.setHeader('content-type', 'text/html'); response.end(`<title>${request.url}</title><body style="background:#eef2f6;padding:20px;font-family:sans-serif"><h1>${request.url}</h1><input id="note" placeholder="Your page state stays here"></body>`) })
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
     const address = `http://127.0.0.1:${server.address().port}`
     await import('../dist/src/main/main.js')
@@ -87,7 +88,7 @@ if (!process.versions.electron) {
         }
         const ready = Date.now() + 20_000
         while (toolbar.isLoading()) { assert.ok(Date.now() < ready); await delay(30) }
-        assert.equal(await toolbar.executeJavaScript('document.querySelector("button").textContent'), 'Return to panel')
+        assert.equal(await toolbar.executeJavaScript('document.querySelector("#return").textContent'), 'Return to panel')
         assert.equal(await toolbar.executeJavaScript('typeof window.copilotDesktop'), 'undefined', 'remote browser controls receive no desktop bridge')
         popup.setContentSize(760, 530)
         await delay(100)
@@ -120,7 +121,7 @@ if (!process.versions.electron) {
           const minimized = Date.now() + 5000
           while (!win.isMinimized()) { assert.ok(Date.now() < minimized); await delay(30) }
         }
-        const point = await toolbar.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()')
+        const point = await toolbar.executeJavaScript('(()=>{const r=document.querySelector("#return").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()')
         popup.focus(); toolbar.focus()
         toolbar.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
         toolbar.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
@@ -147,10 +148,30 @@ if (!process.versions.electron) {
       await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'pop-out',id:${JSON.stringify(tab.id)}})`)
       const closing = BaseWindow.getAllWindows().find(window => window.id !== win.id && window.contentView.children.some(view => view.webContents?.id === page.id))
       const closingToolbar = closing.contentView.children.find(view => view.webContents && view.webContents.id !== page.id).webContents
+      // The window's reload button reloads its page; Shift+click bypasses the cache, as in the panel.
+      const toolbarReady = Date.now() + 20_000
+      while (closingToolbar.isLoading()) { assert.ok(Date.now() < toolbarReady); await delay(30) }
+      assert.equal(await closingToolbar.executeJavaScript('document.querySelector("#reload").getAttribute("aria-label")'), 'Reload page')
+      const reloadButton = await closingToolbar.executeJavaScript('(()=>{const r=document.querySelector("#reload").getBoundingClientRect(),b=document.querySelector("#return").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),width:r.width,sameRow:Math.abs(r.top-b.top)<8}})()')
+      assert.ok(reloadButton.width <= 32 && reloadButton.sameRow, 'reload is a small button on the existing toolbar row')
+      for (const hard of [false, true]) {
+        await page.executeJavaScript(`document.querySelector('#note').value='Reload clears me'`)
+        const before = requests.length
+        closing.focus(); closingToolbar.focus()
+        const modifiers = hard ? ['shift'] : []
+        closingToolbar.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: reloadButton.x, y: reloadButton.y, modifiers })
+        closingToolbar.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: reloadButton.x, y: reloadButton.y, modifiers })
+        const reloaded = Date.now() + 20_000
+        while (requests.length === before || page.isLoading()) { assert.ok(Date.now() < reloaded, `${hard ? 'hard ' : ''}reload from the window toolbar`); await delay(30) }
+        assert.equal(requests.at(-1).url, '/popout')
+        assert.equal(/no-cache/.test(requests.at(-1).cacheControl), hard, `${hard ? 'Shift+click bypasses' : 'a click keeps'} the cache: ${requests.at(-1).cacheControl}`)
+        assert.equal(await page.executeJavaScript(`document.querySelector('#note').value`), '', 'the page was reloaded')
+        assert.equal(closing.isDestroyed(), false, 'reload keeps the page in its window')
+      }
       closing.close()
       const closed = Date.now() + 20_000
       while (!page.isDestroyed() || !closingToolbar.isDestroyed()) { assert.ok(Date.now() < closed, 'closing popup disposes page and toolbar'); await delay(30) }
-      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:4,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,leavesStrip:true,blankPanel:true,neighbourSelected:true,minimizedPopupRestored:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true,maximizedStatePreserved:true,minimizedWindowRestored:true},null,2))
+      await writeFile(join(directory,'result.json'),JSON.stringify({passed:true,cycles:4,pageStatePreserved:true,actionRepliesCurrent:true,popupReturnButton:true,leavesStrip:true,blankPanel:true,neighbourSelected:true,minimizedPopupRestored:true,hiddenPanelReturn:true,otherWorkspaceReturn:true,toolbarDisposed:true,popupCloseDisposed:true,toolbarReload:true,toolbarHardReload:true,maximizedStatePreserved:true,minimizedWindowRestored:true},null,2))
       console.log('Browser pop-out button actual-app check passed:',directory)
     } finally {
       for(const tab of (await current()).tabs) await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)},{type:'close',id:${JSON.stringify(tab.id)}})`)

@@ -573,6 +573,11 @@ export class BrowserDebug {
           this.owner.show(); this.owner.focus()
         }
       }
+    }, hard => {
+      // The same reloads as the panel's button, for the page in this window.
+      if (page.window !== window || this.disposed || contents.isDestroyed()) return
+      page.error = null
+      if (hard) contents.reloadIgnoringCache(); else contents.reload()
     }, this.reportError) : null
     const fit = (): void => {
       if (window.isDestroyed()) return
