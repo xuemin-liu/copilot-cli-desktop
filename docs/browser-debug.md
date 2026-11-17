@@ -4,10 +4,12 @@ Choose **New tab → Browser**, enter an address, or use **Open browser** in a C
 
 Pages belong to a project and share its cookies, storage, Local Overrides and capture group. Separate profiles are the default; Settings can share cookies across projects. The cap is 32 live pages across all projects, including popups and hidden projects. CLI focus never changes the selected page. The current running CLI connects automatically. Switching sessions or selecting a Browser tab updates its target; CLI page selection remains independent until the user changes session or page. Inactive sessions cannot control the browser. A closed CLI-selected cursor stays empty until the CLI selects a page or the user changes the selected Browser tab.
 
-Bare public domains use HTTPS; development, private and loopback hosts use HTTP. Explicit HTTP/HTTPS takes precedence. **Reload** uses the cache; **Shift+click**, **Ctrl+Shift+R**, or **Ctrl+F5** bypasses it. Links and `window.open()` create top-level Browser tabs while preserving their opener. **Open in window** detaches one page; **Return to panel** keeps the same page and form state. Popups may open windows from a detached opener. Closing asks before discarding unsaved page changes; Cancel retains the page.
+Bare public domains use HTTPS; development, private and loopback hosts use HTTP. Explicit HTTP/HTTPS takes precedence. **Reload** uses the cache; **Shift+click**, **Ctrl+Shift+R**, or **Ctrl+F5** bypasses it. Links and `window.open()` create top-level Browser tabs while preserving their opener. **Open in window** moves one page into its own window and out of the tab strip; the panel moves to a neighbouring tab, or shows **No tabs**. The window's toolbar has **↻** (a click reloads; **Shift/Ctrl/Cmd+click** bypasses the cache) and **Return to panel**, which puts the page back in its old place with the same page and form state. Popups may open windows from a detached opener. Closing asks before discarding unsaved page changes; Cancel retains the page.
+
+A page in its own window stays under the agent's control. The session's browser follows the page you last selected or clicked into, in the panel or in its own window, and moving the panel to another tab does not move it. A session window's **Show browser** brings that page forward. Screenshots and test interactions need its window shown, not minimized; text snapshots still work while it is minimized.
 
 The address toolbar shows the selected page's actual browser zoom percentage.
-Zoom is remembered per site (host name, as in Chrome) for every session's browser and
+Zoom is remembered per site (host name, as in Chrome) for every project's browser and
 kept across restarts; returning a site to 100% forgets it.
 Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
@@ -21,9 +23,9 @@ Local Overrides. Chrome's saved override files are ordinary local files and can
 be reused. The folder selection must be configured once in this app; Chrome's
 profile settings are not imported automatically. The overrides folder and other
 DevTools settings, including whether Local Overrides is enabled, are shared by every
-session's browser: a session opened later starts with the settings other sessions
-saved (Chromium saves them a few seconds after a change), and settings from a closed
-session are kept. Console history is shared too.
+project that uses shared settings (the default): a browser opened later starts with the
+settings the others saved (Chromium saves them a few seconds after a change), and they
+are kept after its pages close. Console history is shared too.
 
 Choose **Browser settings → Local Overrides for this project** for private or shared settings. New projects use the default in **Settings → Project browsers**. Private DevTools folders stay in the project's own partition. A changed choice applies after all its browser pages close and a new Browser opens. With shared cookies, the overrides switch is also shared; private folders remain separate.
 
@@ -146,6 +148,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BR
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER" network
 ```
 
+On macOS and Linux the helper is a shell script that needs only `sh` and `curl`. Every helper
+command in this document works the same way: replace
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_BROWSER_HELPER"`
+with `sh "$COPILOT_DESKTOP_BROWSER_HELPER"`, and use absolute POSIX paths (such as
+`/tmp/page.png` or `/tmp/plan.json`) where the examples use Windows paths. Copilot's own
+browser instructions already use the form for its platform.
+
+```sh
+sh "$COPILOT_DESKTOP_BROWSER_HELPER" console
+sh "$COPILOT_DESKTOP_BROWSER_HELPER" screenshot -OutputPath /tmp/page.png
+```
+
 The helper also supports `status` and `request <id>`. Its endpoint always belongs
 to the session that launched the shell, regardless of the currently focused tab.
 Within that session, `console`, `network`, and their `status` counts reflect only
@@ -229,37 +243,39 @@ sent: review the prompt, then press Enter.
   none) and failed requests (HTTP 400 and above, or a network error) as text. Entries are the
   filtered ones the browser already captured, limited to 25 console lines and 10 requests.
 
-## Sharing between sessions
+## Sharing between projects
 
-Like tabs in one Chrome profile, every session's browser shares:
+Each project has one browser: its pages are used by every session of that project, and browser
+control follows the project's current session. Like tabs in one Chrome profile, every project's
+browser shares:
 
-- address-bar history (Settings → **Session browser** → **Clear browsing history** empties it),
+- address-bar history (Settings → **Project browsers** → **Clear browsing history** empties it),
 - [site permissions](#site-permissions),
-- page zoom per site,
-- DevTools settings, the Local Overrides folder and console history.
+- page zoom per site.
 
-All of these are kept across app restarts. Each session keeps its own pages, DevTools window,
-console/network capture, find, and last page to restore.
+All of these are kept across app restarts, whichever cookie setting you choose. DevTools settings
+and the Local Overrides folder follow each project's Local Overrides choice (see above). Each
+page keeps its own console and network capture.
 
-Cookies, logins, local storage, IndexedDB and cache depend on Settings → **Session browser** →
+Cookies, logins, local storage, IndexedDB and cache depend on Settings → **Project browsers** →
 **Cookies, logins and site storage**:
 
-- **Separate for each session** (default): each session is signed in on its own, a page in one
-  session cannot use another session's logins, and closing a session erases its data.
-- **Shared by all sessions, like Chrome**: every session uses one profile, so signing in once
-  signs in everywhere, including for the Copilot agent in each session. Closing a session keeps
-  the shared data; **Clear shared browser data** signs every session out and removes its cookies,
-  site storage and cache. The shared data is kept while you use separate profiles, so switching
-  back finds your logins.
+- **Separate for each project** (default): each project has its own cookies and site storage,
+  so signing in to a site in one project does not sign you in elsewhere. Closing tabs or CLI
+  sessions keeps your logins. Removing a workspace removes its private browser data; adding it
+  again starts fresh.
+- **Shared by all projects, like Chrome**: every project uses one profile, so signing in once
+  signs in everywhere, including for the Copilot agent in each session. **Clear shared browser
+  data** signs every project out and removes its cookies, site storage and cache.
 
-Changing the setting applies to session browsers opened afterwards; a browser that is already
-open keeps its profile until its session closes or the app restarts.
+Changing the setting applies to browsers opened afterwards; an open browser keeps its profile
+until all its project's pages close or the app restarts.
 
 ## Site permissions
 
 A page can ask to copy text to your clipboard (`navigator.clipboard.writeText`), read text from
 your clipboard, or show notifications. A native dialog names the site and the request; **Allow**
-or **Block** is remembered for that site and permission in every session's browser and kept
+or **Block** is remembered for that site and permission in every project's browser and kept
 across app restarts. Open **Site permissions** at the bottom of the browser pane to see the
 answers and **Forget** one (or all), after which the page is asked again.
 
@@ -294,7 +310,7 @@ whether a site requires HTTPS through HSTS, so **Proceed** is offered on those s
 ## Reading authenticated Jira tickets and other pages
 
 Ask the session's Copilot **"Read this Jira ticket, including its comments and linked
-issues"** after loading it in that session's Browser pane and signing in normally.
+issues"** after loading it in that project's Browser tab and signing in normally.
 The browser's existing permissions and login apply; the assistant never exports
 cookies or tokens, makes extra authenticated requests, or replays captured requests.
 No third-party MCP is required. Instructions are installed for newly started local
@@ -661,7 +677,7 @@ This fixture uses synthetic data and does not contact shared application service
 transparent input controls, private tooltips and sensitive-value assertion guards
 through the production helper, with evidence under `test-results/browser-discovery/`.
 
-1. Open the web app in the session browser and select the page to test.
+1. Open the web app in the project's browser and select the page to test.
 2. Tell the session assistant the steps, inputs, and expected results. For example:
    “Search for ITEM-42, open its details with a double-click, and verify that the
    title is ITEM-42 details, the preview has loaded, and no error banner appears.”
