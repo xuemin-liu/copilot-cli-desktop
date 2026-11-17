@@ -36,7 +36,7 @@ if (!process.versions.electron) {
     const { BrowserDebug } = await import('../dist/src/main/browser-debug.js')
     const { browserCommand } = await import('../dist/src/cli/browser-control.js')
     const { prepareBrowserSessionEnvironment } = await import('../dist/src/main/browser-session.js')
-    let saves = 0
+    let saves = 0; let frameRequests = 0
     const html = `<!doctype html><meta charset="utf-8"><title>Generic unattended UI fixture</title>
       <style>body{font:14px sans-serif;margin:12px}.icon{display:inline-block;cursor:pointer;padding:8px;border:1px solid #888;position:relative}
       #menu{display:none;position:absolute;top:30px;left:0;background:#fff;z-index:10;width:100px}.tools:hover #menu{display:block}
@@ -50,11 +50,11 @@ if (!process.versions.electron) {
         <button id="clean" onclick="window.onbeforeunload=null">Saved changes</button>
         <button id="ineffective" onclick="tool='none'">Ineffective tool</button>
         <button id="obstruct" onclick="obstruct=true">Obstruct next input</button>
-        <button id="slow" onclick="fetch('/slow').catch(()=>{})">Slow request</button>
+        <button id="slow" onclick="fetch('/slow').catch(()=>{})">Slow request</button><button id="load-frames" onclick="loadFrames()">Load series</button>
       </div><p id="tool-state">No tool</p>
       <div id="stage"><canvas id="image" width="800" height="400" data-test-render="busy"></canvas>
         <svg id="surface" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg"><circle id="handle" cx="180" cy="100" r="10" fill="#f80"/></svg></div>
-      <p id="shape">empty</p><p id="handle-state">180,100</p><p id="angle">0</p><p id="pixel-result">empty pixels</p><p id="save-status">idle</p><p id="loading">Drawing…</p>
+      <p id="shape">empty</p><p id="handle-state">180,100</p><p id="angle">0</p><p id="pixel-result">empty pixels</p><p id="save-status">idle</p><p id="frames-status">no series</p><p id="loading">Drawing…</p>
       <dialog id="numberDialog"><label>Exact value <input id="number" type="number" value="0" step="0.1"></label>
         <button onclick="commitNumber()">Apply</button></dialog>
       <button id="hidden-control" hidden>Hidden</button><div id="duplicates"><button class="duplicate">Same</button><button class="duplicate">Same</button></div>
@@ -82,11 +82,14 @@ if (!process.versions.electron) {
       });
       surface.addEventListener('dblclick',()=>{document.querySelector('#shape').textContent='finished';render()});
       document.addEventListener('keyup',e=>{if(e.key==='Shift')surface.dataset.testShiftReleased='true'});
+      // Loads a five-frame series in parallel, as a viewer fetches the frames of a series.
+      async function loadFrames(){const status=document.querySelector('#frames-status');status.textContent='loading';const started=performance.now();try{const frames=await Promise.all([0,1,2,3,4].map(i=>fetch('/api/frame/'+i).then(r=>r.json())));status.textContent='loaded '+frames.length;status.dataset.ms=String(Math.round(performance.now()-started))}catch{status.textContent='frames failed'}}
       async function save(){try{const r=await fetch('/api/save',{method:'POST'});await r.text();document.querySelector('#save-status').textContent=r.ok?'saved':'HTTP '+r.status;console.log('fixture save status '+r.status)}catch{document.querySelector('#save-status').textContent='transport failed';console.warn('fixture transport failed')}}
       render();
       </script>`
     const site = createServer(async (request, response) => {
       if (request.url === '/api/save') { saves++; response.setHeader('content-type', 'application/json'); response.end('{"saved":true}'); return }
+      if (request.url?.startsWith('/api/frame/')) { frameRequests++; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ frame: Number(request.url.slice(11)) })); return }
       if (request.url === '/slow') { await delay(3000); response.end('done'); return }
       response.setHeader('content-type', 'text/html'); response.end(html)
     })
@@ -239,6 +242,37 @@ if (!process.versions.electron) {
         passed(report); assert.equal(saves, count); assert.equal(report.evidence.network.affectedRequests.length, 1); assert.equal(report.evidence.network.failureRulesRemoved, true)
         passed(await execute([{ action: 'click', selector: '#save' }, text('#save-status', 'saved')]))
       }
+      // A slow series: three frames are held for a delay, so the app can be checked while they load, then all five arrive.
+      const frames = { urlPattern: url + 'api/frame/*', method: 'GET', state: 'finished' }
+      const servedBefore = frameRequests
+      const delayed = await execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'loading'),
+        { action: 'waitFor', condition: 'requestComplete', request: { ...frames, minCount: 5 }, timeoutMs: 10000 }, text('#frames-status', 'loaded 5')],
+        { allowNetworkFailures: true, networkFailures: [{ urlPattern: url + 'api/frame/*', method: 'GET', failure: 'delay', delayMs: 800, maxRequests: 3, durationMs: 20000 }] })
+      passed(delayed)
+      assert.equal(frameRequests - servedBefore, 5, 'every delayed request reaches the server once')
+      assert.deepEqual(delayed.evidence.network.affectedRequests.map(item => [item.failure, item.delayMs, item.released]), Array(3).fill(['delay', 800, 'after delay']))
+      assert.ok(Number(await browser.view.webContents.executeJavaScript('document.querySelector("#frames-status").dataset.ms')) >= 750, 'the series waited for the delayed frames')
+      assert.equal(delayed.evidence.network.failureRulesRemoved, true)
+      const tooFew = await execute([{ action: 'click', selector: '#load-frames' },
+        { action: 'waitFor', condition: 'requestComplete', request: { ...frames, minCount: 6 }, timeoutMs: 1500 }, text('#frames-status', 'loaded 5')])
+      assert.equal(tooFew.status, 'failed', JSON.stringify(tooFew)); assert.match(tooFew.steps[1].reason, /^5 of 6 matching requests/)
+      assert.deepEqual(tooFew.steps[1].data.requests, { matched: 5, minCount: 6 })
+      // A slow network for the whole run, removed when it ends.
+      const quick = await execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'loaded 5')])
+      passed(quick)
+      const quickMs = Number(await browser.view.webContents.executeJavaScript('document.querySelector("#frames-status").dataset.ms'))
+      const slowed = await execute([{ action: 'click', selector: '#load-frames' }, { ...text('#frames-status', 'loaded 5'), timeoutMs: 10000 }], { networkConditions: { latencyMs: 600, downloadKbps: 512 } })
+      passed(slowed)
+      const slowMs = Number(await browser.view.webContents.executeJavaScript('document.querySelector("#frames-status").dataset.ms'))
+      assert.ok(slowMs >= 550 && slowMs > quickMs + 400, `latency slowed the series (${quickMs} ms before, ${slowMs} ms throttled)`)
+      assert.deepEqual(slowed.evidence.network.networkConditions, { latencyMs: 600, downloadKbps: 512, applied: true, removed: true })
+      passed(await execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'loaded 5')]))
+      assert.ok(Number(await browser.view.webContents.executeJavaScript('document.querySelector("#frames-status").dataset.ms')) < 500, 'the network is fast again after the run')
+      // Offline needs the same opt-in as failures, and the page is back online afterwards.
+      await assert.rejects(execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'frames failed')], { networkConditions: { offline: true } }), /allowNetworkFailures/)
+      const offline = await execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'frames failed')], { allowNetworkFailures: true, networkConditions: { offline: true } })
+      passed(offline); assert.equal(offline.evidence.network.networkConditions.removed, true)
+      passed(await execute([{ action: 'click', selector: '#load-frames' }, text('#frames-status', 'loaded 5')]))
       // While a rule is armed, a second page still reaches the real service.
       const control = await controller()
       if (!networkOnly) {
@@ -276,7 +310,7 @@ if (!process.versions.electron) {
       const ui = networkOnly ? 'skipped' : 'passed'
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, coverage: networkOnly ? 'network-only' : 'full', scale: scale ?? 'host default', devicePixelRatio: await browser.view.webContents.executeJavaScript('devicePixelRatio'), zooms: networkOnly ? [] : [0.8, 1, 1.25, 1.5],
         reload: ui, cancelReload: ui, references: ui, nativeOverlayPointers: ui, drawingAndHandle: ui, exactNumericInput: ui, explicitRenderReadiness: ui,
-        ineffectiveDragFailsAssertion: ui, scopedFailures: 'passed', cleanupOnCancellation: 'passed', recoveryJournal: 'passed', screenshotComparison: 'covered by browser-test-check',
+        ineffectiveDragFailsAssertion: ui, scopedFailures: 'passed', delayedRequests: 'passed', networkConditions: 'passed', requestCounts: 'passed', cleanupOnCancellation: 'passed', recoveryJournal: 'passed', screenshotComparison: 'covered by browser-test-check',
         reports: results.map(report => ({ ...report, expectation: report.status === 'failed' ? 'expected failure, verified by acceptance harness' : 'expected success' })) }, null, 2))
       console.log(`Unattended browser acceptance passed (${scale ?? 'default scale'}). Evidence: ${artifacts}`)
     } finally {

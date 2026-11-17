@@ -29,8 +29,11 @@ export const TEST_CHARACTER_KEY = /^[a-z0-9]$/
 export const RESERVED_CHORDS = ['w', 't', 'f', 'g', 'r', 'i', '0'] as const
 export interface TestRequestMatch { urlPattern: string; method: string }
 export interface TestNetworkFailure extends TestRequestMatch {
-  failure: 'transport' | 'http'; status?: number; maxRequests: number; durationMs: number
+  /** transport and http fail the request; delay holds it for delayMs, then lets it continue unchanged. */
+  failure: 'transport' | 'http' | 'delay'; status?: number; delayMs?: number; maxRequests: number; durationMs: number
 }
+/** A slow or offline network for the selected page, for the whole run. Throughputs are in kilobits per second. */
+export interface TestNetworkConditions { latencyMs?: number; downloadKbps?: number; uploadKbps?: number; offline?: boolean }
 export interface BrowserTestCondition {
   selector?: string
   targetRef?: string
@@ -45,7 +48,8 @@ export interface BrowserTestCondition {
   tolerance?: number
   /** stable: how long the bounds must stay unchanged, in milliseconds (default 500). visualStable: how long the pixels must (default 750). */
   stableMs?: number
-  request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
+  /** requestComplete: minCount is how many matching requests from this run must have reached the state (default 1). */
+  request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number; minCount?: number }
   /** screenshot, compareScreenshot and visualStable: a CSS-pixel viewport region instead of a target. */
   region?: { x: number; y: number; width: number; height: number }
   /** compareScreenshot and visualStable: rectangles to leave out, in CSS pixels relative to the compared area. */
@@ -91,7 +95,7 @@ export interface BrowserTestStep extends BrowserTestCondition {
 }
 export interface BrowserTestPlan {
   description: string; expected: string; steps: BrowserTestStep[]; timeoutMs?: number
-  allowNetworkFailures?: boolean; networkFailures?: TestNetworkFailure[]
+  allowNetworkFailures?: boolean; networkFailures?: TestNetworkFailure[]; networkConditions?: TestNetworkConditions
   /** Fail the step during which the test page logs a console error, unless it matches an ignore pattern. */
   failOnConsoleError?: boolean
   consoleErrorIgnore?: string[]
@@ -214,7 +218,8 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (pageWide && [v.selector, v.targetRef, v.text, v.frame].some(x => x !== undefined)) fail('this condition takes no target.')
     if (v.level !== undefined && (v.condition !== 'consoleMessage' || !CONSOLE_LEVELS.includes(v.level as ConsoleLevel))) fail('level requires the consoleMessage condition and one of debug, info, warning, error.')
     if (v.condition === 'requestComplete') {
-      const request = object(v.request); fields(request, ['urlPattern', 'method', 'state', 'status']); requestMatch(request)
+      const request = object(v.request); fields(request, ['urlPattern', 'method', 'state', 'status', 'minCount']); requestMatch(request)
+      if (request.minCount !== undefined && (typeof request.minCount !== 'number' || !Number.isInteger(request.minCount) || request.minCount < 1 || request.minCount > 1000)) fail('request minCount must be an integer within 1–1000.')
       if (!['finished', 'failed'].includes(String(request.state))) fail('request state must be finished or failed.')
       if (request.status !== undefined && (typeof request.status !== 'number' || !Number.isInteger(request.status) || request.status < 100 || request.status > 599)) fail('invalid request status.')
     } else if (v.request !== undefined) fail('request requires requestComplete.')
@@ -233,7 +238,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     else if (v.expected !== undefined) fail('this condition takes no expected value.')
   }
   const plan = object(structuredClone(value))
-  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures', 'failOnConsoleError', 'consoleErrorIgnore'])
+  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures', 'networkConditions', 'failOnConsoleError', 'consoleErrorIgnore'])
   if (plan.failOnConsoleError !== undefined && typeof plan.failOnConsoleError !== 'boolean') fail('failOnConsoleError must be boolean.')
   if (plan.consoleErrorIgnore !== undefined) {
     if (plan.failOnConsoleError !== true) fail('consoleErrorIgnore requires failOnConsoleError: true.')
@@ -246,13 +251,27 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (plan.allowNetworkFailures !== true) fail('network failure simulation requires explicit allowNetworkFailures: true.')
     if (!Array.isArray(plan.networkFailures) || plan.networkFailures.length < 1 || plan.networkFailures.length > 8) fail('use 1–8 failure rules.')
     for (const raw of plan.networkFailures as unknown[]) {
-      const rule = object(raw); fields(rule, ['urlPattern', 'method', 'failure', 'status', 'maxRequests', 'durationMs']); requestMatch(rule)
-      if (!['transport', 'http'].includes(String(rule.failure))) fail('unsupported network failure.')
-      if (rule.failure === 'http' ? typeof rule.status !== 'number' || !Number.isInteger(rule.status) || rule.status < 400 || rule.status > 599 : rule.status !== undefined) fail('HTTP failures require status 400–599; transport failures take no status.')
-      if (typeof rule.maxRequests !== 'number' || !Number.isInteger(rule.maxRequests) || rule.maxRequests < 1 || rule.maxRequests > 20) fail('failure rules require maxRequests within 1–20.')
+      const rule = object(raw); fields(rule, ['urlPattern', 'method', 'failure', 'status', 'delayMs', 'maxRequests', 'durationMs']); requestMatch(rule)
+      if (!['transport', 'http', 'delay'].includes(String(rule.failure))) fail('unsupported network failure.')
+      if (rule.failure === 'http' ? typeof rule.status !== 'number' || !Number.isInteger(rule.status) || rule.status < 400 || rule.status > 599 : rule.status !== undefined) fail('HTTP failures require status 400–599; transport failures and delays take no status.')
+      if (rule.failure === 'delay' ? typeof rule.delayMs !== 'number' || !Number.isInteger(rule.delayMs) || rule.delayMs < 100 || rule.delayMs > 30000 : rule.delayMs !== undefined) fail('delay rules require delayMs within 100–30000; other failures take no delayMs.')
+      // A series of frames can be hundreds of requests; failing that many is never needed.
+      const most = rule.failure === 'delay' ? 200 : 20
+      if (typeof rule.maxRequests !== 'number' || !Number.isInteger(rule.maxRequests) || rule.maxRequests < 1 || rule.maxRequests > most) fail(`${rule.failure === 'delay' ? 'delay' : 'failure'} rules require maxRequests within 1–${most}.`)
       if (rule.durationMs === undefined) fail('failure rules require durationMs.')
       timeout(rule.durationMs, 60000)
     }
+  }
+  if (plan.networkConditions !== undefined) {
+    const conditions = object(plan.networkConditions); fields(conditions, ['latencyMs', 'downloadKbps', 'uploadKbps', 'offline'])
+    if (!Object.keys(conditions).length) fail('networkConditions needs latencyMs, downloadKbps, uploadKbps or offline.')
+    if (conditions.latencyMs !== undefined && (typeof conditions.latencyMs !== 'number' || !Number.isInteger(conditions.latencyMs) || conditions.latencyMs < 0 || conditions.latencyMs > 10000)) fail('latencyMs must be an integer within 0–10000.')
+    for (const key of ['downloadKbps', 'uploadKbps']) {
+      const value = conditions[key]
+      if (value !== undefined && (typeof value !== 'number' || !Number.isInteger(value) || value < 16 || value > 1000000)) fail(`${key} must be an integer within 16–1000000 kilobits per second.`)
+    }
+    if (conditions.offline !== undefined && typeof conditions.offline !== 'boolean') fail('offline must be true or false.')
+    if (conditions.offline === true && plan.allowNetworkFailures !== true) fail('an offline network requires explicit allowNetworkFailures: true.')
   }
   if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 50) fail('use 1–50 steps.')
   let assertions = 0; let screenshots = 0

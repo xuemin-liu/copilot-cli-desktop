@@ -637,8 +637,12 @@ was recorded. Each page keeps at most 300 console entries and all pages together
 evicted first.
 
 A `requestComplete` condition takes
-`request: {urlPattern,method,state:"finished"|"failed",optional status}` and no target.
-It matches requests observed during this run, never an earlier run.
+`request: {urlPattern,method,state:"finished"|"failed",optional status,optional minCount}` and no target.
+It matches requests observed during this run, never an earlier run. `minCount` (1–1000,
+default 1) waits until that many matching requests have reached the state, for example
+every frame of a series; a timeout reports how many did, and the step's
+`data.requests` gives the count. The latest 2000 requests of a run are kept for
+matching; reports list the latest 100.
 
 Combine network completion with application signals for the current render revision.
 A completed request, changed label, animation frames, decoded image or nonempty
@@ -665,6 +669,37 @@ no credentials/query/fragment), uppercase `method`, `failure: transport|http`,
     { "urlPattern": "http://localhost:3000/api/save", "method": "POST", "failure": "http", "status": 503, "maxRequests": 1, "durationMs": 10000 }
   ]
 }
+```
+
+`failure: "delay"` holds each matching request for `delayMs` (100–30000), then lets
+it continue unchanged, to test what the app does while data is still arriving: scrolling
+to a slice that has not loaded, a cancelled load whose reply comes late, or a stalled
+progress bar. Delay rules take no `status` and allow `maxRequests` up to 200, for the
+frames of a series. When the run ends, fails or is cancelled, any request still held is
+let through at once. Each affected request records its `delayMs` and when it was
+`released` (`after delay`, `rules ended` or `run ended`).
+
+```json
+{
+  "allowNetworkFailures": true,
+  "networkFailures": [
+    { "urlPattern": "http://localhost:3000/dicomweb/studies/*", "method": "GET", "failure": "delay", "delayMs": 3000, "maxRequests": 20, "durationMs": 30000 }
+  ]
+}
+```
+
+A plan can also slow the whole page for the run with `networkConditions`:
+`latencyMs` (0–10000), `downloadKbps` and `uploadKbps` (16–1000000 kilobits per second;
+an omitted direction is not throttled), and `offline`. A slow network needs no opt-in;
+`offline: true` requires `allowNetworkFailures: true`. The conditions apply to the
+selected page through Chromium's network emulation from the run's start, and are
+removed when it ends, fails or is cancelled; if removal fails, the debugger is detached
+to remove them. `evidence.network.networkConditions` records what was applied and whether
+it was removed. Out-of-process frames, other pages and service workers are not
+throttled.
+
+```json
+{ "networkConditions": { "latencyMs": 200, "downloadKbps": 2000, "uploadKbps": 500 } }
 ```
 
 Rules intercept requests only in the selected page's known same-origin frames,

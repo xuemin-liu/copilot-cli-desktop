@@ -439,7 +439,13 @@ Each step result carries console:{entries,total,truncated,complete} with up to 1
 of its messages (errors first, repeats once with count); complete is false when
 messages were not recorded, evicted or cleared.
 requestComplete takes request:{urlPattern,method,
-state:"finished"|"failed",optional status} and no target; it observes only this run.
+state:"finished"|"failed",optional status,optional minCount 1–1000} and no target; it
+observes only this run, and minCount waits for that many matching requests (for
+example every frame of a series). With allowNetworkFailures:true, a networkFailures
+rule with failure:"delay",delayMs 100–30000 (maxRequests up to 200) holds matching
+requests, then lets them continue, to test the app while data is still arriving. A plan
+can slow the page for the run with networkConditions:{latencyMs 0–10000,
+downloadKbps/uploadKbps 16–1000000, offline}; offline also needs allowNetworkFailures.
 Combine request completion with explicit DOM readiness for the current rendering
 revision. Changed labels, nonempty canvases and animation frames are insufficient
 proof that application work has finished. Request explicit discover/screenshot
@@ -475,9 +481,10 @@ frame, never summed across frames).
 
 Only when the user authorized the specific failure scenario, a plan may set
 allowNetworkFailures:true and networkFailures:[{urlPattern,method,failure,
-optional status,maxRequests,durationMs}]. URL patterns use the literal enabled
+optional status,optional delayMs,maxRequests,durationMs}]. URL patterns use the literal enabled
 origin and * in the path, no credentials/query/fragment. Methods are uppercase.
-failure is transport or http; http requires status 400–599. maxRequests is 1–20;
+failure is transport, http or delay; http requires status 400–599; delay requires
+delayMs 100–30000 and allows maxRequests up to 200. Otherwise maxRequests is 1–20;
 durationMs is 100–60000; at most eight rules. No custom headers/bodies or replay.
 Rules are restricted to this page's known same-origin frames, removed at count,
 expiry or run termination, and never installed on shared browser storage sessions.
