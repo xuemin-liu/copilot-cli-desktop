@@ -654,6 +654,59 @@ element. A `compareScreenshot` step compares a capture with a reference PNG (see
 visual inspection. Visual differences must never be presented as proof of
 application semantics.
 
+### Timing and memory
+
+A `measure` step times how long something takes, and can fail when it takes too long.
+An interval runs `from` an earlier step (`{ "step": 1 }`, its `end` by default or its
+`"at": "start"`) or from the first console message matching a glob
+(`{ "consoleMessage": "study requested*" }`), `to` a wait condition, polled until it
+holds (`timeoutMs` up to 60000, default 30000):
+
+```json
+{ "action": "click", "selector": "#open-study" },
+{ "action": "measure", "name": "first image", "from": { "step": 1 },
+  "to": { "selector": "#viewport-1", "condition": "attribute", "attribute": "data-render", "expected": "done" }, "maxMs": 2000 }
+```
+
+- The time is taken by the runner, so the page needs no cooperation. A polled condition
+  is reported as `ms` (when it was seen to hold) and `atLeastMs` (the last poll that saw
+  it false, or the start). Polls are about 100 ms apart, so put the measure step right
+  after the step it starts from. If the condition already held when the measure began,
+  the interval is only bounded by the start.
+- A `consoleMessage` end condition is timed by when the first matching message after the
+  start arrived in the desktop, so `ms` and `atLeastMs` are equal.
+- `maxMs` (1–600000) makes the step an assertion: it fails when `ms` is over the limit.
+  Without it, the step only observes.
+
+A rate counts console messages matching a glob over a window, for cine playback or
+animation:
+
+```json
+{ "action": "measure", "name": "cine", "rateOf": { "consoleMessage": "frame shown*", "level": "debug" },
+  "windowMs": 3000, "minPerSecond": 15 }
+```
+
+`windowMs` is 100–30000; `minPerSecond` and `maxPerSecond` make it an assertion. The
+messages are counted whether or not console recording is on.
+
+A `metrics` step reads the page's JavaScript heap (`jsHeapUsedMb`, `jsHeapTotalMb`) and
+its DOM counts (`nodes`, `documents`, `listeners`), after a garbage collection unless
+`"collectGarbage": false`. With `since` (an earlier `metrics` step's number) it reports
+the growth, and `maxHeapGrowthMb` and `maxNodeGrowth` fail the step when growth is over
+them. This catches a viewer that keeps memory after a study is closed:
+
+```json
+{ "action": "metrics" },
+{ "action": "click", "selector": "#open-study" },
+{ "action": "click", "selector": "#close-study" },
+{ "action": "metrics", "since": 1, "maxHeapGrowthMb": 10, "maxNodeGrowth": 500 }
+```
+
+Readings cover the page's main JavaScript world and its same-process frames. Every
+measurement and reading is also listed in the report's `measurements`, with its step
+number. Timings depend on the machine, on what else it is doing and on whether the
+page is visible, so set generous limits and compare runs on the same machine.
+
 ### Opt-in network failures and recovery
 
 A plan may set `allowNetworkFailures: true` and 1–8 `networkFailures`. Each rule

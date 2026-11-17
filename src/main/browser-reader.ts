@@ -48,6 +48,8 @@ export interface PendingDialog { type: string; message: string; sessionId?: stri
 /** What restarted a visualStable window. */
 interface VisualChange { kind: string; differentPixels?: number; diffRatio?: number; diffBounds?: Rectangle }
 interface VisualSample { bitmap: Buffer; size: { width: number; height: number }; area: Rectangle; since: number; lastAt: number; longest: number; captures: number; lastChange: VisualChange }
+/** One metrics step's reading of the page. */
+interface TestPageMetrics { jsHeapUsedMb: number; jsHeapTotalMb: number; nodes: number; documents: number; listeners: number; garbageCollected: boolean }
 interface DialogRule { spec?: NonNullable<BrowserTestStep['dialog']>; handled: { type: string; message: string; accepted: boolean } | null }
 interface PageReader {
   testNetwork: BrowserTestNetwork | null
@@ -94,6 +96,10 @@ export class BrowserReader {
   private testAbort: AbortController | null = null
   private testDelivery: TestDelivery = 'not-attempted'
   private testConsole: TestConsoleWatch | null = null
+  /** When each step of the current run started and ended, by 1-based step number, for measure steps. */
+  private stepTimes = new Map<number, { start: number; end?: number }>()
+  /** Readings of the current run's metrics steps, by 1-based step number. */
+  private stepMetrics = new Map<number, TestPageMetrics>()
   private testInputUncertain = false
   private testDiagnostics: Params = {}
   private picker: { pageId: number; choose: (backendNodeId: number | null) => void; next: () => Promise<number | null> } | null = null
@@ -188,8 +194,11 @@ export class BrowserReader {
       const report = await runBrowserTest(plan, page.contents.id, { active,
         ...(this.testConsole ? { console: this.testConsole } : {}),
         execute: (step, stop) => this.testStep(page, step, stop),
-        progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
+        progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }); this.stepTimes.set(step, { start: Date.now() }) },
         checkpoint: (report, currentAction) => {
+          // A checkpoint without a current action follows a finished step.
+          const finished = this.stepTimes.get(report.steps.length)
+          if (!currentAction && finished && finished.end === undefined) finished.end = Date.now()
           const { screenshots: _screenshots, ...summary } = report
           this.testProgress.journal = structuredClone(summary)
           this.testProgress.runId = report.runId!
@@ -223,7 +232,7 @@ export class BrowserReader {
       await page.testNetwork?.stop()
       if (page.testNetwork && !page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
-      this.testConsole?.dispose(); this.testConsole = null; this.visualSamples = null
+      this.testConsole?.dispose(); this.testConsole = null; this.visualSamples = null; this.stepTimes.clear(); this.stepMetrics.clear()
       this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
       this.testPageId = null; this.testOrigin = null
     }
@@ -524,7 +533,7 @@ export class BrowserReader {
       }
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (step.dialog && !rule.handled) throw new Error('The step was expected to open a page dialog, but none opened within 1.5 seconds.')
-      const observation = ['assert', 'waitFor', 'discover', 'screenshot', 'compareScreenshot'].includes(step.action)
+      const observation = ['assert', 'waitFor', 'discover', 'screenshot', 'compareScreenshot', 'measure', 'metrics'].includes(step.action)
       const output = { ...result, delivery: observation ? 'not-attempted' as const : result.passed ? 'delivered' as const : this.testDelivery,
         data: { ...this.testDiagnostics, ...result.data } }
       return rule.handled ? { ...output, detail: [result.detail, `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.`].filter(Boolean).join(' ') } : output
@@ -600,7 +609,101 @@ export class BrowserReader {
     return stretch >= windowMs ? { passed: true, data } : { passed: false, data, reason: `The image has been unchanged for ${stretch} of ${windowMs} ms.` }
   }
 
+  /** Waits ms unless the run stops first. */
+  private async pause(ms: number, signal: AbortSignal): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const abort = (): void => { clearTimeout(timer); reject(new Error('Test stopped.')) }
+      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve() }, ms)
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+    })
+  }
+
+  /**
+   * measure: an interval from an earlier step or console message to a condition, or the rate of a console message over a
+   * window. Conditions are polled, so an interval is reported with the earliest it could have been (atLeastMs); console
+   * messages are timed by when they arrived in the desktop.
+   */
+  private async measure(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    const name = step.name!
+    if (step.rateOf) {
+      if (!this.testConsole) return { passed: false, reason: 'Console messages are unavailable for this page.' }
+      // Counted from the running total, so a busy page or a long run never loses messages in the window.
+      const before = this.testConsole.matchCount(step.rateOf.consoleMessage, step.rateOf.level)
+      const start = Date.now()
+      await this.pause(step.windowMs!, signal)
+      const end = Date.now()
+      const count = this.testConsole.matchCount(step.rateOf.consoleMessage, step.rateOf.level) - before
+      const perSecond = Math.round(count / ((end - start) / 1000) * 100) / 100
+      const measurement = { name, kind: 'rate', count, windowMs: end - start, perSecond,
+        ...(step.minPerSecond !== undefined ? { minPerSecond: step.minPerSecond } : {}), ...(step.maxPerSecond !== undefined ? { maxPerSecond: step.maxPerSecond } : {}) }
+      const passed = (step.minPerSecond === undefined || perSecond >= step.minPerSecond) && (step.maxPerSecond === undefined || perSecond <= step.maxPerSecond)
+      return { passed, data: { measurement }, detail: `${name}: ${count} matching messages in ${end - start} ms, ${perSecond} per second.`,
+        ...(passed ? {} : { reason: `${name}: ${count} matching messages in ${end - start} ms is ${perSecond} per second; expected ${[step.minPerSecond !== undefined ? `at least ${step.minPerSecond}` : '', step.maxPerSecond !== undefined ? `at most ${step.maxPerSecond}` : ''].filter(Boolean).join(' and ')} per second.` }) }
+    }
+    const from = step.from!; const to = step.to!
+    const fromTime = from.step !== undefined ? from.at === 'start' ? this.stepTimes.get(from.step)?.start : this.stepTimes.get(from.step)?.end
+      : this.testConsole?.firstArrival(from.consoleMessage!, from.level)
+    const fromText = from.step !== undefined ? `the ${from.at ?? 'end'} of step ${from.step}` : `the first console message matching "${from.consoleMessage}"`
+    if (fromTime === undefined) return { passed: false, reason: `${name}: the start, ${fromText}, has not happened.` }
+    const deadline = Date.now() + (step.timeoutMs ?? 30000)
+    let end: number | undefined; let earliest = fromTime; let reason = 'The end condition was not met before the timeout.'
+    if (to.condition === 'consoleMessage') {
+      if (!this.testConsole) return { passed: false, reason: 'Console messages are unavailable for this page.' }
+      while (end === undefined) {
+        const arrival = this.testConsole.firstArrivalSince(String(to.expected), to.level, fromTime)
+        // Too many matches since the start to know which came first: say so rather than report a later one.
+        if (!arrival.complete) return { passed: false, data: { measurement: { name, kind: 'interval', from: fromText, to: to.condition, incomplete: true } },
+          reason: `${name}: more than 5000 messages matching the end pattern arrived after the start, so the first of them is no longer known. Use a more specific pattern.` }
+        end = arrival.time
+        if (end !== undefined) { earliest = end; break }
+        if (Date.now() >= deadline) break
+        await this.pause(50, signal)
+      }
+    } else {
+      while (end === undefined) {
+        const polled = Date.now()
+        const result = await this.testStepAction(page, { action: 'waitFor', label: step.label, ...to }, signal, 'measure')
+        if (result.passed) { end = Date.now(); break }
+        // The condition was false when this poll began, so it became true no earlier than that.
+        earliest = Math.max(earliest, polled); reason = result.reason ?? reason
+        if (Date.now() >= deadline) break
+        await this.pause(100, signal)
+      }
+    }
+    if (end === undefined) return { passed: false, reason: `${name}: ${reason}`, data: { measurement: { name, kind: 'interval', from: fromText, to: to.condition, timedOut: true } } }
+    const ms = end - fromTime; const atLeastMs = Math.max(0, earliest - fromTime)
+    const measurement = { name, kind: 'interval', ms, atLeastMs, from: fromText, to: to.condition, ...(step.maxMs !== undefined ? { maxMs: step.maxMs } : {}) }
+    const range = atLeastMs === ms ? `${ms} ms` : `${ms} ms (at least ${atLeastMs} ms)`
+    if (step.maxMs !== undefined && ms > step.maxMs) return { passed: false, data: { measurement }, reason: `${name} took ${range}; the limit is ${step.maxMs} ms.` }
+    return { passed: true, data: { measurement }, detail: `${name} took ${range}.` }
+  }
+
+  /** metrics: the page's JavaScript heap and DOM counts, after a garbage collection unless turned off, and growth since an earlier reading. */
+  private async metrics(page: PageReader, step: BrowserTestStep, signal: AbortSignal): Promise<TestObservation> {
+    if (step.collectGarbage !== false) await this.command(page, 'HeapProfiler.collectGarbage', {}, undefined, 30000, signal)
+    await this.command(page, 'Performance.enable', {}, undefined, 10000, signal)
+    let values: { name: string; value: number }[]
+    try { values = (await this.command(page, 'Performance.getMetrics', {}, undefined, 10000, signal)).metrics ?? [] }
+    finally { await this.command(page, 'Performance.disable', {}, undefined, 10000).catch(() => {}) }
+    const value = (name: string): number => Number(values.find(metric => metric.name === name)?.value ?? 0)
+    const mb = (bytes: number): number => Math.round(bytes / 1048576 * 100) / 100
+    const reading: TestPageMetrics = { jsHeapUsedMb: mb(value('JSHeapUsedSize')), jsHeapTotalMb: mb(value('JSHeapTotalSize')), nodes: value('Nodes'),
+      documents: value('Documents'), listeners: value('JSEventListeners'), garbageCollected: step.collectGarbage !== false }
+    this.stepMetrics.set(this.testProgress.step, reading)
+    const base = step.since !== undefined ? this.stepMetrics.get(step.since) : undefined
+    const growth = base ? { heapMb: Math.round((reading.jsHeapUsedMb - base.jsHeapUsedMb) * 100) / 100, nodes: reading.nodes - base.nodes } : undefined
+    const metrics = { ...reading, ...(growth ? { since: step.since, growth } : {}),
+      ...(step.maxHeapGrowthMb !== undefined ? { maxHeapGrowthMb: step.maxHeapGrowthMb } : {}), ...(step.maxNodeGrowth !== undefined ? { maxNodeGrowth: step.maxNodeGrowth } : {}) }
+    const failures = [growth && step.maxHeapGrowthMb !== undefined && growth.heapMb > step.maxHeapGrowthMb ? `the heap grew by ${growth.heapMb} MB, more than ${step.maxHeapGrowthMb} MB` : '',
+      growth && step.maxNodeGrowth !== undefined && growth.nodes > step.maxNodeGrowth ? `the DOM grew by ${growth.nodes} nodes, more than ${step.maxNodeGrowth}` : ''].filter(Boolean)
+    if (failures.length) return { passed: false, data: { metrics }, reason: `Since step ${step.since}, ${failures.join(' and ')}.` }
+    return { passed: true, data: { metrics }, detail: `Heap ${reading.jsHeapUsedMb} MB, ${reading.nodes} DOM nodes${growth ? `; ${growth.heapMb >= 0 ? '+' : ''}${growth.heapMb} MB and ${growth.nodes >= 0 ? '+' : ''}${growth.nodes} nodes since step ${step.since}` : ''}.` }
+  }
+
   private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal, conditionKey = 'c1'): Promise<TestObservation> {
+    if (step.action === 'measure') return this.measure(page, step, signal)
+    if (step.action === 'metrics') return this.metrics(page, step, signal)
     const modifiers = (step.modifiers ?? []).reduce((mask, key) => mask | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[key]), 0)
     const button = step.button ?? 'left'
     const buttons = { left: 1, middle: 4, right: 2 }[button]

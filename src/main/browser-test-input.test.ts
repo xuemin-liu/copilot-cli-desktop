@@ -146,3 +146,33 @@ test('delay rules, a slow network and request counts are bounded and opt-in wher
   assert.ok(counted({ minCount: 120 })); assert.ok(counted({ minCount: 1000 }))
   for (const minCount of [0, 1001, 2.5, '5']) assert.throws(() => counted({ minCount }), /minCount/, String(minCount))
 })
+
+test('measure times an interval from an earlier step or console message to a condition, or a console rate', () => {
+  const click = { action: 'click', selector: '#open' }
+  const rendered = { selector: '#viewport', condition: 'attribute', attribute: 'data-render', expected: 'done' }
+  const interval = { action: 'measure', name: 'first image', from: { step: 1 }, to: rendered }
+  assert.ok(plan([click, interval, assertion]), 'without a limit a measure only observes')
+  assert.ok(plan([click, { ...interval, maxMs: 2000, timeoutMs: 15000 }]), 'with maxMs it is the assertion a plan needs')
+  assert.ok(plan([click, { ...interval, from: { step: 1, at: 'start' }, to: { condition: 'consoleMessage', expected: 'rendered*', level: 'debug' } }, assertion]))
+  assert.ok(plan([click, { ...interval, from: { consoleMessage: 'study requested*' } }, assertion]))
+  const rate = { action: 'measure', name: 'cine', rateOf: { consoleMessage: 'frame shown*' }, windowMs: 3000, minPerSecond: 15 }
+  assert.ok(plan([click, rate]))
+  for (const bad of [{ name: undefined }, { name: 'x'.repeat(101) }, { from: undefined }, { to: undefined }, { from: { step: 2 } }, { from: { step: 0 } },
+    { from: { step: 1, consoleMessage: 'x' } }, { from: { step: 1, at: 'middle' } }, { from: { consoleMessage: 'x', at: 'start' } }, { from: { step: 1, level: 'info' } },
+    { to: { condition: 'visible' } }, { to: { ...rendered, all: [] } }, { maxMs: 0 }, { maxMs: 600001 }, { timeoutMs: 60001 }, { windowMs: 1000 }, { selector: '#x' }]) {
+    assert.throws(() => plan([click, { ...interval, ...bad }, assertion]), /Invalid browser test/, JSON.stringify(bad))
+  }
+  for (const bad of [{ windowMs: undefined }, { windowMs: 99 }, { windowMs: 30001 }, { minPerSecond: -1 }, { maxPerSecond: 'many' }, { maxMs: 100 }, { from: { step: 1 } },
+    { rateOf: { consoleMessage: '' } }, { rateOf: { consoleMessage: 'x', level: 'verbose' } }, { timeoutMs: 1000 }]) {
+    assert.throws(() => plan([click, { ...rate, ...bad }]), /Invalid browser test/, JSON.stringify(bad))
+  }
+})
+
+test('metrics reads the heap and DOM, and growth limits need an earlier metrics step', () => {
+  const metrics = { action: 'metrics' }
+  assert.ok(plan([metrics, assertion]))
+  assert.ok(plan([metrics, { action: 'click', selector: '#open' }, { action: 'metrics', since: 1, maxHeapGrowthMb: 5, maxNodeGrowth: 500, collectGarbage: true }]))
+  for (const bad of [{ since: 2 }, { maxHeapGrowthMb: 5 }, { since: 3, maxHeapGrowthMb: -1 }, { since: 3, maxNodeGrowth: 1.5 }, { collectGarbage: 'yes' }, { selector: '#x' }]) {
+    assert.throws(() => plan([metrics, { action: 'click', selector: '#open' }, { action: 'metrics', ...bad }, assertion]), /Invalid browser test/, JSON.stringify(bad))
+  }
+})

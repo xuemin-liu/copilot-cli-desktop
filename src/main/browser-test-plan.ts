@@ -60,7 +60,7 @@ export interface BrowserTestCondition {
 /** compareScreenshot: per-channel difference allowed for a pixel to match, and the share of pixels allowed to differ. */
 export interface TestImageTolerance { channel?: number; maxDiffRatio?: number }
 export interface BrowserTestStep extends BrowserTestCondition {
-  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot' | 'compareScreenshot'
+  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot' | 'compareScreenshot' | 'measure' | 'metrics'
   label: string
   inputSelector?: string
   inputRef?: string
@@ -75,6 +75,24 @@ export interface BrowserTestStep extends BrowserTestCondition {
   deltaX?: number
   deltaY?: number
   repeat?: number
+  /** measure: what is measured, as reports name it. */
+  name?: string
+  /** measure: the start, an earlier step (1-based, its start or end) or the first console message matching a glob. */
+  from?: { step?: number; at?: 'start' | 'end'; consoleMessage?: string; level?: ConsoleLevel }
+  /** measure: the end, a wait condition; a consoleMessage condition is timed by the message's arrival. */
+  to?: BrowserTestCondition
+  /** measure: the longest the interval may take. */
+  maxMs?: number
+  /** measure: a rate instead of an interval, of console messages matching a glob, over windowMs. */
+  rateOf?: { consoleMessage: string; level?: ConsoleLevel }
+  windowMs?: number
+  minPerSecond?: number
+  maxPerSecond?: number
+  /** metrics: collect garbage before reading (default true), and limits on growth since an earlier metrics step. */
+  collectGarbage?: boolean
+  since?: number
+  maxHeapGrowthMb?: number
+  maxNodeGrowth?: number
   /** compareScreenshot: the reference PNG's local path, as named in the plan. */
   baseline?: string
   /** compareScreenshot: the reference PNG as base64, attached by the helper that read the file. */
@@ -122,6 +140,8 @@ export interface BrowserTestReport {
     /** compareScreenshot evidence: the capture that was compared, or the image marking the pixels that differ. */
     kind?: 'capture' | 'diff' }[]
   evidence?: Record<string, unknown>
+  /** Every measure and metrics result of the run, with its step number. */
+  measurements?: Record<string, unknown>[]
 }
 export interface BrowserTestState {
   /** Compatibility field: the current HTTP(S) page is visible and ready for a new test; no opt-in is required. */
@@ -288,6 +308,8 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
       waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: ['region', 'selector', 'targetRef', 'text'],
       compareScreenshot: ['region', 'selector', 'targetRef', 'text', 'baseline', 'baselineImage', 'ignore', 'imageTolerance'],
+      measure: ['name', 'from', 'to', 'maxMs', 'timeoutMs', 'rateOf', 'windowMs', 'minPerSecond', 'maxPerSecond'],
+      metrics: ['collectGarbage', 'since', 'maxHeapGrowthMb', 'maxNodeGrowth'],
     }
     if (typeof step.action !== 'string' || !extra[step.action]) fail('unsupported action.')
     fields(step, ['action', 'label', ...extra[String(step.action)]!])
@@ -340,6 +362,45 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     }
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
     if ((step.action === 'screenshot' || step.action === 'compareScreenshot') && ++screenshots > MAX_TEST_IMAGES) fail('use at most five screenshots and comparisons together.')
+    if (step.action === 'measure') {
+      string(step.name, 100)
+      const glob = (raw: Record<string, unknown>): void => {
+        string(raw.consoleMessage, 2000)
+        if (raw.level !== undefined && !CONSOLE_LEVELS.includes(raw.level as ConsoleLevel)) fail('level must be one of debug, info, warning, error.')
+      }
+      if (step.rateOf !== undefined) {
+        if (step.from !== undefined || step.to !== undefined || step.maxMs !== undefined || step.timeoutMs !== undefined) fail('a rate measure takes rateOf, windowMs and its limits only.')
+        const rate = object(step.rateOf); fields(rate, ['consoleMessage', 'level']); glob(rate)
+        if (typeof step.windowMs !== 'number' || !Number.isInteger(step.windowMs) || step.windowMs < 100 || step.windowMs > 30000) fail('windowMs must be an integer within 100–30000.')
+        for (const limit of [step.minPerSecond, step.maxPerSecond]) if (limit !== undefined && (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0 || limit > 100000)) fail('rate limits must be within 0–100000 per second.')
+        if (step.minPerSecond !== undefined || step.maxPerSecond !== undefined) assertions++
+      } else {
+        if (step.windowMs !== undefined || step.minPerSecond !== undefined || step.maxPerSecond !== undefined) fail('windowMs and rate limits are for rateOf.')
+        const from = object(step.from); fields(from, ['step', 'at', 'consoleMessage', 'level'])
+        if ((from.step === undefined) === (from.consoleMessage === undefined)) fail('from needs exactly one earlier step or consoleMessage.')
+        if (from.step !== undefined) {
+          if (typeof from.step !== 'number' || !Number.isInteger(from.step) || from.step < 1 || from.step > index) fail('from.step must name an earlier step by its 1-based number.')
+          if (from.at !== undefined && from.at !== 'start' && from.at !== 'end') fail('from.at is start or end.')
+          if (from.level !== undefined) fail('level is for a consoleMessage start.')
+        } else { glob(from); if (from.at !== undefined) fail('at is for a step start.') }
+        const to = object(step.to); fields(to, conditionFields); condition(to)
+        timeout(step.timeoutMs, 60000)
+        if (step.maxMs !== undefined) {
+          if (typeof step.maxMs !== 'number' || !Number.isInteger(step.maxMs) || step.maxMs < 1 || step.maxMs > 600000) fail('maxMs must be an integer within 1–600000.')
+          assertions++
+        }
+      }
+    }
+    if (step.action === 'metrics') {
+      if (step.collectGarbage !== undefined && typeof step.collectGarbage !== 'boolean') fail('collectGarbage must be true or false.')
+      if (step.since !== undefined) {
+        const earlier = (plan.steps as Record<string, unknown>[])[Number(step.since) - 1]
+        if (typeof step.since !== 'number' || !Number.isInteger(step.since) || step.since < 1 || step.since > index || earlier?.action !== 'metrics') fail('since must name an earlier metrics step by its 1-based number.')
+      }
+      if (step.maxHeapGrowthMb !== undefined && (typeof step.maxHeapGrowthMb !== 'number' || !Number.isFinite(step.maxHeapGrowthMb) || step.maxHeapGrowthMb < 0 || step.maxHeapGrowthMb > 100000)) fail('maxHeapGrowthMb must be within 0–100000.')
+      if (step.maxNodeGrowth !== undefined && (typeof step.maxNodeGrowth !== 'number' || !Number.isInteger(step.maxNodeGrowth) || step.maxNodeGrowth < 0 || step.maxNodeGrowth > 10000000)) fail('maxNodeGrowth must be an integer within 0–10000000.')
+      if ((step.maxHeapGrowthMb !== undefined || step.maxNodeGrowth !== undefined)) { if (step.since === undefined) fail('growth limits need since, an earlier metrics step.'); assertions++ }
+    }
     if (step.action === 'compareScreenshot') {
       validateBaselinePath(step.baseline)
       if (step.baselineImage === undefined) fail('the reference image was not attached. Run the plan with the session browser helper, which reads the baseline file.')

@@ -521,6 +521,17 @@ Read snapshot and test-targets [FRAME_ID] to discover visible text, stable CSS
 selectors, labels, element types and CSS-pixel bounds. Targets omit field values. If selectors are
 ambiguous, refine with CSS and optional text. Open shadow roots are supported;
 inspect frames separately and use a frame ID belonging to this page when needed.
+To time something, use {action:"measure",name,from:{step:N} or {consoleMessage:glob},
+to:<wait condition>,optional maxMs,timeoutMs} right after step N: it reports ms and
+atLeastMs (polled conditions are bounded by the last poll that saw them false; a
+consoleMessage end is timed by its arrival), and maxMs makes it an assertion. A rate:
+{action:"measure",name,rateOf:{consoleMessage,optional level},windowMs 100–30000,
+optional minPerSecond,maxPerSecond}, for cine or animation the page logs. Memory:
+{action:"metrics"} reads jsHeapUsedMb and DOM nodes after a garbage collection;
+{action:"metrics",since:N,maxHeapGrowthMb,maxNodeGrowth} fails on growth since metrics
+step N, for leaks across repeated open/close. Report results come from report.measurements;
+timings vary by machine, so use generous limits.
+
 Write a local UTF-8 JSON plan with description, expected and steps. Each step has
 an action. label is optional and defaults to <action> step <n> in reports; provide
 a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
@@ -566,7 +577,8 @@ Fractional display scaling can shift delivered pointer coordinates by about one
 CSS pixel. Prefer assertions of the resulting app state over exact coordinates.
 Conditions: visible, hidden, text (contains expected), count (visible elements),
 checked (boolean), value (exact), imageLoaded, canvasPainted, url (contains expected,
-no selector). At least one assert or compareScreenshot is required. Convert EVERY expected outcome to
+no selector). At least one assert, compareScreenshot, or measure or metrics step with
+a limit is required. Convert EVERY expected outcome to
 an assertion or explain which outcome cannot be automatically verified. A plan
 passing one check does not prove unrelated expected results. Never weaken checks
 just to pass. Wait for ready states, not arbitrary sleeps. Step timeoutMs defaults

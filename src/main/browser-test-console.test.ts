@@ -200,3 +200,30 @@ test('the linear check finds the same prefix as a direct search', () => {
     assert.equal(redactInputs(text, [input]), expected, JSON.stringify({ input, text }))
   }
 })
+
+test('timed console patterns keep counting and timing after their history fills', () => {
+  const { source, log } = page()
+  const timed = plan([{ action: 'click', selector: '#a' }, { action: 'measure', name: 'cine', rateOf: { consoleMessage: 'frame *' }, windowMs: 1000 },
+    { action: 'measure', name: 'render', from: { consoleMessage: 'requested' }, to: { condition: 'consoleMessage', expected: 'frame *' } }, assertion])
+  const watch = new TestConsoleWatch(timed, 1, source)
+  const realNow = Date.now
+  let now = 1_000_000
+  Date.now = () => now
+  try {
+    log('requested')
+    for (let index = 0; index < 7000; index++) { now++; log(`frame ${index}`) }
+    // Saturation before a window: the window still counts what arrives in it.
+    const before = watch.matchCount('frame *')
+    assert.equal(before, 7000, 'every match is counted, beyond the kept history')
+    for (let index = 0; index < 10; index++) { now++; log(`frame late ${index}`) }
+    assert.equal(watch.matchCount('frame *') - before, 10, 'a window after saturation counts its own messages')
+    assert.equal(watch.firstArrival('requested'), 1_000_000, 'the first arrival is always kept')
+    // Saturation before a later measurement: an end after a recent start is still found.
+    const later = now + 1
+    now += 5; log('frame after')
+    assert.deepEqual(watch.firstArrivalSince('frame *', undefined, later), { time: now, complete: true })
+    // An end whose first match fell out of the history is reported as unknown, not as a later match.
+    assert.deepEqual(watch.firstArrivalSince('frame *', undefined, 1_000_001), { complete: false })
+    assert.deepEqual(watch.firstArrivalSince('frame *', undefined, now + 1), { complete: true }, 'nothing yet, and nothing lost')
+  } finally { Date.now = realNow; watch.dispose() }
+})

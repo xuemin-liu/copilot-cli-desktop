@@ -172,3 +172,18 @@ test('a comparison is an assertion whose capture and diff are kept whether it pa
   assert.equal(passed.status, 'passed'); assert.equal(passed.steps[0]?.outcome, 'assertion-passed'); assert.equal(passed.steps[0]?.delivery, 'not-attempted')
   assert.deepEqual(passed.screenshots.map(image => [image.step, image.kind]), [[1, 'capture'], [1, 'diff']])
 })
+
+test('measure and metrics results are gathered in the report, and count as assertions only with a limit', async () => {
+  const steps = [{ action: 'click', selector: '#open' }, { action: 'measure', name: 'first image', from: { step: 1 }, to: { selector: '#v', condition: 'visible' } },
+    { action: 'measure', name: 'limited', from: { step: 1 }, to: { selector: '#v', condition: 'visible' }, maxMs: 10 }]
+  const report = await runBrowserTest(plan(steps), 1, { active: () => true, progress: () => {}, execute: async step => step.action === 'click' ? { passed: true, delivery: 'delivered' }
+    : step.maxMs ? { passed: false, reason: 'limited took 40 ms; the limit is 10 ms.', data: { measurement: { name: 'limited', ms: 40, atLeastMs: 30 } } }
+    : { passed: true, data: { measurement: { name: 'first image', ms: 40, atLeastMs: 30 } } } }, new AbortController().signal)
+  assert.equal(report.status, 'failed')
+  assert.deepEqual(report.steps.map(step => step.outcome), ['delivered', 'observed', 'assertion-failed'])
+  assert.deepEqual(report.measurements, [{ step: 2, name: 'first image', ms: 40, atLeastMs: 30 }, { step: 3, name: 'limited', ms: 40, atLeastMs: 30 }])
+  const metricsReport = await runBrowserTest(plan([{ action: 'metrics' }, { action: 'metrics', since: 1, maxHeapGrowthMb: 5 }]), 1, { active: () => true, progress: () => {},
+    execute: async () => ({ passed: true, data: { metrics: { jsHeapUsedMb: 10, nodes: 100 } } }) }, new AbortController().signal)
+  assert.deepEqual(metricsReport.steps.map(step => step.outcome), ['observed', 'assertion-passed'])
+  assert.deepEqual(metricsReport.measurements?.map(item => [item.step, item.kind]), [[1, 'metrics'], [2, 'metrics']])
+})
