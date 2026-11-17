@@ -597,8 +597,9 @@ Combine network completion with application signals for the current render revis
 A completed request, changed label, animation frames, decoded image or nonempty
 canvas cannot prove that asynchronous rendering has finished. Use explicit
 `discover` and `screenshot` steps for fresh after-action observations and before/after
-evidence, following readiness waits. Screenshot-region comparison is optional and
-not implemented; saved screenshots require separate visual inspection. Visual
+evidence, following readiness waits. Screenshots can be cropped to a region or an
+element, but pixel comparison is not implemented; saved screenshots require
+separate visual inspection. Visual
 differences must never be presented as proof of application semantics.
 
 ### Opt-in network failures and recovery
@@ -813,6 +814,20 @@ evidence. Arbitrary application text/images can contain data; masking is not a
 guarantee that every secret is detected. Frame screenshots are masked; read frame
 snapshots and assert application readiness for embedded content.
 
+A `screenshot` step can be cropped, for example to one viewport cell of a
+multi-cell viewer. `region: {x, y, width, height}` takes CSS pixels in the
+viewport (width and height 1–20000), or `selector`/`targetRef` (with optional
+`text`) crops to one visible element of the top frame. The whole viewport is
+captured and masked first and only then cut, so a mask never moves with the crop.
+An element's bounds are read before and after the capture; if it moved or
+resized, the step fails and no image is kept (add a `stable` wait first). A region
+outside the visible viewport fails. The saved screenshot records the cropped
+`region` in CSS pixels, and the step's `data.pixels` gives it in image pixels.
+
+```json
+{ "action": "screenshot", "label": "Axial cell", "selector": "#viewport-1" }
+```
+
 Plans are limited to 128 KiB, 50 steps, and five screenshots of up to 2 MiB each.
 The default run deadline is 120 seconds; `timeoutMs` can set up to 300 seconds.
 Waits default to 30 seconds and assertions to 5 seconds; each can set `timeoutMs`
@@ -821,7 +836,17 @@ arrow keys, Home, End, PageUp and PageDown. `scroll` takes `pixels` between -200
 and 2000 and an optional container `selector`. `select` takes an option `value`.
 `frame` and `text` are optional on target-based steps. `checked` expects a boolean;
 `count` expects an integer; `text`, `value`, and `url` expect strings. A `url`
-condition has no selector. Navigate uses `url`; screenshot takes no target.
+condition has no selector. Navigate uses `url`; screenshot optionally takes a
+`region` or a target to crop to.
+
+`frame` works with every condition, including `count`: the count is of visible
+matches inside that one frame. Use the frame ID from `frames` or a discovery in
+that frame. A count is never summed across frames, and another window is a
+separate page:
+
+```json
+{ "action": "waitFor", "frame": "F3A1…", "selector": ".flyout-item", "condition": "count", "expected": 4 }
+```
 
 After building, `node scripts/browser-test-check.mjs` runs a real isolated Electron
 workflow and verifies native input, expected results, screenshots, the installed

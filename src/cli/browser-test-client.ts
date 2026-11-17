@@ -53,7 +53,8 @@ export async function executeBrowserTest(plan: BrowserTestPlan, planPath: string
     for (const [index, image] of report.screenshots.entries()) {
       if (typeof image.imageBase64 !== 'string' || image.imageBase64.length > 3 * 1024 * 1024) throw new Error('Invalid test screenshot.')
       await files[index + 1]!.writeFile(Buffer.from(image.imageBase64, 'base64'))
-      const metadata = { step: image.step, redacted: image.redacted, path: paths[index + 1]! }
+      const region = image.region && ['x', 'y', 'width', 'height'].every(key => Number.isFinite((image.region as Record<string, unknown>)[key])) ? { region: image.region } : {}
+      const metadata = { step: image.step, redacted: image.redacted, path: paths[index + 1]!, ...region }
       report.screenshots[index] = metadata
     }
     const saved = { ...report, path }

@@ -4,7 +4,7 @@ import { dialog, nativeImage } from 'electron'
 import type { BaseWindow, WebContents } from 'electron'
 import { browserReadScript } from './browser-read-script.js'
 import { CREDENTIAL_PATTERN_SOURCE } from './browser-read-credentials.js'
-import { maskScreenshotBitmap, sameScreenshotLayout } from './browser-screenshot-mask.js'
+import { maskAndCrop, sameScreenshotLayout, type Rectangle } from './browser-screenshot-mask.js'
 import type { ScreenshotMaskGeometry, ScreenshotLayout } from './browser-screenshot-mask.js'
 import { MAX_RESPONSE_BYTES, capturableBody, readableResponse, readableUrl, redactBrowserValue } from './browser-read-privacy.js'
 import { browserTestScript } from './browser-test-script.js'
@@ -608,10 +608,26 @@ export class BrowserReader {
       check(); this.testDelivery = 'partial'; return { passed: true }
     }
     if (step.action === 'screenshot') {
-      const image = await this.run('screenshot', [String(page.contents.id)], signal, true) as Params
+      // An element crop reads its bounds in the top frame before and after the capture.
+      const targeted = step.selector !== undefined || step.targetRef !== undefined
+      const top = targeted ? (await this.frames(page, signal))[0]?.id : undefined
+      const bounds = async (): Promise<Rectangle> => {
+        const result = await this.evaluate(page, top!, 'bounds', { selector: step.selector, targetRef: step.targetRef, text: step.text, action: 'screenshot' }, true, signal) as Params
+        if (!result || result.error) throw new Error(String(result?.error ?? 'Screenshot target is unavailable.'))
+        return { x: Number(result.x), y: Number(result.y), width: Number(result.width), height: Number(result.height) }
+      }
+      if (targeted && !top) throw new Error('Frame is unavailable in the selected page.')
+      const region = targeted ? await bounds() : step.region
+      const image = await this.run('screenshot', [String(page.contents.id)], signal, true, region) as Params
       check()
-      return image.state === 'available' ? { passed: true, screenshot: { step: 0, imageBase64: image.imageBase64, redacted: Boolean(image.redacted) } }
-        : { passed: false, reason: String(image.reason ?? 'Screenshot is unavailable.') }
+      if (image.state !== 'available') return { passed: false, reason: String(image.reason ?? 'Screenshot is unavailable.') }
+      if (targeted) {
+        const after = await bounds()
+        if ((['x', 'y', 'width', 'height'] as const).some(key => Math.abs(after[key] - region![key]) >= 0.5)) return { passed: false,
+          reason: 'Screenshot target moved or resized during capture; no image was kept. Wait for it to settle (for example with a stable condition) and retry.' }
+      }
+      return { passed: true, ...(region ? { data: { region: image.region, pixels: image.pixels } } : {}),
+        screenshot: { step: 0, imageBase64: image.imageBase64, redacted: Boolean(image.redacted), ...(region ? { region: image.region } : {}) } }
     }
     const frames = await this.frames(page, signal)
     check()
@@ -969,7 +985,7 @@ export class BrowserReader {
       targets: (redactBrowserValue(result.targets).value as Params[]).map(target => ({ ...target, pageId: page.contents.id, frameId })) }
   }
 
-  private async run(command: string, args: string[], signal?: AbortSignal, testScreenshot = false): Promise<unknown> {
+  private async run(command: string, args: string[], signal?: AbortSignal, testScreenshot = false, crop?: Rectangle): Promise<unknown> {
     if (command === 'test-targets') {
       const page = this.page()
       const frames = await this.frames(page, signal)
@@ -1069,12 +1085,18 @@ export class BrowserReader {
         // Paint confirmation and stable geometry are required as well as opaque
         // pixel masks: a mask for the current layout cannot protect an old frame.
         const size = image.getSize(1)
-        const bitmap = maskScreenshotBitmap(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry)
-        const masked = nativeImage.createFromBitmap(bitmap, { ...size, scaleFactor: 1 })
-        const png = masked.resize({ width: Math.min(1600, size.width) }).toPNG()
+        // Crop only after every mask is painted into the full bitmap.
+        const cut = maskAndCrop(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry, crop)
+        if (!cut) return { ...metadata, state: 'unavailable', reason: 'Screenshot region is outside the visible viewport.' }
+        const pixels = cut.pixels
+        const masked = nativeImage.createFromBitmap(cut.bitmap, { ...cut.size, scaleFactor: 1 })
+        const png = masked.resize({ width: Math.min(1600, cut.size.width) }).toPNG()
         if (png.length > 2 * 1024 * 1024) return { ...metadata, state: 'unavailable', reason: 'Screenshot exceeds the 2 MiB limit.', truncated: true }
+        const viewport = (mask as ScreenshotMaskGeometry).viewport
+        const region = crop && pixels ? { x: pixels.x * viewport.width / size.width, y: pixels.y * viewport.height / size.height,
+          width: pixels.width * viewport.width / size.width, height: pixels.height * viewport.height / size.height } : undefined
         return { ...metadata, frameId: top, state: 'available', mimeType: 'image/png', imageBase64: png.toString('base64'),
-          redacted: Boolean(mask.redacted), size: image.getSize(), limitations: [testScreenshot
+          redacted: Boolean(mask.redacted), size: image.getSize(), ...(region ? { region, pixels } : {}), limitations: [testScreenshot
             ? 'Form controls, credential-marked elements and embedded frames are masked. Canvas pixels are included for the authorized test. Screenshot covers the viewport only.'
             : 'Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }
       } finally { await this.evaluate(page, top, 'unmask', {}).catch(() => {}) }

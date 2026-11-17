@@ -48,3 +48,14 @@ test('a letter or digit types its character only without Alt, Control or Meta', 
   assert.deepEqual(testKey('Enter', 2), { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }, 'named keys keep their text')
   assert.deepEqual(testKey('Space', 0), { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' })
 })
+
+test('a screenshot crops to a viewport region or to one top-frame target, never both', () => {
+  assert.ok(plan([{ action: 'screenshot', region: { x: 0, y: 40, width: 320.5, height: 240 } }, assertion]))
+  assert.ok(plan([{ action: 'screenshot', selector: '.cell', text: 'Axial' }, assertion]))
+  assert.ok(plan([{ action: 'screenshot', targetRef: `${'a'.repeat(32)}-t1` }, assertion]))
+  for (const step of [{ region: { x: 0, y: 0, width: 0, height: 10 } }, { region: { x: -1, y: 0, width: 10, height: 10 } }, { region: { x: 0, y: 0, width: 10 } },
+    { region: { x: 0, y: 0, width: 10, height: 10, scale: 2 } }, { region: { x: 0, y: 0, width: 20001, height: 10 } }, { region: { x: '0', y: 0, width: 10, height: 10 } },
+    { region: { x: 0, y: 0, width: 10, height: 10 }, selector: '.cell' }, { text: 'Axial' }, { selector: '.cell', frame: 'f1' }, { selector: '.cell', targetRef: `${'a'.repeat(32)}-t1` }]) {
+    assert.throws(() => plan([{ action: 'screenshot', ...step }, assertion]), /Invalid browser test/, JSON.stringify(step))
+  }
+})
