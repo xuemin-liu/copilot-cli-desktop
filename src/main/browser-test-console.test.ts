@@ -169,3 +169,34 @@ test('redactInputs removes whole values and the start of one left at the end of 
   assert.equal(redactInputs('ab', ['ab']), '[redacted]')
   assert.equal(redactInputs('nothing here', ['SECRET-1']), 'nothing here')
 })
+
+test('the trailing-prefix check is linear: a page cannot stall the main process with crafted text', () => {
+  // A long shared run that differs only at the end: the worst case for a prefix-by-prefix search.
+  const inputs = Array.from({ length: 10 }, (_, i) => 'A'.repeat(4096) + String.fromCharCode(67 + i).repeat(4096))
+  const messages = Array(100).fill('A'.repeat(8192))
+  const started = performance.now()
+  for (const message of messages) redactInputs(message, inputs)
+  const elapsed = performance.now() - started
+  assert.ok(elapsed < 1500, `10 crafted inputs over 100 messages took ${Math.round(elapsed)} ms`)
+  const evidence = redactTestEvidence(plan([{ action: 'fill', label: 'Type', selector: '#f', value: inputs[0]! }, assertion]), { console: messages.slice(0, 7) })
+  assert.equal(evidence.console[0], `${'A'.repeat(4096)}[redacted]`, 'the longest prefix of the value at the end is still redacted')
+})
+
+test('the linear check finds the same prefix as a direct search', () => {
+  const direct = (text: string, input: string): string => {
+    for (let length = Math.min(input.length - 1, text.length); length >= Math.min(4, input.length); length--) {
+      if (text.endsWith(input.slice(0, length))) return `${text.slice(0, text.length - length)}[redacted]`
+    }
+    return text
+  }
+  let seed = 7
+  const random = (n: number): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n }
+  for (let i = 0; i < 3000; i++) {
+    const alphabet = 'ab'.slice(0, 1 + random(2)) + (random(3) ? '' : 'c')
+    const word = (length: number): string => Array.from({ length }, () => alphabet[random(alphabet.length)]).join('')
+    const input = word(1 + random(12)); const text = word(random(20))
+    // Inputs never contain the separator, and whole occurrences are replaced first.
+    const expected = direct(text.split(input).join('[redacted]'), input)
+    assert.equal(redactInputs(text, [input]), expected, JSON.stringify({ input, text }))
+  }
+})

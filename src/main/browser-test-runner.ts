@@ -13,11 +13,25 @@ export function testInputs(plan: BrowserTestPlan): string[] {
 export function redactInputs(text: string, inputs: string[]): string {
   for (const input of inputs) if (text.includes(input)) text = text.split(input).join('[redacted]')
   for (const input of inputs) {
-    for (let length = Math.min(input.length - 1, text.length); length >= Math.min(4, input.length); length--) {
-      if (text.endsWith(input.slice(0, length))) { text = `${text.slice(0, text.length - length)}[redacted]`; break }
-    }
+    const length = prefixAtEnd(input, text)
+    if (length >= Math.min(4, input.length)) text = `${text.slice(0, text.length - length)}[redacted]`
   }
   return text
+}
+/** The longest proper prefix of `input` that `text` ends with, in linear time: the page controls the
+ * text, so a quadratic search could stall the main process. One prefix-function (KMP) pass over
+ * input, a separator plan values never contain, and the end of the text. */
+function prefixAtEnd(input: string, text: string): number {
+  if (input.length < 2 || !text) return 0
+  const s = `${input}\u0000${text.slice(-(input.length - 1))}`
+  const pi = new Int32Array(s.length)
+  for (let i = 1; i < s.length; i++) {
+    let k = pi[i - 1]!
+    while (k > 0 && s[i] !== s[k]) k = pi[k - 1]!
+    if (s[i] === s[k]) k++
+    pi[i] = k
+  }
+  return pi[s.length - 1]!
 }
 export function redactTestEvidence(plan: BrowserTestPlan, value: unknown): any {
   const inputs = testInputs(plan)
