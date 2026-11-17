@@ -13,15 +13,18 @@ export interface ConsoleSource {
 export interface ConsoleErrorRecord { message: string; source: string; line: number; count: number }
 
 const STEP_ENTRIES = 10
-/** Arrival times kept per timed pattern; later matches are only counted. */
+/** Recent arrival times kept per timed pattern. Matches are always counted, and the first is always kept. */
 const TIMES_KEPT = 5000
+
+/** Arrivals of one pattern a measure step times. */
+interface Arrivals { count: number; first?: number; recent: number[]; lastDropped?: number }
 const MESSAGE_CHARS = 500
 const PENDING_ERRORS = 20
 
 /** One run's view of the test page's console. It listens to every message as it arrives, so the
  * error latch and consoleMessage matches do not depend on what the bounded buffer still holds. */
 export class TestConsoleWatch {
-  private readonly patterns = new Map<string, { pattern: string; level?: ConsoleLevel; matched: boolean; times?: number[] }>()
+  private readonly patterns = new Map<string, { pattern: string; level?: ConsoleLevel; matched: boolean; times?: Arrivals }>()
   private readonly ignore: string[]
   private pending: ConsoleErrorRecord[] = []
   private overflow = 0
@@ -33,7 +36,7 @@ export class TestConsoleWatch {
   constructor(plan: BrowserTestPlan, private readonly pageId: number, private readonly source: ConsoleSource) {
     const add = (pattern: string, level: ConsoleLevel | undefined, timed: boolean): void => {
       const entry = this.patterns.get(key(pattern, level)) ?? { pattern, ...(level ? { level } : {}), matched: false }
-      if (timed) entry.times ??= []
+      if (timed) entry.times ??= { count: 0, recent: [] }
       this.patterns.set(key(pattern, level), entry)
     }
     for (const step of plan.steps) {
@@ -54,7 +57,11 @@ export class TestConsoleWatch {
       for (const entry of this.patterns.values()) {
         if ((entry.matched && !entry.times) || (entry.level && entry.level !== message.level) || !globMatches(entry.pattern, message.message)) continue
         entry.matched = true
-        if (entry.times && entry.times.length < TIMES_KEPT) entry.times.push(now)
+        const times = entry.times
+        if (!times) continue
+        times.count++; times.first ??= now; times.recent.push(now)
+        // Oldest first out, in batches; the newest dropped time says which later questions can still be answered.
+        if (times.recent.length > TIMES_KEPT + 1000) times.lastDropped = times.recent.splice(0, 1000).at(-1)!
       }
       if (!latch || message.level !== 'error' || this.ignore.some(pattern => globMatches(pattern, message.message))) return
       const text = this.bound(message.message, MESSAGE_CHARS); const source = this.bound(message.source, 500)
@@ -81,8 +88,23 @@ export class TestConsoleWatch {
     return result
   }
 
-  /** When matching messages arrived since the run started, for a pattern a measure step times. */
-  arrivals(pattern: string, level?: ConsoleLevel): number[] { return this.patterns.get(key(pattern, level))?.times ?? [] }
+  /** How many messages matching a timed pattern have arrived since the run started. Never capped. */
+  matchCount(pattern: string, level?: ConsoleLevel): number { return this.patterns.get(key(pattern, level))?.times?.count ?? 0 }
+
+  /** When the first message matching a timed pattern arrived. */
+  firstArrival(pattern: string, level?: ConsoleLevel): number | undefined { return this.patterns.get(key(pattern, level))?.times?.first }
+
+  /**
+   * When the first message matching a timed pattern arrived at or after `since`. `complete` is false when arrivals that
+   * late were dropped from the bounded history, so the first one cannot be known.
+   */
+  firstArrivalSince(pattern: string, level: ConsoleLevel | undefined, since: number): { time?: number; complete: boolean } {
+    const times = this.patterns.get(key(pattern, level))?.times
+    if (!times) return { complete: true }
+    if (times.lastDropped !== undefined && times.lastDropped >= since) return { complete: false }
+    const time = times.recent.find(value => value >= since)
+    return { ...(time !== undefined ? { time } : {}), complete: true }
+  }
 
   /** Whether a message matching the pattern (and level) has arrived since the run started. */
   matched(pattern: string, level?: ConsoleLevel): boolean { return this.patterns.get(key(pattern, level))?.matched ?? false }

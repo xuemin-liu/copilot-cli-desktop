@@ -628,10 +628,12 @@ export class BrowserReader {
     const name = step.name!
     if (step.rateOf) {
       if (!this.testConsole) return { passed: false, reason: 'Console messages are unavailable for this page.' }
+      // Counted from the running total, so a busy page or a long run never loses messages in the window.
+      const before = this.testConsole.matchCount(step.rateOf.consoleMessage, step.rateOf.level)
       const start = Date.now()
       await this.pause(step.windowMs!, signal)
       const end = Date.now()
-      const count = this.testConsole.arrivals(step.rateOf.consoleMessage, step.rateOf.level).filter(time => time >= start && time <= end).length
+      const count = this.testConsole.matchCount(step.rateOf.consoleMessage, step.rateOf.level) - before
       const perSecond = Math.round(count / ((end - start) / 1000) * 100) / 100
       const measurement = { name, kind: 'rate', count, windowMs: end - start, perSecond,
         ...(step.minPerSecond !== undefined ? { minPerSecond: step.minPerSecond } : {}), ...(step.maxPerSecond !== undefined ? { maxPerSecond: step.maxPerSecond } : {}) }
@@ -641,7 +643,7 @@ export class BrowserReader {
     }
     const from = step.from!; const to = step.to!
     const fromTime = from.step !== undefined ? from.at === 'start' ? this.stepTimes.get(from.step)?.start : this.stepTimes.get(from.step)?.end
-      : this.testConsole?.arrivals(from.consoleMessage!, from.level)[0]
+      : this.testConsole?.firstArrival(from.consoleMessage!, from.level)
     const fromText = from.step !== undefined ? `the ${from.at ?? 'end'} of step ${from.step}` : `the first console message matching "${from.consoleMessage}"`
     if (fromTime === undefined) return { passed: false, reason: `${name}: the start, ${fromText}, has not happened.` }
     const deadline = Date.now() + (step.timeoutMs ?? 30000)
@@ -649,7 +651,11 @@ export class BrowserReader {
     if (to.condition === 'consoleMessage') {
       if (!this.testConsole) return { passed: false, reason: 'Console messages are unavailable for this page.' }
       while (end === undefined) {
-        end = this.testConsole.arrivals(String(to.expected), to.level).find(time => time >= fromTime)
+        const arrival = this.testConsole.firstArrivalSince(String(to.expected), to.level, fromTime)
+        // Too many matches since the start to know which came first: say so rather than report a later one.
+        if (!arrival.complete) return { passed: false, data: { measurement: { name, kind: 'interval', from: fromText, to: to.condition, incomplete: true } },
+          reason: `${name}: more than 5000 messages matching the end pattern arrived after the start, so the first of them is no longer known. Use a more specific pattern.` }
+        end = arrival.time
         if (end !== undefined) { earliest = end; break }
         if (Date.now() >= deadline) break
         await this.pause(50, signal)
