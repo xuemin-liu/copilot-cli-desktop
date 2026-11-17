@@ -356,7 +356,20 @@ inputSelector or inputRef; a click/hover overlay requires point. For example:
 Pointer actions support button left/middle/right (default left), and pointer
 actions and press support modifiers:["Shift","Control","Alt","Meta"] (unique
 entries). Drag is a bounded down/move/up sequence; buttons/modifiers are always
-released, including on cancellation. Never bypass covering elements.
+released, including on cancellation. Never bypass covering elements. Modifiers
+apply to drag as well (e.g. Ctrl+drag for window/level); assert the value after.
+wheel sends native wheel events: {action:"wheel",selector:"#viewport-1",
+deltaY:120,repeat:3,modifiers:["Control"]} (deltas integers within +-1000 per event,
+repeat 1-20, plus hover's point/inputSelector/inputRef). Each event is hit-tested
+first; a target that moved or was covered fails with data.geometry.phase "between
+wheel events" and eventsSent. Wheel on the scrolling container or canvas, not on
+an item that scrolls with it.
+press also takes single letters a-z and digits 0-9 for shortcuts; a letter types
+only without Alt/Control/Meta, so Control+s never inserts text. Control/Meta with
+w, t, f, g, r, i or 0 are browser shortcuts and are refused. A page-level shortcut
+uses {action:"press",scope:"page",key:"s",modifiers:["Control"]} with no target:
+the key goes to the focused element, reported in data.keyboard.focus (no value);
+it refuses when focus is inside a frame.
 
 Use reload(), not F5 or Ctrl+R. A reload step accepts optional all:[conditions],
 timeoutMs and dialog. Its data reports navigation completed/cancelled, loading,

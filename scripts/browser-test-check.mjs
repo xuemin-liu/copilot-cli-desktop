@@ -506,6 +506,68 @@ if (!process.versions.electron) {
         assert.equal(unrecorded.evidence.capture.consoleComplete, false, 'the report says the console was not fully recorded')
       } finally { browser.action('record-console:on') }
       await browser.view.webContents.executeJavaScript('document.querySelector("#console-fixture").remove()')
+      // Input: native wheel with modifiers, page-level keys, letter keys, and the focus guard.
+      const inputSetup = `(${function () {
+        document.querySelector('#input-fixture')?.remove()
+        const fixture = document.createElement('div'); fixture.id = 'input-fixture'
+        fixture.innerHTML = '<canvas id="stack" width="200" height="120" style="display:block;width:200px;height:120px;background:#ddd"></canvas>'
+          + '<div id="scroller" style="height:80px;width:200px;overflow:auto"><div style="height:2000px"><p id="scroll-item" style="margin:20px 0">Item</p></div></div>'
+          + '<canvas id="shifting" width="100" height="40" style="display:block;width:100px;height:40px;background:#bbb"></canvas>'
+          + '<input id="shortcut-field" aria-label="Notes"><iframe id="key-frame" srcdoc="<input id=inner>" style="height:40px"></iframe>'
+        document.body.prepend(fixture)
+        const state = window.inputFixture = { wheels: [], keys: [] }
+        fixture.querySelector('#stack').addEventListener('wheel', event => {
+          event.preventDefault(); state.wheels.push({ deltaY: event.deltaY, ctrl: event.ctrlKey, shift: event.shiftKey, trusted: event.isTrusted })
+        }, { passive: false })
+        // A wheel handler that moves its own canvas, which stays fully visible.
+        fixture.querySelector('#shifting').addEventListener('wheel', event => { event.preventDefault(); event.currentTarget.style.marginLeft = `${(parseInt(event.currentTarget.style.marginLeft) || 0) + 30}px` }, { passive: false })
+        document.addEventListener('keydown', event => {
+          state.keys.push({ key: event.key, code: event.code, ctrl: event.ctrlKey, trusted: event.isTrusted, target: event.target.id || event.target.localName })
+          if (event.ctrlKey && event.key === 'b') event.preventDefault()
+        })
+        return true
+      }.toString()})()`
+      const contents = browser.view.webContents
+      await contents.executeJavaScript(inputSetup)
+      await until(() => contents.executeJavaScript('document.querySelector("#key-frame").contentDocument?.querySelector("#inner") !== null'), 'key frame loaded')
+      const fixtureState = () => contents.executeJavaScript('window.inputFixture')
+      const zoomBefore = contents.getZoomFactor()
+      const wheeled = await execute([step('wheel', 'Ctrl+wheel through the stack', { selector: '#stack', deltaY: 120, repeat: 3, modifiers: ['Control'] }),
+        step('wheel', 'Plain wheel', { selector: '#stack', deltaY: -120 }), visible('#stack')])
+      assert.equal(wheeled.status, 'passed', JSON.stringify(wheeled))
+      assert.deepEqual(wheeled.steps[0].data.wheel, { deltaX: 0, deltaY: 120, requested: 3, sent: 3 })
+      const wheels = (await fixtureState()).wheels
+      assert.deepEqual(wheels.map(event => [Math.sign(event.deltaY), event.ctrl, event.trusted]), [[1, true, true], [1, true, true], [1, true, true], [-1, false, true]], 'native wheel events carry the held modifier, which is released afterwards')
+      assert.equal(contents.getZoomFactor(), zoomBefore, 'a Ctrl+wheel the page handles does not zoom the browser')
+      assert.equal((await execute([step('wheel', 'Scroll the list', { selector: '#scroller', deltaY: 300 }), visible('#scroller')])).status, 'passed')
+      await until(() => contents.executeJavaScript('document.querySelector("#scroller").scrollTop > 0'), 'wheel scrolls its container')
+      await contents.executeJavaScript('document.querySelector("#scroller").scrollTop = 0')
+      const itemWheel = await execute([step('wheel', 'Wheel on an item that scrolls away', { selector: '#scroll-item', deltaY: 100, repeat: 5 }), visible('#scroller')])
+      assert.equal(itemWheel.status, 'failed', JSON.stringify(itemWheel)); assert.match(itemWheel.steps[0].reason, /Target moved (or was covered )?between wheel events/)
+      assert.equal(itemWheel.steps[0].data.geometry.phase, 'between wheel events')
+      assert.ok(itemWheel.steps[0].data.geometry.eventsSent >= 1 && itemWheel.steps[0].data.geometry.eventsSent < 5, JSON.stringify(itemWheel.steps[0].data))
+      const shifted = await execute([step('wheel', 'Wheel a canvas that moves itself', { selector: '#shifting', deltaY: 100, repeat: 3 }), visible('#stack')])
+      assert.equal(shifted.status, 'failed', JSON.stringify(shifted)); assert.match(shifted.steps[0].reason, /^Target moved between wheel events after 1 of 3 were sent\. Changed: x/)
+      assert.deepEqual([shifted.steps[0].data.geometry.phase, shifted.steps[0].data.geometry.eventsSent, shifted.steps[0].data.wheel.sent], ['between wheel events', 1, 1])
+      assert.equal(await contents.executeJavaScript('document.querySelector("#shifting").style.marginLeft'), '30px', 'no wheel event follows the move')
+      await contents.executeJavaScript('document.activeElement?.blur(); window.inputFixture.keys = []')
+      const pageKey = await execute([step('press', 'Page shortcut', { scope: 'page', key: 'k' }), visible('#stack')])
+      assert.equal(pageKey.status, 'passed', JSON.stringify(pageKey)); assert.equal(pageKey.steps[0].data.keyboard.focus, 'document body')
+      await contents.executeJavaScript('document.querySelector("#shortcut-field").focus()')
+      const chord = await execute([step('press', 'Bold shortcut', { scope: 'page', key: 'b', modifiers: ['Control'] }), visible('#stack')])
+      assert.equal(chord.status, 'passed', JSON.stringify(chord)); assert.equal(chord.steps[0].data.keyboard.focus.id, 'shortcut-field')
+      assert.equal(await contents.executeJavaScript('document.querySelector("#shortcut-field").value'), '', 'a Control chord never types its letter')
+      const typed = await execute([step('press', 'Type a letter', { selector: '#shortcut-field', key: 'x' }), visible('#stack')])
+      assert.equal(typed.status, 'passed', JSON.stringify(typed))
+      assert.equal(await contents.executeJavaScript('document.querySelector("#shortcut-field").value'), 'x')
+      assert.deepEqual((await fixtureState()).keys.filter(event => event.key !== 'Control').map(event => [event.key, event.code, event.ctrl, event.trusted, event.target]),
+        [['k', 'KeyK', false, true, 'body'], ['b', 'KeyB', true, true, 'shortcut-field'], ['x', 'KeyX', false, true, 'shortcut-field']])
+      await contents.executeJavaScript('document.querySelector("#key-frame").contentDocument.querySelector("#inner").focus(); window.inputFixture.keys = []')
+      const framed = await execute([step('press', 'Page key while a frame has focus', { scope: 'page', key: 'k' }), visible('#stack')])
+      assert.equal(framed.status, 'failed', JSON.stringify(framed)); assert.match(framed.steps[0].reason, /focus is inside a frame/)
+      assert.equal(framed.steps[0].delivery, 'not-attempted')
+      assert.equal(await contents.executeJavaScript('document.querySelector("#key-frame").contentDocument.querySelector("#inner").value'), '', 'no key reaches the frame')
+      await contents.executeJavaScript('document.querySelector("#input-fixture").remove()')
       for (const switchPage of [false, true]) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         const contents = browser.view.webContents; const pageId = browser.snapshot.activePageId
@@ -623,6 +685,7 @@ if (!process.versions.electron) {
         dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
         geometryPhaseDiagnostics: true, stableCondition: true, dataAttributeCondition: true,
         consoleMessageCondition: true, consoleErrorLatch: true, consoleRepeatCompression: true, consoleLatchWithoutRecording: true,
+        nativeModifierWheel: true, wheelContainerScroll: true, wheelMovedTargetStops: true, pageLevelKeys: true, characterKeys: true, frameFocusGuard: true,
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally {
