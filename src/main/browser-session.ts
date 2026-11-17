@@ -410,8 +410,14 @@ Combine request completion with explicit DOM readiness for the current rendering
 revision. Changed labels, nonempty canvases and animation frames are insufficient
 proof that application work has finished. Request explicit discover/screenshot
 steps after interactions and readiness waits for fresh before/after observations.
-Screenshot-region comparison is optional and unavailable; inspect saved screenshots
-separately and never treat visual change alone as proof of application semantics.
+A screenshot step can crop: region:{x,y,width,height} in viewport CSS pixels, or
+selector/targetRef (optional text) for one top-frame element, e.g.
+{action:"screenshot",selector:"#viewport-1"}. Masks are applied to the whole
+viewport before cropping; an element that moves during capture fails the step.
+Pixel comparison is unavailable; inspect saved screenshots separately and never
+treat visual change alone as proof of application semantics.
+frame works with every condition, including count (visible matches in that one
+frame, never summed across frames).
 
 Only when the user authorized the specific failure scenario, a plan may set
 allowNetworkFailures:true and networkFailures:[{urlPattern,method,failure,

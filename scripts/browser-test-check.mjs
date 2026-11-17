@@ -568,6 +568,34 @@ if (!process.versions.electron) {
       assert.equal(framed.steps[0].delivery, 'not-attempted')
       assert.equal(await contents.executeJavaScript('document.querySelector("#key-frame").contentDocument.querySelector("#inner").value'), '', 'no key reaches the frame')
       await contents.executeJavaScript('document.querySelector("#input-fixture").remove()')
+      // Screenshot crops: the whole viewport is masked first, then cut to an element or a region.
+      const { nativeImage } = await import('electron')
+      await contents.executeJavaScript(`(${function () {
+        document.querySelector('#crop-fixture')?.remove()
+        const fixture = document.createElement('div'); fixture.id = 'crop-fixture'
+        fixture.style.cssText = 'position:fixed;left:20px;top:20px;width:160px;height:40px;background:#fff;z-index:3000'
+        fixture.innerHTML = '<div style="position:absolute;left:0;top:0;width:60px;height:40px;background:#f00"></div><input id="crop-input" value="private-crop-value" style="position:absolute;left:80px;top:0;width:60px;height:30px;border:0;background:#0f0">'
+        const mover = document.createElement('div'); mover.id = 'crop-mover'; mover.style.cssText = 'position:fixed;left:300px;top:20px;width:40px;height:40px;background:#00f;z-index:3000'
+        let frame = 0; const move = () => { mover.style.left = `${300 + (++frame % 100)}px`; window.cropMove = requestAnimationFrame(move) }; window.cropMove = requestAnimationFrame(move)
+        document.body.append(fixture, mover)
+        return true
+      }.toString()})()`)
+      const pixel = (image, x, y) => { const size = image.getSize(); const bitmap = image.toBitmap(); const i = (Math.min(size.height - 1, Math.round(y)) * size.width + Math.min(size.width - 1, Math.round(x))) * 4; return [bitmap[i], bitmap[i + 1], bitmap[i + 2]] }
+      const red = ([a, g, b]) => Math.max(a, b) >= 200 && Math.min(a, b) <= 60 && g <= 60
+      const cropped = await execute([step('screenshot', 'Crop to the element', { selector: '#crop-fixture' }), step('screenshot', 'Crop to a region', { region: { x: 20, y: 20, width: 60, height: 40 } }), visible('#crop-fixture')])
+      assert.equal(cropped.status, 'passed', JSON.stringify(cropped))
+      const [elementShot, regionShot] = cropped.screenshots.map(shot => ({ ...shot, image: nativeImage.createFromPath(shot.path) }))
+      const scale = elementShot.image.getSize().width / 160
+      assert.ok(Math.abs(elementShot.region.x - 20) < 1 && Math.abs(elementShot.region.width - 160) < 1.5, JSON.stringify(elementShot.region))
+      assert.ok(Math.abs(elementShot.image.getSize().height - 40 * scale) <= 2, `element crop is the element's size (${JSON.stringify(elementShot.image.getSize())})`)
+      assert.ok(red(pixel(elementShot.image, 30 * scale, 20 * scale)), `red block is inside the element crop: ${pixel(elementShot.image, 30 * scale, 20 * scale)}`)
+      assert.ok(pixel(elementShot.image, 110 * scale, 15 * scale).every(value => Math.abs(value - 17) <= 2), `the input stays masked inside the crop: ${pixel(elementShot.image, 110 * scale, 15 * scale)}`)
+      assert.ok(Math.abs(regionShot.image.getSize().width - 60 * scale) <= 2 && red(pixel(regionShot.image, 30 * scale, 20 * scale)), 'a region crop holds only that region')
+      const outside = await execute([step('screenshot', 'Crop off screen', { region: { x: 19000, y: 0, width: 50, height: 50 } }), visible('#crop-fixture')])
+      assert.equal(outside.status, 'failed'); assert.match(outside.steps[0].reason, /outside the visible viewport/); assert.equal(outside.screenshots.length, 0)
+      const moving = await execute([step('screenshot', 'Crop a moving element', { selector: '#crop-mover' }), visible('#crop-fixture')])
+      assert.equal(moving.status, 'failed', JSON.stringify(moving)); assert.match(moving.steps[0].reason, /moved or resized during capture/); assert.equal(moving.screenshots.length, 0)
+      await contents.executeJavaScript('cancelAnimationFrame(window.cropMove); document.querySelector("#crop-fixture").remove(); document.querySelector("#crop-mover").remove()')
       for (const switchPage of [false, true]) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         const contents = browser.view.webContents; const pageId = browser.snapshot.activePageId
@@ -628,6 +656,11 @@ if (!process.versions.electron) {
       }
       const foreignReady = await execute([visible('#result', { frame: foreignFrame.id })])
       assert.equal(foreignReady.status, 'passed', 'cross-origin frame assertions remain read-only')
+      // count is per frame: the top document has no #button, and each frame has exactly one.
+      const counted = await execute([step('assert', 'No button in the top document', { selector: '#button', condition: 'count', expected: 0 }),
+        step('assert', 'One button in the same-origin frame', { selector: '#button', frame: sameFrame.id, condition: 'count', expected: 1 }),
+        step('assert', 'One button in the cross-origin frame', { selector: '#button', frame: foreignFrame.id, condition: 'count', expected: 1 })])
+      assert.equal(counted.status, 'passed', JSON.stringify(counted))
       for (const [action, rest] of [['fill', { selector: '#field', value: 'unrelated-env-secret-value-123' }],
         ['select', { selector: '#choice', value: 'new' }], ['press', { selector: '#field', key: 'Enter' }], ['click', { selector: '#button' }],
         ['drag', { selector: '#button', path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }]]) {
@@ -686,6 +719,7 @@ if (!process.versions.electron) {
         geometryPhaseDiagnostics: true, stableCondition: true, dataAttributeCondition: true,
         consoleMessageCondition: true, consoleErrorLatch: true, consoleRepeatCompression: true, consoleLatchWithoutRecording: true,
         nativeModifierWheel: true, wheelContainerScroll: true, wheelMovedTargetStops: true, pageLevelKeys: true, characterKeys: true, frameFocusGuard: true,
+        screenshotElementCrop: true, screenshotRegionCrop: true, cropKeepsMasks: true, movingCropRejected: true, frameCount: true,
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally {

@@ -42,6 +42,8 @@ export interface BrowserTestStep extends BrowserTestCondition {
   deltaX?: number
   deltaY?: number
   repeat?: number
+  /** screenshot: crop to this CSS-pixel viewport region. */
+  region?: { x: number; y: number; width: number; height: number }
   /** press: "page" sends the key to whatever has focus, with no target element. */
   scope?: 'page'
   path?: { x: number; y: number }[]
@@ -76,7 +78,7 @@ export interface BrowserTestReport {
   runId?: string; completed?: boolean; origin?: string; testingEnabled?: boolean
   description: string; expected: string; pageId: number; status: 'passed' | 'failed' | 'cancelled'; startedAt: string; durationMs: number
   steps: BrowserTestStepResult[]
-  screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string }[]
+  screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string; region?: { x: number; y: number; width: number; height: number } }[]
   evidence?: Record<string, unknown>
 }
 export interface BrowserTestState {
@@ -195,7 +197,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       fill: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'],
       press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog', 'scope'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
       wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
-      waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: [],
+      waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: ['region', 'selector', 'targetRef', 'text'],
     }
     if (typeof step.action !== 'string' || !extra[step.action]) fail('unsupported action.')
     fields(step, ['action', 'label', ...extra[String(step.action)]!])
@@ -241,6 +243,13 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     }
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
     if (step.action === 'screenshot' && ++screenshots > 5) fail('use at most five screenshots.')
+    if (step.region !== undefined) {
+      const region = object(step.region); fields(region, ['x', 'y', 'width', 'height'])
+      if (![region.x, region.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
+        || ![region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 20000)) fail('region needs x and y within 0–19999 and width and height within 1–20000 CSS pixels.')
+      if (step.selector !== undefined || step.targetRef !== undefined || step.text !== undefined) fail('crop to a region or to a target, not both.')
+    }
+    if (step.action === 'screenshot' && step.text !== undefined && step.selector === undefined && step.targetRef === undefined) fail('screenshot text filters a selector or targetRef.')
     if (['waitFor', 'assert', 'reload'].includes(String(step.action))) {
       timeout(step.timeoutMs, 60000)
       if (step.all !== undefined) {

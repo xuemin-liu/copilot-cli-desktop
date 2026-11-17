@@ -181,6 +181,11 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     }
     const found = args.targetRef ? [fromRef(String(args.targetRef))] : find(String(args.selector))
     const matches = found.filter(visible)
+    if (operation === 'bounds') {
+      if (matches.length !== 1) return { error: `Screenshot target needs exactly one visible element; ${matches.length > 1 ? 'selector is ambiguous' : 'no visible match'}.` }
+      const r = matches[0]!.getBoundingClientRect()
+      return { x: r.x, y: r.y, width: r.width, height: r.height }
+    }
     if (operation === 'probe') {
       if (args.condition === 'hidden') return { passed: matches.length === 0 }
       if (args.condition === 'count') return { passed: matches.length === args.expected }
