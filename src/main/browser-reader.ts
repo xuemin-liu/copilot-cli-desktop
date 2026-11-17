@@ -581,6 +581,11 @@ export class BrowserReader {
     if ((['x', 'y', 'width', 'height'] as const).some(name => Math.abs(previous.area[name] - area![name]) > 0.5)) return restart({ kind: 'the element moved or was resized' })
     if (previous.size.width !== size.width || previous.size.height !== size.height) return restart({ kind: 'the capture size changed' })
     const result = compareBitmaps(bitmap, previous.bitmap, size, channel, ignorePixels(step.ignore ?? [], size, scale))
+    // With every pixel ignored nothing was observed, so no still time may accumulate.
+    if (!result.comparedPixels) {
+      samples.delete(key)
+      return { passed: false, reason: 'Every pixel of the area is inside an ignore rectangle, so nothing is compared. Make the ignore rectangles smaller than the area.' }
+    }
     if (result.diffRatio > maxDiffRatio) {
       const bounds = result.diffBounds
       return restart({ kind: 'pixels', differentPixels: result.differentPixels, diffRatio: Math.round(result.diffRatio * 1e6) / 1e6,

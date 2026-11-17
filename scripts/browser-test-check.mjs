@@ -637,6 +637,13 @@ if (!process.versions.electron) {
         assert.equal(blinking.status, 'failed', JSON.stringify(blinking))
         const cornerIgnored = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 4000, ignore: [{ x: 240, y: 0, width: 20, height: 20 }] }), visible('#vs-cell')])
         assert.equal(cornerIgnored.status, 'passed', JSON.stringify(cornerIgnored))
+        // Ignoring the whole area observes nothing, so it never counts as still, even while the image keeps changing.
+        await browser.view.webContents.executeJavaScript(visualSetup('animate'))
+        const allIgnored = await execute([settle({ timeoutMs: 1500, ignore: [{ x: 0, y: 0, width: 240, height: 160 }] }), visible('#vs-cell')])
+        assert.equal(allIgnored.status, 'failed', JSON.stringify(allIgnored)); assert.match(allIgnored.steps[0].reason, /Every pixel of the area is inside an ignore rectangle/)
+        const oversized = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 1500, ignore: [{ x: 0, y: 0, width: 5000, height: 5000 }] }), visible('#vs-cell')])
+        assert.equal(oversized.status, 'failed', JSON.stringify(oversized)); assert.match(oversized.steps[0].reason, /nothing is compared/)
+        await browser.view.webContents.executeJavaScript(visualSetup('corner'))
         assert.equal((await execute([settle({ timeoutMs: 4000 }), visible('#vs-cell')])).status, 'passed', 'the target alone ignores the blinking corner')
         // A flicker of 2 in each channel fails an exact wait and passes a tolerance of 3.
         await browser.view.webContents.executeJavaScript(visualSetup('flicker'))
