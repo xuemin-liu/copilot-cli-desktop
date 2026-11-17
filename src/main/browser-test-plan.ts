@@ -11,7 +11,9 @@ export interface BrowserTestCondition {
   targetRef?: string
   text?: string
   frame?: string
-  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable'
+  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable' | 'consoleMessage'
+  /** consoleMessage: only messages of this level. */
+  level?: ConsoleLevel
   attribute?: string
   expected?: string | number | boolean
   /** numericValue: allowed difference. stable: allowed bounds change in CSS pixels (default 0.5). */
@@ -42,12 +44,23 @@ export interface BrowserTestStep extends BrowserTestCondition {
 export interface BrowserTestPlan {
   description: string; expected: string; steps: BrowserTestStep[]; timeoutMs?: number
   allowNetworkFailures?: boolean; networkFailures?: TestNetworkFailure[]
+  /** Fail the step during which the test page logs a console error, unless it matches an ignore pattern. */
+  failOnConsoleError?: boolean
+  consoleErrorIgnore?: string[]
+}
+export const CONSOLE_LEVELS = ['debug', 'info', 'warning', 'error'] as const
+export type ConsoleLevel = typeof CONSOLE_LEVELS[number]
+/** Console messages logged by the test page during one step. */
+export interface TestStepConsole {
+  entries: { level: string; message: string; source: string; line: number; count?: number }[]
+  total: number; truncated: boolean; complete: boolean
 }
 export type TestDelivery = 'not-attempted' | 'partial' | 'delivered' | 'uncertain'
 export interface BrowserTestStepResult {
   id?: string; action: string; label: string; status: 'passed' | 'failed' | 'skipped'; durationMs: number
   outcome?: 'delivered' | 'assertion-passed' | 'assertion-failed' | 'observed' | 'skipped' | 'cancelled' | 'uncertain' | 'failed'
   delivery?: TestDelivery; reason?: string; detail?: string; data?: Record<string, unknown>
+  console?: TestStepConsole
 }
 export interface BrowserTestReport {
   runId?: string; completed?: boolean; origin?: string; testingEnabled?: boolean
@@ -66,17 +79,21 @@ export interface BrowserTestState {
   journal?: Omit<BrowserTestReport, 'screenshots'>
 }
 
+/** Anchored literal glob, not a regular expression. Only * has special meaning: it matches any run of characters. */
+export function globMatches(pattern: string, text: string): boolean {
+  const parts = pattern.split('*')
+  if (parts.length === 1) return text === pattern
+  const first = parts.shift()!, last = parts.pop()!
+  if (!text.startsWith(first) || !text.endsWith(last)) return false
+  let offset = first.length
+  const end = text.length - last.length
+  for (const part of parts) { const next = text.indexOf(part, offset); if (next < 0 || next + part.length > end) return false; offset = next + part.length }
+  return offset <= end
+}
+
 /** Literal URL glob, not a regular expression. Only * has special meaning. */
 export function testRequestMatches(rule: TestRequestMatch, url: string, method: string): boolean {
-  if (rule.method !== method) return false
-  const parts = rule.urlPattern.split('*')
-  if (parts.length === 1) return url === rule.urlPattern
-  const first = parts.shift()!, last = parts.pop()!
-  if (!url.startsWith(first) || !url.endsWith(last)) return false
-  let offset = first.length
-  const end = url.length - last.length
-  for (const part of parts) { const next = url.indexOf(part, offset); if (next < 0 || next + part.length > end) return false; offset = next + part.length }
-  return offset <= end
+  return rule.method === method && globMatches(rule.urlPattern, url)
 }
 
 /** Closed shapes and bounded fixed actions, never arbitrary scripts, headers, bodies or replay. */
@@ -108,11 +125,13 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (url.search || url.hash || String(v.urlPattern).split('://')[1]?.split('/')[0]?.includes('*')) fail('request patterns need a literal origin and no query or fragment.')
     if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(String(v.method))) fail('unsupported request method.')
   }
-  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'request']
+  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request']
   const condition = (v: Record<string, unknown>): void => {
-    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable'].includes(String(v.condition))) fail('unsupported condition.')
-    target(v, !['url', 'requestComplete'].includes(String(v.condition)))
-    if (['url', 'requestComplete'].includes(String(v.condition)) && [v.selector, v.targetRef, v.text, v.frame].some(x => x !== undefined)) fail('this condition takes no target.')
+    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage'].includes(String(v.condition))) fail('unsupported condition.')
+    const pageWide = ['url', 'requestComplete', 'consoleMessage'].includes(String(v.condition))
+    target(v, !pageWide)
+    if (pageWide && [v.selector, v.targetRef, v.text, v.frame].some(x => x !== undefined)) fail('this condition takes no target.')
+    if (v.level !== undefined && (v.condition !== 'consoleMessage' || !CONSOLE_LEVELS.includes(v.level as ConsoleLevel))) fail('level requires the consoleMessage condition and one of debug, info, warning, error.')
     if (v.condition === 'requestComplete') {
       const request = object(v.request); fields(request, ['urlPattern', 'method', 'state', 'status']); requestMatch(request)
       if (!['finished', 'failed'].includes(String(request.state))) fail('request state must be finished or failed.')
@@ -124,7 +143,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (v.tolerance !== undefined && (!['numericValue', 'stable'].includes(String(v.condition)) || typeof v.tolerance !== 'number' || !Number.isFinite(v.tolerance) || v.tolerance < 0
       || v.tolerance > (v.condition === 'stable' ? 50 : 1e12))) fail(v.condition === 'stable' ? 'stable tolerance must be within 0–50 CSS pixels.' : 'invalid numeric tolerance.')
     if (v.stableMs !== undefined && (v.condition !== 'stable' || typeof v.stableMs !== 'number' || !Number.isInteger(v.stableMs) || v.stableMs < 100 || v.stableMs > 5000)) fail('stableMs requires the stable condition and must be within 100–5000 milliseconds.')
-    if (['text', 'url', 'value', 'attribute'].includes(String(v.condition))) string(v.expected, 2000, ['value', 'attribute'].includes(String(v.condition)))
+    if (['text', 'url', 'value', 'attribute', 'consoleMessage'].includes(String(v.condition))) string(v.expected, 2000, ['value', 'attribute'].includes(String(v.condition)))
     else if (v.condition === 'numericValue') {
       if (typeof v.expected !== 'number' || !Number.isFinite(v.expected) || Math.abs(v.expected) > 1e12) fail('invalid expected number.')
     } else if (v.condition === 'count') {
@@ -133,7 +152,13 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     else if (v.expected !== undefined) fail('this condition takes no expected value.')
   }
   const plan = object(structuredClone(value))
-  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures'])
+  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures', 'failOnConsoleError', 'consoleErrorIgnore'])
+  if (plan.failOnConsoleError !== undefined && typeof plan.failOnConsoleError !== 'boolean') fail('failOnConsoleError must be boolean.')
+  if (plan.consoleErrorIgnore !== undefined) {
+    if (plan.failOnConsoleError !== true) fail('consoleErrorIgnore requires failOnConsoleError: true.')
+    if (!Array.isArray(plan.consoleErrorIgnore) || plan.consoleErrorIgnore.length < 1 || plan.consoleErrorIgnore.length > 20) fail('use 1–20 console error ignore patterns.')
+    for (const pattern of plan.consoleErrorIgnore as unknown[]) string(pattern, 500)
+  }
   string(plan.description, 4000); string(plan.expected, 4000); timeout(plan.timeoutMs, 300000)
   if (plan.allowNetworkFailures !== undefined && typeof plan.allowNetworkFailures !== 'boolean') fail('allowNetworkFailures must be boolean.')
   if (plan.networkFailures !== undefined) {

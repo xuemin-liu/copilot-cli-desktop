@@ -6,6 +6,10 @@ export interface BrowserConsoleEntry {
   message: string
   source: string
   line: number
+  /** Consecutive identical messages are kept once: how many arrived, and the sequence number and time of the last. */
+  count?: number
+  lastId?: number
+  lastTimestamp?: string
 }
 
 export interface BrowserNetworkEntry {

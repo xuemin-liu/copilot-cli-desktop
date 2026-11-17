@@ -1,0 +1,122 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { ConsoleBuffer } from './browser-console-buffer.js'
+import { TestConsoleWatch, type ConsoleMessage, type ConsoleSource } from './browser-test-console.js'
+import { globMatches, validateBrowserTestPlan, type BrowserTestStep } from './browser-test-plan.js'
+import { runBrowserTest } from './browser-test-runner.js'
+
+const assertion = { action: 'assert', label: 'Result visible', selector: '#result', condition: 'visible' }
+const plan = (steps: unknown[], extra: Record<string, unknown> = {}) => validateBrowserTestPlan({ description: 'Console run', expected: 'It passes', steps, ...extra })
+
+/** The page the runner drives: what BrowserDebug does with one console-message event. */
+function page(recording = () => true) {
+  const buffer = new ConsoleBuffer()
+  const listeners = new Set<(message: ConsoleMessage) => void>()
+  const source: ConsoleSource = {
+    mark: () => buffer.mark(), slice: (pageId, after, through, max) => buffer.slice(pageId, after, through, max),
+    watch: (_pageId, listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+  }
+  const log = (message: string, level = 'info'): void => {
+    const entry = { level, message, source: 'http://127.0.0.1/app.js', line: 7 }
+    for (const listener of listeners) listener(entry)
+    if (recording()) buffer.add({ pageId: 1, timestamp: new Date().toISOString(), ...entry }); else buffer.drop(1)
+  }
+  return { source, log, listeners }
+}
+
+test('glob patterns are anchored and literal apart from *', () => {
+  assert.ok(globMatches('viewer ready', 'viewer ready')); assert.ok(!globMatches('viewer ready', 'viewer ready!'))
+  assert.ok(globMatches('*ready*', 'the viewer is ready now')); assert.ok(globMatches('state: * frames', 'state: 3 frames'))
+  assert.ok(!globMatches('a.b', 'axb'), 'a dot is literal'); assert.ok(!globMatches('*[x]*', 'x'), 'brackets are literal')
+})
+
+test('the plan validates consoleMessage, level and the console error options', () => {
+  const ready = { action: 'waitFor', label: 'Viewer ready', condition: 'consoleMessage', expected: '*viewer ready*' }
+  assert.ok(plan([ready, assertion]))
+  assert.ok(plan([{ ...ready, level: 'debug' }, assertion]))
+  assert.ok(plan([{ action: 'assert', label: 'Ready and shown', all: [{ condition: 'consoleMessage', expected: 'ready', level: 'info' }, { selector: '#a', condition: 'visible' }] }]))
+  for (const extra of [{ selector: '#a' }, { frame: 'f1' }, { expected: '' }, { expected: undefined }, { level: 'verbose' }, { level: 'log' }]) {
+    assert.throws(() => plan([{ ...ready, ...extra }, assertion]), /Invalid browser test/, JSON.stringify(extra))
+  }
+  assert.throws(() => plan([{ ...assertion, level: 'error' }]), /level requires/)
+  assert.ok(plan([assertion], { failOnConsoleError: true, consoleErrorIgnore: ['*CanvasTextAlign*'] }))
+  for (const extra of [{ failOnConsoleError: 'yes' }, { consoleErrorIgnore: ['*x*'] }, { failOnConsoleError: true, consoleErrorIgnore: [] },
+    { failOnConsoleError: true, consoleErrorIgnore: Array(21).fill('x') }, { failOnConsoleError: true, consoleErrorIgnore: ['x'.repeat(501)] }, { failOnConsoleError: true, consoleErrorIgnore: [''] }]) {
+    assert.throws(() => plan([assertion], extra), /Invalid browser test/, JSON.stringify(extra))
+  }
+})
+
+test('consoleMessage matches messages since the run started, by level, even when recording is off', async () => {
+  let recording = false
+  const { source, log, listeners } = page(() => recording)
+  log('viewer ready (before the run)')
+  const value = plan([{ action: 'waitFor', label: 'Ready', condition: 'consoleMessage', expected: 'viewer ready*' },
+    { action: 'assert', label: 'Debug dump', condition: 'consoleMessage', expected: 'state *', level: 'debug', timeoutMs: 300 }])
+  const watch = new TestConsoleWatch(value, 1, source)
+  let polls = 0
+  const report = await runBrowserTest(value, 1, { active: () => true, progress: () => {}, console: watch,
+    execute: async (step: BrowserTestStep) => {
+      if (++polls === 3) log('viewer ready')
+      if (step.label === 'Debug dump') log('state frames=2', 'info')
+      return { passed: watch.matched(String(step.expected), step.level) }
+    } }, new AbortController().signal)
+  assert.equal(report.steps[0]!.status, 'passed', 'the wait passes once the message arrives, not on the one before the run')
+  assert.equal(report.steps[1]!.status, 'failed', 'an info message does not satisfy level debug')
+  assert.equal(report.steps[0]!.console?.complete, false, 'a step whose messages were not recorded says so')
+  watch.dispose(); assert.equal(listeners.size, 0)
+  recording = true
+})
+
+test('failOnConsoleError fails the step the error arrived in, stops a wait early, and skips the rest', async () => {
+  const { source, log } = page()
+  const value = plan([{ action: 'click', label: 'Open viewer', selector: '#open' },
+    { action: 'waitFor', label: 'Never', selector: '#never', condition: 'visible', timeoutMs: 20000 },
+    { action: 'click', label: 'Do not run', selector: '#write' }, assertion], { failOnConsoleError: true, consoleErrorIgnore: ['*CanvasTextAlign*'] })
+  const watch = new TestConsoleWatch(value, 1, source)
+  const executed: string[] = []
+  const started = Date.now()
+  const report = await runBrowserTest(value, 1, { active: () => true, progress: () => {}, console: watch,
+    execute: async step => {
+      executed.push(step.label)
+      if (step.label === 'Open viewer') { log('CanvasTextAlign is deprecated', 'error'); log('warning only', 'warning'); return { passed: true, delivery: 'delivered' } }
+      if (executed.length === 3) { log('TypeError: frame is undefined', 'error'); log('TypeError: frame is undefined', 'error') }
+      return { passed: false }
+    } }, new AbortController().signal)
+  watch.dispose()
+  assert.equal(report.status, 'failed')
+  assert.deepEqual(report.steps.map(step => step.status), ['passed', 'failed', 'skipped', 'skipped'], 'ignored errors and warnings pass')
+  assert.ok(Date.now() - started < 5000, 'the wait stopped at its next poll, not at its timeout')
+  assert.match(report.steps[1]!.reason!, /^Console error during this step: TypeError: frame is undefined$/)
+  assert.deepEqual((report.steps[1]!.data!.consoleErrors as { errors: { count: number }[] }).errors.map(error => error.count), [2])
+  assert.ok(!executed.includes('Do not run'))
+  assert.deepEqual(report.steps[0]!.console?.entries.map(entry => entry.level), ['error', 'warning'])
+  assert.equal(report.steps[1]!.console?.entries[0]!.count, 2)
+})
+
+test('an action finishes delivering before its console error fails it, and the delivery is kept', async () => {
+  const { source, log } = page()
+  const value = plan([{ action: 'click', label: 'Save', selector: '#save' }, assertion], { failOnConsoleError: true })
+  const watch = new TestConsoleWatch(value, 1, source)
+  const report = await runBrowserTest(value, 1, { active: () => true, progress: () => {}, console: watch,
+    execute: async () => { log('Uncaught ReferenceError: x is not defined', 'error'); return { passed: true, delivery: 'delivered' } } }, new AbortController().signal)
+  watch.dispose()
+  assert.deepEqual([report.steps[0]!.status, report.steps[0]!.delivery, report.steps[0]!.outcome], ['failed', 'delivered', 'failed'])
+})
+
+test('without failOnConsoleError errors are only reported, and step slices redact inputs and stay bounded', async () => {
+  const { source, log } = page()
+  const value = plan([{ action: 'fill', label: 'Type', selector: '#field', value: 'private-input-value' }, assertion])
+  const watch = new TestConsoleWatch(value, 1, source)
+  const report = await runBrowserTest(value, 1, { active: () => true, progress: () => {}, console: watch,
+    execute: async step => {
+      if (step.action === 'fill') { log('typed private-input-value', 'error'); for (let i = 0; i < 30; i++) log(`noise ${i}`); log('x'.repeat(5000)) }
+      return { passed: true }
+    } }, new AbortController().signal)
+  watch.dispose()
+  assert.equal(report.status, 'passed')
+  const slice = report.steps[0]!.console!
+  assert.ok(!JSON.stringify(report).includes('private-input-value'))
+  assert.deepEqual([slice.total, slice.truncated, slice.entries.length, slice.entries[0]!.level], [32, true, 10, 'error'])
+  assert.ok(slice.entries.every(entry => entry.message.length <= 500))
+  assert.equal(report.steps[1]!.console, undefined, 'a quiet step carries no console field')
+})

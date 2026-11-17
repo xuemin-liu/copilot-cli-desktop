@@ -1,6 +1,7 @@
 import { redactBrowserValue } from './browser-read-privacy.js'
 import { randomUUID } from 'node:crypto'
-import type { BrowserTestPlan, BrowserTestReport, BrowserTestStep, TestDelivery } from './browser-test-plan.js'
+import type { BrowserTestPlan, BrowserTestReport, BrowserTestStep, TestDelivery, TestStepConsole } from './browser-test-plan.js'
+import type { ConsoleErrorRecord } from './browser-test-console.js'
 
 export interface TestObservation { passed: boolean; delivery?: TestDelivery; reason?: string; detail?: string; data?: Record<string, unknown>; screenshot?: BrowserTestReport['screenshots'][number] }
 export function redactTestEvidence(plan: BrowserTestPlan, value: unknown): any {
@@ -19,6 +20,8 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
   execute: (step: BrowserTestStep, signal: AbortSignal) => Promise<TestObservation>
   progress: (index: number, total: number, label: string) => void
   checkpoint?: (report: BrowserTestReport, current: { id: string; action: string; delivery: TestDelivery } | null) => void
+  /** The test page's console: sequence marks, per-step slices, and errors latched by failOnConsoleError. */
+  console?: { mark: () => number; slice: (after: number) => TestStepConsole; takeErrors: () => { errors: ConsoleErrorRecord[]; more: number } }
 }, cancelled: AbortSignal): Promise<BrowserTestReport> {
   const started = Date.now(); const expired = new AbortController()
   const timer = setTimeout(() => expired.abort(), plan.timeoutMs ?? 120000)
@@ -34,6 +37,19 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
   const report: BrowserTestReport = { runId: randomUUID(), completed: false, description: safe(plan.description), expected: safe(plan.expected), pageId,
     status: 'passed', startedAt: new Date(started).toISOString(), durationMs: 0, steps: [], screenshots: [] }
   const check = (): void => { if (signal.aborted || !executor.active()) throw new Error(expired.signal.aborted ? 'Test timed out.' : 'Test stopped or the selected page changed.') }
+  // A console error fails the step it arrived in at a safe boundary: a wait stops at its next
+  // poll, and an action finishes delivering first. It is never retried.
+  let latched: { errors: ConsoleErrorRecord[]; more: number } | null = null
+  const latch = (): boolean => {
+    const taken = executor.console?.takeErrors()
+    if (taken?.errors.length) latched = latched ? { errors: [...latched.errors, ...taken.errors].slice(0, 20), more: latched.more + taken.more } : taken
+    return latched !== null
+  }
+  const stepConsole = (after: number | undefined): { console?: TestStepConsole } => {
+    if (after === undefined || !executor.console) return {}
+    const slice = executor.console.slice(after)
+    return slice.total || !slice.complete ? { console: clean(slice) } : {}
+  }
   try {
     for (const [index, step] of plan.steps.entries()) {
       const stepStart = Date.now(); const label = safe(step.label)
@@ -41,11 +57,13 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
       executor.progress(index + 1, plan.steps.length, label)
       executor.checkpoint?.(report, { id, action: step.action, delivery: 'not-attempted' })
       let result: TestObservation | undefined
+      const consoleStart = executor.console?.mark()
+      latched = null
       try {
         check()
         result = await executor.execute(step, signal)
         const end = stepStart + (step.timeoutMs ?? (step.action === 'waitFor' ? 30000 : 5000))
-        while (!result.passed && ['waitFor', 'assert'].includes(step.action) && Date.now() < end) {
+        while (!result.passed && ['waitFor', 'assert'].includes(step.action) && Date.now() < end && !latch()) {
           check()
           await new Promise<void>((resolve, reject) => {
             const abort = (): void => { clearTimeout(wait); reject(new Error('Test stopped.')) }
@@ -58,12 +76,17 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
           result = await executor.execute(step, signal)
         }
         check()
+        if (latch() && latched) {
+          const { errors, more } = latched as { errors: ConsoleErrorRecord[]; more: number }
+          throw Object.assign(new Error(`Console error during this step: ${errors[0]!.message}${errors.length + more > 1 ? ` (and ${errors.length + more - 1} more)` : ''}`),
+            { delivery: result.delivery, data: { ...result.data, consoleErrors: { errors, more } } })
+        }
         if (!result.passed) throw Object.assign(new Error(result.reason ?? 'Expected condition was not met before the timeout.'), { delivery: result.delivery, data: result.data })
         if (result.screenshot) report.screenshots.push({ ...result.screenshot, step: index + 1 })
         const observation = ['discover', 'screenshot', 'waitFor'].includes(step.action)
         report.steps.push({ id, action: step.action, label, status: 'passed', outcome: step.action === 'assert' ? 'assertion-passed' : observation ? 'observed' : 'delivered',
           delivery: result.delivery ?? 'not-attempted', durationMs: Date.now() - stepStart,
-          ...(result.detail ? { detail: safe(result.detail) } : {}), ...(result.data ? { data: clean(result.data) } : {}) })
+          ...(result.detail ? { detail: safe(result.detail) } : {}), ...(result.data ? { data: clean(result.data) } : {}), ...stepConsole(consoleStart) })
         executor.checkpoint?.(report, null)
       } catch (error) {
         report.status = expired.signal.aborted ? 'failed' : signal.aborted || !executor.active() ? 'cancelled' : 'failed'
@@ -71,7 +94,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         report.steps.push({ id, action: step.action, label, status: 'failed',
           outcome: failure.delivery === 'uncertain' ? 'uncertain' : report.status === 'cancelled' ? 'cancelled' : step.action === 'assert' ? 'assertion-failed' : 'failed',
           delivery: failure.delivery ?? 'not-attempted', ...(failure.data ? { data: clean(failure.data) } : {}), durationMs: Date.now() - stepStart,
-          reason: safe(expired.signal.aborted ? 'Test timed out.' : error instanceof Error ? error.message : 'Step failed.') })
+          reason: safe(expired.signal.aborted ? 'Test timed out.' : error instanceof Error ? error.message : 'Step failed.'), ...stepConsole(consoleStart) })
         for (const [offset, skipped] of plan.steps.slice(index + 1).entries()) report.steps.push({ id: `${report.runId}:${index + offset + 2}`, action: skipped.action, label: safe(skipped.label), status: 'skipped', outcome: 'skipped', delivery: 'not-attempted', durationMs: 0 })
         executor.checkpoint?.(report, null)
         break

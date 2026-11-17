@@ -37,6 +37,8 @@ import { contextMenuItems, type ContextMenuId, type ContextMenuInput } from './b
 import { BrowserHistory } from './browser-history.js'
 import { BROWSER_POPOUT_TOOLBAR_HEIGHT, createBrowserPopoutToolbar } from './browser-popout-toolbar.js'
 import { OVERRIDES_SCRIPT, POPUP_OVERRIDES_LOADED_SCRIPT, POPUP_OVERRIDES_READY_SCRIPT, overridesFromDevtools, overridesFromPreferences, popupOverrideResponseScript, type OverridesSetting } from './browser-overrides.js'
+import { ConsoleBuffer } from './browser-console-buffer.js'
+import type { ConsoleMessage } from './browser-test-console.js'
 
 const MAX_ENTRIES = 300
 const MAX_PAGES = 32
@@ -112,7 +114,9 @@ export class BrowserDebug {
   private readonly token = randomBytes(32).toString('hex')
   private readonly endpointPath: string
   private readonly reportError: (message: string) => void
-  private consoleSequence = 0
+  /** Console history; state.console is its entries array, kept in step after every clear. */
+  private readonly consoleBuffer = new ConsoleBuffer(id => this.pages.has(id))
+  private readonly consoleWatchers = new Map<number, Set<(message: ConsoleMessage) => void>>()
   private certificateSequence = 0
   private bounds: BrowserBounds | null = null
   private readonly started = new Map<string, number>()
@@ -151,7 +155,7 @@ export class BrowserDebug {
     activePageId: 0, pages: [], zoomFactor: 1, view: 'page',
     recordingConsole: true, recordingNetwork: true, preserveConsole: true, preserveNetwork: true,
     url: '', loading: false, canGoBack: false, canGoForward: false,
-    devtools: false, error: null, console: [], network: [], sitePermissions: [], history: [],
+    devtools: false, error: null, console: this.consoleBuffer.entries, network: [], sitePermissions: [], history: [],
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
@@ -196,9 +200,22 @@ export class BrowserDebug {
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
       active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
       recording: () => this.state.recordingNetwork, visible: id => { const page = this.pages.get(id); return Boolean(page && (page.window || page.attached && this.bounds) && page.view.getVisible()) },
-      evidence: (pageId, startedAt) => ({ console: this.state.console.filter(entry => entry.pageId === pageId && entry.timestamp >= startedAt).slice(-100),
-        capture: { recordingConsole: this.state.recordingConsole, recordingNetwork: this.state.recordingNetwork,
-          limitations: ['Console evidence retains at most 100 entries from this run; activity retains at most 300. Capture settings, navigation, clearing and debugger attachment can make evidence incomplete. Arbitrary application text can contain sensitive data.'] } }),
+      evidence: (pageId, startedAt, after) => {
+        const slice = after === undefined ? null : this.consoleBuffer.slice(pageId, after)
+        return { console: slice ? slice.entries : this.state.console.filter(entry => entry.pageId === pageId && entry.timestamp >= startedAt).slice(-100),
+          capture: { recordingConsole: this.state.recordingConsole, recordingNetwork: this.state.recordingNetwork,
+            ...(slice ? { consoleMessages: slice.total, consoleTruncated: slice.truncated, consoleComplete: slice.complete } : {}),
+            limitations: ['Console evidence keeps at most 100 entries from this run, errors first, and repeats of one message once with a count. Each page keeps at most 300 console entries and all pages 1000; network activity keeps at most 300. consoleComplete is false when recording was off, or entries were evicted or cleared, during the run. Arbitrary application text can contain sensitive data.'] } }
+      },
+      console: {
+        mark: () => this.consoleBuffer.mark(),
+        slice: (pageId, after, through, max) => this.consoleBuffer.slice(pageId, after, through, max),
+        watch: (pageId, listener) => {
+          const listeners = this.consoleWatchers.get(pageId) ?? new Set()
+          listeners.add(listener); this.consoleWatchers.set(pageId, listeners)
+          return () => { listeners.delete(listener); if (!listeners.size) this.consoleWatchers.delete(pageId) }
+        },
+      },
       ...(options.approveInteraction ? { approve: options.approveInteraction } : {}) })
     const view = new WebContentsView({ webPreferences: {
       partition: this.partition, sandbox: true, contextIsolation: true,
@@ -448,7 +465,7 @@ export class BrowserDebug {
       page.certificateFailure = null
       if (page.certificateWarning) { page.certificateWarning = null; this.layout() }
       if (this.findQuery && this.activePageId === contents.id) { this.stopFind(); this.notifyShortcut('find-close') }
-      if (!this.state.preserveConsole) this.state.console = this.state.console.filter(entry => entry.pageId !== contents.id)
+      if (!this.state.preserveConsole) { this.consoleBuffer.clear(contents.id); this.state.console = this.consoleBuffer.entries }
       if (!this.state.preserveNetwork) {
         this.reader.clear(contents.id)
         for (const entry of this.state.network) if (entry.pageId === contents.id) this.started.delete(entry.id)
@@ -491,10 +508,11 @@ export class BrowserDebug {
     contents.on('context-menu', (_event, params) => { if ((this.activePageId === contents.id || page.window) && !this.disposed) this.showContextMenu(page, params) })
     contents.on('focus', () => { if (!this.disposed && this.pages.has(contents.id)) this.onPageFocus?.(contents.id) })
     contents.on('console-message', details => {
-      if (!this.state.recordingConsole) return
-      this.state.console.push({ id: ++this.consoleSequence, pageId: contents.id, timestamp: new Date().toISOString(),
-        level: details.level, message: sanitizedText(details.message), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber })
-      if (this.state.console.length > MAX_ENTRIES) this.state.console.shift()
+      const message = { level: details.level, message: sanitizedText(details.message), source: sanitizedUrl(details.sourceId).slice(0, 2048), line: details.lineNumber }
+      // A test run sees every message, even when recording is off or the entry is later evicted.
+      for (const listener of this.consoleWatchers.get(contents.id) ?? []) listener(message)
+      if (!this.state.recordingConsole) { this.consoleBuffer.drop(contents.id); return }
+      this.consoleBuffer.add({ pageId: contents.id, timestamp: new Date().toISOString(), ...message })
     })
     const id = contents.id
     contents.on('devtools-closed', () => {
@@ -1222,8 +1240,8 @@ export class BrowserDebug {
         this.zoom.set(contents.getURL(), factor)
         break
       }
-      case 'clear': this.state.console = []; this.state.network = []; this.started.clear(); this.reader.clear(); break
-      case 'clear-console': this.state.console = []; break
+      case 'clear': this.consoleBuffer.clear(); this.state.console = this.consoleBuffer.entries; this.state.network = []; this.started.clear(); this.reader.clear(); break
+      case 'clear-console': this.consoleBuffer.clear(); this.state.console = this.consoleBuffer.entries; break
       case 'clear-network': this.state.network = []; this.started.clear(); this.reader.clear(); break
       case 'devtools': this.showView(this.activePage.devtools && this.state.view !== 'page' ? 'page' : 'devtools'); break
       default: throw new Error('Unknown browser action')
