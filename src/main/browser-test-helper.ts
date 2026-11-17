@@ -28,10 +28,28 @@ try {
       $step | Add-Member -NotePropertyName value -NotePropertyValue $browserValue
     }
   }
+  # compareScreenshot names a reference PNG; this shell reads it, so the desktop never opens a path from the plan.
+  $browserCompare = @($browserPlan.steps | Where-Object { $_.action -eq 'compareScreenshot' })
+  foreach ($step in $browserCompare) {
+    if ($step.PSObject.Properties['baselineImage']) { throw 'Invalid browser test: baselineImage is attached by the helper; name the file in baseline.' }
+    if ($step.baseline -isnot [string] -or $step.baseline -notmatch '^[A-Za-z]:[\\/]' -or $step.baseline -notmatch '\.png$' -or
+        $step.baseline.Substring(2) -match '[\x00-\x1f<>:"|?*]' -or
+        $step.baseline -match '(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)') {
+      throw 'Invalid browser test: baseline must be a local absolute .png path; network and device paths are not allowed.'
+    }
+    if (!(Test-Path -LiteralPath $step.baseline -PathType Leaf)) { throw ('The baseline image does not exist: ' + $step.baseline) }
+    if ((Get-Item -LiteralPath $step.baseline).Length -gt 2097152) { throw 'A baseline image exceeds 2 MiB.' }
+  }
   $browserBody = $browserPlan | ConvertTo-Json -Depth 20 -Compress
   if ([Text.Encoding]::UTF8.GetByteCount($browserBody) -gt 131072) { throw 'Test plan exceeds 128 KiB.' }
-  $browserCount = @($browserPlan.steps | Where-Object { $_.action -eq 'screenshot' }).Count
-  if ($browserCount -gt 5) { throw 'Use at most five screenshots.' }
+  $browserShots = @($browserPlan.steps | Where-Object { $_.action -eq 'screenshot' }).Count
+  if ($browserShots + $browserCompare.Count -gt 5) { throw 'Use at most five screenshots and comparisons together.' }
+  if ($browserCompare.Count) {
+    foreach ($step in $browserCompare) { $step | Add-Member -NotePropertyName baselineImage -NotePropertyValue ([Convert]::ToBase64String([IO.File]::ReadAllBytes($step.baseline))) }
+    $browserBody = $browserPlan | ConvertTo-Json -Depth 20 -Compress
+  }
+  # One image file per screenshot; a comparison keeps its capture and, when pixels differ, a diff image.
+  $browserCount = $browserShots + 2 * $browserCompare.Count
   $browserPaths = @($OutputPath)
   for ($i = 1; $i -le $browserCount; $i++) { $browserPaths += [regex]::Replace($OutputPath, '\.json$', '.image-' + $i + '.png', 'IgnoreCase') }
   foreach ($path in $browserPaths) { $browserFiles += [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
@@ -125,7 +143,7 @@ try {
   exit 1
 } finally {
   foreach ($file in $browserFiles) { $file.Dispose() }
-  $browserBody = $null; $browserPlan = $null; $browserValue = $null; $browserControl = $null
+  $browserBody = $null; $browserPlan = $null; $browserValue = $null; $browserControl = $null; $browserCompare = $null
   $browserRequest = $null; $browserReport = $null; $browserEvidence = $null; $browserFailureMessage = $null
   $browserRequestFailure = $null; $browserRequestMessage = $null; $browserExecutionStarted = $false
   $browserErrorResponse = $null; $browserErrorBody = $null; $browserError = $null

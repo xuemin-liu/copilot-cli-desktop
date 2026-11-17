@@ -1,7 +1,7 @@
 import { open, readFile, stat, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
-import { MAX_TEST_BYTES, validateBrowserTestPlan } from '../main/browser-test-plan.js'
+import { MAX_BASELINE_BYTES, MAX_TEST_BYTES, MAX_TEST_IMAGES, reservedTestImages, validateBaselinePath, validateBrowserTestPlan } from '../main/browser-test-plan.js'
 import type { BrowserTestPlan, BrowserTestReport } from '../main/browser-test-plan.js'
 
 export class BrowserTestRejectedError extends Error {
@@ -17,11 +17,42 @@ export function validateTestPath(path: string): void {
 export async function loadBrowserTest(path: string, environment = process.env): Promise<BrowserTestPlan> {
   validateTestPath(path)
   if ((await stat(path)).size > MAX_TEST_BYTES) throw new Error('Test plan exceeds 128 KiB.')
-  return parseBrowserTest(await readFile(path, 'utf8'), environment)
+  const text = await readFile(path, 'utf8')
+  return parseBrowserTest(text, environment, await readBaselines(text))
 }
 
-/** A plan's text with its `valueFromEnv` inputs filled in from `environment`, validated. */
-export function parseBrowserTest(text: string, environment: Record<string, string | undefined>): BrowserTestPlan {
+/**
+ * The reference paths a plan's compareScreenshot steps name, decoded from its JSON and validated, each once. The macOS and
+ * Linux helper cannot decode JSON, so the desktop answers it with this list; the files are still read by the helper's shell.
+ * A plan that is not JSON names none here, and its run reports the error.
+ */
+export function testBaselinePaths(text: string): string[] {
+  let raw: any
+  try { raw = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { return [] }
+  const paths = new Set<string>()
+  if (Array.isArray(raw?.steps)) for (const step of raw.steps) {
+    if (step?.action !== 'compareScreenshot' || typeof step.baseline !== 'string') continue
+    validateBaselinePath(step.baseline); paths.add(step.baseline)
+  }
+  if (paths.size > MAX_TEST_IMAGES) throw new Error('Invalid browser test: use at most five screenshots and comparisons together.')
+  return [...paths]
+}
+
+/** The reference PNGs a plan's compareScreenshot steps name, read by the caller, keyed by the path as written. */
+export async function readBaselines(text: string): Promise<Map<string, string>> {
+  const images = new Map<string, string>()
+  for (const path of testBaselinePaths(text)) {
+    let size: number
+    try { size = (await stat(path)).size } catch { throw new Error(`The baseline image does not exist: ${path}`) }
+    if (size > MAX_BASELINE_BYTES) throw new Error('A baseline image exceeds 2 MiB.')
+    images.set(path, (await readFile(path)).toString('base64'))
+  }
+  return images
+}
+
+/** A plan's text with its `valueFromEnv` inputs and its reference images filled in, validated. `baselines` holds the images
+ * the caller read, keyed by the baseline path as the plan names it. */
+export function parseBrowserTest(text: string, environment: Record<string, string | undefined>, baselines = new Map<string, string>()): BrowserTestPlan {
   let raw: any
   try { raw = JSON.parse(text.replace(/^\uFEFF/, '')) }
   catch { throw new Error('Invalid test JSON.') }
@@ -32,8 +63,34 @@ export function parseBrowserTest(text: string, environment: Record<string, strin
       if (typeof value !== 'string') throw new Error('The test input environment variable is not set.')
       delete step.valueFromEnv; step.value = value
     }
+    if (step && typeof step === 'object' && step.action === 'compareScreenshot') {
+      if ('baselineImage' in step) throw new Error('Invalid browser test: baselineImage is attached by the helper; name the file in baseline.')
+      const image = typeof step.baseline === 'string' ? baselines.get(step.baseline) : undefined
+      if (image !== undefined) step.baselineImage = image
+    }
   }
   return validateBrowserTestPlan(raw)
+}
+
+/**
+ * The form fields the macOS and Linux helper sends: `plan` (the plan's text), `output` (the new report path), `env:NAME`
+ * inputs, and for each reference image `baseline-N` (the file's bytes as base64) with `baselinePath-N` (its path as the
+ * plan names it).
+ */
+export function parseTestForm(fields: Map<string, string>): { plan: BrowserTestPlan; output: string } {
+  const text = fields.get('plan')
+  const output = fields.get('output')
+  if (text === undefined || output === undefined) throw new Error('Invalid test request.')
+  if (Buffer.byteLength(text) > MAX_TEST_BYTES) throw new Error('Test plan exceeds 128 KiB.')
+  const inputs: Record<string, string> = {}
+  const baselines = new Map<string, string>()
+  for (const [name, value] of fields) {
+    if (name.startsWith('env:')) inputs[name.slice(4)] = value
+    const index = /^baselinePath-(\d{1,2})$/.exec(name)?.[1]
+    const image = index === undefined ? undefined : fields.get(`baseline-${index}`)
+    if (image !== undefined) baselines.set(value, image)
+  }
+  return { plan: parseBrowserTest(text, inputs, baselines), output }
 }
 
 /** Reserve new artifacts before performing any page actions; never overwrite user files. */
@@ -41,7 +98,7 @@ export async function executeBrowserTest(plan: BrowserTestPlan, planPath: string
   request: (plan: BrowserTestPlan) => Promise<unknown>): Promise<BrowserTestReport & { path: string }> {
   const path = output ?? planPath.replace(/\.json$/i, `.report-${randomUUID()}.json`)
   validateTestPath(path)
-  const count = plan.steps.filter(step => step.action === 'screenshot').length
+  const count = reservedTestImages(plan.steps)
   const paths = [path, ...Array.from({ length: count }, (_, index) => path.replace(/\.json$/i, `.image-${index + 1}.png`))]
   const files: Awaited<ReturnType<typeof open>>[] = []
   let performed = false
@@ -54,7 +111,8 @@ export async function executeBrowserTest(plan: BrowserTestPlan, planPath: string
       if (typeof image.imageBase64 !== 'string' || image.imageBase64.length > 3 * 1024 * 1024) throw new Error('Invalid test screenshot.')
       await files[index + 1]!.writeFile(Buffer.from(image.imageBase64, 'base64'))
       const region = image.region && ['x', 'y', 'width', 'height'].every(key => Number.isFinite((image.region as Record<string, unknown>)[key])) ? { region: image.region } : {}
-      const metadata = { step: image.step, redacted: image.redacted, path: paths[index + 1]!, ...region }
+      const kind = image.kind === 'capture' || image.kind === 'diff' ? { kind: image.kind } : {}
+      const metadata = { step: image.step, redacted: image.redacted, path: paths[index + 1]!, ...region, ...kind }
       report.screenshots[index] = metadata
     }
     const saved = { ...report, path }

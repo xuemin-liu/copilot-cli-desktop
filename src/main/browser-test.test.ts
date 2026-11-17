@@ -156,3 +156,19 @@ test('dialog expectations are accepted only on actions that can trigger a dialog
     assert.throws(() => plan([{ action, selector: '#a', pixels: 1, condition: 'visible', dialog: { accept: true } }, assertion]), /Invalid browser test/, action)
   }
 })
+
+test('a comparison is an assertion whose capture and diff are kept whether it passes or fails', async () => {
+  const baseline = process.platform === 'win32' ? 'C:/tests/cell.png' : '/tmp/cell.png'
+  const compare = { action: 'compareScreenshot', selector: '#cell', baseline, baselineImage: 'AAAA' }
+  const images = [{ step: 0, redacted: false, kind: 'capture' as const, imageBase64: 'Y2FwdHVyZQ==' }, { step: 0, redacted: false, kind: 'diff' as const, imageBase64: 'ZGlmZg==' }]
+  const run = (passed: boolean) => runBrowserTest(plan([compare, { action: 'click', selector: '#next' }]), 1, { active: () => true, progress: () => {},
+    execute: async step => step.action === 'compareScreenshot' ? { passed, reason: 'Pixels differ.', data: { comparison: { differentPixels: 5 } }, screenshots: images } : { passed: true, delivery: 'delivered' } },
+  new AbortController().signal)
+  const failed = await run(false)
+  assert.equal(failed.status, 'failed'); assert.equal(failed.steps[0]?.outcome, 'assertion-failed'); assert.equal(failed.steps[0]?.reason, 'Pixels differ.')
+  assert.equal(failed.steps[1]?.status, 'skipped')
+  assert.deepEqual(failed.screenshots.map(image => [image.step, image.kind]), [[1, 'capture'], [1, 'diff']])
+  const passed = await run(true)
+  assert.equal(passed.status, 'passed'); assert.equal(passed.steps[0]?.outcome, 'assertion-passed'); assert.equal(passed.steps[0]?.delivery, 'not-attempted')
+  assert.deepEqual(passed.screenshots.map(image => [image.step, image.kind]), [[1, 'capture'], [1, 'diff']])
+})

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { executeBrowserTest, loadBrowserTest, validateTestPath } from './browser-test-client.js'
+import { executeBrowserTest, loadBrowserTest, parseTestForm, testBaselinePaths, validateTestPath } from './browser-test-client.js'
 import { browserCommand } from './browser-control.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from '../main/browser-session.js'
 
@@ -109,4 +109,86 @@ test('CLI and installed PowerShell test transports send credentials only in the 
     if (savedPassword === undefined) delete process.env.COPILOT_TEST_PASSWORD; else process.env.COPILOT_TEST_PASSWORD = savedPassword
     server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true })
   }
+})
+
+test('a comparison baseline is read by the caller, sent with the plan, and its capture and diff are saved', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browser-test-baseline-'))
+  const input = join(root, 'plan.json'); const baseline = join(root, 'cell one.png')
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255, 1, 2])
+  const savedEndpoint = process.env.COPILOT_DESKTOP_BROWSER_STATE
+  const token = 'b'.repeat(64); const seen: any[] = []
+  const comparePlan = { description: 'Compare', expected: 'Matches', steps: [{ action: 'compareScreenshot', selector: '#cell', baseline }] }
+  const compareReply = { status: 'failed', steps: [{ status: 'failed' }], screenshots: [
+    { step: 1, redacted: false, kind: 'capture', imageBase64: Buffer.from('capture-png').toString('base64') },
+    { step: 1, redacted: false, kind: 'diff', imageBase64: Buffer.from('diff-png').toString('base64') }] }
+  const server = createServer(async (request, response) => {
+    let body = ''; for await (const chunk of request) body += chunk
+    seen.push(JSON.parse(body))
+    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(compareReply))
+  })
+  try {
+    await writeFile(baseline, bytes)
+    await writeFile(input, JSON.stringify(comparePlan))
+    const loaded = await loadBrowserTest(input, {})
+    assert.equal(loaded.steps[0]!.baselineImage, bytes.toString('base64'))
+    assert.equal(loaded.steps[0]!.baseline, baseline, 'the path stays in the plan for the report')
+    const result = await executeBrowserTest(loaded, input, join(root, 'report.json'), async () => structuredClone(compareReply))
+    assert.deepEqual(result.screenshots.map(image => image.kind), ['capture', 'diff'])
+    assert.equal(await readFile(result.screenshots[1]!.path!, 'utf8'), 'diff-png')
+    await assert.rejects(executeBrowserTest(loaded, input, join(root, 'too-many.json'), async () => ({ ...compareReply, screenshots: [...compareReply.screenshots, compareReply.screenshots[0]] })), /Invalid browser test response/)
+    await writeFile(input, JSON.stringify({ ...comparePlan, steps: [{ ...comparePlan.steps[0], baselineImage: 'AAAA' }] }))
+    await assert.rejects(loadBrowserTest(input, {}), /attached by the helper/)
+    await writeFile(input, JSON.stringify({ ...comparePlan, steps: [{ ...comparePlan.steps[0], baseline: join(root, 'missing.png') }] }))
+    await assert.rejects(loadBrowserTest(input, {}), /does not exist/)
+    await writeFile(join(root, 'large.png'), Buffer.alloc(2 * 1024 * 1024 + 1))
+    await writeFile(input, JSON.stringify({ ...comparePlan, steps: [{ ...comparePlan.steps[0], baseline: join(root, 'large.png') }] }))
+    await assert.rejects(loadBrowserTest(input, {}), /exceeds 2 MiB/)
+    await writeFile(input, JSON.stringify({ ...comparePlan, steps: [{ ...comparePlan.steps[0], baseline: 'cell.png' }] }))
+    await assert.rejects(loadBrowserTest(input, {}), /local absolute .png/)
+
+    // The macOS and Linux helper sends the file's bytes in form fields; the desktop matches them to the plan by path.
+    const form = new Map([['plan', JSON.stringify(comparePlan)], ['output', join(root, 'form-report.json')], ['baseline-1', bytes.toString('base64')], ['baselinePath-1', baseline]])
+    assert.equal(parseTestForm(form).plan.steps[0]!.baselineImage, bytes.toString('base64'))
+    assert.throws(() => parseTestForm(new Map([...form].filter(([name]) => name !== 'baseline-1'))), /reference image was not attached/)
+    assert.throws(() => parseTestForm(new Map([...form, ['baselinePath-1', join(root, 'other.png')]])), /reference image was not attached/)
+
+    if (process.platform === 'win32') {
+      const endpoint = join(root, 'control.json')
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      await writeFile(endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token }))
+      const env = await prepareBrowserSessionEnvironment(root, 'tab-1', process.env)
+      env.COPILOT_DESKTOP_BROWSER_STATE = endpoint
+      const helper = browserSessionPaths(root, 'tab-1').helper
+      const run = (output: string) => promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', helper, 'test', input, '-OutputPath', output], { env, windowsHide: true, timeout: 60000 })
+      await writeFile(input, JSON.stringify(comparePlan))
+      const report = JSON.parse((await run(join(root, 'shell-report.json'))).stdout)
+      assert.equal(seen.at(-1).steps[0].baselineImage, bytes.toString('base64'), 'PowerShell reads the baseline and sends it as base64')
+      assert.deepEqual(report.screenshots.map((image: { kind: string }) => image.kind), ['capture', 'diff'])
+      assert.equal(await readFile(report.screenshots[0].path, 'utf8'), 'capture-png')
+      const count = seen.length
+      for (const [steps, message] of [[[{ ...comparePlan.steps[0], baselineImage: 'AAAA' }], /attached by the helper/], [[{ ...comparePlan.steps[0], baseline: join(root, 'missing.png') }], /does not exist/],
+        [[{ ...comparePlan.steps[0], baseline: join(root, 'large.png') }], /exceeds 2 MiB/], [[{ ...comparePlan.steps[0], baseline: '\\\\host\\share\\cell.png' }], /local absolute .png/]] as const) {
+        await writeFile(input, JSON.stringify({ ...comparePlan, steps }))
+        const failure = await run(join(root, `rejected-${seen.length}-${String(message).length}.json`)).then(() => null, error => error)
+        assert.ok(failure); assert.match(failure.stderr, message)
+      }
+      assert.equal(seen.length, count, 'an invalid baseline is refused before any request')
+    }
+  } finally {
+    if (savedEndpoint === undefined) delete process.env.COPILOT_DESKTOP_BROWSER_STATE; else process.env.COPILOT_DESKTOP_BROWSER_STATE = savedEndpoint
+    if (server.listening) { server.closeAllConnections(); server.close() } await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the baseline paths a plan names are decoded from its JSON, once each, whatever the spelling', () => {
+  const path = process.platform === 'win32' ? 'C:/tests/cell ' + String.fromCharCode(0x4e2d) + '.png' : '/tmp/tests/cell ' + String.fromCharCode(0x4e2d) + '.png'
+  const escaped = JSON.stringify(path).replaceAll('/', '\\/').replace(String.fromCharCode(0x4e2d), '\\u4e2d')
+  const text = `{ "steps" : [ { "action" : "compareScreenshot", "baseline" :\n ${escaped} }, { "action": "compare\\u0053creenshot", "baseline": ${JSON.stringify(path)} },
+    { "action": "screenshot", "baseline": "/elsewhere.png" }, { "action": "assert", "label": "\\"baseline \\": \\"/tmp/fake.png \\"" } ] }`
+  assert.deepEqual(testBaselinePaths(text), [path], 'escaped and literal spellings name one file; other steps and strings name none')
+  assert.deepEqual(testBaselinePaths('not json'), [], 'a plan that is not JSON names none; its run reports the error')
+  assert.deepEqual(testBaselinePaths('\uFEFF' + JSON.stringify({ steps: [] })), [])
+  assert.throws(() => testBaselinePaths(JSON.stringify({ steps: [{ action: 'compareScreenshot', baseline: 'cell.png' }] })), /local absolute .png/)
+  const many = Array.from({ length: 6 }, (_, index) => ({ action: 'compareScreenshot', baseline: path.replace('.png', `${index}.png`) }))
+  assert.throws(() => testBaselinePaths(JSON.stringify({ steps: many })), /five screenshots and comparisons/)
 })

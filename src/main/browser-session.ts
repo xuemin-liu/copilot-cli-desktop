@@ -81,6 +81,34 @@ token=$(printf '%s' "$control" | sed -n 's/.*"token":"\([a-f0-9]\{64\}\)".*/\1/p
 if [ -z "$pid" ] || [ -z "$port" ] || [ -z "$token" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] || ! kill -0 "$pid" 2>/dev/null; then
   fail "$prefix""Browser control state is stale or invalid. Reopen this session Browser pane."
 fi
+# compareScreenshot names reference PNGs. This shell cannot decode JSON, so the desktop lists the decoded paths, one per
+# line; curl then uploads each file with the test, so the desktop never opens a path from the plan. Paths hold no quote,
+# backslash or control character, which keeps both the list and curl's form syntax unambiguous.
+: > "$work/baselines"
+if [ "$command" = test ]; then
+  {
+    printf 'noproxy = "*"\nsilent\nshow-error\nmax-redirs = 0\nmax-time = 30\n'
+    printf 'write-out = "\\n%%{http_code}"\n'
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'url = "http://127.0.0.1:%s/test/baselines"\n' "$port"
+    printf 'form = "plan=<%s"\n' "$(quote "$work/plan")"
+  } > "$work/baseline-config"
+  chmod 600 "$work/baseline-config"
+  listing=$(curl -K - < "$work/baseline-config") || fail "$prefix""The desktop did not answer. Is Copilot CLI Desktop still running?"
+  listing_status=$(printf '%s\n' "$listing" | tail -n 1)
+  listing_body=$(printf '%s\n' "$listing" | sed '$d')
+  if [ "$listing_status" != 200 ]; then
+    message=$(printf '%s' "$listing_body" | sed -n 's/^.*"message":"\(.*\)"}$/\1/p' | sed 's/\\"/"/g')
+    [ -n "$message" ] || message="The desktop answered with HTTP $listing_status."
+    fail "$prefix$message"
+  fi
+  printf '%s\n' "$listing_body" | sed '/^$/d' > "$work/baselines"
+  while IFS= read -r baseline; do
+    if ! local_path "$baseline" || ! printf '%s' "$baseline" | grep -qi '\.png$'; then fail "$prefix""Invalid browser test: baseline must be a local absolute .png path; network and device paths are not allowed."; fi
+    [ -f "$baseline" ] || fail "$prefix""The baseline image does not exist: $baseline"
+    [ "$(wc -c < "$baseline" | tr -d ' ')" -le 2097152 ] || fail "$prefix""A baseline image exceeds 2 MiB."
+  done < "$work/baselines"
+fi
 timeout=30
 if [ "$command" = test ]; then
   route=test; timeout=315
@@ -111,6 +139,12 @@ if [ "$command" = test ]; then
     value=$(printenv "$name") || continue
     printf 'form-string = "env:%s=%s"\n' "$name" "$(quote "$value")" >> "$work/config"
   done < "$work/inputs"
+  index=0
+  while IFS= read -r baseline; do
+    index=$((index + 1))
+    printf 'form = "baseline-%s=@\\"%s\\";type=image/png"\n' "$index" "$baseline" >> "$work/config"
+    printf 'form-string = "baselinePath-%s=%s"\n' "$index" "$baseline" >> "$work/config"
+  done < "$work/baselines"
 fi
 response=$(curl -K - < "$work/config") || fail "$prefix""The desktop did not answer. Is Copilot CLI Desktop still running?"
 status=$(printf '%s\n' "$response" | tail -n 1)
@@ -414,8 +448,22 @@ A screenshot step can crop: region:{x,y,width,height} in viewport CSS pixels, or
 selector/targetRef (optional text) for one top-frame element, e.g.
 {action:"screenshot",selector:"#viewport-1"}. Masks are applied to the whole
 viewport before cropping; an element that moves during capture fails the step.
-Pixel comparison is unavailable; inspect saved screenshots separately and never
-treat visual change alone as proof of application semantics.
+To check what an image looks like, compare it with a reference PNG:
+{action:"compareScreenshot",selector:"#viewport-1",baseline:"ABSOLUTE_REFERENCE.png"}
+(region or selector/targetRef as for screenshot; no target compares the viewport).
+The helper reads the baseline file and sends it; on macOS and Linux its path must
+not contain a quote or backslash. Optional ignore:[{x,y,width,height}] (1–20, CSS
+pixels relative to the compared area) leaves out areas that change legitimately,
+such as dates or overlays, and imageTolerance:{channel 0–255 (default 0),
+maxDiffRatio 0–1 (default 0)} allows small differences. The capture must have the
+reference's exact pixel size (same area, zoom and display scaling); nothing is
+rescaled. The step counts as an assertion. It saves the capture, and a diff image
+(differing pixels red) when pixels differ; data.comparison reports the differing
+pixels, ratio, largest channel difference and diffBounds in CSS pixels. To create
+a reference, run a screenshot step of the same area once, inspect it, and use its
+saved PNG as baseline. Masked areas are masked in both images, so changes under a
+mask are not seen. Without a reference, inspect saved screenshots separately and
+never treat visual change alone as proof of application semantics.
 frame works with every condition, including count (visible matches in that one
 frame, never summed across frames).
 
@@ -465,7 +513,8 @@ an action. label is optional and defaults to <action> step <n> in reports; provi
 a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
 drag(selector,path,optional durationMs,inputSelector), dragTo(selector,dropSelector,optional point,dropPoint,dropText,durationMs), fill(selector,value), select(selector,value), press(selector,key),
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
-assert(condition,selector,optional expected), screenshot(). Optional text filters
+assert(condition,selector,optional expected), screenshot(),
+compareScreenshot(baseline,optional selector,region,ignore,imageTolerance). Optional text filters
 match visible element text; optional frame selects a current-page frame.
 A step that triggers a JavaScript alert, confirm or leave-page dialog (click, doubleClick,
 press, fill, select, navigate) must say so with dialog:{accept:true|false,optional message}.
@@ -504,12 +553,13 @@ Fractional display scaling can shift delivered pointer coordinates by about one
 CSS pixel. Prefer assertions of the resulting app state over exact coordinates.
 Conditions: visible, hidden, text (contains expected), count (visible elements),
 checked (boolean), value (exact), imageLoaded, canvasPainted, url (contains expected,
-no selector). At least one assert is required. Convert EVERY expected outcome to
+no selector). At least one assert or compareScreenshot is required. Convert EVERY expected outcome to
 an assertion or explain which outcome cannot be automatically verified. A plan
 passing one check does not prove unrelated expected results. Never weaken checks
 just to pass. Wait for ready states, not arbitrary sleeps. Step timeoutMs defaults
 to 30 seconds for waitFor, 5 seconds for assert, maximum 60 seconds. Plan timeoutMs
-defaults to 120 seconds, maximum 300 seconds. At most 50 steps and 5 screenshots.
+defaults to 120 seconds, maximum 300 seconds. At most 50 steps, and 5 screenshots
+and comparisons together.
 
 Run powershell.exe -NoProfile -ExecutionPolicy Bypass -File
 "$env:COPILOT_DESKTOP_BROWSER_HELPER" test "ABSOLUTE_PLAN.json"
@@ -529,8 +579,9 @@ Reports and screenshot files use new filenames and never overwrite existing file
 Test screenshots mask forms, credential-marked elements and embedded frames but
 include canvas pixels. imageLoaded proves decoding, canvasPainted checks a nonempty
 2D canvas; neither proves correct visual content. For WebGL/visual correctness,
-assert application readiness and inspect the screenshot against the user's
-expectation, reporting uncertainty if it cannot be established. View saved PNGs
+assert application readiness, then use compareScreenshot when a reference image
+exists, or inspect the screenshot against the user's expectation, reporting
+uncertainty if it cannot be established. View saved PNGs
 with an image tool. Summarize passed, failed and skipped checks, relevant console/
 network evidence (recording limits still apply), and link the report/screenshots.
 `

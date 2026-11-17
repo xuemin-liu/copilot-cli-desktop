@@ -276,7 +276,7 @@ if (!process.versions.electron) {
       const ui = networkOnly ? 'skipped' : 'passed'
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, coverage: networkOnly ? 'network-only' : 'full', scale: scale ?? 'host default', devicePixelRatio: await browser.view.webContents.executeJavaScript('devicePixelRatio'), zooms: networkOnly ? [] : [0.8, 1, 1.25, 1.5],
         reload: ui, cancelReload: ui, references: ui, nativeOverlayPointers: ui, drawingAndHandle: ui, exactNumericInput: ui, explicitRenderReadiness: ui,
-        ineffectiveDragFailsAssertion: ui, scopedFailures: 'passed', cleanupOnCancellation: 'passed', recoveryJournal: 'passed', screenshotRegionComparison: 'optional, not implemented',
+        ineffectiveDragFailsAssertion: ui, scopedFailures: 'passed', cleanupOnCancellation: 'passed', recoveryJournal: 'passed', screenshotComparison: 'covered by browser-test-check',
         reports: results.map(report => ({ ...report, expectation: report.status === 'failed' ? 'expected failure, verified by acceptance harness' : 'expected success' })) }, null, 2))
       console.log(`Unattended browser acceptance passed (${scale ?? 'default scale'}). Evidence: ${artifacts}`)
     } finally {

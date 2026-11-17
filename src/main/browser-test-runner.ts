@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto'
 import type { BrowserTestPlan, BrowserTestReport, BrowserTestStep, TestDelivery, TestStepConsole } from './browser-test-plan.js'
 import type { ConsoleErrorRecord } from './browser-test-console.js'
 
-export interface TestObservation { passed: boolean; delivery?: TestDelivery; reason?: string; detail?: string; data?: Record<string, unknown>; screenshot?: BrowserTestReport['screenshots'][number] }
+export interface TestObservation { passed: boolean; delivery?: TestDelivery; reason?: string; detail?: string; data?: Record<string, unknown>; screenshot?: BrowserTestReport['screenshots'][number]
+  /** Evidence images kept whether the step passes or fails, such as a comparison's capture and diff. */
+  screenshots?: BrowserTestReport['screenshots'] }
 /** The plan's fill and select values, longest first. */
 export function testInputs(plan: BrowserTestPlan): string[] {
   return plan.steps.filter(step => step.action === 'fill' || step.action === 'select').map(step => step.value!).filter(Boolean).sort((a, b) => b.length - a.length)
@@ -84,6 +86,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
       executor.progress(index + 1, plan.steps.length, label)
       executor.checkpoint?.(report, { id, action: step.action, delivery: 'not-attempted' })
       let result: TestObservation | undefined
+      let imagesKept = false
       const consoleStart = executor.console?.mark()
       latched = null
       try {
@@ -110,16 +113,21 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         }
         if (!result.passed) throw Object.assign(new Error(result.reason ?? 'Expected condition was not met before the timeout.'), { delivery: result.delivery, data: result.data })
         if (result.screenshot) report.screenshots.push({ ...result.screenshot, step: index + 1 })
+        for (const image of result.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
+        imagesKept = true
         const observation = ['discover', 'screenshot', 'waitFor'].includes(step.action)
-        report.steps.push({ id, action: step.action, label, status: 'passed', outcome: step.action === 'assert' ? 'assertion-passed' : observation ? 'observed' : 'delivered',
+        const assertion = step.action === 'assert' || step.action === 'compareScreenshot'
+        report.steps.push({ id, action: step.action, label, status: 'passed', outcome: assertion ? 'assertion-passed' : observation ? 'observed' : 'delivered',
           delivery: result.delivery ?? 'not-attempted', durationMs: Date.now() - stepStart,
           ...(result.detail ? { detail: safe(result.detail) } : {}), ...(result.data ? { data: clean(result.data) } : {}), ...stepConsole(consoleStart) })
         executor.checkpoint?.(report, null)
       } catch (error) {
         report.status = expired.signal.aborted ? 'failed' : signal.aborted || !executor.active() ? 'cancelled' : 'failed'
+        // A failed comparison keeps its capture and diff: they are the evidence of what differed.
+        if (!imagesKept) for (const image of result?.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
         const failure = { delivery: result?.delivery, data: result?.data, ...error as { delivery?: TestDelivery; data?: Record<string, unknown> } }
         report.steps.push({ id, action: step.action, label, status: 'failed',
-          outcome: failure.delivery === 'uncertain' ? 'uncertain' : report.status === 'cancelled' ? 'cancelled' : step.action === 'assert' ? 'assertion-failed' : 'failed',
+          outcome: failure.delivery === 'uncertain' ? 'uncertain' : report.status === 'cancelled' ? 'cancelled' : step.action === 'assert' || step.action === 'compareScreenshot' ? 'assertion-failed' : 'failed',
           delivery: failure.delivery ?? 'not-attempted', ...(failure.data ? { data: clean(failure.data) } : {}), durationMs: Date.now() - stepStart,
           reason: safe(expired.signal.aborted ? 'Test timed out.' : error instanceof Error ? error.message : 'Step failed.'), ...stepConsole(consoleStart) })
         for (const [offset, skipped] of plan.steps.slice(index + 1).entries()) report.steps.push({ id: `${report.runId}:${index + offset + 2}`, action: skipped.action, label: safe(skipped.label), status: 'skipped', outcome: 'skipped', delivery: 'not-attempted', durationMs: 0 })

@@ -21,14 +21,16 @@ export async function readBody(request: IncomingMessage, maxBytes: number): Prom
 export const isJsonType = (contentType: string | undefined): boolean => /^application\/json(?:;|$)/i.test(contentType ?? '')
 export const isFormType = (contentType: string | undefined): boolean => /^multipart\/form-data;/i.test(contentType ?? '')
 
-/** The text fields of a `multipart/form-data` body (an uploaded file counts as text), or null when it cannot be parsed. */
-export async function parseFormFields(body: Buffer, contentType: string): Promise<Map<string, string> | null> {
+/** The text fields of a `multipart/form-data` body (an uploaded file counts as text), or null when it cannot be parsed. The
+ * fields `binary` names hold an uploaded file's bytes as base64 instead. */
+export async function parseFormFields(body: Buffer, contentType: string, binary: (name: string) => boolean = () => false): Promise<Map<string, string> | null> {
   try {
     const form = await new Response(new Uint8Array(body), { headers: { 'content-type': contentType } }).formData()
     const fields = new Map<string, string>()
     for (const [name, value] of form.entries()) {
       if (fields.has(name)) return null
-      fields.set(name, typeof value === 'string' ? value : await value.text())
+      fields.set(name, binary(name) ? (typeof value === 'string' ? Buffer.from(value) : Buffer.from(await value.arrayBuffer())).toString('base64')
+        : typeof value === 'string' ? value : await value.text())
     }
     return fields
   } catch {
