@@ -763,6 +763,130 @@ measurement and reading is also listed in the report's `measurements`, with its 
 number. Timings depend on the machine, on what else it is doing and on whether the
 page is visible, so set generous limits and compare runs on the same machine.
 
+### Rendered-frame sequences
+
+`frameSequence` asserts a bounded stream of **render commits**, including transient
+stale images that attribute polling can miss. The viewer must instrument accepted
+requests and final-quality commits by logging one string per event:
+
+```js
+console.debug('desktop-test-frame ' + JSON.stringify({
+  version: 1, type: 'request', viewport: 'v1', epoch: 'fixture1',
+  revision: 1, frame: 12, timeMs: performance.now()
+}));
+// When that request's image is committed to the viewport:
+console.debug('desktop-test-frame ' + JSON.stringify({
+  version: 1, type: 'commit', viewport: 'v1', epoch: 'fixture1',
+  revision: 1, frame: 12, timeMs: performance.now()
+}));
+```
+
+These exact seven fields form the version-1 contract. Use non-sensitive aliases
+(`viewport` and `epoch`: 1–64 letters, digits, underscores or hyphens), increasing
+nonnegative safe-integer revisions, a zero-based frame index 0–10,000,000, and the
+same monotonic application clock for both events. Change epoch for a new series or
+document. Emit commits only after the viewer has committed the image, not after
+network/decode completion. Do not emit a commit for discarded requests. A revision
+commits once; progressive preview renders need a separate logging channel.
+
+```json
+[
+  { "action": "click", "selector": "#play-fixture" },
+  { "action": "waitFor", "condition": "consoleMessage", "expected": "fixture playback complete" },
+  { "action": "frameSequence", "sequence": {
+    "viewport": "v1", "epoch": "fixture1", "since": 1, "minFrames": 30,
+    "order": "ascending", "wrapAt": 99, "maxRepeats": 0, "maxSkipped": 0,
+    "maxStallMs": 250, "maxLatencyMs": 150
+  } }
+]
+```
+
+`since` names an earlier step; collection includes events arriving from that step's
+start until this assertion. A completion log emitted after the final commit provides
+a stream-order barrier. Capture is independent of the console recording toggle.
+The assertion always fails on obsolete request revisions, unmatched frame/revision
+pairs, duplicate commits, decreasing request revisions/timestamps, or another epoch
+requested/committed into the watched viewport after this epoch began. Thus viewers
+that deliberately commit an older request while a newer one is pending do not meet
+this strict contract. Other viewports are independent.
+
+`minFrames` defaults to 1. Directional order is opt-in; `wrapAt` is the inclusive
+last index, with wrapping back to zero (or the reverse). `maxSkipped` requires an
+explicit direction. Repeats, gaps, request-to-commit latency and longest commit
+arrival silence have optional limits. The report includes counts, interval/latency
+min/median/95th percentile/max, and the latest 100 commit identities. Up to 5000
+events total are retained; overflow or malformed instrumented events fail closed.
+Event time measures application-reported commit timing; silence uses desktop
+arrival time, including the start/end of the selected window. Neither is physical
+display presentation timing or CT acquisition temporal resolution.
+
+### Measurements, pixel probes and viewer resources
+
+Use `assertMeasurement` on a public element exposing `data-measurement-value` and
+`data-measurement-unit`. The expected value comes from an independent test fixture.
+Canonical units are `mm`, `mm2`, `deg`, and `HU`; tolerance is absolute and defaults
+to zero. Missing/private/nonfinite values and incorrect units fail. Raw measured
+values stay out of assertions; use an explicit `capture` when a filtered value is
+needed for diagnostics.
+
+```json
+[
+  { "action": "click", "selector": "#pixel-probe-tool" },
+  { "action": "hover", "selector": "#viewport-1", "point": { "x": 150, "y": 60 } },
+  { "action": "assertMeasurement", "selector": "#probe-result", "unit": "HU", "expected": 0, "tolerance": 1 }
+]
+```
+
+Pixel probing composes existing native pointer input with calibrated viewer output;
+it never reads screenshot RGB as HU. Line/angle/ROI tools compose `drag`/`click` with
+the same assertion. Test anisotropic spacing and repeat known measurements after
+zoom, pan, rotation or flip. Equal displayed values do not independently verify the
+viewer calculation: the expected geometry/calibration must come from fixture truth.
+
+`sampleMetrics` reads 1–10 public numeric attributes from one visible element and
+records their declared units. It supports a maximum value and growth since an
+earlier sample of the same source, field, unit and document:
+
+```json
+[
+  { "action": "sampleMetrics", "selector": "#viewer-stats", "samples": [
+    { "name": "decoded", "attribute": "data-cache-bytes", "unit": "bytes" },
+    { "name": "workers", "attribute": "data-workers", "unit": "count" }
+  ] },
+  { "action": "click", "selector": "#open-study" },
+  { "action": "click", "selector": "#close-study" },
+  { "action": "sampleMetrics", "selector": "#viewer-stats", "since": 1, "samples": [
+    { "name": "decoded", "attribute": "data-cache-bytes", "unit": "bytes", "maxGrowth": 0 },
+    { "name": "workers", "attribute": "data-workers", "unit": "count", "max": 0 }
+  ] }
+]
+```
+
+Values/limits must be finite and within 0–10^12. Names are unique bounded aliases;
+credential-marked attributes/names and protected elements are refused. Without a
+limit, this is an observation, so the plan still needs an assertion. These are
+**viewer-reported** decoded-cache/worker counters or GPU estimates, not browser GPU
+memory accounting. Use existing `metrics` separately for JavaScript heap/DOM growth.
+
+### Request and cache summaries
+
+After an application/network completion barrier, `networkSummary` summarizes the
+current run's requests matching a literal-origin URL glob and method:
+
+```json
+{ "action": "networkSummary", "networkMatch": { "urlPattern": "http://localhost:3000/frames/*", "method": "GET" },
+  "minRequests": 2, "maxRequests": 100, "maxFailures": 0, "maxBytes": 10485760, "minCacheHits": 1 }
+```
+
+Limits are optional; providing one makes this an assertion. It reports completed,
+loading, failed, cancelled and redirected requests, encoded transferred bytes,
+unknown byte counts, disk and memory/other cache hits, and service-worker responses.
+Service-worker responses are separate because they do not establish a cache hit.
+Assertions fail if requests are still loading or the 2000-record retention limit
+was exceeded. A byte limit also fails on unknown byte counts, including failed
+requests whose transferred bytes were not reported. Redirect hops are counted
+separately. Browser-reported encoded bytes are distinct from decoded-image memory.
+
 ### Opt-in network failures and recovery
 
 A plan may set `allowNetworkFailures: true` and 1–8 `networkFailures`. Each rule
@@ -1068,16 +1192,30 @@ outside the visible viewport fails. The saved screenshot records the cropped
 
 ### Comparing with a reference image
 
-Viewport/DPR emulation is not exposed as a test action. The feasibility check
-`node scripts/browser-viewport-feasibility-check.mjs` probes the native masked
-capture path and restores metrics afterward. With Electron 45.3.2 and host scaling
-125%, a 640×480 CSS viewport produced an 800×600 PNG for both emulated DPR 1 and 2,
-although native click, wheel and drag coordinates worked. Thus emulated DPR does
-not currently establish screenshot pixel dimensions. Results and captures are saved
-under `test-results/browser-viewport-feasibility/<host-scale>/`. The script also
-accepts `--force-device-scale-factor=1` or `=2`. Use consistent real display scaling
-and browser zoom for baselines; a future viewport API must first verify capture
-geometry, masking, input mapping and restoration on every exit path.
+A plan can set `viewport: {width: 640, height: 480, dpr: 2}` before its first step.
+`{action: "resizeViewport", viewport: {width: 600, height: 400, dpr: 1}}` changes it
+during a run. Browser zoom must be 100%; each requested size must fit within the
+original visible page surface. CSS dimensions are integers 64–1600, DPR is 0.5–3,
+and resulting bitmap dimensions must be integers, at most 1600×3200 and four million
+pixels. The run restores the original geometry after pass, failure or cancellation.
+Unconfirmed restoration fails the report and detaches the debugger; evidence records
+the requested/original geometry and cleanup result. Use these settings with no
+concurrent DevTools emulation changes.
+
+The native-capture feasibility probe found that Electron `capturePage` follows host
+scaling, not emulated DPR. Viewport-configured tests therefore use Chromium's
+[`Page.captureScreenshot`](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-captureScreenshot)
+inside the existing mask preparation, before/after layout checks and opaque bitmap
+masking pipeline. Captures whose dimensions disagree with CSS size × DPR are refused;
+these captures are never resampled. Tests without viewport settings retain native
+capture and its existing export-size limit. The 2 MiB exported-PNG limit still applies.
+
+`npm run browser-viewer:check` verifies both host scales, DPR 1/2, masking, click,
+wheel, drawing and HTML5 drop targeting, resize/reload and cleanup. The synthetic
+canvas pixels match across host scales at the same configured DPR; native controls
+and fonts can still rasterize differently. Crop image comparisons to the viewport or
+use justified tolerances for UI text. The original probe remains available with
+`npm run browser-viewport:check` and records both capture transports.
 
 `compareScreenshot` captures an element, a region or the whole viewport exactly as a
 test screenshot does, and compares its pixels with a reference PNG. Use it to check

@@ -111,7 +111,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       const timer = setTimeout(() => finish(false), 500)
       frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => finish(true)) })
     })
-    if (operation === 'viewport') return { width: innerWidth, height: innerHeight }
+    if (operation === 'viewport') return { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }
     if (operation === 'inspect') {
       const primaryTargets: Element[] = [], fallbackTargets: Element[] = [], unavailable: Element[] = []
       const counts = new Map<string, number>()
@@ -229,6 +229,24 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     }
     const found = args.targetRef ? [fromRef(String(args.targetRef))] : find(String(args.selector))
     const matches = found.filter(visible)
+    if (operation === 'sampleMetrics' || operation === 'assertMeasurement') {
+      if (matches.length !== 1) return { error: 'Sampling needs exactly one visible public target.' }
+      const element = matches[0]!
+      if (operation === 'assertMeasurement') {
+        const value = publicScalar(element, 'data-measurement-value'), unit = publicScalar(element, 'data-measurement-unit')
+        if (!value.trim() || !Number.isFinite(Number(value))) return { error: 'Measurement value is not a finite number.' }
+        return { passed: unit === args.unit && Math.abs(Number(value) - args.expected) <= (args.tolerance ?? 0),
+          reason: unit !== args.unit ? 'Measurement unit does not match.' : 'Measurement differs from the expected fixture value.',
+          data: { measurement: { unit: args.unit, expected: args.expected, tolerance: args.tolerance ?? 0, source: 'viewer public attributes; actual value withheld' } } }
+      }
+      const samples: Record<string, number> = Object.create(null) as Record<string, number>
+      for (const sample of args.samples) {
+        const raw = publicScalar(element, sample.attribute), value = Number(raw)
+        if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 1e12) return { error: 'Metric values must be nonnegative finite numbers within 0–1e12.' }
+        samples[sample.name] = value
+      }
+      return { passed: true, samples }
+    }
     if (operation === 'capture') {
       if (matches.length !== 1) return { error: 'Capture requires exactly one visible target.' }
       const state = scalarState()

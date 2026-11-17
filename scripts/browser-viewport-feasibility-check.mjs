@@ -54,6 +54,9 @@ if (!process.versions.electron) {
         if (png) await writeFile(join(artifacts, `dpr-${dpr}.png`), png)
         const native = png ? nativeImage.createFromBuffer(png) : null
         const bitmap = native?.getSize() ?? null
+        // Synthetic fixture only. Production must retain its before/after layout checks and bitmap masks.
+        const cdp = await send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false })
+        const cdpBitmap = nativeImage.createFromBuffer(Buffer.from(cdp.data, 'base64')).getSize()
         const dom = await state()
         const events = await wc.executeJavaScript('events.splice(0)')
         const click = events.find(event => event.type === 'click'), wheel = events.find(event => event.type === 'wheel'), dragEnd = events.filter(event => event.type === 'pointerup').at(-1)
@@ -64,7 +67,7 @@ if (!process.versions.electron) {
           const pixel = [...bytes.subarray((y * bitmap.width + x) * 4, (y * bitmap.width + x) * 4 + 4)]
           markerAligned = pixel[1] === 0 && pixel[3] === 255 && Math.max(pixel[0], pixel[2]) === 255 && Math.min(pixel[0], pixel[2]) === 0
         }
-        observations.push({ configured: { width: 640, height: 480, dpr }, dom, bitmap, expectedBitmap: { width: 640 * dpr, height: 480 * dpr },
+        observations.push({ configured: { width: 640, height: 480, dpr }, dom, bitmap, cdpBitmap, expectedBitmap: { width: 640 * dpr, height: 480 * dpr },
           exactBitmap: bitmap?.width === 640 * dpr && bitmap?.height === 480 * dpr, inputAligned, markerAligned, inputStatus: report.status, failure: report.steps.find(step => step.status === 'failed')?.reason, captureState: screenshot.state, captureReason: screenshot.reason, events })
       } finally { await send('Emulation.clearDeviceMetricsOverride').catch(() => wc.debugger.detach()) }
       assert.deepEqual(await state(), original, 'metrics restored after probe')

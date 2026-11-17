@@ -19,6 +19,8 @@ import { compareCapture, type TestCapture } from './browser-test-compare.js'
 import { compareBitmaps, everyPixelIgnored, ignorePixels } from './browser-image-compare.js'
 import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
+import { BrowserTestViewport } from './browser-test-viewport.js'
+import type { TestViewport } from './browser-test-viewport.js'
 
 const MAX_RESPONSES = 100
 const MAX_BODY_CACHE = 4 * 1024 * 1024
@@ -165,6 +167,9 @@ export class BrowserReader {
   /** Only successful actual captures, never diff images; bounded by MAX_TEST_IMAGES. */
   private testCaptures = new Map<number, TestCapture>()
   private captureEpoch = 0
+  private testViewport: BrowserTestViewport | null = null
+  private frameMarks = new Map<number, number>()
+  private resourceSamples = new Map<number, { epoch: number; source: string; values: Record<string, number>; definitions: NonNullable<BrowserTestStep['samples']> }>()
 
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
     const plan = validateBrowserTestPlan(value)
@@ -186,6 +191,15 @@ export class BrowserReader {
     let executionStarted = false
     try {
       const frames = await this.frames(page, this.testAbort.signal)
+      if (plan.viewport || plan.steps.some(step => step.action === 'resizeViewport')) {
+        if (page.contents.getZoomFactor() !== 1) throw new Error('Viewport tests require browser zoom 100%.')
+        this.testViewport = new BrowserTestViewport((method, params) => this.command(page, method, params, undefined, 3000), async () => {
+          const top = (await this.frames(page))[0]!
+          return await this.evaluate(page, top.id, 'viewport', {}, true) as TestViewport
+        }, () => { if (!page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach() })
+        await this.testViewport.initialize()
+        if (plan.viewport) await abortable(this.testViewport.apply(plan.viewport), AbortSignal.any([signal, this.testAbort.signal]))
+      }
       page.testNetwork = new BrowserTestNetwork(plan.networkFailures ?? [], origin,
         new Set(frames.filter(frame => this.httpOrigin(frame.url) === origin).map(frame => frame.id)),
         (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted,
@@ -197,7 +211,7 @@ export class BrowserReader {
       const report = await runBrowserTest(plan, page.contents.id, { active,
         ...(this.testConsole ? { console: this.testConsole } : {}),
         execute: (step, stop) => this.testStep(page, step, stop),
-        progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }); this.stepTimes.set(step, { start: Date.now() }) },
+        progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }); this.stepTimes.set(step, { start: Date.now() }); this.frameMarks.set(step, this.testConsole?.frames.mark() ?? 0) },
         checkpoint: (report, currentAction) => {
           // A checkpoint without a current action follows a finished step.
           const finished = this.stepTimes.get(report.steps.length)
@@ -212,11 +226,14 @@ export class BrowserReader {
       }, AbortSignal.any([signal, this.testAbort.signal]))
       report.origin = origin
       report.testingEnabled = this.testState.enabled
+      await this.testViewport?.stop()
+      if (this.testViewport?.evidence().cleanupFailed) report.status = 'failed'
       await page.testNetwork.stop()
       // If the transport cannot remove interception, detaching Chromium's
       // debugger removes Fetch interception rather than leaving a live rule.
       if (!page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt, consoleStart),
+        ...(this.testViewport ? { viewport: this.testViewport.evidence() } : {}),
         ...(plan.failOnConsoleError ? { consoleErrors: { failOnConsoleError: true, ignorePatterns: plan.consoleErrorIgnore?.length ?? 0,
           observed: 'every console message of the test page, including same-origin frames, while the run is open, recorded or not. Messages arrive asynchronously and are attributed to the step during which they arrive; workers and messages after the last step are not observed.' } } : {}),
         visibilityRequired: true, screenshotComparison: 'compareScreenshot steps compare pixels with a reference PNG; other screenshots require separate visual inspection' }) as Params
@@ -232,10 +249,12 @@ export class BrowserReader {
       }
       throw error
     } finally {
+      await this.testViewport?.stop(); this.testViewport = null
       for (const [frameId] of page.contexts) {
         if (!page.contents.isDestroyed()) await this.evaluate(page, frameId, 'clearCaptures', {}, true).catch(() => {})
       }
       this.testCaptures.clear()
+      this.frameMarks.clear(); this.resourceSamples.clear()
       await page.testNetwork?.stop()
       if (page.testNetwork && !page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
@@ -541,7 +560,7 @@ export class BrowserReader {
       }
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (step.dialog && !rule.handled) throw new Error('The step was expected to open a page dialog, but none opened within 1.5 seconds.')
-      const observation = ['assert', 'waitFor', 'discover', 'capture', 'screenshot', 'compareScreenshot', 'measure', 'metrics'].includes(step.action)
+      const observation = ['assert', 'waitFor', 'discover', 'capture', 'screenshot', 'compareScreenshot', 'measure', 'metrics', 'frameSequence', 'networkSummary', 'sampleMetrics', 'assertMeasurement'].includes(step.action)
       const output = { ...result, delivery: observation ? 'not-attempted' as const : result.passed ? 'delivered' as const : this.testDelivery,
         data: { ...this.testDiagnostics, ...result.data } }
       return rule.handled ? { ...output, detail: [result.detail, `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.`].filter(Boolean).join(' ') } : output
@@ -724,6 +743,26 @@ export class BrowserReader {
       this.checkTestOrigin(page.contents.getURL())
     }
     check()
+    if (step.action === 'resizeViewport') {
+      if (!this.testViewport) throw new Error('Viewport controller is unavailable.')
+      await abortable(this.testViewport.apply(step.viewport!), signal)
+      check(); return { passed: true, data: { viewport: step.viewport } }
+    }
+    if (step.action === 'frameSequence') {
+      if (!this.testConsole) return { passed: false, reason: 'Console instrumentation is unavailable.' }
+      const since = step.sequence!.since, mark = this.frameMarks.get(since), start = this.stepTimes.get(since)?.start
+      if (mark === undefined || start === undefined) return { passed: false, reason: 'Frame sequence start is unavailable.' }
+      return this.testConsole.frames.analyze(step.sequence!, mark, start)
+    }
+    if (step.action === 'networkSummary') {
+      const summary = page.testNetwork!.summary(step.networkMatch!)
+      const limited = [step.minRequests, step.maxRequests, step.maxBytes, step.minCacheHits, step.maxFailures].some(value => value !== undefined)
+      const failures = [limited && !summary.complete ? 'Network evidence is incomplete or requests are still loading.' : '',
+        summary.requests < (step.minRequests ?? 0) ? 'Too few requests.' : '', summary.requests > (step.maxRequests ?? Infinity) ? 'Too many requests.' : '',
+        step.maxBytes !== undefined && (summary.unknownByteCounts > 0 || summary.encodedBytes > step.maxBytes) ? 'Transferred bytes exceed the limit or are unknown.' : '',
+        summary.cacheHits < (step.minCacheHits ?? 0) ? 'Too few cache hits.' : '', summary.failures > (step.maxFailures ?? Infinity) ? 'Too many failed requests.' : ''].filter(Boolean)
+      return { passed: !failures.length, reason: failures.join(' '), data: { networkSummary: summary } }
+    }
     if (['waitFor', 'assert'].includes(step.action) && step.all) {
       const results: { passed: boolean; reason?: string }[] = []
       for (const [index, condition] of step.all.entries()) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal, `c${index + 1}`))
@@ -848,6 +887,28 @@ export class BrowserReader {
       const filtered = redactBrowserValue({ [step.attribute!]: result.value })
       return { passed: true, data: { capture: { name: step.name, step: this.testProgress.step, attribute: step.attribute, selector: step.selector, targetRef: step.targetRef,
         value: (filtered.value as Params)[step.attribute!], redacted: filtered.redacted } } }
+    }
+    if (step.action === 'assertMeasurement') return await evaluate('assertMeasurement') as TestObservation
+    if (step.action === 'sampleMetrics') {
+      const result = await evaluate('sampleMetrics'), values = result.samples as Record<string, number>
+      for (const sample of step.samples!) {
+        const original = values[sample.name]!
+        const clean = redactBrowserValue({ [sample.attribute]: original, [sample.name]: original }).value as Params
+        if (clean[sample.attribute] !== original || clean[sample.name] !== original) throw new Error('Credential-marked metrics are unavailable.')
+      }
+      const source = JSON.stringify([step.selector, step.targetRef, frame.id])
+      const baseline = step.since === undefined ? undefined : this.resourceSamples.get(step.since)
+      if (step.since !== undefined && (!baseline || baseline.source !== source || baseline.epoch !== this.captureEpoch)) throw new Error('Metric baseline source or document changed.')
+      const samples = step.samples!.map(sample => {
+        const before = baseline?.definitions.find(other => other.name === sample.name)
+        if (baseline && (!before || before.attribute !== sample.attribute || before.unit !== sample.unit)) throw new Error('Metric baseline field/unit does not match.')
+        const value = values[sample.name]!, growth = baseline ? value - baseline.values[sample.name]! : undefined
+        return { name: sample.name, attribute: sample.attribute, unit: sample.unit, value, ...(growth === undefined ? {} : { growth }),
+          passed: value <= (sample.max ?? Infinity) && (growth ?? 0) <= (sample.maxGrowth ?? Infinity) }
+      })
+      this.resourceSamples.set(this.testProgress.step, { source, epoch: this.captureEpoch, values, definitions: step.samples! })
+      return { passed: samples.every(sample => sample.passed), reason: 'A viewer-reported metric exceeded its limit.',
+        data: { sampleMetrics: { samples, since: step.since, source: 'Viewer-reported public attributes; GPU bytes, if supplied, are estimates, not browser GPU accounting.' } } }
     }
     if ((step.action === 'waitFor' || step.action === 'assert') && step.condition === 'visualStable') return this.visualStable(page, frame.id, step, conditionKey, signal)
     if (step.action === 'waitFor' || step.action === 'assert') {
@@ -1399,7 +1460,14 @@ export class BrowserReader {
         if (!await unchanged()) return { ...metadata, state: 'unavailable', reason: 'Page layout changed while preparing screenshot masks. Wait for it to settle and retry.' }
         let image
         for (let attempt = 0; attempt < 3; attempt++) {
-          try { image = await page.contents.capturePage(undefined, { stayHidden: true, stayAwake: true }); break }
+          try {
+            if (testScreenshot && this.testViewport?.current) {
+              const result = await this.command(page, 'Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, undefined, 10000, signal)
+              if (typeof result.data !== 'string' || result.data.length > 24 * 1024 * 1024) throw new Error('Viewport capture exceeds the bounded bitmap budget.')
+              image = nativeImage.createFromBuffer(Buffer.from(result.data, 'base64'))
+            } else image = await page.contents.capturePage(undefined, { stayHidden: true, stayAwake: true })
+            break
+          }
           catch { if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150)) }
         }
         if (!image) return { ...metadata, state: 'unavailable', reason: 'No rendered display surface is available. Show this browser page and retry.' }
@@ -1408,12 +1476,15 @@ export class BrowserReader {
         // Paint confirmation and stable geometry are required as well as opaque
         // pixel masks: a mask for the current layout cannot protect an old frame.
         const size = image.getSize(1)
+        const requested = testScreenshot ? this.testViewport?.current : undefined
+        if (requested && (size.width !== requested.width * requested.dpr || size.height !== requested.height * requested.dpr
+          || mask.viewport.width !== requested.width || mask.viewport.height !== requested.height)) return { ...metadata, state: 'unavailable', reason: 'Viewport capture dimensions differ from the configured CSS size/DPR; no image was exported.' }
         // Crop only after every mask is painted into the full bitmap.
         const cut = maskAndCrop(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry, crop)
         if (!cut) return { ...metadata, state: 'unavailable', reason: 'Screenshot region is outside the visible viewport.' }
         const pixels = cut.pixels
         const masked = nativeImage.createFromBitmap(cut.bitmap, { ...cut.size, scaleFactor: 1 })
-        const png = masked.resize({ width: Math.min(1600, cut.size.width) }).toPNG()
+        const png = requested ? masked.toPNG() : masked.resize({ width: Math.min(1600, cut.size.width) }).toPNG()
         if (png.length > 2 * 1024 * 1024) return { ...metadata, state: 'unavailable', reason: 'Screenshot exceeds the 2 MiB limit.', truncated: true }
         const viewport = (mask as ScreenshotMaskGeometry).viewport
         const region = crop && pixels ? { x: pixels.x * viewport.width / size.width, y: pixels.y * viewport.height / size.height,

@@ -10,6 +10,9 @@ export interface TestObservation { passed: boolean; delivery?: TestDelivery; rea
 /** Steps whose outcome is an assertion: assert, compareScreenshot, and measure or metrics steps with a limit. */
 export function assertionStep(step: BrowserTestStep): boolean {
   return step.action === 'assert' || step.action === 'compareScreenshot'
+    || step.action === 'frameSequence' || step.action === 'assertMeasurement'
+    || step.action === 'networkSummary' && [step.minRequests, step.maxRequests, step.maxBytes, step.minCacheHits, step.maxFailures].some(value => value !== undefined)
+    || step.action === 'sampleMetrics' && Boolean(step.samples?.some(sample => sample.max !== undefined || sample.maxGrowth !== undefined))
     || step.action === 'measure' && (step.maxMs !== undefined || step.minPerSecond !== undefined || step.maxPerSecond !== undefined)
     || step.action === 'metrics' && (step.maxHeapGrowthMb !== undefined || step.maxNodeGrowth !== undefined)
 }
@@ -82,7 +85,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
   }
   // Measurements and metrics readings are also gathered in one list, pass or fail.
   const measured = (result: TestObservation | undefined): void => {
-    const value = result?.data?.measurement ?? result?.data?.metrics
+    const value = result?.data?.measurement ?? result?.data?.metrics ?? result?.data?.frameSequence ?? result?.data?.networkSummary ?? result?.data?.sampleMetrics
     if (value) (report.measurements ??= []).push(clean({ step: report.steps.length + 1, ...(result!.data!.metrics ? { kind: 'metrics' } : {}), ...value as Record<string, unknown> }))
   }
   const stepConsole = (after: number | undefined): { console?: TestStepConsole } => {
@@ -127,7 +130,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         for (const image of result.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
         imagesKept = true
         measured(result)
-        const observation = ['discover', 'capture', 'screenshot', 'waitFor', 'measure', 'metrics'].includes(step.action)
+        const observation = ['discover', 'capture', 'screenshot', 'waitFor', 'measure', 'metrics', 'networkSummary', 'sampleMetrics'].includes(step.action)
         const assertion = assertionStep(step)
         report.steps.push({ id, action: step.action, label, status: 'passed', outcome: assertion ? 'assertion-passed' : observation ? 'observed' : 'delivered',
           delivery: result.delivery ?? 'not-attempted', durationMs: Date.now() - stepStart,

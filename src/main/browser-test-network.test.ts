@@ -4,6 +4,25 @@ import { BrowserTestNetwork } from './browser-test-network.js'
 import { testRequestMatches } from './browser-test-plan.js'
 
 const rule = { urlPattern: 'http://localhost:3000/api/*', method: 'POST', failure: 'transport' as const, maxRequests: 1, durationMs: 1000 }
+
+test('network summaries distinguish bytes, cache sources, redirects, cancellation and incomplete evidence', async () => {
+  const network = new BrowserTestNetwork([], 'http://localhost:3000', new Set(['top']), async () => {})
+  const start = (requestId: string, extra = {}) => network.message('Network.requestWillBeSent', { requestId, frameId: 'top', request: { url: 'http://localhost:3000/api/image', method: 'POST' }, ...extra })
+  await start('disk'); await network.message('Network.responseReceived', { requestId: 'disk', response: { status: 200, fromDiskCache: true } })
+  await network.message('Network.loadingFinished', { requestId: 'disk', encodedDataLength: 0 })
+  await start('memory'); await network.message('Network.requestServedFromCache', { requestId: 'memory' }); await network.message('Network.loadingFinished', { requestId: 'memory', encodedDataLength: 0 })
+  await start('worker'); await network.message('Network.responseReceived', { requestId: 'worker', response: { status: 200, fromServiceWorker: true } }); await network.message('Network.loadingFinished', { requestId: 'worker', encodedDataLength: 100 })
+  await start('cancel'); await network.message('Network.loadingFailed', { requestId: 'cancel', canceled: true })
+  await start('redirect'); await start('redirect', { redirectResponse: { status: 302, encodedDataLength: 20 } }); await network.message('Network.loadingFinished', { requestId: 'redirect', encodedDataLength: 300 })
+  const summary = network.summary(rule)
+  assert.equal(summary.requests, 6); assert.equal(summary.encodedBytes, 420); assert.equal(summary.cacheHits, 2)
+  assert.equal(summary.serviceWorker, 1); assert.equal(summary.cancelled, 1); assert.equal(summary.unknownByteCounts, 1); assert.equal(summary.redirected, 1); assert.equal(summary.complete, true)
+  network.detached(); assert.equal(network.summary(rule).complete, false); assert.equal(network.summary(rule).captureInterrupted, true)
+  await start('loading'); assert.equal(network.summary(rule).complete, false)
+  for (let i = 0; i < 2001; i++) await start(`extra-${i}`)
+  assert.equal(network.summary(rule).evicted, true)
+  await network.stop()
+})
 test('literal request globs and page/frame/origin/method/count bounds constrain interception', async () => {
   assert.ok(testRequestMatches(rule, 'http://localhost:3000/api/save', 'POST'))
   assert.ok(!testRequestMatches(rule, 'http://localhost:3000/api/save', 'GET'))
