@@ -8,6 +8,7 @@ import test from 'node:test'
 import { promisify } from 'node:util'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
 import { isFormType, parseFormFields } from './form-body.js'
+import { testBaselinePaths } from '../cli/browser-test-client.js'
 
 test('each terminal gets its own endpoint and additive browser instructions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'browser-sessions-'))
@@ -101,6 +102,12 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
       seen.push({ method: request.method, url: request.url, ...(form ? { form } : {}) })
       response.setHeader('content-type', 'application/json')
       if (request.url === '/console') { response.statusCode = 400; response.end(JSON.stringify({ message: 'Capture "paused"' })); return }
+      if (request.url === '/test/baselines') {
+        // Answered as the desktop does: the decoded reference paths, one per line.
+        try { const paths = testBaselinePaths(form!.get('plan')!); response.setHeader('content-type', 'text/plain'); response.end(paths.join('\n')) }
+        catch (error) { response.statusCode = 400; response.end(JSON.stringify({ message: (error as Error).message })) }
+        return
+      }
       response.end(JSON.stringify({ state: 'available' }))
     })())
   })
@@ -148,17 +155,22 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
     assert.ok(![...sent.form!.keys()].some((key) => key.includes('OTHER_SECRET')), 'only COPILOT_TEST_ inputs are sent')
     await run('test', plan)
     assert.match(seen.at(-1)!.form!.get('output')!, /plan\.report-[0-9a-f]{16}\.json$/)
-    // A comparison's reference PNG is uploaded by curl with the path the plan names; the desktop never opens it.
-    const baseline = join(root, 'cell one;type=x.png')
+    // A comparison's reference PNG is uploaded by curl with the path the plan names, decoded from its JSON by the desktop;
+    // the desktop never opens it. Escaped characters, slashes and whitespace name the same file.
+    const baseline = join(root, 'cell 中 one;type=x.png')
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255, 10, 13, 34])
     await writeFile(baseline, bytes)
-    await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', selector: '#cell', baseline }, { action: 'compareScreenshot', baseline }] }, null, 2))
+    const escaped = JSON.stringify(baseline).replaceAll('/', '\\/').replace('中', '\\u4e2d')
+    assert.ok(escaped.includes('\\u4e2d') && escaped.includes('\\/'))
+    await writeFile(plan, `{ "description" : "x", "steps" : [ { "action": "compareScreenshot", "selector": "#cell", "baseline" :\n  ${escaped} },\n  { "action": "compare\\u0053creenshot", "baseline": ${JSON.stringify(baseline)} } ] }`)
     await run('test', plan, '-OutputPath', join(root, 'compare-report.json'))
+    assert.equal(seen.at(-2)!.url, '/test/baselines', 'the helper asks the desktop which files the plan names')
     const compared = seen.at(-1)!.form!
     assert.equal(compared.get('baseline-1'), bytes.toString('base64'), 'the file arrives byte for byte')
     assert.equal(compared.get('baselinePath-1'), baseline)
     assert.ok(!compared.has('baseline-2'), 'a baseline named twice is sent once')
-    const before = seen.length
+    const tests = () => seen.filter(item => item.url === '/test').length
+    const before = tests()
     for (const [path, message] of [[join(root, 'missing.png'), /does not exist/], ['cell.png', /local absolute .png/]] as const) {
       await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', baseline: path }] }))
       await assert.rejects(run('test', plan, '-OutputPath', join(root, `rejected-${seen.length}-${path.length}.json`)), message)
@@ -166,7 +178,7 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
     await writeFile(join(root, 'large.png'), Buffer.alloc(2 * 1024 * 1024 + 1))
     await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', baseline: join(root, 'large.png') }] }))
     await assert.rejects(run('test', plan, '-OutputPath', join(root, 'rejected-large.json')), /exceeds 2 MiB/)
-    assert.equal(seen.length, before, 'an invalid baseline is refused before any request')
+    assert.equal(tests(), before, 'an invalid baseline is refused before the test request')
     await rm(paths.endpoint)
     await assert.rejects(run('console'), /Open or resume this session to use its browser helper/)
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }

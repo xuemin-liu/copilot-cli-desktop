@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { executeBrowserTest, loadBrowserTest, parseTestForm, validateTestPath } from './browser-test-client.js'
+import { executeBrowserTest, loadBrowserTest, parseTestForm, testBaselinePaths, validateTestPath } from './browser-test-client.js'
 import { browserCommand } from './browser-control.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from '../main/browser-session.js'
 
@@ -178,4 +178,17 @@ test('a comparison baseline is read by the caller, sent with the plan, and its c
     if (savedEndpoint === undefined) delete process.env.COPILOT_DESKTOP_BROWSER_STATE; else process.env.COPILOT_DESKTOP_BROWSER_STATE = savedEndpoint
     if (server.listening) { server.closeAllConnections(); server.close() } await rm(root, { recursive: true, force: true })
   }
+})
+
+test('the baseline paths a plan names are decoded from its JSON, once each, whatever the spelling', () => {
+  const path = process.platform === 'win32' ? 'C:/tests/cell ' + String.fromCharCode(0x4e2d) + '.png' : '/tmp/tests/cell ' + String.fromCharCode(0x4e2d) + '.png'
+  const escaped = JSON.stringify(path).replaceAll('/', '\\/').replace(String.fromCharCode(0x4e2d), '\\u4e2d')
+  const text = `{ "steps" : [ { "action" : "compareScreenshot", "baseline" :\n ${escaped} }, { "action": "compare\\u0053creenshot", "baseline": ${JSON.stringify(path)} },
+    { "action": "screenshot", "baseline": "/elsewhere.png" }, { "action": "assert", "label": "\\"baseline \\": \\"/tmp/fake.png \\"" } ] }`
+  assert.deepEqual(testBaselinePaths(text), [path], 'escaped and literal spellings name one file; other steps and strings name none')
+  assert.deepEqual(testBaselinePaths('not json'), [], 'a plan that is not JSON names none; its run reports the error')
+  assert.deepEqual(testBaselinePaths('\uFEFF' + JSON.stringify({ steps: [] })), [])
+  assert.throws(() => testBaselinePaths(JSON.stringify({ steps: [{ action: 'compareScreenshot', baseline: 'cell.png' }] })), /local absolute .png/)
+  const many = Array.from({ length: 6 }, (_, index) => ({ action: 'compareScreenshot', baseline: path.replace('.png', `${index}.png`) }))
+  assert.throws(() => testBaselinePaths(JSON.stringify({ steps: many })), /five screenshots and comparisons/)
 })

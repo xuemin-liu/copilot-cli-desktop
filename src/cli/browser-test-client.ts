@@ -1,7 +1,7 @@
 import { open, readFile, stat, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
-import { MAX_BASELINE_BYTES, MAX_TEST_BYTES, reservedTestImages, validateBaselinePath, validateBrowserTestPlan } from '../main/browser-test-plan.js'
+import { MAX_BASELINE_BYTES, MAX_TEST_BYTES, MAX_TEST_IMAGES, reservedTestImages, validateBaselinePath, validateBrowserTestPlan } from '../main/browser-test-plan.js'
 import type { BrowserTestPlan, BrowserTestReport } from '../main/browser-test-plan.js'
 
 export class BrowserTestRejectedError extends Error {
@@ -21,19 +21,31 @@ export async function loadBrowserTest(path: string, environment = process.env): 
   return parseBrowserTest(text, environment, await readBaselines(text))
 }
 
+/**
+ * The reference paths a plan's compareScreenshot steps name, decoded from its JSON and validated, each once. The macOS and
+ * Linux helper cannot decode JSON, so the desktop answers it with this list; the files are still read by the helper's shell.
+ * A plan that is not JSON names none here, and its run reports the error.
+ */
+export function testBaselinePaths(text: string): string[] {
+  let raw: any
+  try { raw = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { return [] }
+  const paths = new Set<string>()
+  if (Array.isArray(raw?.steps)) for (const step of raw.steps) {
+    if (step?.action !== 'compareScreenshot' || typeof step.baseline !== 'string') continue
+    validateBaselinePath(step.baseline); paths.add(step.baseline)
+  }
+  if (paths.size > MAX_TEST_IMAGES) throw new Error('Invalid browser test: use at most five screenshots and comparisons together.')
+  return [...paths]
+}
+
 /** The reference PNGs a plan's compareScreenshot steps name, read by the caller, keyed by the path as written. */
 export async function readBaselines(text: string): Promise<Map<string, string>> {
   const images = new Map<string, string>()
-  let raw: any
-  try { raw = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { return images }
-  if (!Array.isArray(raw?.steps)) return images
-  for (const step of raw.steps) {
-    if (step?.action !== 'compareScreenshot' || typeof step.baseline !== 'string' || images.has(step.baseline)) continue
-    validateBaselinePath(step.baseline)
+  for (const path of testBaselinePaths(text)) {
     let size: number
-    try { size = (await stat(step.baseline)).size } catch { throw new Error(`The baseline image does not exist: ${step.baseline}`) }
+    try { size = (await stat(path)).size } catch { throw new Error(`The baseline image does not exist: ${path}`) }
     if (size > MAX_BASELINE_BYTES) throw new Error('A baseline image exceeds 2 MiB.')
-    images.set(step.baseline, (await readFile(step.baseline)).toString('base64'))
+    images.set(path, (await readFile(path)).toString('base64'))
   }
   return images
 }

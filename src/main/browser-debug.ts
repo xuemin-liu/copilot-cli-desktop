@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, screen, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath, validateBrowserScreenshotPath } from '../cli/browser-control.js'
-import { executeBrowserTest, parseTestForm } from '../cli/browser-test-client.js'
+import { executeBrowserTest, parseTestForm, testBaselinePaths } from '../cli/browser-test-client.js'
 import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -1419,6 +1419,22 @@ export class BrowserDebug {
       if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { message: 'Forbidden' }); return }
       const authorization = request.headers.authorization ?? ''
       if (!constantTimeTokenEqual(authorization, `Bearer ${token}`)) { send(401, { message: 'Unauthorized' }); return }
+      if (request.url === '/test/baselines') {
+        // The macOS and Linux helper sends a plan's text and gets back the reference paths it names, one per line, to upload
+        // with the test. Nothing runs and no file is opened here.
+        const type = request.headers['content-type']
+        if (request.method !== 'POST' || !isFormType(type)) { send(405, { message: 'Baseline lists require a POST form.' }); return }
+        void (async () => {
+          const body = await readBody(request, MAX_TEST_BYTES + 64 * 1024)
+          const fields = body === null ? null : await parseFormFields(body, type!)
+          const text = fields?.get('plan')
+          if (text === undefined) throw new Error(body === null ? 'Test plan exceeds 128 KiB.' : 'Invalid test request.')
+          const paths = testBaselinePaths(text)
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+          response.end(paths.join('\n'))
+        })().catch(error => { if (!response.destroyed && !response.headersSent) send(400, { message: sanitizedText(error instanceof Error ? error.message : 'Invalid test request.') }) })
+        return
+      }
       if (request.url === '/test') {
         if (request.method !== 'POST') { send(405, { message: 'Tests require POST.' }); return }
         const type = request.headers['content-type']

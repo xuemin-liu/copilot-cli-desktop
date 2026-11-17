@@ -60,15 +60,6 @@ if [ "$command" = test ]; then
   fi
   if ! local_path "$output" || ! printf '%s' "$output" | grep -qi '\.json$'; then fail "$prefix""Test files must use local absolute .json paths."; fi
   cp -- "$plan" "$work/plan" || fail "$prefix""Could not read the test plan."
-  # compareScreenshot names a reference PNG: curl uploads the file, so the desktop never opens a path from the plan.
-  # Baseline paths hold no quote or backslash, so they can be found without a JSON parser.
-  grep -o '"baseline"[[:space:]]*:[[:space:]]*"[^"\\]*"' "$work/plan" | sed 's/^"baseline"[[:space:]]*:[[:space:]]*"//; s/"$//' | sort -u > "$work/baselines"
-  [ "$(wc -l < "$work/baselines" | tr -d ' ')" -le 5 ] || fail "$prefix""Use at most five screenshots and comparisons together."
-  while IFS= read -r baseline; do
-    if ! local_path "$baseline" || ! printf '%s' "$baseline" | grep -qi '\.png$'; then fail "$prefix""Invalid browser test: baseline must be a local absolute .png path; network and device paths are not allowed."; fi
-    [ -f "$baseline" ] || fail "$prefix""The baseline image does not exist: $baseline"
-    [ "$(wc -c < "$baseline" | tr -d ' ')" -le 2097152 ] || fail "$prefix""A baseline image exceeds 2 MiB."
-  done < "$work/baselines"
 elif [ "$output_state" = given ]; then
   [ "$command" = screenshot ] || fail "$prefix""OutputPath is only supported for screenshots."
   if ! local_path "$output" || ! printf '%s' "$output" | grep -qi '\.png$'; then
@@ -89,6 +80,34 @@ port=$(printf '%s' "$control" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
 token=$(printf '%s' "$control" | sed -n 's/.*"token":"\([a-f0-9]\{64\}\)".*/\1/p')
 if [ -z "$pid" ] || [ -z "$port" ] || [ -z "$token" ] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] || ! kill -0 "$pid" 2>/dev/null; then
   fail "$prefix""Browser control state is stale or invalid. Reopen this session Browser pane."
+fi
+# compareScreenshot names reference PNGs. This shell cannot decode JSON, so the desktop lists the decoded paths, one per
+# line; curl then uploads each file with the test, so the desktop never opens a path from the plan. Paths hold no quote,
+# backslash or control character, which keeps both the list and curl's form syntax unambiguous.
+: > "$work/baselines"
+if [ "$command" = test ]; then
+  {
+    printf 'noproxy = "*"\nsilent\nshow-error\nmax-redirs = 0\nmax-time = 30\n'
+    printf 'write-out = "\\n%%{http_code}"\n'
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'url = "http://127.0.0.1:%s/test/baselines"\n' "$port"
+    printf 'form = "plan=<%s"\n' "$(quote "$work/plan")"
+  } > "$work/baseline-config"
+  chmod 600 "$work/baseline-config"
+  listing=$(curl -K - < "$work/baseline-config") || fail "$prefix""The desktop did not answer. Is Copilot CLI Desktop still running?"
+  listing_status=$(printf '%s\n' "$listing" | tail -n 1)
+  listing_body=$(printf '%s\n' "$listing" | sed '$d')
+  if [ "$listing_status" != 200 ]; then
+    message=$(printf '%s' "$listing_body" | sed -n 's/^.*"message":"\(.*\)"}$/\1/p' | sed 's/\\"/"/g')
+    [ -n "$message" ] || message="The desktop answered with HTTP $listing_status."
+    fail "$prefix$message"
+  fi
+  printf '%s\n' "$listing_body" | sed '/^$/d' > "$work/baselines"
+  while IFS= read -r baseline; do
+    if ! local_path "$baseline" || ! printf '%s' "$baseline" | grep -qi '\.png$'; then fail "$prefix""Invalid browser test: baseline must be a local absolute .png path; network and device paths are not allowed."; fi
+    [ -f "$baseline" ] || fail "$prefix""The baseline image does not exist: $baseline"
+    [ "$(wc -c < "$baseline" | tr -d ' ')" -le 2097152 ] || fail "$prefix""A baseline image exceeds 2 MiB."
+  done < "$work/baselines"
 fi
 timeout=30
 if [ "$command" = test ]; then
