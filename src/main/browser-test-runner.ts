@@ -127,7 +127,7 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         for (const image of result.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
         imagesKept = true
         measured(result)
-        const observation = ['discover', 'screenshot', 'waitFor', 'measure', 'metrics'].includes(step.action)
+        const observation = ['discover', 'capture', 'screenshot', 'waitFor', 'measure', 'metrics'].includes(step.action)
         const assertion = assertionStep(step)
         report.steps.push({ id, action: step.action, label, status: 'passed', outcome: assertion ? 'assertion-passed' : observation ? 'observed' : 'delivered',
           delivery: result.delivery ?? 'not-attempted', durationMs: Date.now() - stepStart,

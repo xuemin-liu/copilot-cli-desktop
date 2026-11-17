@@ -32,6 +32,10 @@ try {
   $browserCompare = @($browserPlan.steps | Where-Object { $_.action -eq 'compareScreenshot' })
   foreach ($step in $browserCompare) {
     if ($step.PSObject.Properties['baselineImage']) { throw 'Invalid browser test: baselineImage is attached by the helper; name the file in baseline.' }
+    if ($step.PSObject.Properties['baselineStep']) {
+      if ($step.PSObject.Properties['baseline']) { throw 'Use baselineStep or a baseline file, not both.' }
+      continue
+    }
     if ($step.baseline -isnot [string] -or $step.baseline -notmatch '^[A-Za-z]:[\\/]' -or $step.baseline -notmatch '\.png$' -or
         $step.baseline.Substring(2) -match '[\x00-\x1f<>:"|?*]' -or
         $step.baseline -match '(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)') {
@@ -45,7 +49,7 @@ try {
   $browserShots = @($browserPlan.steps | Where-Object { $_.action -eq 'screenshot' }).Count
   if ($browserShots + $browserCompare.Count -gt 5) { throw 'Use at most five screenshots and comparisons together.' }
   if ($browserCompare.Count) {
-    foreach ($step in $browserCompare) { $step | Add-Member -NotePropertyName baselineImage -NotePropertyValue ([Convert]::ToBase64String([IO.File]::ReadAllBytes($step.baseline))) }
+    foreach ($step in $browserCompare) { if (!$step.PSObject.Properties['baselineStep']) { $step | Add-Member -NotePropertyName baselineImage -NotePropertyValue ([Convert]::ToBase64String([IO.File]::ReadAllBytes($step.baseline))) } }
     $browserBody = $browserPlan | ConvertTo-Json -Depth 20 -Compress
   }
   # One image file per screenshot; a comparison keeps its capture and, when pixels differ, a diff image.

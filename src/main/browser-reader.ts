@@ -15,7 +15,7 @@ import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-
 import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
-import { compareCapture } from './browser-test-compare.js'
+import { compareCapture, type TestCapture } from './browser-test-compare.js'
 import { compareBitmaps, everyPixelIgnored, ignorePixels } from './browser-image-compare.js'
 import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
@@ -162,6 +162,9 @@ export class BrowserReader {
 
   /** visualStable captures for the current run step, keyed by condition. */
   private visualSamples: { scope: string; samples: Map<string, VisualSample> } | null = null
+  /** Only successful actual captures, never diff images; bounded by MAX_TEST_IMAGES. */
+  private testCaptures = new Map<number, TestCapture>()
+  private captureEpoch = 0
 
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
     const plan = validateBrowserTestPlan(value)
@@ -229,6 +232,10 @@ export class BrowserReader {
       }
       throw error
     } finally {
+      for (const [frameId] of page.contexts) {
+        if (!page.contents.isDestroyed()) await this.evaluate(page, frameId, 'clearCaptures', {}, true).catch(() => {})
+      }
+      this.testCaptures.clear()
       await page.testNetwork?.stop()
       if (page.testNetwork && !page.testNetwork.cleanedUp() && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
@@ -251,6 +258,7 @@ export class BrowserReader {
       void this.message(page, method, params, sessionId || undefined).catch(() => {})
     })
     contents.on('did-start-navigation', details => {
+      if (!details.isSameDocument && this.testPageId === contents.id) this.captureEpoch++
       if (details.isMainFrame && !details.isSameDocument) page.contexts.clear()
     })
     // Main-page navigation must obey the origin grant. Embedded pages may load
@@ -533,7 +541,7 @@ export class BrowserReader {
       }
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (step.dialog && !rule.handled) throw new Error('The step was expected to open a page dialog, but none opened within 1.5 seconds.')
-      const observation = ['assert', 'waitFor', 'discover', 'screenshot', 'compareScreenshot', 'measure', 'metrics'].includes(step.action)
+      const observation = ['assert', 'waitFor', 'discover', 'capture', 'screenshot', 'compareScreenshot', 'measure', 'metrics'].includes(step.action)
       const output = { ...result, delivery: observation ? 'not-attempted' as const : result.passed ? 'delivered' as const : this.testDelivery,
         data: { ...this.testDiagnostics, ...result.data } }
       return rule.handled ? { ...output, detail: [result.detail, `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.`].filter(Boolean).join(' ') } : output
@@ -803,8 +811,17 @@ export class BrowserReader {
         if ((['x', 'y', 'width', 'height'] as const).some(key => Math.abs(after[key] - region![key]) >= 0.5)) return { passed: false,
           reason: 'Screenshot target moved or resized during capture; no image was kept. Wait for it to settle (for example with a stable condition) and retry.' }
       }
-      if (step.action === 'compareScreenshot') return compareCapture(step, { imageBase64: String(image.imageBase64), redacted: Boolean(image.redacted),
-        viewport: image.viewport as { width: number; height: number }, ...(region ? { region: image.region as Rectangle } : {}) })
+      const capture: TestCapture = { imageBase64: String(image.imageBase64), redacted: Boolean(image.redacted),
+        viewport: image.viewport as { width: number; height: number }, masks: image.masks as Rectangle[], ...(region ? { region: image.region as Rectangle } : {}) }
+      if (step.action === 'compareScreenshot') {
+        const baseline = step.baselineStep === undefined ? undefined : this.testCaptures.get(step.baselineStep)
+        if (step.baselineStep !== undefined && !baseline) throw new Error('baselineStep capture is unavailable in this run.')
+        const result = compareCapture(step, capture, baseline)
+        if (result.passed) this.testCaptures.set(this.testProgress.step, { ...capture,
+          imageBase64: result.screenshots![0]!.imageBase64!, masks: [...(capture.masks ?? []), ...(baseline?.masks ?? [])] })
+        return result
+      }
+      this.testCaptures.set(this.testProgress.step, capture)
       return { passed: true, ...(region ? { data: { region: image.region, pixels: image.pixels } } : {}),
         screenshot: { step: 0, imageBase64: image.imageBase64, redacted: Boolean(image.redacted), ...(region ? { region: image.region } : {}) } }
     }
@@ -819,10 +836,18 @@ export class BrowserReader {
     const evaluate = async (operation: string, args: Params = {}): Promise<Params> => {
       check()
       const result = await this.evaluate(page, frame.id, operation, { ...step, reference, requireReference: reference !== undefined,
+        runScope: `${this.testProgress.runId}:${this.captureEpoch}`, stepNumber: this.testProgress.step,
         ...(interaction ? { allowedOrigin: this.testOrigin } : {}), ...args }, true, signal) as Params
       check()
       if (result?.error) throw new Error(String(result.error))
       return result
+    }
+    if (step.action === 'capture') {
+      const result = await evaluate('capture')
+      // Preserve the field name for credential filtering, before report input redaction.
+      const filtered = redactBrowserValue({ [step.attribute!]: result.value })
+      return { passed: true, data: { capture: { name: step.name, step: this.testProgress.step, attribute: step.attribute, selector: step.selector, targetRef: step.targetRef,
+        value: (filtered.value as Params)[step.attribute!], redacted: filtered.redacted } } }
     }
     if ((step.action === 'waitFor' || step.action === 'assert') && step.condition === 'visualStable') return this.visualStable(page, frame.id, step, conditionKey, signal)
     if (step.action === 'waitFor' || step.action === 'assert') {
@@ -1122,10 +1147,19 @@ export class BrowserReader {
       // Native wheel events at one point. Each is hit-tested first; a target that moved fails
       // rather than sending the rest of the wheel somewhere else.
       const events = step.repeat ?? 1
-      const wheel = { deltaX: step.deltaX ?? 0, deltaY: step.deltaY ?? 0, requested: events, sent: 0 }
+      const dispatchTimesMs: number[] = [], intervalsMs: number[] = []
+      const wheel = { deltaX: step.deltaX ?? 0, deltaY: step.deltaY ?? 0, requested: events, sent: 0,
+        ...(step.intervalMs === undefined ? {} : { intervalMs: step.intervalMs, dispatchTimesMs, intervalsMs }) }
+      const wheelStart = performance.now()
+      let lastDispatch: number | undefined
       this.testDiagnostics.wheel = wheel
       for (let event = 1; event <= events; event++) {
         check()
+        if (step.intervalMs !== undefined && lastDispatch !== undefined) {
+          const remaining = step.intervalMs - (performance.now() - lastDispatch)
+          if (remaining > 0) await abortable(new Promise(resolve => setTimeout(resolve, remaining)), signal)
+          check()
+        }
         let fresh: Params
         try { fresh = await targetPoint(false, step.point, false) }
         catch (error) {
@@ -1140,9 +1174,13 @@ export class BrowserReader {
           geometryFailure('between wheel events', point, fresh, moved, { eventsSent: wheel.sent })
           throw new Error(`Target moved between wheel events after ${wheel.sent} of ${events} were sent. Changed: ${moved.join(', ')}. Wheel on the scrolling container or canvas, not on an item that scrolls with it.`)
         }
+        const dispatched = performance.now()
+        dispatchTimesMs.push(Math.round((dispatched - wheelStart) * 100) / 100)
+        if (lastDispatch !== undefined) intervalsMs.push(Math.round((dispatched - lastDispatch) * 100) / 100)
+        lastDispatch = dispatched
         await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX: wheel.deltaX, deltaY: wheel.deltaY, modifiers }, undefined, 10000, signal)
         wheel.sent = event
-        if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
+        if (step.intervalMs === undefined && !(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
       }
       check(); return { passed: true, data: { wheel } }
     }
@@ -1380,8 +1418,15 @@ export class BrowserReader {
         const viewport = (mask as ScreenshotMaskGeometry).viewport
         const region = crop && pixels ? { x: pixels.x * viewport.width / size.width, y: pixels.y * viewport.height / size.height,
           width: pixels.width * viewport.width / size.width, height: pixels.height * viewport.height / size.height } : undefined
+        // Relative CSS rectangles include native mask padding and the resize filter footprint.
+        const filterPad = 4 * Math.max(1, cut.size.width / 1600)
+        const padX = filterPad * viewport.width / size.width, padY = filterPad * viewport.height / size.height
+        const masks = (mask as ScreenshotMaskGeometry).rectangles.map(rect => ({
+          x: rect.x - (region?.x ?? 0) - padX, y: rect.y - (region?.y ?? 0) - padY,
+          width: rect.width + 2 * padX, height: rect.height + 2 * padY,
+        }))
         return { ...metadata, frameId: top, state: 'available', mimeType: 'image/png', imageBase64: png.toString('base64'),
-          redacted: Boolean(mask.redacted), size: image.getSize(), ...(testScreenshot ? { viewport } : {}), ...(region ? { region, pixels } : {}), limitations: [testScreenshot
+          redacted: Boolean(mask.redacted), size: image.getSize(), ...(testScreenshot ? { viewport, masks } : {}), ...(region ? { region, pixels } : {}), limitations: [testScreenshot
             ? 'Form controls, credential-marked elements and embedded frames are masked. Canvas pixels are included for the authorized test. Screenshot covers the viewport only.'
             : 'Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }
       } finally { await this.evaluate(page, top, 'unmask', {}).catch(() => {}) }

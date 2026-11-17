@@ -510,6 +510,15 @@ canvas, not on an item that scrolls with it. `data.wheel` reports the events sen
 { "action": "wheel", "selector": "#viewport-1", "deltaY": 120, "repeat": 3, "modifiers": ["Control"] }
 ```
 
+Optional `intervalMs` (integer 0–1000) sets the requested minimum interval between
+wheel dispatches. Zero adds no deliberate delay. When specified, the runner skips
+the per-event paint wait but still hit-tests before every event and stops on
+cancellation, movement or coverage. Omitting it preserves the existing paint wait.
+`repeat` remains limited to 20. With `intervalMs`, `data.wheel.dispatchTimesMs` and `intervalsMs` report
+actual main-process dispatch times, including attempted delivery if its acknowledgement
+is uncertain; `sent` counts acknowledged events. CDP and hit-testing overhead can
+make intervals longer. These are input timings, not rendered-frame timings.
+
 `press` accepts the named keys above and single letters `a`–`z` and digits `0`–`9`
 for application shortcuts. A letter or digit types its character only without
 `Alt`, `Control` or `Meta`, so `Control`+`s` is a shortcut and never inserts text;
@@ -601,6 +610,53 @@ prevents repeated numeric-range assertions from disclosing protected values.
 Text target filters also exclude these protected elements and private aggregates
 before reading their text, including for visibility and count assertions or actions.
 Use a public application-state indicator for assertions instead.
+
+### Captured values and linked state
+
+`capture` records one public attribute, up to 256 characters, under a unique `name`.
+A run allows 20 captures. Names start with a letter and contain up to 64 letters,
+digits, underscores or hyphens. Capture steps are observations; include an assertion.
+
+```json
+[
+  { "action": "capture", "name": "revisionBefore", "selector": "#viewport-1", "attribute": "data-render-revision" },
+  { "action": "wheel", "selector": "#viewport-1", "deltaY": 120, "repeat": 3, "intervalMs": 10 },
+  { "action": "assert", "selector": "#viewport-1", "condition": "attribute", "attribute": "data-render-revision",
+    "expected": { "captured": "revisionBefore", "op": "greater" } },
+  { "action": "assert", "selector": "#viewport-1", "condition": "attribute", "attribute": "data-window-center",
+    "expected": { "selector": "#viewport-2", "attribute": "data-window-center", "numeric": true }, "tolerance": 0.1 }
+]
+```
+
+For `attribute` and `numericValue`, `expected` can name an earlier capture or a live
+attribute (`selector` or `targetRef`, plus `attribute`). The live source is in the
+same document as the assertion target. `op` is `equal` (default), `changed`, `greater`
+or `within`. `greater` and `within` use numbers; `numeric: true` also selects numeric
+mode. A numeric literal on `attribute` enables numeric comparison; a string literal
+keeps exact string equality. `numericValue` always uses numbers. Numeric comparisons
+reject missing, blank and nonfinite values. `tolerance` is an absolute difference,
+defaults to zero, and is unavailable for strings or strict `greater`. Numeric
+`changed` means the difference exceeds that tolerance.
+
+Both operands must be visible and public. A captured source is rechecked when used;
+a removed/replaced source or newly private source is refused. Selectors for live
+sources resolve again on each poll, whereas discovery references reject replacements.
+Captures are invalidated by document navigation and cleared at run end; they cannot
+be used in a different frame/document or a later run. Reports identify the capture
+step and field and include its filtered value. Existing numeric assertions continue
+to withhold raw values. Credential filtering and input-value redaction still apply.
+Multiple conditions are sampled sequentially, not as an atomic application snapshot.
+
+For final-frame tests, a higher render counter alone is insufficient: an old request
+can overwrite a new image after a successful poll. Wait for the viewer to acknowledge
+the final input, capture its intended request identity, then await a viewer-provided
+idle signal covering loading, decoding and render commits. Assert that the rendered
+request matches the capture and that image quality is complete. Use bounded selective
+network delays to reproduce out-of-order loading deterministically. `requestComplete`
+only establishes network completion; `visualStable` only establishes sampled pixel
+stability. Transient stale commits between polls require render-event instrumentation.
+For linked viewports, publish compatible patient-space coordinates and units; equal
+attributes alone do not establish correct registration.
 
 A `consoleMessage` condition takes `expected`, an anchored glob in which only `*`
 is special (`"viewer ready*"`, `"*state: 3 frames*"`), an optional `level`
@@ -1012,6 +1068,17 @@ outside the visible viewport fails. The saved screenshot records the cropped
 
 ### Comparing with a reference image
 
+Viewport/DPR emulation is not exposed as a test action. The feasibility check
+`node scripts/browser-viewport-feasibility-check.mjs` probes the native masked
+capture path and restores metrics afterward. With Electron 45.3.2 and host scaling
+125%, a 640×480 CSS viewport produced an 800×600 PNG for both emulated DPR 1 and 2,
+although native click, wheel and drag coordinates worked. Thus emulated DPR does
+not currently establish screenshot pixel dimensions. Results and captures are saved
+under `test-results/browser-viewport-feasibility/<host-scale>/`. The script also
+accepts `--force-device-scale-factor=1` or `=2`. Use consistent real display scaling
+and browser zoom for baselines; a future viewport API must first verify capture
+geometry, masking, input mapping and restoration on every exit path.
+
 `compareScreenshot` captures an element, a region or the whole viewport exactly as a
 test screenshot does, and compares its pixels with a reference PNG. Use it to check
 what an image viewer shows: window/level, colour lookup tables, orientation, zoom,
@@ -1027,10 +1094,17 @@ overlays and annotations.
 - **`baseline`** is a local absolute `.png` path of at most 2 MiB. The helper's shell
   reads the file and sends it with the plan; the desktop never opens a path from the
   plan. On macOS and Linux the path must not contain a quote or backslash.
+- **`baselineStep`** instead names an earlier successful `screenshot` or
+  `compareScreenshot` step by its 1-based number. It uses that step's actual capture,
+  never its diff, and needs no baseline file. It cannot be combined with `baseline`.
+  The compared CSS sizes and PNG sizes must match. Captures live only for this run.
+  For example: screenshot → pan → reset → `compareScreenshot` with `baselineStep: 1`.
 - **Making a reference:** run a `screenshot` step of the same area once, check the saved
   PNG, and use it as the baseline. Keep the same browser zoom and display scaling.
 - **Size:** the capture must have the reference's exact pixel size. A different size
-  fails the step with both sizes and the scale; nothing is rescaled.
+  fails the step with both sizes and the scale; comparison does not rescale either
+  input. The existing screenshot export reduces captures wider than 1600 pixels
+  before comparison; this is not a native-resolution pixel-accuracy test.
 - **`imageTolerance`:** `channel` (0–255, default 0) is how far one colour channel may
   move before a pixel counts as different, and `maxDiffRatio` (0–1, default 0) is the
   share of compared pixels that may differ. The defaults require an exact match;
@@ -1041,6 +1115,9 @@ overlays and annotations.
 - **Masks:** form controls, credential-marked elements and embedded frames are masked
   in both images, including any that sit under a canvas, so a change under a mask is
   not seen. Keep compared areas clear of them.
+  For `baselineStep`, the union of both captures' privacy masks is excluded and
+  painted into comparison evidence, including when masks moved between steps.
+  A fully masked/ignored area fails rather than passing with zero compared pixels.
 - **Result:** the step counts as an assertion, with outcome `assertion-passed` or
   `assertion-failed`, and is not retried. `data.comparison` reports the pixel size,
   CSS size and scale, the tolerance, the compared, ignored and differing pixels, the

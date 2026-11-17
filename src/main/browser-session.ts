@@ -537,8 +537,12 @@ an action. label is optional and defaults to <action> step <n> in reports; provi
 a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
 drag(selector,path,optional durationMs,inputSelector), dragTo(selector,dropSelector,optional point,dropPoint,dropText,durationMs), fill(selector,value), select(selector,value), press(selector,key),
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
-assert(condition,selector,optional expected), screenshot(),
-compareScreenshot(baseline,optional selector,region,ignore,imageTolerance). Optional text filters
+assert(condition,selector,optional expected), capture(name,selector,attribute), screenshot(),
+compareScreenshot(baseline OR baselineStep,optional selector,region,ignore,imageTolerance). baselineStep names an earlier successful screenshot/comparison's actual capture, never a diff. No baseline file is read for it.
+capture stores up to 256 characters from one public attribute, with at most 20 unique names per run. Navigation invalidates captures; removed/replaced/private sources cannot be reused.
+attribute accepts a number with tolerance, or exact string equality. attribute/numericValue expected may be {captured:"name",op:"equal"|"changed"|"greater"|"within",numeric:true} or {selector:"#other",attribute:"data-value",numeric:true}; selector can be targetRef. Numeric mode rejects blank/nonfinite values; greater is strict and takes no tolerance. Live references stay in the same document. Existing numeric assertions do not export raw values; capture reports filter credentials and supplied inputs.
+wheel optionally takes intervalMs:0..1000, skipping per-event paint waits while retaining hit tests; repeat stays 1..20. Actual dispatch intervals are reported, not guaranteed. A final rendered-frame check needs the viewer's load/decode/commit idle barrier and intended request identity; network completion and visual stability alone are insufficient.
+Optional text filters
 match visible element text; optional frame selects a current-page frame.
 A step that triggers a JavaScript alert, confirm or leave-page dialog (click, doubleClick,
 press, fill, select, navigate) must say so with dialog:{accept:true|false,optional message}.
