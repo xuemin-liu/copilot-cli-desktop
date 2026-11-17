@@ -616,9 +616,10 @@ A completed request, changed label, animation frames, decoded image or nonempty
 canvas cannot prove that asynchronous rendering has finished. Use explicit
 `discover` and `screenshot` steps for fresh after-action observations and before/after
 evidence, following readiness waits. Screenshots can be cropped to a region or an
-element, but pixel comparison is not implemented; saved screenshots require
-separate visual inspection. Visual
-differences must never be presented as proof of application semantics.
+element. A `compareScreenshot` step compares a capture with a reference PNG (see
+*Comparing with a reference image* below); other saved screenshots require separate
+visual inspection. Visual differences must never be presented as proof of
+application semantics.
 
 ### Opt-in network failures and recovery
 
@@ -665,8 +666,8 @@ Final reports include bounded run-specific request metadata, affected requests,
 console evidence, capture limitations and pointer/hit diagnostics. Bodies, headers,
 storage and credentials are excluded; known credentials and supplied input values
 are filtered. Arbitrary application prose/images can still contain sensitive data.
-Screenshots remain explicit plan steps (maximum five), and files are never
-overwritten. Report skipped/cancelled/unavailable checks and human visual inspection
+Screenshots and comparisons remain explicit plan steps (at most five together), and
+files are never overwritten. Report skipped/cancelled/unavailable checks and human visual inspection
 separately; do not mark an unverified application expectation passed.
 
 Run `npm run browser-unattended:check` for the isolated generic toolbar, hover menu,
@@ -711,7 +712,7 @@ for input and screenshots. A run acts only on its own session's pages.
 
 The runner supports navigation, click, double-click, hover, coordinate dragging, HTML5 drag-and-drop between elements, text entry and replacement,
 single-choice select elements, keyboard keys and page-level shortcuts, document/container scrolling, native wheel input, waits,
-assertions, and screenshots. CSS selectors plus optional visible text identify
+assertions, screenshots, and comparisons with a reference image. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
 are rejected. Pointer actions recheck the target after hover-driven layout changes
 and stop if the element is replaced or does not stabilize.
@@ -733,6 +734,7 @@ inspection and assertions. Use current frame IDs from `frames`. Opaque/sandboxed
 frames and frames with non-HTTP(S) URLs cannot receive test input.
 Closed shadow roots, rotated/skewed frames,
 uploads, downloads, file drops, custom DataTransfer content, and arbitrary JavaScript are unavailable.
+Reference images for `compareScreenshot` are read by the helper, not uploaded to the page.
 
 For drawing, canvas panning, or moving an item within a surface, use `drag` with a
 unique `selector` and a `path` of 2–100 `{ "x": number, "y": number }` points. Each
@@ -821,15 +823,16 @@ the app's state after the drop:
 
 Assertions check visibility, hidden state, visible element count, text containment,
 exact field value, checkbox/radio state, URL containment, decoded images, or a
-nonempty 2D canvas. Waits poll the same conditions. A plan must include an assertion;
+nonempty 2D canvas. Waits poll the same conditions. A plan must include an assertion
+or a `compareScreenshot` step;
 the assistant must cover each user expectation or explain what remains unverified.
 Every step requires an `action`. `label` is optional and defaults to
 `<action> step <n>` in reports; provide a short label when the step's purpose is
 not obvious.
 An image loading or a canvas painting does not establish correct visual content.
-For WebGL and visual expectations, use the app's ready indicator and have the
-assistant inspect a saved screenshot against the expected result. A missing or
-unverifiable signal must not be reported as a pass.
+For WebGL and visual expectations, use the app's ready indicator, then compare
+with a reference image, or have the assistant inspect a saved screenshot against
+the expected result. A missing or unverifiable signal must not be reported as a pass.
 
 For direct use, create a local UTF-8 plan:
 
@@ -890,7 +893,54 @@ outside the visible viewport fails. The saved screenshot records the cropped
 { "action": "screenshot", "label": "Axial cell", "selector": "#viewport-1" }
 ```
 
-Plans are limited to 128 KiB, 50 steps, and five screenshots of up to 2 MiB each.
+### Comparing with a reference image
+
+`compareScreenshot` captures an element, a region or the whole viewport exactly as a
+test screenshot does, and compares its pixels with a reference PNG. Use it to check
+what an image viewer shows: window/level, colour lookup tables, orientation, zoom,
+overlays and annotations.
+
+```json
+{ "action": "compareScreenshot", "label": "CT at W 400 L 40", "selector": "#viewport-1",
+  "baseline": "C:\\tests\\viewer\\ct-w400-l40.png",
+  "ignore": [{ "x": 0, "y": 0, "width": 220, "height": 60 }],
+  "imageTolerance": { "channel": 8, "maxDiffRatio": 0.002 } }
+```
+
+- **`baseline`** is a local absolute `.png` path of at most 2 MiB. The helper's shell
+  reads the file and sends it with the plan; the desktop never opens a path from the
+  plan. On macOS and Linux the path must not contain a quote or backslash.
+- **Making a reference:** run a `screenshot` step of the same area once, check the saved
+  PNG, and use it as the baseline. Keep the same browser zoom and display scaling.
+- **Size:** the capture must have the reference's exact pixel size. A different size
+  fails the step with both sizes and the scale; nothing is rescaled.
+- **`imageTolerance`:** `channel` (0–255, default 0) is how far one colour channel may
+  move before a pixel counts as different, and `maxDiffRatio` (0–1, default 0) is the
+  share of compared pixels that may differ. The defaults require an exact match;
+  allow a little for anti-aliasing or GPU differences.
+- **`ignore`:** 1–20 rectangles in CSS pixels relative to the compared area, for
+  content that changes legitimately, such as dates, patient overlays or a frame
+  counter. Ignored pixels are left out of the count.
+- **Masks:** form controls, credential-marked elements and embedded frames are masked
+  in both images, including any that sit under a canvas, so a change under a mask is
+  not seen. Keep compared areas clear of them.
+- **Result:** the step counts as an assertion, with outcome `assertion-passed` or
+  `assertion-failed`, and is not retried. `data.comparison` reports the pixel size,
+  CSS size and scale, the tolerance, the compared, ignored and differing pixels, the
+  difference ratio, the largest channel difference, and `diffBounds` (the box around
+  every differing pixel, in CSS pixels of the compared area; `diffBoundsPixels` in
+  image pixels).
+- **Evidence:** the capture is saved whether the step passes or fails (`kind:
+  "capture"`). When any pixel differs, a diff image is saved too (`kind: "diff"`):
+  the capture faded to grey, differing pixels in red and ignored areas dark. Each
+  comparison reserves two image files; unused ones are removed.
+
+A comparison checks pixels only. It cannot tell an intended change from a regression,
+so a failed comparison needs a look at the capture and the diff image before the
+reference is replaced.
+
+Plans are limited to 128 KiB, not counting reference images, and 50 steps. Screenshots
+and comparisons are limited to five together, and each image to 2 MiB.
 The default run deadline is 120 seconds; `timeoutMs` can set up to 300 seconds.
 Waits default to 30 seconds and assertions to 5 seconds; each can set `timeoutMs`
 up to 60 seconds. Supported keys: Enter, Tab, Escape, Space, Backspace, Delete,

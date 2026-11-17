@@ -15,6 +15,7 @@ import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-
 import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
+import { compareCapture } from './browser-test-compare.js'
 import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
 
@@ -198,7 +199,7 @@ export class BrowserReader {
       report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt, consoleStart),
         ...(plan.failOnConsoleError ? { consoleErrors: { failOnConsoleError: true, ignorePatterns: plan.consoleErrorIgnore?.length ?? 0,
           observed: 'every console message of the test page, including same-origin frames, while the run is open, recorded or not. Messages arrive asynchronously and are attributed to the step during which they arrive; workers and messages after the last step are not observed.' } } : {}),
-        visibilityRequired: true, screenshotRegionComparison: 'unsupported; screenshots require separate visual inspection' }) as Params
+        visibilityRequired: true, screenshotComparison: 'compareScreenshot steps compare pixels with a reference PNG; other screenshots require separate visual inspection' }) as Params
       const { screenshots: _screenshots, ...summary } = report
       this.testProgress.report = summary
       this.testProgress.journal = summary
@@ -515,7 +516,7 @@ export class BrowserReader {
       }
       if (this.testUnexpectedDialog) throw new Error(this.testUnexpectedDialog)
       if (step.dialog && !rule.handled) throw new Error('The step was expected to open a page dialog, but none opened within 1.5 seconds.')
-      const observation = ['assert', 'waitFor', 'discover', 'screenshot'].includes(step.action)
+      const observation = ['assert', 'waitFor', 'discover', 'screenshot', 'compareScreenshot'].includes(step.action)
       const output = { ...result, delivery: observation ? 'not-attempted' as const : result.passed ? 'delivered' as const : this.testDelivery,
         data: { ...this.testDiagnostics, ...result.data } }
       return rule.handled ? { ...output, detail: [result.detail, `${rule.handled.type} dialog “${rule.handled.message}” was ${rule.handled.accepted ? 'accepted' : 'dismissed'}.`].filter(Boolean).join(' ') } : output
@@ -610,7 +611,7 @@ export class BrowserReader {
       })
       check(); this.testDelivery = 'partial'; return { passed: true }
     }
-    if (step.action === 'screenshot') {
+    if (step.action === 'screenshot' || step.action === 'compareScreenshot') {
       // An element crop reads its bounds in the top frame before and after the capture.
       const targeted = step.selector !== undefined || step.targetRef !== undefined
       const top = targeted ? (await this.frames(page, signal))[0]?.id : undefined
@@ -629,6 +630,8 @@ export class BrowserReader {
         if ((['x', 'y', 'width', 'height'] as const).some(key => Math.abs(after[key] - region![key]) >= 0.5)) return { passed: false,
           reason: 'Screenshot target moved or resized during capture; no image was kept. Wait for it to settle (for example with a stable condition) and retry.' }
       }
+      if (step.action === 'compareScreenshot') return compareCapture(step, { imageBase64: String(image.imageBase64), redacted: Boolean(image.redacted),
+        viewport: image.viewport as { width: number; height: number }, ...(region ? { region: image.region as Rectangle } : {}) })
       return { passed: true, ...(region ? { data: { region: image.region, pixels: image.pixels } } : {}),
         screenshot: { step: 0, imageBase64: image.imageBase64, redacted: Boolean(image.redacted), ...(region ? { region: image.region } : {}) } }
     }
@@ -1204,7 +1207,7 @@ export class BrowserReader {
         const region = crop && pixels ? { x: pixels.x * viewport.width / size.width, y: pixels.y * viewport.height / size.height,
           width: pixels.width * viewport.width / size.width, height: pixels.height * viewport.height / size.height } : undefined
         return { ...metadata, frameId: top, state: 'available', mimeType: 'image/png', imageBase64: png.toString('base64'),
-          redacted: Boolean(mask.redacted), size: image.getSize(), ...(region ? { region, pixels } : {}), limitations: [testScreenshot
+          redacted: Boolean(mask.redacted), size: image.getSize(), ...(testScreenshot ? { viewport } : {}), ...(region ? { region, pixels } : {}), limitations: [testScreenshot
             ? 'Form controls, credential-marked elements and embedded frames are masked. Canvas pixels are included for the authorized test. Screenshot covers the viewport only.'
             : 'Form controls, credential-marked elements, embedded frames and canvases are masked. Screenshot covers the rendered viewport only.'] }
       } finally { await this.evaluate(page, top, 'unmask', {}).catch(() => {}) }

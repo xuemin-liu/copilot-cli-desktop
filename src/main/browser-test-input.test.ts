@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { validateBrowserTestPlan } from './browser-test-plan.js'
+import { reservedTestImages, validateBaselinePath, validateBrowserTestPlan } from './browser-test-plan.js'
 import { testKey } from './browser-test-keys.js'
 
 const assertion = { action: 'assert', label: 'Result visible', selector: '#result', condition: 'visible' }
@@ -71,4 +71,37 @@ test('dragTo takes a source, exactly one drop target, optional points inside eac
     { dataTransfer: { 'text/plain': 'injected' } }, { files: ['C:/secret.txt'] }, { dropText: '' }]) {
     assert.throws(() => plan([{ ...dragTo, ...extra }, assertion]), /Invalid browser test/, JSON.stringify(extra))
   }
+})
+
+test('compareScreenshot needs a local baseline path and the image the helper attached, and counts as an assertion', () => {
+  const baseline = process.platform === 'win32' ? 'C:\\tests\\viewer\\cell.png' : '/tmp/viewer/cell.png'
+  const compare = { action: 'compareScreenshot', selector: '#viewport-1', baseline, baselineImage: Buffer.from('png').toString('base64') }
+  assert.ok(plan([compare]), 'a comparison is the assertion a plan needs')
+  assert.ok(plan([{ ...compare, selector: undefined, region: { x: 0, y: 0, width: 200, height: 100 } }]))
+  assert.ok(plan([{ ...compare, selector: undefined }]), 'the whole viewport')
+  assert.ok(plan([{ ...compare, text: 'Axial', ignore: [{ x: 0, y: 0, width: 220, height: 60 }], imageTolerance: { channel: 8, maxDiffRatio: 0.002 } }]))
+  const tooLarge = 'A'.repeat(Math.ceil(2 * 1024 * 1024 / 3) * 4 + 4)
+  for (const extra of [{ baseline: undefined }, { baseline: 'cell.png' }, { baseline: baseline.replace(/\.png$/, '.jpg') }, { baseline: '//host/share/cell.png' },
+    { baselineImage: undefined }, { baselineImage: '' }, { baselineImage: 'not base64!' }, { baselineImage: tooLarge },
+    { ignore: [] }, { ignore: [{ x: 0, y: 0, width: 0, height: 5 }] }, { ignore: [{ x: -1, y: 0, width: 5, height: 5 }] }, { ignore: Array(21).fill({ x: 0, y: 0, width: 1, height: 1 }) },
+    { imageTolerance: { channel: 256 } }, { imageTolerance: { channel: 1.5 } }, { imageTolerance: { maxDiffRatio: 1.5 } }, { imageTolerance: { pixels: 3 } },
+    { tolerance: 3 }, { selector: undefined, text: 'Axial' }, { region: { x: 0, y: 0, width: 10, height: 10 } }, { condition: 'visible' }]) {
+    assert.throws(() => plan([{ ...compare, ...extra }]), /Invalid browser test/, JSON.stringify(extra).slice(0, 120))
+  }
+  const shot = { action: 'screenshot' }
+  assert.ok(plan([shot, shot, shot, shot, compare]))
+  assert.throws(() => plan([shot, shot, shot, shot, shot, compare]), /five screenshots and comparisons/)
+  assert.ok(plan([{ ...compare, label: 'x'.repeat(200), baselineImage: 'A'.repeat(1024 * 1024) }]), 'the reference image does not count toward the 128 KiB plan limit')
+})
+
+test('baseline paths are local absolute .png paths, and off Windows hold no quote or backslash', () => {
+  for (const path of ['C:\\tests\\cell.png', 'D:/tests/cell.PNG']) assert.doesNotThrow(() => validateBaselinePath(path, 'win32'), path)
+  for (const path of ['\\\\host\\share\\cell.png', 'C:cell.png', 'C:\\tests\\cell.exe', 'C:\\tests\\CON.png', 'C:\\te|sts\\cell.png', '/tmp/cell.png']) {
+    assert.throws(() => validateBaselinePath(path, 'win32'), /local absolute .png/, path)
+  }
+  for (const path of ['/tmp/cell one.png', '/Users/me/tests/cell.png']) assert.doesNotThrow(() => validateBaselinePath(path, 'linux'), path)
+  for (const path of ['tmp/cell.png', '//host/cell.png', '/tmp/ce"ll.png', '/tmp/ce\\ll.png', '/tmp/cell\n.png', 'C:\\tests\\cell.png']) {
+    assert.throws(() => validateBaselinePath(path, 'darwin'), /local absolute .png/, path)
+  }
+  assert.equal(reservedTestImages([{ action: 'screenshot' }, { action: 'compareScreenshot' }, { action: 'click' }]), 3)
 })

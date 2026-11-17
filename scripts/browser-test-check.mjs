@@ -464,6 +464,99 @@ if (!process.versions.electron) {
         assert.equal(clicked.status, 'passed', JSON.stringify(clicked)); assert.equal((await dndState()).clicks, 1, `input works after a failed drop (${reason})`)
       }
       await browser.view.webContents.executeJavaScript('document.querySelector("#dnd-fixture").remove()')
+      {
+      // compareScreenshot: a viewer cell with a WebGL image and a 2D overlay, compared with a reference PNG
+      // recorded by an ordinary screenshot step.
+      const compareSetup = state => `(${function (state) {
+        document.querySelector('#cmp-fixture')?.remove()
+        // Form controls are masked wherever they are, even under an overlay, so the rest of the page is hidden while comparing.
+        for (const child of document.body.children) if (!child.hasAttribute('data-cmp-hidden')) { child.setAttribute('data-cmp-hidden', child.style.display); child.style.display = 'none' }
+        const fixture = document.createElement('div'); fixture.id = 'cmp-fixture'
+        fixture.style.cssText = `position:fixed;left:0;top:0;width:${state.wide ? 280 : 240}px;height:170px;z-index:3000;background:#102030`
+        fixture.innerHTML = `<canvas id="cmp-gl" width="${state.wide ? 280 : 240}" height="120" style="display:block"></canvas><canvas id="cmp-2d" width="240" height="40" style="display:block"></canvas>`
+          + `<span id="cmp-stamp" style="position:absolute;left:4px;top:4px;width:90px;height:16px;background:#000;color:#ff0;font:12px monospace">${state.stamp ?? '2026-11-17'}</span>`
+        document.body.append(fixture)
+        const gl = fixture.querySelector('#cmp-gl').getContext('webgl', { antialias: false })
+        gl.enable(gl.SCISSOR_TEST)
+        const rect = (x, y, width, height, [r, g, b]) => { gl.scissor(x, y, width, height); gl.clearColor(r / 255, g / 255, b / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT) }
+        rect(0, 0, state.wide ? 280 : 240, 120, [40, 40, 40])
+        // A bright block on the left; "flip" mirrors it to the right, as a flipped image would.
+        rect(state.flip ? 150 : 20, 20, 70, 80, [230, 230, 230])
+        rect(100, 50, 40, 20, [200, 60, 60])
+        const context = fixture.querySelector('#cmp-2d').getContext('2d')
+        const shade = 120 + (state.shade ?? 0)
+        context.fillStyle = `rgb(${shade},${shade},${shade})`; context.fillRect(0, 0, 240, 40)
+        context.fillStyle = 'rgb(0,160,255)'; context.fillRect(10, 10, 60, 20)
+        return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))
+      }.toString()})(${JSON.stringify(state)})`
+      const { nativeImage: images } = await import('electron')
+      const compare = (baseline, extra = {}) => step('compareScreenshot', 'Cell matches the reference', { selector: '#cmp-fixture', baseline, ...extra })
+      await browser.view.webContents.executeJavaScript(compareSetup({}))
+      const recorded = await execute([step('screenshot', 'Record the reference', { selector: '#cmp-fixture' }), visible('#cmp-fixture')])
+      assert.equal(recorded.status, 'passed', JSON.stringify(recorded))
+      const baseline = recorded.screenshots[0].path
+      const reference = images.createFromPath(baseline)
+      assert.ok(!reference.isEmpty(), 'the recorded screenshot is a PNG')
+      const compareResults = {}
+      for (const shell of [false, true]) {
+        const same = await execute([compare(baseline)], shell)
+        assert.equal(same.status, 'passed', JSON.stringify(same))
+        assert.equal(same.steps[0].outcome, 'assertion-passed')
+        assert.equal(same.steps[0].data.comparison.differentPixels, 0, JSON.stringify(same.steps[0].data))
+        assert.deepEqual(same.screenshots.map(image => image.kind), ['capture'], 'a match keeps only the capture')
+        compareResults[shell ? 'shellMatch' : 'match'] = same.steps[0].data.comparison
+      }
+      // A flipped image fails; the diff image marks the changed block in red.
+      await browser.view.webContents.executeJavaScript(compareSetup({ flip: true }))
+      const flipped = await execute([compare(baseline), step('click', 'Must not run after a failed comparison', { selector: '#write' })], true)
+      assert.equal(flipped.status, 'failed', JSON.stringify(flipped)); assert.equal(flipped.steps[0].outcome, 'assertion-failed')
+      assert.equal(flipped.steps[1].status, 'skipped'); assert.equal(writes, 0)
+      assert.match(flipped.steps[0].reason, /differ from the baseline/)
+      const flip = flipped.steps[0].data.comparison
+      assert.ok(flip.differentPixels > 0 && flip.diffBounds, JSON.stringify(flip))
+      // The blocks move between x 20–90 and x 150–220 CSS pixels, rows 20–100 of the WebGL canvas (drawn from the bottom).
+      assert.ok(Math.abs(flip.diffBounds.x - 20) <= 1 && Math.abs(flip.diffBounds.x + flip.diffBounds.width - 220) <= 1, JSON.stringify(flip.diffBounds))
+      assert.ok(Math.abs(flip.diffBounds.y - 20) <= 1 && Math.abs(flip.diffBounds.y + flip.diffBounds.height - 100) <= 1, JSON.stringify(flip.diffBounds))
+      assert.deepEqual(flipped.screenshots.map(image => image.kind), ['capture', 'diff'])
+      const diff = images.createFromPath(flipped.screenshots[1].path)
+      const diffBitmap = diff.toBitmap(); const diffSize = diff.getSize()
+      let red = 0
+      for (let index = 0; index < diffBitmap.length; index += 4) {
+        if (diffBitmap[index + 1] === 0 && (diffBitmap[index] === 255 && diffBitmap[index + 2] === 0 || diffBitmap[index] === 0 && diffBitmap[index + 2] === 255)) red++
+      }
+      assert.equal(red, flip.differentPixels, 'the diff image marks exactly the differing pixels')
+      assert.deepEqual(diffSize, reference.getSize())
+      compareResults.flip = flip
+      // A change only inside an ignored area passes; the same change without it fails.
+      await browser.view.webContents.executeJavaScript(compareSetup({ stamp: '2027-01-01' }))
+      const stampChanged = await execute([compare(baseline)])
+      assert.equal(stampChanged.status, 'failed', JSON.stringify(stampChanged))
+      const ignored = await execute([compare(baseline, { ignore: [{ x: 0, y: 0, width: 100, height: 24 }] })])
+      assert.equal(ignored.status, 'passed', JSON.stringify(ignored))
+      assert.ok(ignored.steps[0].data.comparison.ignoredPixels > 0 && ignored.steps[0].data.comparison.differentPixels === 0, JSON.stringify(ignored.steps[0].data))
+      compareResults.ignored = ignored.steps[0].data.comparison
+      // A slight shade change fails an exact comparison and passes a per-channel tolerance above it.
+      await browser.view.webContents.executeJavaScript(compareSetup({ shade: 3 }))
+      const strict = await execute([compare(baseline)])
+      assert.equal(strict.status, 'failed', JSON.stringify(strict)); assert.ok(strict.steps[0].data.comparison.maxChannelDelta <= 4, JSON.stringify(strict.steps[0].data))
+      const tolerant = await execute([compare(baseline, { imageTolerance: { channel: 4 } })])
+      assert.equal(tolerant.status, 'passed', JSON.stringify(tolerant))
+      const ratio = await execute([compare(baseline, { imageTolerance: { maxDiffRatio: 0.5 } })])
+      assert.equal(ratio.status, 'passed', JSON.stringify(ratio)); assert.match(ratio.steps[0].detail, /within the allowed 50%/)
+      // A different size is refused, never rescaled.
+      await browser.view.webContents.executeJavaScript(compareSetup({ wide: true }))
+      const resized = await execute([compare(baseline)])
+      assert.equal(resized.status, 'failed', JSON.stringify(resized)); assert.match(resized.steps[0].reason, /Nothing is rescaled/)
+      assert.deepEqual(resized.screenshots.map(image => image.kind), ['capture'])
+      // A file that is not a PNG is refused.
+      const notPng = join(artifacts, `not-png-${runId}.png`); await writeFile(notPng, 'not a png')
+      const unreadable = await execute([compare(notPng)])
+      assert.equal(unreadable.status, 'failed', JSON.stringify(unreadable)); assert.match(unreadable.steps[0].reason, /not a PNG/)
+      await assert.rejects(execute([compare(join(artifacts, 'missing-baseline.png'))]), /does not exist/)
+      await assert.rejects(execute([compare(join(artifacts, 'missing-baseline.png'))], true), /does not exist/)
+      await writeFile(join(artifacts, `compare-${runId}.json`), JSON.stringify(compareResults, null, 2))
+      await browser.view.webContents.executeJavaScript('document.querySelector("#cmp-fixture").remove();for (const child of document.querySelectorAll("[data-cmp-hidden]")) { child.style.display = child.getAttribute("data-cmp-hidden"); child.removeAttribute("data-cmp-hidden") }')
+      }
       // Geometry phases: a target that keeps moving before the press, one that moves on
       // mousedown, and one that moves between double-click presses. Each fails with the
       // phase it was observed in, and none delivers the click it was supposed to.
@@ -764,14 +857,18 @@ if (!process.versions.electron) {
       assert.equal((await fetch(testRoute, { method: 'POST', body: '{}' })).status, 401)
       assert.equal((await fetch(testRoute, { method: 'POST', headers: { origin: 'https://untrusted.test', authorization: `Bearer ${controller.token}` } })).status, 403)
       assert.equal((await request({ ...plan([visible('#title')]), script: 'alert(1)' })).status, 400)
-      assert.equal((await fetch(testRoute, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: ' '.repeat(131073) })).status, 413)
+      // The JSON route also carries reference images, so its byte limit is larger; the plan itself stays within 128 KiB.
+      const { MAX_TEST_REQUEST_BYTES } = await import('../dist/src/main/browser-test-plan.js')
+      assert.equal((await fetch(testRoute, { method: 'POST', headers: { authorization: `Bearer ${controller.token}`, 'content-type': 'application/json' }, body: ' '.repeat(MAX_TEST_REQUEST_BYTES + 1) })).status, 413)
+      const oversized = await request(plan([visible('#title', { label: 'x'.repeat(150) })], { expected: 'y'.repeat(4000), description: 'z'.repeat(4000), consoleErrorIgnore: undefined, steps: Array.from({ length: 50 }, () => visible('#title' + ', #absent'.repeat(55), { text: 'w'.repeat(2000), label: 'v'.repeat(200) })) }))
+      assert.equal(oversized.status, 400); assert.match((await oversized.json()).message, /128 KiB/)
       await browser.navigate(foreignUrl)
       assert.equal(browser.snapshot.testing.enabled, true, 'new site is ready for a fresh run automatically')
       assert.equal((await execute([step('fill', 'Explicitly chosen site', { selector: '#q', value: 'user-test-input' }), visible('#q')])).status, 'passed')
       await until(() => receivedValues.includes('user-test-input'), 'new test binds to the newly selected site')
       assert.ok(!receivedValues.includes('unrelated-env-secret-value-123'))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, workflow: true, nativeInput: true, nativeDoubleClick: true,
-        screenshots: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
+        screenshots: true, screenshotComparison: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
         disconnect: true, sameOriginFrame: true, crossOriginFrame: true, isolation: true, authentication: true, noPerStepApproval: approvals === 0,
         unicode: true, hover: true, openShadowRoot: true, contentEditable: true, navigationCancellation: true, hiddenCancellation: true,
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,

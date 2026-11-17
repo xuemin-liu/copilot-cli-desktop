@@ -97,7 +97,7 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
     request.on('data', (chunk: Buffer) => chunks.push(chunk))
     request.on('end', () => void (async () => {
       const type = request.headers['content-type']
-      const form = isFormType(type) ? await parseFormFields(Buffer.concat(chunks), type!) ?? undefined : undefined
+      const form = isFormType(type) ? await parseFormFields(Buffer.concat(chunks), type!, name => name.startsWith('baseline-')) ?? undefined : undefined
       seen.push({ method: request.method, url: request.url, ...(form ? { form } : {}) })
       response.setHeader('content-type', 'application/json')
       if (request.url === '/console') { response.statusCode = 400; response.end(JSON.stringify({ message: 'Capture "paused"' })); return }
@@ -148,6 +148,25 @@ test('the sh helper sends the same requests, names a new screenshot file, and up
     assert.ok(![...sent.form!.keys()].some((key) => key.includes('OTHER_SECRET')), 'only COPILOT_TEST_ inputs are sent')
     await run('test', plan)
     assert.match(seen.at(-1)!.form!.get('output')!, /plan\.report-[0-9a-f]{16}\.json$/)
+    // A comparison's reference PNG is uploaded by curl with the path the plan names; the desktop never opens it.
+    const baseline = join(root, 'cell one;type=x.png')
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255, 10, 13, 34])
+    await writeFile(baseline, bytes)
+    await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', selector: '#cell', baseline }, { action: 'compareScreenshot', baseline }] }, null, 2))
+    await run('test', plan, '-OutputPath', join(root, 'compare-report.json'))
+    const compared = seen.at(-1)!.form!
+    assert.equal(compared.get('baseline-1'), bytes.toString('base64'), 'the file arrives byte for byte')
+    assert.equal(compared.get('baselinePath-1'), baseline)
+    assert.ok(!compared.has('baseline-2'), 'a baseline named twice is sent once')
+    const before = seen.length
+    for (const [path, message] of [[join(root, 'missing.png'), /does not exist/], ['cell.png', /local absolute .png/]] as const) {
+      await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', baseline: path }] }))
+      await assert.rejects(run('test', plan, '-OutputPath', join(root, `rejected-${seen.length}-${path.length}.json`)), message)
+    }
+    await writeFile(join(root, 'large.png'), Buffer.alloc(2 * 1024 * 1024 + 1))
+    await writeFile(plan, JSON.stringify({ description: 'x', steps: [{ action: 'compareScreenshot', baseline: join(root, 'large.png') }] }))
+    await assert.rejects(run('test', plan, '-OutputPath', join(root, 'rejected-large.json')), /exceeds 2 MiB/)
+    assert.equal(seen.length, before, 'an invalid baseline is refused before any request')
     await rm(paths.endpoint)
     await assert.rejects(run('console'), /Open or resume this session to use its browser helper/)
   } finally { server.closeAllConnections(); server.close(); await rm(root, { recursive: true, force: true }) }

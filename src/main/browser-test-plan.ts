@@ -1,6 +1,27 @@
 import { parseSafeHttpUrl } from './external-targets.js'
 
 export const MAX_TEST_BYTES = 128 * 1024
+/** A reference PNG for compareScreenshot, read by the helper's shell and sent with the plan. */
+export const MAX_BASELINE_BYTES = 2 * 1024 * 1024
+export const MAX_BASELINE_BASE64 = Math.ceil(MAX_BASELINE_BYTES / 3) * 4
+/** Screenshots and comparisons together. Each comparison can keep two images: the capture and a diff. */
+export const MAX_TEST_IMAGES = 5
+/** The largest test request: the plan plus one reference image per allowed comparison. */
+export const MAX_TEST_REQUEST_BYTES = MAX_TEST_BYTES + MAX_TEST_IMAGES * (MAX_BASELINE_BASE64 + 64)
+/** How many image files a helper reserves for a plan: one per screenshot, two per comparison. */
+export function reservedTestImages(steps: readonly { action?: unknown }[]): number {
+  return steps.reduce((count, step) => count + (step.action === 'screenshot' ? 1 : step.action === 'compareScreenshot' ? 2 : 0), 0)
+}
+/** A reference image path names a local absolute .png file. The desktop never opens it: the helper's shell reads it. Paths
+ * with a quote or backslash are refused off Windows, so the sh helper can find them in the plan text without a JSON parser. */
+export function validateBaselinePath(path: unknown, platform: NodeJS.Platform = process.platform): void {
+  const windows = platform === 'win32'
+  if (typeof path !== 'string' || path.length > 4096 || !/\.png$/i.test(path) || /[\u0000-\u001f]/.test(path) || /^[\\/]{2}/.test(path)
+    || (windows ? !/^[A-Za-z]:[\\/]/.test(path) || /[<>:"|?*]/.test(path.slice(2)) || /(^|[\\/])(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|[\\/]|$)/i.test(path)
+      : !path.startsWith('/') || /["\\]/.test(path))) {
+    throw new Error('Invalid browser test: baseline must be a local absolute .png path; network and device paths are not allowed.')
+  }
+}
 export const TEST_KEYS = ['Enter', 'Tab', 'Escape', 'Space', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'] as const
 /** Single letters and digits, for application shortcuts. */
 export const TEST_CHARACTER_KEY = /^[a-z0-9]$/
@@ -26,8 +47,10 @@ export interface BrowserTestCondition {
   stableMs?: number
   request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
 }
+/** compareScreenshot: per-channel difference allowed for a pixel to match, and the share of pixels allowed to differ. */
+export interface TestImageTolerance { channel?: number; maxDiffRatio?: number }
 export interface BrowserTestStep extends BrowserTestCondition {
-  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot'
+  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot' | 'compareScreenshot'
   label: string
   inputSelector?: string
   inputRef?: string
@@ -42,8 +65,15 @@ export interface BrowserTestStep extends BrowserTestCondition {
   deltaX?: number
   deltaY?: number
   repeat?: number
-  /** screenshot: crop to this CSS-pixel viewport region. */
+  /** screenshot and compareScreenshot: crop to this CSS-pixel viewport region. */
   region?: { x: number; y: number; width: number; height: number }
+  /** compareScreenshot: the reference PNG's local path, as named in the plan. */
+  baseline?: string
+  /** compareScreenshot: the reference PNG as base64, attached by the helper that read the file. */
+  baselineImage?: string
+  /** compareScreenshot: rectangles to leave out, in CSS pixels relative to the compared area. */
+  ignore?: { x: number; y: number; width: number; height: number }[]
+  imageTolerance?: TestImageTolerance
   /** press: "page" sends the key to whatever has focus, with no target element. */
   scope?: 'page'
   path?: { x: number; y: number }[]
@@ -83,7 +113,9 @@ export interface BrowserTestReport {
   runId?: string; completed?: boolean; origin?: string; testingEnabled?: boolean
   description: string; expected: string; pageId: number; status: 'passed' | 'failed' | 'cancelled'; startedAt: string; durationMs: number
   steps: BrowserTestStepResult[]
-  screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string; region?: { x: number; y: number; width: number; height: number } }[]
+  screenshots: { step: number; imageBase64?: string; redacted: boolean; path?: string; region?: { x: number; y: number; width: number; height: number }
+    /** compareScreenshot evidence: the capture that was compared, or the image marking the pixels that differ. */
+    kind?: 'capture' | 'diff' }[]
   evidence?: Record<string, unknown>
 }
 export interface BrowserTestState {
@@ -204,6 +236,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog', 'scope'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
       wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
       waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: ['region', 'selector', 'targetRef', 'text'],
+      compareScreenshot: ['region', 'selector', 'targetRef', 'text', 'baseline', 'baselineImage', 'ignore', 'imageTolerance'],
     }
     if (typeof step.action !== 'string' || !extra[step.action]) fail('unsupported action.')
     fields(step, ['action', 'label', ...extra[String(step.action)]!])
@@ -255,14 +288,33 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (step.repeat !== undefined && (typeof step.repeat !== 'number' || !Number.isInteger(step.repeat) || step.repeat < 1 || step.repeat > 20)) fail('wheel repeat must be within 1–20 events.')
     }
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
-    if (step.action === 'screenshot' && ++screenshots > 5) fail('use at most five screenshots.')
+    if ((step.action === 'screenshot' || step.action === 'compareScreenshot') && ++screenshots > MAX_TEST_IMAGES) fail('use at most five screenshots and comparisons together.')
+    if (step.action === 'compareScreenshot') {
+      validateBaselinePath(step.baseline)
+      if (step.baselineImage === undefined) fail('the reference image was not attached. Run the plan with the session browser helper, which reads the baseline file.')
+      if (typeof step.baselineImage !== 'string' || !step.baselineImage || step.baselineImage.length > MAX_BASELINE_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(step.baselineImage)) fail('the reference image must be a PNG of at most 2 MiB.')
+      if (step.ignore !== undefined) {
+        if (!Array.isArray(step.ignore) || step.ignore.length < 1 || step.ignore.length > 20) fail('use 1–20 ignore rectangles.')
+        for (const raw of step.ignore as unknown[]) {
+          const rect = object(raw); fields(rect, ['x', 'y', 'width', 'height'])
+          if (![rect.x, rect.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
+            || ![rect.width, rect.height].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 20000)) fail('ignore rectangles need x and y within 0–19999 and width and height within 0–20000 CSS pixels.')
+        }
+      }
+      if (step.imageTolerance !== undefined) {
+        const tolerance = object(step.imageTolerance); fields(tolerance, ['channel', 'maxDiffRatio'])
+        if (tolerance.channel !== undefined && (typeof tolerance.channel !== 'number' || !Number.isInteger(tolerance.channel) || tolerance.channel < 0 || tolerance.channel > 255)) fail('imageTolerance.channel must be an integer within 0–255.')
+        if (tolerance.maxDiffRatio !== undefined && (typeof tolerance.maxDiffRatio !== 'number' || !Number.isFinite(tolerance.maxDiffRatio) || tolerance.maxDiffRatio < 0 || tolerance.maxDiffRatio > 1)) fail('imageTolerance.maxDiffRatio must be within 0–1.')
+      }
+      assertions++
+    }
     if (step.region !== undefined) {
       const region = object(step.region); fields(region, ['x', 'y', 'width', 'height'])
       if (![region.x, region.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
         || ![region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 20000)) fail('region needs x and y within 0–19999 and width and height within 1–20000 CSS pixels.')
       if (step.selector !== undefined || step.targetRef !== undefined || step.text !== undefined) fail('crop to a region or to a target, not both.')
     }
-    if (step.action === 'screenshot' && step.text !== undefined && step.selector === undefined && step.targetRef === undefined) fail('screenshot text filters a selector or targetRef.')
+    if ((step.action === 'screenshot' || step.action === 'compareScreenshot') && step.text !== undefined && step.selector === undefined && step.targetRef === undefined) fail('screenshot text filters a selector or targetRef.')
     if (['waitFor', 'assert', 'reload'].includes(String(step.action))) {
       timeout(step.timeoutMs, 60000)
       if (step.all !== undefined) {
@@ -277,6 +329,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     }
   }
   if (!assertions) fail('include at least one assertion of the expected result.')
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_TEST_BYTES) fail('plan exceeds 128 KiB.')
+  // Reference images are counted by their own limit, not the plan's.
+  if (Buffer.byteLength(JSON.stringify(value, (key, field) => key === 'baselineImage' ? undefined : field)) > MAX_TEST_BYTES) fail('plan exceeds 128 KiB.')
   return plan as unknown as BrowserTestPlan
 }

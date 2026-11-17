@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { BaseWindow, BrowserWindow, ClipboardItem, Menu, WebContentsView, clipboard, dialog, screen, session as electronSession } from 'electron'
 import type { BrowserWindowConstructorOptions, OnBeforeRequestListenerDetails, OnHeadersReceivedListenerDetails, OnSendHeadersListenerDetails, Session, WebContents } from 'electron'
 import { browserControlPath, validateBrowserScreenshotPath } from '../cli/browser-control.js'
-import { executeBrowserTest, parseBrowserTest } from '../cli/browser-test-client.js'
+import { executeBrowserTest, parseTestForm } from '../cli/browser-test-client.js'
 import { isFormType, isJsonType, parseFormFields, readBody } from './form-body.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { writeFileAtomic } from './atomic-file.js'
@@ -15,11 +15,12 @@ import type { BrowserBounds, BrowserDebugState, BrowserNetworkEntry, BrowserView
 import { restorableUrl, sanitizedHeaders, sanitizedText, sanitizedUrl } from './browser-privacy.js'
 import { BrowserReader, type BrowserCursor } from './browser-reader.js'
 import { BROWSER_READ_COMMANDS, browserReadMethod, validateBrowserReadCommand } from '../cli/browser-read-command.js'
-import { MAX_TEST_BYTES } from './browser-test-plan.js'
+import { MAX_BASELINE_BYTES, MAX_TEST_BYTES, MAX_TEST_IMAGES, MAX_TEST_REQUEST_BYTES } from './browser-test-plan.js'
 import { replaceDevtoolsPreferencesScript, type DevtoolsPreferences } from './browser-devtools-settings.js'
 
 /** A plan sent as form data, with its test inputs. */
-const MAX_TEST_FORM_BYTES = 2 * MAX_TEST_BYTES + 64 * 1024
+// The plan's text, its inputs, and up to one reference PNG per allowed comparison.
+const MAX_TEST_FORM_BYTES = 2 * MAX_TEST_BYTES + 64 * 1024 + MAX_TEST_IMAGES * (MAX_BASELINE_BYTES + 8 * 1024)
 
 /** Save a screenshot in a new file and answer with its metadata and path, as `browser.ps1 screenshot -OutputPath` does. */
 async function saveScreenshot(value: unknown, path: string): Promise<unknown> {
@@ -1385,14 +1386,9 @@ export class BrowserDebug {
   private async testFromForm(request: IncomingMessage, type: string, signal: AbortSignal): Promise<unknown> {
     const body = await readBody(request, MAX_TEST_FORM_BYTES)
     if (body === null) throw new Error('Test plan exceeds 128 KiB.')
-    const fields = await parseFormFields(body, type)
-    const text = fields?.get('plan')
-    const output = fields?.get('output')
-    if (text === undefined || output === undefined) throw new Error('Invalid test request.')
-    if (Buffer.byteLength(text) > MAX_TEST_BYTES) throw new Error('Test plan exceeds 128 KiB.')
-    const inputs: Record<string, string> = {}
-    for (const [name, value] of fields!) if (name.startsWith('env:')) inputs[name.slice(4)] = value
-    const plan = parseBrowserTest(text, inputs)
+    const fields = await parseFormFields(body, type, name => /^baseline-\d+$/.test(name))
+    if (!fields) throw new Error('Invalid test request.')
+    const { plan, output } = parseTestForm(fields)
     return executeBrowserTest(plan, output, output, value => this.reader.test(value, signal))
   }
 
@@ -1438,7 +1434,8 @@ export class BrowserDebug {
           const chunks: Buffer[] = []; let bytes = 0
           for await (const chunk of request) {
             bytes += chunk.length
-            if (bytes > MAX_TEST_BYTES) { send(413, { message: 'Test plan exceeds 128 KiB.' }); return }
+            // Reference images ride in the plan; validation still limits the plan without them to 128 KiB.
+            if (bytes > MAX_TEST_REQUEST_BYTES) { send(413, { message: 'Test plan exceeds 128 KiB, or its baseline images exceed 2 MiB each.' }); return }
             chunks.push(Buffer.from(chunk))
           }
           let plan: unknown
