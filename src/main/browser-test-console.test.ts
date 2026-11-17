@@ -3,7 +3,8 @@ import test from 'node:test'
 import { ConsoleBuffer } from './browser-console-buffer.js'
 import { TestConsoleWatch, type ConsoleMessage, type ConsoleSource } from './browser-test-console.js'
 import { globMatches, validateBrowserTestPlan, type BrowserTestStep } from './browser-test-plan.js'
-import { runBrowserTest } from './browser-test-runner.js'
+import { redactInputs, redactTestEvidence, runBrowserTest } from './browser-test-runner.js'
+import { sanitizedText } from './browser-privacy.js'
 
 const assertion = { action: 'assert', label: 'Result visible', selector: '#result', condition: 'visible' }
 const plan = (steps: unknown[], extra: Record<string, unknown> = {}) => validateBrowserTestPlan({ description: 'Console run', expected: 'It passes', steps, ...extra })
@@ -17,7 +18,8 @@ function page(recording = () => true) {
     watch: (_pageId, listener) => { listeners.add(listener); return () => listeners.delete(listener) },
   }
   const log = (message: string, level = 'info'): void => {
-    const entry = { level, message, source: 'http://127.0.0.1/app.js', line: 7 }
+    // As BrowserDebug does: capture-time sanitizing bounds the text before anything else sees it.
+    const entry = { level, message: sanitizedText(message), source: 'http://127.0.0.1/app.js', line: 7 }
     for (const listener of listeners) listener(entry)
     if (recording()) buffer.add({ pageId: 1, timestamp: new Date().toISOString(), ...entry }); else buffer.drop(1)
   }
@@ -119,4 +121,51 @@ test('without failOnConsoleError errors are only reported, and step slices redac
   assert.deepEqual([slice.total, slice.truncated, slice.entries.length, slice.entries[0]!.level], [32, true, 10, 'error'])
   assert.ok(slice.entries.every(entry => entry.message.length <= 500))
   assert.equal(report.steps[1]!.console, undefined, 'a quiet step carries no console field')
+})
+
+test('supplied inputs are redacted before console text is cut, at every boundary', async () => {
+  const value = 'SYNTHETIC-PRIVATE-INPUT-12345'
+  const long = `LONG-${'p'.repeat(600)}-END`
+  const leaks = (text: string): string[] => [value.slice(0, 10), long.slice(0, 20), 'pppppppppppppppppppppppppppppp', 'wSYN'].filter(part => text.includes(part))
+  for (const failOnConsoleError of [false, true]) {
+    const { source, log } = page()
+    const steps = [{ action: 'fill', label: 'Type', selector: '#field', value }, { action: 'fill', label: 'Type long', selector: '#other', value: long }, assertion]
+    const plan_ = plan(steps, failOnConsoleError ? { failOnConsoleError } : {})
+    const watch = new TestConsoleWatch(plan_, 1, source)
+    const report = await runBrowserTest(plan_, 1, { active: () => true, progress: () => {}, console: watch,
+      execute: async step => {
+        if (step.label === 'Type') {
+          log('x'.repeat(490) + value, 'error')        // crosses the 500-character cut
+          log('w'.repeat(497) + value)                  // would leave only 3 characters, below the tail check
+          log(`start ${long}`)                          // longer than the cut
+          log('y'.repeat(8180) + value)                 // crosses the capture limit
+        }
+        return { passed: true }
+      } }, new AbortController().signal)
+    watch.dispose()
+    const evidence = redactTestEvidence(plan_, { console: source.slice(1, 0, Number.MAX_SAFE_INTEGER, 100).entries })
+    assert.deepEqual(leaks(JSON.stringify(report)), [], `report (failOnConsoleError: ${failOnConsoleError})`)
+    assert.deepEqual(leaks(JSON.stringify(evidence)), [], `evidence (failOnConsoleError: ${failOnConsoleError})`)
+    if (failOnConsoleError) {
+      assert.equal(report.steps[0]!.status, 'failed')
+      assert.match(report.steps[0]!.reason!, /^Console error during this step: x+\[redacted\]$/)
+    } else assert.equal(report.status, 'passed')
+  }
+})
+
+test('run evidence redacts inputs before its size budget can cut one', () => {
+  const value = 'SYNTHETIC-PRIVATE-INPUT-12345'
+  const plan_ = plan([{ action: 'fill', label: 'Type', selector: '#field', value }, assertion])
+  // 65536 characters in all: the key, eight fillers, then a message the budget cuts two characters into the value.
+  const evidence = redactTestEvidence(plan_, { console: [...Array(8).fill('f'.repeat(8000)), 'x'.repeat(1527) + value] })
+  assert.ok(!JSON.stringify(evidence).includes('xSY'), 'a value cut by the budget must already be redacted')
+  assert.equal(evidence.truncated, true)
+})
+
+test('redactInputs removes whole values and the start of one left at the end of cut text', () => {
+  assert.equal(redactInputs('a SECRET-1 b SECRET-1', ['SECRET-1']), 'a [redacted] b [redacted]')
+  assert.equal(redactInputs('cut at SECR', ['SECRET-1']), 'cut at [redacted]')
+  assert.equal(redactInputs('ends with SEC', ['SECRET-1']), 'ends with SEC', 'fewer than four characters are kept')
+  assert.equal(redactInputs('ab', ['ab']), '[redacted]')
+  assert.equal(redactInputs('nothing here', ['SECRET-1']), 'nothing here')
 })

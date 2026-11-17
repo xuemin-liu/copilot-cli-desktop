@@ -4,16 +4,32 @@ import type { BrowserTestPlan, BrowserTestReport, BrowserTestStep, TestDelivery,
 import type { ConsoleErrorRecord } from './browser-test-console.js'
 
 export interface TestObservation { passed: boolean; delivery?: TestDelivery; reason?: string; detail?: string; data?: Record<string, unknown>; screenshot?: BrowserTestReport['screenshots'][number] }
+/** The plan's fill and select values, longest first. */
+export function testInputs(plan: BrowserTestPlan): string[] {
+  return plan.steps.filter(step => step.action === 'fill' || step.action === 'select').map(step => step.value!).filter(Boolean).sort((a, b) => b.length - a.length)
+}
+/** Replaces every supplied input value in text, and the start of one (4 characters or more) left at
+ * the end by an earlier cut, such as the capture limit. Run it before any further cutting. */
+export function redactInputs(text: string, inputs: string[]): string {
+  for (const input of inputs) if (text.includes(input)) text = text.split(input).join('[redacted]')
+  for (const input of inputs) {
+    for (let length = Math.min(input.length - 1, text.length); length >= Math.min(4, input.length); length--) {
+      if (text.endsWith(input.slice(0, length))) { text = `${text.slice(0, text.length - length)}[redacted]`; break }
+    }
+  }
+  return text
+}
 export function redactTestEvidence(plan: BrowserTestPlan, value: unknown): any {
-  const inputs = plan.steps.filter(step => step.action === 'fill' || step.action === 'select').map(step => step.value!).filter(Boolean).sort((a, b) => b.length - a.length)
+  const inputs = testInputs(plan)
   let inputRedacted = false
+  // Inputs first: the credential filter below may cut text, and a cut value is no longer recognizable.
   const walk = (value: any): any => {
-    if (typeof value === 'string') { for (const input of inputs) if (value.includes(input)) { inputRedacted = true; value = value.split(input).join('[redacted]') }; return value }
+    if (typeof value === 'string') { const clean = redactInputs(value, inputs); if (clean !== value) inputRedacted = true; return clean }
     if (Array.isArray(value)) return value.map(walk)
     return value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, value]) => [key, walk(value)])) : value
   }
-  const filtered = redactBrowserValue(value)
-  return { ...walk(filtered.value), redacted: filtered.redacted || inputRedacted, truncated: filtered.truncated }
+  const filtered = redactBrowserValue(walk(value))
+  return { ...filtered.value as Record<string, unknown>, redacted: filtered.redacted || inputRedacted, truncated: filtered.truncated }
 }
 export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, executor: {
   active: () => boolean
@@ -27,11 +43,8 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
   const timer = setTimeout(() => expired.abort(), plan.timeoutMs ?? 120000)
   const signal = AbortSignal.any([cancelled, expired.signal])
   // Input values never appear in reports, including a value copied into a label.
-  const inputs = plan.steps.filter(step => step.action === 'fill' || step.action === 'select').map(step => step.value!).filter(Boolean).sort((a, b) => b.length - a.length)
-  const safe = (text: string): string => {
-    for (const input of inputs) text = text.split(input).join('[redacted]')
-    return String(redactBrowserValue(text).value)
-  }
+  const inputs = testInputs(plan)
+  const safe = (text: string): string => String(redactBrowserValue(redactInputs(text, inputs)).value)
   const clean = (value: unknown): any => typeof value === 'string' ? safe(value) : Array.isArray(value) ? value.map(clean)
     : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, value]) => [key, clean(value)])) : value
   const report: BrowserTestReport = { runId: randomUUID(), completed: false, description: safe(plan.description), expected: safe(plan.expected), pageId,
