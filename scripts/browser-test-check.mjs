@@ -552,6 +552,13 @@ if (!process.versions.electron) {
       const notPng = join(artifacts, `not-png-${runId}.png`); await writeFile(notPng, 'not a png')
       const unreadable = await execute([compare(notPng)])
       assert.equal(unreadable.status, 'failed', JSON.stringify(unreadable)); assert.match(unreadable.steps[0].reason, /not a PNG/)
+      // A small file that describes a huge image is refused from its header, never decoded.
+      const huge = Buffer.alloc(33); Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(huge)
+      huge.writeUInt32BE(13, 8); huge.write('IHDR', 12, 'ascii'); huge.writeUInt32BE(16000, 16); huge.writeUInt32BE(16000, 20)
+      const hugePath = join(artifacts, `huge-header-${runId}.png`); await writeFile(hugePath, huge)
+      const hugeResult = await execute([compare(hugePath)])
+      assert.equal(hugeResult.status, 'failed', JSON.stringify(hugeResult)); assert.match(hugeResult.steps[0].reason, /baseline is 16000×16000 pixels.*Nothing is rescaled/)
+      assert.ok(hugeResult.steps[0].durationMs < 1000, `refused before decoding (${hugeResult.steps[0].durationMs} ms)`)
       await assert.rejects(execute([compare(join(artifacts, 'missing-baseline.png'))]), /does not exist/)
       await assert.rejects(execute([compare(join(artifacts, 'missing-baseline.png'))], true), /does not exist/)
       await writeFile(join(artifacts, `compare-${runId}.json`), JSON.stringify(compareResults, null, 2))

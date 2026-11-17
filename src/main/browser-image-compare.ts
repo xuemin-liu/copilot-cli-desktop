@@ -21,6 +21,21 @@ export interface ImageComparison {
   mask: Uint8Array
 }
 
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/**
+ * A PNG's pixel size from its header, without decoding it: the signature, then the IHDR chunk, which must come first
+ * (length 13, type "IHDR", width and height as big-endian 32-bit integers). Null for anything else. The file limit is on
+ * compressed bytes, so a small file can describe a huge bitmap; reading the size first keeps it from ever being decoded.
+ */
+export function pngSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes.length < 24 || PNG_SIGNATURE.some((value, index) => bytes[index] !== value)) return null
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (view.getUint32(8) !== 13 || String.fromCharCode(...bytes.subarray(12, 16)) !== 'IHDR') return null
+  const width = view.getUint32(16), height = view.getUint32(20)
+  return width > 0 && height > 0 ? { width, height } : null
+}
+
 /** Image-pixel rectangles from CSS-pixel ones relative to the compared area, rounded outwards and clipped. */
 export function ignorePixels(ignore: readonly PixelRectangle[], size: Size, scale: { x: number; y: number }): PixelRectangle[] {
   const out: PixelRectangle[] = []

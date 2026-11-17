@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { compareBitmaps, diffBitmap, ignorePixels } from './browser-image-compare.js'
+import { compareBitmaps, diffBitmap, ignorePixels, pngSize } from './browser-image-compare.js'
 
 const size = { width: 4, height: 3 }
 const solid = (value: number): Buffer => Buffer.alloc(size.width * size.height * 4, value)
@@ -55,4 +55,22 @@ test('the diff image marks differing pixels red in the platform byte order and f
     assert.ok(faded[0] === faded[1] && faded[1] === faded[2] && faded[0]! > 160, 'matching pixels are light grey')
     assert.ok(pixel(0, 0)[0]! < 40, 'ignored pixels are dark')
   }
+})
+
+test('a PNG size is read from its header without decoding, and anything else is refused', () => {
+  const header = (width: number, height: number, type = 'IHDR', length = 13): Buffer => {
+    const bytes = Buffer.alloc(33)
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes)
+    bytes.writeUInt32BE(length, 8); bytes.write(type, 12, 'ascii'); bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20)
+    return bytes
+  }
+  assert.deepEqual(pngSize(header(23000, 23000)), { width: 23000, height: 23000 }, 'a huge image is measured from 33 bytes')
+  assert.deepEqual(pngSize(header(300, 213).subarray(0, 24)), { width: 300, height: 213 })
+  for (const bytes of [header(0, 10), header(10, 10, 'IDAT'), header(10, 10, 'IHDR', 12), Buffer.from('not a png at all, just text bytes'), header(10, 10).subarray(0, 20)]) {
+    assert.equal(pngSize(bytes), null)
+  }
+  const jpeg = header(10, 10); jpeg[0] = 0xff
+  assert.equal(pngSize(jpeg), null)
+  const offset = Buffer.concat([Buffer.alloc(5), header(64, 32)]).subarray(5)
+  assert.deepEqual(pngSize(offset), { width: 64, height: 32 }, 'works on a view into a larger buffer')
 })

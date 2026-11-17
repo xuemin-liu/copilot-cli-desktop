@@ -1,6 +1,6 @@
 import { deflateSync, crc32 } from 'node:zlib'
 import { nativeImage } from 'electron'
-import { compareBitmaps, diffBitmap, ignorePixels, type PixelRectangle } from './browser-image-compare.js'
+import { compareBitmaps, diffBitmap, ignorePixels, pngSize, type PixelRectangle } from './browser-image-compare.js'
 import type { BrowserTestReport, BrowserTestStep } from './browser-test-plan.js'
 import type { TestObservation } from './browser-test-runner.js'
 
@@ -39,15 +39,19 @@ export function compareCapture(step: BrowserTestStep, capture: Capture): TestObs
   const size = actual.getSize()
   const scale = { x: size.width / area.width, y: size.height / area.height }
   const baselineBytes = Buffer.from(step.baselineImage!, 'base64')
-  const reference = baselineBytes.subarray(0, 8).equals(PNG_SIGNATURE) ? nativeImage.createFromBuffer(baselineBytes) : null
   const summary = { baseline: step.baseline, width: size.width, height: size.height, cssWidth: round(area.width, 2), cssHeight: round(area.height, 2),
     scale: round(scale.x, 4) }
-  if (!reference || reference.isEmpty()) return { passed: false, reason: 'The baseline file is not a PNG image that can be read.', data: { comparison: summary }, screenshots: [kept] }
-  const expected = reference.getSize()
+  const unreadable: TestObservation = { passed: false, reason: 'The baseline file is not a PNG image that can be read.', data: { comparison: summary }, screenshots: [kept] }
+  // The size comes from the header, so only a reference the size of the capture is ever decoded.
+  const expected = pngSize(baselineBytes)
+  if (!expected) return unreadable
   if (expected.width !== size.width || expected.height !== size.height) {
     return { passed: false, data: { comparison: { ...summary, baselineWidth: expected.width, baselineHeight: expected.height } }, screenshots: [kept],
       reason: `The baseline is ${expected.width}×${expected.height} pixels but the capture is ${size.width}×${size.height} pixels (${summary.cssWidth}×${summary.cssHeight} CSS pixels at scale ${summary.scale}). Nothing is rescaled: recreate the baseline from a capture of the same area at the same browser zoom and display scaling.` }
   }
+  const reference = nativeImage.createFromBuffer(baselineBytes)
+  const decoded = reference.getSize()
+  if (reference.isEmpty() || decoded.width !== size.width || decoded.height !== size.height) return unreadable
   const channel = step.imageTolerance?.channel ?? 0
   const maxDiffRatio = step.imageTolerance?.maxDiffRatio ?? 0
   const bitmap = actual.toBitmap()
