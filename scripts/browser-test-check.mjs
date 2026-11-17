@@ -557,7 +557,8 @@ if (!process.versions.electron) {
       assert.ok(flood.steps.slice(broken + 1).every(item => item.status === 'skipped')); assert.equal(writes, 0)
       assert.equal(flood.evidence.capture.consoleComplete, true)
       const frame = await execute([step('click', 'Frame error', { selector: '#frame-error' }), visible('#log-ready')], false, { failOnConsoleError: true })
-      const frameObserved = frame.status === 'failed' && /error inside the frame/.test(frame.steps[0].reason)
+      // Console messages arrive asynchronously: the error fails the click or the step after it.
+      const frameObserved = frame.status === 'failed' && frame.steps.some(item => item.status === 'failed' && /error inside the frame/.test(item.reason ?? ''))
       assert.ok(frameObserved, `the latch sees a same-origin frame's console error: ${JSON.stringify(frame)}`)
       browser.action('record-console:off')
       try {
