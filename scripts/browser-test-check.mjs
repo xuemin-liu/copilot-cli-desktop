@@ -658,6 +658,63 @@ if (!process.versions.electron) {
         await writeFile(join(artifacts, `visual-stable-${runId}.json`), JSON.stringify(visualResults, null, 2))
         await browser.view.webContents.executeJavaScript('window.vsFixture.stop();document.querySelector("#vs-fixture").remove();for (const child of document.querySelectorAll("[data-vs-hidden]")) { child.style.display = child.getAttribute("data-vs-hidden"); child.removeAttribute("data-vs-hidden") }')
       }
+      // measure and metrics: a study that renders 500 ms after it is opened, a cine loop logging 20 frames a second, and a leak.
+      {
+        await browser.view.webContents.executeJavaScript(`(${function () {
+          document.querySelector('#timing-fixture')?.remove()
+          const fixture = document.createElement('div'); fixture.id = 'timing-fixture'
+          fixture.style.cssText = 'position:fixed;left:0;top:0;width:400px;height:60px;z-index:3000;background:#fff'
+          fixture.innerHTML = '<button id="open-study">Open study</button><button id="play-cine">Play</button><button id="stop-cine">Stop</button><button id="leak">Leak</button><button id="garbage">Garbage</button><div id="timing-view" data-render="idle"></div>'
+          document.body.append(fixture)
+          const view = fixture.querySelector('#timing-view')
+          window.timingFixture = { cine: 0, retained: [] }
+          fixture.querySelector('#open-study').onclick = () => { view.dataset.render = 'loading'; console.log('study requested'); setTimeout(() => { view.dataset.render = 'done'; console.log('study rendered') }, 500) }
+          fixture.querySelector('#play-cine').onclick = () => { let frame = 0; clearInterval(window.timingFixture.cine); window.timingFixture.cine = setInterval(() => console.debug('frame shown ' + ++frame), 50) }
+          fixture.querySelector('#stop-cine').onclick = () => clearInterval(window.timingFixture.cine)
+          // Retains tens of MB of JavaScript objects and 3000 nodes, as a viewer that never frees a closed study would. Typed
+          // arrays would not do: their memory lives outside the JavaScript heap that the reading counts.
+          fixture.querySelector('#leak').onclick = () => { const holder = document.createElement('div'); for (let i = 0; i < 3000; i++) holder.append(document.createElement('span')); window.timingFixture.retained.push(holder, Array.from({ length: 600000 }, (_, i) => ({ i, label: 'slice ' + i }))) }
+          fixture.querySelector('#garbage').onclick = () => { window.timingFixture.sum = Array.from({ length: 600000 }, (_, i) => ({ i, label: 'slice ' + i })).length }
+          return true
+        }.toString()})()`)
+        const rendered = { selector: '#timing-view', condition: 'attribute', attribute: 'data-render', expected: 'done' }
+        const open = step('click', 'Open the study', { selector: '#open-study' })
+        const timing = await execute([open, step('measure', 'First image', { name: 'first image', from: { step: 1 }, to: rendered, maxMs: 3000 }),
+          step('click', 'Open again', { selector: '#open-study' }),
+          step('measure', 'Render log', { name: 'rendered log', from: { step: 3 }, to: { condition: 'consoleMessage', expected: 'study rendered' } }),
+          step('measure', 'Request to render', { name: 'request to render', from: { consoleMessage: 'study requested' }, to: { condition: 'consoleMessage', expected: 'study rendered' } })], true)
+        assert.equal(timing.status, 'passed', JSON.stringify(timing))
+        const [first, logged, logs] = timing.measurements
+        assert.ok(first.ms >= 450 && first.ms <= 1500 && first.atLeastMs <= first.ms && first.ms - first.atLeastMs <= 400, JSON.stringify(first))
+        assert.ok(logged.ms >= 450 && logged.ms <= 1000 && logged.atLeastMs === logged.ms, JSON.stringify(logged))
+        assert.ok(logs.ms >= 450 && logs.ms <= 800, `from the first request to the first render log (${JSON.stringify(logs)})`)
+        assert.deepEqual(timing.steps.map(item => item.outcome), ['delivered', 'assertion-passed', 'delivered', 'observed', 'observed'])
+        const tooSlow = await execute([open, step('measure', 'First image', { name: 'first image', from: { step: 1 }, to: rendered, maxMs: 200 }), step('click', 'Must not run', { selector: '#write' })])
+        assert.equal(tooSlow.status, 'failed', JSON.stringify(tooSlow)); assert.match(tooSlow.steps[1].reason, /^first image took \d+ ms.*the limit is 200 ms/)
+        assert.equal(tooSlow.steps[1].outcome, 'assertion-failed'); assert.equal(tooSlow.steps[2].status, 'skipped'); assert.equal(writes, 0)
+        await browser.view.webContents.executeJavaScript('document.querySelector("#timing-view").dataset.render="idle"')
+        const never = await execute([step('click', 'Stop', { selector: '#stop-cine' }), step('measure', 'Never', { name: 'never', from: { step: 1 }, to: rendered, timeoutMs: 600 }), visible('#timing-view')])
+        assert.equal(never.status, 'failed', JSON.stringify(never)); assert.equal(never.measurements[0].timedOut, true)
+        // Rate: about 20 frames a second.
+        const cine = await execute([step('click', 'Play', { selector: '#play-cine' }),
+          step('measure', 'Cine rate', { name: 'cine', rateOf: { consoleMessage: 'frame shown *', level: 'debug' }, windowMs: 2000, minPerSecond: 15, maxPerSecond: 25 }),
+          step('click', 'Stop', { selector: '#stop-cine' })])
+        assert.equal(cine.status, 'passed', JSON.stringify(cine))
+        assert.ok(cine.measurements[0].count >= 30 && cine.measurements[0].count <= 50, JSON.stringify(cine.measurements[0]))
+        const slowCine = await execute([step('click', 'Play', { selector: '#play-cine' }), step('measure', 'Cine rate', { name: 'cine', rateOf: { consoleMessage: 'frame shown *' }, windowMs: 1000, minPerSecond: 40 })])
+        await browser.view.webContents.executeJavaScript('clearInterval(window.timingFixture.cine)')
+        assert.equal(slowCine.status, 'failed', JSON.stringify(slowCine)); assert.match(slowCine.steps[1].reason, /per second; expected at least 40 per second/)
+        // Memory: garbage is collected away; a retained allocation fails the growth limit.
+        const clean = await execute([step('metrics', 'Before'), step('click', 'Make garbage', { selector: '#garbage' }), step('metrics', 'After', { since: 1, maxHeapGrowthMb: 10, maxNodeGrowth: 200 })])
+        assert.equal(clean.status, 'passed', JSON.stringify(clean))
+        assert.ok(clean.measurements[0].jsHeapUsedMb > 0 && clean.measurements[0].nodes > 0, JSON.stringify(clean.measurements[0]))
+        const leaked = await execute([step('metrics', 'Before'), step('click', 'Leak', { selector: '#leak' }), step('metrics', 'After', { since: 1, maxHeapGrowthMb: 10, maxNodeGrowth: 200 })])
+        assert.equal(leaked.status, 'failed', JSON.stringify(leaked))
+        assert.match(leaked.steps[2].reason, /heap grew by \d+(\.\d+)? MB, more than 10 MB and the DOM grew by \d+ nodes, more than 200/)
+        assert.ok(leaked.measurements[1].growth.heapMb >= 15 && leaked.measurements[1].growth.nodes >= 3000, JSON.stringify(leaked.measurements[1]))
+        await writeFile(join(artifacts, `timing-${runId}.json`), JSON.stringify({ timing: timing.measurements, cine: cine.measurements, clean: clean.measurements, leaked: leaked.measurements }, null, 2))
+        await browser.view.webContents.executeJavaScript('clearInterval(window.timingFixture.cine);window.timingFixture.retained=[];document.querySelector("#timing-fixture").remove()')
+      }
       // Geometry phases: a target that keeps moving before the press, one that moves on
       // mousedown, and one that moves between double-click presses. Each fails with the
       // phase it was observed in, and none delivers the click it was supposed to.
@@ -969,7 +1026,7 @@ if (!process.versions.electron) {
       await until(() => receivedValues.includes('user-test-input'), 'new test binds to the newly selected site')
       assert.ok(!receivedValues.includes('unrelated-env-secret-value-123'))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, workflow: true, nativeInput: true, nativeDoubleClick: true,
-        screenshots: true, screenshotComparison: true, visualStable: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
+        screenshots: true, screenshotComparison: true, visualStable: true, measurements: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
         disconnect: true, sameOriginFrame: true, crossOriginFrame: true, isolation: true, authentication: true, noPerStepApproval: approvals === 0,
         unicode: true, hover: true, openShadowRoot: true, contentEditable: true, navigationCancellation: true, hiddenCancellation: true,
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,

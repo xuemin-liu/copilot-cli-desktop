@@ -13,13 +13,15 @@ export interface ConsoleSource {
 export interface ConsoleErrorRecord { message: string; source: string; line: number; count: number }
 
 const STEP_ENTRIES = 10
+/** Arrival times kept per timed pattern; later matches are only counted. */
+const TIMES_KEPT = 5000
 const MESSAGE_CHARS = 500
 const PENDING_ERRORS = 20
 
 /** One run's view of the test page's console. It listens to every message as it arrives, so the
  * error latch and consoleMessage matches do not depend on what the bounded buffer still holds. */
 export class TestConsoleWatch {
-  private readonly patterns = new Map<string, { pattern: string; level?: ConsoleLevel; matched: boolean }>()
+  private readonly patterns = new Map<string, { pattern: string; level?: ConsoleLevel; matched: boolean; times?: number[] }>()
   private readonly ignore: string[]
   private pending: ConsoleErrorRecord[] = []
   private overflow = 0
@@ -29,15 +31,31 @@ export class TestConsoleWatch {
   private readonly bound: (text: string, max: number) => string
 
   constructor(plan: BrowserTestPlan, private readonly pageId: number, private readonly source: ConsoleSource) {
-    for (const step of plan.steps) for (const condition of [step, ...step.all ?? []] as BrowserTestStep[]) {
-      if (condition.condition === 'consoleMessage') this.patterns.set(key(String(condition.expected), condition.level), { pattern: String(condition.expected), ...(condition.level ? { level: condition.level } : {}), matched: false })
+    const add = (pattern: string, level: ConsoleLevel | undefined, timed: boolean): void => {
+      const entry = this.patterns.get(key(pattern, level)) ?? { pattern, ...(level ? { level } : {}), matched: false }
+      if (timed) entry.times ??= []
+      this.patterns.set(key(pattern, level), entry)
+    }
+    for (const step of plan.steps) {
+      for (const condition of [step, ...step.all ?? []] as BrowserTestStep[]) if (condition.condition === 'consoleMessage') add(String(condition.expected), condition.level, false)
+      // A measure times its console events by when each message arrived.
+      if (step.action === 'measure') {
+        if (step.from?.consoleMessage !== undefined) add(step.from.consoleMessage, step.from.level, true)
+        if (step.to?.condition === 'consoleMessage') add(String(step.to.expected), step.to.level, true)
+        if (step.rateOf) add(step.rateOf.consoleMessage, step.rateOf.level, true)
+      }
     }
     const inputs = testInputs(plan)
     this.bound = (text, max) => String(redactBrowserValue(redactInputs(text, inputs)).value).slice(0, max)
     this.ignore = plan.failOnConsoleError ? plan.consoleErrorIgnore ?? [] : []
     const latch = plan.failOnConsoleError === true
     this.stop = source.watch(pageId, message => {
-      for (const entry of this.patterns.values()) if (!entry.matched && (!entry.level || entry.level === message.level) && globMatches(entry.pattern, message.message)) entry.matched = true
+      const now = Date.now()
+      for (const entry of this.patterns.values()) {
+        if ((entry.matched && !entry.times) || (entry.level && entry.level !== message.level) || !globMatches(entry.pattern, message.message)) continue
+        entry.matched = true
+        if (entry.times && entry.times.length < TIMES_KEPT) entry.times.push(now)
+      }
       if (!latch || message.level !== 'error' || this.ignore.some(pattern => globMatches(pattern, message.message))) return
       const text = this.bound(message.message, MESSAGE_CHARS); const source = this.bound(message.source, 500)
       const last = this.pending.at(-1)
@@ -62,6 +80,9 @@ export class TestConsoleWatch {
     this.pending = []; this.overflow = 0
     return result
   }
+
+  /** When matching messages arrived since the run started, for a pattern a measure step times. */
+  arrivals(pattern: string, level?: ConsoleLevel): number[] { return this.patterns.get(key(pattern, level))?.times ?? [] }
 
   /** Whether a message matching the pattern (and level) has arrived since the run started. */
   matched(pattern: string, level?: ConsoleLevel): boolean { return this.patterns.get(key(pattern, level))?.matched ?? false }

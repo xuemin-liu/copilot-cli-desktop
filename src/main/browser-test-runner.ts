@@ -7,6 +7,12 @@ export interface TestObservation { passed: boolean; delivery?: TestDelivery; rea
   /** Evidence images kept whether the step passes or fails, such as a comparison's capture and diff. */
   screenshots?: BrowserTestReport['screenshots'] }
 /** The plan's fill and select values, longest first. */
+/** Steps whose outcome is an assertion: assert, compareScreenshot, and measure or metrics steps with a limit. */
+export function assertionStep(step: BrowserTestStep): boolean {
+  return step.action === 'assert' || step.action === 'compareScreenshot'
+    || step.action === 'measure' && (step.maxMs !== undefined || step.minPerSecond !== undefined || step.maxPerSecond !== undefined)
+    || step.action === 'metrics' && (step.maxHeapGrowthMb !== undefined || step.maxNodeGrowth !== undefined)
+}
 export function testInputs(plan: BrowserTestPlan): string[] {
   return plan.steps.filter(step => step.action === 'fill' || step.action === 'select').map(step => step.value!).filter(Boolean).sort((a, b) => b.length - a.length)
 }
@@ -74,6 +80,11 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
     if (taken?.errors.length) latched = latched ? { errors: [...latched.errors, ...taken.errors].slice(0, 20), more: latched.more + taken.more } : taken
     return latched !== null
   }
+  // Measurements and metrics readings are also gathered in one list, pass or fail.
+  const measured = (result: TestObservation | undefined): void => {
+    const value = result?.data?.measurement ?? result?.data?.metrics
+    if (value) (report.measurements ??= []).push(clean({ step: report.steps.length + 1, ...(result!.data!.metrics ? { kind: 'metrics' } : {}), ...value as Record<string, unknown> }))
+  }
   const stepConsole = (after: number | undefined): { console?: TestStepConsole } => {
     if (after === undefined || !executor.console) return {}
     const slice = executor.console.slice(after)
@@ -115,8 +126,9 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
         if (result.screenshot) report.screenshots.push({ ...result.screenshot, step: index + 1 })
         for (const image of result.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
         imagesKept = true
-        const observation = ['discover', 'screenshot', 'waitFor'].includes(step.action)
-        const assertion = step.action === 'assert' || step.action === 'compareScreenshot'
+        measured(result)
+        const observation = ['discover', 'screenshot', 'waitFor', 'measure', 'metrics'].includes(step.action)
+        const assertion = assertionStep(step)
         report.steps.push({ id, action: step.action, label, status: 'passed', outcome: assertion ? 'assertion-passed' : observation ? 'observed' : 'delivered',
           delivery: result.delivery ?? 'not-attempted', durationMs: Date.now() - stepStart,
           ...(result.detail ? { detail: safe(result.detail) } : {}), ...(result.data ? { data: clean(result.data) } : {}), ...stepConsole(consoleStart) })
@@ -124,10 +136,10 @@ export async function runBrowserTest(plan: BrowserTestPlan, pageId: number, exec
       } catch (error) {
         report.status = expired.signal.aborted ? 'failed' : signal.aborted || !executor.active() ? 'cancelled' : 'failed'
         // A failed comparison keeps its capture and diff: they are the evidence of what differed.
-        if (!imagesKept) for (const image of result?.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 })
+        if (!imagesKept) { for (const image of result?.screenshots ?? []) report.screenshots.push({ ...image, step: index + 1 }); measured(result) }
         const failure = { delivery: result?.delivery, data: result?.data, ...error as { delivery?: TestDelivery; data?: Record<string, unknown> } }
         report.steps.push({ id, action: step.action, label, status: 'failed',
-          outcome: failure.delivery === 'uncertain' ? 'uncertain' : report.status === 'cancelled' ? 'cancelled' : step.action === 'assert' || step.action === 'compareScreenshot' ? 'assertion-failed' : 'failed',
+          outcome: failure.delivery === 'uncertain' ? 'uncertain' : report.status === 'cancelled' ? 'cancelled' : assertionStep(step) ? 'assertion-failed' : 'failed',
           delivery: failure.delivery ?? 'not-attempted', ...(failure.data ? { data: clean(failure.data) } : {}), durationMs: Date.now() - stepStart,
           reason: safe(expired.signal.aborted ? 'Test timed out.' : error instanceof Error ? error.message : 'Step failed.'), ...stepConsole(consoleStart) })
         for (const [offset, skipped] of plan.steps.slice(index + 1).entries()) report.steps.push({ id: `${report.runId}:${index + offset + 2}`, action: skipped.action, label: safe(skipped.label), status: 'skipped', outcome: 'skipped', delivery: 'not-attempted', durationMs: 0 })
