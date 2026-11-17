@@ -549,7 +549,7 @@ Every condition must hold in the same polling pass; observations across frames a
 sequential, not an atomic application snapshot. Additional conditions are `enabled`,
 `attribute` (public `data-*`, `aria-*`, `role`, `title`, `class`),
 `numericValue` (`expected` number, optional nonnegative `tolerance`, default zero)
-and `stable`. An application can publish its own state in `data-*` attributes
+`stable` and `visualStable`. An application can publish its own state in `data-*` attributes
 (for example `data-grp="g"` on a link-group chip) and the plan can wait on or
 assert it directly, instead of encoding the value in a CSS selector.
 
@@ -564,6 +564,35 @@ settles:
 ```json
 { "action": "waitFor", "selector": "#tool-link", "condition": "stable", "stableMs": 300 }
 ```
+
+`visualStable` waits until the *pixels* of one top-frame element, or of a viewport
+`region`, stop changing. `stable` only watches an element's position and size, which
+stay the same while a viewer refines its image inside a canvas: low resolution first,
+then full resolution as slices and tiles arrive. Use `visualStable` before a
+comparison or a screenshot when the app has no ready signal of its own.
+
+```json
+{ "action": "waitFor", "selector": "#viewport-1", "condition": "visualStable",
+  "stableMs": 750, "imageTolerance": { "channel": 4, "maxDiffRatio": 0.001 }, "timeoutMs": 20000 }
+```
+
+- On each of the runner's polls (about every 150 ms plus the capture) the area is
+  captured the same way test screenshots are, with canvases included and masks
+  applied, and compared with the previous capture.
+- It passes once the area has stayed within `imageTolerance` for `stableMs` (100–10000,
+  default 750), which must be shorter than the step's timeout. `imageTolerance` and
+  `ignore` work as for `compareScreenshot`; the defaults allow no change at all.
+- The window starts again when the element is replaced, moves or is resized, when the
+  capture size changes, or when a capture is unavailable (for example while the page
+  is hidden). It takes no `frame`.
+- `data.visualStable` reports the window, the number of captures, how long the area
+  was unchanged, and the last change seen (its pixels, ratio and bounds in CSS pixels).
+  On a timeout the reason names the last change and the longest still stretch.
+- Only the latest capture is kept, and only for the current step.
+- A page that keeps animating inside the area, such as a playing cine loop or a
+  spinner, never settles: stop the animation first, or `ignore` the spinner. An
+  animation that returns to exactly the same pixels between two captures can look
+  still, because captures are a few hundred milliseconds apart.
 Numeric checks read visible field values or numeric element text without exporting
 the value. Content assertions (`numericValue`, `value`, `text`, `attribute`) refuse
 private regions, aggregates containing private content, password fields, and

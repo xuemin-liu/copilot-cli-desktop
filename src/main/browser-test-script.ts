@@ -221,6 +221,18 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       return { x: r.x, y: r.y, width: r.width, height: r.height }
     }
     if (operation === 'probe') {
+      if (args.condition === 'visualStable') {
+        // The desktop compares the pixels; the page only says where the element is and whether it is still the same one.
+        const scope = globalThis as typeof globalThis & { __desktopTestVisual?: { scope: string; elements: Map<string, Element> } }
+        let state = scope.__desktopTestVisual
+        if (!state || state.scope !== args.stableScope) state = scope.__desktopTestVisual = { scope: String(args.stableScope), elements: new Map() }
+        const key = String(args.stableKey)
+        if (matches.length !== 1) { state.elements.delete(key); return { count: matches.length } }
+        const replaced = state.elements.has(key) && state.elements.get(key) !== matches[0]
+        state.elements.set(key, matches[0]!)
+        const r = matches[0]!.getBoundingClientRect()
+        return { count: 1, replaced, bounds: { x: r.x, y: r.y, width: r.width, height: r.height } }
+      }
       if (args.condition === 'hidden') return { passed: matches.length === 0 }
       if (args.condition === 'count') return { passed: matches.length === args.expected }
       if (args.condition === 'stable') {

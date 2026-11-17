@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { compareBitmaps, diffBitmap, ignorePixels, pngSize } from './browser-image-compare.js'
+import { compareBitmaps, diffBitmap, everyPixelIgnored, ignorePixels, pngSize } from './browser-image-compare.js'
 
 const size = { width: 4, height: 3 }
 const solid = (value: number): Buffer => Buffer.alloc(size.width * size.height * 4, value)
@@ -73,4 +73,13 @@ test('a PNG size is read from its header without decoding, and anything else is 
   assert.equal(pngSize(jpeg), null)
   const offset = Buffer.concat([Buffer.alloc(5), header(64, 32)]).subarray(5)
   assert.deepEqual(pngSize(offset), { width: 64, height: 32 }, 'works on a view into a larger buffer')
+})
+
+test('an area is fully ignored only when the rectangles together cover every pixel', () => {
+  const area = { width: 4, height: 3 }
+  assert.equal(everyPixelIgnored([], area), false)
+  assert.equal(everyPixelIgnored([{ x: 0, y: 0, width: 4, height: 3 }], area), true)
+  assert.equal(everyPixelIgnored([{ x: 0, y: 0, width: 2, height: 3 }, { x: 2, y: 0, width: 2, height: 3 }], area), true, 'two halves cover it')
+  assert.equal(everyPixelIgnored([{ x: 0, y: 0, width: 4, height: 2 }, { x: 0, y: 1, width: 3, height: 2 }], area), false, 'one corner pixel is left')
+  assert.equal(everyPixelIgnored(ignorePixels([{ x: 0, y: 0, width: 5000, height: 5000 }], area, { x: 1.25, y: 1.25 }), area), true, 'an oversized rectangle is clipped to the area')
 })

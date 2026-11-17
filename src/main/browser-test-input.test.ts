@@ -105,3 +105,22 @@ test('baseline paths are local absolute .png paths, and off Windows hold no quot
   }
   assert.equal(reservedTestImages([{ action: 'screenshot' }, { action: 'compareScreenshot' }, { action: 'click' }]), 3)
 })
+
+test('visualStable waits on one top-frame element or a region, with an image tolerance and a window shorter than the timeout', () => {
+  const settle = { action: 'waitFor', selector: '#viewport-1', condition: 'visualStable' }
+  assert.ok(plan([settle, assertion]))
+  assert.ok(plan([{ ...settle, stableMs: 10000, timeoutMs: 20000, imageTolerance: { channel: 4, maxDiffRatio: 0.001 }, ignore: [{ x: 0, y: 0, width: 40, height: 20 }] }, assertion]))
+  assert.ok(plan([{ action: 'waitFor', condition: 'visualStable', region: { x: 0, y: 0, width: 300, height: 200 } }, assertion]))
+  assert.ok(plan([{ action: 'assert', selector: '#viewport-1', text: 'Axial', condition: 'visualStable', timeoutMs: 3000 }]))
+  assert.ok(plan([{ action: 'waitFor', all: [{ selector: '#loading', condition: 'hidden' }, { selector: '#viewport-1', condition: 'visualStable', stableMs: 300 }] }, assertion]))
+  for (const extra of [{ stableMs: 99 }, { stableMs: 10001 }, { stableMs: 5000, timeoutMs: 5000 }, { frame: 'f1' }, { selector: undefined },
+    { region: { x: 0, y: 0, width: 10, height: 10 } }, { expected: 'x' }, { tolerance: 1 }, { imageTolerance: { channel: 300 } }, { ignore: [] }, { baseline: 'C:/a.png' }]) {
+    assert.throws(() => plan([{ ...settle, ...extra }, assertion]), /Invalid browser test/, JSON.stringify(extra))
+  }
+  assert.throws(() => plan([{ action: 'waitFor', all: [{ selector: '#a', condition: 'visualStable', stableMs: 2000 }], timeoutMs: 2000 }, assertion]), /shorter than the step timeout/)
+  for (const condition of ['visible', 'stable', 'text']) {
+    assert.throws(() => plan([{ action: 'waitFor', selector: '#a', condition, expected: condition === 'text' ? 'x' : undefined, region: { x: 0, y: 0, width: 5, height: 5 } }, assertion]), /visualStable/)
+    assert.throws(() => plan([{ action: 'waitFor', selector: '#a', condition, expected: condition === 'text' ? 'x' : undefined, imageTolerance: { channel: 1 } }, assertion]), /visualStable/)
+  }
+  assert.throws(() => plan([{ action: 'waitFor', selector: '#a', condition: 'stable', stableMs: 6000, timeoutMs: 10000 }, assertion]), /5000/, 'stable keeps its own window limit')
+})

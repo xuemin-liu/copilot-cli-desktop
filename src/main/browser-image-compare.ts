@@ -49,6 +49,14 @@ export function ignorePixels(ignore: readonly PixelRectangle[], size: Size, scal
   return out
 }
 
+/** Whether the ignore rectangles (in image pixels, as ignorePixels returns them) cover every pixel of the image. */
+export function everyPixelIgnored(ignore: readonly PixelRectangle[], size: Size): boolean {
+  if (!ignore.length) return false
+  const covered = new Uint8Array(size.width * size.height)
+  for (const rect of ignore) for (let y = rect.y; y < rect.y + rect.height; y++) covered.fill(1, y * size.width + rect.x, y * size.width + rect.x + rect.width)
+  return covered.every(Boolean)
+}
+
 /** Compares two same-size 32-bit bitmaps. Alpha counts as a channel, so a transparent pixel never matches an opaque one. */
 export function compareBitmaps(actual: Buffer, baseline: Buffer, size: Size, channel: number, ignore: readonly PixelRectangle[] = []): ImageComparison {
   const pixels = size.width * size.height

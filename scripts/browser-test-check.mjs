@@ -564,6 +564,100 @@ if (!process.versions.electron) {
       await writeFile(join(artifacts, `compare-${runId}.json`), JSON.stringify(compareResults, null, 2))
       await browser.view.webContents.executeJavaScript('document.querySelector("#cmp-fixture").remove();for (const child of document.querySelectorAll("[data-cmp-hidden]")) { child.style.display = child.getAttribute("data-cmp-hidden"); child.removeAttribute("data-cmp-hidden") }')
       }
+      // visualStable: a viewer cell that refines in timed passes, one that never settles, and one replaced mid-wait.
+      {
+        const visualSetup = mode => `(${function (mode) {
+          window.vsFixture?.stop?.()
+          document.querySelector('#vs-fixture')?.remove()
+          for (const child of document.body.children) if (!child.hasAttribute('data-vs-hidden')) { child.setAttribute('data-vs-hidden', child.style.display); child.style.display = 'none' }
+          const fixture = document.createElement('div'); fixture.id = 'vs-fixture'
+          fixture.style.cssText = 'position:fixed;left:0;top:0;width:260px;height:180px;z-index:3000;background:#102030'
+          fixture.innerHTML = '<div id="vs-cell" style="width:240px;height:160px"><canvas width="240" height="160" style="display:block"></canvas></div><span id="vs-corner" style="position:absolute;left:240px;top:0;width:20px;height:20px;background:#000"></span>'
+          document.body.append(fixture)
+          const state = window.vsFixture = { passes: 0, lastAt: 0, replacedAt: 0, timers: [], frame: 0, stop: null }
+          const draw = (canvas, detail) => {
+            const gl = canvas.getContext('webgl', { antialias: false }); gl.enable(gl.SCISSOR_TEST)
+            const size = Math.max(4, 80 >> detail)
+            for (let x = 0; x < 240; x += size) for (let y = 0; y < 160; y += size) {
+              gl.scissor(x, y, size, size); const v = ((x * 7 + y * 13) % 200) / 255; gl.clearColor(v, 0.3, 1 - v, 1); gl.clear(gl.COLOR_BUFFER_BIT)
+            }
+          }
+          const canvas = () => fixture.querySelector('canvas')
+          draw(canvas(), 0)
+          let handle = 0
+          if (mode === 'refine') for (const [index, at] of [300, 600, 900].entries()) state.timers.push(setTimeout(() => { draw(canvas(), index + 1); state.passes = index + 1; state.lastAt = Date.now() }, at))
+          if (mode === 'animate' || mode === 'corner' || mode === 'flicker') {
+            const tick = () => {
+              state.frame++
+              if (mode === 'animate') { const gl = canvas().getContext('webgl'); gl.disable(gl.SCISSOR_TEST); gl.clearColor((state.frame % 50) / 50, 0.2, 0.4, 1); gl.clear(gl.COLOR_BUFFER_BIT) }
+              // Never-repeating changes: an animation that returns to the same pixels between two captures looks still.
+              if (mode === 'corner') { const v = (state.frame * 7) % 256; fixture.querySelector('#vs-corner').style.background = `rgb(${v},${v},${v})` }
+              // A slow ramp of one step per 120 ms: at most 3 per channel between captures up to 360 ms apart.
+              if (mode === 'flicker') { const t = (performance.now() / 120) % 120; const v = Math.floor(100 + (t < 60 ? t : 120 - t)); fixture.querySelector('#vs-corner').style.background = `rgb(${v},${v},${v})` }
+              handle = requestAnimationFrame(tick)
+            }
+            handle = requestAnimationFrame(tick)
+          }
+          if (mode === 'replace') state.timers.push(setTimeout(() => {
+            const old = fixture.querySelector('#vs-cell'); const copy = old.cloneNode(true); old.replaceWith(copy); draw(copy.querySelector('canvas'), 0); state.replacedAt = Date.now()
+          }, 300))
+          state.stop = () => { cancelAnimationFrame(handle); for (const timer of state.timers) clearTimeout(timer) }
+          return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))
+        }.toString()})(${JSON.stringify(mode)})`
+        const fixtureState = () => browser.view.webContents.executeJavaScript('({ passes: window.vsFixture.passes, lastAt: window.vsFixture.lastAt, replacedAt: window.vsFixture.replacedAt })')
+        const settle = (extra = {}) => step('waitFor', 'Viewer image settles', { selector: '#vs-cell', condition: 'visualStable', stableMs: 400, timeoutMs: 8000, ...extra })
+        const stepEnd = report => Date.parse(report.startedAt) + report.steps[0].durationMs
+        const visualResults = {}
+        for (const shell of [false, true]) {
+          await browser.view.webContents.executeJavaScript(visualSetup('refine'))
+          const refined = await execute([settle(), visible('#vs-cell')], shell)
+          assert.equal(refined.status, 'passed', JSON.stringify(refined))
+          const state = await fixtureState()
+          assert.equal(state.passes, 3, 'the wait ends only after the last refinement pass')
+          assert.ok(stepEnd(refined) - state.lastAt >= 350, `the image stayed unchanged for the window after the last pass (${stepEnd(refined) - state.lastAt} ms)`)
+          // A wait that began before the last pass must have seen it change; a slow start can begin after it.
+          if (Date.parse(refined.startedAt) < state.lastAt - 100) assert.equal(refined.steps[0].data.visualStable.lastChange?.kind, 'pixels', JSON.stringify(refined.steps[0].data))
+          visualResults[shell ? 'shellRefine' : 'refine'] = refined.steps[0].data.visualStable
+        }
+        await browser.view.webContents.executeJavaScript(visualSetup('animate'))
+        const animated = await execute([settle({ timeoutMs: 1500 }), step('click', 'Must not run after a failed wait', { selector: '#write' }), visible('#vs-cell')])
+        assert.equal(animated.status, 'failed', JSON.stringify(animated)); assert.equal(animated.steps[1].status, 'skipped'); assert.equal(writes, 0)
+        assert.match(animated.steps[0].reason, /still changing: \d+ pixels .* changed within .*The longest still stretch was \d+ of 400 ms/)
+        assert.ok(animated.steps[0].data.visualStable.longestStillMs < 400, JSON.stringify(animated.steps[0].data))
+        visualResults.animate = animated.steps[0].data.visualStable
+        await browser.view.webContents.executeJavaScript(visualSetup('replace'))
+        const replaced = await execute([settle(), visible('#vs-cell')])
+        assert.equal(replaced.status, 'passed', JSON.stringify(replaced))
+        const replacedState = await fixtureState()
+        assert.ok(replacedState.replacedAt > 0 && stepEnd(replaced) - replacedState.replacedAt >= 350, `a replaced element starts the window again (${stepEnd(replaced) - replacedState.replacedAt} ms)`)
+        // A blinking area outside the target, or ignored inside a region, does not hold up the wait.
+        await browser.view.webContents.executeJavaScript(visualSetup('corner'))
+        const region = { x: 0, y: 0, width: 260, height: 180 }
+        const blinking = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 1500 }), visible('#vs-cell')])
+        assert.equal(blinking.status, 'failed', JSON.stringify(blinking))
+        const cornerIgnored = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 4000, ignore: [{ x: 240, y: 0, width: 20, height: 20 }] }), visible('#vs-cell')])
+        assert.equal(cornerIgnored.status, 'passed', JSON.stringify(cornerIgnored))
+        // Ignoring the whole area observes nothing, so it never counts as still, even while the image keeps changing.
+        await browser.view.webContents.executeJavaScript(visualSetup('animate'))
+        const allIgnored = await execute([settle({ timeoutMs: 1500, ignore: [{ x: 0, y: 0, width: 240, height: 160 }] }), visible('#vs-cell')])
+        assert.equal(allIgnored.status, 'failed', JSON.stringify(allIgnored)); assert.match(allIgnored.steps[0].reason, /Every pixel of the area is inside an ignore rectangle/)
+        const oversized = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 1500, ignore: [{ x: 0, y: 0, width: 5000, height: 5000 }] }), visible('#vs-cell')])
+        assert.equal(oversized.status, 'failed', JSON.stringify(oversized)); assert.match(oversized.steps[0].reason, /nothing is compared/)
+        await browser.view.webContents.executeJavaScript(visualSetup('corner'))
+        assert.equal((await execute([settle({ timeoutMs: 4000 }), visible('#vs-cell')])).status, 'passed', 'the target alone ignores the blinking corner')
+        // A flicker of 2 in each channel fails an exact wait and passes a tolerance of 3.
+        await browser.view.webContents.executeJavaScript(visualSetup('flicker'))
+        const exact = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 1500 }), visible('#vs-cell')])
+        assert.equal(exact.status, 'failed', JSON.stringify(exact))
+        const tolerant = await execute([step('waitFor', 'Region settles', { condition: 'visualStable', region, stableMs: 400, timeoutMs: 4000, imageTolerance: { channel: 3 } }), visible('#vs-cell')])
+        assert.equal(tolerant.status, 'passed', JSON.stringify(tolerant))
+        // Inside all, with another readiness condition.
+        await browser.view.webContents.executeJavaScript(visualSetup('refine'))
+        const combined = await execute([step('waitFor', 'Viewer ready', { all: [{ selector: '#vs-cell', condition: 'visible' }, { selector: '#vs-cell', condition: 'visualStable', stableMs: 400 }], timeoutMs: 8000 }), visible('#vs-cell')])
+        assert.equal(combined.status, 'passed', JSON.stringify(combined)); assert.equal((await fixtureState()).passes, 3)
+        await writeFile(join(artifacts, `visual-stable-${runId}.json`), JSON.stringify(visualResults, null, 2))
+        await browser.view.webContents.executeJavaScript('window.vsFixture.stop();document.querySelector("#vs-fixture").remove();for (const child of document.querySelectorAll("[data-vs-hidden]")) { child.style.display = child.getAttribute("data-vs-hidden"); child.removeAttribute("data-vs-hidden") }')
+      }
       // Geometry phases: a target that keeps moving before the press, one that moves on
       // mousedown, and one that moves between double-click presses. Each fails with the
       // phase it was observed in, and none delivers the click it was supposed to.
@@ -875,7 +969,7 @@ if (!process.versions.electron) {
       await until(() => receivedValues.includes('user-test-input'), 'new test binds to the newly selected site')
       assert.ok(!receivedValues.includes('unrelated-env-secret-value-123'))
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, workflow: true, nativeInput: true, nativeDoubleClick: true,
-        screenshots: true, screenshotComparison: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
+        screenshots: true, screenshotComparison: true, visualStable: true, installedPowerShell: true, failStopsWrites: true, ambiguity: true, coveredTarget: true, cancel: true, tabChange: true,
         disconnect: true, sameOriginFrame: true, crossOriginFrame: true, isolation: true, authentication: true, noPerStepApproval: approvals === 0,
         unicode: true, hover: true, openShadowRoot: true, contentEditable: true, navigationCancellation: true, hiddenCancellation: true,
         targetValuesWithheld: true, frameOverlayStopsWrites: true, replacedTargetStopsWrites: true, changedDocumentStopsWrites: true, hoverReflow: true,
