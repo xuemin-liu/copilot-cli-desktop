@@ -1,4 +1,6 @@
 import { parseSafeHttpUrl } from './external-targets.js'
+import { frameAlias, type FrameSequenceSpec } from './browser-frame-sequence.js'
+import type { TestViewport } from './browser-test-viewport.js'
 
 export const MAX_TEST_BYTES = 128 * 1024
 /** A reference PNG for compareScreenshot, read by the helper's shell and sent with the plan. */
@@ -34,6 +36,12 @@ export interface TestNetworkFailure extends TestRequestMatch {
 }
 /** A slow or offline network for the selected page, for the whole run. Throughputs are in kilobits per second. */
 export interface TestNetworkConditions { latencyMs?: number; downloadKbps?: number; uploadKbps?: number; offline?: boolean }
+/** One bounded scalar from this run, or a public attribute in the same document. */
+export interface TestValueReference {
+  captured?: string; selector?: string; targetRef?: string; attribute?: string
+  op?: 'equal' | 'changed' | 'greater' | 'within'
+  numeric?: boolean
+}
 export interface BrowserTestCondition {
   selector?: string
   targetRef?: string
@@ -43,7 +51,7 @@ export interface BrowserTestCondition {
   /** consoleMessage: only messages of this level. */
   level?: ConsoleLevel
   attribute?: string
-  expected?: string | number | boolean
+  expected?: string | number | boolean | TestValueReference
   /** numericValue: allowed difference. stable: allowed bounds change in CSS pixels (default 0.5). */
   tolerance?: number
   /** stable: how long the bounds must stay unchanged, in milliseconds (default 500). visualStable: how long the pixels must (default 750). */
@@ -60,8 +68,14 @@ export interface BrowserTestCondition {
 /** compareScreenshot: per-channel difference allowed for a pixel to match, and the share of pixels allowed to differ. */
 export interface TestImageTolerance { channel?: number; maxDiffRatio?: number }
 export interface BrowserTestStep extends BrowserTestCondition {
-  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot' | 'compareScreenshot' | 'measure' | 'metrics'
+  action: 'navigate' | 'reload' | 'discover' | 'capture' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot' | 'compareScreenshot' | 'measure' | 'metrics' | 'frameSequence' | 'resizeViewport' | 'networkSummary' | 'sampleMetrics' | 'assertMeasurement'
   label: string
+  sequence?: FrameSequenceSpec
+  viewport?: TestViewport
+  networkMatch?: TestRequestMatch
+  minRequests?: number; maxRequests?: number; maxBytes?: number; minCacheHits?: number; maxFailures?: number
+  samples?: { name: string; attribute: string; unit: string; max?: number; maxGrowth?: number }[]
+  unit?: 'mm' | 'mm2' | 'deg' | 'HU'
   inputSelector?: string
   inputRef?: string
   point?: { x: number; y: number }
@@ -75,6 +89,8 @@ export interface BrowserTestStep extends BrowserTestCondition {
   deltaX?: number
   deltaY?: number
   repeat?: number
+  /** Optional minimum intentional spacing; actual dispatch intervals are reported. */
+  intervalMs?: number
   /** measure: what is measured, as reports name it. */
   name?: string
   /** measure: the start, an earlier step (1-based, its start or end) or the first console message matching a glob. */
@@ -95,6 +111,8 @@ export interface BrowserTestStep extends BrowserTestCondition {
   maxNodeGrowth?: number
   /** compareScreenshot: the reference PNG's local path, as named in the plan. */
   baseline?: string
+  /** Earlier successful screenshot/comparison's actual capture in this run. */
+  baselineStep?: number
   /** compareScreenshot: the reference PNG as base64, attached by the helper that read the file. */
   baselineImage?: string
   /** press: "page" sends the key to whatever has focus, with no target element. */
@@ -113,6 +131,7 @@ export interface BrowserTestStep extends BrowserTestCondition {
 }
 export interface BrowserTestPlan {
   description: string; expected: string; steps: BrowserTestStep[]; timeoutMs?: number
+  viewport?: TestViewport
   allowNetworkFailures?: boolean; networkFailures?: TestNetworkFailure[]; networkConditions?: TestNetworkConditions
   /** Fail the step during which the test page logs a console error, unless it matches an ignore pattern. */
   failOnConsoleError?: boolean
@@ -219,6 +238,17 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (tolerance.maxDiffRatio !== undefined && (typeof tolerance.maxDiffRatio !== 'number' || !Number.isFinite(tolerance.maxDiffRatio) || tolerance.maxDiffRatio < 0 || tolerance.maxDiffRatio > 1)) fail('imageTolerance.maxDiffRatio must be within 0–1.')
     }
   }
+  const captures = new Set<string>()
+  const viewport = (raw: unknown): void => {
+    const v = object(raw); fields(v, ['width', 'height', 'dpr'])
+    if (![v.width, v.height].every(x => typeof x === 'number' && Number.isInteger(x) && x >= 64 && x <= 1600)
+      || typeof v.dpr !== 'number' || !Number.isFinite(v.dpr) || v.dpr < 0.5 || v.dpr > 3
+      || !Number.isInteger(Number(v.width) * v.dpr) || !Number.isInteger(Number(v.height) * v.dpr)
+      || Number(v.width) * v.dpr > 1600 || Number(v.height) * v.dpr > 3200 || Number(v.width) * Number(v.height) * v.dpr ** 2 > 4_000_000) fail('viewport needs integer CSS dimensions 64–1600 and DPR 0.5–3; integral bitmap dimensions at most 1600×3200 and four million pixels.')
+  }
+  const attribute = (v: unknown): void => {
+    if (typeof v !== 'string' || !/^(data-[a-z0-9][a-z0-9-]{0,63}|aria-[a-z-]{1,64}|role|title|class)$/.test(v)) fail('use a public data-*, aria-*, role, title or class attribute.')
+  }
   const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request', 'region', 'ignore', 'imageTolerance']
   const condition = (v: Record<string, unknown>): void => {
     if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage', 'visualStable'].includes(String(v.condition))) fail('unsupported condition.')
@@ -243,22 +273,36 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (!['finished', 'failed'].includes(String(request.state))) fail('request state must be finished or failed.')
       if (request.status !== undefined && (typeof request.status !== 'number' || !Number.isInteger(request.status) || request.status < 100 || request.status > 599)) fail('invalid request status.')
     } else if (v.request !== undefined) fail('request requires requestComplete.')
-    if (v.condition === 'attribute') {
-      if (typeof v.attribute !== 'string' || !/^(data-[a-z0-9][a-z0-9-]{0,63}|aria-[a-z-]{1,64}|role|title|class)$/.test(v.attribute)) fail('use a public data-*, aria-*, role, title or class attribute.')
-    } else if (v.attribute !== undefined) fail('attribute requires the attribute condition.')
-    if (v.tolerance !== undefined && (!['numericValue', 'stable'].includes(String(v.condition)) || typeof v.tolerance !== 'number' || !Number.isFinite(v.tolerance) || v.tolerance < 0
+    if (v.condition === 'attribute') attribute(v.attribute)
+    else if (v.attribute !== undefined) fail('attribute requires the attribute condition.')
+    let reference: Record<string, unknown> | undefined
+    if (v.expected !== null && typeof v.expected === 'object') {
+      if (!['attribute', 'numericValue'].includes(String(v.condition))) fail('value references require attribute or numericValue.')
+      reference = object(v.expected); fields(reference, ['captured', 'selector', 'targetRef', 'attribute', 'op', 'numeric'])
+      if (reference.captured !== undefined) {
+        if (typeof reference.captured !== 'string' || !captures.has(reference.captured)) fail('captured must name an earlier capture.')
+        if ([reference.selector, reference.targetRef, reference.attribute].some(x => x !== undefined)) fail('use a captured value or a live attribute, not both.')
+      } else { target(reference, true); attribute(reference.attribute) }
+      if (reference.op !== undefined && !['equal', 'changed', 'greater', 'within'].includes(String(reference.op))) fail('unsupported comparison operator.')
+      if (reference.numeric !== undefined && typeof reference.numeric !== 'boolean') fail('numeric must be boolean.')
+      if (reference.numeric === false && (v.condition === 'numericValue' || ['greater', 'within'].includes(String(reference.op)))) fail('this comparison requires numeric mode.')
+    }
+    const numeric = v.condition === 'numericValue' || v.condition === 'attribute' && (typeof v.expected === 'number' || reference?.numeric === true || ['greater', 'within'].includes(String(reference?.op)))
+    if (v.tolerance !== undefined && (!(numeric || v.condition === 'stable') || reference?.op === 'greater' || typeof v.tolerance !== 'number' || !Number.isFinite(v.tolerance) || v.tolerance < 0
       || v.tolerance > (v.condition === 'stable' ? 50 : 1e12))) fail(v.condition === 'stable' ? 'stable tolerance must be within 0–50 CSS pixels.' : 'invalid numeric tolerance.')
     if (v.stableMs !== undefined && (v.condition !== 'stable' || typeof v.stableMs !== 'number' || !Number.isInteger(v.stableMs) || v.stableMs < 100 || v.stableMs > 5000)) fail('stableMs requires the stable condition and must be within 100–5000 milliseconds.')
-    if (['text', 'url', 'value', 'attribute', 'consoleMessage'].includes(String(v.condition))) string(v.expected, 2000, ['value', 'attribute'].includes(String(v.condition)))
-    else if (v.condition === 'numericValue') {
+    if (reference) { /* Validated above; the document resolves the operand. */ }
+    else if (numeric) {
       if (typeof v.expected !== 'number' || !Number.isFinite(v.expected) || Math.abs(v.expected) > 1e12) fail('invalid expected number.')
-    } else if (v.condition === 'count') {
+    } else if (['text', 'url', 'value', 'attribute', 'consoleMessage'].includes(String(v.condition))) string(v.expected, 2000, ['value', 'attribute'].includes(String(v.condition)))
+    else if (v.condition === 'count') {
       if (typeof v.expected !== 'number' || !Number.isInteger(v.expected) || v.expected < 0 || v.expected > 10000) fail('invalid expected count.')
     } else if (v.condition === 'checked') { if (typeof v.expected !== 'boolean') fail('expected must be boolean.') }
     else if (v.expected !== undefined) fail('this condition takes no expected value.')
   }
   const plan = object(structuredClone(value))
-  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures', 'networkConditions', 'failOnConsoleError', 'consoleErrorIgnore'])
+  fields(plan, ['description', 'expected', 'steps', 'timeoutMs', 'allowNetworkFailures', 'networkFailures', 'networkConditions', 'failOnConsoleError', 'consoleErrorIgnore', 'viewport'])
+  if (plan.viewport !== undefined) viewport(plan.viewport)
   if (plan.failOnConsoleError !== undefined && typeof plan.failOnConsoleError !== 'boolean') fail('failOnConsoleError must be boolean.')
   if (plan.consoleErrorIgnore !== undefined) {
     if (plan.failOnConsoleError !== true) fail('consoleErrorIgnore requires failOnConsoleError: true.')
@@ -300,14 +344,19 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     const pointer = ['selector', 'targetRef', 'inputSelector', 'inputRef', 'point', 'text', 'frame', 'modifiers']
     const extra: Record<string, string[]> = {
       navigate: ['url', 'dialog'], reload: ['all', 'timeoutMs', 'dialog'], discover: ['frame'],
+      capture: ['name', 'selector', 'targetRef', 'text', 'frame', 'attribute'],
+      frameSequence: ['sequence'], resizeViewport: ['viewport'],
+      networkSummary: ['networkMatch', 'minRequests', 'maxRequests', 'maxBytes', 'minCacheHits', 'maxFailures'],
+      sampleMetrics: ['selector', 'targetRef', 'frame', 'samples', 'since'],
+      assertMeasurement: ['selector', 'targetRef', 'frame', 'expected', 'tolerance', 'unit'],
       click: [...pointer, 'button', 'dialog'], doubleClick: [...pointer, 'button', 'dialog'], hover: pointer,
       drag: [...pointer.filter(field => field !== 'point'), 'button', 'path', 'durationMs'],
       dragTo: ['selector', 'targetRef', 'text', 'frame', 'point', 'modifiers', 'dropSelector', 'dropRef', 'dropText', 'dropPoint', 'durationMs', 'dialog'],
       fill: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'],
       press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog', 'scope'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
-      wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
+      wheel: [...pointer, 'deltaX', 'deltaY', 'repeat', 'intervalMs'],
       waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: ['region', 'selector', 'targetRef', 'text'],
-      compareScreenshot: ['region', 'selector', 'targetRef', 'text', 'baseline', 'baselineImage', 'ignore', 'imageTolerance'],
+      compareScreenshot: ['region', 'selector', 'targetRef', 'text', 'baseline', 'baselineStep', 'baselineImage', 'ignore', 'imageTolerance'],
       measure: ['name', 'from', 'to', 'maxMs', 'timeoutMs', 'rateOf', 'windowMs', 'minPerSecond', 'maxPerSecond'],
       metrics: ['collectGarbage', 'since', 'maxHeapGrowthMb', 'maxNodeGrowth'],
     }
@@ -315,6 +364,54 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     fields(step, ['action', 'label', ...extra[String(step.action)]!])
     if (step.label === undefined) step.label = `${step.action} step ${index + 1}`
     string(step.label, 200)
+    if (step.action === 'resizeViewport') viewport(step.viewport)
+    if (step.action === 'frameSequence') {
+      const spec = object(step.sequence); fields(spec, ['viewport', 'epoch', 'since', 'minFrames', 'order', 'wrapAt', 'maxRepeats', 'maxSkipped', 'maxStallMs', 'maxLatencyMs'])
+      if (!frameAlias(spec.viewport) || !frameAlias(spec.epoch)) fail('sequence viewport and epoch must be 1–64 letters, digits, underscores or hyphens; use fixture aliases.')
+      if (typeof spec.since !== 'number' || !Number.isInteger(spec.since) || spec.since < 1 || spec.since > index) fail('sequence since must name an earlier step.')
+      if (spec.order !== undefined && !['any', 'ascending', 'descending'].includes(String(spec.order))) fail('invalid sequence order.')
+      for (const name of ['minFrames', 'wrapAt', 'maxRepeats', 'maxSkipped', 'maxStallMs', 'maxLatencyMs']) if (spec[name] !== undefined
+        && (typeof spec[name] !== 'number' || !Number.isInteger(spec[name]) || Number(spec[name]) < (name === 'minFrames' ? 1 : 0) || Number(spec[name]) > 10_000_000)) fail('sequence limits must be bounded nonnegative integers; minFrames must be positive.')
+      if ((spec.wrapAt !== undefined || spec.maxSkipped !== undefined) && !['ascending', 'descending'].includes(String(spec.order))) fail('wrapAt and maxSkipped need an explicit directional order.')
+      assertions++
+    }
+    if (step.action === 'networkSummary') {
+      const match = object(step.networkMatch); fields(match, ['urlPattern', 'method']); requestMatch(match)
+      for (const key of ['minRequests', 'maxRequests', 'maxBytes', 'minCacheHits', 'maxFailures']) if (step[key] !== undefined) {
+        if (typeof step[key] !== 'number' || !Number.isSafeInteger(step[key]) || Number(step[key]) < 0 || Number(step[key]) > 1e12) fail('network limits must be bounded nonnegative integers.')
+      }
+      if (['minRequests', 'maxRequests', 'maxBytes', 'minCacheHits', 'maxFailures'].some(key => step[key] !== undefined)) assertions++
+    }
+    if (step.action === 'assertMeasurement') {
+      target(step, true)
+      if (!['mm', 'mm2', 'deg', 'HU'].includes(String(step.unit)) || typeof step.expected !== 'number' || !Number.isFinite(step.expected) || Math.abs(step.expected) > 1e12
+        || step.tolerance !== undefined && (typeof step.tolerance !== 'number' || !Number.isFinite(step.tolerance) || step.tolerance < 0 || step.tolerance > 1e12)) fail('measurement needs an expected number, canonical unit and optional nonnegative tolerance.')
+      assertions++
+    }
+    if (step.action === 'sampleMetrics') {
+      target(step, true)
+      if (!Array.isArray(step.samples) || step.samples.length < 1 || step.samples.length > 10) fail('sampleMetrics needs 1–10 public numeric attributes.')
+      const names = new Set<string>()
+      for (const raw of step.samples as unknown[]) {
+        const sample = object(raw); fields(sample, ['name', 'attribute', 'unit', 'max', 'maxGrowth']); attribute(sample.attribute)
+        if (!frameAlias(sample.name) || names.has(sample.name)) fail('metric names must be unique bounded aliases.')
+        names.add(sample.name as string); string(sample.unit, 32)
+        for (const key of ['max', 'maxGrowth']) if (sample[key] !== undefined && (typeof sample[key] !== 'number' || !Number.isFinite(sample[key]) || Number(sample[key]) < 0 || Number(sample[key]) > 1e12)) fail('metric limits must be finite numbers within 0–1e12.')
+        if (sample.maxGrowth !== undefined && step.since === undefined) fail('metric growth needs an earlier sampleMetrics step.')
+      }
+      if (step.since !== undefined) {
+        const earlier = (plan.steps as Record<string, unknown>[])[Number(step.since) - 1]
+        if (typeof step.since !== 'number' || !Number.isInteger(step.since) || step.since < 1 || step.since > index || earlier?.action !== 'sampleMetrics') fail('sampleMetrics since must name an earlier sampleMetrics step.')
+      }
+      if ((step.samples as Record<string, unknown>[]).some(sample => sample.max !== undefined || sample.maxGrowth !== undefined)) assertions++
+    }
+    if (step.action === 'capture') {
+      target(step, true); attribute(step.attribute)
+      if (typeof step.name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(step.name)) fail('capture name must be 1–64 letters, digits, underscores or hyphens, starting with a letter.')
+      if (captures.has(step.name as string)) fail('capture names must be unique.')
+      if (captures.size >= 20) fail('use at most 20 captures.')
+      captures.add(step.name as string)
+    }
     if (step.scope !== undefined) {
       if (step.action !== 'press' || step.scope !== 'page') fail('scope "page" is only for press.')
       if ([step.selector, step.targetRef, step.text, step.frame].some(x => x !== undefined)) fail('a page-level press takes no target, text or frame.')
@@ -359,6 +456,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       for (const delta of [step.deltaX, step.deltaY]) if (delta !== undefined && (typeof delta !== 'number' || !Number.isInteger(delta) || Math.abs(delta) > 1000)) fail('wheel deltas must be integers within ±1000 CSS pixels.')
       if (!step.deltaX && !step.deltaY) fail('wheel needs a nonzero deltaX or deltaY.')
       if (step.repeat !== undefined && (typeof step.repeat !== 'number' || !Number.isInteger(step.repeat) || step.repeat < 1 || step.repeat > 20)) fail('wheel repeat must be within 1–20 events.')
+      if (step.intervalMs !== undefined && (typeof step.intervalMs !== 'number' || !Number.isInteger(step.intervalMs) || step.intervalMs < 0 || step.intervalMs > 1000)) fail('wheel intervalMs must be within 0–1000 milliseconds.')
     }
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
     if ((step.action === 'screenshot' || step.action === 'compareScreenshot') && ++screenshots > MAX_TEST_IMAGES) fail('use at most five screenshots and comparisons together.')
@@ -402,9 +500,15 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if ((step.maxHeapGrowthMb !== undefined || step.maxNodeGrowth !== undefined)) { if (step.since === undefined) fail('growth limits need since, an earlier metrics step.'); assertions++ }
     }
     if (step.action === 'compareScreenshot') {
-      validateBaselinePath(step.baseline)
-      if (step.baselineImage === undefined) fail('the reference image was not attached. Run the plan with the session browser helper, which reads the baseline file.')
-      if (typeof step.baselineImage !== 'string' || !step.baselineImage || step.baselineImage.length > MAX_BASELINE_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(step.baselineImage)) fail('the reference image must be a PNG of at most 2 MiB.')
+      if (step.baselineStep !== undefined) {
+        if (step.baseline !== undefined || step.baselineImage !== undefined) fail('use baselineStep or a baseline file, not both.')
+        const earlier = (plan.steps as Record<string, unknown>[])[Number(step.baselineStep) - 1]
+        if (typeof step.baselineStep !== 'number' || !Number.isInteger(step.baselineStep) || step.baselineStep < 1 || step.baselineStep > index || !['screenshot', 'compareScreenshot'].includes(String(earlier?.action))) fail('baselineStep must name an earlier screenshot or comparison.')
+      } else {
+        validateBaselinePath(step.baseline)
+        if (step.baselineImage === undefined) fail('the reference image was not attached. Run the plan with the session browser helper, which reads the baseline file.')
+        if (typeof step.baselineImage !== 'string' || !step.baselineImage || step.baselineImage.length > MAX_BASELINE_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(step.baselineImage)) fail('the reference image must be a PNG of at most 2 MiB.')
+      }
       imageOptions(step)
       assertions++
     }

@@ -5,7 +5,7 @@ import type { BrowserTestReport, BrowserTestStep } from './browser-test-plan.js'
 import type { TestObservation } from './browser-test-runner.js'
 
 type Screenshot = BrowserTestReport['screenshots'][number]
-interface Capture { imageBase64: string; redacted: boolean; region?: PixelRectangle; viewport: { width: number; height: number } }
+export interface TestCapture { imageBase64: string; redacted: boolean; region?: PixelRectangle; viewport: { width: number; height: number }; masks?: PixelRectangle[] }
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -32,16 +32,19 @@ function bitmapRed(): 0 | 2 {
 const round = (value: number, places: number): number => Math.round(value * 10 ** places) / 10 ** places
 
 /** Compares a test capture with the plan's reference PNG. The capture is always kept as evidence, and a diff image when pixels differ. */
-export function compareCapture(step: BrowserTestStep, capture: Capture): TestObservation {
+export function compareCapture(step: BrowserTestStep, capture: TestCapture, checkpoint?: TestCapture): TestObservation {
   const area = capture.region ? { width: capture.region.width, height: capture.region.height } : capture.viewport
-  const kept: Screenshot = { step: 0, imageBase64: capture.imageBase64, redacted: capture.redacted, kind: 'capture', ...(capture.region ? { region: capture.region } : {}) }
+  const kept: Screenshot = { step: 0, imageBase64: capture.imageBase64, redacted: capture.redacted || Boolean(checkpoint?.redacted), kind: 'capture', ...(capture.region ? { region: capture.region } : {}) }
   const actual = nativeImage.createFromBuffer(Buffer.from(capture.imageBase64, 'base64'))
   const size = actual.getSize()
   const scale = { x: size.width / area.width, y: size.height / area.height }
-  const baselineBytes = Buffer.from(step.baselineImage!, 'base64')
-  const summary = { baseline: step.baseline, width: size.width, height: size.height, cssWidth: round(area.width, 2), cssHeight: round(area.height, 2),
+  const baselineBytes = Buffer.from(checkpoint?.imageBase64 ?? step.baselineImage!, 'base64')
+  const summary = { ...(checkpoint ? { baselineStep: step.baselineStep } : { baseline: step.baseline }), width: size.width, height: size.height, cssWidth: round(area.width, 2), cssHeight: round(area.height, 2),
     scale: round(scale.x, 4) }
   const unreadable: TestObservation = { passed: false, reason: 'The baseline file is not a PNG image that can be read.', data: { comparison: summary }, screenshots: [kept] }
+  const baselineArea = checkpoint && (checkpoint.region ?? checkpoint.viewport)
+  if (baselineArea && (baselineArea.width !== area.width || baselineArea.height !== area.height)) return { ...unreadable,
+    reason: 'The checkpoint and capture have different CSS sizes. Nothing is rescaled.' }
   // The size comes from the header, so only a reference the size of the capture is ever decoded.
   const expected = pngSize(baselineBytes)
   if (!expected) return unreadable
@@ -54,8 +57,18 @@ export function compareCapture(step: BrowserTestStep, capture: Capture): TestObs
   if (reference.isEmpty() || decoded.width !== size.width || decoded.height !== size.height) return unreadable
   const channel = step.imageTolerance?.channel ?? 0
   const maxDiffRatio = step.imageTolerance?.maxDiffRatio ?? 0
-  const bitmap = actual.toBitmap()
-  const result = compareBitmaps(bitmap, reference.toBitmap(), size, channel, ignorePixels(step.ignore ?? [], size, scale))
+  const bitmap = actual.toBitmap(), referenceBitmap = reference.toBitmap()
+  const privacyMasks = ignorePixels([...(capture.masks ?? []), ...(checkpoint?.masks ?? [])], size, scale)
+  const opaque = Buffer.from([17, 17, 17, 255])
+  // Paint both sides as well as excluding them: a diff must never reveal a pixel protected by either capture.
+  for (const rect of privacyMasks) for (let y = rect.y; y < rect.y + rect.height; y++) {
+    const start = (y * size.width + rect.x) * 4, end = (y * size.width + rect.x + rect.width) * 4
+    bitmap.fill(opaque, start, end); referenceBitmap.fill(opaque, start, end)
+  }
+  const maskedPng = nativeImage.createFromBitmap(bitmap, { ...size, scaleFactor: 1 }).toPNG()
+  if (maskedPng.length > 2 * 1024 * 1024) return { passed: false, reason: 'Comparison capture exceeds the 2 MiB limit after masking.' }
+  kept.imageBase64 = maskedPng.toString('base64')
+  const result = compareBitmaps(bitmap, referenceBitmap, size, channel, [...privacyMasks, ...ignorePixels(step.ignore ?? [], size, scale)])
   const bounds = result.diffBounds
   const comparison = { ...summary, tolerance: { channel, maxDiffRatio }, comparedPixels: result.comparedPixels, ignoredPixels: result.ignoredPixels,
     differentPixels: result.differentPixels, diffRatio: round(result.diffRatio, 6), maxChannelDelta: result.maxChannelDelta,
@@ -64,7 +77,7 @@ export function compareCapture(step: BrowserTestStep, capture: Capture): TestObs
   const screenshots: Screenshot[] = [kept]
   if (result.differentPixels) {
     const png = nativeImage.createFromBitmap(diffBitmap(bitmap, result, bitmapRed()), { ...size, scaleFactor: 1 }).toPNG()
-    if (png.length <= 2 * 1024 * 1024) screenshots.push({ step: 0, imageBase64: png.toString('base64'), redacted: capture.redacted, kind: 'diff', ...(capture.region ? { region: capture.region } : {}) })
+    if (png.length <= 2 * 1024 * 1024) screenshots.push({ step: 0, imageBase64: png.toString('base64'), redacted: kept.redacted, kind: 'diff', ...(capture.region ? { region: capture.region } : {}) })
   }
   if (!result.comparedPixels) return { passed: false, reason: 'Every pixel is inside an ignore rectangle, so nothing was compared.', data: { comparison }, screenshots }
   const percent = (value: number): string => `${round(value * 100, 4)}%`

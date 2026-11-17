@@ -91,13 +91,27 @@ export function browserTestScript(operation: string, args: Record<string, any>):
   }
   try {
     if (operation === 'invalidate') { delete scope.__desktopTestDiscovery; return { passed: true } }
+    const scalarScope = globalThis as typeof globalThis & { __desktopTestScalars?: { run: string; values: Map<string, { value: string; element: Element; attribute: string; step: number }> } }
+    if (operation === 'clearCaptures') { delete scalarScope.__desktopTestScalars; return { passed: true } }
+    const scalarState = (): NonNullable<typeof scalarScope.__desktopTestScalars> => {
+      if (!scalarScope.__desktopTestScalars || scalarScope.__desktopTestScalars.run !== args.runScope) scalarScope.__desktopTestScalars = { run: args.runScope, values: new Map() }
+      return scalarScope.__desktopTestScalars
+    }
+    const publicScalar = (element: Element, attribute: string): string => {
+      if (!element.isConnected || element.ownerDocument !== document || !visible(element)) throw new Error('Scalar source is hidden, removed, replaced or in another document.')
+      if (privateContent(element)) throw new Error('Scalar values are unavailable for private regions or sensitive fields.')
+      const value = element.getAttribute(attribute)
+      if (value === null) throw new Error('Scalar attribute is missing.')
+      if (value.length > 256) throw new Error('Scalar attribute exceeds 256 characters.')
+      return value
+    }
     if (operation === 'settle') return new Promise(resolve => {
       let done = false; let frame = 0
       const finish = (painted: boolean): void => { if (done) return; done = true; clearTimeout(timer); cancelAnimationFrame(frame); resolve({ painted }) }
       const timer = setTimeout(() => finish(false), 500)
       frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => finish(true)) })
     })
-    if (operation === 'viewport') return { width: innerWidth, height: innerHeight }
+    if (operation === 'viewport') return { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }
     if (operation === 'inspect') {
       const primaryTargets: Element[] = [], fallbackTargets: Element[] = [], unavailable: Element[] = []
       const counts = new Map<string, number>()
@@ -215,6 +229,32 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     }
     const found = args.targetRef ? [fromRef(String(args.targetRef))] : find(String(args.selector))
     const matches = found.filter(visible)
+    if (operation === 'sampleMetrics' || operation === 'assertMeasurement') {
+      if (matches.length !== 1) return { error: 'Sampling needs exactly one visible public target.' }
+      const element = matches[0]!
+      if (operation === 'assertMeasurement') {
+        const value = publicScalar(element, 'data-measurement-value'), unit = publicScalar(element, 'data-measurement-unit')
+        if (!value.trim() || !Number.isFinite(Number(value))) return { error: 'Measurement value is not a finite number.' }
+        return { passed: unit === args.unit && Math.abs(Number(value) - args.expected) <= (args.tolerance ?? 0),
+          reason: unit !== args.unit ? 'Measurement unit does not match.' : 'Measurement differs from the expected fixture value.',
+          data: { measurement: { unit: args.unit, expected: args.expected, tolerance: args.tolerance ?? 0, source: 'viewer public attributes; actual value withheld' } } }
+      }
+      const samples: Record<string, number> = Object.create(null) as Record<string, number>
+      for (const sample of args.samples) {
+        const raw = publicScalar(element, sample.attribute), value = Number(raw)
+        if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 1e12) return { error: 'Metric values must be nonnegative finite numbers within 0–1e12.' }
+        samples[sample.name] = value
+      }
+      return { passed: true, samples }
+    }
+    if (operation === 'capture') {
+      if (matches.length !== 1) return { error: 'Capture requires exactly one visible target.' }
+      const state = scalarState()
+      if (state.values.size >= 20 || state.values.has(args.name)) return { error: 'Capture limit or duplicate capture name.' }
+      const value = publicScalar(matches[0]!, args.attribute)
+      state.values.set(args.name, { value, element: matches[0]!, attribute: args.attribute, step: args.stepNumber })
+      return { passed: true, value }
+    }
     if (operation === 'bounds') {
       if (matches.length !== 1) return { error: `Screenshot target needs exactly one visible element; ${matches.length > 1 ? 'selector is ambiguous' : 'no visible match'}.` }
       const r = matches[0]!.getBoundingClientRect()
@@ -261,10 +301,30 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       switch (args.condition) {
         case 'visible': return { passed: true }
         case 'enabled': return { passed: !disabled(target), reason: disabled(target) ? 'Control is disabled or inert.' : undefined }
-        case 'attribute': return { passed: target.getAttribute(args.attribute) === args.expected }
+        case 'attribute':
         case 'numericValue': {
-          const value = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement ? target.value : (target as HTMLElement).innerText
-          return { passed: Boolean(value?.trim()) && Number.isFinite(Number(value)) && Math.abs(Number(value) - args.expected) <= (args.tolerance ?? 0) }
+          const value = args.condition === 'attribute' ? target.getAttribute(args.attribute)
+            : target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement ? target.value : (target as HTMLElement).innerText
+          let expected = args.expected
+          const ref = expected && typeof expected === 'object' ? expected : null
+          if (ref?.captured) {
+            const saved = scalarState().values.get(ref.captured)
+            if (!saved) return { error: 'Captured value is unavailable in this run/document. Capture again after navigation.' }
+            // Recheck the original source: a retained value must not bypass newly applied privacy.
+            publicScalar(saved.element, saved.attribute)
+            expected = saved.value
+          } else if (ref) {
+            const sources = (ref.targetRef ? [fromRef(ref.targetRef)] : find(ref.selector, false)).filter(visible)
+            if (sources.length !== 1) return { error: 'Live scalar reference requires exactly one visible target.' }
+            expected = publicScalar(sources[0]!, ref.attribute)
+          }
+          const op = ref?.op ?? 'equal'
+          if (ref && value === null) return { passed: false, reason: 'Compared attribute is missing.' }
+          const numeric = args.condition === 'numericValue' || typeof expected === 'number' || ref?.numeric === true || op === 'greater' || op === 'within'
+          if (numeric && (value === null || !String(value).trim() || !String(expected).trim() || !Number.isFinite(Number(value)) || !Number.isFinite(Number(expected)))) return { passed: false, reason: 'Numeric comparison needs nonblank finite values.' }
+          const same = numeric ? Math.abs(Number(value) - Number(expected)) <= (args.tolerance ?? 0) : value === expected
+          const passed = op === 'greater' ? Number(value) > Number(expected) : op === 'changed' ? !same : same
+          return { passed, ...(!passed ? { reason: `Scalar ${numeric ? 'numeric' : 'string'} ${op} comparison did not match${ref?.captured ? ` capture ${ref.captured}` : ''}.` } : {}) }
         }
         case 'text': return { passed: (target as HTMLElement).innerText?.includes(args.expected) === true }
         case 'value': return { passed: target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement ? target.value === args.expected : false }
@@ -344,5 +404,5 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     target.focus()
     if (operation === 'fill' && target.isContentEditable) { const range = document.createRange(); range.selectNodeContents(target); const selection = getSelection(); selection?.removeAllRanges(); selection?.addRange(range) }
     return { passed: true }
-  } catch (error) { return { error: error instanceof Error && /^(Target reference|Too many matches|Page inspection)/.test(error.message) ? error.message : 'Invalid selector or page content unavailable within the inspection limit.' } }
+  } catch (error) { return { error: error instanceof Error && /^(Target reference|Too many matches|Page inspection|Scalar (source|values|attribute))/.test(error.message) ? error.message : 'Invalid selector or page content unavailable within the inspection limit.' } }
 }

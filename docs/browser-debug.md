@@ -510,6 +510,15 @@ canvas, not on an item that scrolls with it. `data.wheel` reports the events sen
 { "action": "wheel", "selector": "#viewport-1", "deltaY": 120, "repeat": 3, "modifiers": ["Control"] }
 ```
 
+Optional `intervalMs` (integer 0–1000) sets the requested minimum interval between
+wheel dispatches. Zero adds no deliberate delay. When specified, the runner skips
+the per-event paint wait but still hit-tests before every event and stops on
+cancellation, movement or coverage. Omitting it preserves the existing paint wait.
+`repeat` remains limited to 20. With `intervalMs`, `data.wheel.dispatchTimesMs` and `intervalsMs` report
+actual main-process dispatch times, including attempted delivery if its acknowledgement
+is uncertain; `sent` counts acknowledged events. CDP and hit-testing overhead can
+make intervals longer. These are input timings, not rendered-frame timings.
+
 `press` accepts the named keys above and single letters `a`–`z` and digits `0`–`9`
 for application shortcuts. A letter or digit types its character only without
 `Alt`, `Control` or `Meta`, so `Control`+`s` is a shortcut and never inserts text;
@@ -601,6 +610,53 @@ prevents repeated numeric-range assertions from disclosing protected values.
 Text target filters also exclude these protected elements and private aggregates
 before reading their text, including for visibility and count assertions or actions.
 Use a public application-state indicator for assertions instead.
+
+### Captured values and linked state
+
+`capture` records one public attribute, up to 256 characters, under a unique `name`.
+A run allows 20 captures. Names start with a letter and contain up to 64 letters,
+digits, underscores or hyphens. Capture steps are observations; include an assertion.
+
+```json
+[
+  { "action": "capture", "name": "revisionBefore", "selector": "#viewport-1", "attribute": "data-render-revision" },
+  { "action": "wheel", "selector": "#viewport-1", "deltaY": 120, "repeat": 3, "intervalMs": 10 },
+  { "action": "assert", "selector": "#viewport-1", "condition": "attribute", "attribute": "data-render-revision",
+    "expected": { "captured": "revisionBefore", "op": "greater" } },
+  { "action": "assert", "selector": "#viewport-1", "condition": "attribute", "attribute": "data-window-center",
+    "expected": { "selector": "#viewport-2", "attribute": "data-window-center", "numeric": true }, "tolerance": 0.1 }
+]
+```
+
+For `attribute` and `numericValue`, `expected` can name an earlier capture or a live
+attribute (`selector` or `targetRef`, plus `attribute`). The live source is in the
+same document as the assertion target. `op` is `equal` (default), `changed`, `greater`
+or `within`. `greater` and `within` use numbers; `numeric: true` also selects numeric
+mode. A numeric literal on `attribute` enables numeric comparison; a string literal
+keeps exact string equality. `numericValue` always uses numbers. Numeric comparisons
+reject missing, blank and nonfinite values. `tolerance` is an absolute difference,
+defaults to zero, and is unavailable for strings or strict `greater`. Numeric
+`changed` means the difference exceeds that tolerance.
+
+Both operands must be visible and public. A captured source is rechecked when used;
+a removed/replaced source or newly private source is refused. Selectors for live
+sources resolve again on each poll, whereas discovery references reject replacements.
+Captures are invalidated by document navigation and cleared at run end; they cannot
+be used in a different frame/document or a later run. Reports identify the capture
+step and field and include its filtered value. Existing numeric assertions continue
+to withhold raw values. Credential filtering and input-value redaction still apply.
+Multiple conditions are sampled sequentially, not as an atomic application snapshot.
+
+For final-frame tests, a higher render counter alone is insufficient: an old request
+can overwrite a new image after a successful poll. Wait for the viewer to acknowledge
+the final input, capture its intended request identity, then await a viewer-provided
+idle signal covering loading, decoding and render commits. Assert that the rendered
+request matches the capture and that image quality is complete. Use bounded selective
+network delays to reproduce out-of-order loading deterministically. `requestComplete`
+only establishes network completion; `visualStable` only establishes sampled pixel
+stability. Transient stale commits between polls require render-event instrumentation.
+For linked viewports, publish compatible patient-space coordinates and units; equal
+attributes alone do not establish correct registration.
 
 A `consoleMessage` condition takes `expected`, an anchored glob in which only `*`
 is special (`"viewer ready*"`, `"*state: 3 frames*"`), an optional `level`
@@ -706,6 +762,130 @@ Readings cover the page's main JavaScript world and its same-process frames. Eve
 measurement and reading is also listed in the report's `measurements`, with its step
 number. Timings depend on the machine, on what else it is doing and on whether the
 page is visible, so set generous limits and compare runs on the same machine.
+
+### Rendered-frame sequences
+
+`frameSequence` asserts a bounded stream of **render commits**, including transient
+stale images that attribute polling can miss. The viewer must instrument accepted
+requests and final-quality commits by logging one string per event:
+
+```js
+console.debug('desktop-test-frame ' + JSON.stringify({
+  version: 1, type: 'request', viewport: 'v1', epoch: 'fixture1',
+  revision: 1, frame: 12, timeMs: performance.now()
+}));
+// When that request's image is committed to the viewport:
+console.debug('desktop-test-frame ' + JSON.stringify({
+  version: 1, type: 'commit', viewport: 'v1', epoch: 'fixture1',
+  revision: 1, frame: 12, timeMs: performance.now()
+}));
+```
+
+These exact seven fields form the version-1 contract. Use non-sensitive aliases
+(`viewport` and `epoch`: 1–64 letters, digits, underscores or hyphens), increasing
+nonnegative safe-integer revisions, a zero-based frame index 0–10,000,000, and the
+same monotonic application clock for both events. Change epoch for a new series or
+document. Emit commits only after the viewer has committed the image, not after
+network/decode completion. Do not emit a commit for discarded requests. A revision
+commits once; progressive preview renders need a separate logging channel.
+
+```json
+[
+  { "action": "click", "selector": "#play-fixture" },
+  { "action": "waitFor", "condition": "consoleMessage", "expected": "fixture playback complete" },
+  { "action": "frameSequence", "sequence": {
+    "viewport": "v1", "epoch": "fixture1", "since": 1, "minFrames": 30,
+    "order": "ascending", "wrapAt": 99, "maxRepeats": 0, "maxSkipped": 0,
+    "maxStallMs": 250, "maxLatencyMs": 150
+  } }
+]
+```
+
+`since` names an earlier step; collection includes events arriving from that step's
+start until this assertion. A completion log emitted after the final commit provides
+a stream-order barrier. Capture is independent of the console recording toggle.
+The assertion always fails on obsolete request revisions, unmatched frame/revision
+pairs, duplicate commits, decreasing request revisions/timestamps, or another epoch
+requested/committed into the watched viewport after this epoch began. Thus viewers
+that deliberately commit an older request while a newer one is pending do not meet
+this strict contract. Other viewports are independent.
+
+`minFrames` defaults to 1. Directional order is opt-in; `wrapAt` is the inclusive
+last index, with wrapping back to zero (or the reverse). `maxSkipped` requires an
+explicit direction. Repeats, gaps, request-to-commit latency and longest commit
+arrival silence have optional limits. The report includes counts, interval/latency
+min/median/95th percentile/max, and the latest 100 commit identities. Up to 5000
+events total are retained; overflow or malformed instrumented events fail closed.
+Event time measures application-reported commit timing; silence uses desktop
+arrival time, including the start/end of the selected window. Neither is physical
+display presentation timing or CT acquisition temporal resolution.
+
+### Measurements, pixel probes and viewer resources
+
+Use `assertMeasurement` on a public element exposing `data-measurement-value` and
+`data-measurement-unit`. The expected value comes from an independent test fixture.
+Canonical units are `mm`, `mm2`, `deg`, and `HU`; tolerance is absolute and defaults
+to zero. Missing/private/nonfinite values and incorrect units fail. Raw measured
+values stay out of assertions; use an explicit `capture` when a filtered value is
+needed for diagnostics.
+
+```json
+[
+  { "action": "click", "selector": "#pixel-probe-tool" },
+  { "action": "hover", "selector": "#viewport-1", "point": { "x": 150, "y": 60 } },
+  { "action": "assertMeasurement", "selector": "#probe-result", "unit": "HU", "expected": 0, "tolerance": 1 }
+]
+```
+
+Pixel probing composes existing native pointer input with calibrated viewer output;
+it never reads screenshot RGB as HU. Line/angle/ROI tools compose `drag`/`click` with
+the same assertion. Test anisotropic spacing and repeat known measurements after
+zoom, pan, rotation or flip. Equal displayed values do not independently verify the
+viewer calculation: the expected geometry/calibration must come from fixture truth.
+
+`sampleMetrics` reads 1–10 public numeric attributes from one visible element and
+records their declared units. It supports a maximum value and growth since an
+earlier sample of the same source, field, unit and document:
+
+```json
+[
+  { "action": "sampleMetrics", "selector": "#viewer-stats", "samples": [
+    { "name": "decoded", "attribute": "data-cache-bytes", "unit": "bytes" },
+    { "name": "workers", "attribute": "data-workers", "unit": "count" }
+  ] },
+  { "action": "click", "selector": "#open-study" },
+  { "action": "click", "selector": "#close-study" },
+  { "action": "sampleMetrics", "selector": "#viewer-stats", "since": 1, "samples": [
+    { "name": "decoded", "attribute": "data-cache-bytes", "unit": "bytes", "maxGrowth": 0 },
+    { "name": "workers", "attribute": "data-workers", "unit": "count", "max": 0 }
+  ] }
+]
+```
+
+Values/limits must be finite and within 0–10^12. Names are unique bounded aliases;
+credential-marked attributes/names and protected elements are refused. Without a
+limit, this is an observation, so the plan still needs an assertion. These are
+**viewer-reported** decoded-cache/worker counters or GPU estimates, not browser GPU
+memory accounting. Use existing `metrics` separately for JavaScript heap/DOM growth.
+
+### Request and cache summaries
+
+After an application/network completion barrier, `networkSummary` summarizes the
+current run's requests matching a literal-origin URL glob and method:
+
+```json
+{ "action": "networkSummary", "networkMatch": { "urlPattern": "http://localhost:3000/frames/*", "method": "GET" },
+  "minRequests": 2, "maxRequests": 100, "maxFailures": 0, "maxBytes": 10485760, "minCacheHits": 1 }
+```
+
+Limits are optional; providing one makes this an assertion. It reports completed,
+loading, failed, cancelled and redirected requests, encoded transferred bytes,
+unknown byte counts, disk and memory/other cache hits, and service-worker responses.
+Service-worker responses are separate because they do not establish a cache hit.
+Assertions fail if requests are still loading or the 2000-record retention limit
+was exceeded. A byte limit also fails on unknown byte counts, including failed
+requests whose transferred bytes were not reported. Redirect hops are counted
+separately. Browser-reported encoded bytes are distinct from decoded-image memory.
 
 ### Opt-in network failures and recovery
 
@@ -1012,6 +1192,31 @@ outside the visible viewport fails. The saved screenshot records the cropped
 
 ### Comparing with a reference image
 
+A plan can set `viewport: {width: 640, height: 480, dpr: 2}` before its first step.
+`{action: "resizeViewport", viewport: {width: 600, height: 400, dpr: 1}}` changes it
+during a run. Browser zoom must be 100%; each requested size must fit within the
+original visible page surface. CSS dimensions are integers 64–1600, DPR is 0.5–3,
+and resulting bitmap dimensions must be integers, at most 1600×3200 and four million
+pixels. The run restores the original geometry after pass, failure or cancellation.
+Unconfirmed restoration fails the report and detaches the debugger; evidence records
+the requested/original geometry and cleanup result. Use these settings with no
+concurrent DevTools emulation changes.
+
+The native-capture feasibility probe found that Electron `capturePage` follows host
+scaling, not emulated DPR. Viewport-configured tests therefore use Chromium's
+[`Page.captureScreenshot`](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-captureScreenshot)
+inside the existing mask preparation, before/after layout checks and opaque bitmap
+masking pipeline. Captures whose dimensions disagree with CSS size × DPR are refused;
+these captures are never resampled. Tests without viewport settings retain native
+capture and its existing export-size limit. The 2 MiB exported-PNG limit still applies.
+
+`npm run browser-viewer:check` verifies both host scales, DPR 1/2, masking, click,
+wheel, drawing and HTML5 drop targeting, resize/reload and cleanup. The synthetic
+canvas pixels match across host scales at the same configured DPR; native controls
+and fonts can still rasterize differently. Crop image comparisons to the viewport or
+use justified tolerances for UI text. The original probe remains available with
+`npm run browser-viewport:check` and records both capture transports.
+
 `compareScreenshot` captures an element, a region or the whole viewport exactly as a
 test screenshot does, and compares its pixels with a reference PNG. Use it to check
 what an image viewer shows: window/level, colour lookup tables, orientation, zoom,
@@ -1027,10 +1232,17 @@ overlays and annotations.
 - **`baseline`** is a local absolute `.png` path of at most 2 MiB. The helper's shell
   reads the file and sends it with the plan; the desktop never opens a path from the
   plan. On macOS and Linux the path must not contain a quote or backslash.
+- **`baselineStep`** instead names an earlier successful `screenshot` or
+  `compareScreenshot` step by its 1-based number. It uses that step's actual capture,
+  never its diff, and needs no baseline file. It cannot be combined with `baseline`.
+  The compared CSS sizes and PNG sizes must match. Captures live only for this run.
+  For example: screenshot → pan → reset → `compareScreenshot` with `baselineStep: 1`.
 - **Making a reference:** run a `screenshot` step of the same area once, check the saved
   PNG, and use it as the baseline. Keep the same browser zoom and display scaling.
 - **Size:** the capture must have the reference's exact pixel size. A different size
-  fails the step with both sizes and the scale; nothing is rescaled.
+  fails the step with both sizes and the scale; comparison does not rescale either
+  input. The existing screenshot export reduces captures wider than 1600 pixels
+  before comparison; this is not a native-resolution pixel-accuracy test.
 - **`imageTolerance`:** `channel` (0–255, default 0) is how far one colour channel may
   move before a pixel counts as different, and `maxDiffRatio` (0–1, default 0) is the
   share of compared pixels that may differ. The defaults require an exact match;
@@ -1041,6 +1253,9 @@ overlays and annotations.
 - **Masks:** form controls, credential-marked elements and embedded frames are masked
   in both images, including any that sit under a canvas, so a change under a mask is
   not seen. Keep compared areas clear of them.
+  For `baselineStep`, the union of both captures' privacy masks is excluded and
+  painted into comparison evidence, including when masks moved between steps.
+  A fully masked/ignored area fails rather than passing with zero compared pixels.
 - **Result:** the step counts as an assertion, with outcome `assertion-passed` or
   `assertion-failed`, and is not retried. `data.comparison` reports the pixel size,
   CSS size and scale, the tolerance, the compared, ignored and differing pixels, the

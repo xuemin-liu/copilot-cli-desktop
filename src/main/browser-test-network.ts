@@ -3,7 +3,8 @@ import { readableUrl } from './browser-read-privacy.js'
 
 type Params = Record<string, any>
 type Send = (method: string, params: Params, session?: string) => Promise<unknown>
-interface RequestRecord { id: string; frame: string; url: string; method: string; state: string; status?: number; timestamp: string; events: string[] }
+interface RequestRecord { id: string; frame: string; url: string; method: string; state: string; status?: number; timestamp: string; events: string[]
+  encodedBytes?: number; cacheSource?: 'disk' | 'service-worker' | 'memory-or-other'; cancelled?: boolean }
 /** Requests kept for matching and counting; reports list the latest of them. */
 const KEPT_REQUESTS = 2000
 const REPORTED_REQUESTS = 100
@@ -21,11 +22,14 @@ export class BrowserTestNetwork {
   private conditionsApplied = false
   private conditionsRemoved: boolean | null = null
   private observed = 0
+  private evicted = false
+  private captureInterrupted = false
   private stopped = false
   private truncated = false
   private cleanupFailed = false
 
   detached(): void {
+    this.captureInterrupted = true
     this.stopped = true; this.sessions.clear(); for (const timer of this.timers) clearTimeout(timer)
     // A detached debugger lets paused requests go and drops its network emulation.
     for (const held of this.held.values()) { clearTimeout(held.timer); held.affected.released = 'debugger detached' }
@@ -122,18 +126,32 @@ export class BrowserTestNetwork {
       return
     }
     if (method === 'Network.requestWillBeSent' && /^https?:\/\//.test(String(params.request?.url))) {
+      const previous = this.requests.get(key)
+      if (previous) {
+        previous.state = 'redirected'; previous.status = Number(params.redirectResponse?.status)
+        if (Number.isFinite(params.redirectResponse?.encodedDataLength)) previous.encodedBytes = Math.max(0, params.redirectResponse.encodedDataLength)
+        this.requests.set(`${key}#redirect-${this.observed}`, previous)
+      }
       // Keep raw URLs only inside the run for matching, never bodies or headers.
       this.requests.set(key, { id: key, frame: String(params.frameId), url: String(params.request.url), method: String(params.request.method), state: 'loading', timestamp: new Date().toISOString(), events: ['requestWillBeSent'] })
       this.observed++
       if (this.observed > REPORTED_REQUESTS) this.truncated = true
-      if (this.requests.size > KEPT_REQUESTS) this.requests.delete(this.requests.keys().next().value!)
+      while (this.requests.size > KEPT_REQUESTS) { this.evicted = true; this.requests.delete(this.requests.keys().next().value!) }
     }
     const request = this.requests.get(key)
     if (!request) return
     if (['Network.responseReceived', 'Network.loadingFinished', 'Network.loadingFailed'].includes(method) && request.events.length < 8) request.events.push(method === 'Network.loadingFailed' ? `loadingFailed:${String(params.errorText).slice(0, 120)}` : method.slice(8))
-    if (method === 'Network.responseReceived') request.status = Number(params.response?.status)
-    if (method === 'Network.loadingFinished') request.state = 'finished'
-    if (method === 'Network.loadingFailed') request.state = 'failed'
+    if (method === 'Network.requestServedFromCache') request.cacheSource = 'memory-or-other'
+    if (method === 'Network.responseReceived') {
+      request.status = Number(params.response?.status)
+      if (params.response?.fromServiceWorker) request.cacheSource = 'service-worker'
+      else if (params.response?.fromDiskCache) request.cacheSource = 'disk'
+    }
+    if (method === 'Network.loadingFinished') {
+      request.state = 'finished'
+      if (Number.isFinite(params.encodedDataLength) && params.encodedDataLength >= 0) request.encodedBytes = params.encodedDataLength
+    }
+    if (method === 'Network.loadingFailed') { request.state = 'failed'; request.cancelled = params.canceled === true }
     if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
       this.intercepted.delete(key)
       await this.expire()
@@ -146,6 +164,22 @@ export class BrowserTestNetwork {
     for (const request of this.requests.values()) if (testRequestMatches(match, request.url, request.method) && request.state === match.state
       && (match.status === undefined || request.status === match.status)) count++
     return count
+  }
+
+  summary(match: TestRequestMatch) {
+    const requests = [...this.requests.values()].filter(request => testRequestMatches(match, request.url, request.method))
+    const loading = requests.filter(request => request.state === 'loading').length
+    return { requests: requests.length, finished: requests.filter(request => request.state === 'finished').length,
+      failures: requests.filter(request => request.state === 'failed' || (request.status ?? 0) >= 400).length,
+      cancelled: requests.filter(request => request.cancelled).length, redirected: requests.filter(request => request.state === 'redirected').length,
+      loading, encodedBytes: requests.reduce((total, request) => total + (request.encodedBytes ?? 0), 0),
+      unknownByteCounts: requests.filter(request => request.encodedBytes === undefined).length,
+      cacheHits: requests.filter(request => request.cacheSource === 'disk' || request.cacheSource === 'memory-or-other').length,
+      diskCache: requests.filter(request => request.cacheSource === 'disk').length,
+      memoryOrOtherCache: requests.filter(request => request.cacheSource === 'memory-or-other').length,
+      serviceWorker: requests.filter(request => request.cacheSource === 'service-worker').length,
+      complete: !this.evicted && !this.captureInterrupted && loading === 0, evicted: this.evicted, captureInterrupted: this.captureInterrupted,
+      limitations: 'Browser-reported encoded bytes, not decoded image/cache memory. Service-worker responses are counted separately and do not prove cache hits. Unknown/failed-request bytes are not treated as zero for byte assertions.' }
   }
 
   async stop(): Promise<void> {

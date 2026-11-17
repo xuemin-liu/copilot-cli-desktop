@@ -2,6 +2,7 @@ import type { ConsoleSlice } from './browser-console-buffer.js'
 import { globMatches, type BrowserTestPlan, type BrowserTestStep, type ConsoleLevel, type TestStepConsole } from './browser-test-plan.js'
 import { redactBrowserValue } from './browser-read-privacy.js'
 import { redactInputs, testInputs } from './browser-test-runner.js'
+import { FrameEvents } from './browser-frame-sequence.js'
 
 export interface ConsoleMessage { level: string; message: string; source: string; line: number }
 export interface ConsoleSource {
@@ -24,6 +25,7 @@ const PENDING_ERRORS = 20
 /** One run's view of the test page's console. It listens to every message as it arrives, so the
  * error latch and consoleMessage matches do not depend on what the bounded buffer still holds. */
 export class TestConsoleWatch {
+  readonly frames: FrameEvents
   private readonly patterns = new Map<string, { pattern: string; level?: ConsoleLevel; matched: boolean; times?: Arrivals }>()
   private readonly ignore: string[]
   private pending: ConsoleErrorRecord[] = []
@@ -34,6 +36,7 @@ export class TestConsoleWatch {
   private readonly bound: (text: string, max: number) => string
 
   constructor(plan: BrowserTestPlan, private readonly pageId: number, private readonly source: ConsoleSource) {
+    this.frames = new FrameEvents(plan.steps.filter(step => step.action === 'frameSequence').map(step => step.sequence!))
     const add = (pattern: string, level: ConsoleLevel | undefined, timed: boolean): void => {
       const entry = this.patterns.get(key(pattern, level)) ?? { pattern, ...(level ? { level } : {}), matched: false }
       if (timed) entry.times ??= { count: 0, recent: [] }
@@ -52,8 +55,10 @@ export class TestConsoleWatch {
     this.bound = (text, max) => String(redactBrowserValue(redactInputs(text, inputs)).value).slice(0, max)
     this.ignore = plan.failOnConsoleError ? plan.consoleErrorIgnore ?? [] : []
     const latch = plan.failOnConsoleError === true
+    const watchFrames = plan.steps.some(step => step.action === 'frameSequence')
     this.stop = source.watch(pageId, message => {
       const now = Date.now()
+      if (watchFrames) this.frames.add(message.message, now)
       for (const entry of this.patterns.values()) {
         if ((entry.matched && !entry.times) || (entry.level && entry.level !== message.level) || !globMatches(entry.pattern, message.message)) continue
         entry.matched = true

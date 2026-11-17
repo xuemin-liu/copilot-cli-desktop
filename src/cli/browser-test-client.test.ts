@@ -165,6 +165,10 @@ test('a comparison baseline is read by the caller, sent with the plan, and its c
       assert.equal(seen.at(-1).steps[0].baselineImage, bytes.toString('base64'), 'PowerShell reads the baseline and sends it as base64')
       assert.deepEqual(report.screenshots.map((image: { kind: string }) => image.kind), ['capture', 'diff'])
       assert.equal(await readFile(report.screenshots[0].path, 'utf8'), 'capture-png')
+      await writeFile(input, JSON.stringify({ ...comparePlan, steps: [{ action: 'screenshot', selector: '#cell' }, { action: 'compareScreenshot', selector: '#cell', baselineStep: 1 }] }))
+      await run(join(root, 'checkpoint-report.json'))
+      assert.equal(seen.at(-1).steps[1].baselineStep, 1, 'PowerShell accepts an in-run checkpoint without reading a baseline file')
+      assert.equal(seen.at(-1).steps[1].baselineImage, undefined)
       const count = seen.length
       for (const [steps, message] of [[[{ ...comparePlan.steps[0], baselineImage: 'AAAA' }], /attached by the helper/], [[{ ...comparePlan.steps[0], baseline: join(root, 'missing.png') }], /does not exist/],
         [[{ ...comparePlan.steps[0], baseline: join(root, 'large.png') }], /exceeds 2 MiB/], [[{ ...comparePlan.steps[0], baseline: '\\\\host\\share\\cell.png' }], /local absolute .png/]] as const) {
