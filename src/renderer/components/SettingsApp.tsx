@@ -865,8 +865,9 @@ export function SettingsApp(): JSX.Element | null {
         </label>
         <p className="settings-disclaimer">
           Separate gives each project its own cookies and site storage. Closing tabs or CLI sessions keeps your logins.
-          Removing a workspace removes its private browser data; adding it again starts fresh. Shared uses one profile
-          across projects. Open browsers keep their profile until all their project's pages close or the app restarts.
+          Removing a workspace forgets its private browser profile, so adding it again starts with fresh logins; its
+          cookies and site storage are deleted at the next app start, or later while a settings recovery is pending.
+          Shared uses one profile across projects. Open browsers keep their profile until all their project's pages close or the app restarts.
           History, site permissions and zoom are shared either way.
         </p>
         <label className="settings-row settings-row-select">
