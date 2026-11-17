@@ -262,8 +262,10 @@ Cookies, logins, local storage, IndexedDB and cache depend on Settings → **Pro
 
 - **Separate for each project** (default): each project has its own cookies and site storage,
   so signing in to a site in one project does not sign you in elsewhere. Closing tabs or CLI
-  sessions keeps your logins. Removing a workspace removes its private browser data; adding it
-  again starts fresh.
+  sessions keeps your logins. Removing a workspace closes its browser and forgets its profile,
+  so adding it again starts with fresh logins. The old profile's cookies and site storage stay
+  on disk until the next app start deletes them, and stay longer while a settings recovery is
+  pending.
 - **Shared by all projects, like Chrome**: every project uses one profile, so signing in once
   signs in everywhere, including for the Copilot agent in each session. **Clear shared browser
   data** signs every project out and removes its cookies, site storage and cache.
