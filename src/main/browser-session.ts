@@ -232,7 +232,7 @@ try {
 
 const WINDOWS_BROWSER_INSTRUCTIONS = `# This session's desktop debug browser
 
-Browser control automatically follows the current CLI session in its project. No browser is required. Activating this session or selecting a Browser tab targets the currently selected browser page. Your CLI select command can choose another page without changing the visible tab; unrelated state updates preserve that cursor.
+Browser control automatically follows the current CLI session in its project. No browser is required. Activating this session or selecting a Browser tab targets the currently selected browser page. Your CLI select command can choose another page without changing the visible tab; unrelated state updates preserve that cursor. A page the user moved into its own window stays your target; screenshots and test interactions need that window shown, not minimized, while text snapshots still work.
 When asked to read the browser console, find exceptions, or inspect network activity,
 use the existing shell tool to run these read-only commands BEFORE claiming browser
 access is unavailable or asking the user to paste/export logs:
