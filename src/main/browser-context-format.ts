@@ -21,7 +21,7 @@ export function formatBrowserContext(page: { url: string; pageId: number; consol
   const lines = [`[Browser console] ${line(sanitizedUrl(page.url), 300) || 'selected page'}`]
   if (shown.length) {
     lines.push(problems.length ? `Console errors and warnings (${problems.length > shown.length ? `latest ${shown.length} of ${problems.length}` : shown.length}):` : `No errors or warnings; latest console messages:`)
-    for (const entry of shown) lines.push(`- ${entry.level}: ${line(entry.message, 400)}${entry.source ? ` (${line(entry.source, 160)}${entry.line ? `:${entry.line}` : ''})` : ''}`)
+    for (const entry of shown) lines.push(`- ${entry.level}: ${line(entry.message, 400)}${entry.source ? ` (${line(entry.source, 160)}${entry.line ? `:${entry.line}` : ''})` : ''}${(entry.count ?? 1) > 1 ? ` ×${entry.count}` : ''}`)
   }
   if (failed.length) {
     lines.push(`Failed requests (${failed.length}):`)

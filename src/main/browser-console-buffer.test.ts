@@ -1,0 +1,77 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { ConsoleBuffer } from './browser-console-buffer.js'
+
+const message = (pageId: number, text: string, level = 'info') => ({ pageId, timestamp: '2026-11-16T00:00:00.000Z', level, message: text, source: 'app.js', line: 1 })
+
+test('consecutive identical messages are kept once with a count, and never compressed across a mark', () => {
+  const buffer = new ConsoleBuffer()
+  for (let i = 0; i < 5; i++) buffer.add(message(1, 'CanvasTextAlign is deprecated', 'warning'))
+  assert.equal(buffer.entries.length, 1)
+  assert.deepEqual([buffer.entries[0]!.count, buffer.entries[0]!.id, buffer.entries[0]!.lastId], [5, 1, 5])
+  const mark = buffer.mark()
+  buffer.add(message(1, 'CanvasTextAlign is deprecated', 'warning'))
+  assert.equal(buffer.entries.length, 2, 'a repeat after a mark starts a new entry')
+  assert.deepEqual(buffer.slice(1, mark).entries.map(entry => entry.count ?? 1), [1])
+  buffer.add(message(2, 'other page')); buffer.add(message(1, 'CanvasTextAlign is deprecated', 'warning'))
+  assert.equal(buffer.entries.findLast(entry => entry.pageId === 1)!.count, 2, 'another page in between does not interrupt this page’s run')
+  buffer.add(message(1, 'different')); buffer.add(message(1, 'CanvasTextAlign is deprecated', 'warning'))
+  assert.equal(buffer.entries.at(-1)!.count, undefined, 'only an uninterrupted run is compressed')
+})
+
+test('a flood of distinct messages evicts only its own page, and the slice says it is incomplete', () => {
+  const buffer = new ConsoleBuffer(() => true, 5, 100)
+  buffer.add(message(2, 'kept on page 2'))
+  const start = buffer.mark()
+  for (let i = 0; i < 8; i++) buffer.add(message(1, `flood ${i}`))
+  assert.equal(buffer.entries.filter(entry => entry.pageId === 1).length, 5)
+  assert.deepEqual(buffer.entries.filter(entry => entry.pageId === 2).map(entry => entry.message), ['kept on page 2'])
+  const slice = buffer.slice(1, start)
+  assert.equal(slice.complete, false); assert.equal(slice.total, 5)
+  const later = buffer.mark(); buffer.add(message(1, 'after the flood'))
+  assert.equal(buffer.slice(1, later).complete, true, 'eviction before a window does not make it incomplete')
+  assert.equal(buffer.slice(2, start).complete, true)
+})
+
+test('the total bound evicts closed pages first, then the page with the most entries', () => {
+  const open = new Set([1, 2])
+  const buffer = new ConsoleBuffer(id => open.has(id), 10, 6)
+  buffer.add(message(3, 'closed a')); buffer.add(message(3, 'closed b'))
+  for (let i = 0; i < 3; i++) buffer.add(message(1, `one ${i}`))
+  buffer.add(message(2, 'two 0'))
+  buffer.add(message(2, 'two 1'))
+  assert.deepEqual(buffer.entries.map(entry => entry.message), ['closed b', 'one 0', 'one 1', 'one 2', 'two 0', 'two 1'])
+  buffer.add(message(2, 'two 2'))
+  assert.ok(!buffer.entries.some(entry => entry.pageId === 3))
+  buffer.add(message(2, 'two 3'))
+  assert.deepEqual(buffer.entries.map(entry => entry.message), ['one 0', 'one 1', 'one 2', 'two 1', 'two 2', 'two 3'], 'page 2 has the most entries')
+  buffer.add(message(1, 'one 3')); buffer.add(message(1, 'one 4'))
+  assert.deepEqual(buffer.entries.map(entry => entry.message), ['one 2', 'two 1', 'two 2', 'two 3', 'one 3', 'one 4'])
+})
+
+test('messages dropped while recording is off, and clearing, make a window incomplete', () => {
+  const buffer = new ConsoleBuffer()
+  let start = buffer.mark()
+  buffer.add(message(1, 'a')); buffer.drop(1); buffer.add(message(1, 'b'))
+  assert.equal(buffer.slice(1, start).complete, false)
+  assert.equal(buffer.slice(2, start).complete, true, 'a drop on one page does not affect another')
+  start = buffer.mark(); buffer.add(message(1, 'c')); buffer.clear(1)
+  assert.equal(buffer.slice(1, start).complete, false)
+  start = buffer.mark(); buffer.add(message(2, 'd')); buffer.clear()
+  assert.equal(buffer.slice(2, start).complete, false); assert.deepEqual(buffer.entries, [])
+  start = buffer.mark(); buffer.add(message(2, 'e'))
+  assert.equal(buffer.slice(2, start).complete, true)
+})
+
+test('a capped slice keeps errors first, then the latest messages, in order', () => {
+  const buffer = new ConsoleBuffer()
+  const start = buffer.mark()
+  buffer.add(message(1, 'early error', 'error'))
+  for (let i = 0; i < 6; i++) buffer.add(message(1, `info ${i}`))
+  buffer.add(message(1, 'late error', 'error'))
+  const slice = buffer.slice(1, start, undefined, 4)
+  assert.deepEqual(slice.entries.map(entry => entry.message), ['early error', 'info 4', 'info 5', 'late error'])
+  assert.deepEqual([slice.total, slice.truncated], [8, true])
+  const through = buffer.mark(); buffer.add(message(1, 'after'))
+  assert.ok(!buffer.slice(1, start, through).entries.some(entry => entry.message === 'after'))
+})

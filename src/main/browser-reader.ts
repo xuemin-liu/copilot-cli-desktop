@@ -14,6 +14,7 @@ import { validateBrowserTestPlan } from './browser-test-plan.js'
 import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-test-plan.js'
 import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
+import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
 import { sanitizedText } from './browser-privacy.js'
 
 const MAX_RESPONSES = 100
@@ -64,7 +65,10 @@ export interface BrowserReaderOptions {
   visible: (id: number) => boolean
   /** Main-process dependency used by isolated fixtures. Never accepted from HTTP. */
   approve?: (description: string) => Promise<boolean>
-  evidence?: (pageId: number, startedAt: string) => Record<string, unknown>
+  /** Console evidence for a run; `after` is the console sequence number when the run started. */
+  evidence?: (pageId: number, startedAt: string, after?: number) => Record<string, unknown>
+  /** The browser's console stream, for per-step slices, the error latch and consoleMessage. */
+  console?: ConsoleSource
 }
 
 /** A fixed-function broker. The private transport never accepts CDP commands,
@@ -81,6 +85,7 @@ export class BrowserReader {
   private testUnexpectedDialog: string | null = null
   private testAbort: AbortController | null = null
   private testDelivery: TestDelivery = 'not-attempted'
+  private testConsole: TestConsoleWatch | null = null
   private testInputUncertain = false
   private testDiagnostics: Params = {}
   private picker: { pageId: number; choose: (backendNodeId: number | null) => void; next: () => Promise<number | null> } | null = null
@@ -166,7 +171,10 @@ export class BrowserReader {
         (method, params, session) => this.command(page, method, params, session, 3000), () => active() && !signal.aborted && !this.testAbort?.signal.aborted)
       await page.testNetwork.start()
       executionStarted = true
+      const consoleStart = this.options.console?.mark()
+      this.testConsole = this.options.console ? new TestConsoleWatch(plan, page.contents.id, this.options.console) : null
       const report = await runBrowserTest(plan, page.contents.id, { active,
+        ...(this.testConsole ? { console: this.testConsole } : {}),
         execute: (step, stop) => this.testStep(page, step, stop),
         progress: (step, total, label) => { Object.assign(this.testProgress, { step, total, label }) },
         checkpoint: (report, currentAction) => {
@@ -184,7 +192,9 @@ export class BrowserReader {
       // If the transport cannot remove interception, detaching Chromium's
       // debugger removes Fetch interception rather than leaving a live rule.
       if (page.testNetwork.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
-      report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt),
+      report.evidence = redactTestEvidence(plan, { network: page.testNetwork.evidence(), ...this.options.evidence?.(page.contents.id, report.startedAt, consoleStart),
+        ...(plan.failOnConsoleError ? { consoleErrors: { failOnConsoleError: true, ignorePatterns: plan.consoleErrorIgnore?.length ?? 0,
+          observed: 'every console message of the test page, including same-origin frames, while the run is open, recorded or not. Messages arrive asynchronously and are attributed to the step during which they arrive; workers and messages after the last step are not observed.' } } : {}),
         visibilityRequired: true, screenshotRegionComparison: 'unsupported; screenshots require separate visual inspection' }) as Params
       const { screenshots: _screenshots, ...summary } = report
       this.testProgress.report = summary
@@ -201,6 +211,7 @@ export class BrowserReader {
       await page.testNetwork?.stop()
       if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
+      this.testConsole?.dispose(); this.testConsole = null
       this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
       this.testPageId = null; this.testOrigin = null
     }
@@ -535,6 +546,8 @@ export class BrowserReader {
       for (const [index, condition] of step.all.entries()) results.push(await this.testStepAction(page, { action: step.action, label: step.label, ...condition }, signal, `c${index + 1}`))
       return { passed: results.every(result => result.passed), reason: results.find(result => !result.passed)?.reason ?? 'Combined readiness conditions are not all satisfied.', data: { conditions: results.map(result => ({ passed: result.passed, reason: result.reason })) } }
     }
+    if (['waitFor', 'assert'].includes(step.action) && step.condition === 'consoleMessage') return {
+      passed: this.testConsole?.matched(String(step.expected), step.level) ?? false, reason: `No ${step.level ? `${step.level} ` : ''}console message from this run matches the pattern.` }
     if (['waitFor', 'assert'].includes(step.action) && step.condition === 'requestComplete') return {
       passed: page.testNetwork?.completed(step.request!) ?? false, reason: 'No matching request from this run has completed with the expected state/status.' }
     if (step.action === 'reload') {

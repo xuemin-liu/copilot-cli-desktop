@@ -78,7 +78,7 @@ if (!process.versions.electron) {
     const browser = new BrowserDebug(window, join(artifacts, `settings-${Date.now()}.json`), { endpointPath: endpoint, approveInteraction: async () => { approvals++; return false } })
     const second = new BrowserDebug(window, join(artifacts, `second-settings-${Date.now()}.json`), { endpointPath: join(artifacts, 'second-control.json') })
     const url = `http://127.0.0.1:${site.address().port}/`
-    const plan = steps => ({ description: 'Exercise a user-described workflow 用户测试', expected: 'Expected checks pass', steps })
+    const plan = (steps, extra = {}) => ({ description: 'Exercise a user-described workflow 用户测试', expected: 'Expected checks pass', steps, ...extra })
     const step = (action, label, rest) => ({ action, label, ...rest })
     const visible = (selector, extra = {}) => step('assert', 'Expected element visible', { selector, condition: 'visible', ...extra })
     const dragSetup = `(${function () {
@@ -254,9 +254,9 @@ if (!process.versions.electron) {
     }
     let sequence = 0
     const runId = Date.now()
-    const execute = async (steps, shell = false) => {
+    const execute = async (steps, shell = false, extra = {}) => {
       const input = join(artifacts, `plan-${runId}-${++sequence}.json`); const output = join(artifacts, `report-${runId}-${sequence}.json`)
-      await writeFile(input, JSON.stringify(plan(steps)))
+      await writeFile(input, JSON.stringify(plan(steps, extra)))
       const result = shell ? JSON.parse((await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', environment.COPILOT_DESKTOP_BROWSER_HELPER, 'test', input, '-OutputPath', output], { env: process.env, windowsHide: true, timeout: 60000 })).stdout)
         : await browserCommand(['test', input, output])
       assert.ok(!JSON.stringify(result).includes('fixture-private-password')); assert.ok(!JSON.stringify(result).includes('imageBase64'))
@@ -458,6 +458,54 @@ if (!process.versions.electron) {
       assert.ok(!(await geometryEvents()).includes('dblclick'), 'the second press is never sent after the target moved')
       assert.equal(writes, 0)
       await browser.view.webContents.executeJavaScript('window.geometryFixture.stop?.(); document.querySelector("#geo-target").remove()')
+      // Console: real Chromium console events, uncaught exceptions, a same-origin frame,
+      // a flood of one library warning, and recording switched off.
+      const consoleSetup = `(${function () {
+        document.querySelector('#console-fixture')?.remove()
+        const fixture = document.createElement('div'); fixture.id = 'console-fixture'
+        fixture.innerHTML = '<button id="log-ready">Open viewer</button><button id="throw">Break viewer</button><button id="flood">Render</button><button id="frame-error">Frame error</button><iframe id="console-frame" srcdoc="<p>frame</p>" style="height:30px"></iframe>'
+        document.body.append(fixture)
+        fixture.querySelector('#log-ready').onclick = () => setTimeout(() => console.debug('viewer ready: frames=2 mpr=true'), 200)
+        fixture.querySelector('#throw').onclick = () => setTimeout(() => { throw new TypeError('frame is undefined') }, 50)
+        fixture.querySelector('#flood').onclick = () => { for (let i = 0; i < 400; i++) console.warn('CanvasTextAlign is deprecated'); console.error('CanvasTextAlign failed once') }
+        fixture.querySelector('#frame-error').onclick = () => fixture.querySelector('#console-frame').contentWindow.console.error('error inside the frame')
+        return true
+      }.toString()})()`
+      await browser.view.webContents.executeJavaScript(consoleSetup)
+      const ready = await execute([step('click', 'Open viewer', { selector: '#log-ready' }),
+        step('waitFor', 'Viewer logs ready', { condition: 'consoleMessage', expected: 'viewer ready*', level: 'debug', timeoutMs: 5000 }),
+        step('assert', 'No info message claims it', { condition: 'consoleMessage', expected: 'viewer ready*', level: 'info', timeoutMs: 300 })])
+      assert.deepEqual(ready.steps.map(item => item.status), ['passed', 'passed', 'failed'], JSON.stringify(ready))
+      assert.deepEqual(ready.steps[1].console.entries.map(entry => entry.message), ['viewer ready: frames=2 mpr=true'])
+      const before = await execute([step('assert', 'Ready from an earlier run does not count', { condition: 'consoleMessage', expected: 'viewer ready*', timeoutMs: 300 })])
+      assert.equal(before.status, 'failed', 'a message from an earlier run never satisfies a new run')
+      const flood = await execute([step('click', 'Render', { selector: '#flood' }), step('click', 'Break viewer', { selector: '#throw' }),
+        step('waitFor', 'Wait for the viewer', { selector: '#never-there', condition: 'visible', timeoutMs: 20000 }),
+        step('click', 'Must not write after a console error', { selector: '#write' }), visible('#log-ready')], false, { failOnConsoleError: true, consoleErrorIgnore: ['CanvasTextAlign*'] })
+      assert.equal(flood.status, 'failed', JSON.stringify(flood))
+      // Messages reach the main process asynchronously, so a burst can spill into the next step's slice.
+      const warnings = flood.evidence.console.filter(entry => entry.level === 'warning')
+      assert.equal(warnings.reduce((sum, entry) => sum + (entry.count ?? 1), 0), 400, JSON.stringify(flood.evidence.console))
+      assert.ok(warnings.length <= flood.steps.length, 'a flood of one warning is kept once per step with its count')
+      assert.ok(flood.evidence.console.some(entry => entry.message === 'CanvasTextAlign failed once'), 'an ignored error is still reported')
+      const broken = flood.steps.findIndex(item => item.status === 'failed')
+      assert.ok(broken === 1 || broken === 2, `the uncaught error fails the click or the wait after it (${broken})`)
+      assert.match(flood.steps[broken].reason, /Console error during this step: .*frame is undefined/)
+      assert.ok(flood.steps[2].durationMs < 5000, 'a wait stops at its next poll after a console error')
+      assert.ok(flood.steps.slice(broken + 1).every(item => item.status === 'skipped')); assert.equal(writes, 0)
+      assert.equal(flood.evidence.capture.consoleComplete, true)
+      const frame = await execute([step('click', 'Frame error', { selector: '#frame-error' }), visible('#log-ready')], false, { failOnConsoleError: true })
+      const frameObserved = frame.status === 'failed' && /error inside the frame/.test(frame.steps[0].reason)
+      assert.ok(frameObserved, `the latch sees a same-origin frame's console error: ${JSON.stringify(frame)}`)
+      browser.action('record-console:off')
+      try {
+        const unrecorded = await execute([step('click', 'Break viewer', { selector: '#throw' }),
+          step('waitFor', 'Wait for the viewer', { selector: '#never-there', condition: 'visible', timeoutMs: 3000 }), visible('#log-ready')], false, { failOnConsoleError: true })
+        assert.equal(unrecorded.status, 'failed', 'the latch still sees errors while recording is off')
+        assert.match(unrecorded.steps.find(item => item.status === 'failed').reason, /frame is undefined/)
+        assert.equal(unrecorded.evidence.capture.consoleComplete, false, 'the report says the console was not fully recorded')
+      } finally { browser.action('record-console:on') }
+      await browser.view.webContents.executeJavaScript('document.querySelector("#console-fixture").remove()')
       for (const switchPage of [false, true]) {
         await browser.view.webContents.executeJavaScript(dragSetup)
         const contents = browser.view.webContents; const pageId = browser.snapshot.activePageId
@@ -574,6 +622,7 @@ if (!process.versions.electron) {
         viewerOverlayMeasurement: true, directSvgInputSurface: true, partiallyVisibleDragSurface: true,
         dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
         geometryPhaseDiagnostics: true, stableCondition: true, dataAttributeCondition: true,
+        consoleMessageCondition: true, consoleErrorLatch: true, consoleRepeatCompression: true, consoleLatchWithoutRecording: true,
         devicePixelRatio: await browser.view.webContents.executeJavaScript('window.devicePixelRatio') }, null, 2))
       console.log('Browser testing check passed: general workflow, native input, expectations, evidence, frames, cancellation and installed helper.')
     } finally {

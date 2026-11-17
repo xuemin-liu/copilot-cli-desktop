@@ -514,7 +514,43 @@ autocomplete fields for passwords, one-time codes or payment details. This also
 prevents repeated numeric-range assertions from disclosing protected values.
 Text target filters also exclude these protected elements and private aggregates
 before reading their text, including for visibility and count assertions or actions.
-Use a public application-state indicator for assertions instead. A `requestComplete` condition takes
+Use a public application-state indicator for assertions instead.
+
+A `consoleMessage` condition takes `expected`, an anchored glob in which only `*`
+is special (`"viewer ready*"`, `"*state: 3 frames*"`), an optional `level`
+(`debug`, `info`, `warning`, `error`) and no target. It passes once the test page
+has logged a matching message during this run, even while console recording is
+off; messages from earlier runs never count. Because any match in the run counts,
+include a revision or the state itself in the logged text when the same message
+can appear more than once:
+
+```json
+{ "action": "waitFor", "condition": "consoleMessage", "expected": "viewer ready*", "level": "debug" }
+```
+
+Set `"failOnConsoleError": true` on the plan to fail a run when the test page (or
+a same-origin frame) logs a console error, including an uncaught exception or a
+failed resource load. `consoleErrorIgnore` takes 1–20 globs of known errors to
+ignore, such as `["*CanvasTextAlign*"]`. The error fails the step during which it
+arrives: a wait stops at its next poll, an action finishes delivering first (its
+`delivery` is kept), and the remaining steps are skipped; the step is never
+retried. The failed step's `data.consoleErrors` lists up to 20 errors, repeats
+counted. Console messages reach the runner asynchronously, so an error caused by
+one step can arrive during the next. Errors are watched as they arrive, whether or
+not the console is being recorded; messages from workers, and from after the last
+step, are not observed.
+
+Each step result carries `console: {entries, total, truncated, complete}` when the
+page logged anything during the step: up to 10 messages, errors kept first, each
+message cut to 500 characters, with consecutive repeats kept once with a `count`.
+`complete` is false when a message in the step was not recorded (recording off),
+or was evicted or cleared. The run's `evidence.console` keeps up to 100 entries
+the same way, and `evidence.capture.consoleComplete` says whether the whole run
+was recorded. Each page keeps at most 300 console entries and all pages together
+1000, so one page's flood cannot evict another page's messages; closed pages are
+evicted first.
+
+A `requestComplete` condition takes
 `request: {urlPattern,method,state:"finished"|"failed",optional status}` and no target.
 It matches requests observed during this run, never an earlier run.
 

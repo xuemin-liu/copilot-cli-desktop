@@ -32,8 +32,8 @@ export function BrowserActivity({ state, tabId, run, report }: {
   for (const entry of consoleEntries) {
     const previous = groups.at(-1)
     if (group && previous && ['pageId', 'level', 'message', 'source', 'line'].every(key =>
-      previous.entry[key as keyof BrowserConsoleEntry] === entry[key as keyof BrowserConsoleEntry])) previous.count++
-    else groups.push({ entry, count: 1 })
+      previous.entry[key as keyof BrowserConsoleEntry] === entry[key as keyof BrowserConsoleEntry])) previous.count += entry.count ?? 1
+    else groups.push({ entry, count: entry.count ?? 1 })
   }
   const request = networkEntries.find(entry => entry.id === requestId)
   const pageIds = [...new Set([...state.pages.map(page => page.id), ...state.console.map(entry => entry.pageId), ...state.network.map(entry => entry.pageId)])]

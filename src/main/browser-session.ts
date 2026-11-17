@@ -379,6 +379,18 @@ does not infer the cause.
 Content assertions (numericValue/value/text/attribute) refuse private regions,
 aggregates containing private content, password inputs, and autocomplete fields
 for passwords, one-time codes or payment details. Use public state indicators.
+consoleMessage takes expected (an anchored glob where only * is special, e.g.
+"viewer ready*"), optional level debug/info/warning/error, and no target. It passes
+once the test page has logged a matching message during this run, recorded or not;
+include a revision or state in the logged text so an earlier match is not mistaken
+for a new one. A plan may set failOnConsoleError:true (with optional
+consoleErrorIgnore:["*CanvasTextAlign*"], 1-20 globs): a console error from the test
+page or a same-origin frame then fails the step it arrives in (a wait stops at its
+next poll; an action finishes first), and later steps are skipped. Messages arrive
+asynchronously, so an error can land in the step after the one that caused it.
+Each step result carries console:{entries,total,truncated,complete} with up to 10
+of its messages (errors first, repeats once with count); complete is false when
+messages were not recorded, evicted or cleared.
 requestComplete takes request:{urlPattern,method,
 state:"finished"|"failed",optional status} and no target; it observes only this run.
 Combine request completion with explicit DOM readiness for the current rendering
