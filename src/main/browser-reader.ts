@@ -15,6 +15,7 @@ import type { BrowserTestState, BrowserTestStep, TestDelivery } from './browser-
 import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
+import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
 
 const MAX_RESPONSES = 100
@@ -741,32 +742,47 @@ export class BrowserReader {
       }
       check(); return { passed: true }
     }
+    if (step.action === 'press' && step.scope === 'page') {
+      const focus = await evaluate('pageFocus')
+      if (focus.inFrame) throw new Error('Keyboard focus is inside a frame. Press on an element in that frame instead of on the page.')
+      this.testDiagnostics.keyboard = { scope: 'page', focus: focus.focus ?? 'document body' }
+      const info = testKey(step.key!, modifiers)
+      check()
+      try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', ...info, modifiers }, undefined, 10000, signal) }
+      finally {
+        if (!page.contents.isDestroyed()) {
+          const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: info.key, code: info.code, windowsVirtualKeyCode: info.windowsVirtualKeyCode, modifiers }, undefined, 1000)
+          if (signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id) await release.catch(() => {})
+          else await release
+        }
+      }
+      check(); return { passed: true, data: { keyboard: this.testDiagnostics.keyboard } }
+    }
     let point = await targetPoint()
     if (step.action === 'scroll') return { passed: Boolean((await evaluate('scroll', { selector: step.selector ?? 'html' })).passed) }
     if (step.action === 'select') { this.testDelivery = 'uncertain'; const result = await evaluate('select'); this.testDelivery = 'partial'; return { passed: Boolean(result.passed) } }
     if (step.action === 'fill' || step.action === 'press') {
       await evaluate(step.action)
-      const key = async (name: string, code: number, text = '', keyModifiers = modifiers): Promise<void> => {
+      const key = async (info: KeyInfo, keyModifiers = modifiers): Promise<void> => {
         check()
         await targetPoint(true)
         await evaluate('focused')
-        try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code, text, modifiers: keyModifiers }, undefined, 10000, signal) }
+        try { await this.command(page, 'Input.dispatchKeyEvent', { type: 'keyDown', ...info, modifiers: keyModifiers }, undefined, 10000, signal) }
         finally {
           if (!page.contents.isDestroyed()) {
-            const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code, modifiers }, undefined, 1000)
+            const release = this.command(page, 'Input.dispatchKeyEvent', { type: 'keyUp', key: info.key, code: info.code, windowsVirtualKeyCode: info.windowsVirtualKeyCode, modifiers }, undefined, 1000)
             if (signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id) await release.catch(() => {})
             else await release
           }
         }
       }
       if (step.action === 'fill') {
-        await key('a', 65, '', process.platform === 'darwin' ? 4 : 2); await key('Backspace', 8)
+        const selectAll = process.platform === 'darwin' ? 4 : 2
+        await key(testKey('a', selectAll), selectAll); await key(testKey('Backspace', 0))
         check(); await targetPoint(true); await evaluate('focused')
         if (step.value) await this.command(page, 'Input.insertText', { text: step.value }, undefined, 10000, signal)
       } else {
-        const codes: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Space: 32, Backspace: 8, Delete: 46,
-          ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34 }
-        await key(step.key === 'Space' ? ' ' : step.key!, codes[step.key!]!, step.key === 'Enter' ? '\r' : step.key === 'Space' ? ' ' : '')
+        await key(testKey(step.key!, modifiers))
       }
       check(); return { passed: true }
     }
@@ -784,7 +800,8 @@ export class BrowserReader {
       this.testDiagnostics.geometry = { phase, ...extra, changed: keys, before: bounds(before), after: bounds(after), delivery: this.testDelivery,
         cause: 'not inferred; the phase says only when the change was observed' }
     }
-    const settling = step.action === 'hover' ? 'pointer settling' : 'pre-press settling'
+    const pressless = step.action === 'hover' || step.action === 'wheel'
+    const settling = pressless ? 'pointer settling' : 'pre-press settling'
     const first = point; let samples = 0
     const stableUntil = Date.now() + 2000
     while (true) {
@@ -795,11 +812,39 @@ export class BrowserReader {
       if (Math.abs(fresh.x - point.x) < 0.5 && Math.abs(fresh.y - point.y) < 0.5) { point = fresh; break }
       if (Date.now() >= stableUntil) {
         geometryFailure(settling, first, fresh, changed(first, fresh), { samples, windowMs: 2000 })
-        throw new Error(`Target did not stabilize during ${settling}: it kept moving for 2 seconds of pointer movement over it.${step.action === 'hover' ? '' : ' No button press was sent.'} Changed: ${changed(first, fresh).join(', ') || 'point'}. See data.geometry; a stable condition before this step can wait for the layout to settle.`)
+        throw new Error(`Target did not stabilize during ${settling}: it kept moving for 2 seconds of pointer movement over it.${pressless ? '' : ' No button press was sent.'} Changed: ${changed(first, fresh).join(', ') || 'point'}. See data.geometry; a stable condition before this step can wait for the layout to settle.`)
       }
       point = fresh
     }
     if (step.action === 'hover') { check(); return { passed: true } }
+    if (step.action === 'wheel') {
+      // Native wheel events at one point. Each is hit-tested first; a target that moved fails
+      // rather than sending the rest of the wheel somewhere else.
+      const events = step.repeat ?? 1
+      const wheel = { deltaX: step.deltaX ?? 0, deltaY: step.deltaY ?? 0, requested: events, sent: 0 }
+      this.testDiagnostics.wheel = wheel
+      for (let event = 1; event <= events; event++) {
+        check()
+        let fresh: Params
+        try { fresh = await targetPoint(false, step.point, false) }
+        catch (error) {
+          // After the first event, a target that scrolled away or under another element shows up here.
+          if (event === 1) throw error
+          this.testDiagnostics.geometry = { phase: 'between wheel events', eventsSent: wheel.sent, before: bounds(point), delivery: this.testDelivery,
+            cause: 'not inferred; the phase says only when the change was observed' }
+          throw new Error(`Target moved or was covered between wheel events after ${wheel.sent} of ${events} were sent: ${error instanceof Error ? error.message : 'target unavailable'} Wheel on the scrolling container or canvas, not on an item that scrolls with it.`)
+        }
+        const moved = changed(point, fresh, ['x', 'y'])
+        if (moved.length) {
+          geometryFailure('between wheel events', point, fresh, moved, { eventsSent: wheel.sent })
+          throw new Error(`Target moved between wheel events after ${wheel.sent} of ${events} were sent. Changed: ${moved.join(', ')}. Wheel on the scrolling container or canvas, not on an item that scrolls with it.`)
+        }
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX: wheel.deltaX, deltaY: wheel.deltaY, modifiers }, undefined, 10000, signal)
+        wheel.sent = event
+        if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
+      }
+      check(); return { passed: true, data: { wheel } }
+    }
     const stable = (fresh: Params, phase: 'after press' | 'between double-click presses', press: number): void => {
       const keys = changed(point, fresh)
       if (!keys.length) return

@@ -469,6 +469,45 @@ Drag performs movement, button down, intermediate moves and button up within one
 bounded action (2–100 points, 100–5000 ms). Buttons/modifiers are released on
 completion, errors and cancellation; no held input crosses plan steps. Target
 replacement, obstruction or geometry movement fails safely with hit diagnostics.
+Modifiers apply to drag too, for tools that change behaviour while a key is held,
+such as Ctrl+drag to window/level or Shift+drag to constrain a line. Assert the
+resulting value afterwards:
+
+```json
+{ "action": "drag", "selector": "#image", "modifiers": ["Control"], "path": [{ "x": 40, "y": 40 }, { "x": 140, "y": 90 }] },
+{ "action": "assert", "selector": "#window-level", "condition": "text", "expected": "W 400" }
+```
+
+`wheel` sends native wheel events to a target point: `deltaX` and/or `deltaY`
+(integers within ±1000 CSS pixels per event, at least one nonzero), `repeat` (1–20
+events, default 1), and the pointer fields of `hover` (`point`, `inputSelector`,
+`inputRef`, `modifiers`). The page sees trusted `wheel` events with the held
+modifiers, as when scrolling an image stack or Ctrl+wheel zooming a viewer. Before
+each event the point is hit-tested again; if the target moved, scrolled away or was
+covered, the step fails with `data.geometry.phase` `between wheel events` and
+`eventsSent`, and no further event is sent. Wheel on the scrolling container or the
+canvas, not on an item that scrolls with it. `data.wheel` reports the events sent.
+
+```json
+{ "action": "wheel", "selector": "#viewport-1", "deltaY": 120, "repeat": 3, "modifiers": ["Control"] }
+```
+
+`press` accepts the named keys above and single letters `a`–`z` and digits `0`–`9`
+for application shortcuts. A letter or digit types its character only without
+`Alt`, `Control` or `Meta`, so `Control`+`s` is a shortcut and never inserts text;
+`Shift` changes letters only. Chords the browser handles itself are refused:
+`Control` or `Meta` with `w`, `t`, `f`, `g`, `r`, `i` or `0` (close, new tab, find,
+reload, DevTools, zoom). Use `reload` and the other test actions instead.
+
+A page-level shortcut uses `"scope": "page"` instead of a target: the key goes to
+whatever has focus, and `data.keyboard.focus` reports that element (tag, id, classes
+and role; never its value) or `document body`. It refuses when focus is inside a
+frame, where the key would reach another document; press on an element in that
+frame instead.
+
+```json
+{ "action": "press", "scope": "page", "key": "s", "modifiers": ["Control"] }
+```
 
 `reload` is independent of F5/Ctrl+R. It waits for navigation and reports
 `navigation: completed|cancelled`, `loading`, and `testingEnabled`, plus fresh target
@@ -652,7 +691,7 @@ failed or cancelled run does not undo completed steps. Keep the Page view visibl
 for input and screenshots. A run acts only on its own session's pages.
 
 The runner supports navigation, click, double-click, hover, coordinate dragging, text entry and replacement,
-single-choice select elements, keyboard keys, document/container scrolling, waits,
+single-choice select elements, keyboard keys and page-level shortcuts, document/container scrolling, native wheel input, waits,
 assertions, and screenshots. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
 are rejected. Pointer actions recheck the target after hover-driven layout changes

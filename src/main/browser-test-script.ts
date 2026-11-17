@@ -172,6 +172,13 @@ export function browserTestScript(operation: string, args: Record<string, any>):
         limitations: ['References are valid only in this page/frame/document and latest discovery generation. Coverage is sampled at the visible center; every input point is hit-tested again.'] }
     }
     if (operation === 'probe' && args.condition === 'url') return { passed: location.href.includes(args.expected) }
+    if (operation === 'pageFocus') {
+      // Keys go to the focused element. Inside a frame they would reach another document, perhaps another origin.
+      let active: Element | null = document.activeElement
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
+      return { focus: active && active !== document.body && active !== document.documentElement ? metadata(active) : null,
+        inFrame: active instanceof HTMLIFrameElement || active instanceof HTMLFrameElement || active instanceof HTMLObjectElement || active instanceof HTMLEmbedElement }
+    }
     const found = args.targetRef ? [fromRef(String(args.targetRef))] : find(String(args.selector))
     const matches = found.filter(visible)
     if (operation === 'probe') {
@@ -225,7 +232,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       return { passed: false }
     }
     const dragging = args.action === 'drag'
-    const pointer = ['drag', 'click', 'doubleClick', 'hover'].includes(args.action)
+    const pointer = ['drag', 'click', 'doubleClick', 'hover', 'wheel'].includes(args.action)
     const coordinate = dragging || Boolean(args.point)
     if (matches.length !== 1 || (!pointer && !(matches[0] instanceof HTMLElement))) return { error: `Action needs exactly one visible element; ${matches.length > 1 ? 'selector is ambiguous' : found.length ? 'target is hidden' : 'no matching target exists'}. Refine the selector or discover a reference.` }
     const target = matches[0]!

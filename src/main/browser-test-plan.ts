@@ -2,6 +2,10 @@ import { parseSafeHttpUrl } from './external-targets.js'
 
 export const MAX_TEST_BYTES = 128 * 1024
 export const TEST_KEYS = ['Enter', 'Tab', 'Escape', 'Space', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'] as const
+/** Single letters and digits, for application shortcuts. */
+export const TEST_CHARACTER_KEY = /^[a-z0-9]$/
+/** Chords the browser handles itself (close, new tab, find, reload, DevTools, zoom): a test must not trigger them. */
+export const RESERVED_CHORDS = ['w', 't', 'f', 'g', 'r', 'i', '0'] as const
 export interface TestRequestMatch { urlPattern: string; method: string }
 export interface TestNetworkFailure extends TestRequestMatch {
   failure: 'transport' | 'http'; status?: number; maxRequests: number; durationMs: number
@@ -23,7 +27,7 @@ export interface BrowserTestCondition {
   request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
 }
 export interface BrowserTestStep extends BrowserTestCondition {
-  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'fill' | 'select' | 'press' | 'scroll' | 'waitFor' | 'assert' | 'screenshot'
+  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot'
   label: string
   inputSelector?: string
   inputRef?: string
@@ -34,6 +38,12 @@ export interface BrowserTestStep extends BrowserTestCondition {
   value?: string
   key?: string
   pixels?: number
+  /** wheel: CSS-pixel delta per event, and how many events (default 1). */
+  deltaX?: number
+  deltaY?: number
+  repeat?: number
+  /** press: "page" sends the key to whatever has focus, with no target element. */
+  scope?: 'page'
   path?: { x: number; y: number }[]
   durationMs?: number
   timeoutMs?: number
@@ -183,14 +193,19 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       click: [...pointer, 'button', 'dialog'], doubleClick: [...pointer, 'button', 'dialog'], hover: pointer,
       drag: [...pointer.filter(field => field !== 'point'), 'button', 'path', 'durationMs'],
       fill: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'],
-      press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
+      press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog', 'scope'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
+      wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
       waitFor: [...conditionFields, 'all', 'timeoutMs'], assert: [...conditionFields, 'all', 'timeoutMs'], screenshot: [],
     }
     if (typeof step.action !== 'string' || !extra[step.action]) fail('unsupported action.')
     fields(step, ['action', 'label', ...extra[String(step.action)]!])
     if (step.label === undefined) step.label = `${step.action} step ${index + 1}`
     string(step.label, 200)
-    target(step, ['click', 'doubleClick', 'hover', 'drag', 'fill', 'select', 'press'].includes(String(step.action)))
+    if (step.scope !== undefined) {
+      if (step.action !== 'press' || step.scope !== 'page') fail('scope "page" is only for press.')
+      if ([step.selector, step.targetRef, step.text, step.frame].some(x => x !== undefined)) fail('a page-level press takes no target, text or frame.')
+    }
+    target(step, ['click', 'doubleClick', 'hover', 'drag', 'fill', 'select', 'wheel'].includes(String(step.action)) || step.action === 'press' && step.scope === undefined)
     if (step.inputSelector !== undefined) string(step.inputSelector, 512)
     if (step.inputRef !== undefined) target({ targetRef: step.inputRef }, true)
     if (step.inputSelector !== undefined && step.inputRef !== undefined) fail('use one inputSelector or inputRef.')
@@ -214,7 +229,16 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (step.durationMs !== undefined && (typeof step.durationMs !== 'number' || !Number.isInteger(step.durationMs) || step.durationMs < 100 || step.durationMs > 5000)) fail('drag duration must be within 100–5000 milliseconds.')
     }
     if (step.action === 'fill' || step.action === 'select') string(step.value, 8192, true)
-    if (step.action === 'press' && !TEST_KEYS.includes(step.key as typeof TEST_KEYS[number])) fail('unsupported key.')
+    if (step.action === 'press') {
+      if (typeof step.key !== 'string' || !TEST_KEYS.includes(step.key as typeof TEST_KEYS[number]) && !TEST_CHARACTER_KEY.test(step.key)) fail('unsupported key.')
+      const modifiers = (step.modifiers ?? []) as string[]
+      if ((modifiers.includes('Control') || modifiers.includes('Meta')) && RESERVED_CHORDS.includes(String(step.key) as typeof RESERVED_CHORDS[number])) fail('this chord is a browser shortcut (close, new tab, find, reload, DevTools or zoom); use the matching test action instead.')
+    }
+    if (step.action === 'wheel') {
+      for (const delta of [step.deltaX, step.deltaY]) if (delta !== undefined && (typeof delta !== 'number' || !Number.isInteger(delta) || Math.abs(delta) > 1000)) fail('wheel deltas must be integers within ±1000 CSS pixels.')
+      if (!step.deltaX && !step.deltaY) fail('wheel needs a nonzero deltaX or deltaY.')
+      if (step.repeat !== undefined && (typeof step.repeat !== 'number' || !Number.isInteger(step.repeat) || step.repeat < 1 || step.repeat > 20)) fail('wheel repeat must be within 1–20 events.')
+    }
     if (step.action === 'scroll' && (typeof step.pixels !== 'number' || !Number.isInteger(step.pixels) || Math.abs(step.pixels) > 2000)) fail('scroll must be within 2000 pixels.')
     if (step.action === 'screenshot' && ++screenshots > 5) fail('use at most five screenshots.')
     if (['waitFor', 'assert', 'reload'].includes(String(step.action))) {
