@@ -659,7 +659,7 @@ export class BrowserReader {
     let prepared = false
     // A second target (dragTo's drop target) keeps its own reference, so replacing either element is detected.
     interface OtherTarget { args: Params; reference: string; prepared: boolean }
-    const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | undefined = step.point, scroll = true, dragPoint?: string, other?: OtherTarget): Promise<Params> => {
+    const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | null | undefined = step.point, scroll = true, dragPoint?: string, other?: OtherTarget): Promise<Params> => {
       const point = await evaluate('target', { ...(other ? { ...other.args, reference: other.reference } : step.targetRef ? {} : { selector: step.selector ?? 'html' }),
         requireReference: other ? other.prepared : prepared, offset, scroll, dragPoint })
       if (other) other.prepared = true; else prepared = true
@@ -779,7 +779,7 @@ export class BrowserReader {
       // drag follows the real cursor. Both ends are hit-tested; the drop target again just before the drop.
       const drop = { args: { selector: step.dropSelector, targetRef: step.dropRef, text: step.dropText }, reference: randomBytes(16).toString('hex'), prepared: false }
       const source = (scroll: boolean): Promise<Params> => targetPoint(false, step.point, scroll, 'source')
-      const destination = (scroll: boolean): Promise<Params> => targetPoint(false, step.dropPoint, scroll, 'drop target', drop)
+      const destination = (scroll: boolean): Promise<Params> => targetPoint(false, step.dropPoint ?? null, scroll, 'drop target', drop) // null, not undefined: no offset means the visible center, never the source's point
       const geometry = ['width', 'height', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight']
       const moved = (a: Params, b: Params): boolean => Math.abs(a.x - b.x) >= 0.5 || Math.abs(a.y - b.y) >= 0.5 || geometry.some(key => Math.abs(Number(a[key]) - Number(b[key])) >= 0.5)
       const pause = (ms: number): Promise<void> => abortable(new Promise<void>(resolve => setTimeout(resolve, ms)), signal)

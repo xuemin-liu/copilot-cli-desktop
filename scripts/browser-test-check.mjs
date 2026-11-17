@@ -438,6 +438,10 @@ if (!process.versions.electron) {
         assert.deepEqual([...new Set(events.map(event => event.type))], ['dragstart', 'dragenter', 'dragover', 'drop', 'dragend'], JSON.stringify(events))
         assert.ok(events.every(event => event.trusted), 'drag-and-drop events are trusted')
       }
+      // A source point alone leaves the drop at the target's visible center, not at the source's offset.
+      await browser.view.webContents.executeJavaScript(dndSetup('') + ';document.querySelector("#D_3").style.width="60px";document.querySelector("#D_3").style.height="60px"')
+      const sourcePointOnly = await execute([dragTo({ point: { x: 130, y: 50 }, dropPoint: undefined }), step('assert', 'Cell shows the series', { selector: '#D_3', condition: 'text', expected: 'Loaded series-42' })])
+      assert.equal(sourcePointOnly.status, 'passed', JSON.stringify(sourcePointOnly))
       // Cancelled and refused drops end the drag, release the pointer and leave later input working.
       const dndFailures = [
         ['reject', dragTo(), /did not accept the drop/, true],
