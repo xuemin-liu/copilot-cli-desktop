@@ -398,6 +398,72 @@ if (!process.versions.electron) {
         if (mode === 'bounds') assert.equal(state.events.length, 0, 'invalid endpoint is rejected before pointer down')
         else assert.ok(state.events.some(event => ['pointerup', 'pointercancel', 'lostpointercapture'].includes(event.type) && event.trusted && event.buttons === 0), 'failed drag clears native button state')
       }
+      // HTML5 drag-and-drop: a thumbnail list and viewer cells, as in an imaging viewer.
+      const dndSetup = mode => `(${function (mode) {
+        document.querySelector('#dnd-fixture')?.remove()
+        const fixture = document.createElement('div'); fixture.id = 'dnd-fixture'
+        fixture.style.cssText = 'position:fixed;left:0;top:0;width:700px;height:420px;z-index:2000;background:#fff'
+        fixture.innerHTML = '<ul style="position:absolute;left:10px;top:10px;margin:0;padding:0;list-style:none"><li data-container draggable="true" style="width:140px;height:60px;background:#8cf">Ball Phantom Axia</li><li data-container style="width:140px;height:60px;background:#ccc;margin-top:8px">Not draggable</li></ul>'
+          + '<div id="D_3" style="position:absolute;left:300px;top:150px;width:300px;height:200px;background:#333;color:#fff">Empty<canvas id="C_3" width="40" height="40"></canvas></div>'
+        document.body.append(fixture)
+        window.dndFixture = { events: [], clicks: 0 }
+        for (const type of ['dragstart', 'dragenter', 'dragover', 'drop', 'dragend', 'click']) fixture.addEventListener(type, event => window.dndFixture.events.push({ type, trusted: event.isTrusted, target: event.target.id || event.target.localName }), true)
+        const source = fixture.querySelector('li[draggable]'); const cell = fixture.querySelector('#D_3')
+        source.addEventListener('dragstart', event => { event.dataTransfer.setData('text/plain', 'series-42'); event.dataTransfer.effectAllowed = 'copy' })
+        cell.addEventListener('click', () => window.dndFixture.clicks++)
+        if (mode !== 'reject') cell.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' })
+        cell.addEventListener('drop', event => {
+          event.preventDefault()
+          const series = event.dataTransfer.getData('text/plain')
+          cell.firstChild.textContent = 'Loaded ' + series
+          cell.querySelector('canvas').getContext('2d').fillRect(0, 0, 40, 40)
+          console.log('dropped ' + series)
+        })
+        if (mode === 'cover') { const cover = document.createElement('div'); cover.id = 'dnd-cover'; cover.style.cssText = 'position:absolute;left:280px;top:130px;width:360px;height:240px;z-index:5'; fixture.append(cover) }
+        return true
+      }.toString()})(${JSON.stringify(mode)})`
+      const dragTo = (extra = {}) => step('dragTo', 'Drop series on empty cell', { selector: 'li[data-container]', text: 'Ball Phantom Axia', dropSelector: '#D_3', dropPoint: { x: 200, y: 150 }, durationMs: 300, ...extra })
+      const dndState = () => browser.view.webContents.executeJavaScript('window.dndFixture')
+      for (const shell of [false, true]) {
+        await browser.view.webContents.executeJavaScript(dndSetup(''))
+        const dropped = await execute([dragTo(), step('assert', 'Cell shows the series', { selector: '#D_3', condition: 'text', expected: 'Loaded series-42' }),
+          step('assert', 'Cell canvas is painted', { selector: '#C_3', condition: 'canvasPainted' }),
+          step('assert', 'Drop handler logged', { condition: 'consoleMessage', expected: 'dropped series-42' })], shell)
+        assert.equal(dropped.status, 'passed', JSON.stringify(dropped))
+        const report = dropped.steps[0].data.dragAndDrop
+        assert.equal(report.dragstartFired, true); assert.equal(report.dragstartOnSource, true); assert.equal(report.dragoverAccepted, true)
+        assert.equal(report.dropFired, true); assert.equal(report.dropAccepted, true); assert.equal(report.dropOnTarget, true)
+        assert.equal(report.dragendFired, true); assert.equal(report.dropEffect, 'copy')
+        const events = (await dndState()).events
+        assert.deepEqual([...new Set(events.map(event => event.type))], ['dragstart', 'dragenter', 'dragover', 'drop', 'dragend'], JSON.stringify(events))
+        assert.ok(events.every(event => event.trusted), 'drag-and-drop events are trusted')
+      }
+      // A source point alone leaves the drop at the target's visible center, not at the source's offset.
+      await browser.view.webContents.executeJavaScript(dndSetup('') + ';document.querySelector("#D_3").style.width="60px";document.querySelector("#D_3").style.height="60px"')
+      const sourcePointOnly = await execute([dragTo({ point: { x: 130, y: 50 }, dropPoint: undefined }), step('assert', 'Cell shows the series', { selector: '#D_3', condition: 'text', expected: 'Loaded series-42' })])
+      assert.equal(sourcePointOnly.status, 'passed', JSON.stringify(sourcePointOnly))
+      // Cancelled and refused drops end the drag, release the pointer and leave later input working.
+      const dndFailures = [
+        ['reject', dragTo(), /did not accept the drop/, true],
+        ['', dragTo({ text: 'Not draggable' }), /did not start an HTML5 drag/, false],
+        ['cover', dragTo(), /covered/, false],
+        ['', dragTo({ dropSelector: '#missing' }), /^Drag drop target: .*no matching target/, false],
+        ['', step('drag', 'Pointer drag on a draggable item', { selector: 'li[data-container]', text: 'Ball Phantom Axia', path: [{ x: 20, y: 20 }, { x: 60, y: 40 }, { x: 130, y: 50 }], durationMs: 200 }), /HTML5 drag-and-drop session/, true],
+      ]
+      for (const [mode, action, reason, started] of dndFailures) {
+        await browser.view.webContents.executeJavaScript(dndSetup(mode))
+        const report = await execute([action, step('click', 'Must not write after failed drop', { selector: '#write' }), visible('#D_3')])
+        assert.equal(report.status, 'failed', JSON.stringify(report)); assert.match(report.steps[0].reason, reason)
+        assert.equal(report.steps[1].status, 'skipped'); assert.equal(writes, 0)
+        const events = (await dndState()).events
+        assert.equal(events.some(event => event.type === 'dragstart'), started, JSON.stringify(events))
+        if (started) assert.ok(events.some(event => event.type === 'dragend'), 'a started drag is ended')
+        assert.ok(!events.some(event => event.type === 'drop'), 'a failed drop delivers no drop event')
+        await browser.view.webContents.executeJavaScript('document.querySelector("#dnd-cover")?.remove()')
+        const clicked = await execute([step('click', 'Cell still takes clicks', { selector: '#D_3' }), visible('#D_3')])
+        assert.equal(clicked.status, 'passed', JSON.stringify(clicked)); assert.equal((await dndState()).clicks, 1, `input works after a failed drop (${reason})`)
+      }
+      await browser.view.webContents.executeJavaScript('document.querySelector("#dnd-fixture").remove()')
       // Geometry phases: a target that keeps moving before the press, one that moves on
       // mousedown, and one that moves between double-click presses. Each fails with the
       // phase it was observed in, and none delivers the click it was supposed to.
@@ -495,7 +561,8 @@ if (!process.versions.electron) {
       assert.ok(flood.steps.slice(broken + 1).every(item => item.status === 'skipped')); assert.equal(writes, 0)
       assert.equal(flood.evidence.capture.consoleComplete, true)
       const frame = await execute([step('click', 'Frame error', { selector: '#frame-error' }), visible('#log-ready')], false, { failOnConsoleError: true })
-      const frameObserved = frame.status === 'failed' && /error inside the frame/.test(frame.steps[0].reason)
+      // Console messages arrive asynchronously: the error fails the click or the step after it.
+      const frameObserved = frame.status === 'failed' && frame.steps.some(item => item.status === 'failed' && /error inside the frame/.test(item.reason ?? ''))
       assert.ok(frameObserved, `the latch sees a same-origin frame's console error: ${JSON.stringify(frame)}`)
       browser.action('record-console:off')
       try {
@@ -714,6 +781,7 @@ if (!process.versions.electron) {
         nativeCoordinateDrag: true, dragInterpolation: true, dragBounds: true, dragGeometryGuard: true, dragOverlayGuard: true,
         dragReplacementGuard: true, zoomedCoordinateDrag: true, dragCancellationReleasesButton: true, dragPageSwitchReleasesButton: true,
         sameOriginFrameDrag: true, crossOriginDragBlocked: true, dragEndpointTolerance: 1,
+        html5DragAndDrop: true, html5DropRefusedOrCancelled: true, pointerDragRefusesHtml5Drag: true,
         viewerOverlayMeasurement: true, directSvgInputSurface: true, partiallyVisibleDragSurface: true,
         dragPointDiagnostics: true, obstructionMetadataWithholdsValues: true, obstructedViewerReleasesPointer: true,
         geometryPhaseDiagnostics: true, stableCondition: true, dataAttributeCondition: true,

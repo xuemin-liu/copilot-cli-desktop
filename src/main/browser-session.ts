@@ -463,7 +463,7 @@ inspect frames separately and use a frame ID belonging to this page when needed.
 Write a local UTF-8 JSON plan with description, expected and steps. Each step has
 an action. label is optional and defaults to <action> step <n> in reports; provide
 a short label when the step's purpose is not obvious. Actions: navigate(url), click(selector), doubleClick(selector), hover(selector),
-drag(selector,path,optional durationMs,inputSelector), fill(selector,value), select(selector,value), press(selector,key),
+drag(selector,path,optional durationMs,inputSelector), dragTo(selector,dropSelector,optional point,dropPoint,dropText,durationMs), fill(selector,value), select(selector,value), press(selector,key),
 scroll(pixels,optional selector), waitFor(condition,selector,optional expected),
 assert(condition,selector,optional expected), screenshot(). Optional text filters
 match visible element text; optional frame selects a current-page frame.
@@ -481,7 +481,18 @@ stay inside that target and the visible viewport; the whole target need not fit
 onscreen. durationMs is 100–5000, default
 500. Example: {action:"drag",selector:"#canvas",path:[{x:20,y:20},{x:100,y:80}]}.
   Native input with the selected button follows the path; covered, moved or replaced targets stop
-the drag and release the button. File/DataTransfer drag-and-drop is unsupported.
+the drag and release the button. drag is for pointer gestures inside one surface;
+on a draggable element it fails and asks for dragTo, so no OS drag starts.
+dragTo is HTML5 drag-and-drop from one element onto another in the same frame:
+{action:"dragTo",selector:"li[data-container]",text:"Ball Phantom",dropSelector:"#D_3",
+dropPoint:{x:200,y:150}} (dropRef instead of dropSelector; dropText filters it;
+point/dropPoint are CSS pixels inside each element, default its visible center).
+The page's own dragstart data goes to dragenter/dragover/drop and dragend fires on
+the source. Both ends are hit-tested, the drop target again just before the drop.
+It fails when no dragstart fires or the target never accepts (no dragover
+preventDefault); data.dragAndDrop reports dragstartFired, dragoverAccepted,
+dropFired, dropAccepted, dragendFired and dropEffect. Custom data and file drops are
+unsupported. Assert the app's state after the drop.
 For viewers that receive input on an overlay, explicitly set inputSelector to that
 visible interaction surface (including SVG). Coordinates remain relative to selector.
 Alternatively, use the input surface itself as selector and measure offsets from it.

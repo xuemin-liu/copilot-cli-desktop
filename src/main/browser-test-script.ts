@@ -179,6 +179,40 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       return { focus: active && active !== document.body && active !== document.documentElement ? metadata(active) : null,
         inFrame: active instanceof HTMLIFrameElement || active instanceof HTMLFrameElement || active instanceof HTMLObjectElement || active instanceof HTMLEmbedElement }
     }
+    // Records drag-and-drop events in this isolated world while dragTo runs. The page's own listeners and
+    // data are untouched; only event types, whether handlers accepted, and the final drop effect are kept.
+    const drags = globalThis as typeof globalThis & { __desktopTestDrag?: { token: string; stop: () => void; report: () => Record<string, any> } }
+    if (operation === 'dragWatch') {
+      drags.__desktopTestDrag?.stop()
+      const targets = (globalThis as typeof globalThis & { __desktopTestTargets?: Map<string, { element: Element; input: Element }> }).__desktopTestTargets
+      const source = targets?.get(String(args.reference))?.element, dropTarget = targets?.get(String(args.dropReference))?.element
+      if (!source || !dropTarget) return { error: 'Drag source or drop target was replaced. Inspect the page again.' }
+      const counts: Record<string, number> = { dragstart: 0, dragenter: 0, dragover: 0, dragleave: 0, drop: 0, dragend: 0 }
+      let lastOver: Event | null = null, drop: Event | null = null, dropOnTarget: boolean | null = null, dropEffect: string | null = null, sourceStarted = false
+      const record = (event: Event): void => {
+        counts[event.type] = (counts[event.type] ?? 0) + 1
+        const node = event.composedPath()[0]
+        const element = node instanceof Element ? node : null
+        if (event.type === 'dragstart') sourceStarted = contains(source, element)
+        if (event.type === 'dragover') lastOver = event
+        if (event.type === 'drop') { drop = event; dropOnTarget = contains(dropTarget, element) }
+        if (event.type === 'dragend') dropEffect = (event as DragEvent).dataTransfer?.dropEffect ?? null
+      }
+      for (const type of Object.keys(counts)) addEventListener(type, record, true)
+      drags.__desktopTestDrag = { token: String(args.reference),
+        stop: () => { for (const type of Object.keys(counts)) removeEventListener(type, record, true); delete drags.__desktopTestDrag },
+        // defaultPrevented is read after dispatch, so it reflects the page's handlers, not this capture listener.
+        report: () => ({ dragstartFired: counts.dragstart! > 0, dragstartOnSource: sourceStarted, dragoverAccepted: (lastOver as Event | null)?.defaultPrevented ?? false,
+          dropFired: drop !== null, dropAccepted: (drop as Event | null)?.defaultPrevented ?? false, dropOnTarget, dragendFired: counts.dragend! > 0, dropEffect, events: { ...counts } }) }
+      return { passed: true }
+    }
+    if (operation === 'dragReport') {
+      const watch = drags.__desktopTestDrag
+      if (!watch || watch.token !== args.reference) return { error: 'Drag events were not recorded: the document changed during the drag.' }
+      const report = watch.report()
+      if (args.stop) watch.stop()
+      return report
+    }
     const found = args.targetRef ? [fromRef(String(args.targetRef))] : find(String(args.selector))
     const matches = found.filter(visible)
     if (operation === 'bounds') {
@@ -236,22 +270,24 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       }
       return { passed: false }
     }
-    const dragging = args.action === 'drag'
-    const pointer = ['drag', 'click', 'doubleClick', 'hover', 'wheel'].includes(args.action)
+    const dragging = args.action === 'drag' || args.action === 'dragTo'
+    const pointer = ['drag', 'dragTo', 'click', 'doubleClick', 'hover', 'wheel'].includes(args.action)
     const coordinate = dragging || Boolean(args.point)
-    if (matches.length !== 1 || (!pointer && !(matches[0] instanceof HTMLElement))) return { error: `Action needs exactly one visible element; ${matches.length > 1 ? 'selector is ambiguous' : found.length ? 'target is hidden' : 'no matching target exists'}. Refine the selector or discover a reference.` }
+    if (matches.length !== 1 || (!pointer && !(matches[0] instanceof HTMLElement))) return { error: `${args.action === 'dragTo' ? `Drag ${args.dragPoint}: ` : ''}Action needs exactly one visible element; ${matches.length > 1 ? 'selector is ambiguous' : found.length ? 'target is hidden' : 'no matching target exists'}. Refine the selector or discover a reference.` }
     const target = matches[0]!
     const inputs = coordinate && args.inputRef ? [fromRef(String(args.inputRef))].filter(visible) : coordinate && args.inputSelector ? find(String(args.inputSelector), false).filter(visible) : [target]
     if (inputs.length !== 1) return { error: 'Drag inputSelector needs exactly one visible element; refine the selector.' }
     const input = inputs[0]!
     if (coordinate && input !== target && contains(input, target)) return { error: 'Drag/pointer input surface must not be an ancestor of the target. Select the actual input surface.' }
     if (args.reference) {
-      const scope = globalThis as typeof globalThis & { __desktopTestTarget?: { token: string; element: Element; input: Element } }
-      const previous = scope.__desktopTestTarget
-      if (args.requireReference && (!previous || previous.token !== args.reference)) return { error: 'Target document changed during the action. Inspect the page again.' }
-      if (previous && previous.token === args.reference && previous.element !== target) return { error: 'Target was replaced during the action. Inspect the page again.' }
-      if (previous && previous.token === args.reference && previous.input !== input) return { error: 'Drag input surface was replaced during the action. Inspect the page again.' }
-      scope.__desktopTestTarget = { token: args.reference, element: target, input }
+      // One record per action target. dragTo holds two at once: its source and its drop target.
+      const scope = globalThis as typeof globalThis & { __desktopTestTargets?: Map<string, { element: Element; input: Element }> }
+      const records = scope.__desktopTestTargets ??= new Map()
+      const previous = records.get(String(args.reference))
+      if (args.requireReference && !previous) return { error: 'Target document changed during the action. Inspect the page again.' }
+      if (previous && previous.element !== target) return { error: 'Target was replaced during the action. Inspect the page again.' }
+      if (previous && previous.input !== input) return { error: 'Drag input surface was replaced during the action. Inspect the page again.' }
+      if (!previous) { if (records.size >= 4) records.delete(records.keys().next().value!); records.set(String(args.reference), { element: target, input }) }
     }
     if ([target, input].some(disabled)) return { error: 'Target is disabled or inert.' }
     if (operation === 'focused') return (target.getRootNode() as Document | ShadowRoot).activeElement === target

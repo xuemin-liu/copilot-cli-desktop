@@ -27,7 +27,7 @@ export interface BrowserTestCondition {
   request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
 }
 export interface BrowserTestStep extends BrowserTestCondition {
-  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot'
+  action: 'navigate' | 'reload' | 'discover' | 'click' | 'doubleClick' | 'hover' | 'drag' | 'dragTo' | 'fill' | 'select' | 'press' | 'scroll' | 'wheel' | 'waitFor' | 'assert' | 'screenshot'
   label: string
   inputSelector?: string
   inputRef?: string
@@ -47,6 +47,11 @@ export interface BrowserTestStep extends BrowserTestCondition {
   /** press: "page" sends the key to whatever has focus, with no target element. */
   scope?: 'page'
   path?: { x: number; y: number }[]
+  /** dragTo: the element that receives the drop, and an optional CSS-pixel point inside it (default: its visible center). */
+  dropSelector?: string
+  dropRef?: string
+  dropText?: string
+  dropPoint?: { x: number; y: number }
   durationMs?: number
   timeoutMs?: number
   /** All conditions must hold in the same polling pass. No user code is evaluated. */
@@ -194,6 +199,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       navigate: ['url', 'dialog'], reload: ['all', 'timeoutMs', 'dialog'], discover: ['frame'],
       click: [...pointer, 'button', 'dialog'], doubleClick: [...pointer, 'button', 'dialog'], hover: pointer,
       drag: [...pointer.filter(field => field !== 'point'), 'button', 'path', 'durationMs'],
+      dragTo: ['selector', 'targetRef', 'text', 'frame', 'point', 'modifiers', 'dropSelector', 'dropRef', 'dropText', 'dropPoint', 'durationMs', 'dialog'],
       fill: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'], select: ['selector', 'targetRef', 'text', 'frame', 'value', 'dialog'],
       press: ['selector', 'targetRef', 'text', 'frame', 'key', 'modifiers', 'dialog', 'scope'], scroll: ['selector', 'targetRef', 'text', 'frame', 'pixels'],
       wheel: [...pointer, 'deltaX', 'deltaY', 'repeat'],
@@ -207,7 +213,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       if (step.action !== 'press' || step.scope !== 'page') fail('scope "page" is only for press.')
       if ([step.selector, step.targetRef, step.text, step.frame].some(x => x !== undefined)) fail('a page-level press takes no target, text or frame.')
     }
-    target(step, ['click', 'doubleClick', 'hover', 'drag', 'fill', 'select', 'wheel'].includes(String(step.action)) || step.action === 'press' && step.scope === undefined)
+    target(step, ['click', 'doubleClick', 'hover', 'drag', 'dragTo', 'fill', 'select', 'wheel'].includes(String(step.action)) || step.action === 'press' && step.scope === undefined)
     if (step.inputSelector !== undefined) string(step.inputSelector, 512)
     if (step.inputRef !== undefined) target({ targetRef: step.inputRef }, true)
     if (step.inputSelector !== undefined && step.inputRef !== undefined) fail('use one inputSelector or inputRef.')
@@ -228,8 +234,15 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (step.action === 'drag') {
       if (!Array.isArray(step.path) || step.path.length < 2 || step.path.length > 100) fail('drag requires 2–100 path points.')
       for (const rawPoint of step.path as unknown[]) point(rawPoint)
-      if (step.durationMs !== undefined && (typeof step.durationMs !== 'number' || !Number.isInteger(step.durationMs) || step.durationMs < 100 || step.durationMs > 5000)) fail('drag duration must be within 100–5000 milliseconds.')
     }
+    if (step.action === 'dragTo') {
+      if (step.dropSelector !== undefined) string(step.dropSelector, 512)
+      if (step.dropRef !== undefined && (typeof step.dropRef !== 'string' || !/^[a-f0-9]{32}-t\d{1,3}$/.test(step.dropRef))) fail('invalid drop target reference.')
+      if ((step.dropSelector === undefined) === (step.dropRef === undefined)) fail('dragTo needs exactly one dropSelector or dropRef.')
+      if (step.dropText !== undefined) string(step.dropText, 2000)
+      if (step.dropPoint !== undefined) point(step.dropPoint)
+    }
+    if ((step.action === 'drag' || step.action === 'dragTo') && step.durationMs !== undefined && (typeof step.durationMs !== 'number' || !Number.isInteger(step.durationMs) || step.durationMs < 100 || step.durationMs > 5000)) fail('drag duration must be within 100–5000 milliseconds.')
     if (step.action === 'fill' || step.action === 'select') string(step.value, 8192, true)
     if (step.action === 'press') {
       if (typeof step.key !== 'string' || !TEST_KEYS.includes(step.key as typeof TEST_KEYS[number]) && !TEST_CHARACTER_KEY.test(step.key)) fail('unsupported key.')

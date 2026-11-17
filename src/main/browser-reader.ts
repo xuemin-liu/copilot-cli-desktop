@@ -47,6 +47,8 @@ interface DialogRule { spec?: NonNullable<BrowserTestStep['dialog']>; handled: {
 interface PageReader {
   testNetwork: BrowserTestNetwork | null
   dialog: PendingDialog | null; dialogRule: DialogRule | null
+  /** Set while a test drag intercepts HTML5 drag-and-drop, so no OS drag follows the real cursor. */
+  dragIntercepted: ((data: Params) => void) | null
   contents: WebContents; sessions: Map<string, string>; contexts: Map<string, number>; ready: Promise<void> | null
   capture: 'starting' | 'ready' | 'unavailable'
   requests: Map<string, { requestId: string; sessionId?: string; resourceType: string; response: ResponseRecord }>
@@ -219,7 +221,7 @@ export class BrowserReader {
   }
 
   add(contents: WebContents): void {
-    const page: PageReader = { testNetwork: null, dialog: null, dialogRule: null, contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
+    const page: PageReader = { testNetwork: null, dialog: null, dialogRule: null, dragIntercepted: null, contents, sessions: new Map(), contexts: new Map(), requests: new Map(), ready: null, capture: 'starting' }
     this.readers.set(contents.id, page)
     contents.debugger.on('detach', () => {
       page.testNetwork?.detached()
@@ -263,7 +265,7 @@ export class BrowserReader {
   private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
     this.cursor.getStore()?.validate()
     if (signal?.aborted) throw new Error('Test stopped.')
-    const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') || method === 'Page.reload' || method === 'Page.navigate'))
+    const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') && method !== 'Input.setInterceptDrags' || method === 'Page.reload' || method === 'Page.navigate'))
     if (delivery) {
       this.testDelivery = 'uncertain'
       if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = 'uncertain'
@@ -324,6 +326,7 @@ export class BrowserReader {
     }
     // Chromium reports Esc in its inspect overlay this way, and the keystroke never reaches the page.
     if (method === 'Overlay.inspectModeCanceled' && !sessionId && this.picker?.pageId === page.contents.id) { this.picker.choose(null); return }
+    if (method === 'Input.dragIntercepted') { if (params.data) page.dragIntercepted?.(params.data as Params); return }
     if (method === 'Page.javascriptDialogOpening') { await this.dialogOpened(page, params, sessionId); return }
     if (method === 'Page.javascriptDialogClosed') { if (page.dialog?.sessionId === sessionId) page.dialog = null; return }
     if (method === 'Runtime.executionContextsCleared' || method === 'Page.frameNavigated') page.contexts.clear()
@@ -654,9 +657,12 @@ export class BrowserReader {
     if (!this.options.visible(page.contents.id) || this.options.owner(page.contents.id).isMinimized() || !this.options.owner(page.contents.id).isVisible()) throw new Error('Show the selected page to run test interactions.')
     reference = randomBytes(16).toString('hex')
     let prepared = false
-    const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | undefined = step.point, scroll = true, dragPoint?: string): Promise<Params> => {
-      const point = await evaluate('target', { ...(step.targetRef ? {} : { selector: step.selector ?? 'html' }), requireReference: prepared, offset, scroll, dragPoint })
-      prepared = true
+    // A second target (dragTo's drop target) keeps its own reference, so replacing either element is detected.
+    interface OtherTarget { args: Params; reference: string; prepared: boolean }
+    const targetPoint = async (requireFocus = false, offset: { x: number; y: number } | null | undefined = step.point, scroll = true, dragPoint?: string, other?: OtherTarget): Promise<Params> => {
+      const point = await evaluate('target', { ...(other ? { ...other.args, reference: other.reference } : step.targetRef ? {} : { selector: step.selector ?? 'html' }),
+        requireReference: other ? other.prepared : prepared, offset, scroll, dragPoint })
+      if (other) other.prepared = true; else prepared = true
       let current = frame
       // Check every embedding frame for overlays. Coordinates from each frame's
       // own viewport are mapped into its parent, including out-of-process frames.
@@ -725,7 +731,12 @@ export class BrowserReader {
       }
       for (const [index, offset] of path.entries()) { const point = await targetPoint(false, offset, false, waypoint(index)); stable(point); mapped.push(point) }
       let last = start; let completed = false; let pressed = false
+      // A draggable element on the path would otherwise start an OS drag that follows the real cursor.
+      let html5: Params | null = null
+      const html5Started = (): void => { if (html5) throw new Error('The drag started an HTML5 drag-and-drop session from a draggable element. Use dragTo to drop it on another element.') }
       try {
+        page.dragIntercepted = data => { html5 ??= data }
+        await this.command(page, 'Input.setInterceptDrags', { enabled: true }, undefined, 10000, signal)
         check()
         const freshStart = await targetPoint(false, path[0], false, waypoint(0)); stable(freshStart)
         if (Math.abs(freshStart.x - start.x) >= 0.5 || Math.abs(freshStart.y - start.y) >= 0.5) throw new Error('Frame position changed before the drag.')
@@ -745,9 +756,11 @@ export class BrowserReader {
           check()
           await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', button, buttons, modifiers, x: point.x, y: point.y }, undefined, 10000, signal)
           last = point
+          html5Started()
         }
-        check(); stable(await targetPoint(false, path.at(-1), false, waypoint(path.length - 1))); completed = true
+        check(); stable(await targetPoint(false, path.at(-1), false, waypoint(path.length - 1))); html5Started(); completed = true
       } finally {
+        if (html5 && !page.contents.isDestroyed()) await this.command(page, 'Input.dispatchDragEvent', { type: 'dragCancel', x: last.x, y: last.y, data: html5, modifiers }, undefined, 1000).catch(() => {})
         if (pressed && !page.contents.isDestroyed()) {
           const stopped = !completed || signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id
           const release = this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button, buttons: 0, modifiers, clickCount: 1,
@@ -755,8 +768,103 @@ export class BrowserReader {
           if (stopped) await release.catch(() => {})
           else await release
         }
+        page.dragIntercepted = null
+        if (!page.contents.isDestroyed()) await this.command(page, 'Input.setInterceptDrags', { enabled: false }, undefined, 1000).catch(() => {})
       }
       check(); return { passed: true }
+    }
+    if (step.action === 'dragTo') {
+      // HTML5 drag-and-drop between two elements of this frame. Chromium's drag interception keeps the drag
+      // inside this page: the page's own dragstart data is delivered unchanged to the drop target, and no OS
+      // drag follows the real cursor. Both ends are hit-tested; the drop target again just before the drop.
+      const drop = { args: { selector: step.dropSelector, targetRef: step.dropRef, text: step.dropText }, reference: randomBytes(16).toString('hex'), prepared: false }
+      const source = (scroll: boolean): Promise<Params> => targetPoint(false, step.point, scroll, 'source')
+      const destination = (scroll: boolean): Promise<Params> => targetPoint(false, step.dropPoint ?? null, scroll, 'drop target', drop) // null, not undefined: no offset means the visible center, never the source's point
+      const geometry = ['width', 'height', 'targetLeft', 'targetTop', 'targetWidth', 'targetHeight']
+      const moved = (a: Params, b: Params): boolean => Math.abs(a.x - b.x) >= 0.5 || Math.abs(a.y - b.y) >= 0.5 || geometry.some(key => Math.abs(Number(a[key]) - Number(b[key])) >= 0.5)
+      const pause = (ms: number): Promise<void> => abortable(new Promise<void>(resolve => setTimeout(resolve, ms)), signal)
+      await source(true)
+      let end = await destination(true)
+      // Scrolling the drop target into view may move the source; it must still be reachable without scrolling.
+      let start = await source(false)
+      const stableUntil = Date.now() + 2000
+      while (true) {
+        check()
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', modifiers, x: start.x, y: start.y }, undefined, 10000, signal)
+        if (!(await evaluate('settle')).painted) throw new Error('Page is not painting. Show the page and retry the test.')
+        const freshStart = await source(false), freshEnd = await destination(false)
+        if (!moved(freshStart, start) && !moved(freshEnd, end)) { start = freshStart; end = freshEnd; break }
+        if (Date.now() >= stableUntil) throw new Error('Drag source or drop target did not stabilize before the drag.')
+        start = freshStart; end = freshEnd
+      }
+      const at = (fraction: number): { x: number; y: number } => ({ x: start.x + (end.x - start.x) * fraction, y: start.y + (end.y - start.y) * fraction })
+      const distance = Math.hypot(end.x - start.x, end.y - start.y)
+      const durationMs = step.durationMs ?? 500
+      let data: Params | null = null
+      let pressed = false; let dropped = false; let watching = false; let last: { x: number; y: number } = { x: start.x, y: start.y }
+      const result: Params = { dragstartFired: false }
+      this.testDiagnostics.dragAndDrop = result
+      try {
+        await evaluate('dragWatch', { dropReference: drop.reference }); watching = true
+        page.dragIntercepted = value => { data ??= value }
+        await this.command(page, 'Input.setInterceptDrags', { enabled: true }, undefined, 10000, signal)
+        check()
+        if (moved(await source(false), start)) throw new Error('Drag source moved before the drag.')
+        pressed = true
+        await this.command(page, 'Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, modifiers, clickCount: 1, x: start.x, y: start.y }, undefined, 10000, signal)
+        // Chromium starts a drag once the held pointer passes a few pixels; move toward the drop target until it does.
+        for (const pixels of [2, 4, 8, 12, 16]) {
+          check()
+          last = at(distance ? Math.min(1, pixels / distance) : 0)
+          await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, modifiers, x: last.x, y: last.y }, undefined, 10000, signal)
+          await pause(16)
+          if (data) break
+        }
+        const startBy = Date.now() + 1000
+        while (!data && Date.now() < startBy) { check(); await pause(16) }
+        if (!data) {
+          const report = await evaluate('dragReport')
+          Object.assign(result, report)
+          throw new Error(report.dragstartFired ? 'The source fired dragstart but cancelled it, so no drag-and-drop session started.'
+            : 'The source did not start an HTML5 drag: no dragstart fired. Check that the source is draggable, or use drag for pointer gestures.')
+        }
+        const dragData: Params = data
+        if (Array.isArray(dragData.files) && dragData.files.length) throw new Error('File drags are not supported.')
+        result.dragstartFired = true
+        const travelled = distance ? Math.min(1, Math.hypot(last.x - start.x, last.y - start.y) / distance) : 1
+        const samples = Math.max(2, Math.ceil(durationMs / 16))
+        for (let sample = 1; sample <= samples; sample++) {
+          await pause(durationMs / samples)
+          check()
+          last = at(travelled + (1 - travelled) * sample / samples)
+          await this.command(page, 'Input.dispatchDragEvent', { type: sample === 1 ? 'dragEnter' : 'dragOver', x: last.x, y: last.y, data: dragData, modifiers }, undefined, 10000, signal)
+        }
+        check()
+        if (moved(await destination(false), end)) throw new Error('Drop target moved during the drag.')
+        await this.command(page, 'Input.dispatchDragEvent', { type: 'drop', x: end.x, y: end.y, data: dragData, modifiers }, undefined, 10000, signal)
+        dropped = true
+      } finally {
+        if (data && !dropped && !page.contents.isDestroyed()) await this.command(page, 'Input.dispatchDragEvent', { type: 'dragCancel', x: last.x, y: last.y, data, modifiers }, undefined, 1000).catch(() => {})
+        if (pressed && !page.contents.isDestroyed()) {
+          const stopped = !dropped || signal.aborted || this.disposed || this.activeId() !== page.contents.id || this.testPageId !== page.contents.id
+          await this.command(page, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, modifiers, clickCount: 1,
+            x: stopped ? -1 : end.x, y: stopped ? -1 : end.y }, undefined, 1000).catch(() => {})
+        }
+        page.dragIntercepted = null
+        if (!page.contents.isDestroyed()) await this.command(page, 'Input.setInterceptDrags', { enabled: false }, undefined, 1000).catch(() => {})
+        if (watching && !dropped) await this.evaluate(page, frame.id, 'dragReport', { reference, stop: true }, true).catch(() => {})
+      }
+      // dragend reaches the source after the drop is handled.
+      const reportBy = Date.now() + 1000
+      let report = await evaluate('dragReport')
+      while (!report.dragendFired && Date.now() < reportBy) { await pause(25); report = await evaluate('dragReport') }
+      await evaluate('dragReport', { stop: true })
+      Object.assign(result, report)
+      check()
+      if (!report.dropFired) throw new Error(report.dragoverAccepted ? 'The drop was delivered but no drop event fired.'
+        : 'The drop target did not accept the drop: no dragover handler called preventDefault, so no drop event fired.')
+      if (report.dropOnTarget === false) throw new Error('The drop event reached an element outside the drop target.')
+      return { passed: true, data: { dragAndDrop: result } }
     }
     if (step.action === 'press' && step.scope === 'page') {
       const focus = await evaluate('pageFocus')
