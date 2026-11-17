@@ -59,3 +59,16 @@ test('a screenshot crops to a viewport region or to one top-frame target, never 
     assert.throws(() => plan([{ action: 'screenshot', ...step }, assertion]), /Invalid browser test/, JSON.stringify(step))
   }
 })
+
+test('dragTo takes a source, exactly one drop target, optional points inside each and a bounded duration', () => {
+  const dragTo = { action: 'dragTo', label: 'Open series in cell', selector: 'li[data-container]', text: 'Ball Phantom', dropSelector: '#D_3' }
+  assert.ok(plan([dragTo, assertion]))
+  assert.ok(plan([{ ...dragTo, point: { x: 10, y: 10 }, dropPoint: { x: 200, y: 150 }, durationMs: 800, modifiers: ['Control'], dropText: 'Empty' }, assertion]))
+  assert.ok(plan([{ action: 'dragTo', targetRef: `${'a'.repeat(32)}-t1`, dropRef: `${'a'.repeat(32)}-t2` }, assertion]))
+  for (const extra of [{ dropSelector: undefined }, { dropRef: `${'a'.repeat(32)}-t2` }, { dropSelector: '' }, { dropSelector: 'x'.repeat(513) },
+    { dropSelector: undefined, dropRef: 'not-a-ref' }, { dropPoint: { x: -1, y: 0 } }, { dropPoint: { x: 1, y: 1, z: 1 } }, { durationMs: 99 }, { durationMs: 5001 },
+    { selector: undefined }, { path: [{ x: 1, y: 1 }, { x: 2, y: 2 }] }, { inputSelector: '#overlay' }, { button: 'right' },
+    { dataTransfer: { 'text/plain': 'injected' } }, { files: ['C:/secret.txt'] }, { dropText: '' }]) {
+    assert.throws(() => plan([{ ...dragTo, ...extra }, assertion]), /Invalid browser test/, JSON.stringify(extra))
+  }
+})

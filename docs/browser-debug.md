@@ -709,7 +709,7 @@ A run stops at its first failed step. Test actions may change the app's data; a
 failed or cancelled run does not undo completed steps. Keep the Page view visible
 for input and screenshots. A run acts only on its own session's pages.
 
-The runner supports navigation, click, double-click, hover, coordinate dragging, text entry and replacement,
+The runner supports navigation, click, double-click, hover, coordinate dragging, HTML5 drag-and-drop between elements, text entry and replacement,
 single-choice select elements, keyboard keys and page-level shortcuts, document/container scrolling, native wheel input, waits,
 assertions, and screenshots. CSS selectors plus optional visible text identify
 targets. Exactly one visible enabled target is required for input. Covered targets
@@ -732,7 +732,7 @@ same-origin HTTP(S) frames support input; cross-origin frames support read-only
 inspection and assertions. Use current frame IDs from `frames`. Opaque/sandboxed
 frames and frames with non-HTTP(S) URLs cannot receive test input.
 Closed shadow roots, rotated/skewed frames,
-uploads, downloads, file/DataTransfer drag-and-drop, and arbitrary JavaScript are unavailable.
+uploads, downloads, file drops, custom DataTransfer content, and arbitrary JavaScript are unavailable.
 
 For drawing, canvas panning, or moving an item within a surface, use `drag` with a
 unique `selector` and a `path` of 2–100 `{ "x": number, "y": number }` points. Each
@@ -774,6 +774,50 @@ remaining actions.
 
 Include an assertion of the app's resulting state after the drag. Painting a
 canvas alone does not prove the intended selection, drawing, or pan succeeded.
+
+`drag` is for pointer gestures. If its path starts an HTML5 drag from a
+`draggable` element, the step fails and asks for `dragTo`, and the drag is
+cancelled, so no operating-system drag follows the real cursor.
+
+To drop one element on another with HTML5 drag-and-drop, such as a thumbnail onto
+an empty viewer cell, use `dragTo`. It needs a source (`selector` or `targetRef`,
+optionally filtered by `text`) and a drop target (`dropSelector` or `dropRef`,
+optionally filtered by `dropText`) in the same frame. `point` and `dropPoint` are
+CSS pixels inside each element and default to its visible center. `durationMs`
+(100–5000, default 500) is how long the pointer takes to cross to the drop point.
+`modifiers` are held throughout, for drops that copy with Ctrl.
+
+```json
+{ "action": "dragTo", "selector": "li[data-container]", "text": "Ball Phantom Axia",
+  "dropSelector": "#D_3", "dropPoint": { "x": 200, "y": 150 }, "durationMs": 800 }
+```
+
+The runner presses the left button on the source and moves a few pixels toward the
+drop target until Chromium starts the drag. Chromium's drag interception keeps the
+drag inside the page, so no operating-system drag starts. The data the page set in
+its own `dragstart` handler is passed unchanged to `dragenter`, `dragover` and
+`drop`, and `dragend` fires on the source. Both ends are hit-tested before the
+press, with the same covered, moved and replaced checks as `drag`. The drop target
+is checked again just before the drop. A drop overlay that the page shows only
+during the drag counts as covering the target unless it is inside the drop target.
+
+The step fails, cancels the drag and releases the button when:
+
+- no `dragstart` fires, or the page cancels it;
+- no `dragover` handler calls `preventDefault()`, so the target never accepts the drop;
+- the drop reaches an element outside the drop target;
+- either end is missing, ambiguous, covered or moved.
+
+The step's `data.dragAndDrop` reports `dragstartFired`, `dragstartOnSource`,
+`dragoverAccepted`, `dropFired`, `dropAccepted` (the drop handler called
+`preventDefault()`), `dropOnTarget`, `dragendFired`, `dropEffect` from `dragend`,
+and a count of each drag event. The data itself is never reported. File drags and
+custom or injected `DataTransfer` content are not supported. As with `drag`, assert
+the app's state after the drop:
+
+```json
+{ "action": "assert", "selector": "#D_3", "condition": "text", "expected": "Ball Phantom Axia" }
+```
 
 Assertions check visibility, hidden state, visible element count, text containment,
 exact field value, checkbox/radio state, URL containment, decoded images, or a
