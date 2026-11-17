@@ -16,6 +16,7 @@ import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
 import { compareCapture } from './browser-test-compare.js'
+import { compareBitmaps, ignorePixels } from './browser-image-compare.js'
 import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
 
@@ -44,6 +45,9 @@ interface ResponseRecord {
 }
 /** A JavaScript dialog (alert, confirm, prompt, beforeunload) that is holding the page until someone answers it. */
 export interface PendingDialog { type: string; message: string; sessionId?: string }
+/** What restarted a visualStable window. */
+interface VisualChange { kind: string; differentPixels?: number; diffRatio?: number; diffBounds?: Rectangle }
+interface VisualSample { bitmap: Buffer; size: { width: number; height: number }; area: Rectangle; since: number; lastAt: number; longest: number; captures: number; lastChange: VisualChange }
 interface DialogRule { spec?: NonNullable<BrowserTestStep['dialog']>; handled: { type: string; message: string; accepted: boolean } | null }
 interface PageReader {
   testNetwork: BrowserTestNetwork | null
@@ -150,6 +154,9 @@ export class BrowserReader {
     if (!this.testOrigin || this.httpOrigin(url) !== this.testOrigin) throw new Error('Test destination is outside this run’s origin. Open the intended site and start a new test there.')
   }
 
+  /** visualStable captures for the current run step, keyed by condition. */
+  private visualSamples: { scope: string; samples: Map<string, VisualSample> } | null = null
+
   async test(value: unknown, signal: AbortSignal): Promise<unknown> {
     const plan = validateBrowserTestPlan(value)
     const page = this.page()
@@ -215,7 +222,7 @@ export class BrowserReader {
       await page.testNetwork?.stop()
       if (page.testNetwork?.evidence().failureRulesRemoved === false && !page.contents.isDestroyed() && page.contents.debugger.isAttached()) page.contents.debugger.detach()
       page.testNetwork = null
-      this.testConsole?.dispose(); this.testConsole = null
+      this.testConsole?.dispose(); this.testConsole = null; this.visualSamples = null
       this.busy = false; this.testProgress.running = false; this.testProgress.currentAction = null; this.testAbort = null
       this.testPageId = null; this.testOrigin = null
     }
@@ -533,6 +540,58 @@ export class BrowserReader {
     }
   }
 
+  /**
+   * visualStable: captures the element or region on each of the runner's polls, the way test screenshots are taken, and
+   * passes once the pixels have stayed within the tolerance for the window. Only the latest capture is kept, per run step and
+   * condition. A replaced element, a moved or resized one, a new size or an unavailable capture starts the window again.
+   */
+  private async visualStable(page: PageReader, top: string, step: BrowserTestStep, key: string, signal: AbortSignal): Promise<TestObservation> {
+    const scope = this.testProgress.currentAction?.id ?? 'manual'
+    if (this.visualSamples?.scope !== scope) this.visualSamples = { scope, samples: new Map() }
+    const samples = this.visualSamples.samples
+    const windowMs = step.stableMs ?? 750
+    const previous = samples.get(key)
+    const now = Date.now()
+    const round = (value: number): number => Math.round(value * 10) / 10
+    let area = step.region
+    let replaced = false
+    if (!area) {
+      const target = await this.evaluate(page, top, 'probe', { ...step, stableScope: scope, stableKey: key }, true, signal) as Params
+      if (target?.error) throw new Error(String(target.error))
+      if (target.count !== 1) { samples.delete(key); return { passed: false, reason: target.count ? 'Selector matches multiple visible elements.' : 'Expected element is not visible.' } }
+      area = target.bounds as Rectangle; replaced = target.replaced === true
+    }
+    const image = await this.run('screenshot', [String(page.contents.id)], signal, true, area) as Params
+    if (image.state !== 'available') { samples.delete(key); return { passed: false, reason: `The element could not be captured: ${String(image.reason ?? 'capture unavailable')}` } }
+    const decoded = nativeImage.createFromBuffer(Buffer.from(String(image.imageBase64), 'base64'))
+    const size = decoded.getSize(); const bitmap = decoded.toBitmap()
+    const scale = { x: size.width / area.width, y: size.height / area.height }
+    const channel = step.imageTolerance?.channel ?? 0; const maxDiffRatio = step.imageTolerance?.maxDiffRatio ?? 0
+    const stretch = previous ? now - previous.since : 0
+    // A still stretch ends at the last capture that matched, not at the one that saw the change.
+    const longest = Math.max(previous?.longest ?? 0, previous ? previous.lastAt - previous.since : 0)
+    const restart = (change: VisualChange): TestObservation => {
+      samples.set(key, { bitmap, size, area: area!, since: now, lastAt: now, longest, captures: (previous?.captures ?? 0) + 1, lastChange: change })
+      const detail = change.kind === 'pixels' ? `${change.differentPixels} pixels (${round((change.diffRatio ?? 0) * 100)}%) changed${change.diffBounds ? ` within x ${change.diffBounds.x}, y ${change.diffBounds.y}, ${change.diffBounds.width}×${change.diffBounds.height} CSS pixels` : ''}` : change.kind
+      return { passed: false, data: { visualStable: { stableMs: windowMs, captures: (previous?.captures ?? 0) + 1, longestStillMs: longest, lastChange: change } },
+        reason: previous ? `The image is still changing: ${detail}. The longest still stretch was ${longest} of ${windowMs} ms.` : `Waiting for the image to stay unchanged for ${windowMs} ms.` }
+    }
+    if (!previous) return restart({ kind: 'first capture' })
+    if (replaced) return restart({ kind: 'the element was replaced' })
+    if ((['x', 'y', 'width', 'height'] as const).some(name => Math.abs(previous.area[name] - area![name]) > 0.5)) return restart({ kind: 'the element moved or was resized' })
+    if (previous.size.width !== size.width || previous.size.height !== size.height) return restart({ kind: 'the capture size changed' })
+    const result = compareBitmaps(bitmap, previous.bitmap, size, channel, ignorePixels(step.ignore ?? [], size, scale))
+    if (result.diffRatio > maxDiffRatio) {
+      const bounds = result.diffBounds
+      return restart({ kind: 'pixels', differentPixels: result.differentPixels, diffRatio: Math.round(result.diffRatio * 1e6) / 1e6,
+        ...(bounds ? { diffBounds: { x: round(bounds.x / scale.x), y: round(bounds.y / scale.y), width: round(bounds.width / scale.x), height: round(bounds.height / scale.y) } } : {}) })
+    }
+    // Compared with the previous capture, so a slow drift within the tolerance counts as still.
+    samples.set(key, { ...previous, bitmap, lastAt: now, captures: previous.captures + 1, longest: Math.max(longest, stretch) })
+    const data = { visualStable: { stableMs: windowMs, captures: previous.captures + 1, stillForMs: stretch, tolerance: { channel, maxDiffRatio }, ...(previous.lastChange.kind !== 'first capture' ? { lastChange: previous.lastChange } : {}) } }
+    return stretch >= windowMs ? { passed: true, data } : { passed: false, data, reason: `The image has been unchanged for ${stretch} of ${windowMs} ms.` }
+  }
+
   private async testStepAction(page: PageReader, step: BrowserTestStep, signal: AbortSignal, conditionKey = 'c1'): Promise<TestObservation> {
     const modifiers = (step.modifiers ?? []).reduce((mask, key) => mask | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[key]), 0)
     const button = step.button ?? 'left'
@@ -651,6 +710,7 @@ export class BrowserReader {
       if (result?.error) throw new Error(String(result.error))
       return result
     }
+    if ((step.action === 'waitFor' || step.action === 'assert') && step.condition === 'visualStable') return this.visualStable(page, frame.id, step, conditionKey, signal)
     if (step.action === 'waitFor' || step.action === 'assert') {
       // A stable condition keeps samples per run step and condition, across the runner's polls.
       const stableArgs = step.condition === 'stable' ? { stableScope: this.testProgress.currentAction?.id ?? 'manual', stableKey: conditionKey } : {}

@@ -462,7 +462,13 @@ rescaled. The step counts as an assertion. It saves the capture, and a diff imag
 pixels, ratio, largest channel difference and diffBounds in CSS pixels. To create
 a reference, run a screenshot step of the same area once, inspect it, and use its
 saved PNG as baseline. Masked areas are masked in both images, so changes under a
-mask are not seen. Without a reference, inspect saved screenshots separately and
+mask are not seen. Before comparing or taking a screenshot of an image that loads
+progressively, wait with {action:"waitFor",selector:"#viewport-1",
+condition:"visualStable",stableMs:750,timeoutMs:20000}: it passes once the element's
+(or a region's) pixels have stayed within imageTolerance for stableMs (100–10000,
+default 750), restarting when the element is replaced, moves or the capture changes;
+it takes ignore and imageTolerance like compareScreenshot. A playing animation inside
+the area never settles; stop it or ignore its area. Without a reference, inspect saved screenshots separately and
 never treat visual change alone as proof of application semantics.
 frame works with every condition, including count (visible matches in that one
 frame, never summed across frames).

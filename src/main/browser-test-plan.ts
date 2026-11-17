@@ -36,16 +36,22 @@ export interface BrowserTestCondition {
   targetRef?: string
   text?: string
   frame?: string
-  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable' | 'consoleMessage'
+  condition?: 'visible' | 'hidden' | 'enabled' | 'text' | 'count' | 'checked' | 'value' | 'numericValue' | 'attribute' | 'imageLoaded' | 'canvasPainted' | 'url' | 'requestComplete' | 'stable' | 'consoleMessage' | 'visualStable'
   /** consoleMessage: only messages of this level. */
   level?: ConsoleLevel
   attribute?: string
   expected?: string | number | boolean
   /** numericValue: allowed difference. stable: allowed bounds change in CSS pixels (default 0.5). */
   tolerance?: number
-  /** stable: how long the bounds must stay unchanged, in milliseconds (default 500). */
+  /** stable: how long the bounds must stay unchanged, in milliseconds (default 500). visualStable: how long the pixels must (default 750). */
   stableMs?: number
   request?: TestRequestMatch & { state: 'finished' | 'failed'; status?: number }
+  /** screenshot, compareScreenshot and visualStable: a CSS-pixel viewport region instead of a target. */
+  region?: { x: number; y: number; width: number; height: number }
+  /** compareScreenshot and visualStable: rectangles to leave out, in CSS pixels relative to the compared area. */
+  ignore?: { x: number; y: number; width: number; height: number }[]
+  /** compareScreenshot and visualStable: how much a pixel may change, and the share of pixels that may change. */
+  imageTolerance?: TestImageTolerance
 }
 /** compareScreenshot: per-channel difference allowed for a pixel to match, and the share of pixels allowed to differ. */
 export interface TestImageTolerance { channel?: number; maxDiffRatio?: number }
@@ -65,15 +71,10 @@ export interface BrowserTestStep extends BrowserTestCondition {
   deltaX?: number
   deltaY?: number
   repeat?: number
-  /** screenshot and compareScreenshot: crop to this CSS-pixel viewport region. */
-  region?: { x: number; y: number; width: number; height: number }
   /** compareScreenshot: the reference PNG's local path, as named in the plan. */
   baseline?: string
   /** compareScreenshot: the reference PNG as base64, attached by the helper that read the file. */
   baselineImage?: string
-  /** compareScreenshot: rectangles to leave out, in CSS pixels relative to the compared area. */
-  ignore?: { x: number; y: number; width: number; height: number }[]
-  imageTolerance?: TestImageTolerance
   /** press: "page" sends the key to whatever has focus, with no target element. */
   scope?: 'page'
   path?: { x: number; y: number }[]
@@ -174,10 +175,41 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
     if (url.search || url.hash || String(v.urlPattern).split('://')[1]?.split('/')[0]?.includes('*')) fail('request patterns need a literal origin and no query or fragment.')
     if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(String(v.method))) fail('unsupported request method.')
   }
-  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request']
+  const region = (raw: unknown): void => {
+    const area = object(raw); fields(area, ['x', 'y', 'width', 'height'])
+    if (![area.x, area.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
+      || ![area.width, area.height].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 20000)) fail('region needs x and y within 0–19999 and width and height within 1–20000 CSS pixels.')
+  }
+  const imageOptions = (v: Record<string, unknown>): void => {
+    if (v.ignore !== undefined) {
+      if (!Array.isArray(v.ignore) || v.ignore.length < 1 || v.ignore.length > 20) fail('use 1–20 ignore rectangles.')
+      for (const raw of v.ignore as unknown[]) {
+        const rect = object(raw); fields(rect, ['x', 'y', 'width', 'height'])
+        if (![rect.x, rect.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
+          || ![rect.width, rect.height].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 20000)) fail('ignore rectangles need x and y within 0–19999 and width and height within 0–20000 CSS pixels.')
+      }
+    }
+    if (v.imageTolerance !== undefined) {
+      const tolerance = object(v.imageTolerance); fields(tolerance, ['channel', 'maxDiffRatio'])
+      if (tolerance.channel !== undefined && (typeof tolerance.channel !== 'number' || !Number.isInteger(tolerance.channel) || tolerance.channel < 0 || tolerance.channel > 255)) fail('imageTolerance.channel must be an integer within 0–255.')
+      if (tolerance.maxDiffRatio !== undefined && (typeof tolerance.maxDiffRatio !== 'number' || !Number.isFinite(tolerance.maxDiffRatio) || tolerance.maxDiffRatio < 0 || tolerance.maxDiffRatio > 1)) fail('imageTolerance.maxDiffRatio must be within 0–1.')
+    }
+  }
+  const conditionFields = ['selector', 'targetRef', 'text', 'frame', 'condition', 'attribute', 'expected', 'tolerance', 'stableMs', 'level', 'request', 'region', 'ignore', 'imageTolerance']
   const condition = (v: Record<string, unknown>): void => {
-    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage'].includes(String(v.condition))) fail('unsupported condition.')
+    if (!['visible', 'hidden', 'enabled', 'text', 'count', 'checked', 'value', 'numericValue', 'attribute', 'imageLoaded', 'canvasPainted', 'url', 'requestComplete', 'stable', 'consoleMessage', 'visualStable'].includes(String(v.condition))) fail('unsupported condition.')
     const pageWide = ['url', 'requestComplete', 'consoleMessage'].includes(String(v.condition))
+    if (v.condition === 'visualStable') {
+      // The pixels of one top-frame element or of a viewport region, captured the way test screenshots are.
+      if (v.frame !== undefined) fail('visualStable reads the top frame; it takes no frame.')
+      if (v.region !== undefined) { region(v.region); if (v.selector !== undefined || v.targetRef !== undefined || v.text !== undefined) fail('use a region or a target, not both.') }
+      else target(v, true)
+      imageOptions(v)
+      if (v.stableMs !== undefined && (typeof v.stableMs !== 'number' || !Number.isInteger(v.stableMs) || v.stableMs < 100 || v.stableMs > 10000)) fail('visualStable stableMs must be within 100–10000 milliseconds.')
+      if (v.expected !== undefined || v.tolerance !== undefined) fail('visualStable takes imageTolerance, not expected or tolerance.')
+      return
+    }
+    if (v.region !== undefined || v.ignore !== undefined || v.imageTolerance !== undefined) fail('region, ignore and imageTolerance are for visualStable.')
     target(v, !pageWide)
     if (pageWide && [v.selector, v.targetRef, v.text, v.frame].some(x => x !== undefined)) fail('this condition takes no target.')
     if (v.level !== undefined && (v.condition !== 'consoleMessage' || !CONSOLE_LEVELS.includes(v.level as ConsoleLevel))) fail('level requires the consoleMessage condition and one of debug, info, warning, error.')
@@ -293,25 +325,11 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
       validateBaselinePath(step.baseline)
       if (step.baselineImage === undefined) fail('the reference image was not attached. Run the plan with the session browser helper, which reads the baseline file.')
       if (typeof step.baselineImage !== 'string' || !step.baselineImage || step.baselineImage.length > MAX_BASELINE_BASE64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(step.baselineImage)) fail('the reference image must be a PNG of at most 2 MiB.')
-      if (step.ignore !== undefined) {
-        if (!Array.isArray(step.ignore) || step.ignore.length < 1 || step.ignore.length > 20) fail('use 1–20 ignore rectangles.')
-        for (const raw of step.ignore as unknown[]) {
-          const rect = object(raw); fields(rect, ['x', 'y', 'width', 'height'])
-          if (![rect.x, rect.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
-            || ![rect.width, rect.height].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 20000)) fail('ignore rectangles need x and y within 0–19999 and width and height within 0–20000 CSS pixels.')
-        }
-      }
-      if (step.imageTolerance !== undefined) {
-        const tolerance = object(step.imageTolerance); fields(tolerance, ['channel', 'maxDiffRatio'])
-        if (tolerance.channel !== undefined && (typeof tolerance.channel !== 'number' || !Number.isInteger(tolerance.channel) || tolerance.channel < 0 || tolerance.channel > 255)) fail('imageTolerance.channel must be an integer within 0–255.')
-        if (tolerance.maxDiffRatio !== undefined && (typeof tolerance.maxDiffRatio !== 'number' || !Number.isFinite(tolerance.maxDiffRatio) || tolerance.maxDiffRatio < 0 || tolerance.maxDiffRatio > 1)) fail('imageTolerance.maxDiffRatio must be within 0–1.')
-      }
+      imageOptions(step)
       assertions++
     }
-    if (step.region !== undefined) {
-      const region = object(step.region); fields(region, ['x', 'y', 'width', 'height'])
-      if (![region.x, region.y].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 20000)
-        || ![region.width, region.height].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 20000)) fail('region needs x and y within 0–19999 and width and height within 1–20000 CSS pixels.')
+    if (step.region !== undefined && (step.action === 'screenshot' || step.action === 'compareScreenshot')) {
+      region(step.region)
       if (step.selector !== undefined || step.targetRef !== undefined || step.text !== undefined) fail('crop to a region or to a target, not both.')
     }
     if ((step.action === 'screenshot' || step.action === 'compareScreenshot') && step.text !== undefined && step.selector === undefined && step.targetRef === undefined) fail('screenshot text filters a selector or targetRef.')
@@ -323,7 +341,7 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
         for (const rawCondition of step.all as unknown[]) { const c = object(rawCondition); fields(c, conditionFields); condition(c) }
       } else if (step.action !== 'reload') condition(step)
       const stableWindow = Math.max(0, ...[step, ...(Array.isArray(step.all) ? step.all as Record<string, unknown>[] : [])]
-        .filter(c => c.condition === 'stable').map(c => Number(c.stableMs ?? 500)))
+        .filter(c => c.condition === 'stable' || c.condition === 'visualStable').map(c => Number(c.stableMs ?? (c.condition === 'visualStable' ? 750 : 500))))
       if (stableWindow && stableWindow >= Number(step.timeoutMs ?? (step.action === 'assert' ? 5000 : 30000))) fail('the stable window must be shorter than the step timeout.')
       if (step.action === 'assert') assertions++
     }
