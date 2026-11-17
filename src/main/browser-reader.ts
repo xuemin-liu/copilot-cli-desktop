@@ -16,7 +16,7 @@ import { BrowserTestNetwork } from './browser-test-network.js'
 import { redactTestEvidence, runBrowserTest, type TestObservation } from './browser-test-runner.js'
 import { TestConsoleWatch, type ConsoleSource } from './browser-test-console.js'
 import { compareCapture } from './browser-test-compare.js'
-import { compareBitmaps, ignorePixels } from './browser-image-compare.js'
+import { compareBitmaps, everyPixelIgnored, ignorePixels } from './browser-image-compare.js'
 import { testKey, type KeyInfo } from './browser-test-keys.js'
 import { sanitizedText } from './browser-privacy.js'
 
@@ -566,6 +566,13 @@ export class BrowserReader {
     const decoded = nativeImage.createFromBuffer(Buffer.from(String(image.imageBase64), 'base64'))
     const size = decoded.getSize(); const bitmap = decoded.toBitmap()
     const scale = { x: size.width / area.width, y: size.height / area.height }
+    // With every pixel ignored nothing can be observed: refuse on every poll, before any sample exists, so no still time
+    // accumulates and the reason does not depend on which poll the timeout lands on.
+    const ignored = ignorePixels(step.ignore ?? [], size, scale)
+    if (everyPixelIgnored(ignored, size)) {
+      samples.delete(key)
+      return { passed: false, reason: 'Every pixel of the area is inside an ignore rectangle, so nothing is compared. Make the ignore rectangles smaller than the area.' }
+    }
     const channel = step.imageTolerance?.channel ?? 0; const maxDiffRatio = step.imageTolerance?.maxDiffRatio ?? 0
     const stretch = previous ? now - previous.since : 0
     // A still stretch ends at the last capture that matched, not at the one that saw the change.
@@ -580,12 +587,7 @@ export class BrowserReader {
     if (replaced) return restart({ kind: 'the element was replaced' })
     if ((['x', 'y', 'width', 'height'] as const).some(name => Math.abs(previous.area[name] - area![name]) > 0.5)) return restart({ kind: 'the element moved or was resized' })
     if (previous.size.width !== size.width || previous.size.height !== size.height) return restart({ kind: 'the capture size changed' })
-    const result = compareBitmaps(bitmap, previous.bitmap, size, channel, ignorePixels(step.ignore ?? [], size, scale))
-    // With every pixel ignored nothing was observed, so no still time may accumulate.
-    if (!result.comparedPixels) {
-      samples.delete(key)
-      return { passed: false, reason: 'Every pixel of the area is inside an ignore rectangle, so nothing is compared. Make the ignore rectangles smaller than the area.' }
-    }
+    const result = compareBitmaps(bitmap, previous.bitmap, size, channel, ignored)
     if (result.diffRatio > maxDiffRatio) {
       const bounds = result.diffBounds
       return restart({ kind: 'pixels', differentPixels: result.differentPixels, diffRatio: Math.round(result.diffRatio * 1e6) / 1e6,
