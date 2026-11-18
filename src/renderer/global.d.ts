@@ -46,7 +46,7 @@ export interface CopilotDesktopBridge {
   browserPickMany(tabId: string): Promise<void>
   onBrowserPicked(listener: (tabId: string, text: string) => void): () => void
   browserScreenshot(tabId: string): Promise<{ redacted: boolean }>
-  browserDialog(tabId: string, accept: boolean): Promise<BrowserDebugState>
+  browserDialog(tabId: string, accept: boolean, pageId: number): Promise<BrowserDebugState>
   browserFind(tabId: string, text: string, forward: boolean, next: boolean): Promise<BrowserDebugState>
   browserFindStop(tabId: string): Promise<BrowserDebugState>
   onBrowserShortcut(listener: (tabId: string, name: 'find' | 'find-close') => void): () => void

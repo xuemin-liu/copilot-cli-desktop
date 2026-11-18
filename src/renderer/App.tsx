@@ -8,7 +8,7 @@ import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
 import { ToolPanelWorkspace } from './components/ToolPanelWorkspace.js'
-import { panelButtonLabel, type ToolsAction, type ToolsState } from '../main/tool-tabs.js'
+import { panelTabs, panelButtonLabel, type ToolsAction, type ToolsState } from '../main/tool-tabs.js'
 import { readToolDockPreferences } from './tool-dock-state.js'
 import { OperationError } from './components/OperationError.js'
 import { MeetingBar } from './components/MeetingBar.js'
@@ -56,7 +56,8 @@ export function App(): JSX.Element {
   const [inputDialog, setInputDialog] = useState<InputDialog | null>(null)
   const [history, setHistory] = useState<{ entries: SessionHistoryEntry[] | null; loadError: string | null; pendingSessionId: string | null; openError: string | null } | null>(null)
   const [tools, setTools] = useState<ToolsState>({ projects: [], connections: [] })
-  const projectPanel = tools.projects.find(project => project.profileId === state.activeProfileId)
+  const toolsProject = tools.projects.find(project => project.profileId === state.activeProfileId)
+  const projectPanel = toolsProject && { ...toolsProject, tabs: panelTabs(toolsProject) }
   const dockOpen = Boolean(projectPanel?.visible)
   const gitOpen = dockOpen && projectPanel?.tabs.find(tab => tab.id === projectPanel.activeId)?.kind === 'git'
   const previousDockOpen = useRef(dockOpen)
@@ -70,8 +71,8 @@ export function App(): JSX.Element {
     void window.copilotDesktop.toolsState(readToolDockPreferences(localStorage).width).then(setTools).catch(error => setOperationError(errorMessage(error)))
   }, [state.activeProfileId, state.windowSessionId])
   const actOnTools = useCallback((profileId: string, action: ToolsAction): void => {
-    void window.copilotDesktop.toolsAction(profileId, action).then(setTools).catch(error => setOperationError(errorMessage(error)))
-  }, [])
+    void window.copilotDesktop.toolsAction(profileId, { ...action, expectedOwnerId: toolsProject?.ownerId ?? null }).then(setTools).catch(error => setOperationError(errorMessage(error)))
+  }, [toolsProject?.ownerId])
   // True only while the workspace is on screen, so the shortcut cannot flip the saved state where no panel can show.
   const gitPanelAvailable = useRef(false)
   const [operationError, setOperationError] = useState<string | null>(null)

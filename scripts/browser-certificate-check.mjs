@@ -23,17 +23,10 @@ if (!process.versions.electron) {
   const { build } = await import('esbuild')
   await build({ stdin: { contents: `
     import { createRoot } from 'react-dom/client';
-    import { SessionWorkspace } from './src/renderer/components/SessionWorkspace';
+    import { BrowserPanel } from './src/renderer/components/BrowserPanel';
     import './src/renderer/styles.css';
-    const tabs = [{ id: 'tab-1', title: 'First session', status: 'running' }];
-    createRoot(document.getElementById('root')).render(<SessionWorkspace tabs={tabs} activeTabId="tab-1" obscured={false} canOpenTab={false}
-      onActivate={() => {}} onCreate={() => {}} onFork={() => {}} onClose={() => {}} onRestart={() => {}} />);
-  `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic',
-    plugins: [{ name: 'fixture-terminal', setup(build) {
-      build.onResolve({ filter: /TerminalPane\.js$/ }, () => ({ path: 'terminal', namespace: 'fixture' }))
-      build.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: 'import React from "react"; export function TerminalPane({tabId}) { return <div data-terminal>{tabId} terminal fixture</div>; }', loader: 'jsx', resolveDir: process.cwd() }))
-    } }],
-  })
+    createRoot(document.getElementById('root')).render(<BrowserPanel tabId="tab-1" active obscured={false} />);
+  `, resolveDir: process.cwd(), loader: 'tsx' }, bundle: true, outfile: join(artifacts, 'fixture.js'), platform: 'browser', jsx: 'automatic' })
   await writeFile(join(artifacts, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"></head><body><div id="root" style="display:flex;height:100vh"><script src="fixture.js"></script></div></body></html>')
   const env = { ...process.env, COPILOT_DESKTOP_BROWSER_STATE: join(artifacts, 'control.json') }
   delete env.ELECTRON_RUN_AS_NODE
@@ -114,8 +107,6 @@ if (!process.versions.electron) {
 
     window.showInactive()
     await window.loadFile(join(artifacts, 'index.html'))
-    await until(() => ui('document.querySelector(".session-browser-toggle") !== null'), 'browser toggle')
-    await ui('document.querySelector(".session-browser-toggle").click()')
     await until(() => ui('Boolean(document.querySelector(".browser-panel"))'), 'browser pane')
     await delay(300)
 

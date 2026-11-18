@@ -5,7 +5,7 @@ WSL terminal (Windows), or SSH. Terminal tabs use MyTerminal's search, filtering
 font zoom, context-menu paste, and focus handling, plus **Add to prompt** for the
 selection or recent output. No destination session needs to be selected.
 
-Local terminals open PowerShell on Windows or the configured shell on macOS/Linux in the project folder.
+Local terminals open PowerShell on Windows or the configured shell on macOS/Linux in the owning session’s working folder or worktree. Workspace shells default to the project folder. Splits and reconnects reuse the tab’s starting folder.
 WSL opens the default distribution or the distribution you enter. **SSH** offers saved MyTerminal connections
 with password/private-key authentication and optional jump hosts. Credentials use the OS credential store;
 the renderer receives presence flags, not saved passwords. New or changed host fingerprints require verification.
@@ -21,11 +21,13 @@ choose **Save connection** to retain it. Temporary tabs are not restored after r
 
 Drag side-panel tabs to reorder them. Right-click a tab to rename it or choose a color; these choices persist
 with saved tabs. The broadcast button sends terminal typing/paste to all connected parent terminal tabs in
-the current project, using MyTerminal's broadcast routing. Browser/Git tabs, disconnected terminals and split
-panes are excluded. **Broadcast ON** stays visible while enabled; hiding the panel, switching projects or
+the same session (or the workspace when typing into a shared tab), using MyTerminal's broadcast routing. Browser/Git tabs, disconnected terminals and split
+panes are excluded. **Broadcast ON** stays visible while enabled; hiding the panel, switching sessions or projects, or
 restarting the app turns it off. CLI writes addressed to a terminal ID remain individual writes.
 
-Tabs belong to the project. Switching tabs/projects or hiding the panel preserves their processes. Closing a tab
+New tabs belong to the main session on screen. A side chat keeps its parent’s panel. Tabs from older versions and tabs opened without a session belong to the workspace. They appear alongside each session’s tabs. Use **Move to workspace** on a selected session tab to keep it when the session closes. Each session remembers its selected tab and whether the panel is visible. Panel width and browser sign-in settings apply across sessions.
+
+Switching tabs, sessions or projects or hiding the panel preserves their processes. Closing a tab
 terminates its PTY; quitting stops all terminals. Saved tabs return disconnected after restart—**Connect** starts
 a fresh shell. **Reconnect** after an exit starts a new process, not a resumed shell. Up to 32 terminal runtimes
 can exist at once, including split panes. Managed SSH uses MyTerminal's bounded reconnect countdown even while
@@ -96,9 +98,7 @@ Example request files:
 
 Other actions: `list`, `read` (optional `cursor` and `generation`), `interrupt`, `close`, `start`, `restart`,
 `split` and `unsplit` (parent terminal ID). `list` includes split channel IDs with their `parentId`.
-Terminal IDs are explicit: selecting another visible tab never redirects input. CLI access follows the active
-session and its project. Read-only, side-chat, and remote CLI sessions cannot use terminal control. Shell-helper
-access requires its own project to be active. An input request already accepted before switching may continue
+Terminal IDs are explicit: selecting another visible tab never redirects input. A live session can use its own terminals in the background and shared workspace terminals while active. Read-only, side-chat, and remote CLI sessions cannot use terminal control. A shell helper can access terminals belonging to its owner. Workspace shell helpers run while their project is active. An input request already accepted before switching may continue
 executing; switching does not kill background work.
 
 Read responses contain raw terminal output, `cursor`, `start`, process `generation`, and shell status. Retained

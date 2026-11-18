@@ -16,23 +16,27 @@ export interface ToolTab {
   detached?: boolean
   loading?: boolean
   error?: string
+  /** Persistent desktop session identity. Absent on shared workspace tabs. */
+  ownerId?: string | undefined
+  gitSelectionKey?: string
+  localCwd?: string
   terminal?: TerminalConfig
 }
-export interface ProjectTools {
+export interface PanelLayout { activeId: string | null; visible: boolean }
+export interface ProjectTools extends PanelLayout {
+  ownerId?: string | undefined
   profileId: string
   browserProfileId: string
   overrides: 'shared' | 'private'
   tabs: ToolTab[]
-  activeId: string | null
-  visible: boolean
   width: number
   broadcast?: boolean
 }
 export interface BrowserConnection { sessionId: string; profileId: string; pageId: number | null }
 export interface ToolsState { projects: ProjectTools[]; connections: BrowserConnection[]; recent?: string[] }
-export type ToolsAction =
+export type ToolsAction = { expectedOwnerId?: string | null } & (
   | { type: 'add'; kind: ToolTabKind; replaceId?: string; url?: string; terminal?: TerminalConfig }
-  | { type: 'select' | 'close' | 'pop-out' | 'return'; id: string }
+  | { type: 'select' | 'close' | 'promote' | 'pop-out' | 'return'; id: string }
   | { type: 'visible'; visible: boolean }
   | { type: 'width'; width: number }
   | { type: 'metadata'; id: string; label?: string; color?: string | null }
@@ -40,6 +44,13 @@ export type ToolsAction =
   | { type: 'broadcast'; enabled: boolean }
   | { type: 'save-connection'; id: string }
   | { type: 'overrides'; mode: 'shared' | 'private' }
+)
+
+/** Workspace tabs precede the selected main session's tabs in the strip. */
+export function panelTabs(project: ProjectTools): ToolTab[] {
+  const shared = project.tabs.filter(tab => !tab.ownerId)
+  return project.ownerId ? shared.concat(project.tabs.filter(tab => tab.ownerId === project.ownerId)) : shared
+}
 
 /** The tab the panel shows in place of tabs[index]: the nearest docked tab to the right, then to the left.
  * A tab whose page is in its own window is never shown in the panel, so it is skipped, as is `skipId`. */
@@ -60,10 +71,11 @@ export function dockedReorder(tabs: readonly ToolTab[], from: number, to: number
 export function removeToolTab(project: ProjectTools, id: string): void {
   const index = project.tabs.findIndex(tab => tab.id === id)
   if (index < 0) return
+  const visibleIndex = panelTabs(project).findIndex(tab => tab.id === id)
   const [removed] = project.tabs.splice(index, 1)
-  if (project.activeId === id) project.activeId = dockedNeighbor(project.tabs, index)
+  if (project.activeId === id) project.activeId = dockedNeighbor(panelTabs(project), visibleIndex)
   // Closing the last docked tab hides the panel; a page closing in its own window leaves the panel as it is.
-  if (!removed!.detached && !project.tabs.some(tab => !tab.detached)) project.visible = false
+  if (visibleIndex >= 0 && !removed!.detached && !panelTabs(project).some(tab => !tab.detached)) project.visible = false
 }
 
 export function panelButtonLabel(project: Pick<ProjectTools, 'tabs' | 'visible'> | undefined): string {

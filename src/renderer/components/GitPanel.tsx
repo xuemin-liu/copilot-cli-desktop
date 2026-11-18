@@ -32,11 +32,12 @@ import type { GitCursorContextRequest } from '../git-cursor-context.js'
 
 export interface GitPanelProps {
   profileId: string
+  selectionKey?: string | undefined
   /** The session whose prompt box receives text, or null when there is none or it lives in another window. `cwd` is the folder it
    * works in; `taskBlocker` says why it cannot take a task that edits files and runs Git. */
   promptTarget: ({ id: string; cwd?: string | null } & ResolveTarget) | null
   /** The active session's worktree folder, when it runs in one: the panel shows that worktree's repository entry. */
-  sessionWorktreePath?: string | null
+  sessionWorktreePath?: string | null | undefined
   /** Every session that runs in a worktree, so the worktree list can say who uses which. */
   worktreeSessions?: readonly WorktreeSession[]
   /** True when the panel is replacing the session area because the window is narrow. */
@@ -146,6 +147,8 @@ function readListShare(): number {
   return 40
 }
 
+const gitViews = new Map<string, { count: number; latest: Promise<GitProjectView> }>()
+
 /** Opens the project in the main process, follows its pushed changes, and closes it again on unmount. */
 function useGitProject(profileId: string): { view: GitProjectView | null; error: string | null; busy: boolean; rescan(): void; replace(view: GitProjectView): void } {
   const [view, setView] = useState<GitProjectView | null>(null)
@@ -156,9 +159,29 @@ function useGitProject(profileId: string): { view: GitProjectView | null; error:
     setView(null)
     setError(null)
     // The first view arrives both as the open's result and as an event; treating both as "latest" is harmless.
-    const off = window.copilotDesktop.onGitChanged(payload => { if (!disposed && payload.profileId === profileId) setView(payload.view) })
-    window.copilotDesktop.gitOpen(profileId).then(next => { if (!disposed) setView(next) }).catch((cause: unknown) => { if (!disposed) setError(errorMessage(cause)) })
-    return () => { disposed = true; off(); void window.copilotDesktop.gitClose(profileId).catch(() => undefined) }
+    let subscription = gitViews.get(profileId)
+    if (!subscription) {
+      subscription = { count: 0, latest: window.copilotDesktop.gitOpen(profileId) }
+      gitViews.set(profileId, subscription)
+    }
+    const shared = subscription
+    shared.count++
+    const off = window.copilotDesktop.onGitChanged(payload => {
+      if (!disposed && payload.profileId === profileId) {
+        shared.latest = Promise.resolve(payload.view)
+        setView(payload.view)
+      }
+    })
+    const initial = shared.latest
+    initial.then(next => { if (!disposed && shared.latest === initial) setView(next) })
+      .catch((cause: unknown) => { if (!disposed) setError(errorMessage(cause)) })
+    return () => {
+      disposed = true; off()
+      if (--shared.count === 0) {
+        gitViews.delete(profileId)
+        void window.copilotDesktop.gitClose(profileId).catch(() => undefined)
+      }
+    }
   }, [profileId])
   const rescan = useCallback(() => {
     setBusy(true)
@@ -362,14 +385,24 @@ function EntryGroup({ title, entries, codeOf, staged, selection, marked, multipl
   )
 }
 
-export function GitPanel({ profileId, promptTarget, takeover = false, active = true, embedded = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
+export function GitPanel({ profileId, selectionKey = profileId, promptTarget, takeover = false, active = true, embedded = false, onClose, insert = insertIntoPrompt, sendTask, sessionWorktreePath = null, worktreeSessions = [] }: GitPanelProps): JSX.Element {
   const currentPromptTarget = useRef(promptTarget)
   useLayoutEffect(() => {
     currentPromptTarget.current = promptTarget
     return () => { currentPromptTarget.current = null }
   }, [promptTarget])
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
-  const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
+  const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(selectionKey))
+  const previousSelectionKey = useRef(selectionKey)
+  useLayoutEffect(() => {
+    if (selectionKey === previousSelectionKey.current) return
+    // Reopening Git reuses its mounted view but gives the new tab its own saved selection.
+    const choice = readStoredRepo(previousSelectionKey.current)
+    if (choice !== null) {
+      try { localStorage.setItem(repoStorageKey(selectionKey), choice) } catch { /* Keep the in-memory choice. */ }
+    }
+    previousSelectionKey.current = selectionKey
+  }, [selectionKey])
   const [tab, setTab] = useState<Tab>('changes')
   const [picked, setSelection] = useState<Selection | null>(null)
   const [filter, setFilter] = useState<{ repoId: string; value: string } | null>(null)
@@ -447,18 +480,19 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     }
     setStoredRepo(next.relativePath)
     if (persist) {
-      try { localStorage.setItem(repoStorageKey(profileId), next.relativePath) } catch { /* Keep the in-memory choice. */ }
+      try { localStorage.setItem(repoStorageKey(selectionKey), next.relativePath) } catch { /* Keep the in-memory choice. */ }
     }
     return true
-  }, [profileId, repoId])
+  }, [selectionKey, repoId])
 
   // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
   useEffect(() => {
+    if (selectionKey !== profileId && readStoredRepo(selectionKey) !== null) return
     if (!sessionWorktreePath) { followedWorktree.current = null; return }
     if (!view || followedWorktree.current === sessionWorktreePath) return
     const match = view.repos.find(candidate => candidate.kind === 'worktree' && candidate.relativePath.toLowerCase() === sessionWorktreePath.toLowerCase())
     if (match && switchRepo(match, false)) followedWorktree.current = sessionWorktreePath
-  }, [view, sessionWorktreePath, switchRepo, operation])
+  }, [view, sessionWorktreePath, switchRepo, operation, selectionKey, profileId])
   const ready = repo?.state === 'ready'
   const currentBranches = branches && branches.repoId === repo?.id && branches.headOid === repo.headOid
     && branches.branch === repo.branch && branches.reload === branchReload ? branches : null

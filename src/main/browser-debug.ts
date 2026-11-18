@@ -107,7 +107,9 @@ export class BrowserDebug {
   private storage!: Session
   private readonly projectMode: boolean
   private readonly changed: () => void
-  private readonly onNewTab: (() => void) | undefined
+  private readonly onNewTab: ((pageId: number) => void) | undefined
+  private readonly panelAllowsPage: (pageId: number) => boolean
+  private readonly onPopup: ((id: number, openerId: number) => void) | undefined
   private readonly canCreatePage: () => string | null
   private readonly pendingClose = new Map<number, Promise<boolean>>()
   private server: Server | null = null
@@ -142,7 +144,7 @@ export class BrowserDebug {
   /** Whether a page asking for a window gets one: only while the browser is in its own window. Beside the terminal,
    * popups stay tabs. */
   private readonly popupWindows: () => boolean
-  private readonly onReturnToPanel: ((pageId: number) => void) | undefined
+  private readonly onReturnToPanel: ((pageId: number) => void | Promise<void>) | undefined
   /** The user focused a page, in the panel or in its own window. */
   private readonly onPageFocus: ((pageId: number) => void) | undefined
   private readonly history: BrowserHistory
@@ -160,11 +162,13 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; panelAllowsPage?: (pageId: number) => boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void | Promise<void>; onPageFocus?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
     this.onReturnToPanel = options.onReturnToPanel
     this.onPageFocus = options.onPageFocus
+    this.panelAllowsPage = options.panelAllowsPage ?? (() => true)
+    this.onPopup = options.onPopup
     this.onNewTab = options.onNewTab
     this.canCreatePage = options.canCreatePage ?? (() => null)
     this.popupWindows = options.popupWindows ?? (() => false)
@@ -199,6 +203,7 @@ export class BrowserDebug {
       return signal.aborted ? null : response === 1
     }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
+      panelAllowsPage: this.panelAllowsPage,
       active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
       recording: () => this.state.recordingNetwork, visible: id => { const page = this.pages.get(id); return Boolean(page && (page.window || page.attached && this.bounds) && page.view.getVisible()) },
       evidence: (pageId, startedAt, after) => {
@@ -298,6 +303,7 @@ export class BrowserDebug {
       title: page.contents.getTitle().slice(0, 160) || 'New browser', url: shownUrl(page),
       ...(page.window ? { window: true } : {}), ...(page.error ? { error: page.error } : {}) }))
   }
+  openerOf(id: number): number | null { return this.pages.get(id)?.opener ?? null }
   hasPage(id: number): boolean { return this.pages.has(id) && !this.pages.get(id)!.contents.isDestroyed() }
   /** Read UI selection without refreshing reader state or validating a command cursor. */
   get uiPageId(): number { return this.activePageId }
@@ -360,6 +366,7 @@ export class BrowserDebug {
     const storage = contents.session
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0, certificateFailure: null, certificateWarning: null }
     this.pages.set(contents.id, page)
+    if (opener !== null) this.onPopup?.(contents.id, opener)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.stopTest(); this.activePageId = contents.id; this.state.view = 'page' }
     if (window) this.showInWindow(page, window)
@@ -427,13 +434,13 @@ export class BrowserDebug {
       const command = input.control || input.meta
       const handled = ((): boolean => {
         if (this.projectMode && command && !input.shift && key === 'w') { void this.closePage(contents.id).catch(error => this.reportError(String(error))); return true }
-        if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(); return true }
+        if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(contents.id); return true }
         if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
-        // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
-        if (!selected) {
-          if (key === 'f12' || (command && input.shift && key === 'i')) { this.selectPage(contents.id); this.showView('devtools'); return true }
-          return false
+        if ((key === 'f12' || (command && input.shift && key === 'i')) && page.window) {
+          void this.inspectPage(page).catch(error => this.reportError(String(error)))
+          return true
         }
+        if (!selected) return false
         if (command && (key === '=' || key === '+')) { this.action('zoom-in'); return true }
         if (command && (key === '-' || key === '_')) { this.action('zoom-out'); return true }
         if (command && key === '0') { this.action('zoom-reset'); return true }
@@ -566,7 +573,7 @@ export class BrowserDebug {
     const { contents, view } = page
     const toolbar = returnToPanel ? createBrowserPopoutToolbar(() => {
       if (page.window !== window || this.disposed) return
-      if (this.onReturnToPanel) this.onReturnToPanel(contents.id)
+      if (this.onReturnToPanel) void Promise.resolve(this.onReturnToPanel(contents.id)).catch(error => this.reportError(String(error)))
       else {
         this.selectPage(contents.id); this.returnPage(contents.id)
         if (!this.owner.isDestroyed()) {
@@ -898,17 +905,20 @@ export class BrowserDebug {
       this.state.url = shownUrl(page)
       this.state.loading = page.loading || this.preparingPreferences
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
-      const failed = page.error ? undefined : this.failedPopupWindow()
-      this.state.error = page.error ?? failed?.error ?? null
+      const activeInPanel = this.panelAllowsPage(contents.id)
+      const popups = [...this.pages.values()].filter(entry => entry.window && this.panelAllowsPage(entry.contents.id))
+      const error = activeInPanel ? page.error : null
+      const failed = error ? undefined : popups.filter(entry => entry.error).at(-1)
+      this.state.error = error ?? failed?.error ?? null
       if (failed) this.state.errorPageId = failed.contents.id
       else delete this.state.errorPageId
       // A popup window has no panel of its own, so its warning shows here too.
-      const warned = page.certificateWarning ? page : [...this.pages.values()].filter(entry => entry.window && entry.certificateWarning).at(-1)
+      const warned = activeInPanel && page.certificateWarning ? page : popups.filter(entry => entry.certificateWarning).at(-1)
       if (warned?.certificateWarning) {
         const { url: _url, ...warning } = warned.certificateWarning
         this.state.certificateWarning = { ...warning, pageId: warned.contents.id }
       } else delete this.state.certificateWarning
-      if (!page.certificateWarning && certificateExceptions(contents.session).coversHost(shownUrl(page))) this.state.certificateBypass = true
+      if (activeInPanel && !page.certificateWarning && certificateExceptions(contents.session).coversHost(shownUrl(page))) this.state.certificateBypass = true
       else delete this.state.certificateBypass
       this.state.devtools = page.devtools
       this.state.activePageId = this.activePageId
@@ -962,11 +972,6 @@ export class BrowserDebug {
     const [partition, defaults] = await Promise.all([preferences(page.contents.session.storagePath), preferences(folders.storagePath)])
     this.savedOverrides = overridesFromPreferences(partition, defaults)
     this.savedOverridesAt = Date.now()
-  }
-
-  /** The most recently opened popup window that has an error. */
-  private failedPopupWindow(): BrowserPage | undefined {
-    return [...this.pages.values()].filter(page => page.window && page.error).at(-1)
   }
 
   get snapshot(): BrowserDebugState {
@@ -1067,9 +1072,9 @@ export class BrowserDebug {
   }
 
   /** The user's answer to an alert, confirm or leave-page dialog. */
-  async answerDialog(accept: boolean): Promise<BrowserDebugState> {
+  async answerDialog(accept: boolean, pageId?: number): Promise<BrowserDebugState> {
     if (this.disposed) throw new Error('Browser has closed')
-    await this.reader.answerDialog(accept)
+    await this.reader.answerDialog(accept, pageId)
     return this.snapshot
   }
 
@@ -1079,7 +1084,7 @@ export class BrowserDebug {
    * for an error that has no way past it, whatever sent the answer.
    */
   private answerCertificate(answer: 'proceed' | 'back', id: number): void {
-    const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id)
+    const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id && this.panelAllowsPage(entry.contents.id))
     if (!page) return
     const failure = page.certificateWarning!
     if (answer === 'proceed' && !certificateCanProceed(failure.error)) return
@@ -1152,27 +1157,35 @@ export class BrowserDebug {
       case 'select-all': contents.selectAll(); break
       case 'copy-link': if (/^https?:\/\//i.test(params.linkURL)) void clipboard.writeText(params.linkURL); break
       case 'copy-image-address': if (/^https?:\/\//i.test(params.srcURL)) void clipboard.writeText(params.srcURL); break
-      case 'open-link': this.openInNewPage(params.linkURL); break
-      case 'inspect': {
-        // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
-        const reused = page.tools !== null
-        if (this.activePageId !== contents.id) this.selectPage(contents.id)
-        this.showView('devtools')
-        const tools = page.tools?.webContents
-        const inspect = (): void => { if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y) }
-        if (reused && tools && !tools.isLoading()) inspect()
-        else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
-        break
-      }
+      case 'open-link': this.openInNewPage(page, params.linkURL); break
+      case 'inspect': void this.inspectPage(page, params).catch(error => this.reportError(String(error))); break
     }
   }
 
-  private openInNewPage(url: string): void {
-    const source = this.activePage
+  private async inspectPage(page: BrowserPage, point?: { x: number; y: number }): Promise<void> {
+    const { contents } = page
+    if (this.projectMode && page.window) {
+      await this.onReturnToPanel?.(contents.id)
+      if (page.window || contents.isDestroyed() || this.activePageId !== contents.id) return
+    }
+    if (this.disposed || contents.isDestroyed() || !this.panelAllowsPage(contents.id)) return
+    const reused = page.tools !== null
+    if (this.activePageId !== contents.id) this.selectPage(contents.id)
+    this.showView('devtools')
+    if (!point) return
+    const tools = page.tools?.webContents
+    const inspect = (): void => {
+      if (!contents.isDestroyed() && this.activePageId === contents.id && this.panelAllowsPage(contents.id)) contents.inspectElement(point.x, point.y)
+    }
+    if (reused && tools && !tools.isLoading()) inspect()
+    else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
+  }
+
+  private openInNewPage(source: BrowserPage, url: string): void {
     try { parseSafeHttpUrl(url) } catch { source.error = 'This browser opens HTTP and HTTPS links only.'; return }
     if (this.pages.size >= MAX_PAGES || this.canCreatePage()) { source.error = 'Close a browser page before opening another (32 pages maximum).'; return }
     const page = this.addPage(new WebContentsView({ webPreferences: { session: source.contents.session,
-      sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+      sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), !this.projectMode, null, source.contents.id)
     this.layout()
     void this.load(page, url).catch(error => { page.error = sanitizedText(String(error)) })
   }
@@ -1192,7 +1205,7 @@ export class BrowserDebug {
       const limit = this.canCreatePage(); if (limit) throw new Error(limit)
       if (this.pages.size >= MAX_PAGES) throw new Error('Close a browser page before opening another (32 pages maximum).')
       this.addPage(new WebContentsView({ webPreferences: { session: this.activePage.contents.session,
-        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true, null, this.activePageId)
       this.layout()
       return this.snapshot
     }
@@ -1484,16 +1497,16 @@ export class BrowserDebug {
         return
       }
       const pageId = cursor ? cursor.active() : this.activePageId
-      if (cursor && !this.pages.has(pageId)) { send(409, { message: 'Page closed; run tabs, then select a page ID.' }); return }
+      if (cursor && (!this.pages.has(pageId) || cursor.allowsPage?.(pageId) === false)) { send(409, { message: 'Page closed; run tabs, then select a page ID.' }); return }
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
         const scoped = cursor ? this.controlState(pageId) : this.snapshot
-        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
-        send(200, { ...state, url: sanitizedUrl(state.url),
+        const { console, network, pages, dialog, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
+        send(200, { ...state, ...(dialog && cursor?.allowsPage?.(dialog.pageId) !== false ? { dialog } : {}), url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
-          pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
+          pages: pages.filter(page => cursor?.allowsPage?.(page.id) !== false).map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
           consoleCount: console.filter(entry => entry.pageId === pageId).length,
           networkCount: network.filter(entry => entry.pageId === pageId).length })
       } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === pageId))

@@ -269,9 +269,21 @@ function projectTools(): ProjectToolService {
     userData: app.getPath('userData'), owner: () => mainWindow,
     project: id => desktopConfig.profiles.find(profile => profile.id === id),
     session: id => tabsState.tabs.find(tab => tab.id === id),
-    currentSession: () => tabsState.tabs.find(tab => tab.id === tabsState.activeTabId && tab.workspaceProfileId === desktopConfig.activeProfileId)?.id ?? null,
+    currentSession: () => {
+      const { main } = visibleSessionTabs(tabsState)
+      if (main?.workspaceProfileId !== desktopConfig.activeProfileId) return null
+      if (main && sessionWindows.has(main.id)) return lastDockedToolSession.get(main.workspaceProfileId) ?? null
+      return main?.id ?? null
+    },
     currentProject: () => desktopConfig.activeProfileId ?? null,
-    activateProject: id => activateProfile(id),
+    activateProject: async (id, ownerId) => {
+      await activateProfile(id)
+      const owner = ownerId && tabsState.tabs.find(tab => tab.workspaceProfileId === id && tab.browserProfileId === ownerId)
+      if (owner) {
+        lastDockedToolSession.set(id, owner.id)
+        selectSessionInMain(owner.id)
+      }
+    },
     defaults: () => ({ shared: desktopConfig.browserProfile === 'shared', overrides: desktopConfig.browserOverrides }),
     browserOptions: () => ({ history: sharedBrowserHistory(), sitePermissions: sharedSitePermissions(), zoom: sharedBrowserZoom(), reportError: logBrowserError,
       onAppShortcut: name => { if (name === 'git-toggle') { toggleGitPanel(); return true } return false } }),
@@ -289,6 +301,7 @@ const sharedSitePermissions = (): SitePermissions => sitePermissions ??= new Sit
   { file: join(app.getPath('userData'), 'browser-permissions.json'), reportError: logBrowserError })
 let browserZoom: BrowserZoom | null = null
 const sharedBrowserZoom = (): BrowserZoom => browserZoom ??= new BrowserZoom(join(app.getPath('userData'), 'browser-zoom.json'), logBrowserError)
+const lastDockedToolSession = new Map<string, string>()
 const sessionWindows = new Map<string, BrowserWindow>()
 const sessionOutputSequences = new Map<string, number>()
 let settingsWindow: BrowserWindow | null = null
@@ -431,7 +444,10 @@ function gitServiceInstance(): GitService | null {
     // A repository a session was asked to resolve a pull in: the panel's writes there wait for it.
     resolverFor: (folder) => gitResolvers.forFolder(folder, sessionStateOf),
     // Folders the profile's sessions report running in; the service lists those that are worktrees of its repositories.
-    sessionWorktrees: (profileId) => tabsState.tabs.flatMap((tab) => tab.workspaceProfileId === profileId && tab.sessionCwd ? [tab.sessionCwd] : []),
+    sessionWorktrees: (profileId) => tabsState.tabs.flatMap(tab => {
+      const cwd = tab.sessionCwd ?? tab.launchWorktreePath
+      return tab.workspaceProfileId === profileId && cwd ? [cwd] : []
+    }),
     // Every live session of the app, whichever profile it belongs to (a worktree can be another profile's workspace), with its
     // folder when known: a worktree removal is refused while one runs there or has not said. A dormant tab counts only
     // where its saved session started, since that is where it resumes; one with no stored session runs nowhere yet, and
@@ -943,6 +959,8 @@ function syncTabState(): void {
 }
 
 function broadcastState(): void {
+  const { main } = visibleSessionTabs(tabsState)
+  if (main && !sessionWindows.has(main.id)) lastDockedToolSession.set(main.workspaceProfileId, main.id)
   projectToolService?.refreshConnections()
   const shared=snapshot()
   if(workflowAttentionReady)workflowNotifications.update(attentionItems(shared),desktopConfig.notifications)
@@ -2192,14 +2210,21 @@ function withSessionChoices(profile: WorkspaceProfile | null, options: NewSessio
 
 function activateSessionTab(tabId: string): DesktopState {
   const popout = sessionWindows.get(tabId)
+  if (popout) {
+    focusSessionWindow(popout)
+    return snapshot()
+  }
+  return selectSessionInMain(tabId)
+}
+
+function selectSessionInMain(tabId: string): DesktopState {
   const previous = tabsState.activeTabId
   tabsState = activateTab(tabsState, tabId)
   syncTabState()
   // The saved tabs mark the one on screen, which a restart shows again.
   if (tabsState.activeTabId !== previous) persistProfileTabs()
   followActiveTabWorkspace()
-  if (popout) focusSessionWindow(popout)
-  else restoreMainWindow()
+  restoreMainWindow()
   broadcastState()
   refreshMenus()
   return snapshot()
@@ -3192,33 +3217,37 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     if (!tab) throw new Error('This session tab no longer exists')
     if (tab.remote) throw new Error('A remote session cannot be unloaded')
     if (tab.status === 'dormant') return snapshot()
-    cancelHeldInput(tabId)
-    const activityTimer = activityBroadcastTimers.get(tabId)
-    if (activityTimer) clearTimeout(activityTimer)
-    activityBroadcastTimers.delete(tabId)
-    const managed = managedTabs.get(tabId)
-    if (managed) {
-      await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before unloading: ${String(error)}`))
-      await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
-      managed.session.removeAllListeners()
-      managedTabs.delete(tabId)
-      if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
-    }
-    forgetSessionName(tabId)
-    // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
-    forgetMeetingSession(tabId)
-    // Until the tab is marked as not running, a browser request finds it closing rather than creating a new browser.
-    await projectToolService?.stopBridge(tabId)
-    // The session resumes where it ran, so its folder and worktree stay known and protected.
-    tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId
-      ? { ...candidate, status: 'dormant' as const, processId: null, activity: null, activityDetail: null }
-      : candidate) }
-    sessionWindows.get(tabId)?.close()
-    syncTabState()
-    persistProfileTabs()
-    broadcastState()
-    refreshMenus()
-    return snapshot()
+    const finishTools = await projectTools().releaseSession(tabId, true)
+    if (!finishTools) return snapshot()
+    try {
+      cancelHeldInput(tabId)
+      const activityTimer = activityBroadcastTimers.get(tabId)
+      if (activityTimer) clearTimeout(activityTimer)
+      activityBroadcastTimers.delete(tabId)
+      const managed = managedTabs.get(tabId)
+      if (managed) {
+        await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before unloading: ${String(error)}`))
+        await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+        managed.session.removeAllListeners()
+        managedTabs.delete(tabId)
+        if (managed.session.lastSessionId) tabsState = setTabSessionId(tabsState, tabId, managed.session.lastSessionId)
+      }
+      forgetSessionName(tabId)
+      // An unloaded session cannot answer: it leaves its meeting (closing it, for a host).
+      forgetMeetingSession(tabId)
+      // Until the tab is marked as not running, a browser request finds it closing rather than creating a new browser.
+      await projectToolService?.stopBridge(tabId)
+      // The session resumes where it ran, so its folder and worktree stay known and protected.
+      tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => candidate.id === tabId
+        ? { ...candidate, status: 'dormant' as const, processId: null, activity: null, activityDetail: null }
+        : candidate) }
+      sessionWindows.get(tabId)?.close()
+      syncTabState()
+      persistProfileTabs()
+      broadcastState()
+      refreshMenus()
+      return snapshot()
+    } finally { finishTools() }
   })
 }
 
@@ -3233,54 +3262,58 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
   // takes effect once the restart's turn finishes, instead of silently
   // dropping the user's click.
   return queueTabTransition(tabId, async () => {
-    cancelHeldInput(tabId)
-    await projectToolService?.stopBridge(tabId)
-    const activityTimer = activityBroadcastTimers.get(tabId)
-    if (activityTimer) clearTimeout(activityTimer)
-    activityBroadcastTimers.delete(tabId)
-    const managed = managedTabs.get(tabId)
-    if (managed) {
-      await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before closing: ${String(error)}`))
-      await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
-      managed.session.removeAllListeners()
-      managedTabs.delete(tabId)
-    }
-    forgetSessionName(tabId)
-    terminalSizes.delete(tabId)
-    forgetMeetingSession(tabId)
-    meetingControl.forget(tabId)
-    // Read before the tab is dropped: its worktree is cleaned up once it is gone.
-    const closing = tabsState.tabs.find((tab) => tab.id === tabId)
-    const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
+    const finishTools = await projectTools().releaseSession(tabId, false)
+    if (!finishTools) return snapshot()
     try {
-      const profileId = tabsState.tabs.find(tab => tab.id === tabId)?.browserProfileId
-      if (profileId) {
-        const paths = browserProfilePaths(app.getPath('userData'), profileId)
-        // Older versions gave each session its own browser profile; a session on the shared profile leaves it to the others.
-        if (await browserProfileHasPartition(app.getPath('userData'), profileId)) {
-          await clearBrowserStorage(electronSession.fromPartition(paths.partition), reportBrowserError)
-        }
-        await removeBrowserProfileSettings(app.getPath('userData'), profileId)
+      cancelHeldInput(tabId)
+      await projectToolService?.stopBridge(tabId)
+      const activityTimer = activityBroadcastTimers.get(tabId)
+      if (activityTimer) clearTimeout(activityTimer)
+      activityBroadcastTimers.delete(tabId)
+      const managed = managedTabs.get(tabId)
+      if (managed) {
+        await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before closing: ${String(error)}`))
+        await managed.session.stop().catch((error) => void writeAppLog(`Failed to stop session ${tabId}: ${String(error)}`))
+        managed.session.removeAllListeners()
+        managedTabs.delete(tabId)
       }
-    } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
-    try { await desktopControl?.forget(tabId) }
-    catch (error) { reportBrowserError(`Failed to turn off desktop control for ${tabId}: ${String(error)}`) }
-    try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
-    catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
-    tabsState = closeTab(tabsState, tabId)
-    syncTabState()
-    followActiveTabWorkspace()
-    const popout = sessionWindows.get(tabId)
-    sessionWindows.delete(tabId)
-    popout?.destroy()
-    persistProfileTabs()
-    await sessionLogWriteQueues.get(tabId)
-    sessionLogBytesWritten.delete(tabId)
-    sessionOutputSequences.delete(tabId)
-    broadcastState()
-    refreshMenus()
-    if (closing) cleanUpSessionWorktree(closing)
-    return snapshot()
+      forgetSessionName(tabId)
+      terminalSizes.delete(tabId)
+      forgetMeetingSession(tabId)
+      meetingControl.forget(tabId)
+      // Read before the tab is dropped: its worktree is cleaned up once it is gone.
+      const closing = tabsState.tabs.find((tab) => tab.id === tabId)
+      const reportBrowserError = (message: string): void => { void writeAppLog(message).catch(() => {}) }
+      try {
+        const profileId = tabsState.tabs.find(tab => tab.id === tabId)?.browserProfileId
+        if (profileId) {
+          const paths = browserProfilePaths(app.getPath('userData'), profileId)
+          // Older versions gave each session its own browser profile; a session on the shared profile leaves it to the others.
+          if (await browserProfileHasPartition(app.getPath('userData'), profileId)) {
+            await clearBrowserStorage(electronSession.fromPartition(paths.partition), reportBrowserError)
+          }
+          await removeBrowserProfileSettings(app.getPath('userData'), profileId)
+        }
+      } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
+      try { await desktopControl?.forget(tabId) }
+      catch (error) { reportBrowserError(`Failed to turn off desktop control for ${tabId}: ${String(error)}`) }
+      try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
+      catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
+      tabsState = closeTab(tabsState, tabId)
+      syncTabState()
+      followActiveTabWorkspace()
+      const popout = sessionWindows.get(tabId)
+      sessionWindows.delete(tabId)
+      popout?.destroy()
+      persistProfileTabs()
+      await sessionLogWriteQueues.get(tabId)
+      sessionLogBytesWritten.delete(tabId)
+      sessionOutputSequences.delete(tabId)
+      broadcastState()
+      refreshMenus()
+      if (closing) cleanUpSessionWorktree(closing)
+      return snapshot()
+    } finally { finishTools() }
   })
 }
 
@@ -3293,13 +3326,12 @@ async function openTabUsesFolder(folder: string): Promise<boolean> {
   try { target = await realPathNative(folder) } catch { return false }
   // A dormant tab whose saved folder is still being read may resume in this one.
   await Promise.all(dormantFolderReads.values())
-  for (const tab of tabsState.tabs) {
-    for (const where of [tab.sessionCwd, tab.launchWorktreePath]) {
-      if (!where) continue
-      let real: string
-      try { real = await realPathNative(where) } catch { continue }
-      if (isSameOrInside(real, target)) return true
-    }
+  const folders = [...tabsState.tabs.flatMap(tab => [tab.sessionCwd, tab.launchWorktreePath]), ...(projectToolService?.localTerminalFolders() ?? [])]
+  for (const where of folders) {
+    if (!where) continue
+    let real: string
+    try { real = await realPathNative(where) } catch { continue }
+    if (isSameOrInside(real, target)) return true
   }
   return false
 }
@@ -3934,7 +3966,9 @@ async function activateProfile(profileId: string): Promise<DesktopState> {
   if (!activeTabBelongsToProfile) {
     const firstProfileTab = tabsState.tabs.find((tab) => tab.workspaceProfileId === profile.id)
     if (firstProfileTab) {
-      activateSessionTab(firstProfileTab.id)
+      selectSessionInMain(firstProfileTab.id)
+      const popout = sessionWindows.get(firstProfileTab.id)
+      if (popout) focusSessionWindow(popout)
     } else if (isCopilotResolved()) {
       await restoreTabsForProfile()
     }
@@ -4616,8 +4650,10 @@ ipcMain.handle('desktop:browser-show-main', async (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string' || event.sender !== sessionWindows.get(tabId)?.webContents && event.sender !== mainWindow?.webContents) throw new Error('Session window mismatch')
   const tab = tabsState.tabs.find(tab => tab.id === tabId); if (!tab) throw new Error('Session closed')
+  if (projectTools().showSessionWindow(tab.id)) return
   await activateProfile(tab.workspaceProfileId)
-  activateSessionTab(tab.id)
+  lastDockedToolSession.set(tab.workspaceProfileId, tab.id)
+  selectSessionInMain(tab.id)
   // The session's page is in its own window: bring that window forward instead of opening another page.
   if (projectTools().showSessionWindow(tab.id)) return
   await projectTools().action(tab.workspaceProfileId, { type: 'add', kind: 'browser' })
@@ -4641,10 +4677,10 @@ ipcMain.handle('desktop:browser-pick-many', async (event, tabId: unknown) => {
   const browser = browserForSender(event, tabId)
   await browser.pickElement(text => { if (!event.sender.isDestroyed()) event.sender.send('desktop:browser-picked', tabId, text) })
 })
-ipcMain.handle('desktop:browser-dialog', (event, tabId: unknown, accept: unknown) => {
+ipcMain.handle('desktop:browser-dialog', (event, tabId: unknown, accept: unknown, pageId?: unknown) => {
   const browser = browserForSender(event, tabId)
-  if (typeof accept !== 'boolean') throw new Error('Invalid dialog answer')
-  return browser.answerDialog(accept)
+  if (typeof accept !== 'boolean' || (pageId !== undefined && typeof pageId !== 'number')) throw new Error('Invalid dialog answer')
+  return browser.answerDialog(accept, pageId)
 })
 ipcMain.handle('desktop:browser-screenshot', (event, tabId: unknown) => browserForSender(event, tabId).screenshotToClipboard())
 ipcMain.handle('desktop:browser-find', (event, tabId: unknown, text: unknown, forward: unknown, next: unknown) => {

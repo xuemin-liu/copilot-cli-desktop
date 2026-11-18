@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { writeFileAtomic } from './atomic-file.js'
@@ -295,7 +295,7 @@ For exception requests, examine console entries with level "error" and messages
 containing Error, Exception, Uncaught, or unhandled rejection. Report the actual
 message, source, and line, with any applicable capture limitations. For network requests,
 report failed HTTP statuses and error fields. Do not fabricate browser observations.
-If this session is inactive, ask the user to activate it in its project. Open a Browser tab if none exists. Resume reconnects automatically. After a CLI-selected page closes, run tabs and select a page explicitly; user page selection or reopening a Browser tab updates the target automatically. Switching to another session revokes this session's browser access. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
+Your session can use its own pages while another session is active. To use a shared workspace page, ask the user to activate your session. Open a Browser tab if none exists. Resume reconnects automatically. After a CLI-selected page closes, run tabs and select a page explicitly; user page selection or reopening a Browser tab updates the target automatically. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
 restricted read/search-only sessions cannot run these commands. A remote connected
 session may run tools on a different computer and cannot use this local endpoint.
 No browser automation extension, third-party MCP, Node installation, or globally
@@ -679,6 +679,31 @@ function protectBrowserSessionsRoot(root: string, reportError: (message: string)
   return protection
 }
 
+async function writeTerminalHelpers(directory: string, endpoint: string): Promise<NodeJS.ProcessEnv> {
+  const terminalHelper = join(directory, process.platform === 'win32' ? 'terminal.ps1' : 'terminal.sh')
+  await writeFileAtomic(terminalHelper, process.platform === 'win32' ? TERMINAL_HELPER_PS : TERMINAL_HELPER_SH)
+  if (process.platform === 'win32') await writeFileAtomic(join(directory, 'terminal-wsl.sh'), TERMINAL_HELPER_WSL)
+  return {
+    COPILOT_DESKTOP_TERMINAL_HELPER: terminalHelper,
+    COPILOT_DESKTOP_TERMINAL_STATE: endpoint,
+    ...(process.platform === 'win32' ? { COPILOT_DESKTOP_TERMINAL_WINDOWS_HELPER: terminalHelper, COPILOT_DESKTOP_TERMINAL_WSL_HELPER: join(directory, 'terminal-wsl.sh') } : {}),
+  }
+}
+
+/** Protect one root. A restarted shell gets a fresh child so the previous bridge can clean up independently. */
+export async function prepareToolTerminalEnvironment(root: string, reportError: (message: string) => void) {
+  if (process.platform === 'win32') await protectBrowserSessionsRoot(root, reportError)
+  else await mkdir(root, { recursive: true, mode: 0o700 })
+  const directory = await mkdtemp(join(root, 'terminal-'))
+  try {
+    const env = await writeTerminalHelpers(directory, join(directory, 'control.json'))
+    return { directory, env: { ...process.env, ...env } }
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true })
+    throw error
+  }
+}
+
 export async function prepareBrowserSessionEnvironment(root: string, tabId: string, environment: NodeJS.ProcessEnv,
   reportError: (message: string) => void = message => console.warn(message)): Promise<NodeJS.ProcessEnv> {
   const paths = browserSessionPaths(root, tabId)
@@ -689,17 +714,13 @@ export async function prepareBrowserSessionEnvironment(root: string, tabId: stri
     await writeFileAtomic(join(paths.directory, 'browser-test.ps1'), BROWSER_TEST_HELPER)
   } else await writeFileAtomic(paths.helper, BROWSER_HELPER_SH)
   await writeFileAtomic(join(paths.directory, '.github', 'instructions', 'browser.instructions.md'), BROWSER_INSTRUCTIONS)
-  const terminalHelper = join(paths.directory, process.platform === 'win32' ? 'terminal.ps1' : 'terminal.sh')
-  await writeFileAtomic(terminalHelper, process.platform === 'win32' ? TERMINAL_HELPER_PS : TERMINAL_HELPER_SH)
-  if (process.platform === 'win32') await writeFileAtomic(join(paths.directory, 'terminal-wsl.sh'), TERMINAL_HELPER_WSL)
+  const terminal = await writeTerminalHelpers(paths.directory, paths.endpoint)
   await writeFileAtomic(join(paths.directory, '.github', 'instructions', 'terminal.instructions.md'), terminalInstructions())
   const existing = environment.COPILOT_CUSTOM_INSTRUCTIONS_DIRS?.split(',').filter(Boolean) ?? []
   return { ...environment,
     COPILOT_DESKTOP_BROWSER_STATE: paths.endpoint,
     COPILOT_DESKTOP_BROWSER_HELPER: paths.helper,
-    COPILOT_DESKTOP_TERMINAL_HELPER: terminalHelper,
-    ...(process.platform === 'win32' ? { COPILOT_DESKTOP_TERMINAL_WINDOWS_HELPER: terminalHelper, COPILOT_DESKTOP_TERMINAL_WSL_HELPER: join(paths.directory, 'terminal-wsl.sh') } : {}),
-    COPILOT_DESKTOP_TERMINAL_STATE: paths.endpoint,
+    ...terminal,
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS: [...new Set([...existing, paths.directory])].join(','),
   }
 }

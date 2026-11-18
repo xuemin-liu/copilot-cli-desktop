@@ -264,8 +264,8 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
       <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : state.dialog.pageId === state.activePageId ? 'This page says'
         : `“${state.pages.find(page => page.id === state.dialog?.pageId)?.title ?? 'Another page'}” says`}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
       <div>
-        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
-        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
+        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true, state.dialog!.pageId))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
+        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false, state.dialog!.pageId))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
       </div>
     </div>}
     {findOpen && <div className="browser-find" role="search" aria-label="Find in page">
@@ -303,7 +303,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
     <footer className="browser-footer"><div className="browser-footer-status">
-      <span role="status" title={testingMessage}>{testingMessage || (state.loading ? 'Loading…' : independent ? 'Browser control automatically follows the current session.' : 'This session’s browser activity is available to Copilot CLI.')}</span>
+      <span role="status" title={testingMessage}>{testingMessage || (state.loading ? 'Loading…' : independent ? 'Browser control follows tab ownership.' : 'This session’s browser activity is available to Copilot CLI.')}</span>
       {state.testing?.running && <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'testing:off'))}>Stop test</button>}
     </div>
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>

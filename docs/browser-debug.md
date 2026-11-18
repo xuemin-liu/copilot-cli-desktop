@@ -2,7 +2,9 @@
 
 Choose **New tab → Browser**, enter an address, or use **Open browser** in a CLI header to create a browser for the current session. Browsing also works with no CLI running. Browser pages and Git share one top-level tab strip; **+** opens another launcher. Close any individual tab, including the last. **Hide tabs** retains pages; **Show tabs** restores them.
 
-Pages belong to a project and share its cookies, storage, Local Overrides and capture group. Separate profiles are the default; Settings can share cookies across projects. The cap is 32 live pages across all projects, including popups and hidden projects. CLI focus never changes the selected page. The current running CLI connects automatically. Switching sessions or selecting a Browser tab updates its target; CLI page selection remains independent until the user changes session or page. Inactive sessions cannot control the browser. A closed CLI-selected cursor stays empty until the CLI selects a page or the user changes the selected Browser tab.
+Pages belong to their main session or the shared workspace. Pages in one project share its configured cookies, storage, Local Overrides and capture group. The cap is 32 live pages across all projects. An eligible running CLI can inspect its own pages while another session is active. The foreground CLI can also inspect shared workspace pages. Each CLI has its own page selection. Hidden rendering-dependent operations identify the page to show.
+
+Choosing **Inspect** or pressing **F12** in a detached page returns it to its owning panel and opens DevTools there. Errors and certificate warnings from detached pages appear in the owner's panel.
 
 Bare public domains use HTTPS; development, private and loopback hosts use HTTP. Explicit HTTP/HTTPS takes precedence. **Reload** uses the cache; **Shift+click**, **Ctrl+Shift+R**, or **Ctrl+F5** bypasses it. Links and `window.open()` create top-level Browser tabs while preserving their opener. **Open in window** moves one page into its own window and out of the tab strip; the panel moves to a neighbouring tab, or shows **No tabs**. The window's toolbar has **↻** (a click reloads; **Shift/Ctrl/Cmd+click** bypasses the cache) and **Return to panel**, which puts the page back in its old place with the same page and form state. Popups may open windows from a detached opener. Closing asks before discarding unsaved page changes; Cancel retains the page.
 
@@ -13,7 +15,7 @@ Zoom is remembered per site (host name, as in Chrome) for every project's browse
 kept across restarts; returning a site to 100% forgets it.
 Opening a child page preserves the source page, POST data and opener callbacks.
 Only the primary page's saved URL is restored after app restart; additional pages are temporary.
-Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, without closing project pages or signing out. Restart/Resume reconnects the current session automatically. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
+Projects retain browser cookies and storage across tab closure, CLI closure and app restarts. Saved tabs restore lazily; saved URLs and Recent pages omit sensitive URL components. Closing a CLI removes its control bridge and helper files, and closes its session-owned pages. Shared workspace pages and project sign-ins survive. Restart/Resume reconnects the current session automatically. Removing a workspace drops its tab manifest and separate profile identity; startup prunes that profile. Shared cookies remain available to other projects.
 
 Switching tabs or hiding retains typed addresses, find text, collected elements and notes. Hiding stops a running test and picking; tests never resume automatically. App startup does not restore a neutral launcher or any CLI browser connection. Upgrades from session-owned browsers start with no open tool tabs and new separate project profiles; old session cookies are not merged.
 
@@ -246,7 +248,7 @@ sent: review the prompt, then press Enter.
 ## Sharing between projects
 
 Each project has one browser: its pages are used by every session of that project, and browser
-control follows the project's current session. Like tabs in one Chrome profile, every project's
+control follows page ownership. Like tabs in one Chrome profile, every project's
 browser shares:
 
 - address-bar history (Settings → **Project browsers** → **Clear browsing history** empties it),
