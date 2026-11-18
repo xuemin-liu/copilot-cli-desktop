@@ -164,9 +164,9 @@ handle, only input/output/resize events.
   or task ID.
 - Visible Windows elevation and permission-access status, with warnings for
   high-trust modes and elevated launches.
-- Stops the full process tree for every running session on app quit, with a
-  detached watchdog covering abrupt desktop-process termination (PowerShell on
-  Windows, `sh` on macOS and Linux, where each child leads its own process group).
+- Stops the full process tree for every running session on app quit. Windows
+  uses kill-on-close job objects for crash cleanup. On macOS and Linux a detached
+  `sh` watchdog monitors each child's process group.
 - A background CLI (`copilot-desktop`) with a token-protected, loopback-only
   HTTP control server (`start` / `status` / `restart` / `logs` / `stop`) and a
   first-class `run --prompt` command for official non-interactive Copilot

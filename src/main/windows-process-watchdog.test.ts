@@ -1,62 +1,51 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import { PassThrough } from 'node:stream'
-import type { ChildProcess } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
-import {
-  buildWatchdogEncodedCommand,
-  configureWindowsProcessWatchdogReporter,
-  startWindowsProcessWatchdog,
-} from './windows-process-watchdog.js'
+import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 
-test('watchdog command tracks validated PID messages in one shared process', () => {
-  const encoded = buildWatchdogEncodedCommand({ SystemRoot: 'C:\\Windows' })
-  const script = Buffer.from(encoded, 'base64').toString('utf16le')
-  assert.match(script, /ReadLine/)
-  assert.match(script, /track \(\[1-9\]\[0-9\]\*\)/)
-  assert.match(script, /release \(\[1-9\]\[0-9\]\*\)/)
-  assert.match(script, /C:\\Windows\\System32\\taskkill\.exe/)
-  assert.match(script, /\/PID \$processId \/T \/F/)
+test('invalid process IDs are rejected before opening a process', () => {
+  for (const pid of [0, -1, 1.5, 2 ** 32]) assert.throws(() => startWindowsProcessWatchdog(pid), /Invalid watchdog process ID/)
 })
 
-test('a destroyed watcher pipe is replaced before exit and live PIDs are replayed', () => {
-  const children: Array<{ process: ChildProcess; writes: string[] }> = []
-  const failures: string[] = []
-  configureWindowsProcessWatchdogReporter((message) => failures.push(message))
-  let spawnCount = 0
-  const spawnWatchdog = () => {
-    spawnCount += 1
-    const stdin = new PassThrough()
-    const writes: string[] = []
-    stdin.on('data', (chunk: Buffer) => writes.push(chunk.toString('utf8')))
-    const process = Object.assign(new EventEmitter(), { stdin, unref() {} }) as unknown as ChildProcess
-    children.push({ process, writes })
-    return process
-  }
-  const environment = { SystemRoot: 'C:\\Windows' }
-  const first = startWindowsProcessWatchdog(111, environment, spawnWatchdog)
-  const second = startWindowsProcessWatchdog(222, environment, spawnWatchdog)
-  assert.equal(spawnCount, 1)
-  assert.equal(children[0]?.writes.join(''), 'track 111\ntrack 222\n')
+test('abrupt owner death kills the tracked Windows tree and preserves a released child',
+  { skip: process.platform !== 'win32', timeout: 20000 }, async t => {
+    const sleeper = 'setTimeout(() => {}, 30000)'
+    const tracked = spawn(process.execPath, ['-e', `
+      process.once('message', () => {
+        const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(sleeper)}], { stdio: 'ignore', windowsHide: true })
+        process.send(child.pid)
+      })
+    `], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true })
+    const released = spawn(process.execPath, ['-e', sleeper], { windowsHide: true, stdio: 'ignore' })
+    t.after(() => { tracked.kill(); released.kill() })
+    assert.ok(tracked.pid && released.pid)
 
-  children[0]?.process.stdin?.destroy()
-  const third = startWindowsProcessWatchdog(333, environment, spawnWatchdog)
-  assert.equal(spawnCount, 2)
-  assert.equal(children[1]?.writes.join(''), 'track 111\ntrack 222\ntrack 333\n')
-  assert.equal(failures.length, 1)
-
-  // The stale process's delayed exit must not clear its replacement.
-  children[0]?.process.emit('exit', 1, null)
-  const fourth = startWindowsProcessWatchdog(444, environment, spawnWatchdog)
-  assert.equal(spawnCount, 2)
-
-  first.release()
-  second.release()
-  third.release()
-  fourth.release()
-  first.release()
-  assert.equal(
-    children[1]?.writes.join(''),
-    'track 111\ntrack 222\ntrack 333\ntrack 444\nrelease 111\nrelease 222\nrelease 333\nrelease 444\n',
-  )
-})
+    const owner = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { startWindowsProcessWatchdog } from ${JSON.stringify(new URL('./windows-process-watchdog.js', import.meta.url).href)}
+      startWindowsProcessWatchdog(${tracked.pid})
+      const lease = startWindowsProcessWatchdog(${released.pid})
+      lease.release()
+      lease.release()
+      process.send('ready')
+      setInterval(() => {}, 30000)
+    `], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], windowsHide: true })
+    t.after(() => { owner.kill() })
+    await once(owner, 'message')
+    const childStarted = once(tracked, 'message')
+    tracked.send('start')
+    const [grandchild] = await childStarted
+    assert.ok(Number.isInteger(grandchild) && grandchild > 0)
+    const alive = (): boolean => { try { process.kill(grandchild, 0); return true } catch { return false } }
+    assert.ok(alive())
+    const ownerExited = once(owner, 'exit')
+    owner.kill()
+    await ownerExited
+    const deadline = Date.now() + 10000
+    while ((tracked.exitCode === null && tracked.signalCode === null || alive()) && Date.now() < deadline) await delay(50)
+    assert.ok(tracked.exitCode !== null || tracked.signalCode !== null, 'tracked process survived owner exit')
+    assert.equal(alive(), false, 'grandchild survived owner exit')
+    assert.equal(released.exitCode, null)
+    assert.equal(released.signalCode, null)
+  })

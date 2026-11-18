@@ -63,6 +63,6 @@ export function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
 }
 
 /** Kill the child's tree if this process dies first, on every platform. */
-export function startProcessWatchdog(pid: number, environment: NodeJS.ProcessEnv = process.env): ProcessWatchdogLease {
-  return process.platform === 'win32' ? startWindowsProcessWatchdog(pid, environment) : startPosixProcessWatchdog(pid)
+export function startProcessWatchdog(pid: number): ProcessWatchdogLease {
+  return process.platform === 'win32' ? startWindowsProcessWatchdog(pid) : startPosixProcessWatchdog(pid)
 }

@@ -227,7 +227,7 @@ async function runProgrammatic(rawArgs: string[]): Promise<void> {
       windowsHide: false,
     })
     // It stays in the terminal's process group, so Ctrl+C still reaches it.
-    const watchdog = child.pid ? startProcessWatchdog(child.pid, environment) : null
+    const watchdog = child.pid ? startProcessWatchdog(child.pid) : null
     child.once('error', (error) => {
       watchdog?.release()
       reject(error)

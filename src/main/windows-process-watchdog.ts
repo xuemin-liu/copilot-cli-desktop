@@ -1,28 +1,12 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { windowsSystemDirectory, windowsSystemExecutable } from './resolve-copilot.js'
+import { createRequire } from 'node:module'
 
 export interface ProcessWatchdogLease {
   release(): void
 }
 
-type SpawnWatchdog = (
-  file: string,
-  args: readonly string[],
-  options: Parameters<typeof spawn>[2],
-) => ChildProcess
-
-interface SharedWatchdog {
-  child: ChildProcess
-}
-
-let sharedWatchdog: SharedWatchdog | null = null
-const trackedPids = new Set<number>()
+const require = createRequire(import.meta.url)
 let failureReported = false
-let failureReporter: (message: string) => void = (message) => console.error(message)
-
-function quotePowerShellLiteral(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`
-}
+let failureReporter: (message: string) => void = message => console.error(message)
 
 export function configureWindowsProcessWatchdogReporter(reporter: (message: string) => void): void {
   failureReporter = reporter
@@ -34,98 +18,68 @@ function reportFailure(error: unknown): void {
   failureReporter(`Windows child-process watchdog is unavailable: ${error instanceof Error ? error.message : String(error)}`)
 }
 
-/** Fixed shared watcher program; PIDs arrive as validated decimal line messages. */
-export function buildWatchdogEncodedCommand(environment: NodeJS.ProcessEnv = process.env): string {
-  const taskkill = quotePowerShellLiteral(windowsSystemExecutable('taskkill.exe', environment))
-  const script = [
-    '$tracked = [System.Collections.Generic.HashSet[int]]::new()',
-    'while (($line = [Console]::In.ReadLine()) -ne $null) {',
-    "  if ($line -match '^track ([1-9][0-9]*)$') { [void]$tracked.Add([int]$Matches[1]) }",
-    "  elseif ($line -match '^release ([1-9][0-9]*)$') { [void]$tracked.Remove([int]$Matches[1]) }",
-    '}',
-    'foreach ($processId in $tracked) {',
-    `  & ${taskkill} /PID $processId /T /F | Out-Null`,
-    '}',
-  ].join('\n')
-  return Buffer.from(script, 'utf16le').toString('base64')
+function loadJobApi() {
+  const koffi = require('koffi') as typeof import('koffi').default
+  const kernel = koffi.load('kernel32.dll')
+  const basic = koffi.struct({
+    PerProcessUserTimeLimit: 'int64', PerJobUserTimeLimit: 'int64', LimitFlags: 'uint32',
+    MinimumWorkingSetSize: 'size_t', MaximumWorkingSetSize: 'size_t', ActiveProcessLimit: 'uint32',
+    Affinity: 'uintptr', PriorityClass: 'uint32', SchedulingClass: 'uint32',
+  })
+  const extended = koffi.struct({
+    BasicLimitInformation: basic, IoInfo: koffi.array('uint64', 6),
+    ProcessMemoryLimit: 'size_t', JobMemoryLimit: 'size_t', PeakProcessMemoryUsed: 'size_t', PeakJobMemoryUsed: 'size_t',
+  })
+  const setInfo = kernel.func('int __stdcall SetInformationJobObject(void *job, int infoClass, void *info, uint32_t size)')
+  const emptyLimits = Buffer.alloc(koffi.sizeof(extended))
+  const killOnClose = Buffer.from(emptyLimits)
+  killOnClose.writeUInt32LE(0x2000, koffi.offsetof(basic, 'LimitFlags')) // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+  return {
+    create: kernel.func('void * __stdcall CreateJobObjectW(void *attributes, void *name)'),
+    open: kernel.func('void * __stdcall OpenProcess(uint32_t access, int inherit, uint32_t pid)'),
+    assign: kernel.func('int __stdcall AssignProcessToJobObject(void *job, void *process)'),
+    wait: kernel.func('uint32_t __stdcall WaitForSingleObject(void *handle, uint32_t timeout)'),
+    close: kernel.func('int __stdcall CloseHandle(void *handle)'),
+    lastError: kernel.func('uint32_t __stdcall GetLastError()'),
+    setKillOnClose(job: unknown, enabled: boolean) {
+      return setInfo(job, 9 /* JobObjectExtendedLimitInformation */, enabled ? killOnClose : emptyLimits, emptyLimits.length)
+    },
+  }
 }
 
-function createSharedWatchdog(
-  environment: NodeJS.ProcessEnv,
-  spawnWatchdog: SpawnWatchdog,
-): SharedWatchdog | null {
+let jobApi: ReturnType<typeof loadJobApi> | undefined
+
+/** The owner keeps the sole job handle. Windows closes it even on abrupt owner death. */
+export function startWindowsProcessWatchdog(pid: number): ProcessWatchdogLease {
+  if (!Number.isInteger(pid) || pid < 1 || pid > 0xffffffff) throw new Error('Invalid watchdog process ID')
   try {
-    const systemDirectory = windowsSystemDirectory(environment)
-    const executable = windowsSystemExecutable('WindowsPowerShell\\v1.0\\powershell.exe', environment)
-    const child = spawnWatchdog(executable, [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-WindowStyle', 'Hidden',
-      '-EncodedCommand', buildWatchdogEncodedCommand(environment),
-    ], {
-      cwd: systemDirectory,
-      detached: true,
-      windowsHide: true,
-      stdio: ['pipe', 'ignore', 'ignore'],
-      env: {
-        SystemRoot: environment.SystemRoot ?? environment.windir ?? 'C:\\Windows',
-        windir: environment.windir ?? environment.SystemRoot ?? 'C:\\Windows',
-      },
-    })
-    const watcher: SharedWatchdog = { child }
-    child.once('error', reportFailure)
-    child.stdin?.once('error', reportFailure)
-    child.once('exit', (code, signal) => {
-      if (sharedWatchdog === watcher) sharedWatchdog = null
-      // Exit code 0 is the expected stdin-EOF path when the owning Node
-      // process is itself shutting down; its remaining PIDs are killed then.
-      if (code !== 0 || signal) {
-        reportFailure(`watcher exited unexpectedly (code ${String(code)}, signal ${String(signal ?? 'none')})`)
+    const api = jobApi ??= loadJobApi()
+    const processHandle = api.open(0x100101 /* SYNCHRONIZE | PROCESS_SET_QUOTA | PROCESS_TERMINATE */, 0, pid)
+    if (!processHandle) {
+      const error = api.lastError()
+      if (error === 87) return { release() {} } // The child exited before OpenProcess.
+      throw new Error(`OpenProcess failed (${error})`)
+    }
+    try {
+      const job = api.create(null, null)
+      if (!job) throw new Error(`CreateJobObject failed (${api.lastError()})`)
+      if (!api.setKillOnClose(job, true) || !api.assign(job, processHandle)) {
+        const error = api.lastError()
+        api.close(job)
+        if (api.wait(processHandle, 0) === 0) return { release() {} } // Already exited.
+        throw new Error(`Could not assign the process to a kill-on-close job (${error})`)
       }
-    })
-    child.unref()
-    ;(child.stdin as (NodeJS.WritableStream & { unref?: () => void }) | null)?.unref?.()
-    for (const trackedPid of trackedPids) child.stdin?.write(`track ${trackedPid}\n`)
-    return watcher
+      let released = false
+      return { release() {
+        if (released) return
+        // Disarm before closing so that a normal release preserves surviving descendants.
+        if (!api.setKillOnClose(job, false)) { reportFailure(`Could not disarm the job (${api.lastError()})`); return }
+        api.close(job)
+        released = true
+      } }
+    } finally { api.close(processHandle) }
   } catch (error) {
     reportFailure(error)
-    return null
+    return { release() {} }
   }
-}
-
-/**
- * One detached, credential-free PowerShell process tracks every child owned by
- * this Node/Electron process. Normal exits release individual PIDs; abrupt
- * owner death closes the shared pipe and terminates every remaining tree.
- */
-export function startWindowsProcessWatchdog(
-  pid: number,
-  environment: NodeJS.ProcessEnv = process.env,
-  spawnWatchdog: SpawnWatchdog = spawn,
-): ProcessWatchdogLease {
-  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('Invalid watchdog process ID')
-  let existingWatcher = sharedWatchdog
-  trackedPids.add(pid)
-  let released = false
-  const release = (): void => {
-    if (released) return
-    released = true
-    trackedPids.delete(pid)
-    const activeInput = sharedWatchdog?.child.stdin
-    if (activeInput && !activeInput.destroyed) activeInput.write(`release ${pid}\n`)
-  }
-  if (existingWatcher && (!existingWatcher.child.stdin || existingWatcher.child.stdin.destroyed)) {
-    reportFailure('watcher input pipe is unavailable')
-    if (sharedWatchdog === existingWatcher) sharedWatchdog = null
-    existingWatcher = null
-  }
-  const watcher = existingWatcher ?? createSharedWatchdog(environment, spawnWatchdog)
-  if (!watcher?.child.stdin || watcher.child.stdin.destroyed) {
-    reportFailure('watcher input pipe is unavailable')
-    return { release }
-  }
-  sharedWatchdog = watcher
-  if (existingWatcher) watcher.child.stdin.write(`track ${pid}\n`)
-  return { release }
 }
