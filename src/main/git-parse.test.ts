@@ -139,7 +139,7 @@ test('parseLog reads fields, refs and merge parents', () => {
   assert.deepEqual(parseLog('garbage\0'), [])
 })
 
-test('staged entries carry the object id of the staged version, so restaging different content is a different list', () => {
+test('staged entries carry the object id and mode, so restaging different content or permissions is a different list', () => {
   const idA = 'a'.repeat(40)
   const idB = 'b'.repeat(40)
   const status = parseStatusV2(rec(
@@ -150,8 +150,11 @@ test('staged entries carry the object id of the staged version, so restaging dif
     `u UU N... 100644 100644 100644 100644 ${H} ${H} ${T} merge.ts`,
   ))
   assert.deepEqual(status.entries.map(entry => entry.indexOid), [idA, null, idB, null, null], 'only entries with something staged have one')
+  assert.deepEqual(status.entries.map(entry => entry.indexMode), ['100644', null, '100644', null, null])
   const restaged = parseStatusV2(rec(`1 M. N... 100644 100644 100644 ${H} ${idB} staged.ts`))
   assert.notDeepEqual(restaged.entries[0], status.entries[0], 'the same name with different staged content is a different entry')
+  const modeChanged = parseStatusV2(rec(`1 M. N... 100644 100755 100755 ${H} ${idA} staged.ts`))
+  assert.notDeepEqual(modeChanged.entries[0], status.entries[0], 'the same blob with a different staged mode is a different entry')
 })
 
 test('parseStagedRaw reads modes and paths, including a submodule entry and a path with spaces', () => {

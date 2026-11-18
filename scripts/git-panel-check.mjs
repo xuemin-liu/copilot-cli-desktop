@@ -103,6 +103,7 @@ if (!process.versions.electron) {
       git(repo, 'commit', '-q', '-m', `init ${name}`)
     }
     const alpha = join(workspace, 'alpha')
+    git(alpha, 'config', 'core.filemode', 'false')
     await writeFile(join(alpha, 'a.txt'), 'one\ntwo\n')              // unstaged change
     await writeFile(join(alpha, 'b.txt'), `${await readFile(join(alpha, 'b.txt'), 'utf8')}buzz\n`); git(alpha, 'add', 'b.txt') // staged change
     await writeFile(join(alpha, 'new.txt'), 'hello\n')               // untracked
@@ -352,7 +353,7 @@ ${point.missing}`)
     await click('.git-diff-path')
     assert.equal(await ui('window.__cursorContext("tab-1")'), cursorContext, 'moving back out of the diff retains the line')
     await click('[aria-label="Clear cursor context"]')
-    assert.equal(await ui('window.__cursorContext("tab-1")'), undefined)
+    await until('window.__cursorContext("tab-1") === undefined', 'clearing the cursor removes its context')
     await click('.git-diff-add')
     results.cursorContext = true
 
@@ -759,6 +760,26 @@ ${point.missing}`)
     await until('document.querySelector(".git-branch-name")?.textContent === "main"', 'the original branch is shown again')
     await click('.git-commit-button')
     await until('!!document.querySelector(".git-hooks")', 'fresh approval requested on the original branch')
+    const beforeModeChange = gitIn('rev-parse', 'HEAD')
+    assert.match(gitIn('ls-files', '-s', '--', 'hooked.txt'), /^100644 /, 'initial approval is for a non-executable file')
+    service.commit = async (...args) => {
+      if (args[5] !== null) gitIn('update-index', '--chmod=+x', '--', 'hooked.txt')
+      return originalCommit(...args)
+    }
+    await clickByText('.git-hooks button', 'Allow these hooks')
+    await until('/staged files changed/i.test(document.querySelector(".git-message-error")?.textContent || "")', 'main refuses approval after a mode-only change')
+    service.commit = originalCommit
+    assert.equal(gitIn('rev-parse', 'HEAD'), beforeModeChange, 'changing the staged mode did not commit')
+    assert.equal(existsSync(marker), false, 'the hook did not run after a mode-only change')
+    assert.match(gitIn('ls-files', '-s', '--', 'hooked.txt'), /^100755 /)
+    await clickByText('.git-group[aria-label="Staged"] .git-entry', 'hooked.txt')
+    await until('/new file mode 100755/.test(document.querySelector(".git-diff-lines")?.textContent || "")', 'the new mode is shown')
+    gitIn('update-index', '--chmod=-x', '--', 'hooked.txt')
+    service.requestRefresh(PROFILE)
+    await until('/new file mode 100644/.test(document.querySelector(".git-diff-lines")?.textContent || "")', 'the original mode is restored')
+    // A new approval can use the now-current staged version.
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'fresh approval requested for the original mode')
     await clickByText('.git-hooks button', 'Allow these hooks')
     await until('/Committed/.test(document.querySelector(".git-message-info")?.innerText || "")', 'committed after approval')
     assert.equal(existsSync(marker), true, 'the approved hook ran')
