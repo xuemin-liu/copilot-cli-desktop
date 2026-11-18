@@ -270,7 +270,7 @@ function EntryRow({ entry, code, selected, marked, multiple, onSelect, action, e
   const actionLabel = (row: RowAction): string => row.labelOf?.(entry) ?? `${row.verb} ${entry.path}`
   return (
     <div className="git-entry-row">
-      <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}${marked ? ' git-entry-marked' : ''}`} aria-pressed={selected || marked}
+      <button type="button" className={`git-entry${selected ? ' git-entry-selected' : ''}${marked ? ' git-entry-marked' : ''}`} aria-current={selected ? 'true' : undefined} aria-pressed={multiple ? marked : undefined}
         // Shift+click would otherwise select the text of every row in between.
         onMouseDown={event => { if (multiple && event.shiftKey) event.preventDefault() }}
         onKeyDown={event => {
@@ -335,8 +335,8 @@ interface GroupAction {
 
 function EntryGroup({ title, entries, codeOf, staged, selection, marked, multiple = true, onSelect, rowAction, groupAction, extraRowAction, extraGroupAction }: {
   title: string; entries: GitEntryView[]; codeOf(entry: GitEntryView): string; staged: boolean; selection: Selection | null
-  /** Paths selected together on this group's side, when two or more are. */
-  marked: ReadonlySet<string>
+  /** Marked paths on this group's side, independent of the open preview. */
+  marked: ReadonlySet<string> | null
   /** Whether several of these files can be selected at once (not conflicts, which are marked resolved one at a time). */
   multiple?: boolean
   onSelect(entry: GitEntryView, staged: boolean, mode: MarkMode, list: readonly string[]): void
@@ -355,7 +355,7 @@ function EntryGroup({ title, entries, codeOf, staged, selection, marked, multipl
       </div>
       {entries.map(entry => (
         <EntryRow key={`${staged ? 's' : 'u'}:${entry.path}`} entry={entry} code={codeOf(entry)} action={rowAction} extra={extraRowAction?.applies(entry) ? extraRowAction : undefined}
-          selected={selection?.path === entry.path && selection.staged === staged} marked={multiple && marked.has(entry.path)} multiple={multiple}
+          selected={selection?.path === entry.path && selection.staged === staged} marked={marked?.has(entry.path) ?? false} multiple={multiple}
           onSelect={mode => onSelect(entry, staged, mode, paths)} />
       ))}
     </section>
@@ -857,8 +857,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   }
   const markedNow = marks ? markedEntries(marks, marks.side, sideEntries(marks.side)) : []
   const several = markedNow.length > 1 ? markedNow : []
-  const markedPaths = (side: MarkSide): ReadonlySet<string> => new Set(several.length > 0 && marks?.side === side ? several.map(entry => entry.path) : [])
-  const forRow = (entry: GitEntryView, side: MarkSide): GitEntryView[] => markedPaths(side).has(entry.path) ? several : [entry]
+  const markedPaths = new Set(markedNow.map(entry => entry.path))
+  const groupMarks = (side: MarkSide): ReadonlySet<string> | null => marks?.side === side ? markedPaths : null
+  const forRow = (entry: GitEntryView, side: MarkSide): GitEntryView[] => several.length > 0 && groupMarks(side)?.has(entry.path) ? several : [entry]
   const discardableOf = (entries: readonly GitEntryView[]): GitEntryView[] => entries.filter(canDiscard)
   const rowLabel = (verb: string, side: MarkSide, pick: (entries: GitEntryView[]) => GitEntryView[] = entries => entries) => (entry: GitEntryView): string | null => {
     const entries = forRow(entry, side)
@@ -1029,17 +1030,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                           onChangeIndex={() => changeIndex(marks.side === 'staged' ? 'unstage' : 'stage', several)} onDiscard={() => discard(discardableOf(several))}
                           onClear={() => setMarks(selection ? { side: selection.staged ? 'staged' : 'working', paths: [selection.path], anchor: selection.path } : null)} />
                       )}
-                      <EntryGroup title="Conflicts" entries={conflictFiles} codeOf={() => 'U'} staged={false} selection={selection} marked={markedPaths('working')} multiple={false} onSelect={pickEntry}
+                      <EntryGroup title="Conflicts" entries={conflictFiles} codeOf={() => 'U'} staged={false} selection={selection} marked={null} multiple={false} onSelect={pickEntry}
                         rowAction={{ symbol: '✓', verb: 'Mark resolved:', disabled: writesLocked, run: entry => changeIndex('stage', [entry]) }} />
-                      <EntryGroup title="Staged" entries={stagedFiles} codeOf={entry => entry.index} staged selection={selection} marked={markedPaths('staged')} onSelect={pickEntry}
+                      <EntryGroup title="Staged" entries={stagedFiles} codeOf={entry => entry.index} staged selection={selection} marked={groupMarks('staged')} onSelect={pickEntry}
                         rowAction={{ symbol: '−', verb: 'Unstage', disabled: writesLocked, run: entry => changeIndex('unstage', forRow(entry, 'staged')), labelOf: rowLabel('Unstage', 'staged') }}
                         groupAction={{ label: query ? 'Unstage shown' : 'Unstage all', title: query ? 'Unstage matching files in this group' : currentStatus.truncated ? 'The file list is cut off, so this would only unstage the files shown' : 'Unstage every staged file', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('unstage', stagedFiles) }} />
-                      <EntryGroup title="Changes" entries={changedFiles} codeOf={entry => entry.worktree} staged={false} selection={selection} marked={markedPaths('working')} onSelect={pickEntry}
+                      <EntryGroup title="Changes" entries={changedFiles} codeOf={entry => entry.worktree} staged={false} selection={selection} marked={groupMarks('working')} onSelect={pickEntry}
                         rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', forRow(entry, 'working')), labelOf: rowLabel('Stage', 'working') }}
                         extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard(discardableOf(forRow(entry, 'working'))), labelOf: rowLabel('Discard', 'working', discardableOf) }}
                         extraGroupAction={{ label: query ? 'Discard shown' : 'Discard all', title: query ? 'Discard matching files in this group' : currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : 'Discard every changed file. You will be asked first, and a copy of each is saved.', disabled: writesLocked || currentStatus.truncated, run: () => discard(changedFiles.filter(canDiscard)) }}
                         groupAction={{ label: query ? 'Stage shown' : 'Stage all', title: query ? 'Stage matching files in this group' : currentStatus.truncated ? 'The file list is cut off, so this would only stage the files shown' : 'Stage every changed file (not untracked ones)', disabled: writesLocked || currentStatus.truncated, run: () => changeIndex('stage', changedFiles) }} />
-                      <EntryGroup title="Untracked" entries={newFiles} codeOf={() => '?'} staged={false} selection={selection} marked={markedPaths('working')} onSelect={pickEntry}
+                      <EntryGroup title="Untracked" entries={newFiles} codeOf={() => '?'} staged={false} selection={selection} marked={groupMarks('working')} onSelect={pickEntry}
                         rowAction={{ symbol: '+', verb: 'Stage', disabled: writesLocked, run: entry => changeIndex('stage', forRow(entry, 'working')), labelOf: rowLabel('Stage', 'working') }}
                         extraRowAction={{ symbol: '↶', verb: 'Discard', disabled: writesLocked, applies: canDiscard, run: entry => discard(discardableOf(forRow(entry, 'working'))), labelOf: rowLabel('Discard', 'working', discardableOf) }}
                         extraGroupAction={{ label: query ? 'Discard shown' : 'Discard all', title: query ? 'Discard matching files in this group' : currentStatus.truncated ? 'The file list is cut off, so this would only discard the files shown' : `Move every untracked file to the ${TRASH_LABEL}. You will be asked first.`, disabled: writesLocked || currentStatus.truncated, run: () => discard(newFiles) }}
