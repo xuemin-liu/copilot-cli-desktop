@@ -771,7 +771,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       <header className="git-panel-header">
         <h2>Git</h2>
         <span className="git-panel-sub">{view ? `${view.repos.length} repositor${view.repos.length === 1 ? 'y' : 'ies'}` : 'Loading…'}</span>
-        <button type="button" className="icon-button" aria-label="Rescan repositories" title="Rescan this folder for repositories and refresh" disabled={busy} onClick={rescan}>↻</button>
+        <button type="button" className="icon-button" aria-label="Rescan repositories" title="Rescan this folder for repositories and refresh" disabled={busy}
+          onClick={() => { setBranchReload(count => count + 1); rescan() }}>↻</button>
         {!embedded && <button type="button" className="icon-button" aria-label={takeover ? 'Close Git panel and return to the session' : 'Close Git panel'}
           title={takeover ? 'Back to the session' : 'Close (Ctrl+Shift+G)'} onClick={onClose}>×</button>}
       </header>
