@@ -241,10 +241,14 @@ export function validateBrowserTestPlan(value: unknown): BrowserTestPlan {
   const captures = new Set<string>()
   const viewport = (raw: unknown): void => {
     const v = object(raw); fields(v, ['width', 'height', 'dpr'])
-    if (![v.width, v.height].every(x => typeof x === 'number' && Number.isInteger(x) && x >= 64 && x <= 1600)
-      || typeof v.dpr !== 'number' || !Number.isFinite(v.dpr) || v.dpr < 0.5 || v.dpr > 3
-      || !Number.isInteger(Number(v.width) * v.dpr) || !Number.isInteger(Number(v.height) * v.dpr)
-      || Number(v.width) * v.dpr > 1600 || Number(v.height) * v.dpr > 3200 || Number(v.width) * Number(v.height) * v.dpr ** 2 > 4_000_000) fail('viewport needs integer CSS dimensions 64–1600 and DPR 0.5–3; integral bitmap dimensions at most 1600×3200 and four million pixels.')
+    const { width, height, dpr } = v
+    if (typeof width !== 'number' || typeof height !== 'number' || typeof dpr !== 'number'
+      || !Number.isInteger(width) || !Number.isInteger(height) || width < 64 || height < 64 || width > 1600 || height > 1600
+      || !Number.isFinite(dpr) || dpr < 0.5 || dpr > 3) return fail('viewport needs integer CSS dimensions 64–1600 and DPR 0.5–3.')
+    const pixelWidth = Math.round(width * dpr), pixelHeight = Math.round(height * dpr)
+    // Recover the DPR from whole pixels. Multiplication alone can round 400 × 1.1 just above 440.
+    if (pixelWidth / width !== dpr || pixelHeight / height !== dpr
+      || pixelWidth > 1600 || pixelHeight > 3200 || pixelWidth * pixelHeight > 4_000_000) fail('viewport needs integral bitmap dimensions at most 1600×3200 and four million pixels.')
   }
   const attribute = (v: unknown): void => {
     if (typeof v !== 'string' || !/^(data-[a-z0-9][a-z0-9-]{0,63}|aria-[a-z-]{1,64}|role|title|class)$/.test(v)) fail('use a public data-*, aria-*, role, title or class attribute.')

@@ -104,6 +104,10 @@ if (!process.versions.electron) {
       const network = await execute([{ action: 'click', selector: '#fetch' }, { action: 'waitFor', selector: '#state', condition: 'attribute', attribute: 'data-ready', expected: 'yes' },
         { action: 'networkSummary', networkMatch: { urlPattern: origin + '/image', method: 'GET' }, minRequests: 2, maxRequests: 2, maxFailures: 0, maxBytes: 4096, minCacheHits: 1 }]); pass(network)
       assert.ok(network.steps[2].data.networkSummary.encodedBytes > 0)
+      const fractional = await execute([visible, { action: 'screenshot' }], { viewport: { width: 400, height: 400, dpr: 1.1 } })
+      pass(fractional)
+      assert.deepEqual(nativeImage.createFromBuffer(Buffer.from(fractional.screenshots[0].imageBase64, 'base64')).getSize(), { width: 440, height: 440 })
+      assert.deepEqual(await geometry(), original)
       for (const dpr of [1, 2]) {
         await load()
         const viewport = { width: 640, height: 480, dpr }
