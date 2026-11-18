@@ -1,3 +1,4 @@
+import { GitOutput } from './GitOutput.js'
 import type { JSX } from 'react'
 import { formatReviewText } from '../../main/git-review-format.js'
 
@@ -79,7 +80,7 @@ export function GitSyncBar(props: GitSyncBarProps): JSX.Element {
         </div>
       )}
 
-      {running !== null && props.progress.trim() !== '' && <pre className="git-progress" aria-live="polite" aria-label="Output while Git works">{props.progress}</pre>}
+      {running !== null && <GitOutput text={props.progress} live />}
     </section>
   )
 }

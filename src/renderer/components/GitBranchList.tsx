@@ -1,10 +1,11 @@
 import { useRef, useState } from 'react'
-import type { JSX } from 'react'
+import type { JSX, ReactNode } from 'react'
 import { formatReviewText } from '../../main/git-review-format.js'
 import { MAX_BRANCH_NAME, MAX_BRANCH_TASK_TITLE, branchNameProblem, suggestBranchName } from '../../main/git-branch.js'
 import type { GitBranchView } from '../../main/git-types.js'
 
 export interface GitBranchListProps {
+  feedback?: ReactNode
   /** Null while loading. */
   branches: readonly GitBranchView[] | null
   error: string | null
@@ -73,6 +74,7 @@ export function GitBranchList(props: GitBranchListProps): JSX.Element {
       {problem && <p className="git-note" role="status">{problem}</p>}
       {props.lockedReason && <p className="git-note" role="status">{props.lockedReason}</p>}
 
+      {props.feedback}
       {error && <p className="git-message git-message-error" role="alert">{error}</p>}
       {branches === null && !error && <p className="git-message" role="status">Loading branches…</p>}
       {branches !== null && branches.length === 0 && <p className="git-message" role="status">No branches yet.</p>}

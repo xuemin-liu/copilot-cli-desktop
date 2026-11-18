@@ -2,8 +2,7 @@
 
 The Git panel shows the state of the Git repositories in your project folder next to the session, so you can review what
 Copilot changed without leaving the app. You can review changes, stage and unstage files, make local commits and hand context
-to Copilot, including a failed pull for Copilot to merge and resolve. Fetch, pull, push, branches and discarding changes are not in the panel yet and are still done in the terminal (or by
-Copilot). See the [plan](git-panel-plan.md) for what comes next.
+to Copilot, including a failed pull for Copilot to merge and resolve. See the [plan](git-panel-plan.md) for what comes next.
 
 Open **New tab → Git**, the Git icon in a session header, or **Ctrl+Shift+G**. There is one Git tab per project; adding it again focuses the existing tab. The shortcut selects Git or hides the panel when Git is already shown. **Hide tabs** preserves its state; its individual close button removes the tab. Reopening recovers the project's draft.
 
@@ -12,6 +11,7 @@ Project switching retains the repository selection, commit draft, and diff selec
 ## What it shows
 
 - **Repositories.** The project folder itself, or every repository found inside it (up to three folders deep, at most 25).
+  Choose the repository name in the Git header to switch. The picker shows each worktree’s path, and the branch and change count stay visible when the picker closes.
   Folders reached through links or junctions are not followed. If the project sits inside a larger repository, that
   repository is listed as "(parent)", unless it is your home folder or a drive root, which are ignored.
 - **Changes.** Staged, changed, untracked and conflicted files for the selected repository, and the branch with its
@@ -23,6 +23,8 @@ Project switching retains the repository selection, commit draft, and diff selec
   shows at most 4,000 lines.
 - **History.** The latest commits, 50 at a time. **Load more** waits for the page in flight, so a double click never lists a
   commit twice or skips one.
+
+Git shows the latest operation result for each repository beside the controls that started it. Expand **Git output** there to read the transcript when the command printed one.
 
 ## Staging and committing
 
@@ -44,7 +46,7 @@ Project switching retains the repository selection, commit draft, and diff selec
   them. The approval prompt applies to the repository, branch, and staged changes shown when you asked Git to commit.
   If those change or you switch repositories, review the changes and click Commit again. Your approval is remembered for
   those exact hook files and asked again if any of them changes. Staging never runs hooks.
-- While a commit runs, whatever the hooks print appears under the message box, and **Cancel** stops the whole process tree. If
+- While a commit runs, expand **Live Git output** under the message box to follow the hooks. **Cancel** stops the whole process tree. If
   Git left a lock file behind after a cancel, the message says which file to delete; the panel never deletes it for you.
 - Writes happen one at a time per repository. If another program (Copilot, an editor) is using the repository, the panel waits up
   to ten seconds for its `index.lock` and then says that another Git process is busy.
@@ -76,8 +78,7 @@ parent and author, and the history is no longer.
 
 ## Fetch, pull and push
 
-Under the branch name are **Fetch**, **Pull** and **Push**. Each runs one Git command for the selected repository, shows what
-Git prints while it runs, and has a **Cancel** that stops the whole process tree. Two minutes is the limit.
+Under the branch name are **Fetch**, **Pull** and **Push**. Expand **Live Git output** beside these controls to follow a running command. **Cancel** stops the whole process tree. Two minutes is the limit.
 
 - **Fetch** updates the remote-tracking branches from the branch's remote (or `origin`, or the only remote). It changes no file in
   your folder, never prunes (whatever `fetch.prune` says) and writes no tags. A fetch applies every `remote.<name>.fetch` setting
