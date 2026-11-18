@@ -18,7 +18,7 @@ import { GitDiffView, diffChangeSignature } from './GitDiffView.js'
 import { GitWorktreeList } from './GitWorktreeList.js'
 import type { WorktreeSession } from './GitWorktreeList.js'
 import type { DiffCommentAnchor } from './GitDiffView.js'
-import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
+import { anchorMovedComments, bucketKey, moveCommentBucket, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../diff-comments.js'
 import type { DiffCommentBuckets } from '../diff-comments.js'
 import { GitReviewCard } from './GitReviewCard.js'
 import { Splitter } from './Splitter.js'
@@ -67,7 +67,45 @@ async function sendOrPaste(profileId: string, repoId: string, tabId: string, tex
 interface PullFailure { repoId: string; branch: string; headOid: string; reason: 'diverged' | 'local-changes'; output: string }
 
 type Tab = 'changes' | 'history' | 'branches'
-interface Selection { path: string; staged: boolean }
+interface Selection { repoId: string; path: string; staged: boolean }
+interface RepoError { repoId: string; message: string }
+interface RepoFeedback { notice: string | null; error: string | null; output: string }
+type WriteKind = 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind
+interface CommitAttempt {
+  repoId: string
+  generation: number
+  message: string
+  branch: string | null
+  headOid: string | null
+  amend: boolean
+}
+interface HookApproval { attempt: CommitAttempt; names: string[]; hash: string }
+
+const EMPTY_FEEDBACK: RepoFeedback = { notice: null, error: null, output: '' }
+
+function groupsOnSide(status: GitRepoStatusView, staged: boolean): readonly GitEntryView[][] {
+  return staged ? [status.staged] : [status.unstaged, status.untracked, status.conflicted]
+}
+
+function entryOnSide(status: GitRepoStatusView, path: string, staged: boolean): GitEntryView | undefined {
+  return groupsOnSide(status, staged).flat().find(entry => entry.path === path)
+}
+
+function reconcileSelection(selection: Selection | null, status: GitRepoStatusView, previous: GitRepoStatusView | null): Selection | null {
+  if (!selection || selection.repoId !== status.repoId || entryOnSide(status, selection.path, selection.staged)) return selection
+  if (status.truncated) return selection
+  if (entryOnSide(status, selection.path, !selection.staged)) return { ...selection, staged: !selection.staged }
+  if (previous?.repoId !== status.repoId) return null
+  const before = groupsOnSide(previous, selection.staged)
+  const groupIndex = before.findIndex(entries => entries.some(entry => entry.path === selection.path))
+  const group = before[groupIndex]
+  if (!group) return null
+  const index = group.findIndex(entry => entry.path === selection.path)
+  const remaining = new Set(groupsOnSide(status, selection.staged)[groupIndex]?.map(entry => entry.path))
+  const ordered = [...group.slice(index + 1), ...group.slice(0, index).reverse()]
+  const neighbor = ordered.find(entry => remaining.has(entry.path))
+  return neighbor ? { ...selection, path: neighbor.path } : null
+}
 
 const repoStorageKey = (profileId: string): string => `git-repo:${profileId}`
 const MAX_DRAFT_FILES = 30
@@ -276,12 +314,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const { view, error, busy, rescan, replace } = useGitProject(profileId)
   const [storedRepo, setStoredRepo] = useState(() => readStoredRepo(profileId))
   const [tab, setTab] = useState<Tab>('changes')
-  const [selection, setSelection] = useState<Selection | null>(null)
+  const [picked, setSelection] = useState<Selection | null>(null)
   const [marks, setMarks] = useState<Marks | null>(null)
   const [status, setStatus] = useState<GitRepoStatusView | null>(null)
-  const [statusError, setStatusError] = useState<string | null>(null)
+  const [statusError, setStatusError] = useState<RepoError | null>(null)
+  const previousStatus = useRef<GitRepoStatusView | null>(null)
   const [diff, setDiff] = useState<{ key: string; value: GitDiff } | null>(null)
-  const [diffError, setDiffError] = useState<string | null>(null)
+  const [diffFailure, setDiffFailure] = useState<{ key: string; message: string } | null>(null)
   const [wholeFile, setWholeFile] = useState(readWholeFile)
   const [listShare, setListShare] = useState(readListShare)
   const changesRef = useRef<HTMLDivElement>(null)
@@ -296,18 +335,19 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const moreRequest = useRef<number | null>(null)
   const moreCounter = useRef(0)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [logError, setLogError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
+  const [logError, setLogError] = useState<(RepoError & { headOid: string | null }) | null>(null)
+  const [feedbackByRepo, setFeedbackByRepo] = useState<ReadonlyMap<string, RepoFeedback>>(() => new Map())
+  const updateFeedback = useCallback((repoId: string, patch: Partial<RepoFeedback>): void => {
+    setFeedbackByRepo(current => new Map(current).set(repoId, { ...EMPTY_FEEDBACK, ...current.get(repoId), ...patch }))
+  }, [])
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
   const [messages, setMessages] = useState<Record<string, string>>({})
-  const [operation, setOperation] = useState<{ kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind; repoId: string } | null>(null)
+  const [operation, setOperation] = useState<{ kind: WriteKind; repoId: string } | null>(null)
   // Set the moment a write starts, so output and Cancel belong to the repository that owns the write even if the view changes.
   const operationRepo = useRef<string | null>(null)
   const [progress, setProgress] = useState('')
-  const [output, setOutput] = useState('')
-  const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
+  const [hookApproval, setHooks] = useState<HookApproval | null>(null)
   // Branches: the list for the selected repository, a draft per repository, and a counter that reloads the list after a change.
   const [branches, setBranches] = useState<{
     repoId: string; headOid: string | null; branch: string | null; reload: number; items: GitBranchView[] | null; error: string | null
@@ -316,63 +356,98 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const [branchReload, setBranchReload] = useState(0)
   // Worktrees of the selected repository (read-only), shown under the branches.
   const [worktrees, setWorktrees] = useState<{ repoId: string; items: GitWorktreeView[] } | null>(null)
-  const [worktreeError, setWorktreeError] = useState<string | null>(null)
+  const [worktreeError, setWorktreeError] = useState<RepoError | null>(null)
   // The session worktree the panel last followed, so a manual choice afterwards is kept until the session changes.
   const followedWorktree = useRef<string | null>(null)
   // Amend: whether the box is amending the last commit, and what is known about that commit.
-  const [amending, setAmending] = useState(false)
+  const [amendRepoId, setAmendRepoId] = useState<string | null>(null)
   const [headCommit, setHeadCommit] = useState<{ repoId: string; headOid: string; info: GitHeadCommitView } | null>(null)
   const amendPrefill = useRef(false)
   // Repository selection can leave the prefilled message behind after it exits amend mode.
   const untouchedAmendDrafts = useRef(new Map<string, string>())
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
-  const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
+  const [publish, setPublish] = useState<{ repoId: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
   const [pullFailure, setPullFailure] = useState<PullFailure | null>(null)
   // The resolver last seen working, per repository, so the panel can say when it has finished.
   const lastResolver = useRef<Map<string, string>>(new Map())
   const resolveInFlight = useRef(false)
   const [resolveSending, setResolveSending] = useState(false)
 
+  const repo = view ? pickRepo(view, storedRepo) : null
+  const repoId = repo?.id ?? null
+  const visibleRepo = useRef(repoId)
+  useLayoutEffect(() => { visibleRepo.current = repoId }, [repoId])
+  const selection = picked?.repoId === repoId ? picked : null
+  const amending = repoId !== null && amendRepoId === repoId
+  const visibleOperation = operation?.repoId === repoId ? operation : null
+  const { notice, error: actionError, output } = (repoId && feedbackByRepo.get(repoId)) || EMPTY_FEEDBACK
+
+  const switchRepo = useCallback((next: GitRepoSummary, persist: boolean): boolean => {
+    if (operationRepo.current !== null) return false
+    if (next.id !== repoId) {
+      setHooks(null)
+      setPublish(null)
+      setAmendRepoId(null)
+      setSelection(null)
+      setMarks(null)
+    }
+    setStoredRepo(next.relativePath)
+    if (persist) {
+      try { localStorage.setItem(repoStorageKey(profileId), next.relativePath) } catch { /* Keep the in-memory choice. */ }
+    }
+    return true
+  }, [profileId, repoId])
+
   // When the active session runs in a worktree that is listed, show that worktree's repository (once per session worktree).
   useEffect(() => {
-    if (!view || !sessionWorktreePath || followedWorktree.current === sessionWorktreePath) return
+    if (!sessionWorktreePath) { followedWorktree.current = null; return }
+    if (!view || followedWorktree.current === sessionWorktreePath) return
     const match = view.repos.find(candidate => candidate.kind === 'worktree' && candidate.relativePath.toLowerCase() === sessionWorktreePath.toLowerCase())
-    if (!match) return
-    followedWorktree.current = sessionWorktreePath
-    setStoredRepo(match.relativePath)
-    setSelection(null)
-    setMarks(null)
-  }, [view, sessionWorktreePath])
-  const repo = view ? pickRepo(view, storedRepo) : null
+    if (match && switchRepo(match, false)) followedWorktree.current = sessionWorktreePath
+  }, [view, sessionWorktreePath, switchRepo, operation])
   const ready = repo?.state === 'ready'
   const currentBranches = branches && branches.repoId === repo?.id && branches.headOid === repo.headOid
     && branches.branch === repo.branch && branches.reload === branchReload ? branches : null
+
+  const acceptStatus = useCallback((next: GitRepoStatusView): void => {
+    setStatus(current => visibleRepo.current !== next.repoId || (current?.repoId === next.repoId && current.generation > next.generation) ? current : next)
+  }, [])
 
   // The file list: reload when this repository's list, branch or commit changes.
   useEffect(() => {
     if (!repo || repo.state !== 'ready') { setStatus(null); return }
     let stale = false
     window.copilotDesktop.gitStatus(profileId, repo.id)
-      .then(next => { if (!stale) { setStatus(next); setStatusError(null) } })
-      .catch((cause: unknown) => { if (!stale) setStatusError(errorMessage(cause)) })
+      .then(next => { if (!stale) { acceptStatus(next); setStatusError(null) } })
+      .catch((cause: unknown) => { if (!stale) setStatusError({ repoId: repo.id, message: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, repo?.id, repo?.state, repo?.generation, repo?.headOid, repo?.branch, repo?.ahead, repo?.behind]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentStatus = status && repo && status.repoId === repo.id ? status : null
-  const selectedEntry = ((): GitEntryView | null => {
-    if (!selection || !currentStatus) return null
-    const list = selection.staged ? currentStatus.staged : [...currentStatus.unstaged, ...currentStatus.untracked, ...currentStatus.conflicted]
-    return list.find(entry => entry.path === selection.path) ?? null
-  })()
+  const selectedEntry = selection && currentStatus ? entryOnSide(currentStatus, selection.path, selection.staged) ?? null : null
+  const currentStatusError = statusError?.repoId === repoId ? statusError.message : null
+
+  // Reconcile selection and comments before showing a fresh status, including changes from a terminal or Copilot.
+  useLayoutEffect(() => {
+    if (!currentStatus) return
+    const previous = previousStatus.current
+    previousStatus.current = currentStatus
+    setSelection(current => reconcileSelection(current, currentStatus, previous))
+    if (currentStatus.truncated) return
+    const staged = new Set(currentStatus.staged.map(entry => entry.path))
+    const working = new Set(groupsOnSide(currentStatus, false).flat().map(entry => entry.path))
+    setComments(current => pruneCommentBuckets(current, currentStatus.repoId, (path, isStaged) => (isStaged ? staged : working).has(path)))
+  }, [currentStatus])
 
   // The diff of the selected file: reload on selection, on a changed list, and when the window regains focus.
   const diffKey = repo && selectedEntry && selection ? `${repo.id}:${selectedEntry.id}:${selection.staged}:${wholeFile ? 'whole' : 'hunks'}` : null
+  const diffError = diffFailure && diffFailure.key === diffKey ? diffFailure.message : null
   useEffect(() => {
-    if (!repo || !selectedEntry || !selection || !diffKey) { setDiff(null); setDiffError(null); return }
+    if (!repo || !selectedEntry || !selection || !diffKey) { setDiff(null); setDiffFailure(null); return }
     let stale = false
     window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged, wholeFile)
-      .then(value => { if (!stale) { setDiff({ key: diffKey, value }); setDiffError(null) } })
-      .catch((cause: unknown) => { if (!stale) setDiffError(errorMessage(cause)) })
+      .then(value => { if (!stale) { setDiff({ key: diffKey, value }); setDiffFailure(null) } })
+      .catch((cause: unknown) => { if (!stale) setDiffFailure({ key: diffKey, message: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, diffKey, reload]) // eslint-disable-line react-hooks/exhaustive-deps
   const cursorScope = JSON.stringify([repo?.id, repo?.branch, repo?.headOid, selection, wholeFile, tab, promptTarget?.id])
@@ -384,7 +459,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   }, [diff?.value.text])
   // Answer synchronously at submission time. Unmounting/closing the panel removes the provider.
   useLayoutEffect(() => {
-    if (!active || !activeCursor || !repo || !selection || !diff || !promptTarget || !ready || statusError) return
+    if (!active || !activeCursor || !repo || !selection || !diff || !promptTarget || !ready || currentStatusError) return
     const text = composeGitCursorContext({ folder: repo.folder, path: selection.path, staged: selection.staged,
       diffText: diff.value.text, ...activeCursor })
     const id = cursor!.id
@@ -399,22 +474,21 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     }
     window.addEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
     return () => window.removeEventListener(GIT_CURSOR_CONTEXT_EVENT, provide)
-  }, [active, activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, statusError])
-  const commentTarget = repo && selection ? { repoId: repo.id, path: selection.path, staged: selection.staged } : null
+  }, [active, activeCursor, cursor?.id, repo, selection, diff, promptTarget?.id, ready, currentStatusError])
+  const commentTarget = selection
   const commentKey = commentTarget ? bucketKey(commentTarget) : null
   const activeComments = commentKey ? comments.get(commentKey) ?? null : null
-  // A file that is no longer changed on a side loses that side's comments, selected or not: there is no diff for them to
-  // point at, and they must not come back when the file changes again later. Only a complete status list proves absence.
-  useEffect(() => {
-    if (!currentStatus || currentStatus.truncated) return
-    const staged = new Set(currentStatus.staged.map(entry => entry.path))
-    const working = new Set([...currentStatus.unstaged, ...currentStatus.untracked, ...currentStatus.conflicted].map(entry => entry.path))
-    setComments(current => pruneCommentBuckets(current, currentStatus.repoId, (path, isStaged) => (isStaged ? staged : working).has(path)))
-  }, [currentStatus])
+  const pendingComments = activeComments?.pending.length ?? 0
+  const commentCount = activeComments ? activeComments.items.size + activeComments.unanchored.length + pendingComments : 0
+  useLayoutEffect(() => {
+    if (!pendingComments || !commentKey || !diff || diff.key !== diffKey || diffError) return
+    setComments(current => anchorMovedComments(current, commentKey, diff.value))
+  }, [pendingComments, commentKey, diff, diffKey, diffError])
   // Compared by the changed lines alone, so comments written in the other view (more or less context) are not stale.
   const diffSignature = useMemo(() => diff ? diffChangeSignature(diff.value.text) : null, [diff])
-  const baselineSignature = useMemo(() => activeComments ? diffChangeSignature(activeComments.diffText) : null, [activeComments?.diffText]) // eslint-disable-line react-hooks/exhaustive-deps
-  const commentsStale = activeComments !== null && diff !== null && diff.key === diffKey && diffSignature !== baselineSignature
+  const baseline = activeComments?.diffText ?? null
+  const baselineSignature = useMemo(() => baseline === null ? null : diffChangeSignature(baseline), [baseline])
+  const commentsStale = baselineSignature !== null && diff?.key === diffKey && diffSignature !== baselineSignature
   const toggleWholeFile = (): void => {
     const next = !wholeFile
     setWholeFile(next)
@@ -448,7 +522,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     setLoadingMore(false)
     window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, 0)
       .then(entries => { if (!stale) { setLog({ repoId: repo.id, headOid: repo.headOid, entries, done: entries.length < HISTORY_PAGE }); setLogError(null) } })
-      .catch((cause: unknown) => { if (!stale) setLogError(errorMessage(cause)) })
+      .catch((cause: unknown) => { if (!stale) setLogError({ repoId: repo.id, headOid: repo.headOid, message: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
   // Amend: the last commit's message and where it is published, whenever amending is on and the commit changes.
@@ -457,7 +531,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     let stale = false
     window.copilotDesktop.gitHeadCommit(profileId, repo.id)
       .then(info => { if (!stale) setHeadCommit({ repoId: repo.id, headOid: info.oid, info }) })
-      .catch((cause: unknown) => { if (!stale) { setActionError(errorMessage(cause)); setAmending(false) } })
+      .catch((cause: unknown) => { if (!stale) { updateFeedback(repo.id, { error: errorMessage(cause) }); setAmendRepoId(null) } })
     return () => { stale = true }
   }, [amending, profileId, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -478,7 +552,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     let stale = false
     window.copilotDesktop.gitWorktrees(profileId, repo.id)
       .then(items => { if (!stale) { setWorktrees({ repoId: repo.id, items }); setWorktreeError(null) } })
-      .catch((cause: unknown) => { if (!stale) setWorktreeError(errorMessage(cause)) })
+      .catch((cause: unknown) => { if (!stale) setWorktreeError({ repoId: repo.id, message: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload, view]) // eslint-disable-line react-hooks/exhaustive-deps
   const loadMore = (): void => {
@@ -489,60 +563,52 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     moreRequest.current = id
     setLoadingMore(true)
     window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, skip)
-      .then(more => setLog(current => {
-        // Extend only the very list this page continues: same repository, same commit, and nothing added since.
-        if (!current || current.repoId !== repoId || current.headOid !== headOid || current.entries.length !== skip) return current
-        const known = new Set(current.entries.map(entry => entry.hash))
-        return { ...current, entries: [...current.entries, ...more.filter(entry => !known.has(entry.hash))], done: more.length < HISTORY_PAGE }
-      }))
-      .catch((cause: unknown) => setLogError(errorMessage(cause)))
+      .then(more => {
+        if (moreRequest.current !== id || visibleRepo.current !== repoId) return
+        setLog(current => {
+          // Extend only the very list this page continues: same repository, same commit, and nothing added since.
+          if (!current || current.repoId !== repoId || current.headOid !== headOid || current.entries.length !== skip) return current
+          const known = new Set(current.entries.map(entry => entry.hash))
+          return { ...current, entries: [...current.entries, ...more.filter(entry => !known.has(entry.hash))], done: more.length < HISTORY_PAGE }
+        })
+      })
+      .catch((cause: unknown) => {
+        if (moreRequest.current === id && visibleRepo.current === repoId) setLogError({ repoId, headOid, message: errorMessage(cause) })
+      })
       .finally(() => { if (moreRequest.current === id) { moreRequest.current = null; setLoadingMore(false) } })
-  }
-
-  const chooseRepo = (next: GitRepoSummary): void => {
-    if (operation) return
-    setHooks(null)
-    setPublish(null)
-    setAmending(false)
-    setStoredRepo(next.relativePath)
-    setSelection(null)
-    setMarks(null)
-    setNotice(null)
-    setActionError(null)
-    try { localStorage.setItem(repoStorageKey(profileId), next.relativePath) } catch { /* Keep the in-memory choice. */ }
   }
 
   const trust = (): void => {
     if (!repo?.configHash) return
     setWorking(true)
-    setActionError(null)
+    updateFeedback(repo.id, { error: null })
     window.copilotDesktop.gitTrust(profileId, repo.id, repo.configHash).then(replace)
-      .catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setWorking(false))
+      .catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) })).finally(() => setWorking(false))
   }
 
   const addToPrompt = (): void => {
     if (!repo || !selection || !selectedEntry || !diff || diff.key !== diffKey || !promptTarget) return
     const send = (value: GitDiff): void => {
       const target = currentPromptTarget.current
-      if (!target) { setActionError('Open or resume a session in this project to add Git context.'); return }
+      if (!target) { updateFeedback(repo.id, { error: 'Open or resume a session in this project to add Git context.' }); return }
       insert(target.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: value }))
-      setNotice(`Added to the prompt box of “${target.title}”. Review it and press Enter to send.`)
+      updateFeedback(repo.id, { notice: `Added to the prompt box of “${target.title}”. Review it and press Enter to send.` })
     }
     if (!wholeFile) { send(diff.value); return }
     // The whole file would crowd the change out of the prompt: send the change with its usual context instead.
-    setActionError(null)
+    updateFeedback(repo.id, { error: null })
     window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged)
-      .then(send).catch((cause: unknown) => setActionError(errorMessage(cause)))
+      .then(send).catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) }))
   }
 
   const addCommentsToPrompt = (): void => {
-    if (!repo || !selection || !activeComments || !promptTarget) return
+    if (!repo || !selection || !activeComments || activeComments.pending.length || !promptTarget) return
     const ordered = orderedComments(activeComments)
     const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered })
     insert(promptTarget.id, result.text)
     const left = ordered.length - result.included
-    setNotice(`Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
-      + (left > 0 ? ` ${left} did not fit.` : '') + (result.quotesDropped ? ' The quoted lines were left out to fit.' : '') + ' Review it and press Enter to send.')
+    updateFeedback(repo.id, { notice: `Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
+      + (left > 0 ? ` ${left} did not fit.` : '') + (result.quotesDropped ? ' The quoted lines were left out to fit.' : '') + ' Review it and press Enter to send.' })
   }
 
   const draftMessage = (): void => {
@@ -551,15 +617,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     const read = currentStatus.staged.slice(0, MAX_DRAFT_FILES)
     const omitted = currentStatus.staged.slice(MAX_DRAFT_FILES).map(entry => entry.path)
     setWorking(true)
-    setActionError(null)
+    updateFeedback(repo.id, { error: null })
     Promise.all(read.map(entry => window.copilotDesktop.gitDiff(profileId, repo.id, entry.id, true).then(value => ({ path: entry.path, diff: value }))))
       .then(parts => {
         const target = currentPromptTarget.current
-        if (!target) { setActionError('Open or resume a session in this project to add Git context.'); return }
+        if (!target) { updateFeedback(repo.id, { error: 'Open or resume a session in this project to add Git context.' }); return }
         insert(target.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts, omitted, listTruncated: currentStatus.truncated }))
-        setNotice(`Asked “${target.title}” to draft a commit message. Review the prompt and press Enter to send.`)
+        updateFeedback(repo.id, { notice: `Asked “${target.title}” to draft a commit message. Review the prompt and press Enter to send.` })
       })
-      .catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => setWorking(false))
+      .catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) })).finally(() => setWorking(false))
   }
 
   // What a running write prints (a commit hook's messages, say) appears as it arrives.
@@ -569,7 +635,18 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
   const messageKey = repo?.relativePath ?? ''
   const message = draftOf(messages, messageKey)
+  const commitAttempt: CommitAttempt | null = repo && currentStatus ? {
+    repoId: repo.id, generation: currentStatus.generation, message,
+    branch: repo.detached ? null : repo.branch, headOid: repo.headOid, amend: amending,
+  } : null
+  const requestedCommit = hookApproval?.attempt
+  const hooks = requestedCommit && commitAttempt
+    && requestedCommit.repoId === commitAttempt.repoId
+    && requestedCommit.generation === commitAttempt.generation && requestedCommit.generation === repo?.generation
+    && requestedCommit.message === commitAttempt.message && requestedCommit.amend === commitAttempt.amend
+    && requestedCommit.branch === commitAttempt.branch && requestedCommit.headOid === commitAttempt.headOid ? hookApproval : null
   const setMessage = (value: string): void => {
+    if (value !== message) setHooks(null)
     if (value.trim() !== untouchedAmendDrafts.current.get(messageKey)?.trim()) untouchedAmendDrafts.current.delete(messageKey)
     setMessages(current => ({ ...current, [messageKey]: value }))
   }
@@ -578,42 +655,64 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const newBranch = draftOf(branchDrafts, branchDraftKey)
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
-  const runWrite = (kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
+  const runWrite = (kind: WriteKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, options: {
+    seen?: { branch: string; headOid: string } | null
+    attempt?: CommitAttempt
+    indexMove?: { paths: readonly string[]; staged: boolean }
+  } = {}): void => {
+    if (operationRepo.current !== null || visibleRepo.current !== owner.id) return
     operationRepo.current = owner.id
     setOperation({ kind, repoId: owner.id })
     setProgress('')
-    setOutput('')
-    setActionError(null)
-    setNotice(null)
+    updateFeedback(owner.id, EMPTY_FEEDBACK)
     setHooks(null)
     setPublish(null)
     setPullFailure(null)
-    const seenBranch = seen
+    const seenBranch = options.seen
     task().then((result: GitOperationResult) => {
-      if (result.status) setStatus(result.status)
+      const next = result.status
+      if (next?.repoId === owner.id) {
+        const latest = previousStatus.current
+        if (result.ok && options.indexMove && !(latest?.repoId === owner.id && latest.generation > next.generation)) {
+          const { paths, staged } = options.indexMove
+          const destination = new Set(groupsOnSide(next, staged).flat().map(entry => entry.path))
+          const moved = new Set(paths.filter(path => destination.has(path)))
+          setSelection(current => current?.repoId === owner.id && current.staged !== staged && moved.has(current.path)
+            ? { ...current, staged } : current)
+          setComments(current => {
+            let updated = current
+            for (const path of moved) {
+              const source = updated.get(bucketKey({ repoId: owner.id, path, staged: !staged }))
+              if (source) updated = moveCommentBucket(updated, source)
+            }
+            return updated
+          })
+        }
+        acceptStatus(next)
+      }
       if (kind === 'pull' && seenBranch && (result.reason === 'diverged' || result.reason === 'local-changes')) {
         setPullFailure({ repoId: owner.id, branch: seenBranch.branch, headOid: seenBranch.headOid, reason: result.reason, output: result.output })
       }
       if (result.ok) {
-        setNotice(result.message)
+        updateFeedback(owner.id, { notice: result.message })
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
         if (kind === 'commit') {
           untouchedAmendDrafts.current.delete(owner.key)
           setMessages(current => ({ ...current, [owner.key]: '' }))
-          setAmending(false)
+          setAmendRepoId(current => current === owner.id ? null : current)
         }
         if (kind === 'worktree') setBranchReload(count => count + 1)
       } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch' || kind === 'worktree')) {
-        setNotice(result.message)
-      } else if (result.reason === 'hooks-need-approval' && result.hooksHash) {
-        setHooks({ names: result.hooks, hash: result.hooksHash })
-      } else if (result.reason === 'needs-upstream' && result.remotes.length > 0) {
-        setPublish({ repoKey: owner.key, branch: seenBranch?.branch ?? '', headOid: seenBranch?.headOid ?? '', remotes: result.remotes, remote: result.remotes.includes('origin') ? 'origin' : result.remotes[0] ?? '' })
+        updateFeedback(owner.id, { notice: result.message })
+      } else if (result.reason === 'hooks-need-approval' && result.hooksHash && options.attempt) {
+        setHooks({ attempt: options.attempt, names: result.hooks, hash: result.hooksHash })
+      } else if (result.reason === 'needs-upstream' && result.remotes.length > 0 && seenBranch) {
+        setPublish({ repoId: owner.id, ...seenBranch, remotes: result.remotes, remote: result.remotes.includes('origin') ? 'origin' : result.remotes[0] ?? '' })
       } else {
-        setActionError(result.message)
+        updateFeedback(owner.id, { error: result.message })
       }
-      setOutput(result.ok ? '' : readableOutput(result.output))
-    }).catch((cause: unknown) => setActionError(errorMessage(cause))).finally(() => {
+      updateFeedback(owner.id, { output: result.ok ? '' : readableOutput(result.output) })
+    }).catch((cause: unknown) => updateFeedback(owner.id, { error: errorMessage(cause) })).finally(() => {
       operationRepo.current = null
       setOperation(null)
       if (kind === 'branch') setBranchReload(count => count + 1)
@@ -625,7 +724,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     const generation = currentStatus.generation
     const ids = entries.map(entry => entry.id)
     setMarks(null)
-    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation))
+    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => kind === 'stage' ? window.copilotDesktop.gitStage(profileId, repo.id, ids, generation) : window.copilotDesktop.gitUnstage(profileId, repo.id, ids, generation),
+      { indexMove: { paths: entries.map(entry => entry.path), staged: kind === 'stage' } })
   }
 
   // A pull or push is for the branch, at the commit, that was on screen when the person clicked; if it has changed since, main refuses.
@@ -633,7 +733,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     if (!repo) return
     const expected = kind === 'fetch' ? null : seen ?? (repo.branch !== null && repo.headOid !== null ? { branch: repo.branch, headOid: repo.headOid } : null)
     if (kind !== 'fetch' && expected === null) return
-    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitSync(profileId, repo.id, kind, publishTo, expected), expected)
+    runWrite(kind, { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitSync(profileId, repo.id, kind, publishTo, expected), { seen: expected })
   }
 
   // A branch change is for the branch, at the commit, that was on screen when the person clicked; main refuses if that has moved.
@@ -662,21 +762,24 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     runWrite('discard', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitDiscard(profileId, repo.id, ids, generation))
   }
 
-  const commit = (approvedHooksHash: string | null): void => {
-    if (!repo || !currentStatus) return
-    const generation = currentStatus.generation
-    // An amend is for the commit that was on screen; main refuses if it has moved.
-    if (amending && repo.headOid !== null) {
-      const expected = { branch: repo.detached ? null : repo.branch, headOid: repo.headOid }
-      runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitAmend(profileId, repo.id, message, generation, approvedHooksHash, expected))
+  const commit = (approval: HookApproval | null): void => {
+    const attempt = approval?.attempt ?? commitAttempt
+    if (!repo || !attempt || attempt.repoId !== repo.id || (approval && approval !== hooks)) return
+    const { repoId, generation, branch, headOid, message } = attempt
+    const hash = approval?.hash ?? null
+    const owner = { id: repoId, key: repo.relativePath }
+    if (attempt.amend) {
+      if (headOid === null) return
+      runWrite('commit', owner, () => window.copilotDesktop.gitAmend(profileId, repoId, message, generation, hash, { branch, headOid }), { attempt })
       return
     }
-    runWrite('commit', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitCommit(profileId, repo.id, message, generation, approvedHooksHash))
+    const expected = approval ? { branch, headOid } : undefined
+    runWrite('commit', owner, () => window.copilotDesktop.gitCommit(profileId, repoId, message, generation, hash, expected), { attempt })
   }
 
   // Turning Amend on puts the last message in an empty box (so it can be edited); turning it off removes it again if it is untouched.
   const toggleAmend = (on: boolean): void => {
-    setAmending(on)
+    setAmendRepoId(on ? repoId : null)
     setHooks(null)
     if (on) amendPrefill.current = message.trim() === ''
     else if (headCommit && headCommit.info.message.trim() === message.trim()) setMessage('')
@@ -688,21 +791,23 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     untouchedAmendDrafts.current.set(repo.relativePath, headCommit.info.message)
     setMessages(current => ({ ...current, [repo.relativePath]: headCommit.info.message }))
   }, [amending, headCommit, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
+  const amendInfo = headCommit && headCommit.repoId === repoId && headCommit.headOid === repo?.headOid ? headCommit.info : null
   const amendState: AmendState | null = repo && repo.headOid !== null ? {
     on: amending,
-    loading: amending && !(headCommit && headCommit.repoId === repo.id && headCommit.headOid === repo.headOid),
-    lastMessage: headCommit && headCommit.repoId === repo.id && headCommit.headOid === repo.headOid ? headCommit.info.message : null,
-    publishedTo: headCommit && headCommit.repoId === repo.id ? headCommit.info.publishedTo : [],
-    isMerge: headCommit?.info.isMerge ?? false,
+    loading: amending && amendInfo === null,
+    lastMessage: amendInfo?.message ?? null,
+    publishedTo: amendInfo?.publishedTo ?? [],
+    isMerge: amendInfo?.isMerge ?? false,
   } : null
 
   // Cancel the repository that owns the running write, not whichever one is selected.
   const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
 
   const pickEntry = (entry: GitEntryView, staged: boolean, mode: MarkMode, list: readonly string[]): void => {
-    setSelection({ path: entry.path, staged })
+    if (!repoId) return
+    setSelection({ repoId, path: entry.path, staged })
     setMarks(current => nextMarks(current, staged ? 'staged' : 'working', entry.path, list, mode))
-    setNotice(null)
+    updateFeedback(repoId, { notice: null })
   }
   // Two or more selected files on one side: the bar acts on them, and so does a row's own button when that row is one of them.
   const sideEntries = (side: MarkSide): GitEntryView[] => !currentStatus ? [] : side === 'staged' ? currentStatus.staged : [...currentStatus.unstaged, ...currentStatus.untracked]
@@ -726,9 +831,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     : conflicted ? (repo.merging ? 'conflicts' : null) : failure?.reason ?? null
   // The claim lives in main: closing and reopening the panel does not forget it, and main refuses the writes it covers.
   const resolver = repo?.resolver ?? null
+  const publishOffer = publish && publish.repoId === repoId && publish.branch === repo?.branch && publish.headOid === repo.headOid ? publish : null
   const copilotWriting = resolver?.working === true
   const writesLocked = operation !== null || copilotWriting
-  const lockedReason = copilotWriting ? `Copilot is working on this repository in “${resolver.title}”. Wait for it to finish.` : null
+  const lockedReason = copilotWriting ? `Copilot is working on this repository in “${resolver.title}”. Wait for it to finish.`
+    : operation && !visibleOperation ? 'Wait for Git to finish in the other repository.' : null
   useEffect(() => {
     if (!view) return
     for (const item of view.repos) {
@@ -736,10 +843,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       if (item.resolver?.working) lastResolver.current.set(item.id, item.resolver.title)
       else if (title !== undefined) {
         lastResolver.current.delete(item.id)
-        if (!item.resolver && item.id === repo?.id) setNotice(`“${title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.`)
+        if (!item.resolver) updateFeedback(item.id, { notice: `“${title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.` })
       }
     }
-  }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, updateFeedback])
 
   const resolveWithCopilot = (): void => {
     if (!repo || !repo.branch || !situation || !promptTarget || !currentStatus) return
@@ -754,16 +861,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     if (resolveInFlight.current) return
     resolveInFlight.current = true
     setResolveSending(true)
-    setActionError(null)
-    setNotice(null)
+    updateFeedback(owner, { error: null, notice: null })
     deliver(owner, target.id, text).finally(() => { resolveInFlight.current = false; setResolveSending(false) }).then(outcome => {
-      if (outcome.result === 'refused') { setActionError(outcome.message); return }
-      setPullFailure(null)
-      setOutput('')
-      setNotice(outcome.result === 'sent'
+      if (outcome.result === 'refused') { updateFeedback(owner, { error: outcome.message }); return }
+      setPullFailure(current => current?.repoId === owner ? null : current)
+      updateFeedback(owner, { output: '', notice: outcome.result === 'sent'
         ? `Asked “${target.title}” to pull and resolve the conflicts. Follow it in the session, and answer if it asks you something.`
-        : `${outcome.message} The task is in the prompt box of “${target.title}”; press Enter there when it is ready.`)
-    }).catch((cause: unknown) => setActionError(errorMessage(cause)))
+        : `${outcome.message} The task is in the prompt box of “${target.title}”; press Enter there when it is ready.` })
+    }).catch((cause: unknown) => updateFeedback(owner, { error: errorMessage(cause) }))
   }
 
   return (
@@ -787,7 +892,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
       {view && view.repos.length > 1 && (
         <div className="git-repos" role="group" aria-label="Repositories">
-          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo?.id} disabled={operation !== null && item.id !== repo?.id} onSelect={() => chooseRepo(item)} />)}
+          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repoId} disabled={operation !== null && item.id !== repoId} onSelect={() => switchRepo(item, true)} />)}
         </div>
       )}
 
@@ -806,11 +911,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
           {ready && (
             <GitSyncBar upstream={repo.upstream} ahead={repo.ahead ?? 0} behind={repo.behind ?? 0}
               noBranch={repo.detached || repo.branch === null || repo.headOid === null}
-              locked={writesLocked} running={operation !== null && (operation.kind === 'fetch' || operation.kind === 'pull' || operation.kind === 'push') ? operation.kind : null}
-              progress={progress}
-              publish={publish && publish.repoKey === repo.relativePath && publish.branch === repo.branch && publish.headOid === repo.headOid ? { branch: publish.branch, remotes: publish.remotes, remote: publish.remote } : null}
-              onSync={kind => sync(kind)} onChooseRemote={remote => setPublish(current => current ? { ...current, remote } : current)}
-              onPublish={() => { if (publish) sync('push', publish.remote, { branch: publish.branch, headOid: publish.headOid }) }} onDismissPublish={() => setPublish(null)} onCancel={cancelWrite} />
+              locked={writesLocked} running={visibleOperation && (visibleOperation.kind === 'fetch' || visibleOperation.kind === 'pull' || visibleOperation.kind === 'push') ? visibleOperation.kind : null}
+              progress={visibleOperation ? progress : ''}
+              publish={publishOffer}
+              onSync={kind => sync(kind)} onChooseRemote={remote => setPublish(current => current && current === publishOffer ? { ...current, remote } : current)}
+              onPublish={() => { if (publishOffer) sync('push', publishOffer.remote, publishOffer) }} onDismissPublish={() => setPublish(null)} onCancel={cancelWrite} />
           )}
 
           {repo.state === 'needs-review' && <GitReviewCard items={repo.reviewItems} working={working} onTrust={trust} />}
@@ -825,7 +930,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                 <button type="button" role="tab" aria-selected={tab === 'branches'} onClick={() => setTab('branches')}>Branches</button>
               </div>
 
-              {statusError && <p className="git-message git-message-error" role="alert">{statusError}</p>}
+              {currentStatusError && <p className="git-message git-message-error" role="alert">{currentStatusError}</p>}
 
               {tab === 'changes' && (
                 // While a diff is shown, the list and the commit box scroll on their own above it, and the divider sets how
@@ -859,16 +964,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                     </div>
                   )}
 
-                  {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null || amending) && amendState && (
+                  {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || visibleOperation !== null || hooks !== null || amending) && amendState && (
                     <button type="button" className="git-amend-open" onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
                   )}
-                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || operation !== null || hooks !== null || amending) && (
+                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || visibleOperation !== null || hooks !== null || amending) && (
                     <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
-                      message={message} onMessageChange={setMessage} busy={operation?.kind ?? null} progress={progress}
+                      message={message} onMessageChange={setMessage} busy={visibleOperation?.kind ?? null} progress={visibleOperation ? progress : ''}
                       canDraft={canInsert && currentStatus.staged.length > 0 && !working}
                       draftTitle={canInsert ? 'Put a prompt in the session asking Copilot to write a commit message for the staged files' : 'Open a session in this window first'}
                       onDraft={draftMessage} onCommit={() => commit(null)} onCancel={cancelWrite}
-                      hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks.hash) }} onDismissHooks={() => setHooks(null)}
+                      hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks) }} onDismissHooks={() => setHooks(null)}
                       amend={amendState} onToggleAmend={toggleAmend} lockedReason={lockedReason} />
                   )}
                   {!selection && currentStatus && currentStatus.totalEntries > 0 && <p className="git-note">Select a file to see its diff.</p>}
@@ -893,7 +998,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                         </button>
                       </div>
                       {diffError && <p className="git-message git-message-error" role="alert">{diffError}</p>}
-                      {!diffError && selectedEntry === null && <p className="git-message" role="status">That file is no longer changed.</p>}
+                      {!diffError && selectedEntry === null && currentStatus?.truncated && <p className="git-message" role="status">This file is outside the displayed changes.</p>}
                       {!diffError && selectedEntry !== null && diff?.key === diffKey && (
                         <GitDiffView diff={diff.value} cursorKey={activeCursor ? `${activeCursor.side}:${activeCursor.line}` : null}
                           onCursor={anchor => setCursor({ scope: cursorScope, diffText: diff.value.text, anchor, id: ++cursorSequence.current, declined: false })}
@@ -907,9 +1012,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                       </p>}
                       {!diffError && selectedEntry !== null && activeComments && (
                         <div className="git-diff-comments-bar">
-                          <span className="git-diff-comments-count">{activeComments.items.size} comment{activeComments.items.size === 1 ? '' : 's'}</span>
+                          <span className="git-diff-comments-count">{commentCount} comment{commentCount === 1 ? '' : 's'}</span>
                           {commentsStale && <span className="git-diff-comments-stale" role="status">The diff changed since these were written; check they still apply.</span>}
-                          <button type="button" disabled={!canInsert} onClick={addCommentsToPrompt}
+                          {pendingComments > 0 && <span role="status">Checking comment locations…</span>}
+                          {activeComments.unanchored.length > 0 && <div className="git-diff-unanchored">
+                            <span className="git-diff-comments-stale" role="status">Review comments without a matching line.</span>
+                            <ul>{activeComments.unanchored.map((comment, index) => <li key={index}>{comment.text}</li>)}</ul>
+                          </div>}
+                          <button type="button" disabled={!canInsert || pendingComments > 0} onClick={addCommentsToPrompt}
                             title={canInsert ? `Put these comments in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
                             Add comments to prompt
                           </button>
@@ -930,14 +1040,14 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                     newName={newBranch} commitDraft={suggestionDraft}
                     onNewNameChange={value => setBranchDrafts(current => ({ ...current, [branchDraftKey]: value }))}
                     onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
-                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions}
+                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError?.repoId === repoId ? worktreeError.message : null} sessions={worktreeSessions}
                     locked={writesLocked} onRemove={removeWorktree} />
                 </>
               )}
 
               {tab === 'history' && (
                 <div className="git-history">
-                  {logError && <p className="git-message git-message-error" role="alert">{logError}</p>}
+                  {logError?.repoId === repoId && logError.headOid === repo.headOid && <p className="git-message git-message-error" role="alert">{logError.message}</p>}
                   {log && log.repoId === repo.id && log.entries.length === 0 && <p className="git-message" role="status">No commits yet.</p>}
                   {log && log.repoId === repo.id && (
                     <ol className="git-log">

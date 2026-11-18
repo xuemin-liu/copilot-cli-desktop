@@ -41,7 +41,9 @@ Project switching retains the repository selection, commit draft, and diff selec
   it never changes your Git configuration.
 - **Hooks.** A commit runs the repository's own hook files (`pre-commit`, `commit-msg`, and the few others a commit can
   trigger). A repository can arrive with hooks you have never seen, so the first commit lists them and waits for you to allow
-  them. Your approval is remembered for those exact files and asked again if any of them changes. Staging never runs hooks.
+  them. The approval prompt applies to the repository, branch, and staged changes shown when you asked Git to commit.
+  If those change or you switch repositories, review the changes and click Commit again. Your approval is remembered for
+  those exact hook files and asked again if any of them changes. Staging never runs hooks.
 - While a commit runs, whatever the hooks print appears under the message box, and **Cancel** stops the whole process tree. If
   Git left a lock file behind after a cancel, the message says which file to delete; the panel never deletes it for you.
 - Writes happen one at a time per repository. If another program (Copilot, an editor) is using the repository, the panel waits up
@@ -209,8 +211,10 @@ unrecognized editing key makes the caret position uncertain, that submission is 
   (Ctrl+Enter saves, Esc cancels; an existing comment shows **✎** and can be edited or removed). Comments collect under
   the diff with a count, **Add comments to prompt** and **Clear**. **Add comments to prompt** puts a numbered list in the
   prompt box, each item naming its line ("Line 45" in the new file, "Old line 12" for a deleted line) and quoting the diff
-  line as it was shown. Nothing is sent. Comments belong to one file and side (staged or working tree); choosing another
-  file keeps them until you return, and they are dropped when the file is no longer changed. If the diff changes under
+  line as it was shown. Nothing is sent. Choosing another file keeps the comments until you return. When a file moves
+  between staged and working-tree changes, the selection and comments follow it. A comment with no unique matching
+  line is shown below the diff and added to the prompt without a line number. Comments are dropped when the file is
+  no longer changed. If the diff changes under
   them (Copilot edits the file, say), the bar says so and the line numbers may no longer match: check them before
   sending. Lines past the panel's 4,000-line display cap cannot be commented on. The list stays under the same 11,000
   character limit: the quoted lines are dropped first, then trailing comments, and the prompt says how many were left out.

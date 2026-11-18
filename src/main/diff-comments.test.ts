@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../renderer/diff-comments.js'
+import { anchorMovedComments, bucketKey, orderedComments, pruneCommentBuckets, removeCommentBucket, updateCommentBucket } from '../renderer/diff-comments.js'
 import type { DiffCommentBuckets } from '../renderer/diff-comments.js'
 
 const anchor = (line: number, order = line, quote = `+line ${line}`) => ({ side: 'new' as const, line, quote, order, position: line })
@@ -41,7 +41,7 @@ test('a quote taken from inside a private-key block of the diff it was captured 
   assert.ok(!JSON.stringify([...buckets.values()]).includes('MIIEow'), 'key material is never stored')
 })
 
-test('buckets of files that are no longer changed on their side are pruned, for the whole repository, without touching others', () => {
+test('clean files lose their comments, and files that moved sides keep their drafts without touching other repositories', () => {
   let buckets: DiffCommentBuckets = new Map()
   buckets = updateCommentBucket(buckets, A, 'a', 'new:1', anchor(1), 'on a')
   buckets = updateCommentBucket(buckets, B, 'b', 'new:1', anchor(1), 'on b')
@@ -52,6 +52,25 @@ test('buckets of files that are no longer changed on their side are pruned, for 
   assert.deepEqual([...pruned.keys()], [bucketKey(A), bucketKey(A_STAGED), bucketKey({ repoId: 'r2', path: 'a.txt', staged: false })], 'b.txt went clean; the other repository is not reconciled')
   assert.equal(pruneCommentBuckets(pruned, 'r1', () => true), pruned, 'nothing to prune returns the same map')
   const staged = pruneCommentBuckets(pruned, 'r1', (_path, staged) => !staged)
-  assert.deepEqual([...staged.keys()], [bucketKey(A), bucketKey({ repoId: 'r2', path: 'a.txt', staged: false })], 'sides are pruned independently')
+  assert.deepEqual([...staged.keys()], [bucketKey(A), bucketKey({ repoId: 'r2', path: 'a.txt', staged: false })])
+  assert.deepEqual(staged.get(bucketKey(A))?.pending.map(comment => comment.text), ['on staged a'])
   assert.equal(buckets.size, 4, 'inputs are never mutated')
+})
+
+test('moving comments reanchors unique quotes and keeps collisions, redacted and ambiguous quotes unanchored', () => {
+  const diffText = '@@ -1 +1,5 @@\n base\n+unique\n+repeated\n+repeated\n+occupied'
+  const privateDiff = '@@ -0,0 +1,3 @@\n+-----BEGIN RSA PRIVATE KEY-----\n+fakepayload\n+-----END RSA PRIVATE KEY-----'
+  let buckets: DiffCommentBuckets = new Map()
+  buckets = updateCommentBucket(buckets, A_STAGED, diffText, 'new:5', anchor(5, 5, '+occupied'), 'destination')
+  buckets = updateCommentBucket(buckets, A, '', 'new:8', anchor(8, 8, '+unique'), 'moves')
+  buckets = updateCommentBucket(buckets, A, '', 'new:9', anchor(9, 9, '+repeated'), 'ambiguous')
+  buckets = updateCommentBucket(buckets, A, '', 'new:10', anchor(10, 10, '+occupied'), 'collision')
+  buckets = updateCommentBucket(buckets, A, privateDiff, 'new:2', anchor(2, 2, '+fakepayload'), 'redacted')
+  const moved = pruneCommentBuckets(buckets, A.repoId, (_path, staged) => staged)
+  const key = bucketKey(A_STAGED)
+  const anchored = anchorMovedComments(moved, key, { entryId: 'e1-0', path: A.path, kind: 'text', text: diffText, truncated: false, added: 4, deleted: 0 })
+  assert.deepEqual(orderedComments(anchored.get(key)!).map(comment => [comment.text, comment.line, comment.redacted]), [
+    ['moves', 2, false], ['destination', 5, false], ['ambiguous', null, false], ['collision', null, false], ['redacted', null, true],
+  ])
+  assert.ok(anchored.get(key)?.unanchored.every(comment => comment.quote === ''))
 })

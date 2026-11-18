@@ -136,7 +136,7 @@ export function composeCommitMessagePrompt(input: CommitPromptInput): string {
 export interface DiffComment {
   /** `new` for added and context lines (numbered in the new file), `old` for deleted lines. */
   side: 'new' | 'old'
-  line: number
+  line: number | null
   /** The diff line as shown, with its leading +, - or space. Masked and bounded before it is quoted. Empty when `redacted`. */
   quote: string
   /** Captured from inside a private-key block of the diff it came from: never quoted, whatever diff is current later. */
@@ -213,9 +213,9 @@ export function composeReviewCommentsPrompt(input: { repoName: string; path: str
     const notes = new Set<string>()
     if (withhold && quotes) notes.add('The changed lines are not quoted because this file looks like it holds secrets.')
     const items = input.comments.slice(0, count).map((comment, index) => {
-      const where = `${comment.side === 'old' ? 'Old line' : 'Line'} ${comment.line}`
+      const where = comment.line === null ? 'Unanchored comment' : `${comment.side === 'old' ? 'Old line' : 'Line'} ${comment.line}`
       let quoted = ''
-      if (quotes && !withhold) {
+      if (quotes && !withhold && comment.line !== null) {
         const masked = comment.redacted ? { text: '[REDACTED PRIVATE KEY]', masked: true } : maskSecrets(comment.quote.replace(CONTROL_CHARS, ''))
         if (masked.masked) notes.add('Values that looked like credentials were replaced with [REDACTED].')
         quoted = ` (${inlineQuote(masked.text.length > MAX_QUOTE_CHARS ? `${masked.text.slice(0, MAX_QUOTE_CHARS)}…` : masked.text)})`

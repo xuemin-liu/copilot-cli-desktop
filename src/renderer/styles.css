@@ -1524,6 +1524,8 @@ button:disabled {
 .git-diff-comments-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-top: 1px solid #252a33; font-size: 11px; color: #929baa; }
 .git-diff-comments-bar button { padding: 4px 9px; font-size: 11px; }
 .git-diff-comments-stale { color: #ffb84d; }
+.git-diff-unanchored { flex-basis: 100%; min-width: 0; max-height: 8em; overflow-y: auto; }
+.git-diff-unanchored ul { margin: 4px 0; padding-left: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .git-diff-add { background: #12301f; color: #7fe0b8; }
 .git-diff-del { background: #3a1c28; color: #ff9aa6; }
 .git-diff-hunk { background: #16213a; color: #7f9fd6; }
