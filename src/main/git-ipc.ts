@@ -1,3 +1,4 @@
+import { commitOid } from './git-commands.js'
 import type { GitService } from './git-service.js'
 import type { GitCommitHead } from './git-types.js'
 
@@ -177,6 +178,11 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     return action === 'create' ? service.createBranch(...args) : service.switchBranch(...args)
   })
   handle('desktop:git-cancel', (service, event, profileId: unknown, repoId: unknown) => { service.cancel(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)) })
+  handle('desktop:git-log-page', async (service, event, profileId: unknown, repoId: unknown, revision: unknown, limit: unknown, skip: unknown, cursor: unknown) => {
+    const headOid = commitOid(revision)
+    if (cursor !== null && (typeof cursor !== 'string' || !/^[0-9a-f]{64}$/.test(cursor))) throw new Error('Invalid history cursor')
+    return service.getLogPage(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), boundedInteger(limit, 'limit', 1, 200), boundedInteger(skip, 'offset', 0, 100_000), headOid, cursor)
+  })
   handle('desktop:git-log', (service, event, profileId: unknown, repoId: unknown, limit: unknown, skip: unknown) =>
     service.getLog(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), boundedInteger(limit, 'limit', 1, 200), boundedInteger(skip, 'offset', 0, 100_000)))
 }

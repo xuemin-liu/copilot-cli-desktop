@@ -21,7 +21,7 @@ Project switching retains the repository selection, commit draft, and diff selec
   and very large files show a notice instead of content. **Whole file** in the diff header switches between the changes
   with a few lines around them and the whole file with its changes in place; the choice is remembered. The panel still
   shows at most 4,000 lines.
-- **History.** The latest commits, 50 at a time. **Load more** waits for the page in flight, so a double click never lists a
+- **History.** The latest commits, 50 at a time. Every page starts from the same commit. When the panel detects a new branch tip, History reloads from that tip. If fetching more ancestry changes the order of an existing page in a shallow clone, History restarts at the first page. **Load more** waits for the page in flight, so a double click never lists a
   commit twice or skips one.
 
 Git shows the latest operation result for each repository beside the controls that started it. Expand **Git output** there to read the transcript when the command printed one.

@@ -6,7 +6,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const cursorOnly = process.argv.includes('--cursor-context')
 const activeSession = process.argv.includes('--active-session')
@@ -552,8 +552,18 @@ ${point.missing}`)
     results.trustReview = true
 
     // 9b. History pages without overlap, even when "Load more" is clicked twice while a page is still loading.
-    const realGetLog = service.getLog.bind(service)
-    service.getLog = async (...args) => { await delay(900); return realGetLog(...args) }
+    const originalTip = git(delta, 'rev-parse', 'HEAD').trim()
+    const expectedHashes = git(delta, 'rev-list', originalTip).trim().split(/\s+/).map(hash => hash.slice(0, 7))
+    const realGetLog = service.getLogPage.bind(service)
+    const secondPage = Promise.withResolvers()
+    const pageRequested = Promise.withResolvers()
+    service.getLogPage = async (...args) => {
+      if (args[4] === 50) {
+        pageRequested.resolve()
+        await secondPage.promise
+      }
+      return realGetLog(...args)
+    }
     await chooseRepo('delta')
     await until('!!document.querySelector(".git-tabs")', 'delta opens')
     await clickByText('.git-tabs button', 'History')
@@ -562,8 +572,12 @@ ${point.missing}`)
     await until('document.querySelector(".git-history > button")?.disabled === true', 'Load more is disabled while the page loads')
     assert.match(await text('.git-history > button'), /Loading/)
     await click('.git-history > button')
+    await pageRequested.promise
+    // Rewrite to a different ancestry before Git serves page two, ahead of the next project refresh.
+    git(delta, 'update-ref', 'HEAD', 'HEAD~10', originalTip)
+    git(delta, 'commit', '--only', '--amend', '--allow-empty', '-qm', 'Amended history tip')
+    secondPage.resolve()
     await until('document.querySelectorAll(".git-log li").length >= 100', 'second page appended')
-    await delay(1600)
     const hashes = () => ui('[...document.querySelectorAll(".git-log-meta code")].map(element => element.innerText)')
     let seen = await hashes()
     assert.equal(seen.length, 100, 'two quick clicks append one page, not two')
@@ -573,7 +587,10 @@ ${point.missing}`)
     seen = await hashes()
     assert.equal(new Set(seen).size, 120, 'every commit is listed exactly once and none is skipped')
     assert.equal(await ui('!document.querySelector(".git-history > button")'), true, 'no Load more once the history is complete')
-    service.getLog = realGetLog
+    assert.deepEqual(seen, expectedHashes, 'every page came from the tip shown before the amend')
+    service.requestRefresh(PROFILE)
+    await until('document.querySelector(".git-log-subject")?.textContent === "Amended history tip" && document.querySelectorAll(".git-log li").length === 50', 'observing the amended tip restarts history')
+    service.getLogPage = realGetLog
     results.historyPaging = true
 
     // 9c. The commit-message prompt accounts for every staged file, including those whose diffs were not read.
@@ -836,7 +853,7 @@ ${point.missing}`)
     await until('/slow hook started/.test(document.querySelector(".git-progress")?.textContent || "")', 'the hook output streams into the panel')
     assert.equal(await ui('document.querySelector(".git-commit .git-output-details").open'), false)
     await click('.git-commit .git-output-details summary')
-    assert.match(await text('.git-commit .git-progress'), /slow hook started/)
+    await until('/slow hook started/.test(document.querySelector(".git-commit .git-progress")?.innerText || "")', 'expanded output shows the running hook')
     assert.match(await text('.git-commit-button'), /Committing/)
     // While a write runs, no other repository can be selected, so Cancel and the output can only mean the repository running it.
     assert.equal(await ui('[...document.querySelectorAll(".git-repo")].find(element => element.innerText.includes("beta")).disabled'), true, 'other repositories are locked during a write')
@@ -1100,6 +1117,35 @@ ${point.missing}`)
     await ui('document.querySelector(".git-amend-toggle input").click()')
     await until('!document.querySelector(".git-commit")', 'turning Amend off closes the box again')
     results.amend = true
+    // A shallow boundary can change traversal order at an existing offset even when the tip stays fixed.
+    const rootCommit = git(delta, 'rev-list', '--max-parents=0', 'HEAD').trim()
+    const side = Array.from({ length: 75 }, (_, i) => [
+      'commit refs/heads/side', 'committer Check <check@example.com> ' + (1_700_100_000 + i) + ' +0000',
+      'data 4', 'side', ...(i === 0 ? ['from ' + rootCommit] : []), '',
+    ].join('\n')).join('\n')
+    execFileSync('git', ['fast-import', '--quiet'], { cwd: delta, input: side + '\n' })
+    const merge = git(delta, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-p', 'side', '-m', 'shallow merge').trim()
+    git(delta, 'branch', 'shallow-merge', merge)
+    const shallow = join(workspace, 'shallow')
+    git(workspace, 'clone', '-q', '--branch', 'shallow-merge', '--depth=31', pathToFileURL(delta).href, shallow)
+    await click('button[aria-label="Rescan repositories"]')
+    await until('[...document.querySelectorAll(".git-repo-name")].some(row => row.textContent === "shallow")', 'shallow clone discovered')
+    await chooseRepo('shallow')
+    await clickByText('.git-tabs button', 'History')
+    await until('document.querySelectorAll(".git-log li").length === 50', 'first shallow page')
+    const oldPage = await hashes()
+    git(shallow, 'fetch', '-q', '--deepen=40', 'origin')
+    assert.equal(git(shallow, 'rev-parse', 'HEAD').trim(), merge)
+    const deepHashes = git(shallow, 'rev-list', 'HEAD').trim().split(/\s+/).map(hash => hash.slice(0, 7))
+    assert.notDeepEqual(oldPage, deepHashes.slice(0, 50), 'deepening reordered the first page')
+    await click('.git-history > button')
+    await until('document.querySelector(".git-history > button")?.disabled === false', 'deepened history loaded')
+    assert.deepEqual(await hashes(), deepHashes.slice(0, 50), 'a changed traversal restarts on the current first page')
+    await click('.git-history > button')
+    await until('document.querySelectorAll(".git-log li").length === 100', 'deepened second page')
+    assert.deepEqual(await hashes(), deepHashes.slice(0, 100))
+    results.shallowHistory = true
+
     assert.equal(service.hasSubscribers(), true)
     await click('button[aria-label="Close Git panel"]')
     await until('!!document.querySelector("#closed")', 'panel closed')

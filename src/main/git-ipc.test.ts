@@ -12,7 +12,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
   const record = (name: string) => (...args: unknown[]): unknown => { calls.push([name, ...args]); return { name } }
   const fake = {
     subscribe: record('subscribe'), unsubscribe: record('unsubscribe'), unsubscribeAll: record('unsubscribeAll'), rescan: record('rescan'),
-    trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
+    trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'), getLogPage: record('getLogPage'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
     getBranches: record('getBranches'), getWorktrees: record('getWorktrees'), removeWorktree: record('removeWorktree'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'), amend: record('amend'), getHeadCommit: record('getHeadCommit'),
@@ -39,7 +39,7 @@ const PROFILE = '0123456789abcdef'
 test('every channel is registered', () => {
   const { handlers } = setup()
   assert.deepEqual([...handlers.keys()].sort(), [
-    'desktop:git-amend', 'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-head-commit', 'desktop:git-log', 'desktop:git-open', 'desktop:git-rescan',
+    'desktop:git-amend', 'desktop:git-branch', 'desktop:git-branches', 'desktop:git-cancel', 'desktop:git-close', 'desktop:git-commit', 'desktop:git-diff', 'desktop:git-discard', 'desktop:git-head-commit', 'desktop:git-log', 'desktop:git-log-page', 'desktop:git-open', 'desktop:git-rescan',
     'desktop:git-stage', 'desktop:git-status', 'desktop:git-sync', 'desktop:git-trust', 'desktop:git-unstage', 'desktop:git-worktree-remove', 'desktop:git-worktrees',
   ])
 })
@@ -58,6 +58,19 @@ test('valid calls reach the service with the sender id', () => {
   assert.deepEqual(calls[4], ['getDiff', 1, PROFILE, 'repo-3', 'e12-4', true, false])
   call('desktop:git-diff', sender(), PROFILE, 'repo-3', 'e12-4', false, true)
   assert.deepEqual(calls.at(-1), ['getDiff', 1, PROFILE, 'repo-3', 'e12-4', false, true])
+})
+
+test('History pages accept only full commit IDs and keep the requested revision', async () => {
+  const { call, sender, calls } = setup()
+  for (const revision of ['HEAD', '--all', 'a'.repeat(39), null]) {
+    await assert.rejects(call('desktop:git-log-page', sender(), PROFILE, 'repo-1', revision, 50, 0) as Promise<unknown>, /Invalid commit/)
+  }
+  assert.equal(calls.length, 0)
+  for (const length of [40, 64]) {
+    const oid = 'b'.repeat(length)
+    await call('desktop:git-log-page', sender(), PROFILE, 'repo-1', oid, 50, 100, 'f'.repeat(64))
+    assert.deepEqual(calls.at(-1), ['getLogPage', 1, PROFILE, 'repo-1', 50, 100, oid, 'f'.repeat(64)])
+  }
 })
 
 test('arguments are validated before the service sees them', () => {
