@@ -162,7 +162,8 @@ export class ProjectToolService {
   private switchPanel(project: PanelProject): boolean {
     const owner = this.foreground(project.profileId)
     if (project.ownerId === owner || this.releasing.has(owner ?? '')) return false
-    project.layouts[project.ownerId ?? 'workspace'] = { activeId: project.activeId, visible: project.visible }
+    const previous = { activeId: project.activeId, visible: project.visible }
+    project.layouts[project.ownerId ?? 'workspace'] = previous
     project.ownerId = owner
     const shared = project.layouts.workspace
     const saved = project.layouts[owner ?? 'workspace'] ?? shared
@@ -170,7 +171,9 @@ export class ProjectToolService {
     project.activeId = tabs.find(tab => !tab.detached && tab.id === saved?.activeId)?.id ?? dockedNeighbor(tabs, 0)
     project.visible = Boolean(saved?.visible && tabs.length)
     project.broadcast = false
-    this.groups.get(project.profileId)?.browser.setBounds(null)
+    if (!project.visible || !previous.visible || previous.activeId !== project.activeId) {
+      this.groups.get(project.profileId)?.browser.setBounds(null)
+    }
     return true
   }
   private canAccess(tab: ToolTab, owner: string | undefined, profileId: string): boolean {
@@ -294,6 +297,10 @@ export class ProjectToolService {
       const browser = new BrowserDebug(owner, profile.settings, { ...this.options.browserOptions(), partition,
         ...(project.overrides === 'private' ? { devtoolsPartition: profile.devtoolsPartition } : {}),
         projectMode: true, tabId: `project:${project.profileId}`, canCreatePage: () => this.limit(),
+        panelAllowsDialog: pageId => {
+          const tab = project.tabs.find(entry => entry.pageId === pageId)
+          return this.shownProject === project.profileId && Boolean(tab && (!tab.ownerId || tab.ownerId === this.foreground(project.profileId)))
+        },
         notify: name => {
           const active = project.tabs.find(entry => entry.pageId === this.groups.get(project.profileId)?.browser.snapshot.activePageId)
           if (active?.resource && !owner.isDestroyed()) owner.webContents.send('desktop:browser-shortcut', active.resource, name)

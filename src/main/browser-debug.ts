@@ -161,7 +161,7 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; panelAllowsDialog?: (pageId: number) => boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
     this.onReturnToPanel = options.onReturnToPanel
@@ -201,6 +201,7 @@ export class BrowserDebug {
       return signal.aborted ? null : response === 1
     }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
+      panelAllowsDialog: options.panelAllowsDialog,
       active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
       recording: () => this.state.recordingNetwork, visible: id => { const page = this.pages.get(id); return Boolean(page && (page.window || page.attached && this.bounds) && page.view.getVisible()) },
       evidence: (pageId, startedAt, after) => {
@@ -363,6 +364,7 @@ export class BrowserDebug {
     const storage = contents.session
     const page: BrowserPage = { contents, view, tools: null, attached: false, loading: false, error: null, lastUrl: '', priming: false, devtools: false, panel: null, overrides: null, window, opener, activatedAt: 0, certificateFailure: null, certificateWarning: null }
     this.pages.set(contents.id, page)
+    if (opener !== null) this.onPopup?.(contents.id, opener)
     this.reader.add(contents)
     if (activate) { this.endFind(); this.reader.stopTest(); this.activePageId = contents.id; this.state.view = 'page' }
     if (window) this.showInWindow(page, window)
@@ -403,7 +405,6 @@ export class BrowserDebug {
           const window = details.disposition === 'new-window' && activated && (this.projectMode ? page.window !== null : this.popupWindows()) ? this.popupWindow(options, page) : null
           if (window) page.activatedAt = 0
           const childPage = this.addPage(child, !this.projectMode && details.disposition !== 'background-tab' && !window, window, page.contents.id)
-          this.onPopup?.(childPage.contents.id, contents.id)
           this.startPopupOverrides(page, childPage)
           this.layout()
           // Electron supplies no guest for browser-initiated background links.
@@ -1071,9 +1072,9 @@ export class BrowserDebug {
   }
 
   /** The user's answer to an alert, confirm or leave-page dialog. */
-  async answerDialog(accept: boolean): Promise<BrowserDebugState> {
+  async answerDialog(accept: boolean, pageId?: number): Promise<BrowserDebugState> {
     if (this.disposed) throw new Error('Browser has closed')
-    await this.reader.answerDialog(accept)
+    await this.reader.answerDialog(accept, pageId)
     return this.snapshot
   }
 
@@ -1156,7 +1157,7 @@ export class BrowserDebug {
       case 'select-all': contents.selectAll(); break
       case 'copy-link': if (/^https?:\/\//i.test(params.linkURL)) void clipboard.writeText(params.linkURL); break
       case 'copy-image-address': if (/^https?:\/\//i.test(params.srcURL)) void clipboard.writeText(params.srcURL); break
-      case 'open-link': this.openInNewPage(params.linkURL); break
+      case 'open-link': this.openInNewPage(page, params.linkURL); break
       case 'inspect': {
         // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
         const reused = page.tools !== null
@@ -1171,12 +1172,11 @@ export class BrowserDebug {
     }
   }
 
-  private openInNewPage(url: string): void {
-    const source = this.activePage
+  private openInNewPage(source: BrowserPage, url: string): void {
     try { parseSafeHttpUrl(url) } catch { source.error = 'This browser opens HTTP and HTTPS links only.'; return }
     if (this.pages.size >= MAX_PAGES || this.canCreatePage()) { source.error = 'Close a browser page before opening another (32 pages maximum).'; return }
     const page = this.addPage(new WebContentsView({ webPreferences: { session: source.contents.session,
-      sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+      sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), !this.projectMode, null, source.contents.id)
     this.layout()
     void this.load(page, url).catch(error => { page.error = sanitizedText(String(error)) })
   }
@@ -1196,7 +1196,7 @@ export class BrowserDebug {
       const limit = this.canCreatePage(); if (limit) throw new Error(limit)
       if (this.pages.size >= MAX_PAGES) throw new Error('Close a browser page before opening another (32 pages maximum).')
       this.addPage(new WebContentsView({ webPreferences: { session: this.activePage.contents.session,
-        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true)
+        sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: true } }), true, null, this.activePageId)
       this.layout()
       return this.snapshot
     }

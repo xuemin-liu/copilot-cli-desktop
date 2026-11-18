@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     ipcRenderer.on('desktop:browser-picked', handler)
     return () => ipcRenderer.removeListener('desktop:browser-picked', handler)
   },
-  browserDialog: (tabId, accept) => ipcRenderer.invoke('desktop:browser-dialog', tabId, accept),
+  browserDialog: (tabId, accept, pageId) => ipcRenderer.invoke('desktop:browser-dialog', tabId, accept, pageId),
   browserScreenshot: (tabId) => ipcRenderer.invoke('desktop:browser-screenshot', tabId),
   browserFind: (tabId, text, forward, next) => ipcRenderer.invoke('desktop:browser-find', tabId, text, forward, next),
   browserFindStop: (tabId) => ipcRenderer.invoke('desktop:browser-find-stop', tabId),

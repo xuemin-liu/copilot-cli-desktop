@@ -4677,10 +4677,10 @@ ipcMain.handle('desktop:browser-pick-many', async (event, tabId: unknown) => {
   const browser = browserForSender(event, tabId)
   await browser.pickElement(text => { if (!event.sender.isDestroyed()) event.sender.send('desktop:browser-picked', tabId, text) })
 })
-ipcMain.handle('desktop:browser-dialog', (event, tabId: unknown, accept: unknown) => {
+ipcMain.handle('desktop:browser-dialog', (event, tabId: unknown, accept: unknown, pageId?: unknown) => {
   const browser = browserForSender(event, tabId)
-  if (typeof accept !== 'boolean') throw new Error('Invalid dialog answer')
-  return browser.answerDialog(accept)
+  if (typeof accept !== 'boolean' || (pageId !== undefined && typeof pageId !== 'number')) throw new Error('Invalid dialog answer')
+  return browser.answerDialog(accept, pageId)
 })
 ipcMain.handle('desktop:browser-screenshot', (event, tabId: unknown) => browserForSender(event, tabId).screenshotToClipboard())
 ipcMain.handle('desktop:browser-find', (event, tabId: unknown, text: unknown, forward: unknown, next: unknown) => {

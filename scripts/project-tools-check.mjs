@@ -221,6 +221,7 @@ if (!process.versions.electron) {
     // Pop-out/return reuse the same native page and its form state.
     await action({ type: 'select', id: reopened.id })
     await until(() => contents(reopened)?.getURL().endsWith('/reopened') && !contents(reopened).isLoading(), 'reopened loaded')
+    // A cancelled session close keeps its browser available to its background owner.
     await contents(reopened).executeJavaScript('document.querySelector("#value").value="popout draft"')
     const browser = tools.resource(reopened.resource).browser
     await browser.action('view:console')
@@ -278,6 +279,25 @@ if (!process.versions.electron) {
     assert.equal((await guest(`/read/select?arg=${reopened.pageId}`)).status, 400)
     assert.equal((await guest(`/read/snapshot?arg=${reopened.pageId}`)).status, 400)
     assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
+    await action({ type: 'add', kind: 'browser', url: `${url}/foreground` })
+    const foregroundTab = state().tabs.find(tab => tab.id === state().activeId)
+    await until(() => contents(foregroundTab)?.getURL().endsWith('/foreground') && !contents(foregroundTab).isLoading(), 'foreground loaded')
+    const scopedBrowser = tools.resource(foregroundTab.resource).browser
+    const sourcePage = scopedBrowser.pages.get(reopened.pageId)
+    scopedBrowser.runContextAction(sourcePage, 'open-link', { linkURL: `${url}/context-link` })
+    await until(() => state().tabs.some(tab => tab.url?.endsWith('/context-link')), 'context menu child')
+    const linked = state().tabs.find(tab => tab.url?.endsWith('/context-link'))
+    assert.equal(linked.ownerId, reopened.ownerId, 'context menu link inherits the clicked page owner')
+    const confirmation = contents(reopened).executeJavaScript("confirm('owner confirmation')", true)
+    await until(async () => (await s2('/status')).body.dialog?.pageId === reopened.pageId, 'owner receives confirmation')
+    assert.equal(scopedBrowser.snapshot.dialog, undefined, 'foreground panel excludes another owner’s dialog')
+    await assert.rejects(scopedBrowser.answerDialog(false), /No page dialog/)
+    await action({ type: 'close', id: foregroundTab.id })
+    currentSession = 's2'; tools.refreshConnections()
+    await scopedBrowser.answerDialog(true)
+    assert.equal(await confirmation, true)
+    await action({ type: 'close', id: linked.id })
+    currentSession = 's1'; tools.refreshConnections()
     // A cancelled session close keeps its browser available to its background owner.
     await contents(reopened).executeJavaScript('document.querySelector("#touch").click();window.onbeforeunload=()=>"editing";void 0', true)
     confirm = false

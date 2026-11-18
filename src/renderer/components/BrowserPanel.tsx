@@ -264,8 +264,8 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
       <p><strong>{state.dialog.type === 'beforeunload' ? 'Leave this page?' : state.dialog.pageId === state.activePageId ? 'This page says'
         : `“${state.pages.find(page => page.id === state.dialog?.pageId)?.title ?? 'Another page'}” says`}</strong> {state.dialog.message || (state.dialog.type === 'beforeunload' ? 'Changes you made may not be saved.' : '')}</p>
       <div>
-        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
-        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
+        <button type="button" autoFocus onClick={() => run(window.copilotDesktop.browserDialog(tabId, true, state.dialog!.pageId))}>{state.dialog.type === 'beforeunload' ? 'Leave' : 'OK'}</button>
+        {state.dialog.type !== 'alert' && <button type="button" onClick={() => run(window.copilotDesktop.browserDialog(tabId, false, state.dialog!.pageId))}>{state.dialog.type === 'beforeunload' ? 'Stay' : 'Cancel'}</button>}
       </div>
     </div>}
     {findOpen && <div className="browser-find" role="search" aria-label="Find in page">

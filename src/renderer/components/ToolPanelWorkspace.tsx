@@ -60,7 +60,6 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
   const terminalProject = useMemo(() => projectTerminal(project.profileId), [project.profileId])
   const [tabMenuOpen, setTabMenuOpen] = useState(false)
-  const [distros, setDistros] = useState<string[]>([])
   useEffect(() => {
     terminalProject.store.setState({ activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast) })
   }, [terminalProject, project.activeId, project.broadcast])
@@ -74,16 +73,6 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     reorderTabs: (from: number, to: number) => { const move = dockedReorder(strip, from, to); if (move) action({ type: 'reorder', ...move }) },
     toggleBroadcast: () => action({ type: 'broadcast', enabled: !project.broadcast }),
   }
-  const [address, setAddress] = useState('')
-  const [connection, setConnection] = useState<'wsl' | 'ssh' | null>(null)
-  useEffect(() => {
-    if (!isWindows || !shown || connection !== 'wsl') return
-    let canceled = false
-    void terminalProject.api.wsl.getDistros().then((values: string[]) => { if (!canceled) setDistros(values) }).catch(() => { if (!canceled) setDistros([]) })
-    return () => { canceled = true }
-  }, [terminalProject, shown, connection])
-  const [host, setHost] = useState(''), [username, setUsername] = useState(''), [port, setPort] = useState(''), [identityFile, setIdentityFile] = useState(''), [distro, setDistro] = useState('')
-  useEffect(() => { setConnection(null) }, [selected?.id])
   return <aside className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
     if (!(event.target instanceof Element && event.target.closest('.tool-terminal-panel, input, textarea, [contenteditable="true"]')) && isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation()
@@ -101,38 +90,9 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
       <p>No tabs</p>
       <button type="button" onClick={() => action({ type: 'add', kind: 'new' })}>New tab</button>
     </div>}
-    {selected?.kind === 'new' && <div id={`tool-content-${selected.id}`} role="tabpanel" className="tool-launcher">
-      <h2>New tab</h2>
-      <form onSubmit={event => { event.preventDefault(); action({ type: 'add', kind: 'browser', replaceId: selected.id, ...(address.trim() ? { url: address.trim() } : {}) }); setAddress('') }}>
-        <input aria-label="New browser URL" placeholder="localhost:3000 or example.com" value={address} onChange={event => setAddress(event.target.value)} />
-        <button type="submit">Open browser</button>
-      </form>
-      <div className="tool-launcher-types">{TOOL_TYPES.map(type => <button type="button" key={type.kind} disabled={type.kind === 'git' && Boolean(profile?.general)}
-        title={type.kind === 'git' && profile?.general ? 'Git requires a project folder' : type.description}
-        onClick={() => {
-          if (type.kind === 'ssh' || type.kind === 'wsl') setConnection(type.kind)
-          else action({ type: 'add', kind: type.kind, replaceId: selected.id })
-        }}><strong>{type.label}</strong><span>{type.description}</span></button>)}</div>
-      {connection === 'ssh' && <MyTerminalConnections profileId={project.profileId} connect={terminal => action({ type: 'add', kind: 'ssh', replaceId: selected.id, terminal })} />}
-      {connection && <form className="tool-connection-form" aria-label={connection === 'ssh' ? 'SSH connection' : 'WSL connection'} onSubmit={event => {
-        event.preventDefault()
-        action({ type: 'add', kind: connection, replaceId: selected.id, terminal: connection === 'wsl' ? { ...(distro.trim() ? { distro: distro.trim() } : {}) }
-          : { host: host.trim(), ...(username.trim() ? { username: username.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}) } })
-      }}>
-        <h3>{connection === 'ssh' ? 'OpenSSH (native)' : 'WSL terminal'}</h3>
-        {connection === 'ssh' ? <>
-          <label>Host or SSH config alias<input autoFocus required aria-label="SSH host" value={host} onChange={event => setHost(event.target.value)} placeholder="server.example.com" /></label>
-          <label>User (optional)<input aria-label="SSH user" value={username} onChange={event => setUsername(event.target.value)} /></label>
-          <label>Port (optional)<input aria-label="SSH port" type="number" min="1" max="65535" value={port} onChange={event => setPort(event.target.value)} /></label>
-          <label>Identity file (optional)<input aria-label="SSH identity file" value={identityFile} onChange={event => setIdentityFile(event.target.value)} /></label>
-          <p>Uses your SSH configuration and keys. Password and host verification prompts appear in the terminal.</p>
-        </> : <label>Distribution (optional)<input autoFocus list={`wsl-distros-${project.profileId}`} aria-label="WSL distribution" placeholder="Default distribution" value={distro} onChange={event => setDistro(event.target.value)} /><datalist id={`wsl-distros-${project.profileId}`}>{distros.map(name => <option key={name} value={name} />)}</datalist></label>}
-        <div><button type="submit">Connect</button><button type="button" onClick={() => setConnection(null)}>Cancel</button></div>
-      </form>}
-      {profile?.general && <p>Git is available in project workspaces.</p>}
-      {!!tools.recent?.length && <div className="tool-recents"><h3>Recent pages</h3>{tools.recent.slice(0, 8).map(url => <button key={url} type="button" title={url}
-        onClick={() => action({ type: 'add', kind: 'browser', replaceId: selected.id, url })}>{url}</button>)}</div>}
-    </div>}
+    {project.tabs.filter(tab => tab.kind === 'new').map(tab => <ToolLauncher key={tab.id} tabId={tab.id}
+      profileId={project.profileId} general={Boolean(profile?.general)} recent={tools.recent ?? []}
+      shown={shown && selected?.id === tab.id} action={action} />)}
     {selected?.kind === 'browser' && <div className="tool-context">
         <button type="button" onClick={() => action({ type: 'pop-out', id: selected.id })}>Open in window</button>
         <details><summary>Browser settings</summary>
@@ -161,6 +121,55 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
       <ToolTerminalPanel profileId={project.profileId} tab={tab} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
     </div>)}
   </aside>
+}
+
+function ToolLauncher({ tabId, profileId, general, recent, shown, action }: {
+  tabId: string; profileId: string; general: boolean; recent: string[]; shown: boolean; action(value: ToolsAction): void
+}): JSX.Element | null {
+  const terminalProject = useMemo(() => projectTerminal(profileId), [profileId])
+  const [distros, setDistros] = useState<string[]>([])
+  const [address, setAddress] = useState('')
+  const [connection, setConnection] = useState<'wsl' | 'ssh' | null>(null)
+  useEffect(() => {
+    if (!isWindows || !shown || connection !== 'wsl') return
+    let canceled = false
+    void terminalProject.api.wsl.getDistros().then((values: string[]) => { if (!canceled) setDistros(values) }).catch(() => { if (!canceled) setDistros([]) })
+    return () => { canceled = true }
+  }, [terminalProject, shown, connection])
+  const [host, setHost] = useState(''), [username, setUsername] = useState(''), [port, setPort] = useState(''), [identityFile, setIdentityFile] = useState(''), [distro, setDistro] = useState('')
+  if (!shown) return null
+  return <div id={`tool-content-${tabId}`} role="tabpanel" className="tool-launcher">
+    <h2>New tab</h2>
+    <form onSubmit={event => { event.preventDefault(); action({ type: 'add', kind: 'browser', replaceId: tabId, ...(address.trim() ? { url: address.trim() } : {}) }); setAddress('') }}>
+      <input aria-label="New browser URL" placeholder="localhost:3000 or example.com" value={address} onChange={event => setAddress(event.target.value)} />
+      <button type="submit">Open browser</button>
+    </form>
+    <div className="tool-launcher-types">{TOOL_TYPES.map(type => <button type="button" key={type.kind} disabled={type.kind === 'git' && general}
+      title={type.kind === 'git' && general ? 'Git requires a project folder' : type.description}
+      onClick={() => {
+        if (type.kind === 'ssh' || type.kind === 'wsl') setConnection(type.kind)
+        else action({ type: 'add', kind: type.kind, replaceId: tabId })
+      }}><strong>{type.label}</strong><span>{type.description}</span></button>)}</div>
+    {connection === 'ssh' && <MyTerminalConnections profileId={profileId} connect={terminal => action({ type: 'add', kind: 'ssh', replaceId: tabId, terminal })} />}
+    {connection && <form className="tool-connection-form" aria-label={connection === 'ssh' ? 'SSH connection' : 'WSL connection'} onSubmit={event => {
+      event.preventDefault()
+      action({ type: 'add', kind: connection, replaceId: tabId, terminal: connection === 'wsl' ? { ...(distro.trim() ? { distro: distro.trim() } : {}) }
+        : { host: host.trim(), ...(username.trim() ? { username: username.trim() } : {}), ...(port ? { port: Number(port) } : {}), ...(identityFile.trim() ? { identityFile: identityFile.trim() } : {}) } })
+    }}>
+      <h3>{connection === 'ssh' ? 'OpenSSH (native)' : 'WSL terminal'}</h3>
+      {connection === 'ssh' ? <>
+        <label>Host or SSH config alias<input autoFocus required aria-label="SSH host" value={host} onChange={event => setHost(event.target.value)} placeholder="server.example.com" /></label>
+        <label>User (optional)<input aria-label="SSH user" value={username} onChange={event => setUsername(event.target.value)} /></label>
+        <label>Port (optional)<input aria-label="SSH port" type="number" min="1" max="65535" value={port} onChange={event => setPort(event.target.value)} /></label>
+        <label>Identity file (optional)<input aria-label="SSH identity file" value={identityFile} onChange={event => setIdentityFile(event.target.value)} /></label>
+        <p>Uses your SSH configuration and keys. Password and host verification prompts appear in the terminal.</p>
+      </> : <label>Distribution (optional)<input autoFocus list={`wsl-distros-${profileId}`} aria-label="WSL distribution" placeholder="Default distribution" value={distro} onChange={event => setDistro(event.target.value)} /><datalist id={`wsl-distros-${profileId}`}>{distros.map(name => <option key={name} value={name} />)}</datalist></label>}
+      <div><button type="submit">Connect</button><button type="button" onClick={() => setConnection(null)}>Cancel</button></div>
+    </form>}
+    {general && <p>Git is available in project workspaces.</p>}
+    {recent.length > 0 && <div className="tool-recents"><h3>Recent pages</h3>{recent.slice(0, 8).map(url => <button key={url} type="button" title={url}
+      onClick={() => action({ type: 'add', kind: 'browser', replaceId: tabId, url })}>{url}</button>)}</div>}
+  </div>
 }
 
 interface GitToolView { key: string; tabId: string | null; ownerId: string | undefined; selectionKey: string }

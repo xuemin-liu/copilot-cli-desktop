@@ -76,6 +76,7 @@ export interface BrowserReaderOptions {
   owner: (pageId: number) => BaseWindow
   recording: () => boolean
   visible: (id: number) => boolean
+  panelAllowsDialog?: ((pageId: number) => boolean) | undefined
   /** Main-process dependency used by isolated fixtures. Never accepted from HTTP. */
   approve?: (description: string) => Promise<boolean>
   /** Console evidence for a run; `after` is the console sequence number when the run started. */
@@ -462,9 +463,9 @@ export class BrowserReader {
 
   /** The selected page when a dialog holds it, else another page a dialog holds: no waiting dialog stays out of sight. */
   private dialogPage(): PageReader | undefined {
+    const pages = this.availablePages().filter(page => this.cursor.getStore() || this.options.panelAllowsDialog?.(page.id) !== false)
     const active = this.readers.get(this.activeId())
-    if (active?.dialog) return active
-    const pages = this.availablePages()
+    if (active?.dialog && pages.includes(active.contents)) return active
     return [...this.readers.values()].find(page => page.dialog && pages.includes(page.contents))
   }
 
@@ -474,10 +475,11 @@ export class BrowserReader {
     return page?.dialog ? { type: page.dialog.type, message: page.dialog.message, pageId: page.contents.id } : null
   }
 
-  async answerDialog(accept: boolean): Promise<void> {
-    const page = this.dialogPage() ?? this.page()
+  async answerDialog(accept: boolean, pageId?: number): Promise<void> {
+    const page = this.dialogPage()
+    if (!page?.dialog) throw new Error('No page dialog is waiting.')
+    if (pageId !== undefined && pageId !== page.contents.id) throw new Error('The displayed dialog changed.')
     const dialog = page.dialog
-    if (!dialog) throw new Error('No page dialog is waiting.')
     page.dialog = null
     await this.command(page, 'Page.handleJavaScriptDialog', { accept }, dialog.sessionId)
   }
