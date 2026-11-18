@@ -879,7 +879,6 @@ ${point.missing}`)
     results.sync = true
 
     // 15. Branches: suggest, edit and create, then switch (asked first, refused while a session is working).
-    gitIn('branch', 'feat/add-branch-name-suggestions')
     await writeFile(join(alpha, 'branch-staged.txt'), 'keep this staged\n')
     gitIn('add', '--', 'branch-staged.txt')
     const headBeforeBranch = gitIn('rev-parse', 'HEAD')
@@ -908,6 +907,9 @@ ${point.missing}`)
     await clickByText('.git-tabs button', 'Branches')
     await waitForBranchList()
     assert.match(await text('.git-branch-current'), /topic/, 'the current branch is marked')
+    gitIn('branch', 'feat/add-branch-name-suggestions')
+    await click('button[aria-label="Rescan repositories"]')
+    await until('document.querySelector(".git-branches").innerText.includes("feat/add-branch-name-suggestions")', 'rescan loads an externally created branch')
     const refsBeforeSuggestion = gitIn('branch', '--list')
     await branchButton('Suggest name')
     await until(`${valueOf(branchInput)} === 'feat/add-branch-name-suggestions-2'`, 'the suggestion uses the draft and finds a free name')

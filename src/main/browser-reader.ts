@@ -1477,7 +1477,7 @@ export class BrowserReader {
         // pixel masks: a mask for the current layout cannot protect an old frame.
         const size = image.getSize(1)
         const requested = testScreenshot ? this.testViewport?.current : undefined
-        if (requested && (size.width !== requested.width * requested.dpr || size.height !== requested.height * requested.dpr
+        if (requested && (size.width !== Math.round(requested.width * requested.dpr) || size.height !== Math.round(requested.height * requested.dpr)
           || mask.viewport.width !== requested.width || mask.viewport.height !== requested.height)) return { ...metadata, state: 'unavailable', reason: 'Viewport capture dimensions differ from the configured CSS size/DPR; no image was exported.' }
         // Crop only after every mask is painted into the full bitmap.
         const cut = maskAndCrop(image.toBitmap({ scaleFactor: 1 }), size, mask as ScreenshotMaskGeometry, crop)

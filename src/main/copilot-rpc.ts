@@ -49,7 +49,7 @@ export class CopilotRpc {
       detached: detachedGroup(),
       stdio: 'pipe',
     })
-    this.watchdog = this.child.pid ? startProcessWatchdog(this.child.pid, env) : null
+    this.watchdog = this.child.pid ? startProcessWatchdog(this.child.pid) : null
     this.child.stdout.on('data', (chunk: Buffer) => this.read(chunk))
     // Drain logs without exposing credentials or session contents to the UI.
     this.child.stderr.resume()
