@@ -680,15 +680,15 @@ export class GitService {
     throw new Error(repo.state === 'needs-review' ? 'This repository\'s settings changed and need review before it can be read' : repo.error ?? 'This repository is not available')
   }
 
-  async getLog(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]> {
+  async getLog(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number, revision?: string): Promise<GitLogEntry[]> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     await this.requireGate(project, repo, runtime)
-    const result = await runtime.runner.run({ cwd: repo.discovered.root, args: logArgs({ limit, skip }), signal: project.abort.signal })
+    const result = await runtime.runner.run({ cwd: repo.discovered.root, args: logArgs({ limit, skip, ...(revision === undefined ? {} : { revision }) }), signal: project.abort.signal })
     // A repository with no commits yet exits 128 with "does not have any commits".
-    if (result.exitCode === 128 && /does not have any commits/i.test(result.stderr)) return []
+    if (revision === undefined && result.exitCode === 128 && /does not have any commits/i.test(result.stderr)) return []
     if (!gitSucceeded(result)) throw new Error(describeFailure(result, 'git log', repo.discovered.root))
     return parseLog(result.stdout.toString('utf8'))
   }

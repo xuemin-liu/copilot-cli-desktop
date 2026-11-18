@@ -1,7 +1,8 @@
+import { GitHistory } from './GitHistory.js'
 import { GitOutput } from './GitOutput.js'
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
-import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
+import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt, composeGitCursorContext, composeResolvePullPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
 import type { ResolvePullSituation } from '../../main/git-prompt.js'
 import { filesInTheWay } from '../../main/git-sync.js'
@@ -122,7 +123,6 @@ function reconcileSelection(selection: Selection | null, status: GitRepoStatusVi
 
 const repoStorageKey = (profileId: string): string => `git-repo:${profileId}`
 const MAX_DRAFT_FILES = 30
-const HISTORY_PAGE = 50
 
 function readStoredRepo(profileId: string): string | null {
   try { return localStorage.getItem(repoStorageKey(profileId)) } catch { return null }
@@ -363,12 +363,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   // part of the key), each remembering the diff it was written against so the panel can warn when that has changed.
   const [comments, setComments] = useState<DiffCommentBuckets>(() => new Map())
   const [reload, setReload] = useState(0)
-  const [log, setLog] = useState<{ repoId: string; headOid: string | null; entries: GitLogEntry[]; done: boolean } | null>(null)
-  // The "Load more" request in flight, if any. Only one at a time, and a response only extends the list it was asked for.
-  const moreRequest = useRef<number | null>(null)
-  const moreCounter = useRef(0)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [logError, setLogError] = useState<(RepoError & { headOid: string | null }) | null>(null)
   const [feedbackByRepo, setFeedbackByRepo] = useState<ReadonlyMap<string, RepoFeedback>>(() => new Map())
   const updateFeedback = useCallback((repoId: string, feedback: RepoFeedback): void => {
     setFeedbackByRepo(current => new Map(current).set(repoId, feedback))
@@ -546,18 +540,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   // A changed project view means files may have changed under a selection that still exists.
   useEffect(() => { setReload(count => count + 1) }, [view])
 
-  // History.
-  useEffect(() => {
-    if (tab !== 'history' || !repo || repo.state !== 'ready') return
-    let stale = false
-    // A new first page replaces the list, so any page still loading for the old one no longer applies.
-    moreRequest.current = null
-    setLoadingMore(false)
-    window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, 0)
-      .then(entries => { if (!stale) { setLog({ repoId: repo.id, headOid: repo.headOid, entries, done: entries.length < HISTORY_PAGE }); setLogError(null) } })
-      .catch((cause: unknown) => { if (!stale) setLogError({ repoId: repo.id, headOid: repo.headOid, message: errorMessage(cause) }) })
-    return () => { stale = true }
-  }, [profileId, tab, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
   // Amend: the last commit's message and where it is published, whenever amending is on and the commit changes.
   useEffect(() => {
     if (!amending || !repo || repo.state !== 'ready' || repo.headOid === null) return
@@ -588,29 +570,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       .catch((cause: unknown) => { if (!stale) setWorktreeError({ repoId: repo.id, message: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload, view]) // eslint-disable-line react-hooks/exhaustive-deps
-  const loadMore = (): void => {
-    if (!repo || !log || moreRequest.current !== null) return
-    const { repoId, headOid } = log
-    const skip = log.entries.length
-    const id = ++moreCounter.current
-    moreRequest.current = id
-    setLoadingMore(true)
-    window.copilotDesktop.gitLog(profileId, repo.id, HISTORY_PAGE, skip)
-      .then(more => {
-        if (moreRequest.current !== id || visibleRepo.current !== repoId) return
-        setLog(current => {
-          // Extend only the very list this page continues: same repository, same commit, and nothing added since.
-          if (!current || current.repoId !== repoId || current.headOid !== headOid || current.entries.length !== skip) return current
-          const known = new Set(current.entries.map(entry => entry.hash))
-          return { ...current, entries: [...current.entries, ...more.filter(entry => !known.has(entry.hash))], done: more.length < HISTORY_PAGE }
-        })
-      })
-      .catch((cause: unknown) => {
-        if (moreRequest.current === id && visibleRepo.current === repoId) setLogError({ repoId, headOid, message: errorMessage(cause) })
-      })
-      .finally(() => { if (moreRequest.current === id) { moreRequest.current = null; setLoadingMore(false) } })
-  }
-
   const trust = (): void => {
     if (!repo?.configHash) return
     setWorking(true)
@@ -1100,24 +1059,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                 </>
               )}
 
-              {tab === 'history' && (
-                <div className="git-history">
-                  {logError?.repoId === repoId && logError.headOid === repo.headOid && <p className="git-message git-message-error" role="alert">{logError.message}</p>}
-                  {log && log.repoId === repo.id && log.entries.length === 0 && <p className="git-message" role="status">No commits yet.</p>}
-                  {log && log.repoId === repo.id && (
-                    <ol className="git-log">
-                      {log.entries.map(entry => (
-                        <li key={entry.hash}>
-                          <span className="git-log-subject" title={entry.subject}>{entry.subject}</span>
-                          {entry.refs.length > 0 && <span className="git-log-refs">{entry.refs.join(', ')}</span>}
-                          <span className="git-log-meta"><code>{entry.hash.slice(0, 7)}</code> · {entry.author} · {new Date(entry.date).toLocaleDateString()}</span>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  {log && log.repoId === repo.id && !log.done && <button type="button" disabled={loadingMore} onClick={loadMore}>{loadingMore ? 'Loading…' : 'Load more'}</button>}
-                </div>
-              )}
+              {tab === 'history' && <GitHistory key={JSON.stringify([profileId, repo.id, repo.headOid])}
+                profileId={profileId} repoId={repo.id} headOid={repo.headOid} />}
             </>
           )}
         </div>

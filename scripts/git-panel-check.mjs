@@ -552,8 +552,18 @@ ${point.missing}`)
     results.trustReview = true
 
     // 9b. History pages without overlap, even when "Load more" is clicked twice while a page is still loading.
+    const originalTip = git(delta, 'rev-parse', 'HEAD').trim()
+    const expectedHashes = git(delta, 'rev-list', originalTip).trim().split(/\s+/).map(hash => hash.slice(0, 7))
     const realGetLog = service.getLog.bind(service)
-    service.getLog = async (...args) => { await delay(900); return realGetLog(...args) }
+    const secondPage = Promise.withResolvers()
+    const pageRequested = Promise.withResolvers()
+    service.getLog = async (...args) => {
+      if (args[4] === 50) {
+        pageRequested.resolve()
+        await secondPage.promise
+      }
+      return realGetLog(...args)
+    }
     await chooseRepo('delta')
     await until('!!document.querySelector(".git-tabs")', 'delta opens')
     await clickByText('.git-tabs button', 'History')
@@ -562,8 +572,12 @@ ${point.missing}`)
     await until('document.querySelector(".git-history > button")?.disabled === true', 'Load more is disabled while the page loads')
     assert.match(await text('.git-history > button'), /Loading/)
     await click('.git-history > button')
+    await pageRequested.promise
+    // Rewrite to a different ancestry before Git serves page two, ahead of the next project refresh.
+    git(delta, 'update-ref', 'HEAD', 'HEAD~10', originalTip)
+    git(delta, 'commit', '--only', '--amend', '--allow-empty', '-qm', 'Amended history tip')
+    secondPage.resolve()
     await until('document.querySelectorAll(".git-log li").length >= 100', 'second page appended')
-    await delay(1600)
     const hashes = () => ui('[...document.querySelectorAll(".git-log-meta code")].map(element => element.innerText)')
     let seen = await hashes()
     assert.equal(seen.length, 100, 'two quick clicks append one page, not two')
@@ -573,6 +587,9 @@ ${point.missing}`)
     seen = await hashes()
     assert.equal(new Set(seen).size, 120, 'every commit is listed exactly once and none is skipped')
     assert.equal(await ui('!document.querySelector(".git-history > button")'), true, 'no Load more once the history is complete')
+    assert.deepEqual(seen, expectedHashes, 'every page came from the tip shown before the amend')
+    service.requestRefresh(PROFILE)
+    await until('document.querySelector(".git-log-subject")?.textContent === "Amended history tip" && document.querySelectorAll(".git-log li").length === 50', 'observing the amended tip restarts history')
     service.getLog = realGetLog
     results.historyPaging = true
 

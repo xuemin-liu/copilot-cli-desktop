@@ -101,12 +101,18 @@ export function diffArgs(options: { staged: boolean; path?: string; alsoPath?: s
   return args
 }
 
-export function logArgs(options: { limit: number; skip?: number }): string[] {
+export function commitOid(value: unknown): string {
+  if (typeof value !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) throw new Error('Invalid commit')
+  return value
+}
+
+export function logArgs(options: { limit: number; skip?: number; revision?: string }): string[] {
   return [
     'log', '-z', '--no-show-signature', '--no-ext-diff', '--no-textconv', '--no-color',
     `--max-count=${boundedInteger(options.limit, 'limit', 500)}`,
     `--skip=${boundedInteger(options.skip ?? 0, 'skip', 1_000_000)}`,
     `--format=${GIT_LOG_FORMAT}`,
+    ...(options.revision === undefined ? [] : [commitOid(options.revision), '--']),
   ]
 }
 
