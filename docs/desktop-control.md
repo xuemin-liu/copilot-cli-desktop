@@ -8,11 +8,13 @@ Windows 10 and 11 only. On macOS and Linux the setting is shown but can't be tur
 
 ## Turning it on
 
-1. **Settings → Desktop control:** check *Let sessions use the mouse and keyboard in other apps when I turn it on for
-   them*. Sessions that start from then on get the desktop control helper. A session that was already running needs a
+1. In **Settings → Desktop control**, check **Let sessions request desktop control**.
+   Sessions that start from then on get the desktop control helper. A session that was already running needs a
    restart (↻ in its header). Read-only sessions, side chats and remote sessions never get it.
-2. **In the session:** click the monitor button in the session's header, then **Turn on**. Only you can do this; Copilot
-   can't turn it on for itself.
+2. The first desktop action opens a prompt naming the session, action and target. Choose **Allow once** for that
+   command or **Allow for this session** to keep control on. **Deny** cancels the request. An approved request
+   continues automatically. Checking status never opens a prompt. You can also click the monitor button in the
+   session header and select **Turn on**.
 
 While it is on, a red border and a banner show on every display:
 *Copilot is controlling your computer — press Ctrl+Alt+Shift+X to stop*. Both ignore the mouse and are left out of

@@ -53,6 +53,7 @@ class FakeMonitor implements DesktopInputMonitor {
 
 interface Harness {
   control: DesktopControl
+  host: DesktopControlHost
   native: FakeNative
   monitor: FakeMonitor
   folder: string
@@ -78,7 +79,7 @@ async function harness(t: test.TestContext): Promise<Harness> {
     ownProgramPath: OWN,
     reservedAccelerators: () => ['CommandOrControl+Alt+H', 'Control+Alt+Shift+X'],
     stopKeyLabel: 'Ctrl+Alt+Shift+X',
-    sessionFolder: () => folder,
+    sessionFolder: id => id === 'tab' ? folder : join(folder, id),
     sessionRefusal: () => refusal.value,
     sessionTitle: () => 'Session',
     approve: async request => { asked.push(request.app); return answers.shift() ?? 'deny' },
@@ -93,7 +94,8 @@ async function harness(t: test.TestContext): Promise<Harness> {
   }
   const control = new DesktopControl(host, native, monitor)
   t.after(() => control.dispose())
-  return { control, native, monitor, folder, answers, asked, paint: value => { fill = value }, overlay, refusal }
+  await control.register('tab')
+  return { control, host, native, monitor, folder, answers, asked, paint: value => { fill = value }, overlay, refusal }
 }
 
 /** Notepad at (100,100) 400×300, in front of everything, focused, with a session-approved grant. */
@@ -114,10 +116,12 @@ async function refused(promise: Promise<unknown>, pattern: RegExp): Promise<void
   await assert.rejects(promise, (error: unknown) => error instanceof DesktopControlError && pattern.test(error.message))
 }
 
-test('requests are refused until the person turns control on, and the state file holds the token only while it is on', async t => {
+test('eligible sessions start off, support manual activation and revoke their credential on close', async t => {
   const h = await harness(t)
-  await refused(h.control.handle('tab', 'status', {}), /off for this session/)
+  assert.equal((await h.control.handle('tab', 'status', {})).enabled, false)
+  assert.deepEqual(h.asked, [])
   h.refusal.value = 'Allow desktop control in Settings first.'
+  await refused(h.control.handle('tab', 'windows', {}), /Settings/)
   await refused(h.control.enable('tab'), /Settings/)
   h.refusal.value = null
   await h.control.enable('tab')
@@ -127,14 +131,101 @@ test('requests are refused until the person turns control on, and the state file
   assert.match(state.token, /^[a-f0-9]{64}$/)
   assert.equal((await h.control.handle('tab', 'status', {})).enabled, true)
   await h.control.disable('tab')
-  assert.equal(existsSync(desktopControlStatePath(h.folder)), false)
   assert.equal(h.monitor.running, false)
   assert.deepEqual(h.overlay.at(-1), { active: false, paused: false })
-  await refused(h.control.handle('tab', 'windows', {}), /off for this session/)
+  assert.equal((await h.control.handle('tab', 'status', {})).enabled, false)
+  await h.control.forget('tab')
+  assert.equal(existsSync(desktopControlStatePath(h.folder)), false)
+  await refused(h.control.handle('tab', 'windows', {}), /unavailable for this session/)
+})
+
+test('the helper’s first request asks for the named action and resumes only after approval', async t => {
+  const h = await harness(t)
+  h.native.list = [window('11', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 })]
+  const prompts: Parameters<DesktopControlHost['approve']>[0][] = []
+  let captureCount = 0
+  const capture = h.host.capture
+  h.host.capture = (...args) => { captureCount++; return capture(...args) }
+  h.host.approve = async request => {
+    prompts.push(request)
+    assert.equal(h.control.isEnabled('tab'), request.scope !== 'off')
+    return h.answers.shift() ?? 'deny'
+  }
+  const helper = async (command: string, body: Record<string, unknown>) => {
+    const { port, token } = JSON.parse(await readFile(desktopControlStatePath(h.folder), 'utf8'))
+    return post(port, '/desktop/' + command, { authorization: 'Bearer ' + token }, JSON.stringify(body))
+  }
+  assert.equal((await helper('screenshot', { target: '11' })).status, 403)
+  assert.equal(captureCount, 0)
+  assert.equal(h.monitor.running, false)
+  h.answers.push('once')
+  const shot = await helper('screenshot', { target: '11' })
+  assert.equal(shot.status, 200)
+  const click = { frameId: JSON.parse(shot.body).frameId, x: 10, y: 20 }
+  assert.equal(h.control.isEnabled('tab'), false)
+  assert.equal(captureCount, 1)
+  h.answers.push('session')
+  assert.equal((await helper('click', click)).status, 200)
+  assert.deepEqual(h.native.actions, ['click 110,120 left 1'])
+  assert.equal(h.control.isEnabled('tab'), true)
+  assert.equal((await helper('click', click)).status, 200)
+  assert.deepEqual(prompts.map(p => [p.tabId, p.command, p.app, p.scope]), [
+    ['tab', 'screenshot', 'notepad', 'off'], ['tab', 'screenshot', 'notepad', 'off'], ['tab', 'click', 'notepad', 'off'],
+  ])
+  assert.equal((await helper('screenshot', { target: 'screen' })).status, 403)
+  assert.equal(prompts.at(-1)?.screen, true)
+})
+
+test('turning off pending first-use approval cancels the dialog and ignores a late Allow', async t => {
+  const h = await harness(t)
+  let show!: (signal: AbortSignal) => void
+  let allow!: (answer: DesktopApproval) => void
+  const opened = new Promise<AbortSignal>(resolve => { show = resolve })
+  h.host.approve = (_request, signal) => { show(signal); return new Promise(resolve => { allow = resolve }) }
+  const pending = h.control.handle('tab', 'windows', {})
+  const signal = await opened
+  await refused(h.control.handle('tab', 'windows', {}), /still running/)
+  assert.equal(h.monitor.running, false)
+  await h.control.disableAll('Turned off in Settings.')
+  assert.equal(signal.aborted, true)
+  allow('session')
+  await refused(pending, /turned off/)
+  assert.deepEqual(h.control.enabledTabs(), [])
+  assert.deepEqual(h.native.actions, [])
+})
+
+test('a one-time click rechecks its frame after approval and expires when the target changes', async t => {
+  const h = await harness(t)
+  h.native.list = [window('11', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 })]
+  h.answers.push('once')
+  const shot = await h.control.handle('tab', 'screenshot', { target: '11' })
+  h.host.approve = async () => { h.paint(0); return 'once' }
+  await refused(h.control.handle('tab', 'click', { frameId: shot.frameId, x: 10, y: 20 }), /screen changed/)
+  assert.deepEqual(h.native.actions, [])
+  assert.equal(h.control.isEnabled('tab'), false)
+})
+
+test('closing the helper request dismisses first-use approval without granting session access', async t => {
+  const h = await harness(t)
+  let show!: (signal: AbortSignal) => void
+  const opened = new Promise<AbortSignal>(resolve => { show = resolve })
+  h.host.approve = (_request, signal) => new Promise(resolve => {
+    show(signal)
+    signal.addEventListener('abort', () => resolve('session'), { once: true })
+  })
+  const client = new AbortController()
+  const pending = h.control.handle('tab', 'windows', {}, client.signal)
+  const dialog = await opened
+  client.abort()
+  assert.equal(dialog.aborted, true)
+  await refused(pending, /request was canceled/)
+  assert.equal(h.monitor.running, false)
+  assert.equal(h.control.isEnabled('tab'), false)
 })
 
 test('only one session controls the desktop at a time', async t => {
   const h = await harness(t)
+  await Promise.all([h.control.register('a'), h.control.register('b')])
   await h.control.enable('a')
   await h.control.enable('b')
   assert.deepEqual(h.control.enabledTabs(), ['b'])
@@ -381,6 +472,7 @@ test('a stop while typing waits for the focus to move after a Tab ends the reque
 
 test('two sessions turning control on at once leave one owner', async t => {
   const h = await harness(t)
+  await Promise.all([h.control.register('a'), h.control.register('b')])
   await Promise.all([h.control.enable('a'), h.control.enable('b')])
   assert.deepEqual(h.control.enabledTabs(), ['b'])
 })

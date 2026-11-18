@@ -197,7 +197,7 @@ import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
 import { withShutdownDeadline } from './shutdown-deadline.js'
 import { BrowserDebug } from './browser-debug.js'
 import { browserSessionPaths, prepareBrowserSessionEnvironment } from './browser-session.js'
-import { DesktopControl, DesktopControlError } from './desktop-control.js'
+import { DesktopControl, DesktopControlError, type DesktopControlHost } from './desktop-control.js'
 import { prepareDesktopControlSessionEnvironment } from './desktop-control-session.js'
 import { SHARED_BROWSER_PROFILE_ID, browserProfilePaths, selectBrowserProfileId } from './browser-profile.js'
 import { browserProfileHasPartition, clearBrowserStorage, pruneBrowserProfiles, pruneBrowserLaunches, removeBrowserProfileSettings, removeBrowserLaunch } from './browser-cleanup.js'
@@ -298,8 +298,6 @@ let updateController: DesktopUpdateController | null = null
 let desktopControl: DesktopControl | null = null
 let desktopOverlay: import('./desktop-capture.js').DesktopOverlay | null = null
 let desktopScreenLocked = false
-/** Sessions started with desktop control's helper and instructions; only these can turn it on. */
-const desktopControlTabs = new Set<string>()
 let updateCheckTimer: NodeJS.Timeout | null = null
 let copilotResolutionRefreshTimer: NodeJS.Timeout | null = null
 let copilotResolutionProbePromise: Promise<{ resolution: CopilotResolution; sequence: number }> | null = null
@@ -585,14 +583,11 @@ const launchId = randomUUID()
 function browserSessionRoot(): string { return join(app.getPath('userData'), 'browser-sessions', launchId) }
 
 /** A session gets desktop control's helper when Settings allows it and the session can run shell commands on this computer. */
-async function prepareDesktopControlEnvironment(tabId: string, preset: string | null, sideChat: boolean, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv> {
-  if (process.platform !== 'win32' || !desktopConfig.desktopControl || sideChat || preset === null || preset === 'read-only') {
-    desktopControlTabs.delete(tabId)
-    return environment
+async function prepareDesktopControlEnvironment(tabId: string, preset: string | null, sideChat: boolean, environment: NodeJS.ProcessEnv): Promise<NodeJS.ProcessEnv | null> {
+  if (!desktopControl || !desktopConfig.desktopControl || sideChat || preset === null || preset === 'read-only') {
+    return null
   }
-  const next = await prepareDesktopControlSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, DESKTOP_STOP_SHORTCUT_LABEL, environment)
-  desktopControlTabs.add(tabId)
-  return next
+  return prepareDesktopControlSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, DESKTOP_STOP_SHORTCUT_LABEL, environment)
 }
 
 function sessionLogPath(tabId: string): string {
@@ -932,7 +927,7 @@ function snapshot(windowSessionId?: string): DesktopState {
     workflowError: workflowError ?? workflowNotice,
     meetingToolsUrl: guestMcp.url(),
     desktopControlAllowed: desktopControl !== null && desktopConfig.desktopControl,
-    desktopControlReadyTabIds: [...desktopControlTabs],
+    desktopControlReadyTabIds: state.tabs.filter(tab => desktopControl?.isRegistered(tab.id)).map(tab => tab.id),
     ...(desktopControl ? { desktopControl: Object.fromEntries(state.tabs.map(tab => [tab.id, desktopControl!.view(tab.id)])) } : {}),
   }
 }
@@ -1760,7 +1755,10 @@ function wireSessionEvents(id: string, session: PtySession): void {
   })
   session.on('desktop-event', (event: DesktopEvent) => handleDesktopEvent(id, event))
   session.on('exit', (exit: PtySessionExit) => {
-    if (managedTabs.get(id)?.session === session) void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
+    if (managedTabs.get(id)?.session === session) {
+      void projectToolService?.stopBridge(id).catch(error => logBrowserError(String(error)))
+      void desktopControl?.unregister(id, 'Turned off: the session ended.').catch(error => logBrowserError(String(error)))
+    }
     usageService?.noteSourceChanged()
     if (session.lastSessionId) {
       tabsState = setTabSessionId(tabsState, id, session.lastSessionId)
@@ -1868,6 +1866,7 @@ async function startSessionTab(
   const sessionPermissionMode = connectSessionId || sideOptions.sideChat ? null : sessionPermissionModeOverride
   pendingSessionCreations++
   let plan: Awaited<ReturnType<typeof buildSessionSpawnPlan>>
+  let desktopEnvironment: NodeJS.ProcessEnv | null
   try {
     plan = await buildSessionSpawnPlan(launchProfile, resumeMode, resumeSessionId, attachmentPaths, connectSessionId, sessionTitle)
     plan.nameSession = !autoTitle
@@ -1875,7 +1874,8 @@ async function startSessionTab(
     if (reusedSessionId) plan.sessionId = reusedSessionId
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), id, plan.env, logBrowserError)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), id).directory, await meetingControl.register(id), plan.env, { version: plan.cliVersion, sideChat: Boolean(sideOptions.sideChat), remote: Boolean(connectSessionId), preset: sessionPermissionPreset })
-    plan.env = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
+    desktopEnvironment = await prepareDesktopControlEnvironment(id, sessionPermissionPreset, Boolean(sideOptions.sideChat), plan.env)
+    if (desktopEnvironment) plan.env = desktopEnvironment
   }
   finally { pendingSessionCreations-- }
   // Recheck after credential resolution: another creation or shutdown may
@@ -1939,6 +1939,7 @@ async function startSessionTab(
       if (shuttingDown()) throw new Error('The app is shutting down or updating')
       if(sideOptions.authorizeAutomatic&&!sideOptions.authorizeAutomatic())throw new Error('Automatic work was paused')
       await projectTools().startBridge(id, profile.id, browserSessionPaths(browserSessionRoot(), id).endpoint)
+      if (desktopEnvironment) await desktopControl!.register(id)
       await session.start()
       if (shuttingDown()) {
         await session.stop()
@@ -1949,6 +1950,7 @@ async function startSessionTab(
   } catch (error) {
     await projectToolService?.stopBridge(id)
     if (managedTabs.get(id)?.session === session) {
+      await desktopControl?.forget(id)
       session.removeAllListeners()
       const wasActive = tabsState.activeTabId === id
       tabsState = closeTab(tabsState, id)
@@ -3263,7 +3265,6 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     } catch (error) { reportBrowserError(`Failed to remove browser profile for ${tabId}: ${String(error)}`) }
     try { await desktopControl?.forget(tabId) }
     catch (error) { reportBrowserError(`Failed to turn off desktop control for ${tabId}: ${String(error)}`) }
-    desktopControlTabs.delete(tabId)
     try { await removeBrowserLaunch(app.getPath('userData'), launchId, tabId) }
     catch (error) { reportBrowserError(`Failed to remove browser helper for ${tabId}: ${String(error)}`) }
     tabsState = closeTab(tabsState, tabId)
@@ -3475,9 +3476,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     if (worktreeGone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
     plan.env = await prepareBrowserSessionEnvironment(browserSessionRoot(), tabId, plan.env, logBrowserError)
     plan.env = await prepareMeetingSessionEnvironment(browserSessionPaths(browserSessionRoot(), tabId).directory, await meetingControl.register(tabId), plan.env, { version: plan.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset })
-    // The restarted process starts with control off; the person turns it on again.
-    await desktopControl?.disable(tabId, 'Turned off: the session restarted.')
-    plan.env = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
+    const desktopEnvironment = await prepareDesktopControlEnvironment(tabId, sessionPermissionPreset, Boolean(tab.sideChat), plan.env)
+    if (desktopEnvironment) plan.env = desktopEnvironment
+    await desktopControl?.unregister(tabId, 'Turned off: the session restarted.')
 
     stopRequested=true
     cancelHeldInput(tabId)
@@ -3568,9 +3569,11 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
 
     try {
       await projectTools().startBridge(tabId, tab.workspaceProfileId, browserSessionPaths(browserSessionRoot(), tabId).endpoint)
+      if (desktopEnvironment) await desktopControl!.register(tabId)
       await session.start()
       scheduleCopilotResolutionRefresh()
     } catch (error) {
+      await desktopControl?.unregister(tabId, 'Turned off: the session failed to start.')
       managedTabs.delete(tabId)
       tabsState = setTabStatus(tabsState, tabId, 'crashed')
       // The old process's PID is still sitting in tabsState from its own
@@ -4690,20 +4693,29 @@ ipcMain.handle('desktop:dock-tab', (event, tabId: unknown) => {
   return dockSessionTab(tabId)
 })
 /** Ask the person whether Copilot may control an app (or capture a whole display) in a session. */
-async function askDesktopApproval(request: { tabId: string; app: string; detail: string; warning: string | null; screen: boolean }, signal: AbortSignal): Promise<'deny' | 'once' | 'session'> {
+const askDesktopApproval: DesktopControlHost['approve'] = async (request, signal) => {
   const owner = sessionWindows.get(request.tabId) ?? mainWindow
-  if (!owner || owner.isDestroyed()) return 'deny'
+  if (!owner || owner.isDestroyed() || signal.aborted) return 'deny'
   if (owner.isMinimized()) owner.restore()
   if (!owner.isVisible()) owner.show()
   owner.focus()
   if (!owner.isFocused()) owner.flashFrame(true)
   const title = tabsState.tabs.find(tab => tab.id === request.tabId)?.title ?? 'this session'
+  const actions: Record<string, string> = {
+    windows: 'list open windows', screenshot: `take a screenshot of ${request.app}`, focus: `bring ${request.app} to the front`,
+    click: `click in ${request.app}`, move: `move the pointer in ${request.app}`, drag: `drag in ${request.app}`,
+    scroll: `scroll in ${request.app}`, type: `type in ${request.app}`, key: `send a keystroke to ${request.app}`,
+  }
+  const sessionAccess = request.screen ? 'allow full-display screenshots' : request.command === 'windows'
+    ? 'keep desktop control on and ask about each app' : `allow screenshots and input in ${request.app}`
   const { response } = await dialog.showMessageBox(owner, {
     type: request.warning ? 'warning' : 'question',
     title: 'Desktop control',
-    message: request.screen ? `Allow Copilot to capture ${request.app} in “${title}”?` : `Allow Copilot to control ${request.app} in “${title}”?`,
-    detail: [request.detail, request.warning].filter(Boolean).join('\n\n'),
-    buttons: ['Deny', 'Allow once', 'Allow for this session'],
+    message: `Allow “${title}” to ${actions[request.command]}?`,
+    detail: [request.detail, request.warning, request.scope === 'off' && 'Desktop control is off for this session.',
+      request.scope !== 'once' && `Allow once approves this action. Allow for this session will ${sessionAccess}.`].filter(Boolean).join('\n\n'),
+    buttons: request.scope === 'once' ? ['Deny', 'Allow once'] : ['Deny', 'Allow once', 'Allow for this session'],
+    // A first-use prompt can appear while the person is pressing Enter in another app.
     defaultId: 0,
     cancelId: 0,
     noLink: true,
@@ -4731,7 +4743,7 @@ async function startDesktopControl(): Promise<void> {
       if (tab.remote) return 'A remote session runs on another computer, so it can’t control this one.'
       if (tab.sideChat) return 'Side chats can’t use desktop control.'
       if (tab.cli) return `Desktop control works with Copilot sessions, not ${sessionCliLabel(tab.cli)}.`
-      if (!desktopControlTabs.has(tabId)) return 'This session started before desktop control was allowed, or it is read-only. Restart it (with shell access) to use desktop control.'
+      if (!desktopControl?.isRegistered(tabId)) return 'This session started before desktop control was allowed, or it is read-only. Restart it (with shell access) to use desktop control.'
       return null
     },
     sessionTitle: tabId => tabsState.tabs.find(tab => tab.id === tabId)?.title ?? 'Session',

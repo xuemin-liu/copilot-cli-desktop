@@ -32,6 +32,7 @@ export interface DesktopControlLogEntry {
 }
 
 export type DesktopApproval = 'deny' | 'once' | 'session'
+type DesktopAccessScope = 'off' | 'once' | 'session'
 
 export interface DesktopDisplay { id: number; bounds: DesktopRect; scaleFactor: number; primary: boolean }
 
@@ -46,7 +47,7 @@ export interface DesktopControlHost {
   /** Why a session may not use desktop control (read-only, remote, …), or null. */
   sessionRefusal(tabId: string): string | null
   sessionTitle(tabId: string): string
-  approve(request: { tabId: string; app: string; detail: string; warning: string | null; screen: boolean }, signal: AbortSignal): Promise<DesktopApproval>
+  approve(request: { tabId: string; command: string; scope: DesktopAccessScope; app: string; detail: string; warning: string | null; screen: boolean }, signal: AbortSignal): Promise<DesktopApproval>
   displays(): DesktopDisplay[]
   /** The physical area as a BGRA image of `size`, with the physical rectangles in `blank` painted over. */
   capture(bounds: DesktopRect, size: { width: number; height: number }, blank: DesktopRect[]): Promise<Buffer>
@@ -72,19 +73,20 @@ interface Frame {
   bitmap: Buffer
   blank: DesktopRect[]
   /** The windows that could be under a point when the frame was taken, front to back. */
-  layout: Array<{ id: string; bounds: DesktopRect }>
+  layout: Array<{ id: string; pid: number; bounds: DesktopRect }>
   createdAt: number
   epoch: number
 }
 
 interface TabControl {
   token: string
+  scope: DesktopAccessScope
   grants: Map<string, string>
   fullScreen: boolean
   paused: boolean
-  busy: boolean
+  action: AbortSignal | null
   frames: Frame[]
-  aborts: Set<AbortController>
+  lifetime: AbortController
   idleTimer: NodeJS.Timeout | null
   limiter: DesktopRateLimiter
 }
@@ -107,6 +109,11 @@ const COMMANDS = new Set(['status', 'windows', 'screenshot', 'click', 'move', 'd
 
 interface Target { window: DesktopNativeWindow; identity: DesktopAppIdentity; key: string; name: string }
 
+function inactiveControl(token: string): TabControl {
+  return { token, scope: 'off', grants: new Map(), fullScreen: false, paused: false, action: null, frames: [],
+    lifetime: new AbortController(), idleTimer: null, limiter: new DesktopRateLimiter(10) }
+}
+
 export function desktopControlStatePath(folder: string): string {
   return join(folder, 'desktop-control.json')
 }
@@ -123,14 +130,16 @@ export class DesktopControl {
 
   constructor(private readonly host: DesktopControlHost, private readonly native: DesktopNativeLayer, private readonly monitor: DesktopInputMonitor) {}
 
-  isEnabled(tabId: string): boolean { return this.tabs.has(tabId) }
+  isRegistered(tabId: string): boolean { return this.tabs.has(tabId) }
 
-  enabledTabs(): string[] { return [...this.tabs.keys()] }
+  isEnabled(tabId: string): boolean { return (this.tabs.get(tabId)?.scope ?? 'off') !== 'off' }
+
+  enabledTabs(): string[] { return [...this.tabs.keys()].filter(id => this.isEnabled(id)) }
 
   view(tabId: string): DesktopControlTabView {
     const control = this.tabs.get(tabId)
     return {
-      enabled: Boolean(control),
+      enabled: this.isEnabled(tabId),
       paused: control?.paused ?? false,
       approvedApps: control ? [...control.grants].map(([key, name]) => ({ key, name })) : [],
       fullScreen: control?.fullScreen ?? false,
@@ -147,20 +156,52 @@ export class DesktopControl {
     return run
   }
 
-  enable(tabId: string): Promise<void> { return this.serial(() => this.enableNow(tabId)) }
+  /** Give the helper an authenticated route to request approval, without granting desktop access. */
+  register(tabId: string): Promise<void> {
+    return this.serial(async () => {
+      if (!this.tabs.has(tabId)) this.tabs.set(tabId, inactiveControl(await this.newToken(tabId)))
+    })
+  }
+
+  private async newToken(tabId: string): Promise<string> {
+    const token = randomBytes(32).toString('hex')
+    await this.publishToken(tabId, token)
+    return token
+  }
+
+  private async publishToken(tabId: string, token: string): Promise<void> {
+    const port = await this.startServer()
+    await writeFileAtomic(desktopControlStatePath(this.host.sessionFolder(tabId)), JSON.stringify({ pid: process.pid, port, token }))
+  }
+
+  enable(tabId: string): Promise<void> {
+    return this.serial(async () => {
+      const control = this.tabs.get(tabId)
+      if (!control) throw new DesktopControlError(this.host.sessionRefusal(tabId) ?? 'Restart this session to use desktop control.')
+      if (control.scope === 'session') return
+      if (control.action) await this.disableNow(tabId, 'The user turned on desktop control manually.')
+      const current = this.tabs.get(tabId)!
+      current.action = current.lifetime.signal
+      try { await this.enableNow(tabId, current, 'session') }
+      finally { current.action = null }
+    })
+  }
 
   disable(tabId: string, message = 'Desktop control turned off.'): Promise<void> { return this.serial(() => this.disableNow(tabId, message)) }
 
   disableAll(message: string): Promise<void> {
-    return this.serial(async () => { for (const tabId of [...this.tabs.keys()]) await this.disableNow(tabId, message) })
+    return this.serial(async () => { await Promise.all([...this.tabs.keys()].map(tabId => this.disableNow(tabId, message))) })
   }
 
-  private async enableNow(tabId: string): Promise<void> {
-    if (this.tabs.has(tabId)) return
+  private async enableNow(tabId: string, control: TabControl, scope: 'once' | 'session'): Promise<void> {
+    this.alive(tabId, control)
     const refusal = this.host.sessionRefusal(tabId)
     if (refusal) throw new DesktopControlError(refusal)
     // Only one session controls the desktop at a time; turning it on here turns it off elsewhere.
-    for (const other of [...this.tabs.keys()]) await this.disableNow(other, 'Turned off: desktop control was turned on in another session.')
+    for (const other of this.tabs.keys()) {
+      if (other !== tabId) await this.disableNow(other, 'Turned off: desktop control was turned on in another session.')
+    }
+    control.token = await this.newToken(tabId)
     if (!this.monitorRunning) {
       // Without the monitor, the person's own input would no longer pause control: fail closed.
       await this.monitor.start(() => {
@@ -168,14 +209,11 @@ export class DesktopControl {
       })
       this.monitorRunning = true
     }
-    const port = await this.startServer()
-    const control: TabControl = {
-      token: randomBytes(32).toString('hex'), grants: new Map(), fullScreen: false, paused: false, busy: false, frames: [],
-      aborts: new Set(), idleTimer: null, limiter: new DesktopRateLimiter(10),
+    control.scope = scope
+    if (control.action?.aborted || this.host.sessionRefusal(tabId)) {
+      await this.disableNow(tabId, 'Desktop control activation was canceled.')
+      throw new DesktopControlError('Desktop control activation was canceled.', 409)
     }
-    const folder = this.host.sessionFolder(tabId)
-    await writeFileAtomic(desktopControlStatePath(folder), JSON.stringify({ pid: process.pid, port, token: control.token }))
-    this.tabs.set(tabId, control)
     if (!this.host.stopKey(true, () => { void this.disableAll('Stopped with the stop key.') })) {
       await this.disableNow(tabId, 'Turned off: the stop key could not be registered.')
       throw new DesktopControlError(`The stop key (${this.host.stopKeyLabel}) is in use by another app, so desktop control stays off.`)
@@ -186,16 +224,28 @@ export class DesktopControl {
     this.host.changed()
   }
 
-  private async disableNow(tabId: string, message: string): Promise<void> {
+  private async disableNow(tabId: string, message: string, keepFrame?: Frame, closing = false): Promise<void> {
     const control = this.tabs.get(tabId)
     if (!control) return
-    this.tabs.delete(tabId)
+    const rotate = control.scope !== 'off' || control.action !== null
+    const next = inactiveControl(rotate ? randomBytes(32).toString('hex') : control.token)
+    if (keepFrame) {
+      next.frames.push(keepFrame)
+      next.idleTimer = setTimeout(() => { next.frames.length = 0 }, DESKTOP_FRAME_MAX_AGE_MS)
+      next.idleTimer.unref()
+    }
+    if (closing) this.tabs.delete(tabId)
+    else this.tabs.set(tabId, next)
     if (control.idleTimer) clearTimeout(control.idleTimer)
-    for (const abort of control.aborts) abort.abort()
+    control.lifetime.abort()
     control.frames.length = 0
-    await removeStateFile(desktopControlStatePath(this.host.sessionFolder(tabId)), control.token)
+    if (closing) await removeStateFile(desktopControlStatePath(this.host.sessionFolder(tabId)), control.token)
+    if (!rotate) {
+      if (closing) this.host.changed()
+      return
+    }
     this.record(tabId, { command: 'off', result: 'ok', message })
-    if (this.tabs.size === 0) {
+    if (control.scope !== 'off') {
       this.host.stopKey(false, () => {})
       if (this.monitorRunning) {
         this.monitorRunning = false
@@ -204,6 +254,7 @@ export class DesktopControl {
     }
     this.refreshOverlay()
     this.host.changed()
+    if (!closing) await this.publishToken(tabId, next.token)
   }
 
   resume(tabId: string): void {
@@ -223,19 +274,23 @@ export class DesktopControl {
 
   setFullScreen(tabId: string, allowed: boolean): void {
     const control = this.tabs.get(tabId)
-    if (!control || control.fullScreen === allowed) return
+    if (!control || control.scope === 'off' || control.fullScreen === allowed) return
     control.fullScreen = allowed
     this.host.changed()
   }
 
-  /** A session closed: forget its control and its log. */
+  /** Revoke the helper credential when its session is restarted or closed. */
+  unregister(tabId: string, message: string): Promise<void> {
+    return this.serial(() => this.disableNow(tabId, message, undefined, true))
+  }
+
   async forget(tabId: string): Promise<void> {
-    await this.disable(tabId)
+    await this.unregister(tabId, 'Desktop control stopped for this session.')
     this.logs.delete(tabId)
   }
 
   async dispose(): Promise<void> {
-    await this.disableAll('Desktop control turned off: the app is closing.')
+    await Promise.all([...this.tabs.keys()].map(id => this.forget(id)))
     const server = this.server
     this.server = null
     this.serverStart = null
@@ -244,7 +299,7 @@ export class DesktopControl {
   }
 
   private refreshOverlay(): void {
-    const controls = [...this.tabs.values()]
+    const controls = [...this.tabs.values()].filter(control => control.scope !== 'off')
     this.host.overlay({ active: controls.length > 0, paused: controls.some(control => control.paused) })
   }
 
@@ -275,20 +330,36 @@ export class DesktopControl {
   // Requests
 
   /** Handle one helper request for a session; every refusal is logged and thrown as a DesktopControlError. */
-  async handle(tabId: string, command: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async handle(tabId: string, command: string, body: Record<string, unknown>, signal = new AbortController().signal): Promise<Record<string, unknown>> {
     const control = this.tabs.get(tabId)
-    if (!control) throw new DesktopControlError('Desktop control is off for this session. Ask the user to turn it on from the session’s toolbar.', 409)
+    if (!control) throw new DesktopControlError('Desktop control is unavailable for this session. Check Settings and restart an eligible session.', 409)
     if (!COMMANDS.has(command)) throw new DesktopControlError(`Unknown desktop command: ${command}`, 404)
-    this.touch(tabId)
+    const refusal = this.host.sessionRefusal(tabId)
+    if (refusal) throw new DesktopControlError(refusal, 403)
+    if (control.scope === 'off' && command === 'status') return { enabled: false, session: this.host.sessionTitle(tabId) }
+    if (control.scope !== 'off') this.touch(tabId)
     if (command === 'status') return this.status(tabId, control)
     if (control.paused) throw this.refuse(tabId, command, undefined, 'Desktop control is paused because the user used the mouse or keyboard. Ask the user to click Resume in the session’s Desktop control panel.', 409)
-    if (control.busy) throw this.refuse(tabId, command, undefined, 'Another desktop action is still running; wait for it to finish.', 409)
-    control.busy = true
+    if (control.action) throw this.refuse(tabId, command, undefined, 'Another desktop action is still running; wait for it to finish.', 409)
+    control.action = signal
+    let keepFrame: Frame | undefined
     try {
       if (this.host.locked() || !await this.native.desktopAvailable()) throw new DesktopControlError('The desktop isn’t available (it is locked, or a sign-in or administrator prompt is showing).', 409)
       switch (command) {
-        case 'windows': return await this.windows(tabId)
-        case 'screenshot': return await this.screenshot(tabId, control, body)
+        case 'windows': {
+          if (control.scope === 'off') {
+            const answer = await this.ask(tabId, control, command, { app: 'open windows', detail: 'List visible apps and their window titles.', warning: null, screen: false })
+            if (answer === 'deny') throw this.refuse(tabId, command, undefined, 'The user did not allow listing open windows.', 403)
+          }
+          const result = await this.windows(tabId)
+          this.alive(tabId, control)
+          return result
+        }
+        case 'screenshot': {
+          const result = await this.screenshot(tabId, control, body)
+          keepFrame = control.frames.at(-1)
+          return result
+        }
         case 'focus': return await this.focus(tabId, control, body)
         default: return await this.input(tabId, control, command, body)
       }
@@ -298,13 +369,19 @@ export class DesktopControl {
       this.host.changed()
       throw error
     } finally {
-      control.busy = false
+      if (control.scope === 'once') {
+        await this.serial(async () => {
+          if (this.tabs.get(tabId) === control) await this.disableNow(tabId, 'One-time desktop access ended.', keepFrame)
+        })
+      }
+      control.action = null
     }
   }
 
   /** Checked right before anything is sent to the desktop: control may have been turned off (or off and on) meanwhile. */
   private alive(tabId: string, control: TabControl): void {
     if (this.tabs.get(tabId) !== control) throw new DesktopControlError('Desktop control was turned off.', 409)
+    if (control.action?.aborted) throw new DesktopControlError('The desktop request was canceled.', 409)
   }
 
   private refuse(tabId: string, command: string, app: string | undefined, message: string, status = 400): DesktopControlError {
@@ -349,19 +426,23 @@ export class DesktopControl {
    * Ask the person, then put back the window that was in front: the prompt raises this app's window, which would
    * otherwise cover the app Copilot is about to capture or click.
    */
-  private async ask(tabId: string, control: TabControl, request: Omit<Parameters<DesktopControlHost['approve']>[0], 'tabId'>): Promise<DesktopApproval> {
-    const abort = new AbortController()
-    control.aborts.add(abort)
+  private async ask(tabId: string, control: TabControl, command: string, request: Omit<Parameters<DesktopControlHost['approve']>[0], 'tabId' | 'command' | 'scope'>): Promise<DesktopApproval> {
     const front = await this.native.foreground().catch(() => null)
-    try {
-      const answer = await this.host.approve({ tabId, ...request }, abort.signal)
-      this.alive(tabId, control)
-      if (answer !== 'deny' && front) {
-        await this.native.focus(front).catch(() => false)
-        await new Promise(resolve => setTimeout(resolve, 150))
-      }
-      return answer
-    } finally { control.aborts.delete(abort) }
+    this.alive(tabId, control)
+    const scope = control.scope
+    const signal = AbortSignal.any([control.action!, control.lifetime.signal])
+    const answer = await this.host.approve({ tabId, command, scope, ...request }, signal)
+    this.alive(tabId, control)
+    if (answer === 'deny') return answer
+    if (this.host.locked() || !await this.native.desktopAvailable()) throw new DesktopControlError('The desktop is no longer available.', 409)
+    if (scope === 'off') await this.serial(() => this.enableNow(tabId, control, answer))
+    this.alive(tabId, control)
+    if (front) {
+      await this.native.focus(front).catch(() => false)
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+    this.alive(tabId, control)
+    return answer
   }
 
   /** Ask the user to approve an app for this session, unless it already is. */
@@ -371,7 +452,7 @@ export class DesktopControl {
       ? `${target.name} can open files and start programs. Approving it lets Copilot start programs from it, outside Copilot CLI’s shell approvals.`
       : null
     const detail = target.identity.kind === 'program' ? target.identity.path : target.identity.aumid
-    const answer = await this.ask(tabId, control, { app: target.name, detail, warning, screen: false })
+    const answer = await this.ask(tabId, control, command, { app: target.name, detail, warning, screen: false })
     if (answer === 'deny') throw this.refuse(tabId, command, target.name, `The user did not allow Copilot to control ${target.name}.`, 403)
     if (answer === 'session') { control.grants.set(target.key, target.name); this.host.changed() }
     return answer
@@ -425,12 +506,13 @@ export class DesktopControl {
       }
       const asked = displayAt()
       if (!control.fullScreen) {
-        const answer = await this.ask(tabId, control, { app: 'your whole screen', detail: `Display ${asked.index} (${asked.display.bounds.width}×${asked.display.bounds.height})`, warning: 'A full-screen capture shows every app on that display except blocked ones, which are painted over.', screen: true })
+        const answer = await this.ask(tabId, control, 'screenshot', { app: 'your whole screen', detail: `Display ${asked.index} (${asked.display.bounds.width}×${asked.display.bounds.height})`, warning: 'A full-screen capture shows every app on that display except blocked ones, which are painted over.', screen: true })
         if (answer === 'deny') throw this.refuse(tabId, 'screenshot', 'screen', 'The user did not allow a full-screen capture.', 403)
         if (answer === 'session') { control.fullScreen = true; this.host.changed() }
       }
       // Windows may have opened or moved while the person answered: paint over what is on the screen now.
       const { display } = displayAt()
+      if (display.id !== asked.display.id) throw new DesktopControlError('The display changed; request a new screenshot.', 409)
       const current = await this.native.windows()
       const size = desktopFrameSize(display.bounds)
       frame = { tabId, kind: 'screen', windowId: null, identity: null, bounds: display.bounds, ...size, blank: this.blankFor('screen', current, null, null), layout: this.layout(current) }
@@ -448,11 +530,13 @@ export class DesktopControl {
       // An approval prompt changes which windows are in front: read them again.
       const current = await this.native.windows()
       const shown = current.find(entry => entry.id === window.id)
-      if (!shown) throw new DesktopControlError('That window closed; run windows again.')
+      const currentTarget = shown && this.target(shown)
+      if (!shown || shown.minimized || !currentTarget || 'blocked' in currentTarget || currentTarget.key !== target.key || shown.pid !== window.pid) throw new DesktopControlError('That window changed or closed; run windows again.')
       const size = desktopFrameSize(shown.bounds)
       frame = { tabId, kind: 'window', windowId: shown.id, identity: target.key, bounds: shown.bounds, ...size, blank: this.blankFor('window', current, shown, target.key), layout: this.layout(current) }
       app = target.name
     }
+    this.alive(tabId, control)
     const bitmap = await this.host.capture(frame.bounds, { width: frame.width, height: frame.height }, frame.blank)
     this.alive(tabId, control)
     const stored: Frame = { ...frame, bitmap, id: `f${randomBytes(6).toString('hex')}`, createdAt: Date.now(), epoch: this.epoch }
@@ -477,6 +561,9 @@ export class DesktopControl {
     if ('blocked' in target) throw this.refuse(tabId, 'focus', undefined, DESKTOP_BLOCK_MESSAGES[target.blocked], 403)
     if (!control.limiter.take()) throw new DesktopControlError('Too many desktop actions; at most 10 a second.', 429)
     await this.approveApp(tabId, control, 'focus', target)
+    const current = (await this.native.windows()).find(entry => entry.id === window.id)
+    const checkedTarget = current && this.target(current)
+    if (!checkedTarget || 'blocked' in checkedTarget || checkedTarget.key !== target.key || current?.pid !== window.pid) throw new DesktopControlError('That window changed or closed; run windows again.', 409)
     this.alive(tabId, control)
     const front = await this.native.focus(window.id)
     this.record(tabId, { command: 'focus', app: target.name, result: front ? 'ok' : 'failed', message: front ? 'Brought to the front.' : 'Windows did not bring it to the front.' })
@@ -499,7 +586,7 @@ export class DesktopControl {
   }
 
   private layout(windows: DesktopNativeWindow[]): Frame['layout'] {
-    return windows.filter(window => !window.clickThrough && !window.minimized).map(window => ({ id: window.id, bounds: window.bounds }))
+    return windows.filter(window => !window.clickThrough && !window.minimized).map(window => ({ id: window.id, pid: window.pid, bounds: window.bounds }))
   }
 
   /**
@@ -508,7 +595,7 @@ export class DesktopControl {
    */
   private sameWindowAt(frame: Frame, hit: DesktopNativeWindow, point: { x: number; y: number }): boolean {
     const shown = frame.layout.find(window => rectContains(window.bounds, point))
-    return shown !== undefined && shown.id === hit.id && sameRect(shown.bounds, hit.bounds)
+    return shown !== undefined && shown.id === hit.id && shown.pid === hit.pid && sameRect(shown.bounds, hit.bounds)
   }
 
   /** The window under a point must be an approved app that the frame showed; returns it, approving it if needed. */
@@ -599,10 +686,12 @@ export class DesktopControl {
       // focus, and any key (a letter, or Ctrl+V of a clipboard Copilot set) can enter text, so `key` is checked too.
       const ready = async (): Promise<DesktopNativeFocus> => {
         const now = this.keyboardTarget(tabId, command, frame, await this.native.windows(), await this.native.foreground(), resolved.window.id)
+        if (now.key !== resolved.key || now.window.pid !== resolved.window.pid) throw this.refuse(tabId, command, now.name, 'The focused app changed; take a new screenshot.', 409)
         const focused = await this.native.focused().catch(() => UNKNOWN_FOCUS)
         if (focused.pid !== now.window.pid) throw this.refuse(tabId, command, now.name, 'Desktop control could not tell which control has the keyboard focus, so it did not type.', 409)
         if (focused.password !== false) throw this.refuse(tabId, command, now.name, 'The focused control is a password field (or could not be checked), so desktop control did not type. Ask the user to enter it.', 403)
         this.alive(tabId, control)
+        this.frameFor(tabId, control, command, frame.id)
         return focused
       }
       summary = command === 'type' ? `Typed ${text.length} characters.` : `Pressed ${[...chord!.modifiers, chord!.key].join('+')}.`
@@ -631,6 +720,12 @@ export class DesktopControl {
       target = await this.pointTarget(tabId, control, command, frame, windows, point)
       if (command === 'click' || command === 'scroll' || command === 'drag') {
         windows = await this.native.windows()
+        this.alive(tabId, control)
+        const hit = this.hitTest(windows, point)
+        const current = hit && this.target(hit)
+        if (!current || 'blocked' in current || current.key !== target.key || !this.sameWindowAt(frame, current.window, point)) {
+          throw this.refuse(tabId, command, target.name, 'The screen changed; take a new screenshot.', 409)
+        }
         if (!await this.patchUnchanged(frame, windows, body.x as number, body.y as number)) {
           throw this.refuse(tabId, command, target.name, 'The screen changed around that point; take a new screenshot.', 409)
         }
@@ -647,6 +742,7 @@ export class DesktopControl {
           }
         }
         this.alive(tabId, control)
+        this.frameFor(tabId, control, command, frame.id)
       }
       const start = [{ at: point, windowId: target.window.id }]
       if (command === 'click') {
@@ -734,6 +830,7 @@ export class DesktopControl {
     if (request.headers.origin || request.headers.host !== `127.0.0.1:${port}`) { send(403, { message: 'Forbidden' }); return }
     const tabId = this.tokenTab(request.headers.authorization ?? '')
     if (!tabId) { send(401, { message: 'Desktop control is off for this session, or the request is not authorized.' }); return }
+    const control = this.tabs.get(tabId)!
     const match = /^\/desktop\/([a-z]+)$/.exec(request.url ?? '')
     if (!match) { send(404, { message: 'Unknown desktop route' }); return }
     if (request.method !== 'POST') { send(405, { message: 'Desktop commands use POST.' }); return }
@@ -749,8 +846,13 @@ export class DesktopControl {
     try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {} }
     catch { send(400, { message: 'Invalid JSON.' }); return }
     if (!body || typeof body !== 'object' || Array.isArray(body)) { send(400, { message: 'Invalid request.' }); return }
+    const client = new AbortController()
+    response.once('close', () => client.abort())
+    if (response.destroyed) return
     try {
-      send(200, await this.handle(tabId, match[1]!, body as Record<string, unknown>))
+      this.alive(tabId, control)
+      if (this.tokenTab(request.headers.authorization ?? '') !== tabId) throw new DesktopControlError('Desktop control authorization changed.', 401)
+      send(200, await this.handle(tabId, match[1]!, body as Record<string, unknown>, client.signal))
     } catch (error) {
       if (error instanceof DesktopControlError) send(error.status, { message: error.message })
       else {

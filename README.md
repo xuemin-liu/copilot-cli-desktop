@@ -67,8 +67,8 @@ handle, only input/output/resize events.
   session and local/WSL shells can list terminals, read output, and send input through the project terminal helper.
   **Add to prompt** always targets the current session. See [workspace terminals](docs/workspace-terminals.md).
 - **Desktop control** (Windows, off by default) lets a session see the screen and use the mouse
-  and keyboard in other apps, for tasks files, shell commands and the browser can't do. You turn
-  it on per session and approve each app. It can never control this app, terminals, File Explorer,
+  and keyboard in other apps, for tasks files, shell commands and the browser can't do. Eligible sessions ask
+  on first use. You can approve one action or grant session access, with approval for each app. It can never control this app, terminals, File Explorer,
   Start, sign-in or password windows, or administrator windows, and it never types into password
   fields. A banner shows while it is on, and Ctrl+Alt+Shift+X stops it anywhere. See
   [Desktop control](docs/desktop-control.md).

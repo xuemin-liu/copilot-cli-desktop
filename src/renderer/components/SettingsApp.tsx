@@ -837,12 +837,12 @@ export function SettingsApp(): JSX.Element | null {
             disabled={!isWindows}
             onChange={(event) => updatePreference({ desktopControl: event.target.checked })}
           />
-          Let sessions use the mouse and keyboard in other apps when I turn it on for them
+          Let sessions request desktop control
         </label>
         <p className="settings-disclaimer">
           {isWindows ? '' : 'Desktop control is available on Windows only. '}
-          Sessions that start while this is on get a desktop control helper; it stays off in each session until you turn it on
-          from the session's toolbar. Copilot then sees and uses only apps you approve. It can never control this app, terminals,
+          New sessions ask when they first need desktop access. You can allow one action, allow access for the session,
+          or turn it on from the session toolbar. Copilot sees and uses only apps you approve. It can never control this app, terminals,
           File Explorer, Start, sign-in or password windows, or administrator windows, and it never types into password fields.
           A banner shows while it is on, and Ctrl+Alt+Shift+X stops it anywhere. Turning this off turns desktop control off in
           every session. Off by default.
