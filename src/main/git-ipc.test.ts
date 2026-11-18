@@ -12,7 +12,7 @@ function setup(options: { mainWindowId?: number; service?: boolean; untrusted?: 
   const record = (name: string) => (...args: unknown[]): unknown => { calls.push([name, ...args]); return { name } }
   const fake = {
     subscribe: record('subscribe'), unsubscribe: record('unsubscribe'), unsubscribeAll: record('unsubscribeAll'), rescan: record('rescan'),
-    trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'),
+    trust: record('trust'), getStatus: record('getStatus'), getDiff: record('getDiff'), getLog: record('getLog'), getLogPage: record('getLogPage'),
     stage: record('stage'), unstage: record('unstage'), commit: record('commit'), cancel: record('cancel'),
     fetch: record('fetch'), pull: record('pull'), push: record('push'),
     getBranches: record('getBranches'), getWorktrees: record('getWorktrees'), removeWorktree: record('removeWorktree'), createBranch: record('createBranch'), switchBranch: record('switchBranch'), discard: record('discard'), amend: record('amend'), getHeadCommit: record('getHeadCommit'),
@@ -68,9 +68,8 @@ test('History pages accept only full commit IDs and keep the requested revision'
   assert.equal(calls.length, 0)
   for (const length of [40, 64]) {
     const oid = 'b'.repeat(length)
-    const page = await call('desktop:git-log-page', sender(), PROFILE, 'repo-1', oid, 50, 100) as { headOid: string }
-    assert.equal(page.headOid, oid)
-    assert.deepEqual(calls.at(-1), ['getLog', 1, PROFILE, 'repo-1', 50, 100, oid])
+    await call('desktop:git-log-page', sender(), PROFILE, 'repo-1', oid, 50, 100, 'f'.repeat(64))
+    assert.deepEqual(calls.at(-1), ['getLogPage', 1, PROFILE, 'repo-1', 50, 100, oid, 'f'.repeat(64)])
   }
 })
 

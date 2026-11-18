@@ -216,4 +216,6 @@ export interface GitProgressEvent {
   text: string
 }
 
+export interface GitLogPage { headOid: string; entries: GitLogEntry[]; restart: boolean; cursor: string }
+
 export type { GitLogEntry }

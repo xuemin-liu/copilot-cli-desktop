@@ -8,7 +8,8 @@ const PAGE_SIZE = 50
 /** The parent remounts History when the repository or its observed tip changes. */
 export function GitHistory({ profileId, repoId, headOid }: { profileId: string; repoId: string; headOid: string | null }): JSX.Element {
   const [entries, setEntries] = useState<GitLogEntry[]>([])
-  const [request, setRequest] = useState({ skip: 0 })
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [request, setRequest] = useState<{ skip: number; cursor: string | null }>({ skip: 0, cursor: null })
   const [done, setDone] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -16,11 +17,12 @@ export function GitHistory({ profileId, repoId, headOid }: { profileId: string; 
   useEffect(() => {
     if (!headOid) return
     let stale = false
-    window.copilotDesktop.gitLogPage(profileId, repoId, headOid, PAGE_SIZE, request.skip)
+    window.copilotDesktop.gitLogPage(profileId, repoId, headOid, PAGE_SIZE, request.skip, request.cursor)
       .then(page => {
         if (stale) return
         if (page.headOid !== headOid) throw new Error('History changed. Reload this page.')
-        setEntries(current => [...current, ...page.entries])
+        setEntries(current => page.restart ? page.entries : [...current, ...page.entries])
+        setCursor(page.cursor)
         setDone(page.entries.length < PAGE_SIZE)
       })
       .catch((cause: unknown) => { if (!stale) setError(errorMessage(cause)) })
@@ -31,7 +33,7 @@ export function GitHistory({ profileId, repoId, headOid }: { profileId: string; 
   const nextPage = (): void => {
     setError(null)
     setLoading(true)
-    setRequest({ skip: entries.length })
+    setRequest({ skip: entries.length, cursor })
   }
   return (
     <div className="git-history">

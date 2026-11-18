@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, commitOid, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
@@ -17,7 +18,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitCommitHead, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
+  GitBranchView, GitCommitHead, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -680,17 +681,46 @@ export class GitService {
     throw new Error(repo.state === 'needs-review' ? 'This repository\'s settings changed and need review before it can be read' : repo.error ?? 'This repository is not available')
   }
 
-  async getLog(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number, revision?: string): Promise<GitLogEntry[]> {
+  async getLog(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     await this.requireGate(project, repo, runtime)
-    const result = await runtime.runner.run({ cwd: repo.discovered.root, args: logArgs({ limit, skip, ...(revision === undefined ? {} : { revision }) }), signal: project.abort.signal })
+    const result = await runtime.runner.run({ cwd: repo.discovered.root, args: logArgs({ limit, skip }), signal: project.abort.signal })
     // A repository with no commits yet exits 128 with "does not have any commits".
-    if (revision === undefined && result.exitCode === 128 && /does not have any commits/i.test(result.stderr)) return []
+    if (result.exitCode === 128 && /does not have any commits/i.test(result.stderr)) return []
     if (!gitSucceeded(result)) throw new Error(describeFailure(result, 'git log', repo.discovered.root))
     return parseLog(result.stdout.toString('utf8'))
+  }
+
+  async getLogPage(subscriberId: number, profileId: string, repoId: string, limit: number, skip: number, headOid: string, cursor: string | null): Promise<GitLogPage> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
+    const root = repo.discovered.root
+    const run = (args: string[], maxStdoutBytes?: number) => runtime.runner.run({ cwd: root, args, signal: project.abort.signal,
+      ...(maxStdoutBytes === undefined ? {} : { maxStdoutBytes }) })
+    // Walk once for this page. A shallow fetch may reorder ancestors with the very same tip.
+    // Compare the entire displayed prefix, then read metadata for the IDs from that exact walk.
+    const count = skip + limit
+    const walk = await run(['rev-list', '--max-count=' + count, commitOid(headOid), '--'], count * 66 + 1)
+    if (!gitSucceeded(walk)) throw new Error(describeFailure(walk, 'git rev-list', root))
+    const ids = walk.stdout.toString('ascii').trim().split(/\s+/).filter(Boolean)
+    const digest = (length: number) => createHash('sha256').update(ids.slice(0, length).join('\n')).digest('hex')
+    const restart = skip > 0 && (ids.length < skip || digest(skip) !== cursor)
+    const offset = restart ? 0 : skip
+    const pageIds = ids.slice(offset, offset + limit)
+    let entries: GitLogEntry[] = []
+    if (pageIds.length) {
+      const page = await run([...logArgs({ limit }), '--no-walk=unsorted', ...pageIds.map(commitOid), '--'])
+      if (!gitSucceeded(page)) throw new Error(describeFailure(page, 'git log', root))
+      entries = parseLog(page.stdout.toString('utf8'))
+      if (entries.length !== pageIds.length || entries.some((entry, i) => entry.hash !== pageIds[i])) throw new Error('Git could not read the selected history page.')
+    }
+    return { headOid, entries, restart, cursor: digest(offset + pageIds.length) }
   }
 
   // ---- trust --------------------------------------------------------------------------------------
