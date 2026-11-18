@@ -1,3 +1,4 @@
+import { GitOutput } from './GitOutput.js'
 import type { JSX } from 'react'
 import { formatReviewText } from '../../main/git-review-format.js'
 
@@ -61,13 +62,12 @@ export function GitCommitBox(props: GitCommitBoxProps): JSX.Element {
   const amending = amend?.on === true
   const blocker = props.lockedReason ?? commitBlocker(stagedCount, conflictCount, message, amend)
   const canCommit = blocker === null && busy === null && hooks === null
-  // Fetch, pull and push show their own output and Cancel in the sync bar.
-  const writing = busy === 'stage' || busy === 'unstage' || busy === 'commit'
+  const writing = busy === 'commit'
   return (
     <section className="git-commit" aria-label="Commit">
       {amend && (
         <label className="git-amend-toggle">
-          <input type="checkbox" checked={amend.on} disabled={busy !== null || hooks !== null} onChange={event => props.onToggleAmend(event.target.checked)} />
+          <input type="checkbox" checked={amend.on} disabled={busy !== null || hooks !== null || Boolean(props.lockedReason)} onChange={event => props.onToggleAmend(event.target.checked)} />
           Amend the last commit
         </label>
       )}
@@ -96,7 +96,7 @@ export function GitCommitBox(props: GitCommitBoxProps): JSX.Element {
         </button>
       </div>
       {blocker && busy === null && hooks === null && <p className="git-note">{blocker}</p>}
-      {writing && props.progress.trim() !== '' && <pre className="git-progress" aria-live="polite" aria-label="Output while Git works">{props.progress}</pre>}
+      {writing && <GitOutput text={props.progress} live />}
     </section>
   )
 }

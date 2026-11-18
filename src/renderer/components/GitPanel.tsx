@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { GitOutput } from './GitOutput.js'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitBranchView, GitDiffView as GitDiff, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProjectView, GitRepoStatusView, GitRepoSummary, GitWorktreeView } from '../../main/git-types.js'
 import { composeCommitMessagePrompt, composeDiffPrompt, composeGitCursorContext, composeResolvePullPrompt, composeReviewCommentsPrompt } from '../../main/git-prompt.js'
@@ -69,7 +70,8 @@ interface PullFailure { repoId: string; branch: string; headOid: string; reason:
 type Tab = 'changes' | 'history' | 'branches'
 interface Selection { repoId: string; path: string; staged: boolean }
 interface RepoError { repoId: string; message: string }
-interface RepoFeedback { notice: string | null; error: string | null; output: string }
+type FeedbackArea = 'sync' | 'files' | 'commit' | 'branch' | 'worktree' | 'diff' | 'trust'
+interface RepoFeedback { area: FeedbackArea; notice?: string; error?: string; output?: string }
 type WriteKind = 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind
 interface CommitAttempt {
   repoId: string
@@ -81,7 +83,18 @@ interface CommitAttempt {
 }
 interface HookApproval { attempt: CommitAttempt; names: string[]; hash: string }
 
-const EMPTY_FEEDBACK: RepoFeedback = { notice: null, error: null, output: '' }
+const writeArea: Record<WriteKind, FeedbackArea> = {
+  fetch: 'sync', pull: 'sync', push: 'sync', stage: 'files', unstage: 'files', discard: 'files',
+  commit: 'commit', branch: 'branch', worktree: 'worktree',
+}
+
+function GitFeedback({ feedback }: { feedback: RepoFeedback }): JSX.Element {
+  return <div className="git-feedback" data-area={feedback.area}>
+    {feedback.error && <p className="git-message git-message-error" role="alert">{feedback.error}</p>}
+    {feedback.notice && <p className="git-message git-message-info" role="status">{feedback.notice}</p>}
+    {feedback.output && <GitOutput text={feedback.output} />}
+  </div>
+}
 
 function groupsOnSide(status: GitRepoStatusView, staged: boolean): readonly GitEntryView[][] {
   return staged ? [status.staged] : [status.unstaged, status.untracked, status.conflicted]
@@ -173,8 +186,28 @@ export function RepoRow({ repo, selected, onSelect, disabled = false }: { repo: 
       <span className="git-repo-dot" aria-hidden="true" />
       <span className="git-repo-name">{repo.name}{repo.kind === 'parent' && <em> (parent)</em>}{repo.kind === 'worktree' && <em> (worktree)</em>}</span>
       <span className="git-repo-meta">{[repo.branch ?? (repo.detached ? 'detached' : ''), stateLabel(repo), (repo.behind ?? 0) > 0 ? `↓${repo.behind}` : ''].filter(Boolean).join(' · ')}</span>
+      {(repo.kind === 'worktree' || (repo.relativePath !== '.' && repo.relativePath !== repo.name)) &&
+        <span className="git-repo-path">{repo.relativePath}</span>}
     </button>
   )
+}
+
+function RepoSwitcher({ repos, repo, locked, active, onSelect }: {
+  repos: readonly GitRepoSummary[]; repo: GitRepoSummary; locked: boolean; active: boolean; onSelect(repo: GitRepoSummary): void
+}): JSX.Element {
+  const id = useId()
+  const picker = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => { if (!active) picker.current?.hidePopover() }, [active])
+  return <>
+    <button type="button" className="git-repo-switch" popoverTarget={id} aria-label={`Switch repository, current repository ${repo.name}, ${repos.length} repositories`}
+      title={`${repo.folder} · ${repos.length} repositories`}>
+      <span>{repo.name}</span><span aria-hidden="true">▾</span>
+    </button>
+    <div id={id} ref={picker} popover="auto" className="git-repos" role="group" aria-label="Repositories">
+      {repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repo.id} disabled={locked && item.id !== repo.id}
+        onSelect={() => { onSelect(item); picker.current?.hidePopover() }} />)}
+    </div>
+  </>
 }
 
 function fileParts(path: string): { name: string; folder: string } {
@@ -337,8 +370,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const [loadingMore, setLoadingMore] = useState(false)
   const [logError, setLogError] = useState<(RepoError & { headOid: string | null }) | null>(null)
   const [feedbackByRepo, setFeedbackByRepo] = useState<ReadonlyMap<string, RepoFeedback>>(() => new Map())
-  const updateFeedback = useCallback((repoId: string, patch: Partial<RepoFeedback>): void => {
-    setFeedbackByRepo(current => new Map(current).set(repoId, { ...EMPTY_FEEDBACK, ...current.get(repoId), ...patch }))
+  const updateFeedback = useCallback((repoId: string, feedback: RepoFeedback): void => {
+    setFeedbackByRepo(current => new Map(current).set(repoId, feedback))
   }, [])
   const [working, setWorking] = useState(false)
   // Writes: one at a time. `messages` keeps a draft per repository; `hooks` is set when a commit needs hook approval.
@@ -380,7 +413,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const selection = picked?.repoId === repoId ? picked : null
   const amending = repoId !== null && amendRepoId === repoId
   const visibleOperation = operation?.repoId === repoId ? operation : null
-  const { notice, error: actionError, output } = (repoId && feedbackByRepo.get(repoId)) || EMPTY_FEEDBACK
+  const feedback = repoId ? feedbackByRepo.get(repoId) : undefined
 
   const switchRepo = useCallback((next: GitRepoSummary, persist: boolean): boolean => {
     if (operationRepo.current !== null) return false
@@ -531,7 +564,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     let stale = false
     window.copilotDesktop.gitHeadCommit(profileId, repo.id)
       .then(info => { if (!stale) setHeadCommit({ repoId: repo.id, headOid: info.oid, info }) })
-      .catch((cause: unknown) => { if (!stale) { updateFeedback(repo.id, { error: errorMessage(cause) }); setAmendRepoId(null) } })
+      .catch((cause: unknown) => { if (!stale) { updateFeedback(repo.id, { area: 'commit', error: errorMessage(cause) }); setAmendRepoId(null) } })
     return () => { stale = true }
   }, [amending, profileId, repo?.id, repo?.state, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -581,24 +614,24 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const trust = (): void => {
     if (!repo?.configHash) return
     setWorking(true)
-    updateFeedback(repo.id, { error: null })
+    updateFeedback(repo.id, { area: 'trust' })
     window.copilotDesktop.gitTrust(profileId, repo.id, repo.configHash).then(replace)
-      .catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) })).finally(() => setWorking(false))
+      .catch((cause: unknown) => updateFeedback(repo.id, { area: 'trust', error: errorMessage(cause) })).finally(() => setWorking(false))
   }
 
   const addToPrompt = (): void => {
     if (!repo || !selection || !selectedEntry || !diff || diff.key !== diffKey || !promptTarget) return
     const send = (value: GitDiff): void => {
       const target = currentPromptTarget.current
-      if (!target) { updateFeedback(repo.id, { error: 'Open or resume a session in this project to add Git context.' }); return }
+      if (!target) { updateFeedback(repo.id, { area: 'diff', error: 'Open or resume a session in this project to add Git context.' }); return }
       insert(target.id, composeDiffPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, diff: value }))
-      updateFeedback(repo.id, { notice: `Added to the prompt box of “${target.title}”. Review it and press Enter to send.` })
+      updateFeedback(repo.id, { area: 'diff', notice: `Added to the prompt box of “${target.title}”. Review it and press Enter to send.` })
     }
     if (!wholeFile) { send(diff.value); return }
     // The whole file would crowd the change out of the prompt: send the change with its usual context instead.
-    updateFeedback(repo.id, { error: null })
+    updateFeedback(repo.id, { area: 'diff' })
     window.copilotDesktop.gitDiff(profileId, repo.id, selectedEntry.id, selection.staged)
-      .then(send).catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) }))
+      .then(send).catch((cause: unknown) => updateFeedback(repo.id, { area: 'diff', error: errorMessage(cause) }))
   }
 
   const addCommentsToPrompt = (): void => {
@@ -607,7 +640,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     const result = composeReviewCommentsPrompt({ repoName: repo.name, path: selection.path, staged: selection.staged, comments: ordered })
     insert(promptTarget.id, result.text)
     const left = ordered.length - result.included
-    updateFeedback(repo.id, { notice: `Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
+    updateFeedback(repo.id, { area: 'diff', notice: `Added ${result.included} comment${result.included === 1 ? '' : 's'} to the prompt box of “${promptTarget.title}”.`
       + (left > 0 ? ` ${left} did not fit.` : '') + (result.quotesDropped ? ' The quoted lines were left out to fit.' : '') + ' Review it and press Enter to send.' })
   }
 
@@ -617,15 +650,15 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     const read = currentStatus.staged.slice(0, MAX_DRAFT_FILES)
     const omitted = currentStatus.staged.slice(MAX_DRAFT_FILES).map(entry => entry.path)
     setWorking(true)
-    updateFeedback(repo.id, { error: null })
+    updateFeedback(repo.id, { area: 'commit' })
     Promise.all(read.map(entry => window.copilotDesktop.gitDiff(profileId, repo.id, entry.id, true).then(value => ({ path: entry.path, diff: value }))))
       .then(parts => {
         const target = currentPromptTarget.current
-        if (!target) { updateFeedback(repo.id, { error: 'Open or resume a session in this project to add Git context.' }); return }
+        if (!target) { updateFeedback(repo.id, { area: 'commit', error: 'Open or resume a session in this project to add Git context.' }); return }
         insert(target.id, composeCommitMessagePrompt({ repoName: repo.name, branch: repo.branch, parts, omitted, listTruncated: currentStatus.truncated }))
-        updateFeedback(repo.id, { notice: `Asked “${target.title}” to draft a commit message. Review the prompt and press Enter to send.` })
+        updateFeedback(repo.id, { area: 'commit', notice: `Asked “${target.title}” to draft a commit message. Review the prompt and press Enter to send.` })
       })
-      .catch((cause: unknown) => updateFeedback(repo.id, { error: errorMessage(cause) })).finally(() => setWorking(false))
+      .catch((cause: unknown) => updateFeedback(repo.id, { area: 'commit', error: errorMessage(cause) })).finally(() => setWorking(false))
   }
 
   // What a running write prints (a commit hook's messages, say) appears as it arrives.
@@ -664,7 +697,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     operationRepo.current = owner.id
     setOperation({ kind, repoId: owner.id })
     setProgress('')
-    updateFeedback(owner.id, EMPTY_FEEDBACK)
+    const area = writeArea[kind]
+    updateFeedback(owner.id, { area })
     setHooks(null)
     setPublish(null)
     setPullFailure(null)
@@ -693,8 +727,9 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       if (kind === 'pull' && seenBranch && (result.reason === 'diverged' || result.reason === 'local-changes')) {
         setPullFailure({ repoId: owner.id, branch: seenBranch.branch, headOid: seenBranch.headOid, reason: result.reason, output: result.output })
       }
+      const output = readableOutput(result.output).trimEnd()
       if (result.ok) {
-        updateFeedback(owner.id, { notice: result.message })
+        updateFeedback(owner.id, { area, notice: result.message, output })
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
         if (kind === 'commit') {
           untouchedAmendDrafts.current.delete(owner.key)
@@ -703,16 +738,17 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
         }
         if (kind === 'worktree') setBranchReload(count => count + 1)
       } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch' || kind === 'worktree')) {
-        updateFeedback(owner.id, { notice: result.message })
+        updateFeedback(owner.id, { area, notice: result.message, output })
       } else if (result.reason === 'hooks-need-approval' && result.hooksHash && options.attempt) {
+        updateFeedback(owner.id, { area, output })
         setHooks({ attempt: options.attempt, names: result.hooks, hash: result.hooksHash })
       } else if (result.reason === 'needs-upstream' && result.remotes.length > 0 && seenBranch) {
+        updateFeedback(owner.id, { area, output })
         setPublish({ repoId: owner.id, ...seenBranch, remotes: result.remotes, remote: result.remotes.includes('origin') ? 'origin' : result.remotes[0] ?? '' })
       } else {
-        updateFeedback(owner.id, { error: result.message })
+        updateFeedback(owner.id, { area, error: result.message, output })
       }
-      updateFeedback(owner.id, { output: result.ok ? '' : readableOutput(result.output) })
-    }).catch((cause: unknown) => updateFeedback(owner.id, { error: errorMessage(cause) })).finally(() => {
+    }).catch((cause: unknown) => updateFeedback(owner.id, { area, error: errorMessage(cause) })).finally(() => {
       operationRepo.current = null
       setOperation(null)
       if (kind === 'branch') setBranchReload(count => count + 1)
@@ -803,11 +839,22 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   // Cancel the repository that owns the running write, not whichever one is selected.
   const cancelWrite = (): void => { if (operation) void window.copilotDesktop.gitCancel(profileId, operation.repoId).catch(() => undefined) }
 
+  const feedbackAt = (area: FeedbackArea): JSX.Element | null => {
+    if (visibleOperation && writeArea[visibleOperation.kind] === area && (area === 'files' || area === 'branch' || area === 'worktree')) {
+      return <div className="git-feedback" data-area={area}>
+        <button type="button" onClick={cancelWrite}>Cancel</button>
+        <GitOutput text={progress} live />
+      </div>
+    }
+    return feedback?.area === area && (feedback.notice || feedback.error || feedback.output)
+      ? <GitFeedback key={repoId} feedback={feedback} /> : null
+  }
+
   const pickEntry = (entry: GitEntryView, staged: boolean, mode: MarkMode, list: readonly string[]): void => {
     if (!repoId) return
     setSelection({ repoId, path: entry.path, staged })
     setMarks(current => nextMarks(current, staged ? 'staged' : 'working', entry.path, list, mode))
-    updateFeedback(repoId, { notice: null })
+    if (feedback?.area === 'diff') updateFeedback(repoId, { area: 'diff' })
   }
   // Two or more selected files on one side: the bar acts on them, and so does a row's own button when that row is one of them.
   const sideEntries = (side: MarkSide): GitEntryView[] => !currentStatus ? [] : side === 'staged' ? currentStatus.staged : [...currentStatus.unstaged, ...currentStatus.untracked]
@@ -843,7 +890,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       if (item.resolver?.working) lastResolver.current.set(item.id, item.resolver.title)
       else if (title !== undefined) {
         lastResolver.current.delete(item.id)
-        if (!item.resolver) updateFeedback(item.id, { notice: `“${title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.` })
+        if (!item.resolver) updateFeedback(item.id, { area: 'sync', notice: `“${title}” has finished. Check the Changes list and History, and what Copilot reported, before you push.` })
       }
     }
   }, [view, updateFeedback])
@@ -861,21 +908,23 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     if (resolveInFlight.current) return
     resolveInFlight.current = true
     setResolveSending(true)
-    updateFeedback(owner, { error: null, notice: null })
+    updateFeedback(owner, { area: 'sync' })
     deliver(owner, target.id, text).finally(() => { resolveInFlight.current = false; setResolveSending(false) }).then(outcome => {
-      if (outcome.result === 'refused') { updateFeedback(owner, { error: outcome.message }); return }
+      if (outcome.result === 'refused') { updateFeedback(owner, { area: 'sync', error: outcome.message }); return }
       setPullFailure(current => current?.repoId === owner ? null : current)
-      updateFeedback(owner, { output: '', notice: outcome.result === 'sent'
+      updateFeedback(owner, { area: 'sync', notice: outcome.result === 'sent'
         ? `Asked “${target.title}” to pull and resolve the conflicts. Follow it in the session, and answer if it asks you something.`
         : `${outcome.message} The task is in the prompt box of “${target.title}”; press Enter there when it is ready.` })
-    }).catch((cause: unknown) => updateFeedback(owner, { error: errorMessage(cause) }))
+    }).catch((cause: unknown) => updateFeedback(owner, { area: 'sync', error: errorMessage(cause) }))
   }
 
   return (
     <aside className="git-panel" aria-label="Git">
       <header className="git-panel-header">
         <h2>Git</h2>
-        <span className="git-panel-sub">{view ? `${view.repos.length} repositor${view.repos.length === 1 ? 'y' : 'ies'}` : 'Loading…'}</span>
+        {repo && view && view.repos.length > 1
+          ? <RepoSwitcher active={active} repos={view.repos} repo={repo} locked={operation !== null} onSelect={item => switchRepo(item, true)} />
+          : <span className="git-panel-sub">{repo?.name ?? (view ? '0 repositories' : 'Loading…')}</span>}
         <button type="button" className="icon-button" aria-label="Rescan repositories" title="Rescan this folder for repositories and refresh" disabled={busy}
           onClick={() => { setBranchReload(count => count + 1); rescan() }}>↻</button>
         {!embedded && <button type="button" className="icon-button" aria-label={takeover ? 'Close Git panel and return to the session' : 'Close Git panel'}
@@ -891,12 +940,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       )}
       {view && view.notes.length > 0 && view.repos.length > 0 && <p className="git-note" role="status">{view.notes.join(' ')}</p>}
 
-      {view && view.repos.length > 1 && (
-        <div className="git-repos" role="group" aria-label="Repositories">
-          {view.repos.map(item => <RepoRow key={item.id} repo={item} selected={item.id === repoId} disabled={operation !== null && item.id !== repoId} onSelect={() => switchRepo(item, true)} />)}
-        </div>
-      )}
-
       {repo && (
         <div className="git-repo-view">
           {ready && (
@@ -905,7 +948,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
               {repo.upstream && <span className="git-branch-upstream">{repo.upstream}</span>}
               {(repo.ahead ?? 0) > 0 && <span className="git-ahead">↑{repo.ahead}</span>}
               {(repo.behind ?? 0) > 0 && <span className="git-behind">↓{repo.behind}</span>}
-              {view && view.repos.length === 1 && <span className="git-branch-state">{stateLabel(repo)}</span>}
+              <span className="git-branch-state">{stateLabel(repo)}</span>
             </div>
           )}
 
@@ -919,8 +962,16 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
               onPublish={() => { if (publishOffer) sync('push', publishOffer.remote, publishOffer) }} onDismissPublish={() => setPublish(null)} onCancel={cancelWrite} />
           )}
 
+          {feedbackAt('sync')}
+          {ready && situation && repo.branch && !copilotWriting && (
+            <GitResolveBar situation={situation} branch={repo.branch} upstream={repo.upstream} folder={repo.folder} target={promptTarget}
+              outside={promptTarget?.cwd ? !folderWithin(repo.folder, promptTarget.cwd) : false}
+              blocker={resolveBlocker(promptTarget, operation !== null, resolveSending)} onResolve={resolveWithCopilot} />
+          )}
+          {copilotWriting && <p className="git-message git-message-info" role="status">{lockedReason}</p>}
           {repo.state === 'needs-review' && <GitReviewCard items={repo.reviewItems} working={working} onTrust={trust} />}
 
+          {feedbackAt('trust')}
           {repo.state === 'error' && <p className="git-message git-message-error" role="alert">{repo.error ?? 'This repository could not be read.'}</p>}
 
           {ready && (
@@ -938,6 +989,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                 // much of the height each gets: a long list must not push the diff out of sight.
                 <div className={`git-changes${selection ? ' git-changes-split' : ''}`} ref={changesRef}>
                   <div className="git-changes-list" style={selection ? { flexBasis: `${listShare}%` } : undefined}>
+                  {feedbackAt('files')}
                   {currentStatus && currentStatus.totalEntries === 0 && <p className="git-message" role="status">Nothing to commit. The working tree is clean.</p>}
                   {currentStatus && (
                     <div className="git-files">
@@ -965,10 +1017,10 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                     </div>
                   )}
 
-                  {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || visibleOperation !== null || hooks !== null || amending) && amendState && (
-                    <button type="button" className="git-amend-open" onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
+                  {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || visibleOperation?.kind === 'commit' || hooks !== null || amending) && amendState && (
+                    <button type="button" className="git-amend-open" disabled={writesLocked} onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
                   )}
-                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || visibleOperation !== null || hooks !== null || amending) && (
+                  {currentStatus && (currentStatus.staged.length > 0 || message !== '' || visibleOperation?.kind === 'commit' || hooks !== null || amending) && (
                     <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
                       message={message} onMessageChange={setMessage} busy={visibleOperation?.kind ?? null} progress={visibleOperation ? progress : ''}
                       canDraft={canInsert && currentStatus.staged.length > 0 && !working}
@@ -977,6 +1029,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                       hooks={hooks?.names ?? null} onApproveHooks={() => { if (hooks) commit(hooks) }} onDismissHooks={() => setHooks(null)}
                       amend={amendState} onToggleAmend={toggleAmend} lockedReason={lockedReason} />
                   )}
+                  {feedbackAt('commit')}
                   {!selection && currentStatus && currentStatus.totalEntries > 0 && <p className="git-note">Select a file to see its diff.</p>}
                   </div>
 
@@ -998,6 +1051,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                           Add to prompt
                         </button>
                       </div>
+                      {feedbackAt('diff')}
                       {diffError && <p className="git-message git-message-error" role="alert">{diffError}</p>}
                       {!diffError && selectedEntry === null && currentStatus?.truncated && <p className="git-message" role="status">This file is outside the displayed changes.</p>}
                       {!diffError && selectedEntry !== null && diff?.key === diffKey && (
@@ -1035,13 +1089,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
               {tab === 'branches' && (
                 <>
-                  <GitBranchList key={repo.id} branches={currentBranches?.items ?? null} error={currentBranches?.error ?? null}
+                  <GitBranchList key={repo.id} feedback={feedbackAt('branch')} branches={currentBranches?.items ?? null} error={currentBranches?.error ?? null}
                     locked={writesLocked || repo.headOid === null}
                     lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
                     newName={newBranch} commitDraft={suggestionDraft}
                     onNewNameChange={value => setBranchDrafts(current => ({ ...current, [branchDraftKey]: value }))}
                     onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
-                  <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError?.repoId === repoId ? worktreeError.message : null} sessions={worktreeSessions}
+                  <GitWorktreeList feedback={feedbackAt('worktree')} worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError?.repoId === repoId ? worktreeError.message : null} sessions={worktreeSessions}
                     locked={writesLocked} onRemove={removeWorktree} />
                 </>
               )}
@@ -1066,16 +1120,6 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
               )}
             </>
           )}
-
-          {actionError && <p className="git-message git-message-error" role="alert">{actionError}</p>}
-          {output && <pre className="git-output" aria-label="What Git printed">{output}</pre>}
-          {ready && situation && repo.branch && !copilotWriting && (
-            <GitResolveBar situation={situation} branch={repo.branch} upstream={repo.upstream} folder={repo.folder} target={promptTarget}
-              outside={promptTarget?.cwd ? !folderWithin(repo.folder, promptTarget.cwd) : false}
-              blocker={resolveBlocker(promptTarget, operation !== null, resolveSending)} onResolve={resolveWithCopilot} />
-          )}
-          {copilotWriting && <p className="git-message git-message-info" role="status">{lockedReason}</p>}
-          {notice && <p className="git-message git-message-info" role="status">{notice}</p>}
         </div>
       )}
     </aside>

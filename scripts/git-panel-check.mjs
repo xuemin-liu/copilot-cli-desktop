@@ -102,9 +102,12 @@ if (!process.versions.electron) {
       git(repo, 'add', '.')
       git(repo, 'commit', '-q', '-m', `init ${name}`)
     }
+    const beta = join(workspace, 'beta')
+    git(beta, 'checkout', '-qb', 'other-tip')
+    git(beta, 'commit', '--allow-empty', '-qm', 'Other branch message')
     const alpha = join(workspace, 'alpha')
     git(alpha, 'config', 'core.filemode', 'false')
-    await writeFile(join(alpha, 'a.txt'), 'one\ntwo\n')              // unstaged change
+    await writeFile(join(alpha, 'a.txt'), 'one\ntwo\npreview A\npreview B\n') // multiple changed lines for the short-window check
     await writeFile(join(alpha, 'b.txt'), `${await readFile(join(alpha, 'b.txt'), 'utf8')}buzz\n`); git(alpha, 'add', 'b.txt') // staged change
     await writeFile(join(alpha, 'new.txt'), 'hello\n')               // untracked
     git(join(workspace, 'gamma'), 'config', 'core.sshCommand', 'ssh -i check') // needs review
@@ -225,6 +228,11 @@ ${point.missing}`)
       assert.ok(found, `no ${selector} containing ${label}`)
       await click('[data-click-target]')
     }
+    const chooseRepo = async name => {
+      if (!await ui('!!document.querySelector(".git-repos:popover-open")')) await click('.git-repo-switch')
+      await until('!!document.querySelector(".git-repos:popover-open")', 'repository picker opened')
+      await clickByText('.git-repo', name)
+    }
     // A hidden window does not repaint on its own, so a capture would show the previous frame. Paint, then capture.
     const screenshot = async name => {
       await ui('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
@@ -237,7 +245,8 @@ ${point.missing}`)
 
     // 1. The panel opens on the repository with changes and lists the others.
     await until('!!document.querySelector(".git-repo-selected")', 'repositories listed')
-    assert.match(await text('.git-panel-sub'), /4 repositories/)
+    assert.match(await ui('document.querySelector(".git-repo-switch").getAttribute("aria-label")'), /4 repositories/)
+    assert.equal(await ui('document.querySelector(".git-repos").getBoundingClientRect().height'), 0, 'repository list starts closed')
     assert.match(await text('.git-repo-selected'), /alpha/)
     assert.deepEqual(await ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)'), ['alpha', 'beta', 'delta', 'gamma'])
     results.repositories = true
@@ -505,15 +514,30 @@ ${point.missing}`)
     results.liveRefreshAndEscaping = true
 
     // 8. A clean repository, and its history.
-    await clickByText('.git-repo', 'beta')
+    await chooseRepo('beta')
     await until('/clean/i.test(document.querySelector(".git-changes")?.innerText || "")', 'clean repository')
+    // Keep the switch pending while the user visits Changes on the old HEAD.
+    const switchConfirmation = Promise.withResolvers()
+    confirmAnswer = switchConfirmation.promise
+    await clickByText('.git-tabs button', 'Branches')
+    await until('!!document.querySelector(\'button[aria-label="Switch to main"]:enabled\')', 'main can be selected')
+    await click('button[aria-label="Switch to main"]')
+    await until('!!document.querySelector(".git-branches .git-feedback button")', 'branch switch in progress')
+    await clickByText('.git-tabs button', 'Changes')
+    await click('.git-amend-open')
+    assert.equal(await ui('!!document.querySelector(".git-amend-open:disabled")'), true, 'Amend stays locked during a pending branch switch')
+    switchConfirmation.resolve(true)
+    await until('document.querySelector(".git-branch-name").textContent === "main" && !!document.querySelector(".git-amend-open:enabled")', 'amend available again on the new HEAD')
+    assert.equal(await ui('!!document.querySelector(".git-commit textarea")'), false, 'switching did not create an amend draft from the previous tip')
+    assert.equal(confirmations.pop()?.title, 'Switch to "main"?')
+    confirmAnswer = true
     await clickByText('.git-tabs button', 'History')
     await until('/init beta/.test(document.querySelector(".git-log")?.innerText || "")', 'history listed')
     assert.match(await text('.git-log'), /Check/)
     results.history = true
 
     // 9. A repository whose config names a program waits for review, and opens after the user trusts it.
-    await clickByText('.git-repo', 'gamma')
+    await chooseRepo('gamma')
     await until('!!document.querySelector(".git-review")', 'review card')
     assert.match(await text('.git-review'), /core\.sshcommand/)
     // Trust accepts the whole value, so the card shows the whole value: the command after the padding is on screen.
@@ -530,7 +554,7 @@ ${point.missing}`)
     // 9b. History pages without overlap, even when "Load more" is clicked twice while a page is still loading.
     const realGetLog = service.getLog.bind(service)
     service.getLog = async (...args) => { await delay(900); return realGetLog(...args) }
-    await clickByText('.git-repo', 'delta')
+    await chooseRepo('delta')
     await until('!!document.querySelector(".git-tabs")', 'delta opens')
     await clickByText('.git-tabs button', 'History')
     await until('document.querySelectorAll(".git-log li").length === 50', 'first page of history')
@@ -567,7 +591,7 @@ ${point.missing}`)
     results.draftAccountsForEveryFile = true
 
     // 10. Back to alpha for the screenshot, then close: the panel tells the main process to stop.
-    await clickByText('.git-repo', 'alpha')
+    await chooseRepo('alpha')
     await clickByText('.git-tabs button', 'Changes')
     await until('[...document.querySelectorAll(".git-entry-name")].some(element => element.innerText === "a.txt")', 'alpha files loaded')
     await clickByText('.git-entry', 'a.txt')
@@ -591,8 +615,14 @@ ${point.missing}`)
     await ui('document.querySelector(".git-changes .splitter-horizontal").focus()')
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' })
     await until('document.querySelector(".git-changes .splitter-horizontal").getAttribute("aria-valuenow") === "80"', 'list share at its maximum')
-    const short = await ui('(() => { const area = document.querySelector(".git-diff-area").getBoundingClientRect(); const lines = document.querySelector(".git-diff-lines").getBoundingClientRect(); return { areaTop: area.top, linesTop: lines.top, height: window.innerHeight } })()')
-    assert.ok(short.linesTop < short.height, `the diff starts on screen in a short window (diff lines at ${short.linesTop}, window ${short.height})`)
+    assert.equal(await ui('window.innerWidth'), 460)
+    assert.equal(await ui('document.querySelectorAll(".git-repos .git-repo").length'), 4)
+    const visibleChanges = await ui(`[...document.querySelectorAll('.git-diff-add, .git-diff-del')].filter(line => {
+      const rect = line.getBoundingClientRect()
+      const x = rect.left + rect.width / 2
+      return rect.height > 0 && [rect.top + 1, rect.bottom - 1].every(y => line.contains(document.elementFromPoint(x, y)))
+    }).map(line => line.textContent.trim())`)
+    assert.ok(visibleChanges.length >= 3, `three complete changed lines on screen at 460×560: ${visibleChanges.join(', ')}`)
     await screenshot('short-window.png')
     // Back to the default share (80 → 40 in steps of 5) and size for the rest of the check.
     for (let step = 0; step < 8; step++) { window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Up' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Up' }) }
@@ -716,20 +746,26 @@ ${point.missing}`)
     await until('!!document.querySelector(".git-hooks")', 'hook approval requested')
     assert.match(await text('.git-hooks'), /pre-commit/)
     assert.equal(existsSync(marker), false, 'nothing ran before approval')
-    const beta = join(workspace, 'beta')
     const linked = join(realpathSync.native(directory), 'approval-worktree')
     git(beta, 'worktree', 'add', '-q', '-b', 'approval-worktree', linked)
     await writeFile(join(linked, 'staged.txt'), 'unrelated\n')
     git(linked, 'add', '.')
     const otherHead = git(linked, 'rev-parse', 'HEAD')
-    reportedWorktrees.push(linked)
+    const otherLinked = join(realpathSync.native(directory), 'other', 'approval-worktree')
+    git(beta, 'worktree', 'add', '-q', '--detach', otherLinked)
+    reportedWorktrees.push(linked, otherLinked)
     service.requestRefresh(PROFILE)
-    const linkedSelected = 'document.querySelector(".git-repo-selected")?.innerText.includes("approval-worktree")'
-    await until('[...document.querySelectorAll(".git-repo")].some(element => element.innerText.includes("approval-worktree"))', 'linked worktree is listed')
-    await clickByText('.git-repo', 'approval-worktree')
+    const linkedSelected = `document.querySelector(".git-repo-selected .git-repo-path")?.textContent === ${JSON.stringify(linked)}`
+    await click('.git-repo-switch')
+    await until('document.querySelectorAll(".git-repos:popover-open .git-repo-path").length === 2', 'both worktree paths are listed')
+    for (const path of [linked, otherLinked]) {
+      assert.ok(await ui(`[...document.querySelectorAll('.git-repo-path')].some(element => element.innerText === ${JSON.stringify(path)} && element.checkVisibility())`),
+        'same-named worktrees have visible, distinct paths')
+    }
+    await chooseRepo(linked)
     await until(`${linkedSelected} && !!document.querySelector(".git-commit textarea")`, 'manual switch loads the other staged file')
     assert.equal(await ui('!!document.querySelector(".git-hooks")'), false, 'the other repository has no approval')
-    await clickByText('.git-repo', 'alpha')
+    await chooseRepo('alpha')
     await until('document.querySelector(".git-commit textarea")?.value === "chore: through a hook"', 'the original draft is preserved')
     await click('.git-commit-button')
     await until('!!document.querySelector(".git-hooks")', 'the original repository asks again')
@@ -739,7 +775,7 @@ ${point.missing}`)
     assert.equal(git(linked, 'rev-parse', 'HEAD'), otherHead, 'the other repository never committed')
     assert.equal(existsSync(marker), false, 'the original hook never ran')
     await ui('window.__setWorktree(null)')
-    await clickByText('.git-repo', 'alpha')
+    await chooseRepo('alpha')
     await until('document.querySelector(".git-commit textarea")?.value === "chore: through a hook"', 'the original draft is still present')
     await click('.git-commit-button')
     await until('!!document.querySelector(".git-hooks")', 'fresh approval requested in the original repository')
@@ -797,13 +833,18 @@ ${point.missing}`)
     await click('.git-commit-button')
     await until('!!document.querySelector(".git-hooks")', 'the changed hook is a new question')
     await clickByText('.git-hooks button', 'Allow these hooks')
-    await until('/slow hook started/.test(document.querySelector(".git-progress")?.innerText || "")', 'the hook output streams into the panel')
+    await until('/slow hook started/.test(document.querySelector(".git-progress")?.textContent || "")', 'the hook output streams into the panel')
+    assert.equal(await ui('document.querySelector(".git-commit .git-output-details").open'), false)
+    await click('.git-commit .git-output-details summary')
+    assert.match(await text('.git-commit .git-progress'), /slow hook started/)
     assert.match(await text('.git-commit-button'), /Committing/)
     // While a write runs, no other repository can be selected, so Cancel and the output can only mean the repository running it.
     assert.equal(await ui('[...document.querySelectorAll(".git-repo")].find(element => element.innerText.includes("beta")).disabled'), true, 'other repositories are locked during a write')
-    await clickByText('.git-repo', 'beta')
+    await chooseRepo('beta')
     await delay(150)
     assert.match(await text('.git-repo-selected'), /alpha/, 'a click on a locked repository does nothing')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
+    await until('!document.querySelector(".git-repos:popover-open")', 'Escape dismisses the repository picker')
     await ui(`window.__setWorktree(${JSON.stringify(linked)})`)
     await until('!!document.querySelector(".git-commit-row .git-commit-button:disabled")', 'the active commit still owns the operation')
     assert.match(await text('.git-repo-selected'), /alpha/, 'automatic following also waits while Git is running')
@@ -811,13 +852,15 @@ ${point.missing}`)
     await clickByText('.git-commit-row button', 'Cancel')
     await until(`${linkedSelected} && !!document.querySelector(".git-commit textarea")`, 'automatic following resumes after the write')
     assert.equal(await ui('!!document.querySelector(".git-message-error, .git-output, .git-hooks, .git-progress")'), false, 'worktree shows none of the original repository’s feedback')
-    await clickByText('.git-repo', 'alpha')
+    await chooseRepo('alpha')
     await until('/Cancelled/.test(document.querySelector(".git-message-error")?.innerText || "")', 'cancelled')
+    assert.equal(await ui('document.querySelector(\'.git-feedback[data-area="commit"] details\').open'), false)
+    await click('.git-feedback[data-area="commit"] summary')
     assert.match(await text('.git-output'), /slow hook started/, 'the hook output belongs to the original repository')
-    await clickByText('.git-repo', 'beta')
+    await chooseRepo('beta')
     await until('document.querySelector(".git-repo-selected")?.innerText.startsWith("beta")', 'manual switch after the failure')
     assert.equal(await ui('!!document.querySelector(".git-message-error, .git-output")'), false, 'manual switching hides another repository’s errors and output')
-    await clickByText('.git-repo', 'alpha')
+    await chooseRepo('alpha')
     await until('document.querySelector(".git-commit textarea")?.value === "chore: never finishes"', 'back in the original repository')
     assert.equal(gitIn('rev-parse', 'HEAD').trim(), headBeforeCancel, 'no commit was made')
     assert.equal(existsSync(join(alpha, '.git', 'index.lock')), false, 'cancelling during a hook leaves no lock behind')
@@ -848,7 +891,7 @@ ${point.missing}`)
     await writeFile(join(colleague, 'theirs.txt'), 'from a colleague\n')
     git(colleague, 'add', '.'); git(colleague, 'commit', '-q', '-m', 'colleague work'); git(colleague, 'push', '-q', 'origin', 'HEAD')
     await clickByText('.git-sync-row button', 'Fetch')
-    await until('/Fetched origin\\./.test(document.querySelector(".git-message-info")?.innerText || "")', 'fetch reported')
+    await until('/Fetched origin\\./.test(document.querySelector(\'.git-feedback[data-area="sync"] .git-message-info\')?.innerText || "")', 'fetch reported')
     await until('[...document.querySelectorAll(".git-sync-row button")].some(element => element.innerText === "Pull \u21931")', 'the fetch shows one commit to pull')
     assert.equal(existsSync(join(alpha, 'theirs.txt')), false, 'a fetch changes no file')
     await clickByText('.git-sync-row button', 'Pull')
@@ -898,7 +941,7 @@ ${point.missing}`)
     const chooseBranchRepo = async name => {
       const target = JSON.stringify(name)
       await until(`[...document.querySelectorAll('.git-repo:not(:disabled) .git-repo-name')].some(repo => repo.textContent === ${target})`, `${name} can be selected`)
-      await clickByText('.git-repo', name)
+      await chooseRepo(name)
       await until(`document.querySelector('.git-repo-selected .git-repo-name')?.textContent === ${target}`, `${name} is selected`)
       await waitForBranchList()
     }

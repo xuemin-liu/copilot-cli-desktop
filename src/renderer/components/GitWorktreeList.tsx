@@ -1,4 +1,4 @@
-import type { JSX } from 'react'
+import type { JSX, ReactNode } from 'react'
 import { formatReviewText } from '../../main/git-review-format.js'
 import type { GitWorktreeView } from '../../main/git-types.js'
 
@@ -9,6 +9,7 @@ export interface WorktreeSession {
 }
 
 export interface GitWorktreeListProps {
+  feedback?: ReactNode
   /** Null while loading. */
   worktrees: readonly GitWorktreeView[] | null
   error: string | null
@@ -48,10 +49,11 @@ export function removeBlocker(worktree: GitWorktreeView, sessions: readonly Work
 }
 
 /** The repository's worktrees: where each is, what it has checked out, which session uses it, and Remove for a merged, unused one. */
-export function GitWorktreeList({ worktrees, error, sessions, locked = false, onRemove }: GitWorktreeListProps): JSX.Element {
+export function GitWorktreeList({ worktrees, error, feedback, sessions, locked = false, onRemove }: GitWorktreeListProps): JSX.Element {
   return (
     <section className="git-worktrees" aria-label="Worktrees">
       <h3 className="git-section-title">Worktrees</h3>
+      {feedback}
       {error && <p className="git-message git-message-error" role="alert">{error}</p>}
       {worktrees === null && !error && <p className="git-message" role="status">Loading worktrees…</p>}
       {worktrees !== null && worktrees.length <= 1 && <p className="git-note" role="status">No linked worktrees. A session started with the worktree launch option gets one.</p>}

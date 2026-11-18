@@ -74,7 +74,7 @@ if (!process.versions.electron) {
     }
     assert.ok(main, 'main window did not load')
     main.setContentSize(1500, 900)
-    const ui = code => main.webContents.executeJavaScript(code)
+    const ui = code => main.webContents.executeJavaScript(code).catch(error => { throw new Error(code, { cause: error }) })
     const until = async (code, label) => {
       const end = Date.now() + 25_000
       while (Date.now() < end) { if (await ui(code)) return; await delay(50) }
@@ -109,7 +109,8 @@ if (!process.versions.electron) {
     await until('!!document.querySelector(".git-repo-selected")', 'panel opened with repositories')
     assert.deepEqual(await ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)'), ['alpha', 'beta'])
     assert.equal(await ui('document.querySelector(".session-git-toggle").getAttribute("aria-pressed")'), 'true')
-    assert.equal(await ui('String(JSON.parse(localStorage.getItem("workspace-tool-dock-v1")).open)'), 'true')
+    const gitTab = await ui('document.querySelector(".tool-tab [role=tab][aria-selected=true]").dataset.tabId')
+    assert.ok(await ui(`window.copilotDesktop.toolsState().then(state => state.projects.some(project => project.visible && project.activeId === ${JSON.stringify(gitTab)}))`))
     const widths = await ui('({ panel: document.querySelector(".git-panel").getBoundingClientRect().width, main: document.querySelector(".project-dock-main").getBoundingClientRect().width })')
     assert.ok(widths.panel >= 320 && widths.main >= 480, JSON.stringify(widths))
     assert.equal(await sameTerminal(), true)
@@ -195,11 +196,14 @@ if (!process.versions.electron) {
     await ui('document.querySelector(".git-commit textarea").focus()')
     await ui('(() => { const e=document.querySelector(".git-commit textarea"); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(e, "keep this draft across tool switches"); e.dispatchEvent(new Event("input", { bubbles: true })) })()')
     await until('document.querySelector(".git-commit textarea").value.includes("keep this draft")', 'draft entered')
-    await click('[data-tool="browser"]')
+    await click('.workspace-tools-header [aria-label="New tab"]')
+    await until('!!document.querySelector(".tool-launcher")', 'new tab launcher opened')
+    await click('.tool-launcher button[type="submit"]')
     await until('!!document.querySelector(".browser-panel")', 'browser tab opened')
+    const browserTab = await ui('document.querySelector(".tool-tab [role=tab][aria-selected=true]").dataset.tabId')
     assert.equal(await ui('document.querySelector(".git-panel") === window.__git'), true)
     assert.equal(await ui('document.querySelector(".git-panel").getBoundingClientRect().width'), 0)
-    await click('[data-tool="git"]')
+    await click(`.tool-tab [data-tab-id="${gitTab}"]`)
     await until('document.querySelector(".git-panel").getBoundingClientRect().width > 0', 'Git tab restored')
     assert.equal(await ui('document.querySelector(".git-commit textarea").value'), 'keep this draft across tool switches')
     assert.equal(await sameTerminal(), true)
@@ -207,9 +211,9 @@ if (!process.versions.electron) {
 
     // A write finishing while Git is hidden must still release its busy state.
     await click('[aria-label="Stage b.txt"]')
-    await click('[data-tool="browser"]')
+    await click(`.tool-tab [data-tab-id="${browserTab}"]`)
     await until('[...document.querySelectorAll(".git-repo")].every(e => !e.disabled)', 'hidden staging finished')
-    await click('[data-tool="git"]')
+    await click(`.tool-tab [data-tab-id="${gitTab}"]`)
     await until('document.querySelector(".git-panel").getBoundingClientRect().width > 0', 'Git after background staging')
 
     // Ctrl+Shift+G with the terminal focused toggles the panel and the terminal never sees ^G.
@@ -224,6 +228,8 @@ if (!process.versions.electron) {
     results.shortcutWithTerminalFocused = true
 
     // The open state and the chosen repository survive a reload.
+    await click('.git-repo-switch')
+    await until('!!document.querySelector(".git-repos:popover-open")', 'repository picker opened')
     await ui('document.querySelectorAll("[data-pick]").forEach(e => e.removeAttribute("data-pick"))')
     await ui('[...document.querySelectorAll(".git-repo")].find(element => element.innerText.includes("beta")).setAttribute("data-pick", "")')
     await click('[data-pick]')
@@ -241,7 +247,7 @@ if (!process.versions.electron) {
     await until('getComputedStyle(document.querySelector(".project-dock-main")).display === "none"', 'panel takes over a narrow window')
     assert.equal(await ui('document.querySelector(".git-panel").getBoundingClientRect().width > 500'), true)
     assert.equal(await sameTerminal(), true, 'the terminal stays mounted while hidden')
-    await click('button[aria-label="Back to CLI"]')
+    await click('.workspace-tools-header button[aria-label="Hide tabs"]')
     await until('!document.querySelector(".git-panel")?.getBoundingClientRect().width && getComputedStyle(document.querySelector(".project-dock-main")).display !== "none"', 'the session returns')
     assert.equal(await sameTerminal(), true)
     results.narrowTakeover = true
