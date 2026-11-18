@@ -108,6 +108,7 @@ export class BrowserDebug {
   private readonly projectMode: boolean
   private readonly changed: () => void
   private readonly onNewTab: ((pageId: number) => void) | undefined
+  private readonly panelAllowsPage: (pageId: number) => boolean
   private readonly onPopup: ((id: number, openerId: number) => void) | undefined
   private readonly canCreatePage: () => string | null
   private readonly pendingClose = new Map<number, Promise<boolean>>()
@@ -143,7 +144,7 @@ export class BrowserDebug {
   /** Whether a page asking for a window gets one: only while the browser is in its own window. Beside the terminal,
    * popups stay tabs. */
   private readonly popupWindows: () => boolean
-  private readonly onReturnToPanel: ((pageId: number) => void) | undefined
+  private readonly onReturnToPanel: ((pageId: number) => void | Promise<void>) | undefined
   /** The user focused a page, in the panel or in its own window. */
   private readonly onPageFocus: ((pageId: number) => void) | undefined
   private readonly history: BrowserHistory
@@ -161,11 +162,12 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; panelAllowsDialog?: (pageId: number) => boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; panelAllowsPage?: (pageId: number) => boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void | Promise<void>; onPageFocus?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
     this.onReturnToPanel = options.onReturnToPanel
     this.onPageFocus = options.onPageFocus
+    this.panelAllowsPage = options.panelAllowsPage ?? (() => true)
     this.onPopup = options.onPopup
     this.onNewTab = options.onNewTab
     this.canCreatePage = options.canCreatePage ?? (() => null)
@@ -201,7 +203,7 @@ export class BrowserDebug {
       return signal.aborted ? null : response === 1
     }
     this.reader = new BrowserReader({ pages: () => [...this.pages.values()].map(page => page.contents),
-      panelAllowsDialog: options.panelAllowsDialog,
+      panelAllowsPage: this.panelAllowsPage,
       active: () => this.activePageId, select: id => { this.selectPage(id) }, owner: id => this.pages.get(id)?.window ?? this.owner,
       recording: () => this.state.recordingNetwork, visible: id => { const page = this.pages.get(id); return Boolean(page && (page.window || page.attached && this.bounds) && page.view.getVisible()) },
       evidence: (pageId, startedAt, after) => {
@@ -434,11 +436,11 @@ export class BrowserDebug {
         if (this.projectMode && command && !input.shift && key === 'w') { void this.closePage(contents.id).catch(error => this.reportError(String(error))); return true }
         if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(contents.id); return true }
         if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
-        // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
-        if (!selected) {
-          if (key === 'f12' || (command && input.shift && key === 'i')) { this.selectPage(contents.id); this.showView('devtools'); return true }
-          return false
+        if ((key === 'f12' || (command && input.shift && key === 'i')) && page.window) {
+          void this.inspectPage(page).catch(error => this.reportError(String(error)))
+          return true
         }
+        if (!selected) return false
         if (command && (key === '=' || key === '+')) { this.action('zoom-in'); return true }
         if (command && (key === '-' || key === '_')) { this.action('zoom-out'); return true }
         if (command && key === '0') { this.action('zoom-reset'); return true }
@@ -571,7 +573,7 @@ export class BrowserDebug {
     const { contents, view } = page
     const toolbar = returnToPanel ? createBrowserPopoutToolbar(() => {
       if (page.window !== window || this.disposed) return
-      if (this.onReturnToPanel) this.onReturnToPanel(contents.id)
+      if (this.onReturnToPanel) void Promise.resolve(this.onReturnToPanel(contents.id)).catch(error => this.reportError(String(error)))
       else {
         this.selectPage(contents.id); this.returnPage(contents.id)
         if (!this.owner.isDestroyed()) {
@@ -903,17 +905,20 @@ export class BrowserDebug {
       this.state.url = shownUrl(page)
       this.state.loading = page.loading || this.preparingPreferences
       // A popup window has no error line of its own, and the browser keeps showing its opener: show its error here.
-      const failed = page.error ? undefined : this.failedPopupWindow()
-      this.state.error = page.error ?? failed?.error ?? null
+      const activeInPanel = this.panelAllowsPage(contents.id)
+      const popups = [...this.pages.values()].filter(entry => entry.window && this.panelAllowsPage(entry.contents.id))
+      const error = activeInPanel ? page.error : null
+      const failed = error ? undefined : popups.filter(entry => entry.error).at(-1)
+      this.state.error = error ?? failed?.error ?? null
       if (failed) this.state.errorPageId = failed.contents.id
       else delete this.state.errorPageId
       // A popup window has no panel of its own, so its warning shows here too.
-      const warned = page.certificateWarning ? page : [...this.pages.values()].filter(entry => entry.window && entry.certificateWarning).at(-1)
+      const warned = activeInPanel && page.certificateWarning ? page : popups.filter(entry => entry.certificateWarning).at(-1)
       if (warned?.certificateWarning) {
         const { url: _url, ...warning } = warned.certificateWarning
         this.state.certificateWarning = { ...warning, pageId: warned.contents.id }
       } else delete this.state.certificateWarning
-      if (!page.certificateWarning && certificateExceptions(contents.session).coversHost(shownUrl(page))) this.state.certificateBypass = true
+      if (activeInPanel && !page.certificateWarning && certificateExceptions(contents.session).coversHost(shownUrl(page))) this.state.certificateBypass = true
       else delete this.state.certificateBypass
       this.state.devtools = page.devtools
       this.state.activePageId = this.activePageId
@@ -967,11 +972,6 @@ export class BrowserDebug {
     const [partition, defaults] = await Promise.all([preferences(page.contents.session.storagePath), preferences(folders.storagePath)])
     this.savedOverrides = overridesFromPreferences(partition, defaults)
     this.savedOverridesAt = Date.now()
-  }
-
-  /** The most recently opened popup window that has an error. */
-  private failedPopupWindow(): BrowserPage | undefined {
-    return [...this.pages.values()].filter(page => page.window && page.error).at(-1)
   }
 
   get snapshot(): BrowserDebugState {
@@ -1084,7 +1084,7 @@ export class BrowserDebug {
    * for an error that has no way past it, whatever sent the answer.
    */
   private answerCertificate(answer: 'proceed' | 'back', id: number): void {
-    const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id)
+    const page = [...this.pages.values()].find(entry => entry.certificateWarning?.id === id && this.panelAllowsPage(entry.contents.id))
     if (!page) return
     const failure = page.certificateWarning!
     if (answer === 'proceed' && !certificateCanProceed(failure.error)) return
@@ -1158,18 +1158,27 @@ export class BrowserDebug {
       case 'copy-link': if (/^https?:\/\//i.test(params.linkURL)) void clipboard.writeText(params.linkURL); break
       case 'copy-image-address': if (/^https?:\/\//i.test(params.srcURL)) void clipboard.writeText(params.srcURL); break
       case 'open-link': this.openInNewPage(page, params.linkURL); break
-      case 'inspect': {
-        // A tools view that already exists was loaded earlier, even when the Page view was showing, and will not load again.
-        const reused = page.tools !== null
-        if (this.activePageId !== contents.id) this.selectPage(contents.id)
-        this.showView('devtools')
-        const tools = page.tools?.webContents
-        const inspect = (): void => { if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y) }
-        if (reused && tools && !tools.isLoading()) inspect()
-        else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
-        break
-      }
+      case 'inspect': void this.inspectPage(page, params).catch(error => this.reportError(String(error))); break
     }
+  }
+
+  private async inspectPage(page: BrowserPage, point?: { x: number; y: number }): Promise<void> {
+    const { contents } = page
+    if (this.projectMode && page.window) {
+      await this.onReturnToPanel?.(contents.id)
+      if (page.window || contents.isDestroyed() || this.activePageId !== contents.id) return
+    }
+    if (this.disposed || contents.isDestroyed() || !this.panelAllowsPage(contents.id)) return
+    const reused = page.tools !== null
+    if (this.activePageId !== contents.id) this.selectPage(contents.id)
+    this.showView('devtools')
+    if (!point) return
+    const tools = page.tools?.webContents
+    const inspect = (): void => {
+      if (!contents.isDestroyed() && this.activePageId === contents.id && this.panelAllowsPage(contents.id)) contents.inspectElement(point.x, point.y)
+    }
+    if (reused && tools && !tools.isLoading()) inspect()
+    else tools?.once('did-finish-load', () => setTimeout(inspect, 300))
   }
 
   private openInNewPage(source: BrowserPage, url: string): void {

@@ -76,7 +76,7 @@ export interface BrowserReaderOptions {
   owner: (pageId: number) => BaseWindow
   recording: () => boolean
   visible: (id: number) => boolean
-  panelAllowsDialog?: ((pageId: number) => boolean) | undefined
+  panelAllowsPage?: ((pageId: number) => boolean) | undefined
   /** Main-process dependency used by isolated fixtures. Never accepted from HTTP. */
   approve?: (description: string) => Promise<boolean>
   /** Console evidence for a run; `after` is the console sequence number when the run started. */
@@ -124,16 +124,36 @@ export class BrowserReader {
     await this.attach(page)
     return new Promise<boolean>((resolve, reject) => {
       let settled = false
+      let decision: Promise<boolean> | undefined
+      const ask = (): Promise<boolean> => decision ??= confirm()
+      const prevented = (): void => {
+        void ask().then(leave => {
+          if (settled || page.contents.isDestroyed()) return
+          if (leave) page.contents.close({ waitForBeforeUnload: false })
+          else finish(false)
+        }).catch(failed)
+      }
+      const cleanup = (): void => {
+        this.closeGuards.delete(id)
+        page.contents.off('destroyed', destroyed)
+        page.contents.off('will-prevent-unload', prevented)
+      }
       const finish = (value: boolean): void => {
         if (settled) return; settled = true
-        this.closeGuards.delete(id); page.contents.off('destroyed', destroyed); resolve(value)
+        cleanup(); resolve(value)
       }
       const destroyed = (): void => finish(true)
-      const failed = (error: unknown): void => { if (settled) return; settled = true; this.closeGuards.delete(id); page.contents.off('destroyed', destroyed); reject(error) }
-      this.closeGuards.set(id, { confirm, cancelled: () => finish(false), failed })
+      const failed = (error: unknown): void => { if (settled) return; settled = true; cleanup(); reject(error) }
+      this.closeGuards.set(id, { confirm: ask, cancelled: () => finish(false), failed })
       page.contents.once('destroyed', destroyed)
       void this.command(page, 'Page.close').catch(error => {
         if (page.contents.isDestroyed()) finish(true)
+        else if (error instanceof Error && error.message.includes('Not attached to an active page')) {
+          // Chromium can detach the CDP target when native DevTools moves between windows.
+          // Let Electron run beforeunload and ask the user if that prevents the close.
+          page.contents.once('will-prevent-unload', prevented)
+          page.contents.close({ waitForBeforeUnload: true })
+        }
         else failed(error)
       })
     })
@@ -463,7 +483,7 @@ export class BrowserReader {
 
   /** The selected page when a dialog holds it, else another page a dialog holds: no waiting dialog stays out of sight. */
   private dialogPage(): PageReader | undefined {
-    const pages = this.availablePages().filter(page => this.cursor.getStore() || this.options.panelAllowsDialog?.(page.id) !== false)
+    const pages = this.availablePages().filter(page => this.cursor.getStore() || this.options.panelAllowsPage?.(page.id) !== false)
     const active = this.readers.get(this.activeId())
     if (active?.dialog && pages.includes(active.contents)) return active
     return [...this.readers.values()].find(page => page.dialog && pages.includes(page.contents))

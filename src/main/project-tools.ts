@@ -297,7 +297,7 @@ export class ProjectToolService {
       const browser = new BrowserDebug(owner, profile.settings, { ...this.options.browserOptions(), partition,
         ...(project.overrides === 'private' ? { devtoolsPartition: profile.devtoolsPartition } : {}),
         projectMode: true, tabId: `project:${project.profileId}`, canCreatePage: () => this.limit(),
-        panelAllowsDialog: pageId => {
+        panelAllowsPage: pageId => {
           const tab = project.tabs.find(entry => entry.pageId === pageId)
           return this.shownProject === project.profileId && Boolean(tab && (!tab.ownerId || tab.ownerId === this.foreground(project.profileId)))
         },
@@ -310,7 +310,7 @@ export class ProjectToolService {
           void Promise.resolve(this.options.activateProject?.(project.profileId, ownerId))
             .then(() => this.action(project.profileId, { type: 'add', kind: 'new' })).catch(this.options.error)
         },
-        onReturnToPanel: pageId => { void this.returnBrowserToPanel(project.profileId, pageId).catch(this.options.error) },
+        onReturnToPanel: pageId => this.returnBrowserToPanel(project.profileId, pageId),
         onPageFocus: pageId => { this.focusPage(project, pageId); this.refreshConnections() },
         onPopup: (pageId, openerId) => {
           const opener = project.tabs.find(tab => tab.pageId === openerId)

@@ -288,6 +288,40 @@ if (!process.versions.electron) {
     await until(() => state().tabs.some(tab => tab.url?.endsWith('/context-link')), 'context menu child')
     const linked = state().tabs.find(tab => tab.url?.endsWith('/context-link'))
     assert.equal(linked.ownerId, reopened.ownerId, 'context menu link inherits the clicked page owner')
+    currentSession = 's2'; tools.refreshConnections()
+    await action({ type: 'pop-out', id: linked.id })
+    await action({ type: 'select', id: reopened.id })
+    const popup = scopedBrowser.pages.get(linked.pageId)
+    popup.certificateWarning = { id: 91, url: 'https://fixture.invalid', host: 'fixture.invalid', error: 'ERR_CERT_DATE_INVALID' }
+    popup.error = 'Detached fixture error'
+    assert.equal(scopedBrowser.snapshot.certificateWarning?.pageId, linked.pageId)
+    assert.equal(scopedBrowser.snapshot.errorPageId, linked.pageId)
+    currentSession = 's1'; tools.refreshConnections()
+    assert.equal(scopedBrowser.snapshot.certificateWarning, undefined, 'another owner’s detached warning stays with its session')
+    assert.equal(scopedBrowser.snapshot.errorPageId, undefined)
+    scopedBrowser.action('certificate-back:91')
+    assert.equal(popup.certificateWarning?.id, 91, 'a stale answer cannot change another owner’s warning')
+    popup.certificateWarning = null
+    popup.error = null
+    for (const inspect of [
+      () => scopedBrowser.runContextAction(popup, 'inspect', { x: 2, y: 2 }),
+      () => popup.contents.emit('before-input-event', { preventDefault() {} }, { type: 'keyDown', key: 'F12' }),
+    ]) {
+      let release
+      const activation = new Promise(resolve => { release = resolve })
+      options.activateProject = async (_profileId, ownerId) => {
+        assert.equal(ownerId, linked.ownerId)
+        await activation
+        currentSession = 's2'; tools.refreshConnections()
+      }
+      inspect()
+      assert.equal(scopedBrowser.uiPageId, foregroundTab.pageId, 'inspection waits for the owner before switching native views')
+      release()
+      await until(() => state().activeId === linked.id && !state().tabs.find(tab => tab.id === linked.id).detached && scopedBrowser.snapshot.view === 'devtools', 'inspection in owning panel')
+      await action({ type: 'pop-out', id: linked.id })
+      currentSession = 's1'; tools.refreshConnections()
+    }
+    delete options.activateProject
     const confirmation = contents(reopened).executeJavaScript("confirm('owner confirmation')", true)
     await until(async () => (await s2('/status')).body.dialog?.pageId === reopened.pageId, 'owner receives confirmation')
     assert.equal(scopedBrowser.snapshot.dialog, undefined, 'foreground panel excludes another owner’s dialog')
