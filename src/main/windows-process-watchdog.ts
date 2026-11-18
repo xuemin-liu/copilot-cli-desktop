@@ -34,15 +34,46 @@ function loadJobApi() {
   const emptyLimits = Buffer.alloc(koffi.sizeof(extended))
   const killOnClose = Buffer.from(emptyLimits)
   killOnClose.writeUInt32LE(0x2000, koffi.offsetof(basic, 'LimitFlags')) // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-  const processEntry = koffi.struct({
-    dwSize: 'uint32', cntUsage: 'uint32', th32ProcessID: 'uint32', th32DefaultHeapID: 'uintptr',
-    th32ModuleID: 'uint32', cntThreads: 'uint32', th32ParentProcessID: 'uint32',
-    pcPriClassBase: 'int32', dwFlags: 'uint32', szExeFile: koffi.array('uint16', 260),
+  // The fixed prefix of SYSTEM_PROCESS_INFORMATION (winternl.h). The variable
+  // thread array and image name are skipped using NextEntryOffset.
+  const processPrefix = koffi.struct({
+    next: 'uint32', threads: 'uint32', workingSetPrivate: 'int64', hardFaults: 'uint32',
+    highWatermark: 'uint32', cycles: 'uint64', created: 'int64', user: 'int64', kernel: 'int64',
+    nameLength: 'uint16', nameCapacity: 'uint16', nameBuffer: 'uintptr', priority: 'int32',
+    pid: 'uintptr', parent: 'uintptr',
   })
-  const snapshot = kernel.func('intptr __stdcall CreateToolhelp32Snapshot(uint32 flags, uint32 pid)')
-  const first = kernel.func('int __stdcall Process32FirstW(intptr snapshot, void *entry)')
-  const next = kernel.func('int __stdcall Process32NextW(intptr snapshot, void *entry)')
-  const closeSnapshot = kernel.func('int __stdcall CloseHandle(intptr handle)')
+  const pidOffset = koffi.offsetof(processPrefix, 'pid'), parentOffset = koffi.offsetof(processPrefix, 'parent')
+  const createdOffset = koffi.offsetof(processPrefix, 'created')
+  const prefixSize = koffi.sizeof(processPrefix)
+  const query = koffi.load('ntdll.dll').func('int32 __stdcall NtQuerySystemInformation(uint32 infoClass, void *info, uint32 size, void *written)')
+  let processBuffer = Buffer.alloc(1024 * 1024)
+  const written = Buffer.alloc(4)
+  let supportsBasicInventory = true
+  function inventory(infoClass: number): number {
+    for (;;) {
+      const status = query(infoClass, processBuffer, processBuffer.length, written)
+      const size = written.readUInt32LE()
+      if (status === -1073741821 /* STATUS_INVALID_INFO_CLASS */ && infoClass === 252) return 0
+      if (status === -1073741820 /* STATUS_INFO_LENGTH_MISMATCH */) {
+        const capacity = Math.max(size + 65536, processBuffer.length * 2)
+        if (capacity > 64 * 1024 * 1024) throw new Error('Process inventory exceeds size limit')
+        processBuffer = Buffer.alloc(capacity)
+        continue
+      }
+      if (status < 0 || !size || size > processBuffer.length) throw new Error(`Process inventory failed (NTSTATUS ${status})`)
+      return size
+    }
+  }
+  function* records(size: number, minimum: number): Generator<number> {
+    for (let offset = 0; offset + minimum <= size;) {
+      yield offset
+      const step = processBuffer.readUInt32LE(offset)
+      if (step === 0) return
+      if (step < minimum) break
+      offset += step
+    }
+    throw new Error('Incomplete process inventory')
+  }
   const times = kernel.func('int __stdcall GetProcessTimes(void *process, void *created, void *exited, void *kernel, void *user)')
   const inJob = kernel.func('int __stdcall IsProcessInJob(void *process, void *job, void *result)')
   const lastError = kernel.func('uint32_t __stdcall GetLastError()')
@@ -53,22 +84,32 @@ function loadJobApi() {
     wait: kernel.func('uint32_t __stdcall WaitForSingleObject(void *handle, uint32_t timeout)'),
     close: kernel.func('int __stdcall CloseHandle(void *handle)'),
     lastError,
-    processes(): Map<number, number> {
-      const handle = snapshot(2 /* TH32CS_SNAPPROCESS */, 0)
-      if (handle === -1 || handle === -1n) throw new Error(`Process snapshot failed (${lastError()})`)
-      try {
-        const entry = Buffer.alloc(koffi.sizeof(processEntry))
-        entry.writeUInt32LE(entry.length)
-        const parents = new Map<number, number>()
-        let found = first(handle, entry)
-        while (found) {
-          parents.set(entry.readUInt32LE(koffi.offsetof(processEntry, 'th32ProcessID')),
-            entry.readUInt32LE(koffi.offsetof(processEntry, 'th32ParentProcessID')))
-          found = next(handle, entry)
-        }
-        if (lastError() !== 18 /* ERROR_NO_MORE_FILES */) throw new Error(`Process enumeration failed (${lastError()})`)
-        return parents
-      } finally { closeSnapshot(handle) }
+    mayHaveChildren(pid: number): boolean {
+      // SystemBasicProcessInformation avoids collecting per-thread timing data.
+      // Older Windows versions fall back to the full inventory.
+      if (!supportsBasicInventory) return true
+      const size = inventory(252)
+      if (!size) { supportsBasicInventory = false; return true }
+      const pointerSize = koffi.sizeof('uintptr')
+      const parentOffset = 2 * pointerSize // NextEntryOffset, UniqueProcessId, InheritedFromUniqueProcessId
+      for (const offset of records(size, parentOffset + pointerSize)) {
+        if (processBuffer.readUInt32LE(offset + parentOffset) === pid) return true
+      }
+      return false
+    },
+    processes(): Map<number, ProcessIdentity[]> {
+      const size = inventory(5 /* SystemProcessInformation */)
+      const children = new Map<number, ProcessIdentity[]>()
+      for (const offset of records(size, prefixSize)) {
+        // Windows process IDs fit in a DWORD even in a pointer-sized field.
+        const pid = processBuffer.readUInt32LE(offset + pidOffset)
+        const parent = processBuffer.readUInt32LE(offset + parentOffset)
+        const entry = { pid, created: processBuffer.readBigUInt64LE(offset + createdOffset) }
+        const siblings = children.get(parent)
+        if (siblings) siblings.push(entry)
+        else children.set(parent, [entry])
+      }
+      return children
     },
     created(process: unknown): bigint {
       const created = Buffer.alloc(8), exited = Buffer.alloc(8), kernelTime = Buffer.alloc(8), user = Buffer.alloc(8)
@@ -88,39 +129,50 @@ function loadJobApi() {
 
 let jobApi: ReturnType<typeof loadJobApi> | undefined
 
-function assignExistingDescendants(api: ReturnType<typeof loadJobApi>, job: unknown, pid: number, root: unknown): void {
-  // Assign each parent BEFORE enumerating its children. Children created later
-  // inherit the job; already-running children need their own assignment and scan.
-  // Keep handles until the entire walk finishes so known parent IDs cannot be reused.
-  const parents = [{ pid, created: api.created(root) }]
-  const handles: unknown[] = []
-  try {
+interface ProcessIdentity { pid: number; created: bigint }
+
+/** Each inventory covers every descendant visible at that instant. Only newly
+ * assigned parents need another pass for processes born before their assignment. */
+export function enrollDescendants(root: ProcessIdentity, mayHaveChildren: (pid: number) => boolean,
+  inventory: () => Map<number, ProcessIdentity[]>, enroll: (child: ProcessIdentity) => boolean): void {
+  if (!mayHaveChildren(root.pid)) return
+  let parents = [root]
+  while (parents.length) {
+    const children = inventory()
+    const newlyAssigned: ProcessIdentity[] = []
     for (const parent of parents) {
-      for (const [childPid, parentPid] of api.processes()) {
-        if (parentPid !== parent.pid || childPid === parent.pid) continue
-        const child = api.open(0x101101 /* query limited + synchronize + set quota + terminate */, 0, childPid)
-        if (!child) {
-          if (api.lastError() === 87) continue // Exited since the snapshot.
-          reportFailure(`Could not open descendant ${childPid} (${api.lastError()})`)
-          continue
-        }
-        handles.push(child)
-        try {
-          const created = api.created(child)
-          // A stale parent ID may refer to an unrelated process older than this
-          // parent. Also recheck the relationship with the child handle pinned:
-          // its ID might have been reused between the first snapshot and OpenProcess.
-          if (created < parent.created || api.processes().get(childPid) !== parent.pid) continue
-          if (api.contains(job, child)) continue // Its descendants already inherit this job.
-          if (!api.assign(job, child)) {
-            const error = api.lastError()
-            if (api.wait(child, 0) !== 0) throw new Error(`Could not assign descendant ${childPid} (${error})`)
-          }
-          // Even an exited child can have living descendants with its parent ID.
-          parents.push({ pid: childPid, created })
-        } catch (error) { reportFailure(error) }
+      for (const entry of children.get(parent.pid) ?? []) {
+        if (entry.pid === parent.pid || entry.created < parent.created || !enroll(entry)) continue
+        parents.push(entry)
+        newlyAssigned.push(entry)
       }
     }
+    parents = newlyAssigned
+  }
+}
+
+function assignExistingDescendants(api: ReturnType<typeof loadJobApi>, job: unknown, pid: number, root: unknown): void {
+  // Keep the handles until the walk finishes so known parent IDs cannot be reused.
+  const handles: unknown[] = []
+  try {
+    enrollDescendants({ pid, created: api.created(root) }, api.mayHaveChildren, api.processes, entry => {
+      const child = api.open(0x101101 /* query limited + synchronize + set quota + terminate */, 0, entry.pid)
+      if (!child) {
+        const error = api.lastError()
+        if (error !== 87) reportFailure(`Could not open descendant ${entry.pid} (${error})`)
+        return false
+      }
+      handles.push(child)
+      try {
+        // Check the sampled identity on the opened handle in case the PID was recycled.
+        if (api.created(child) !== entry.created || api.contains(job, child)) return false
+        if (!api.assign(job, child)) {
+          const error = api.lastError()
+          if (api.wait(child, 0) !== 0) throw new Error(`Could not assign descendant ${entry.pid} (${error})`)
+        }
+        return true
+      } catch (error) { reportFailure(error); return false }
+    })
   } finally { for (const handle of handles) api.close(handle) }
 }
 

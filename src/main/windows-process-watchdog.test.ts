@@ -3,10 +3,36 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
-import { startWindowsProcessWatchdog } from './windows-process-watchdog.js'
+import { enrollDescendants, startWindowsProcessWatchdog } from './windows-process-watchdog.js'
 
 test('invalid process IDs are rejected before opening a process', () => {
   for (const pid of [0, -1, 1.5, 2 ** 32]) assert.throws(() => startWindowsProcessWatchdog(pid), /Invalid watchdog process ID/)
+})
+
+test('a childless root needs no full inventory and a whole existing chain needs only one catch-up scan', () => {
+  const root = { pid: 1, created: 1n }
+  enrollDescendants(root, () => false, () => assert.fail('unexpected full inventory'), () => assert.fail('unexpected child'))
+  const tree = new Map<number, { pid: number; created: bigint }[]>()
+  for (let pid = 2; pid <= 11; pid++) tree.set(pid - 1, [{ pid, created: BigInt(pid) }])
+  let scans = 0
+  const enrolled = new Set<number>()
+  const enroll = (child: { pid: number }): boolean => {
+    if (enrolled.has(child.pid)) return false
+    enrolled.add(child.pid)
+    return true
+  }
+  enrollDescendants(root, () => true, () => { scans++; return tree }, enroll)
+  assert.equal(enrolled.size, 10)
+  assert.equal(scans, 2)
+  // A child born during the first scan must also be discovered and enrolled.
+  enrolled.clear()
+  scans = 0
+  enrollDescendants(root, () => true, () => {
+    if (++scans === 2) tree.set(11, [{ pid: 12, created: 12n }])
+    return tree
+  }, enroll)
+  assert.ok(enrolled.has(12))
+  assert.equal(scans, 3)
 })
 
 for (const release of [false, true]) {
