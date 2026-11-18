@@ -735,8 +735,19 @@ ${point.missing}`)
     const keyboardModifier = process.platform === 'darwin' ? 'meta' : 'control'
     key('Down', [keyboardModifier])
     await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Untracked"', 'modifier moves focus independently')
-    key('Space', [keyboardModifier])
-    await until('document.querySelectorAll(".git-entry-marked").length === 2', 'keyboard toggles a second file')
+    key('Down', [keyboardModifier])
+    await until('document.activeElement === [...document.querySelectorAll(".git-entry")].at(-1)', 'focus skips an untracked file without marking it')
+    key('Space')
+    await until('document.querySelector(".git-entry-selected")?.closest(".git-group")?.ariaLabel === "Untracked"', 'Space previews the focused file')
+    const toggled = await ui('document.querySelectorAll(".git-entry-marked").length')
+    await click('.git-path-filter')
+    window.webContents.insertText('NEW.TXT')
+    await until('document.querySelectorAll(".git-entry").length === 1', 'filter narrowed for keyboard dismissal')
+    key('Down')
+    await until('document.activeElement?.matches(".git-entry")', 'focus moved to the matching file')
+    key('Escape')
+    await until('document.activeElement?.matches(".git-path-filter") && document.querySelector(".git-path-filter")?.value === "" && document.querySelectorAll(".git-entry").length === 4', 'Escape on a file clears the filter and returns focus to search')
+    assert.equal(toggled, 2, 'Space toggled a second file without a system shortcut')
     results.keyboardAndFilter = true
 
     // 11b. Several files at once: Ctrl+click (Cmd on macOS) a changed and an untracked file, stage both, then unstage both.

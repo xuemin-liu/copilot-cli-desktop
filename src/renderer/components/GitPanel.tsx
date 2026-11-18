@@ -274,9 +274,9 @@ function EntryRow({ entry, code, selected, marked, multiple, onSelect, action, e
         // Shift+click would otherwise select the text of every row in between.
         onMouseDown={event => { if (multiple && event.shiftKey) event.preventDefault() }}
         onKeyDown={event => {
-          if (multiple && event.key === ' ' && (event.shiftKey || isShortcutModifier(event))) {
+          if (multiple && event.key === ' ' && !event.altKey) {
             event.preventDefault()
-            onSelect(markMode(event))
+            if (!event.repeat) onSelect(event.shiftKey ? 'range' : 'toggle')
           }
         }}
         onClick={event => onSelect(multiple ? markMode(event) : 'only')}
@@ -1002,11 +1002,19 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                   {feedbackAt('files')}
                   {currentStatus && currentStatus.totalEntries === 0 && <p className="git-message" role="status">Nothing to commit. The working tree is clean.</p>}
                   {currentStatus && (
-                    <div className="git-files" onKeyDown={navigateFiles}>
+                    <div className="git-files" onKeyDown={event => {
+                      if (event.key === 'Escape' && pathFilter) {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        filterFiles('')
+                        event.currentTarget.querySelector<HTMLInputElement>('.git-path-filter')?.focus()
+                      } else {
+                        navigateFiles(event)
+                      }
+                    }}>
                       {(currentStatus.totalEntries > 0 || pathFilter) && <input type="search" className="git-path-filter"
                         aria-label="Filter changed files by path" placeholder="Filter by path" value={pathFilter}
                         onChange={event => filterFiles(event.target.value)} onKeyDown={event => {
-                          if (event.key === 'Escape' && pathFilter) { event.preventDefault(); event.stopPropagation(); filterFiles('') }
                           if (event.key === 'ArrowDown') {
                             event.preventDefault()
                             const first = event.currentTarget.parentElement?.querySelector<HTMLButtonElement>('.git-entry')
