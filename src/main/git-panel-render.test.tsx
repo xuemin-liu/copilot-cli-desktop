@@ -261,7 +261,7 @@ test('publishing a branch names the branch and the remote, and is a separate con
 const branch = (extra: Partial<GitBranchView> = {}): GitBranchView => ({ name: 'main', current: false, oid: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, upstreamGone: false, subject: 'work', committedAt: 1, ...extra })
 const branchList = (extra: Partial<GitBranchListProps> = {}): string => renderToStaticMarkup(
   <GitBranchList branches={[branch({ name: 'main', current: true }), branch({ name: 'feature/x', upstream: null, ahead: null, behind: null, subject: 'in progress' })]} error={null}
-    locked={false} lockedReason={null} newName="" onNewNameChange={() => undefined} onCreate={() => undefined} onSwitch={() => undefined} {...extra} />)
+    locked={false} lockedReason={null} newName="" commitDraft="" onNewNameChange={() => undefined} onCreate={() => undefined} onSwitch={() => undefined} {...extra} />)
 
 test('the branch list marks the current branch, offers Switch for the others, and shows how far each is from its upstream', () => {
   const list = branchList()
@@ -291,7 +291,15 @@ test('creating a branch needs a valid name, and everything is locked while a wri
   const locked = branchList({ newName: 'idea', locked: true })
   assert.match(locked, /<button[^>]*disabled[^>]*>Create and switch/)
   assert.match(locked, /<button[^>]*disabled[^>]*>Switch</)
+  assert.match(locked, /<button[^>]*disabled[^>]*>Suggest name</)
   assert.match(branchList({ locked: true, lockedReason: 'There are no commits yet.' }), /There are no commits yet\./)
+})
+
+test('branch suggestions wait for the local branch list while manual creation is available', () => {
+  const loading = branchList({ branches: null, newName: 'idea' })
+  assert.match(loading, /<button[^>]*disabled[^>]*>Suggest name</)
+  assert.doesNotMatch(loading, /<button[^>]*disabled[^>]*>Create and switch/)
+  assert.match(branchList(), /<button type="button">Suggest name</)
 })
 
 test('the branch list says when it is loading, empty, or failed', () => {
