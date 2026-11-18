@@ -1487,6 +1487,7 @@ button:disabled {
 .git-changes-split .git-diff-lines { flex: 1; min-height: 0; max-height: none; }
 .splitter-horizontal { flex: none; height: 5px; margin: 2px 6px 4px; border-radius: 2px; background: #292d35; cursor: row-resize; touch-action: none; }
 .splitter-horizontal:hover, .splitter-horizontal:focus-visible { background: #4f88ff; outline: none; }
+.git-path-filter { box-sizing: border-box; width: 100%; margin-bottom: 3px; }
 .git-files { padding: 4px 6px 0; }
 .git-group h3 { margin: 8px 4px 2px; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: #929baa; }
 .git-entry { display: grid; grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr); column-gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px; border: 0; border-radius: 4px; background: transparent; color: #e6edf3; }

@@ -704,6 +704,41 @@ ${point.missing}`)
     service.requestRefresh(PROFILE)
     results.stagingCommentContinuity = true
 
+    const key = (keyCode, modifiers = []) => {
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+    }
+    await ui('document.querySelector(".git-tabs [aria-selected=true]").focus()')
+    key('Right')
+    await until('document.activeElement?.textContent === "History" && !!document.querySelector(".git-history")', 'Right selects History')
+    key('Home')
+    await until('document.activeElement?.textContent.startsWith("Changes") && !!document.querySelector(".git-path-filter")', 'Home returns to Changes')
+    await click('.git-path-filter')
+    window.webContents.insertText('NEW.TXT')
+    await until('document.querySelectorAll(".git-entry").length === 1 && document.querySelector(".git-entry-name")?.textContent === "new.txt"', 'case-insensitive path match')
+    key('Down')
+    await until('document.activeElement?.matches(".git-entry") && document.querySelector(".git-diff-path")?.textContent === "new.txt"', 'Down previews the first match')
+    await clickByText('.git-group-action', 'Stage shown')
+    await until('!!document.querySelector(".git-group[aria-label=Staged] .git-entry")', 'only the matching untracked file is staged')
+    assert.deepEqual(gitIn('diff', '--cached', '--name-only').trim().split(/\r?\n/).sort(), ['b.txt', 'new.txt'])
+    await clickByText('.git-group-action', 'Unstage shown')
+    await until('!!document.querySelector(".git-group[aria-label=Untracked] .git-entry")', 'filtered file unstaged')
+    await click('.git-path-filter')
+    window.webContents.insertText('missing')
+    await until('document.querySelectorAll(".git-entry").length === 0 && document.body.textContent.includes("No matching files.")', 'empty filter result')
+    key('Escape')
+    await until('document.querySelector(".git-path-filter")?.value === "" && document.querySelectorAll(".git-entry").length === 4', 'Escape restores all file rows')
+    key('Down')
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Staged"', 'first file focused')
+    key('Down')
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Changes"', 'Down crosses into changed files')
+    const keyboardModifier = process.platform === 'darwin' ? 'meta' : 'control'
+    key('Down', [keyboardModifier])
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Untracked"', 'modifier moves focus independently')
+    key('Space', [keyboardModifier])
+    await until('document.querySelectorAll(".git-entry-marked").length === 2', 'keyboard toggles a second file')
+    results.keyboardAndFilter = true
+
     // 11b. Several files at once: Ctrl+click (Cmd on macOS) a changed and an untracked file, stage both, then unstage both.
     const pickKey = process.platform === 'darwin' ? 'meta' : 'control'
     const entryIn = (group, index) => `[...document.querySelectorAll(".git-group")].find(candidate => candidate.getAttribute("aria-label") === ${JSON.stringify(group)}).querySelectorAll(".git-entry")[${index}]`
