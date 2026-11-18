@@ -15,7 +15,7 @@ import { restorableUrl } from './browser-privacy.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
 import { dockedNeighbor, isTerminalKind, removeToolTab, panelTabs, type PanelLayout, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
-import { prepareBrowserSessionEnvironment } from './browser-session.js'
+import { prepareToolTerminalEnvironment } from './browser-session.js'
 import { writeToBroadcastTargets } from '../../vendor/myterminal/channels.mjs'
 import MyTerminalServices from '../../vendor/myterminal/services.cjs'
 import { createBellNotifier, createReconnectController } from '../../vendor/myterminal/lifecycle.cjs'
@@ -75,7 +75,8 @@ export class ProjectToolService {
       else { lifecycle?.retry.dispose(); this.terminalLifecycles.delete(id) }
     },
   })
-  private readonly terminalBridges = new Map<string, Promise<{ server: Server; endpoint: string; env: NodeJS.ProcessEnv }>>()
+  private readonly terminalBridges = new Map<string, Promise<{ server: Server; directory: string; env: NodeJS.ProcessEnv }>>()
+  private readonly closingTerminalBridges = new Set<Promise<void>>()
   private readonly releasing = new Set<string>()
   private readonly suspendingPages = new Set<string>()
   private readonly cancelledStarts = new Set<string>()
@@ -566,13 +567,15 @@ export class ProjectToolService {
     this.terminalLifecycles.delete(id)
     if (this.terminalStarts.has(id)) this.cancelledStarts.add(id)
     this.terminals.close(profileId, id)
-    void this.stopTerminalBridge(id).catch(this.options.error)
+    const closing = this.stopTerminalBridge(id)
+    this.closingTerminalBridges.add(closing)
+    void closing.finally(() => this.closingTerminalBridges.delete(closing)).catch(this.options.error)
   }
   private async terminalEnvironment(profileId: string, sourceId: string): Promise<NodeJS.ProcessEnv> {
     let pending = this.terminalBridges.get(sourceId)
     if (!pending) {
       pending = (async () => {
-        const env = await prepareBrowserSessionEnvironment(join(this.options.userData, 'terminal-helpers', randomUUID()), 'tab-1', { ...process.env }, message => this.options.error(message))
+        const { directory, env } = await prepareToolTerminalEnvironment(join(this.options.userData, 'terminal-helpers'), message => this.options.error(message))
         const endpoint = env.COPILOT_DESKTOP_TERMINAL_STATE!, token = randomBytes(32).toString('hex')
         const server = createServer((request, response) => {
           const port = (server.address() as { port: number }).port
@@ -587,13 +590,18 @@ export class ProjectToolService {
           }, scope)
         })
         server.requestTimeout = 15000
-        await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
-        try { await writeFileAtomic(endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token })) }
-        catch (error) { server.close(); throw error }
+        try {
+          await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+          await writeFileAtomic(endpoint, JSON.stringify({ pid: process.pid, port: (server.address() as { port: number }).port, token }))
+        } catch (error) {
+          if (server.listening) server.close()
+          await rm(directory, { recursive: true, force: true })
+          throw error
+        }
         // A tool shell is not an agent session; do not inherit browser authority or instruction directories.
         delete env.COPILOT_DESKTOP_BROWSER_STATE; delete env.COPILOT_DESKTOP_BROWSER_HELPER; delete env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS
         if (process.platform === 'win32') env.WSLENV = [env.WSLENV, 'COPILOT_DESKTOP_TERMINAL_STATE', 'COPILOT_DESKTOP_TERMINAL_WINDOWS_HELPER', 'COPILOT_DESKTOP_TERMINAL_HELPER/p'].filter(Boolean).join(':')
-        return { server, endpoint, env }
+        return { server, directory, env }
       })()
       this.terminalBridges.set(sourceId, pending)
       void pending.catch(() => { if (this.terminalBridges.get(sourceId) === pending) this.terminalBridges.delete(sourceId) })
@@ -603,7 +611,7 @@ export class ProjectToolService {
   private async stopTerminalBridge(sourceId: string): Promise<void> {
     const pending = this.terminalBridges.get(sourceId); this.terminalBridges.delete(sourceId)
     if (!pending) return
-    try { const bridge = await pending; bridge.server.closeAllConnections(); bridge.server.close(); await rm(bridge.endpoint, { force: true }) }
+    try { const bridge = await pending; bridge.server.closeAllConnections(); bridge.server.close(); await rm(bridge.directory, { recursive: true, force: true }) }
     catch (error) { this.options.error(error) }
   }
   private async startTerminal(profileId: string, id: string): Promise<unknown> {
@@ -873,6 +881,7 @@ export class ProjectToolService {
     await Promise.all([...this.terminalServices.values()].map(service => service.dispose()))
     this.terminalServices.clear(); this.splits.clear()
     await Promise.all([...this.terminalBridges.keys()].map(id => this.stopTerminalBridge(id)))
+    await Promise.all(this.closingTerminalBridges)
     await this.writing.catch(this.options.error)
     await Promise.all([...this.bridges.keys()].map(id => this.stopBridge(id)))
     await Promise.all([...this.groups.values()].map(group => group.browser.dispose()))

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { request as httpRequest } from 'node:http'
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const out = resolve('test-results/tool-terminal'), delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -165,6 +165,7 @@ if (!process.versions.electron) {
       assert.equal((await tools.terminalFeature('p2', 'snippets:getAll', []))[0].id, 'fresh')
       projects.delete('p2'); await tools.removeProject('p2')
       await tools.dispose()
+      assert.deepEqual(await readdir(join(options.userData, 'terminal-helpers')), [], 'closed and restarted terminal bridges release their helper directories')
       tools = new ProjectToolService(options)
       const restored = await tools.terminalAction('p1', { action: 'list' })
       assert.equal(restored.length, 1); assert.equal(restored[0].status, 'disconnected', 'restoring tabs never auto-connects shells')
