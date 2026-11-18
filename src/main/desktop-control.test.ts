@@ -158,6 +158,9 @@ test('the helper’s first request asks for the named action and resumes only af
   assert.equal((await helper('screenshot', { target: '11' })).status, 403)
   assert.equal(captureCount, 0)
   assert.equal(h.monitor.running, false)
+  // Restart the denied session to allow it to ask again.
+  await h.control.unregister('tab', 'Restarted.')
+  await h.control.register('tab')
   h.answers.push('once')
   const shot = await helper('screenshot', { target: '11' })
   assert.equal(shot.status, 200)
@@ -203,6 +206,42 @@ test('a one-time click rechecks its frame after approval and expires when the ta
   await refused(h.control.handle('tab', 'click', { frameId: shot.frameId, x: 10, y: 20 }), /screen changed/)
   assert.deepEqual(h.native.actions, [])
   assert.equal(h.control.isEnabled('tab'), false)
+})
+
+test('a fresh one-time click can finish after the approval dialog has been open for 31 seconds', async t => {
+  const h = await harness(t)
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() })
+  h.native.list = [window('11', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 })]
+  h.answers.push('once')
+  const shot = await h.control.handle('tab', 'screenshot', { target: '11' })
+  h.host.approve = async () => { t.mock.timers.tick(31_000); return 'once' }
+  await h.control.handle('tab', 'click', { frameId: shot.frameId, x: 10, y: 20 })
+  assert.deepEqual(h.native.actions, ['click 110,120 left 1'])
+})
+
+test('denying first use prevents repeated prompts until manual activation', async t => {
+  const h = await harness(t)
+  await refused(h.control.handle('tab', 'windows', {}), /did not allow/)
+  await refused(h.control.handle('tab', 'windows', {}), /turn on desktop control/i)
+  assert.deepEqual(h.asked, ['open windows'])
+  await h.control.enable('tab')
+  assert.deepEqual((await h.control.handle('tab', 'windows', {})).windows, [])
+})
+
+test('the stop key silences further prompts for the stopped session until restart', async t => {
+  const h = await harness(t)
+  let stop!: () => void
+  h.host.stopKey = (active, callback) => { if (active) stop = callback; return true }
+  await h.control.enable('tab')
+  stop()
+  await h.control.register('tab') // Wait for the queued stop to finish.
+  await refused(h.control.handle('tab', 'windows', {}), /turn on desktop control/i)
+  assert.deepEqual(h.asked, [])
+  await h.control.unregister('tab', 'Restarted.')
+  await h.control.register('tab')
+  h.answers.push('once')
+  await h.control.handle('tab', 'windows', {})
+  assert.deepEqual(h.asked, ['open windows'])
 })
 
 test('closing the helper request dismisses first-use approval without granting session access', async t => {

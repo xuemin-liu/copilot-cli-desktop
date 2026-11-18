@@ -12,7 +12,8 @@ Windows 10 and 11 only. On macOS and Linux the setting is shown but can't be tur
    Sessions that start from then on get the desktop control helper. A session that was already running needs a
    restart (↻ in its header). Read-only sessions, side chats and remote sessions never get it.
 2. The first desktop action opens a prompt naming the session, action and target. Choose **Allow once** for that
-   command or **Allow for this session** to keep control on. **Deny** cancels the request. An approved request
+   command or **Allow for this session** to keep control on. **Deny** on first use, **Turn off**, and the stop key
+   silence future requests for that session until you turn control on manually or restart the session. An approved request
    continues automatically. Checking status never opens a prompt. You can also click the monitor button in the
    session header and select **Turn on**.
 
@@ -40,7 +41,8 @@ apply to running it):
 | `key <frameId> <chord>` | One key or chord, such as `enter` or `ctrl+s`, from a fixed list |
 
 Every input names the screenshot it was planned from. Before acting, the app checks that the screenshot is less than
-30 seconds old and that the screen hasn't locked or changed since. For a point, it also checks that the window under
+30 seconds old when the input request starts and that the screen hasn't locked or changed since. Time spent in the
+approval dialog is excluded for that request's final age check. For a point, it also checks that the window under
 the point is still the same app and window, and that the pixels around the point (about 64×64 px) still match the
 screenshot. If anything changed, Copilot is told to take a new screenshot. So a dialog that appears after the
 screenshot, or a sheet drawn inside the window, isn't clicked by mistake.

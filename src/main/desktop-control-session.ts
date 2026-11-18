@@ -141,9 +141,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_CO
 \`\`\`
 
 How it works:
-- status checks availability without asking for access. When enabled is false, issue the desktop command needed
+- status checks availability without asking for access. When enabled is false and canRequest is true, issue the desktop command needed
   for the task. The desktop shows the approval prompt and continues that request if the user allows it.
-  Allow once covers one command. If the user denies or stops control, stop the task until they ask to continue.
+  Allow once covers one command. If canRequest is false, the user must turn on desktop control in the panel or restart
+  the session. If the user denies or stops control, stop the task until they ask to continue.
 - windows lists visible windows with an id, the app, its title and whether it is approved, needs approval or is blocked.
 - screenshot saves a PNG and answers with its path, a frameId and its size. View the PNG to see the screen.
   With no argument it captures the window in front. screen (or screen:N) captures a whole display; the user approves
