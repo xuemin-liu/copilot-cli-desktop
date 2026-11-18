@@ -277,6 +277,33 @@ shardedTest('log returns commits newest first and pages with skip', { skip }, as
   assert.deepEqual((await h.service.getLog(SUBSCRIBER, PROFILE, repo.id, 1, 1)).map(entry => entry.subject), ['first: a thing'])
 })
 
+shardedTest('commit details and patches use the selected merge and its first parent', { skip }, async t => {
+  const h = await harness(t, (f, root) => {
+    f.plain(root, 'init', '-q', '-b', 'main')
+    f.plain(root, 'commit', '-q', '--allow-empty', '-m', 'root')
+    f.plain(root, 'checkout', '-qb', 'topic')
+    writeFileSync(join(root, '-topic.txt'), 'from topic\n')
+    writeFileSync(join(root, 'binary.dat'), Buffer.from([0, 1, 255]))
+    f.plain(root, 'add', '.')
+    f.plain(root, 'commit', '-qm', 'topic')
+    f.plain(root, 'checkout', '-q', 'main')
+    writeFileSync(join(root, 'main.txt'), 'from main\n')
+    f.plain(root, 'add', '.')
+    f.plain(root, 'commit', '-qm', 'main')
+    f.plain(root, 'merge', '-q', '--no-ff', 'topic', '-m', 'Merge topic', '-m', 'Merge body')
+  })
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  const oid = repo.headOid!
+  const details = await h.service.getCommitDetails(SUBSCRIBER, PROFILE, repo.id, oid)
+  assert.equal(details.body, 'Merge body')
+  assert.deepEqual(details.files.map(file => file.path), ['-topic.txt', 'binary.dat'])
+  assert.equal(details.files[1]?.binary, true)
+  writeFileSync(join(h.project, '-topic.txt'), 'working copy only\n')
+  const patch = await h.service.getCommitDiff(SUBSCRIBER, PROFILE, repo.id, oid, '-topic.txt')
+  assert.match(patch.text, /^\+from topic$/m)
+  assert.doesNotMatch(patch.text, /working copy only|binary.dat|main.txt/)
+})
+
 shardedTest('an empty repository has no log and does not fail', { skip }, async (t) => {
   const h = await harness(t, (f, project) => f.plain(project, 'init', '-q'))
   const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!

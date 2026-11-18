@@ -218,4 +218,10 @@ export interface GitProgressEvent {
 
 export interface GitLogPage { headOid: string; entries: GitLogEntry[]; restart: boolean; cursor: string }
 
+export interface GitCommitDetails {
+  body: string
+  files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean }>
+  truncated: boolean
+}
+
 export type { GitLogEntry }

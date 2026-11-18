@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, commitOid, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, commitOid, commitShowArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
@@ -18,7 +18,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitCommitHead, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
+  GitBranchView, GitCommitDetails, GitCommitHead, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -721,6 +721,35 @@ export class GitService {
       if (entries.length !== pageIds.length || entries.some((entry, i) => entry.hash !== pageIds[i])) throw new Error('Git could not read the selected history page.')
     }
     return { headOid, entries, restart, cursor: digest(offset + pageIds.length) }
+  }
+
+  private async readCommit(subscriberId: number, profileId: string, repoId: string, oid: string, path?: string): Promise<GitRunResult> {
+    const project = this.projectFor(subscriberId, profileId)
+    const repo = this.repoFor(project, repoId)
+    const runtime = await this.getRuntime()
+    if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
+    await this.requireGate(project, repo, runtime)
+    const root = repo.discovered.root
+    const result = await runtime.runner.run({ cwd: root, args: commitShowArgs(oid, path), signal: project.abort.signal, maxStdoutBytes: MAX_DIFF_BYTES + 64 * 1024 })
+    if (result.cancelled || result.timedOut || (!gitSucceeded(result) && !result.stdoutTruncated)) throw new Error(describeFailure(result, 'git show', root))
+    return result
+  }
+
+  async getCommitDetails(subscriberId: number, profileId: string, repoId: string, oid: string): Promise<GitCommitDetails> {
+    const result = await this.readCommit(subscriberId, profileId, repoId, oid)
+    const end = result.stdout.indexOf(0)
+    if (end < 0) throw new Error('The commit message is too large to list its files.')
+    // Git writes a NUL after the format record and a newline before the first numstat record.
+    // A capped result may end halfway through a path. Only parse complete NUL-terminated records.
+    const stats = result.stdout.subarray(end + 1, result.stdout.lastIndexOf(0) + 1).toString('utf8').replace(/^\0?\n?/, '')
+    const files = parseNumstat(stats)
+    return { body: result.stdout.subarray(0, end).toString('utf8').trimEnd(), files: files.slice(0, 5_000), truncated: result.stdoutTruncated || files.length > 5_000 }
+  }
+
+  async getCommitDiff(subscriberId: number, profileId: string, repoId: string, oid: string, path: string): Promise<{ text: string; truncated: boolean }> {
+    const result = await this.readCommit(subscriberId, profileId, repoId, oid, path)
+    const bounded = boundText(result.stdout, MAX_DIFF_BYTES)
+    return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated }
   }
 
   // ---- trust --------------------------------------------------------------------------------------

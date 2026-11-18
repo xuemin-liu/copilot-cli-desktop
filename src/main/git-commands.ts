@@ -115,6 +115,15 @@ export function logArgs(options: { limit: number; skip?: number }): string[] {
   ]
 }
 
+export function commitShowArgs(oid: string, path?: string): string[] {
+  const args = ['show', '--no-notes', '--no-show-signature', '--no-ext-diff', '--no-textconv', '--no-color',
+    '--no-renames', '--submodule=short', '--root', '-m', '--first-parent']
+  const revision = commitOid(oid) + '^{commit}'
+  if (path === undefined) return [...args, '--format=%b%x00', '--numstat', '-z', revision, '--']
+  assertGitArgument(path, 'path')
+  return [...args, '--format=', '--patch', revision, '--', path]
+}
+
 // ---- network ------------------------------------------------------------------------------------------------------------
 
 /** The configured remote names, one per line. */

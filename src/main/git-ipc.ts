@@ -178,6 +178,12 @@ export function registerGitIpc(deps: GitIpcDeps): void {
     return action === 'create' ? service.createBranch(...args) : service.switchBranch(...args)
   })
   handle('desktop:git-cancel', (service, event, profileId: unknown, repoId: unknown) => { service.cancel(event.sender.id, profileIdArg(profileId), repoIdArg(repoId)) })
+  handle('desktop:git-commit-details', (service, event, profileId: unknown, repoId: unknown, oid: unknown) =>
+    service.getCommitDetails(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), commitOid(oid)))
+  handle('desktop:git-commit-diff', (service, event, profileId: unknown, repoId: unknown, oid: unknown, path: unknown) => {
+    if (typeof path !== 'string' || !path || path.includes('\0') || path.length > 32_767) throw new Error('Invalid file path')
+    return service.getCommitDiff(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), commitOid(oid), path)
+  })
   handle('desktop:git-log-page', async (service, event, profileId: unknown, repoId: unknown, revision: unknown, limit: unknown, skip: unknown, cursor: unknown) => {
     const headOid = commitOid(revision)
     if (cursor !== null && (typeof cursor !== 'string' || !/^[0-9a-f]{64}$/.test(cursor))) throw new Error('Invalid history cursor')

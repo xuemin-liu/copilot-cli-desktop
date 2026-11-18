@@ -534,6 +534,13 @@ ${point.missing}`)
     await clickByText('.git-tabs button', 'History')
     await until('/init beta/.test(document.querySelector(".git-log")?.innerText || "")', 'history listed')
     assert.match(await text('.git-log'), /Check/)
+    await clickByText('.git-log-subject', 'init beta')
+    await until('document.querySelectorAll(".git-commit-file").length === 2', 'root commit lists both changed files')
+    await clickByText('.git-commit-file', 'a.txt')
+    await until('document.querySelector(".git-commit-details .git-diff-add")?.textContent.includes("+one")', 'root commit shows the original addition')
+    assert.equal(await ui('!!document.querySelector(".git-commit-details .git-diff-gutter")'), false, 'historical patches are read-only')
+    await clickByText('.git-log-subject', 'init beta')
+    await until('!document.querySelector(".git-commit-details")', 'commit details collapsed')
     results.history = true
 
     // 9. A repository whose config names a program waits for review, and opens after the user trusts it.
