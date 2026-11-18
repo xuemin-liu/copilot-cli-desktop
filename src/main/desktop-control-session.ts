@@ -5,7 +5,7 @@ import { desktopControlStatePath } from './desktop-control.js'
 /**
  * What a session needs to use desktop control: a PowerShell helper (no Node or desktop CLI needed, like `browser.ps1`)
  * and instructions. They are added when the session starts with desktop control allowed in Settings; the app still
- * refuses every request until the user turns control on for that session.
+ * asks for approval when the helper first requests a desktop action.
  */
 
 export function desktopControlHelperPath(folder: string): string {
@@ -78,14 +78,14 @@ try {
     }
   }
   if (!$env:COPILOT_DESKTOP_CONTROL_STATE -or !(Test-Path -LiteralPath $env:COPILOT_DESKTOP_CONTROL_STATE)) {
-    throw 'Desktop control is off for this session. Ask the user to turn it on from the session toolbar (Desktop control).'
+    throw 'Desktop control is unavailable for this session. Check Settings > Desktop control and restart a local session with shell access.'
   }
   $desktopControl = Get-Content -LiteralPath $env:COPILOT_DESKTOP_CONTROL_STATE -Raw | ConvertFrom-Json
   if ($desktopControl.pid -notmatch '^\d+$' -or [long]$desktopControl.pid -lt 1 -or [long]$desktopControl.pid -gt 2147483647 -or
       !(Get-Process -Id ([int]$desktopControl.pid) -ErrorAction SilentlyContinue) -or
       $desktopControl.port -notmatch '^\d+$' -or [long]$desktopControl.port -lt 1 -or [long]$desktopControl.port -gt 65535 -or
       $desktopControl.token -notmatch '^[a-f0-9]{64}$') {
-    throw 'Desktop control state is stale. Ask the user to turn desktop control off and on again for this session.'
+    throw 'Desktop control state is stale. Restart this session to reconnect the helper.'
   }
   $desktopHeaders = @{ Authorization = 'Bearer ' + $desktopControl.token }
   $desktopBody = [System.Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress -Depth 4))
@@ -118,7 +118,7 @@ export function desktopControlInstructions(stopKey: string): string {
   return `# This session's desktop control
 
 The user can let this session see the screen and use the mouse and keyboard in other apps on their Windows computer.
-It is off until the user turns it on from this session's toolbar (Desktop control). Use it only when the user asks you
+The desktop asks for approval on the first action. The user can also turn it on from this session's toolbar. Use it only when the user asks you
 to do something in another app, or when a task can't be done with files and shell commands. Prefer the shell, file
 tools and this session's Debug browser (browser helper) whenever they can do the job.
 
@@ -141,7 +141,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:COPILOT_DESKTOP_CO
 \`\`\`
 
 How it works:
-- Run status first. If it says desktop control is off, ask the user to turn it on; do not look for another way in.
+- status checks availability without asking for access. When enabled is false and canRequest is true, issue the desktop command needed
+  for the task. The desktop shows the approval prompt and continues that request if the user allows it.
+  Allow once covers one command. If canRequest is false, the user must turn on desktop control in the panel or restart
+  the session. If the user denies or stops control, stop the task until they ask to continue.
 - windows lists visible windows with an id, the app, its title and whether it is approved, needs approval or is blocked.
 - screenshot saves a PNG and answers with its path, a frameId and its size. View the PNG to see the screen.
   With no argument it captures the window in front. screen (or screen:N) captures a whole display; the user approves

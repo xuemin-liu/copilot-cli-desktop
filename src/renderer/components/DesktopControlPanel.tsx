@@ -56,6 +56,7 @@ export function DesktopControlPanel({ tab, allowed, ready, view }: DesktopContro
     {unavailable && !enabled
       ? <p className="desktop-control-note">{unavailable}</p>
       : <p className="desktop-control-note">
+        {!enabled && (view?.promptsBlocked ? 'Requests are stopped. Select Turn on to allow desktop access again. ' : 'You’ll be asked when Copilot first needs desktop access. ')}
         Copilot can see and use apps you approve, one at a time. It can never control this app, terminals, File Explorer,
         Start, sign-in or password windows, or administrator windows, and it never types into password fields.
         Press <kbd>{STOP_KEY}</kbd> anywhere to stop it.

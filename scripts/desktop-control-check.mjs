@@ -119,14 +119,14 @@ function save() { var fso = new ActiveXObject("Scripting.FileSystemObject"); var
     const readOut = async () => (await readFile(out)).toString('utf16le').replace(/^﻿/, '')
 
     try {
-      await refusedWith(/off for this session/, 'status')
-      await control.enable('tab-1')
-      assert.equal((await ok('status')).enabled, true)
+      await control.register('tab-1')
+      assert.equal((await ok('status')).enabled, false)
 
       const window = await until(async () => (await ok('windows')).windows.find(entry => entry.title === 'Desktop control check'), 'HTA window')
       assert.equal(window.status, 'needs approval')
+      assert.equal((await ok('status')).enabled, true)
       assert.equal((await ok('focus', window.id)).focused, true)
-      assert.deepEqual(approvals, ['mshta'])
+      assert.deepEqual(approvals, ['open windows', 'mshta'])
       await delay(400)
 
       // Type into the text field, found by its colour.
@@ -200,7 +200,7 @@ function save() { var fso = new ActiveXObject("Scripting.FileSystemObject"); var
       // The stop key turns control off everywhere.
       await native.key([0x11, 0x12, 0x10, 0x58])
       await until(async () => control.enabledTabs().length === 0, 'stop key turns control off')
-      await refusedWith(/off for this session/, 'status')
+      assert.equal((await ok('status')).enabled, false)
 
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, approvals }))
       console.log('[desktop-control-check] all checks passed')

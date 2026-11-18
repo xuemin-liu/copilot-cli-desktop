@@ -172,6 +172,7 @@ export interface CopilotResolution {
 
 export interface DesktopControlTabView {
   enabled: boolean
+  promptsBlocked: boolean
   paused: boolean
   approvedApps: Array<{ key: string; name: string }>
   fullScreen: boolean

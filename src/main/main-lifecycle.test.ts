@@ -25,9 +25,10 @@ const FORK = '22222222-2222-4222-8222-222222222222'
 interface Harness {
   shellCalls: { action: string; target: string }[]
   createTestWindow(): void
+  startTestDesktopControl(): Promise<void>
   flushToolPersistence(): Promise<boolean>
   /** Answer every native message box with this button, and collect what each one asked. */
-  answerMessageBoxes(response: number, beforeAnswer?: () => void): { title: string; detail: string; buttons: string[] }[]
+  answerMessageBoxes(response: number, beforeAnswer?: () => void): { title: string; message: string; detail: string; buttons: string[] }[]
   /** Settles once every worktree cleanup started by a tab close has finished. */
   worktreeCleanups(): Promise<void>
   refreshAppMenu(): void
@@ -167,7 +168,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           });
           setMenu(menu) { this.menu = menu; } setTitle(title) { this.title = title; }
           isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; } isVisible() { return true; }
-          show() {} focus() { this.focused++; this.emit('focus'); } restore() {}
+          show() {} focus() { this.focused++; this.emit('focus'); } restore() {} flashFrame() {}
           async loadFile(path) {
             this.url = (await import('node:url')).pathToFileURL(path).href;
             let prevented = false;
@@ -271,6 +272,11 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const lifecycleTest = {
           shellCalls: shell.calls,
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
+          async startTestDesktopControl() {
+            await startDesktopControl();
+            desktopControl.native.desktopAvailable = async () => true;
+            desktopControl.native.foreground = async () => null;
+          },
           async flushToolPersistence() { await projectToolService?.writing; return projectToolService?.profileRecoveryRequired; },
           refreshAppMenu: installApplicationMenu,
           quitCalls: () => app.quitCalls,
@@ -376,7 +382,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           browserStorageClears,
           blockBrowserDispose,
           request: (name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: mainWindow?.webContents }, ...args),
-          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
+          async cleanup() { workflowAttentionReady=false;workflowNotifications.close();workflowResources.close();workflowError = 'test cleanup'; for(const run of automaticTurns.values())clearTimeout(run.timer);automaticTurns.clear();automations?.close();automations=null;workflowStore?.close(); workflowStore = null; clearTimeout(updateQuitTimer); await stopAllSessions();await desktopControl?.dispose();await projectToolService?.dispose();deliveryJournal?.close();deliveryJournal=null; clearTimeout(meetingPumpTimer); await Promise.allSettled(meetingWrites.values()); await configWriteQueue; await quitCleanupForTest; await quitWorkForTest; await Promise.allSettled(diagnosticWrites); },
         };
       `, resolveDir: dirname(mainPath), loader: 'js' },
       bundle: true, platform: 'node', format: 'esm', packages: 'external', write: false,
@@ -400,6 +406,27 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
+
+test('a newly launched CLI can request desktop approval before manual activation', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, desktopControl: true, profiles: [profile], activeProfileId: profile.id }, capabilities)
+  harness.createTestWindow()
+  await harness.startTestDesktopControl()
+  const state = await harness.createMain()
+  const tabId = state.activeTabId!
+  assert.ok(state.desktopControlReadyTabIds?.includes(tabId))
+  assert.equal(state.desktopControl?.[tabId]?.enabled, false)
+  const endpoint = JSON.parse(await readFile(harness.spawns[0]!.env.COPILOT_DESKTOP_CONTROL_STATE!, 'utf8'))
+  const asked = harness.answerMessageBoxes(0)
+  const response = await fetch(`http://127.0.0.1:${endpoint.port}/desktop/windows`, {
+    method: 'POST', headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, body: '{}',
+  })
+  assert.equal(response.status, 403)
+  assert.equal(asked.length, 1)
+  assert.ok(asked[0]!.message.includes(state.tabs.find(tab => tab.id === tabId)!.title))
+  assert.match(asked[0]!.message, /list open windows/)
+  assert.deepEqual(asked[0]!.buttons, ['Deny', 'Allow once', 'Allow for this session'])
+}))
 
 test('worktree timeout settings validate and persist, and new sessions and restarts use the latest value', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
