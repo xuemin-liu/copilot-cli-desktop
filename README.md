@@ -59,9 +59,9 @@ handle, only input/output/resize events.
   through `copilot-desktop browser` commands, without an MCP server. Automated testing is available immediately and
   lets the assistant run user-described web-app workflows and check expected results,
   with step reports and screenshots.
-- **Workspace terminal tabs** share the optional right panel with Browser and Git. Choose **New tab → Local terminal,
+- **Session tools** share the optional right panel. Switching sessions restores its Browser, Git and terminal tabs. Existing workspace tabs remain shared. Choose **New tab → Local terminal,
   WSL terminal (Windows), or SSH**. Open several terminals, close them individually, or hide the panel while they keep
-  running. Local/WSL shells start in the project folder. MyTerminal's saved SSH connections support jump hosts,
+  running. Local shells start in the session’s working folder or worktree. WSL shells start in the project folder. MyTerminal's saved SSH connections support jump hosts,
   SFTP and remote editing, and local/remote/SOCKS forwarding; native OpenSSH remains available for config aliases.
   Terminal tabs also reuse MyTerminal's snippets, split panes, settings, backup/import and disk logging. The current Copilot
   session and local/WSL shells can list terminals, read output, and send input through the project terminal helper.
@@ -203,9 +203,9 @@ runs for a new, a restarted and a resumed tab.
 
 The main window has three areas: projects and sessions on the left, the CLI in the center, and an optional resizable tools panel on the right. **New tab** opens a launcher; choose **Browser** or **Git**. **+** adds another tab, including another independent browser page. Every tab has a close button; closing the last one removes the panel. **Hide tabs** returns the space to the CLI while preserving all tabs, and **Show tabs** restores them.
 
-Tabs belong to the project. Changing CLI focus does not change the selected browser or Git repository. Project switching retains browser pages, forms, and Git drafts. **Ctrl+Shift+G** opens/focuses Git or hides the panel when Git is already selected. Narrow windows use the same **Hide tabs** control to return to the CLI. Hiding a browser stops a running test and picking without closing its page.
+New tabs belong to the running main session. Switching sessions restores its tabs, selection and visibility. A side chat shares its parent’s panel. Existing workspace tabs and tabs created without a running session are shared. Use **Move to workspace** to share a session tab. Panel width and browser sign-in settings remain project preferences. **Ctrl+Shift+G** opens or focuses Git, or hides an already selected Git panel.
 
-Browsers work without a CLI session. Browser control automatically follows the current running Copilot session and selected Browser tab in that project; no session picker or reconnect step is needed. Switching sessions transfers control without moving or reopening pages. Resume reconnects automatically. Closing a CLI or a browser tab keeps project logins; removing the workspace removes its separate profile at the next startup. Existing session browser profiles are not merged into project profiles; separate profiles require signing in again after this upgrade.
+A live session can use its own browser pages and shells in the background. The foreground session can also use shared workspace tools. Unloading releases the session’s live tools and retains restorable tab records. Resuming reconnects the CLI. Closing the session removes its own tabs and preserves workspace tabs and project sign-ins.
 
 Run `pnpm project-tools:check` for the native lifecycle and real-app layout checks.
 

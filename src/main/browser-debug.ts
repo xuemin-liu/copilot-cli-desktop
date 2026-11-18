@@ -107,7 +107,8 @@ export class BrowserDebug {
   private storage!: Session
   private readonly projectMode: boolean
   private readonly changed: () => void
-  private readonly onNewTab: (() => void) | undefined
+  private readonly onNewTab: ((pageId: number) => void) | undefined
+  private readonly onPopup: ((id: number, openerId: number) => void) | undefined
   private readonly canCreatePage: () => string | null
   private readonly pendingClose = new Map<number, Promise<boolean>>()
   private server: Server | null = null
@@ -160,11 +161,12 @@ export class BrowserDebug {
   }
 
   constructor(private owner: BrowserWindow, private readonly settingsPath: string,
-    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: () => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
+    options: { endpointPath?: string; partition?: string; devtoolsPartition?: string; reportError?: (message: string) => void; approveInteraction?: (description: string) => Promise<boolean>; approvePermission?: (description: string) => Promise<boolean>; tabId?: string; history?: BrowserHistory; sitePermissions?: SitePermissions; zoom?: BrowserZoom; notify?: (name: 'find' | 'find-close') => void; onAppShortcut?: (name: 'git-toggle' | 'close-window') => boolean; showMenu?: (menu: Menu, window: BaseWindow) => void; confirmLeave?: (window: BaseWindow) => Promise<boolean>; popupWindows?: () => boolean; projectMode?: boolean; changed?: () => void; canCreatePage?: () => string | null; onNewTab?: (pageId: number) => void; onPopup?: (id: number, openerId: number) => void; onReturnToPanel?: (pageId: number) => void; onPageFocus?: (pageId: number) => void } = {}) {
     this.projectMode = options.projectMode === true
     this.changed = () => { if (!this.disposed) queueMicrotask(() => options.changed?.()) }
     this.onReturnToPanel = options.onReturnToPanel
     this.onPageFocus = options.onPageFocus
+    this.onPopup = options.onPopup
     this.onNewTab = options.onNewTab
     this.canCreatePage = options.canCreatePage ?? (() => null)
     this.popupWindows = options.popupWindows ?? (() => false)
@@ -298,6 +300,7 @@ export class BrowserDebug {
       title: page.contents.getTitle().slice(0, 160) || 'New browser', url: shownUrl(page),
       ...(page.window ? { window: true } : {}), ...(page.error ? { error: page.error } : {}) }))
   }
+  openerOf(id: number): number | null { return this.pages.get(id)?.opener ?? null }
   hasPage(id: number): boolean { return this.pages.has(id) && !this.pages.get(id)!.contents.isDestroyed() }
   /** Read UI selection without refreshing reader state or validating a command cursor. */
   get uiPageId(): number { return this.activePageId }
@@ -400,6 +403,7 @@ export class BrowserDebug {
           const window = details.disposition === 'new-window' && activated && (this.projectMode ? page.window !== null : this.popupWindows()) ? this.popupWindow(options, page) : null
           if (window) page.activatedAt = 0
           const childPage = this.addPage(child, !this.projectMode && details.disposition !== 'background-tab' && !window, window, page.contents.id)
+          this.onPopup?.(childPage.contents.id, contents.id)
           this.startPopupOverrides(page, childPage)
           this.layout()
           // Electron supplies no guest for browser-initiated background links.
@@ -427,7 +431,7 @@ export class BrowserDebug {
       const command = input.control || input.meta
       const handled = ((): boolean => {
         if (this.projectMode && command && !input.shift && key === 'w') { void this.closePage(contents.id).catch(error => this.reportError(String(error))); return true }
-        if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(); return true }
+        if (this.projectMode && command && !input.shift && key === 't') { this.onNewTab?.(contents.id); return true }
         if (command && !input.shift && key === 'w' && page.window) { page.window.close(); return true }
         // DevTools for a popup window shows in the browser, so F12 selects the popup there first.
         if (!selected) {
@@ -1484,16 +1488,16 @@ export class BrowserDebug {
         return
       }
       const pageId = cursor ? cursor.active() : this.activePageId
-      if (cursor && !this.pages.has(pageId)) { send(409, { message: 'Page closed; run tabs, then select a page ID.' }); return }
+      if (cursor && (!this.pages.has(pageId) || cursor.allowsPage?.(pageId) === false)) { send(409, { message: 'Page closed; run tabs, then select a page ID.' }); return }
       if (request.method !== 'GET') { send(405, { message: 'Read-only browser API' }); return }
       if (request.url === '/status') {
         this.refreshState()
         const scoped = cursor ? this.controlState(pageId) : this.snapshot
-        const { console, network, pages, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
-        send(200, { ...state, url: sanitizedUrl(state.url),
+        const { console, network, pages, dialog, sitePermissions: _sitePermissions, history: _history, find: _find, overrides: _overrides, certificateWarning: _certificateWarning, ...state } = scoped
+        send(200, { ...state, ...(dialog && cursor?.allowsPage?.(dialog.pageId) !== false ? { dialog } : {}), url: sanitizedUrl(state.url),
           // Chromium can synthesize titles from URLs without a scheme. Omit titles
           // from CLI metadata rather than exposing credentials in those strings.
-          pages: pages.map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
+          pages: pages.filter(page => cursor?.allowsPage?.(page.id) !== false).map(page => ({ id: page.id, url: sanitizedUrl(page.url), ...(page.window ? { window: true } : {}) })),
           consoleCount: console.filter(entry => entry.pageId === pageId).length,
           networkCount: network.filter(entry => entry.pageId === pageId).length })
       } else if (request.url === '/console') send(200, this.state.console.filter(entry => entry.pageId === pageId))

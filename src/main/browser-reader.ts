@@ -64,6 +64,7 @@ interface PageReader {
 }
 export interface BrowserCursor {
   active(): number
+  allowsPage?(id: number): boolean
   select(id: number): void
   validate(): void
 }
@@ -106,6 +107,7 @@ export class BrowserReader {
   private testDiagnostics: Params = {}
   private picker: { pageId: number; choose: (backendNodeId: number | null) => void; next: () => Promise<number | null> } | null = null
   private pickAbort: AbortController | null = null
+  private progressPageId: number | null = null
   private testProgress: Omit<BrowserTestState, 'enabled'> = { running: false, step: 0, total: 0, label: '', report: null }
 
   private readonly closeGuards = new Map<number, { confirm(): Promise<boolean>; cancelled(): void; failed(error: unknown): void }>()
@@ -137,6 +139,11 @@ export class BrowserReader {
   }
   private readonly cursor = new AsyncLocalStorage<BrowserCursor>()
   withCursor<T>(cursor: BrowserCursor, action: () => T): T { return this.cursor.run(cursor, action) }
+  private availablePages(): WebContents[] {
+    const cursor = this.cursor.getStore()
+    cursor?.validate()
+    return this.options.pages().filter(page => cursor?.allowsPage?.(page.id) !== false)
+  }
   private activeId(): number { this.cursor.getStore()?.validate(); return this.cursor.getStore()?.active() ?? this.options.active() }
   private selectId(id: number): void { const cursor = this.cursor.getStore(); if (cursor) { cursor.validate(); cursor.select(id) } else this.options.select(id) }
   constructor(private readonly options: BrowserReaderOptions) {}
@@ -144,6 +151,7 @@ export class BrowserReader {
   get testState(): BrowserTestState {
     const id = this.activeId(), page = this.readers.get(id)
     const enabled = Boolean(page && !page.contents.isDestroyed() && this.options.visible(id) && this.httpOrigin(page.contents.getURL()))
+    if (this.progressPageId !== null && this.progressPageId !== id) return { enabled, running: false, step: 0, total: 0, label: '', report: null }
     return structuredClone({ enabled, ...this.testProgress })
   }
 
@@ -176,8 +184,10 @@ export class BrowserReader {
     const page = this.page()
     const origin = this.httpOrigin(page.contents.getURL())
     if (!origin) throw new Error('Open an HTTP or HTTPS page before starting a test.')
-    if (!this.options.visible(page.contents.id)) throw new Error('Show the selected browser page before starting a test.')
+    if (!this.options.visible(page.contents.id)) throw new Error(`Show browser page ${page.contents.id} before starting a test.`)
     if (this.busy) throw new Error('Another browser inspection or test is in progress.')
+    if (this.progressPageId !== page.contents.id) this.testProgress = { running: false, step: 0, total: 0, label: '', report: null }
+    this.progressPageId = page.contents.id
     this.testPageId = page.contents.id
     this.testOrigin = origin
     this.testBlocked = false
@@ -308,7 +318,12 @@ export class BrowserReader {
   }
 
   private async command(page: PageReader, method: string, params: Params = {}, sessionId?: string, timeoutMs = 10000, signal?: AbortSignal): Promise<Params> {
-    this.cursor.getStore()?.validate()
+    const cursor = this.cursor.getStore()
+    const validate = (): void => {
+      cursor?.validate()
+      if (cursor?.allowsPage?.(page.contents.id) === false) throw new Error('Page is unavailable in this session.')
+    }
+    validate()
     if (signal?.aborted) throw new Error('Test stopped.')
     const delivery = Boolean(this.testProgress.currentAction && this.testAbort && (method.startsWith('Input.') && method !== 'Input.setInterceptDrags' || method === 'Page.reload' || method === 'Page.navigate'))
     if (delivery) {
@@ -325,7 +340,7 @@ export class BrowserReader {
         this.testDelivery = this.testInputUncertain ? 'uncertain' : 'partial'
         if (this.testProgress.currentAction) this.testProgress.currentAction.delivery = this.testDelivery
       }
-      this.cursor.getStore()?.validate()
+      validate()
       return result
     } catch (error) { if (delivery) this.testInputUncertain = true; throw error }
     finally { if (timer) clearTimeout(timer) }
@@ -449,7 +464,7 @@ export class BrowserReader {
   private dialogPage(): PageReader | undefined {
     const active = this.readers.get(this.activeId())
     if (active?.dialog) return active
-    const pages = this.options.pages()
+    const pages = this.availablePages()
     return [...this.readers.values()].find(page => page.dialog && pages.includes(page.contents))
   }
 
@@ -487,7 +502,7 @@ export class BrowserReader {
   private page(id?: string): PageReader {
     if (id !== undefined && !/^[1-9]\d*$/.test(id)) throw new Error('Invalid browser page ID.')
     const page = this.readers.get(id === undefined ? this.activeId() : Number(id))
-    if (!page || page.contents.isDestroyed() || !this.options.pages().includes(page.contents)) throw new Error('Page is unavailable in this session.')
+    if (!page || page.contents.isDestroyed() || !this.availablePages().includes(page.contents)) throw new Error('Page is unavailable in this session.')
     return page
   }
 
@@ -1377,7 +1392,7 @@ export class BrowserReader {
       if (!frame) throw new Error('Test frame is unavailable.')
       return this.discoverTargets(page, frame.id, signal)
     }
-    if (command === 'tabs') return { tabs: this.options.pages().map(contents => ({ id: contents.id,
+    if (command === 'tabs') return { tabs: this.availablePages().map(contents => ({ id: contents.id,
       url: readableUrl(contents.getURL()), active: contents.id === this.activeId(), loading: contents.isLoading() })), timestamp: new Date().toISOString() }
     if (command === 'responses') {
       const pageId = this.page(args[0]).contents.id

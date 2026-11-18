@@ -295,7 +295,7 @@ For exception requests, examine console entries with level "error" and messages
 containing Error, Exception, Uncaught, or unhandled rejection. Report the actual
 message, source, and line, with any applicable capture limitations. For network requests,
 report failed HTTP statuses and error fields. Do not fabricate browser observations.
-If this session is inactive, ask the user to activate it in its project. Open a Browser tab if none exists. Resume reconnects automatically. After a CLI-selected page closes, run tabs and select a page explicitly; user page selection or reopening a Browser tab updates the target automatically. Switching to another session revokes this session's browser access. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
+Your session can use its own pages while another session is active. To use a shared workspace page, ask the user to activate your session. Open a Browser tab if none exists. Resume reconnects automatically. After a CLI-selected page closes, run tabs and select a page explicitly; user page selection or reopening a Browser tab updates the target automatically. Hidden interaction targets must be shown by the user; never change the panel selection implicitly. Permissions still apply: do not bypass a disabled shell tool;
 restricted read/search-only sessions cannot run these commands. A remote connected
 session may run tools on a different computer and cannot use this local endpoint.
 No browser automation extension, third-party MCP, Node installation, or globally

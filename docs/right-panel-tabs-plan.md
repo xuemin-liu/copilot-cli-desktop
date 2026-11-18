@@ -2,6 +2,8 @@
 
 Status: agreed after four rounds in meeting 27AC; implemented and independently reviewed in PR #193 for v0.1.94. This supersedes the fixed Browser/Git interaction shipped in v0.1.93. The user authorized implementation, PR/fix-pr, merge, branch cleanup, and release after meeting agreement. Not every Codex behavior has been verified.
 
+Meeting 5EVC supersedes the project-only ownership and foreground-only access rules below. The current session and workspace behavior is documented in [Workspace terminals](workspace-terminals.md).
+
 ## Problem and required behavior
 
 The layout remains left navigation, center CLI, and an optional resizable right panel. The right panel contains user-created tabs, not mandatory tool categories. The current fixed Browser/Git strip, browser selection following CLI sessions, disabled last-page close button, and backend replacement of the last closed page violate this requirement.

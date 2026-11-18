@@ -131,6 +131,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           pages = [{id:12,title:"Browser",url:""}];
           get pageCount(){return this.pages.length;}
           pageList(){return this.pages;}
+          openerOf(){return null;}
           hasPage(id){return this.pages.some(p=>p.id===id);}
           selectUiPage(id){this.snapshot.activePageId=id;}
           createPage(){const id=this.pages.length+12;this.pages.push({id,title:"Browser",url:""});return id;}
@@ -732,17 +733,18 @@ test('Git task delivery refuses a session that is no longer current', async()=>f
   assert.deepEqual(harness.spawns[0]!.written,[]);
 }))
 
-test('project browser survives CLI focus, restart and close while session bridges are isolated', async()=>fixture(async(harness,directory)=>{
+test('promoted workspace browser survives session switches, restart and session closure', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);harness.createTestWindow();
   const first=(await harness.createMain()).activeTabId!;
   const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
   const resource=tools.projects[0].tabs[0].resource;
   await harness.request('desktop:browser-navigate',resource,'https://first.example/');
+  await harness.request('desktop:tools-action',profile.id,{type:'promote',id:tools.projects[0].tabs[0].id});
   const second=(await harness.createMain()).activeTabId!;
   assert.notEqual(harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[1]!.env.COPILOT_DESKTOP_BROWSER_STATE);
   await harness.request('desktop:activate-tab',first);await harness.request('desktop:restart-tab',first);
   assert.equal(harness.spawns[2]!.env.COPILOT_DESKTOP_BROWSER_STATE,harness.spawns[0]!.env.COPILOT_DESKTOP_BROWSER_STATE);
-  assert.deepEqual((await harness.request<any>('desktop:tools-state')).connections.map((connection:any)=>connection.sessionId),[first],'restart automatically reconnects the current session');
+  assert.deepEqual((await harness.request<any>('desktop:tools-state')).connections.map((connection:any)=>connection.sessionId).sort(),[first,second].sort(),'both live sessions retain their bridges');
   await harness.request('desktop:close-tab',first);await harness.request('desktop:close-tab',second);
   assert.equal((await harness.request<any>('desktop:browser-state',resource)).url,'https://first.example/');
   assert.equal(harness.browserConfigs.length,1);
@@ -847,7 +849,10 @@ test('idle pop-outs retain their title, stay menu-free, and focus on workspace a
   harness.refreshAppMenu()
   assert.ok(harness.windowFor().menu)
   assert.equal(popout.menu, null, 'global menu rebuilding must not restore pop-out accelerators')
-  await harness.request('desktop:create-tab', null, second.id)
+  const other = await harness.request('desktop:create-tab', null, second.id)
+  const raised = await harness.request('desktop:activate-tab', firstId)
+  assert.equal(raised.activeProfileId, second.id, 'raising a detached window keeps the main workspace')
+  assert.equal(raised.activeTabId, other.activeTabId)
   const previousFocus = popout.focused
   const switched = await harness.request('desktop:activate-profile', first.id)
   assert.equal(popout.focused, previousFocus + 1)
@@ -1630,20 +1635,35 @@ test('opening a History session in a project startup has not listed yet keeps th
   assert.equal(after.tabs.filter((tab) => tab.lastSessionId === savedThere).length, 1, 'startup does not list it twice')
 }))
 
-test('unloading a CLI revokes its bridge but retains project browser pages', async()=>fixture(async(harness,directory)=>{
+test('unloading a CLI releases its browser and restores its tab on resume', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);profile.defaultResumeMode='new';harness.createTestWindow();
   const id=(await harness.createMain()).activeTabId!;
   const tools=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
   const resource=tools.projects[0].tabs[0].resource;
   await harness.request('desktop:unload-tab',id);
   assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
-  await harness.request('desktop:browser-state',resource);
+  assert.equal((await harness.request<any>('desktop:tools-state')).projects[0].tabs[0].pageId,undefined);
   await harness.request('desktop:restart-tab',id);
   await harness.request('desktop:browser-state',resource);
-  assert.equal(harness.browserConfigs.length,1);
+  assert.equal(harness.browserConfigs.length,2);
 }))
 
-test('project browser control follows current session and reconnects after Resume', async()=>fixture(async(harness,directory)=>{
+test('side chat focus and raising a detached session preserve the main panel', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  harness.createTestWindow()
+  const first = (await harness.createMain()).activeTabId!
+  const tools = await harness.request<any>('desktop:tools-action', profile.id, { type: 'add', kind: 'new' })
+  const tabId = tools.projects[0].activeId
+  await harness.createSide(profile, first)
+  assert.equal((await harness.request<any>('desktop:tools-state')).projects[0].activeId, tabId)
+  const second = (await harness.createMain()).activeTabId!
+  await harness.request('desktop:pop-out-tab', second)
+  await harness.request('desktop:activate-tab', first)
+  await harness.request('desktop:activate-tab', second)
+  assert.equal((await harness.request<any>('desktop:tools-state')).projects[0].activeId, tabId)
+}))
+
+test('browser control follows its owner and reconnects after Resume', async()=>fixture(async(harness,directory)=>{
   const {profile}=configure(harness,directory);harness.createTestWindow();
   const first=(await harness.createMain()).activeTabId!;
   const opened=await harness.request<any>('desktop:tools-action',profile.id,{type:'add',kind:'browser'});
@@ -1651,18 +1671,19 @@ test('project browser control follows current session and reconnects after Resum
   assert.deepEqual(opened.connections.map((entry:any)=>entry.sessionId),[first]);
   const second=(await harness.createMain()).activeTabId!;
   let tools=await harness.request<any>('desktop:tools-state');
-  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[second]);
-  assert.equal(tools.connections[0].pageId,page.pageId);
+  assert.equal(tools.connections.find((entry:any)=>entry.sessionId===first).pageId,page.pageId);
+  assert.equal(tools.connections.find((entry:any)=>entry.sessionId===second).pageId,null);
+  assert.equal(tools.projects[0].visible,false);
   await harness.request('desktop:activate-tab',first);
   tools=await harness.request<any>('desktop:tools-state');
-  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[first]);
+  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId).sort(),[first,second].sort());
   await harness.request('desktop:unload-tab',first);
-  assert.equal((await harness.request<any>('desktop:tools-state')).connections.length,0);
+  assert.deepEqual((await harness.request<any>('desktop:tools-state')).connections.map((entry:any)=>entry.sessionId),[second]);
   await harness.request('desktop:restart-tab',first);
   tools=await harness.request<any>('desktop:tools-state');
-  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId),[first]);
+  assert.deepEqual(tools.connections.map((entry:any)=>entry.sessionId).sort(),[first,second].sort());
   assert.equal(tools.projects[0].tabs[0].resource,page.resource);
-  assert.equal(harness.browserConfigs.length,1,'session changes retain the native browser group');
+  assert.equal(harness.browserConfigs.length,2,'resume restores the released group');
 }))
 
 

@@ -4,9 +4,9 @@ The Git panel shows the state of the Git repositories in your project folder nex
 Copilot changed without leaving the app. You can review changes, stage and unstage files, make local commits and hand context
 to Copilot, including a failed pull for Copilot to merge and resolve. See the [plan](git-panel-plan.md) for what comes next.
 
-Open **New tab → Git**, the Git icon in a session header, or **Ctrl+Shift+G**. There is one Git tab per project; adding it again focuses the existing tab. The shortcut selects Git or hides the panel when Git is already shown. **Hide tabs** preserves its state; its individual close button removes the tab. Reopening recovers the project's draft.
+Open **New tab → Git**, the Git icon in a session header, or **Ctrl+Shift+G**. Adding Git focuses the existing Git tab for the current owner or creates one. A session Git tab opens on its linked worktree. **Move to workspace** makes the selected tab available alongside other sessions. The shortcut selects Git or hides the panel when Git is already shown. **Hide tabs** preserves its state; its individual close button removes the tab. Reopening recovers the project's draft.
 
-Project switching retains the repository selection, commit draft, and diff selection. CLI focus never retargets the repository. Git prompt actions automatically use the currently selected session; there is no destination picker. Open or resume a session in this window to use those actions. General workspaces explain why Git is unavailable in the launcher and do not create a disabled Git tab.
+Each Git view retains its repository selection, commit draft, and diff selection when you switch sessions or projects. Git prompt actions automatically use the currently selected session; there is no destination picker. Open or resume a session in this window to use those actions. General workspaces explain why Git is unavailable in the launcher and do not create a disabled Git tab.
 
 ## What it shows
 

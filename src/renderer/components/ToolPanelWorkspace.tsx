@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
-import { dockedReorder, isTerminalKind } from '../../main/tool-tabs.js'
+import { dockedReorder, isTerminalKind, panelTabs } from '../../main/tool-tabs.js'
 import { visibleSessionTabs } from '../../main/session-tab-machine.js'
 import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
@@ -17,7 +17,7 @@ import { MyTerminalConnections } from './MyTerminalConnections.js'
 export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new'>; label: string; description: string }[] = [
   { kind: 'browser', label: 'Browser', description: 'Open a web page in a new tab' },
   { kind: 'git', label: 'Git', description: 'Changes, commits, branches and worktrees' },
-  { kind: 'local', label: 'Local terminal', description: 'Open a shell in this project folder' },
+  { kind: 'local', label: 'Local terminal', description: 'Open a shell in the session or workspace folder' },
   ...(isWindows ? [{ kind: 'wsl' as const, label: 'WSL terminal', description: 'Open a Linux shell in Windows Subsystem for Linux' }] : []),
   { kind: 'ssh', label: 'SSH', description: 'Saved connections, SFTP and tunnels, or OpenSSH' },
 ]
@@ -48,9 +48,13 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   const action = (value: ToolsAction): void => act(project.profileId, value)
   const selected = project.tabs.find(tab => tab.id === project.activeId)
   const profile = desktop.profiles.find(profile => profile.id === project.profileId)
-  const [gitUsed, setGitUsed] = useState(project.tabs.some(tab => tab.kind === 'git'))
-  useEffect(() => { if (project.tabs.some(tab => tab.kind === 'git')) setGitUsed(true) }, [project.tabs])
+  const strip = panelTabs(project)
   const sessions = desktop.tabs.filter(tab => tab.workspaceProfileId === project.profileId)
+  // A Git view keeps its draft and running operation after its tab closes. Reuse
+  // that view when its owner reopens Git, and carry the same view through promotion.
+  const [gitViews, setGitViews] = useState<GitToolView[]>([])
+  const nextViews = reconcileGitViews(gitViews, project, sessions)
+  if (nextViews !== gitViews) setGitViews(nextViews)
   const prompt = desktop.activeProfileId === project.profileId ? sessions.find(tab => tab.id === desktop.activeTabId && !['dormant', 'completed', 'crashed'].includes(tab.status) && !(desktop.poppedOutTabIds ?? []).includes(tab.id)) : undefined
   const promptTarget = prompt ? { id: prompt.id, title: prompt.title, cwd: prompt.sessionCwd ?? profile?.path ?? null,
     taskBlocker: sessionTaskBlocker({ cli: prompt.cli, status: prompt.status, preset: prompt.sessionPermissionPreset, sideChat: prompt.sideChat === true, remote: prompt.remote }) } : null
@@ -62,12 +66,12 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   }, [terminalProject, project.activeId, project.broadcast])
   const tabState = {
     // A page in its own window leaves the strip, as in Chrome; Return to panel in that window brings it back.
-    tabs: project.tabs.filter(tab => !tab.detached).map(tab => ({ id: tab.id, label: tab.label || tab.title, color: tab.color, terminal: isTerminalKind(tab.kind),
+    tabs: strip.filter(tab => !tab.detached).map(tab => ({ id: tab.id, label: (project.ownerId && !tab.ownerId ? 'Workspace · ' : '') + (tab.label || tab.title), color: tab.color, terminal: isTerminalKind(tab.kind),
       isLocal: tab.kind !== 'ssh', config: tab.terminal?.temporary ? tab.terminal : null, sessionId: tab.terminal?.temporary ? null : tab.terminal?.connectionId })),
     activeTabId: project.activeId, broadcastMode: Boolean(project.broadcast),
     setActiveTab: (id: string) => action({ type: 'select', id }), closeTab: (id: string) => action({ type: 'close', id }),
     updateTab: (id: string, patch: {label?: string; color?: string | null}) => action({ type: 'metadata', id, ...patch }),
-    reorderTabs: (from: number, to: number) => { const move = dockedReorder(project.tabs, from, to); if (move) action({ type: 'reorder', ...move }) },
+    reorderTabs: (from: number, to: number) => { const move = dockedReorder(strip, from, to); if (move) action({ type: 'reorder', ...move }) },
     toggleBroadcast: () => action({ type: 'broadcast', enabled: !project.broadcast }),
   }
   const [address, setAddress] = useState('')
@@ -89,8 +93,8 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
   }}>
     <div className="myterminal-embedded workspace-tabbar-host">
       <WorkspaceTabBar host={{ ...terminalProject, tabState, active: shown, onMenu: setTabMenuOpen,
-        saveConnection: async (id: string) => { await window.copilotDesktop.toolsAction(project.profileId, { type: 'save-connection', id }); await terminalProject.load() },
-        toolbar: <><button type="button" aria-label="New tab" title="New tab" onClick={() => action({ type: 'add', kind: 'new' })}>+</button>
+        saveConnection: async (id: string) => { await window.copilotDesktop.toolsAction(project.profileId, { type: 'save-connection', id, expectedOwnerId: project.ownerId ?? null }); await terminalProject.load() },
+        toolbar: <>{selected?.ownerId && selected.kind !== 'new' && <button type="button" title="Move this tab to the shared workspace" onClick={() => action({ type: 'promote', id: selected.id })}>Move to workspace</button>}<button type="button" aria-label="New tab" title="New tab" onClick={() => action({ type: 'add', kind: 'new' })}>+</button>
           <button type="button" aria-label="Hide tabs" title={takeover ? 'Hide tabs and return to CLI' : 'Hide tabs'} onClick={() => action({ type: 'visible', visible: false })}>▥</button></> }} />
     </div>
     {!selected && <div className="tool-empty-panel" role="status">
@@ -132,23 +136,47 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     {selected?.kind === 'browser' && <div className="tool-context">
         <button type="button" onClick={() => action({ type: 'pop-out', id: selected.id })}>Open in window</button>
         <details><summary>Browser settings</summary>
-          <p>The current session automatically uses this project's browser pages.</p>
+          <p>{selected.ownerId ? 'This browser tab belongs to its session.' : 'The active session can use this workspace tab.'}</p>
           <label>Local Overrides for this project <select aria-label="Project Local Overrides" value={project.overrides} onChange={event => action({ type: 'overrides', mode: event.target.value as 'shared' | 'private' })}>
             <option value="shared">Shared settings</option><option value="private">Private project settings</option>
           </select></label><p>Applies after all project browser tabs close and a browser is opened again.</p>
         </details>
     </div>}
+    {selected?.kind === 'browser' && !selected.resource && <button type="button" onClick={() => action({ type: 'select', id: selected.id })}>Open browser page</button>}
     {project.tabs.filter(tab => tab.kind === 'browser' && tab.resource).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-browser-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
       <BrowserPanel tabId={tab.resource!} sessionTitle={tab.title} independent promptTargetId={prompt?.id ?? null}
         active={shown && selected?.id === tab.id} obscured={obscured || tabMenuOpen} />
     </div>)}
-    {gitUsed && <div className="tool-git-host" hidden={!shown || selected?.kind !== 'git'} role="tabpanel" id={selected?.kind === 'git' ? `tool-content-${selected.id}` : undefined}>
-      <GitPanel profileId={project.profileId} embedded active={shown && selected?.kind === 'git'} promptTarget={promptTarget}
-        worktreeSessions={sessions.flatMap(tab => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])}
-        onClose={() => { if (selected) action({ type: 'close', id: selected.id }) }} />
-    </div>}
+    {nextViews.map(view => {
+      const owner = sessions.find(session => view.ownerId && session.browserProfileId === view.ownerId)
+      const active = shown && view.tabId !== null && view.tabId === selected?.id
+      return <div key={view.key} className="tool-git-host" hidden={!active} role="tabpanel" id={view.tabId ? `tool-content-${view.tabId}` : undefined}>
+        <GitPanel embedded active={active} profileId={project.profileId} selectionKey={view.selectionKey} promptTarget={promptTarget}
+          sessionWorktreePath={owner?.worktree?.path ?? owner?.launchWorktreePath}
+          worktreeSessions={sessions.flatMap(tab => tab.worktree ? [{ path: tab.worktree.path, title: tab.title }] : [])}
+          onClose={() => { if (view.tabId) action({ type: 'close', id: view.tabId }) }} />
+      </div>
+    })}
     {project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-terminal-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
       <ToolTerminalPanel profileId={project.profileId} tab={tab} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
     </div>)}
   </aside>
+}
+
+interface GitToolView { key: string; tabId: string | null; ownerId: string | undefined; selectionKey: string }
+function reconcileGitViews(previous: GitToolView[], project: ProjectTools, sessions: DesktopState['tabs']): GitToolView[] {
+  const tabs = project.tabs.filter(tab => tab.kind === 'git')
+  const views = previous.flatMap(view => {
+    const tab = tabs.find(tab => tab.id === view.tabId)
+    if (tab) return [view.ownerId === tab.ownerId ? view : { ...view, ownerId: tab.ownerId }]
+    if (view.ownerId && !sessions.some(session => session.browserProfileId === view.ownerId)) return []
+    return [view.tabId === null ? view : { ...view, tabId: null }]
+  })
+  for (const tab of tabs) {
+    if (views.some(view => view.tabId === tab.id)) continue
+    const closed = views.findIndex(view => view.tabId === null && view.ownerId === tab.ownerId)
+    if (closed >= 0) views[closed] = { ...views[closed]!, tabId: tab.id, selectionKey: tab.gitSelectionKey ?? project.profileId }
+    else views.push({ key: tab.id, tabId: tab.id, ownerId: tab.ownerId, selectionKey: tab.gitSelectionKey ?? project.profileId })
+  }
+  return views.length === previous.length && views.every((view, i) => view === previous[i]) ? previous : views
 }

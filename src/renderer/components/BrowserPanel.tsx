@@ -303,7 +303,7 @@ export function BrowserPanel({ tabId, obscured, active, unloaded = false, sessio
       {state.view === 'activity' && <BrowserActivity state={state} tabId={tabId} run={run} report={report} />}
     </div>
     <footer className="browser-footer"><div className="browser-footer-status">
-      <span role="status" title={testingMessage}>{testingMessage || (state.loading ? 'Loading…' : independent ? 'Browser control automatically follows the current session.' : 'This session’s browser activity is available to Copilot CLI.')}</span>
+      <span role="status" title={testingMessage}>{testingMessage || (state.loading ? 'Loading…' : independent ? 'Browser control follows tab ownership.' : 'This session’s browser activity is available to Copilot CLI.')}</span>
       {state.testing?.running && <button type="button" onClick={() => run(window.copilotDesktop.browserAction(tabId, 'testing:off'))}>Stop test</button>}
     </div>
       {state.testing?.report && <details className="browser-test-report"><summary>Last test: {state.testing.report.status}</summary>

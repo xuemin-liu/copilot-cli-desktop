@@ -27,7 +27,7 @@ if (!process.versions.electron) {
     const url = `http://127.0.0.1:${server.address().port}`
     win = new BrowserWindow({ show: false, width: 1200, height: 800 })
     await win.loadURL('about:blank')
-    const sessions = new Map([['s1', { workspaceProfileId: 'p1', status: 'running' }], ['s2', { workspaceProfileId: 'p1', status: 'running' }]])
+    const sessions = new Map([['s1', { browserProfileId: '11111111-1111-4111-8111-111111111111', workspaceProfileId: 'p1', status: 'running' }], ['s2', { browserProfileId: '22222222-2222-4222-8222-222222222222', workspaceProfileId: 'p1', status: 'running' }]])
     let currentSession = null
     let confirm = false, confirmations = 0
     const errors = []
@@ -138,7 +138,7 @@ if (!process.versions.electron) {
       assert.equal(status.body.activePageId, b.pageId)
       assert.equal((await s1('/read/tabs')).status, 200)
       assert.equal(state().activeId, selected)
-      if (kind === 'new') await action({ type: 'close', id: selected })
+      await action({ type: 'close', id: selected })
     }
     await action({ type: 'select', id: b.id })
     await action({ type: 'visible', visible: false })
@@ -149,7 +149,7 @@ if (!process.versions.electron) {
     assert.equal((await s1('/status')).status, 409)
     assert.equal((await s2('/status')).body.activePageId, b.pageId)
     assert.equal((await s2(`/read/select?arg=${a.pageId}`)).status, 200)
-    assert.equal(state().activeId, b.id)
+    assert.equal(state().activeId, a.id, 'B starts with the workspace selection')
     tools.refreshConnections()
     assert.equal((await s2('/status')).body.activePageId, a.pageId)
     // Revocation is checked at async command boundaries, even before a renderer/state event arrives.
@@ -270,16 +270,33 @@ if (!process.versions.electron) {
     assert.equal(state().tabs.length, 1)
     await tools.removeProject('p2')
     assert.equal(contents(other), undefined)
-    // No active session means no connection; it does not create or discard pages.
+    // A private browser stays available to its live owner in the background.
+    const guest = await bridge('s1')
+    sessions.set('s1', { workspaceProfileId: 'p1', status: 'running', browserProfileId: '11111111-1111-4111-8111-111111111111' })
+    currentSession = 's1'; tools.refreshConnections()
+    assert.ok(!(await guest('/read/tabs')).body.tabs.some(page => page.id === reopened.pageId))
+    assert.equal((await guest(`/read/select?arg=${reopened.pageId}`)).status, 400)
+    assert.equal((await guest(`/read/snapshot?arg=${reopened.pageId}`)).status, 400)
+    assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
+    // A cancelled session close keeps its browser available to its background owner.
+    await contents(reopened).executeJavaScript('document.querySelector("#touch").click();window.onbeforeunload=()=>"editing";void 0', true)
+    confirm = false
+    assert.equal(await tools.releaseSession('s2', false), null)
+    assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
+    confirm = true
     currentSession = null; tools.refreshConnections()
-    assert.equal((await s2('/status')).status, 409)
+    assert.equal((await s2('/status')).body.activePageId, reopened.pageId)
+    currentSession = 's2'; tools.refreshConnections()
     // Restart restores descriptors, not resources or launchers.
     await action({ type: 'add', kind: 'browser', url: `${url}/saved-neighbor` })
     // A page in its own window is saved as a docked tab: windows are not restored.
     await action({ type: 'pop-out', id: state().activeId })
     await action({ type: 'select', id: reopened.id })
     await action({ type: 'add', kind: 'new' })
-    await tools.dispose(); tools = new ProjectToolService(options)
+    await tools.dispose()
+    // Desktop runtime IDs can change with startup order; the persisted tab UUID identifies its tools.
+    sessions.set('restored-s2', sessions.get('s2')); sessions.delete('s2'); currentSession = 'restored-s2'
+    tools = new ProjectToolService(options)
     assert.equal(state().tabs.some(tab => tab.kind === 'new'), false)
     assert.equal(state().tabs.some(tab => tab.pageId !== undefined), false)
     tools.showProject('p1')
