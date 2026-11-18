@@ -40,7 +40,8 @@ export function CommitDetails({ profileId, repoId, entry }: CommitProps): JSX.El
     {error && <p role="alert" className="git-message git-message-error">{error}</p>}
     {!error && !details && <p role="status">Loading commit…</p>}
     {details?.body && <pre className="git-commit-body">{details.body}</pre>}
-    {details && details.files.length === 0 && !details.truncated && <p>No files changed.</p>}
+    {details?.missingParent && <p role="status">Fetch parent commit {details.missingParent.slice(0, 7)} to view the changed files.</p>}
+    {details && !details.missingParent && details.files.length === 0 && !details.truncated && <p>No files changed.</p>}
     {details && details.files.map(file => <div key={file.path}>
       <button type="button" className="git-commit-file" aria-expanded={path === file.path}
         onClick={() => setPath(path === file.path ? null : file.path)}>{file.path}</button>

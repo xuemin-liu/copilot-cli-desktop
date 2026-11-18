@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type test from 'node:test'
 import { shardedTest } from './fixtures/sharded-test.js'
 import { createGitFixture, findGitForTests, folderLink, shellPath } from './fixtures/git-fixture.js'
@@ -302,6 +303,60 @@ shardedTest('commit details and patches use the selected merge and its first par
   const patch = await h.service.getCommitDiff(SUBSCRIBER, PROFILE, repo.id, oid, '-topic.txt')
   assert.match(patch.text, /^\+from topic$/m)
   assert.doesNotMatch(patch.text, /working copy only|binary.dat|main.txt/)
+})
+
+shardedTest('commit details with a missing shallow parent keep the message and omit the snapshot', { skip }, async t => {
+  const h = await harness(t, (f, root) => {
+    const source = join(f.root, 'source')
+    mkdirSync(source)
+    f.plain(source, 'init', '-q')
+    writeFileSync(join(source, 'existing.txt'), 'unchanged')
+    f.plain(source, 'add', '.')
+    f.plain(source, 'commit', '-qm', 'initial')
+    writeFileSync(join(source, 'new.txt'), 'new')
+    f.plain(source, 'add', '.')
+    f.plain(source, 'commit', '-qm', 'second', '-m', 'message at the boundary')
+    f.plain(f.root, 'clone', '-q', '--depth=1', pathToFileURL(source).href, root)
+  })
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  const details = await h.service.getCommitDetails(SUBSCRIBER, PROFILE, repo.id, repo.headOid!)
+  assert.equal(details.body, 'message at the boundary')
+  assert.deepEqual(details.files, [])
+  assert.match(details.missingParent ?? '', /^[0-9a-f]{40,64}$/)
+  await assert.rejects(h.service.getCommitDiff(SUBSCRIBER, PROFILE, repo.id, repo.headOid!, 'existing.txt'), /parent/i)
+  h.fixture.plain(h.project, 'fetch', '-q', '--deepen=1', 'origin')
+  const deepened = await h.service.getCommitDetails(SUBSCRIBER, PROFILE, repo.id, repo.headOid!)
+  assert.deepEqual(deepened.files.map(file => file.path), ['new.txt'])
+})
+
+shardedTest('commit patches for file and directory replacements return only the exact literal path', { skip }, async t => {
+  const h = await harness(t, (f, root) => {
+    f.plain(root, 'init', '-q')
+    const path = join(root, '[item]')
+    writeFileSync(path, 'old file\n')
+    f.plain(root, 'add', '.')
+    f.plain(root, 'commit', '-qm', 'initial')
+    rmSync(path)
+    mkdirSync(path)
+    writeFileSync(join(path, 'child.txt'), 'child\n')
+    f.plain(root, 'add', '-A')
+    f.plain(root, 'commit', '-qm', 'convert to directory')
+    rmSync(join(path, 'child.txt'))
+    rmSync(path, { recursive: true })
+    writeFileSync(path, 'new file\n')
+    f.plain(root, 'add', '-A')
+    f.plain(root, 'commit', '-qm', 'convert to file')
+  })
+  const repo = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  for (const [revision, line] of [['HEAD~1', '-old file'], ['HEAD', '+new file']] as const) {
+    const oid = h.fixture.plain(h.project, 'rev-parse', revision).trim()
+    const result = await h.service.getCommitDiff(SUBSCRIBER, PROFILE, repo.id, oid, '[item]')
+    assert.ok(result.text.includes(line))
+    assert.doesNotMatch(result.text, /child/)
+    const child = await h.service.getCommitDiff(SUBSCRIBER, PROFILE, repo.id, oid, '[item]/child.txt')
+    assert.match(child.text, /child\.txt/)
+    assert.doesNotMatch(child.text, /old file|new file\n/)
+  }
 })
 
 shardedTest('an empty repository has no log and does not fail', { skip }, async (t) => {

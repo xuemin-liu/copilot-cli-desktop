@@ -115,13 +115,13 @@ export function logArgs(options: { limit: number; skip?: number }): string[] {
   ]
 }
 
-export function commitShowArgs(oid: string, path?: string): string[] {
-  const args = ['show', '--no-notes', '--no-show-signature', '--no-ext-diff', '--no-textconv', '--no-color',
-    '--no-renames', '--submodule=short', '--root', '-m', '--first-parent']
-  const revision = commitOid(oid) + '^{commit}'
-  if (path === undefined) return [...args, '--format=%b%x00', '--numstat', '-z', revision, '--']
+export function commitDiffTreeArgs(oid: string, firstParent: string | null, path?: string): string[] {
+  const trees = firstParent ? [commitOid(firstParent), commitOid(oid)] : ['--root', commitOid(oid)]
+  const args = ['diff-tree', '-r', '--no-commit-id', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--submodule=short']
+  if (path === undefined) return [...args, '--numstat', '-z', ...trees, '--']
   assertGitArgument(path, 'path')
-  return [...args, '--format=', '--patch', revision, '--', path]
+  // A literal pathspec also includes descendants. Exclude the directory form when a file changes into a directory or back.
+  return ['--no-literal-pathspecs', ...args, '--patch', ...trees, '--', ':(top,literal)' + path, ':(top,exclude,literal)' + path + '/']
 }
 
 // ---- network ------------------------------------------------------------------------------------------------------------

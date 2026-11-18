@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
-import { branchListArgs, commitArgs, commitOid, commitShowArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
+import { branchListArgs, commitArgs, commitOid, commitDiffTreeArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
 import { DiscardRefused, checkSnapshotable, checkTrashable, pruneSnapshots, saveSnapshot, stampFiles } from './git-discard.js'
 import type { Snapshot } from './git-discard.js'
@@ -723,31 +723,50 @@ export class GitService {
     return { headOid, entries, restart, cursor: digest(offset + pageIds.length) }
   }
 
-  private async readCommit(subscriberId: number, profileId: string, repoId: string, oid: string, path?: string): Promise<GitRunResult> {
+  private async readCommit(subscriberId: number, profileId: string, repoId: string, oid: string, path?: string): Promise<{ body: string; missingParent: string | null; changes: GitRunResult | null }> {
     const project = this.projectFor(subscriberId, profileId)
     const repo = this.repoFor(project, repoId)
     const runtime = await this.getRuntime()
     if (!runtime || repo.state !== 'ready') throw new Error('This repository is not available')
     await this.requireGate(project, repo, runtime)
     const root = repo.discovered.root
-    const result = await runtime.runner.run({ cwd: root, args: commitShowArgs(oid, path), signal: project.abort.signal, maxStdoutBytes: MAX_DIFF_BYTES + 64 * 1024 })
-    if (result.cancelled || result.timedOut || (!gitSucceeded(result) && !result.stdoutTruncated)) throw new Error(describeFailure(result, 'git show', root))
-    return result
+    const run = (args: string[]) => runtime.runner.run({ cwd: root, args, signal: project.abort.signal, maxStdoutBytes: MAX_DIFF_BYTES + 64 * 1024 })
+    const revision = commitOid(oid) + '^{commit}'
+    const metadata = await run(['show', '-s', '--no-notes', '--no-show-signature', path === undefined ? '--format=%P%x00%b' : '--format=%P%x00', revision, '--'])
+    if (!gitSucceeded(metadata)) throw new Error(describeFailure(metadata, 'git show', root))
+    const separator = metadata.stdout.indexOf(0)
+    if (separator < 0) throw new Error('Git could not read this commit.')
+    const body = metadata.stdout.subarray(separator + 1).toString('utf8').trimEnd()
+    let parent = metadata.stdout.subarray(0, separator).toString('ascii').split(' ')[0] || null
+    if (!parent) {
+      // The revision walker hides parents at shallow boundaries. The commit object's header retains them.
+      const raw = await run(['cat-file', 'commit', revision])
+      if (raw.cancelled || raw.timedOut || (!gitSucceeded(raw) && !raw.stdoutTruncated)) throw new Error(describeFailure(raw, 'git cat-file', root))
+      const header = raw.stdout.subarray(0, 180).toString('ascii')
+      parent = /^tree [0-9a-f]+\nparent ([0-9a-f]+)\n/.exec(header)?.[1] ?? null
+      if (parent) {
+        const available = await run(['rev-parse', '--verify', '--quiet', commitOid(parent) + '^{tree}'])
+        if (available.exitCode === 1 && !available.cancelled && !available.timedOut) return { body, missingParent: parent, changes: null }
+        if (!gitSucceeded(available)) throw new Error(describeFailure(available, 'git rev-parse', root))
+      }
+    }
+    const changes = await run(commitDiffTreeArgs(oid, parent, path))
+    if (changes.cancelled || changes.timedOut || (!gitSucceeded(changes) && !changes.stdoutTruncated)) throw new Error(describeFailure(changes, 'git diff-tree', root))
+    return { body, missingParent: null, changes }
   }
 
   async getCommitDetails(subscriberId: number, profileId: string, repoId: string, oid: string): Promise<GitCommitDetails> {
-    const result = await this.readCommit(subscriberId, profileId, repoId, oid)
-    const end = result.stdout.indexOf(0)
-    if (end < 0) throw new Error('The commit message is too large to list its files.')
-    // Git writes a NUL after the format record and a newline before the first numstat record.
-    // A capped result may end halfway through a path. Only parse complete NUL-terminated records.
-    const stats = result.stdout.subarray(end + 1, result.stdout.lastIndexOf(0) + 1).toString('utf8').replace(/^\0?\n?/, '')
+    const { body, missingParent, changes } = await this.readCommit(subscriberId, profileId, repoId, oid)
+    if (!changes) return { body, missingParent, files: [], truncated: false }
+    // Only complete NUL-terminated records can name a selectable file.
+    const stats = changes.stdout.subarray(0, changes.stdout.lastIndexOf(0) + 1).toString('utf8')
     const files = parseNumstat(stats)
-    return { body: result.stdout.subarray(0, end).toString('utf8').trimEnd(), files: files.slice(0, 5_000), truncated: result.stdoutTruncated || files.length > 5_000 }
+    return { body, missingParent, files: files.slice(0, 5_000), truncated: changes.stdoutTruncated || files.length > 5_000 }
   }
 
   async getCommitDiff(subscriberId: number, profileId: string, repoId: string, oid: string, path: string): Promise<{ text: string; truncated: boolean }> {
-    const result = await this.readCommit(subscriberId, profileId, repoId, oid, path)
+    const { changes: result } = await this.readCommit(subscriberId, profileId, repoId, oid, path)
+    if (!result) throw new Error('Fetch the parent commit to view its changes.')
     const bounded = boundText(result.stdout, MAX_DIFF_BYTES)
     return { text: bounded.text, truncated: result.stdoutTruncated || bounded.truncated }
   }

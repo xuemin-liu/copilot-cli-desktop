@@ -220,6 +220,7 @@ export interface GitLogPage { headOid: string; entries: GitLogEntry[]; restart: 
 
 export interface GitCommitDetails {
   body: string
+  missingParent: string | null
   files: Array<{ path: string; added: number | null; deleted: number | null; binary: boolean }>
   truncated: boolean
 }
