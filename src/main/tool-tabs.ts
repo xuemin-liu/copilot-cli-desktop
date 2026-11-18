@@ -16,6 +16,7 @@ export interface ToolTab {
   detached?: boolean
   loading?: boolean
   error?: string
+  localCwd?: string
   terminal?: TerminalConfig
 }
 export interface ProjectTools {

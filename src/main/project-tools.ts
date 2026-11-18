@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { BrowserDebug } from './browser-debug.js'
 import type { BrowserCursor } from './browser-reader.js'
@@ -27,7 +27,7 @@ interface Options {
   userData: string
   owner(): BrowserWindow | null
   project(id: string): { name: string; path: string | null } | undefined
-  session(id: string): { workspaceProfileId: string; status: string; sideChat?: boolean; remote?: boolean; sessionPermissionPreset?: string | null } | undefined
+  session(id: string): { workspaceProfileId: string; status: string; sessionCwd?: string | null; launchWorktreePath?: string; sideChat?: boolean; remote?: boolean; sessionPermissionPreset?: string | null } | undefined
   currentSession(): string | null
   currentProject?(): string | null
   activateProject?(id: string): Promise<unknown>
@@ -96,6 +96,7 @@ export class ProjectToolService {
         }
         for (const tab of tabs) {
           const entry = candidate.tabs.find((entry: ToolTab | null) => entry?.id === tab.id)
+          if (tab.kind === 'local' && typeof entry?.localCwd === 'string' && isAbsolute(entry.localCwd)) tab.localCwd = entry.localCwd
           if (typeof entry?.label === 'string') tab.label = entry.label.trim().slice(0, 128)
           if (typeof entry?.color === 'string' && /^#[0-9a-f]{6}$/i.test(entry.color)) tab.color = entry.color
         }
@@ -163,7 +164,7 @@ export class ProjectToolService {
       tabs: project.tabs.filter(tab => tab.kind !== 'new' && !tab.terminal?.temporary).map(tab => {
       let url: string | null = null
       try { url = tab.url ? restorableUrl(tab.url) : null } catch { /* Blank or invalid URL. */ }
-      return { id: tab.id, kind: tab.kind, ...(tab.label ? { label: tab.label } : {}), ...(tab.color ? { color: tab.color } : {}), ...(url ? { url } : {}), ...(tab.terminal ? { terminal: tab.terminal } : {}) }
+      return { id: tab.id, kind: tab.kind, ...(tab.localCwd ? { localCwd: tab.localCwd } : {}), ...(tab.label ? { label: tab.label } : {}), ...(tab.color ? { color: tab.color } : {}), ...(url ? { url } : {}), ...(tab.terminal ? { terminal: tab.terminal } : {}) }
     }) }))
     const text = JSON.stringify({ version: 2, projects })
     if (!this.profileRecoveryRequired) this.writing = this.writing.catch(() => {}).then(() => writeFileAtomic(this.file, text))
@@ -296,6 +297,12 @@ export class ProjectToolService {
       if (!tab) {
         tab = { id: randomUUID(), kind: action.kind, title: action.kind === 'new' ? 'New tab' : action.kind === 'git' ? 'Git' : 'Browser' }
         if (isTerminalKind(action.kind)) {
+          if (action.kind === 'local') {
+            const current = this.options.currentSession()
+            const session = current ? this.options.session(current) : undefined
+            const folder = session?.workspaceProfileId === profileId && !session.remote ? session.sessionCwd ?? session.launchWorktreePath : undefined
+            if (folder && isAbsolute(folder)) tab.localCwd = folder
+          }
           tab.terminal = terminalLaunch(action.kind, action.terminal ?? {}, this.options.project(profileId)?.path ?? undefined).config
           if (tab.terminal.transport === 'managed') Object.assign(tab.terminal, this.myTerminal(profileId).connectionMetadata(tab.terminal.connectionId!))
           tab.title = this.terminalTitle(action.kind, tab.terminal)
@@ -487,7 +494,7 @@ export class ProjectToolService {
         this.terminalLifecycles.set(id, lifecycle)
       }
       const terminalEnv = tab.kind === 'wsl' ? { ...env, COPILOT_DESKTOP_TERMINAL_HELPER: env.COPILOT_DESKTOP_TERMINAL_WSL_HELPER } : env
-      return this.terminals.start(profileId, id, tab.kind, tab.terminal ?? {}, this.options.project(profileId)?.path ?? null, terminalEnv)
+      return this.terminals.start(profileId, id, tab.kind, tab.terminal ?? {}, tab.localCwd ?? this.options.project(profileId)?.path ?? null, terminalEnv)
     })()
     this.terminalStarts.set(id, pending)
     try { return await pending } finally { this.terminalStarts.delete(id) }
