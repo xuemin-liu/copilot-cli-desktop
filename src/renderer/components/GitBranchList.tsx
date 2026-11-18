@@ -1,6 +1,7 @@
+import { useRef, useState } from 'react'
 import type { JSX } from 'react'
 import { formatReviewText } from '../../main/git-review-format.js'
-import { branchNameProblem } from '../../main/git-branch.js'
+import { MAX_BRANCH_NAME, MAX_BRANCH_TASK_TITLE, branchNameProblem, suggestBranchName } from '../../main/git-branch.js'
 import type { GitBranchView } from '../../main/git-types.js'
 
 export interface GitBranchListProps {
@@ -12,6 +13,7 @@ export interface GitBranchListProps {
   /** Why nothing can be changed, when `locked` is because of the repository rather than a running write. */
   lockedReason: string | null
   newName: string
+  commitDraft: string
   onNewNameChange(value: string): void
   onCreate(): void
   onSwitch(name: string): void
@@ -28,16 +30,46 @@ export function upstreamLabel(branch: Pick<GitBranchView, 'upstream' | 'ahead' |
 /** The local branches with Switch, and a form that creates a branch at the current commit. */
 export function GitBranchList(props: GitBranchListProps): JSX.Element {
   const { branches, error, locked, newName } = props
+  const [taskTitle, setTaskTitle] = useState<string | null>(null)
+  const [suggestionFailed, setSuggestionFailed] = useState(false)
+  const nameInput = useRef<HTMLInputElement>(null)
+  const titleInput = useRef<HTMLInputElement>(null)
   const problem = newName.trim() === '' ? null : branchNameProblem(newName)
   const canCreate = !locked && newName.trim() !== '' && problem === null
+  const canSuggest = !locked && branches !== null && !error
+  const suggest = (source: string): boolean => {
+    if (!canSuggest) return false
+    const name = suggestBranchName(source, branches)
+    if (name === null) return false
+    props.onNewNameChange(name)
+    setTaskTitle(null)
+    setSuggestionFailed(false)
+    nameInput.current?.focus()
+    return true
+  }
   return (
     <div className="git-branches">
       <form className="git-branch-new" onSubmit={event => { event.preventDefault(); if (canCreate) props.onCreate() }}>
-        <input type="text" aria-label="New branch name" placeholder="New branch name" maxLength={200} spellCheck={false} value={newName}
+        <input ref={nameInput} type="text" aria-label="New branch name" placeholder="New branch name" maxLength={MAX_BRANCH_NAME} spellCheck={false} value={newName}
           disabled={locked} onChange={event => props.onNewNameChange(event.target.value)} />
+        <button type="button" disabled={!canSuggest} onClick={() => {
+          if (taskTitle !== null) titleInput.current?.focus()
+          else if (!suggest(props.commitDraft)) setTaskTitle('')
+        }}>Suggest name</button>
         <button type="submit" className="primary-button" disabled={!canCreate}
           title="Create the branch at the current commit and switch to it. No file changes.">Create and switch</button>
       </form>
+      {taskTitle !== null && (
+        <form className="git-branch-new" onSubmit={event => {
+          event.preventDefault()
+          if (canSuggest && taskTitle.trim() && !suggest(taskTitle)) setSuggestionFailed(true)
+        }}>
+          <input ref={titleInput} autoFocus type="text" aria-label="Task title" placeholder="Task title" maxLength={MAX_BRANCH_TASK_TITLE}
+            value={taskTitle} disabled={locked} onChange={event => { setTaskTitle(event.target.value); setSuggestionFailed(false) }} />
+          <button type="submit" disabled={!canSuggest || !taskTitle.trim()}>Suggest from title</button>
+        </form>
+      )}
+      {suggestionFailed && <p className="git-note" role="status">Try a different task title or enter a branch name.</p>}
       {problem && <p className="git-note" role="status">{problem}</p>}
       {props.lockedReason && <p className="git-note" role="status">{props.lockedReason}</p>}
 

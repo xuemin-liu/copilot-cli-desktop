@@ -308,10 +308,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const [progress, setProgress] = useState('')
   const [output, setOutput] = useState('')
   const [hooks, setHooks] = useState<{ names: string[]; hash: string } | null>(null)
-  // Branches: the list for the selected repository, the name being typed, and a counter that reloads the list after a change.
-  const [branches, setBranches] = useState<{ repoId: string; headOid: string | null; items: GitBranchView[] } | null>(null)
-  const [branchError, setBranchError] = useState<string | null>(null)
-  const [newBranch, setNewBranch] = useState('')
+  // Branches: the list for the selected repository, a draft per repository, and a counter that reloads the list after a change.
+  const [branches, setBranches] = useState<{
+    repoId: string; headOid: string | null; branch: string | null; reload: number; items: GitBranchView[] | null; error: string | null
+  } | null>(null)
+  const [branchDrafts, setBranchDrafts] = useState<Record<string, string>>({})
   const [branchReload, setBranchReload] = useState(0)
   // Worktrees of the selected repository (read-only), shown under the branches.
   const [worktrees, setWorktrees] = useState<{ repoId: string; items: GitWorktreeView[] } | null>(null)
@@ -322,6 +323,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const [amending, setAmending] = useState(false)
   const [headCommit, setHeadCommit] = useState<{ repoId: string; headOid: string; info: GitHeadCommitView } | null>(null)
   const amendPrefill = useRef(false)
+  // Repository selection can leave the prefilled message behind after it exits amend mode.
+  const untouchedAmendDrafts = useRef(new Map<string, string>())
   // Set when a push finds the branch has no upstream: the person picks the remote and confirms before anything is sent.
   const [publish, setPublish] = useState<{ repoKey: string; branch: string; headOid: string; remotes: string[]; remote: string } | null>(null)
   const [pullFailure, setPullFailure] = useState<PullFailure | null>(null)
@@ -342,6 +345,8 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   }, [view, sessionWorktreePath])
   const repo = view ? pickRepo(view, storedRepo) : null
   const ready = repo?.state === 'ready'
+  const currentBranches = branches && branches.repoId === repo?.id && branches.headOid === repo.headOid
+    && branches.branch === repo.branch && branches.reload === branchReload ? branches : null
 
   // The file list: reload when this repository's list, branch or commit changes.
   useEffect(() => {
@@ -460,9 +465,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   useEffect(() => {
     if (tab !== 'branches' || !repo || repo.state !== 'ready') return
     let stale = false
+    const scope = { repoId: repo.id, headOid: repo.headOid, branch: repo.branch, reload: branchReload }
+    setBranches(null)
     window.copilotDesktop.gitBranches(profileId, repo.id)
-      .then(items => { if (!stale) { setBranches({ repoId: repo.id, headOid: repo.headOid, items }); setBranchError(null) } })
-      .catch((cause: unknown) => { if (!stale) setBranchError(errorMessage(cause)) })
+      .then(items => { if (!stale) setBranches({ ...scope, items, error: null }) })
+      .catch((cause: unknown) => { if (!stale) setBranches({ ...scope, items: null, error: errorMessage(cause) }) })
     return () => { stale = true }
   }, [profileId, tab, repo?.id, repo?.state, repo?.headOid, repo?.branch, branchReload]) // eslint-disable-line react-hooks/exhaustive-deps
   // Worktrees: reloaded with the branches, and whenever the project view changes (a session's worktree may have appeared).
@@ -562,7 +569,13 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
   const messageKey = repo?.relativePath ?? ''
   const message = draftOf(messages, messageKey)
-  const setMessage = (value: string): void => setMessages(current => ({ ...current, [messageKey]: value }))
+  const setMessage = (value: string): void => {
+    if (value.trim() !== untouchedAmendDrafts.current.get(messageKey)?.trim()) untouchedAmendDrafts.current.delete(messageKey)
+    setMessages(current => ({ ...current, [messageKey]: value }))
+  }
+  const suggestionDraft = amending || untouchedAmendDrafts.current.get(messageKey)?.trim() === message.trim() ? '' : message
+  const branchDraftKey = repo?.folder ?? ''
+  const newBranch = draftOf(branchDrafts, branchDraftKey)
 
   /** Run one write, show its outcome, and take the fresh status it returns. */
   const runWrite = (kind: 'stage' | 'unstage' | 'commit' | 'branch' | 'discard' | 'worktree' | GitSyncKind, owner: { id: string; key: string }, task: () => Promise<GitOperationResult>, seen?: { branch: string; headOid: string } | null): void => {
@@ -584,8 +597,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
       if (result.ok) {
         setNotice(result.message)
         // The draft that was committed belongs to the repository that committed it, whichever one is on screen now.
-        if (kind === 'commit') { setMessages(current => ({ ...current, [owner.key]: '' })); setAmending(false) }
-        if (kind === 'branch') setNewBranch('')
+        if (kind === 'commit') {
+          untouchedAmendDrafts.current.delete(owner.key)
+          setMessages(current => ({ ...current, [owner.key]: '' }))
+          setAmending(false)
+        }
         if (kind === 'worktree') setBranchReload(count => count + 1)
       } else if (result.reason === 'cancelled' && (kind === 'discard' || kind === 'branch' || kind === 'worktree')) {
         setNotice(result.message)
@@ -624,7 +640,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
   const changeBranch = (action: 'create' | 'switch', name: string): void => {
     if (!repo || repo.headOid === null) return
     const expected = { branch: repo.detached ? null : repo.branch, headOid: repo.headOid }
-    runWrite('branch', { id: repo.id, key: repo.relativePath }, () => window.copilotDesktop.gitBranch(profileId, repo.id, action, name, expected))
+    runWrite('branch', { id: repo.id, key: repo.relativePath }, async () => {
+      const result = await window.copilotDesktop.gitBranch(profileId, repo.id, action, name, expected)
+      if (result.ok && action === 'create') setBranchDrafts(current => ({ ...current, [repo.folder]: '' }))
+      return result
+    })
   }
 
   // The service checks that the worktree is merged, unused and unlocked, then asks in a native window; nothing here decides.
@@ -665,6 +685,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
     // Only the last commit's own message: the info cached from an earlier commit (before this amend or commit) must never be used.
     if (!amending || !headCommit || !repo || headCommit.repoId !== repo.id || headCommit.headOid !== repo.headOid || !amendPrefill.current) return
     amendPrefill.current = false
+    untouchedAmendDrafts.current.set(repo.relativePath, headCommit.info.message)
     setMessages(current => ({ ...current, [repo.relativePath]: headCommit.info.message }))
   }, [amending, headCommit, repo?.headOid]) // eslint-disable-line react-hooks/exhaustive-deps
   const amendState: AmendState | null = repo && repo.headOid !== null ? {
@@ -903,10 +924,11 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
 
               {tab === 'branches' && (
                 <>
-                  <GitBranchList branches={branches && branches.repoId === repo.id ? branches.items : null} error={branchError}
+                  <GitBranchList key={repo.id} branches={currentBranches?.items ?? null} error={currentBranches?.error ?? null}
                     locked={writesLocked || repo.headOid === null}
                     lockedReason={repo.headOid === null ? 'There are no commits yet. Make the first commit before creating or switching branches.' : null}
-                    newName={newBranch} onNewNameChange={setNewBranch}
+                    newName={newBranch} commitDraft={suggestionDraft}
+                    onNewNameChange={value => setBranchDrafts(current => ({ ...current, [branchDraftKey]: value }))}
                     onCreate={() => changeBranch('create', newBranch.trim())} onSwitch={name => changeBranch('switch', name)} />
                   <GitWorktreeList worktrees={worktrees && worktrees.repoId === repo.id ? worktrees.items : null} error={worktreeError} sessions={worktreeSessions}
                     locked={writesLocked} onRemove={removeWorktree} />

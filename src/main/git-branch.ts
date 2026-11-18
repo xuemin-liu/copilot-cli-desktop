@@ -8,6 +8,9 @@ import { redactDiagnosticText } from './desktop-diagnostics.js'
  */
 
 export const MAX_BRANCH_NAME = 200
+export const MAX_BRANCH_TASK_TITLE = 160
+const MAX_BRANCH_SLUG = 48
+const MAX_BRANCH_SUGGESTION_ATTEMPTS = 20
 
 /** Why a branch name cannot be used, or null. Git's own `check-ref-format` has the last word; this keeps obvious trouble out of its way. */
 export function branchNameProblem(name: string): string | null {
@@ -20,6 +23,36 @@ export function branchNameProblem(name: string): string | null {
   if (/[\s~^:?*[\\]/.test(name) || name.includes('..') || name.includes('@{')) return 'A branch name cannot contain spaces or any of ~ ^ : ? * [ \\ .. @{'
   if (name.startsWith('/') || name.endsWith('/') || name.endsWith('.') || name.endsWith('.lock') || name.includes('//')) return 'That is not a valid branch name.'
   return null
+}
+
+/** Suggest a local branch name from a task title or the first line of a commit draft. */
+export function suggestBranchName(text: string, branches: readonly { name: string }[]): string | null {
+  const subject = text.split(/\r\n?|\n/, 1)[0]!.trim()
+  const header = /^([a-z][a-z0-9-]*)(?:\([^)]+\))?!?:\s+/i.exec(subject)
+  const words = subject.slice(header?.[0].length ?? 0).toLowerCase().normalize('NFC').match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu)
+  const slug = Array.from(words?.join('-') ?? '').slice(0, MAX_BRANCH_SLUG).join('').replace(/-+$/, '')
+  if (!slug) return null
+
+  const prefixes = new Set<string>()
+  const names = branches.map(({ name }) => {
+    // Desktop worktree branches have no slash, so they cannot establish a prefix.
+    const slash = name.indexOf('/')
+    if (slash > 0) prefixes.add(name.slice(0, slash))
+    return name.toLowerCase().normalize('NFC')
+  })
+  const type = header?.[1]?.toLowerCase()
+  const matchingPrefix = [...prefixes].find(prefix => prefix.toLowerCase() === type)
+  const prefix = matchingPrefix ?? (prefixes.size === 1 ? prefixes.values().next().value : undefined)
+  const search = (base: string): string | null => {
+    for (let attempt = 1; attempt <= MAX_BRANCH_SUGGESTION_ATTEMPTS; attempt++) {
+      const candidate = attempt === 1 ? base : `${base}-${attempt}`
+      const key = candidate.toLowerCase().normalize('NFC')
+      if (branchNameProblem(candidate) === null && !names.some(name =>
+        name === key || name.startsWith(`${key}/`) || key.startsWith(`${name}/`))) return candidate
+    }
+    return null
+  }
+  return (prefix ? search(`${prefix}/${slug}`) : null) ?? search(slug)
 }
 
 export type SwitchFailureReason = 'local-changes' | 'failed'

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { RECENT_ACTIVITY_MS, branchNameProblem, describeSwitchFailure, projectActivity } from './git-branch.js'
+import { RECENT_ACTIVITY_MS, branchNameProblem, describeSwitchFailure, projectActivity, suggestBranchName } from './git-branch.js'
 import { branchListArgs, createBranchArgs, refFormatArgs, switchArgs } from './git-commands.js'
 import { parseBranches, parsePublishedRefs } from './git-parse.js'
 import type { GitRunResult } from './git-runner.js'
@@ -22,6 +22,25 @@ test('branch names it will not, with a reason', () => {
     ['/x', /not a valid/], ['x/', /not a valid/], ['x.', /not a valid/], ['x.lock', /not a valid/], ['a//b', /not a valid/],
   ]
   for (const [name, reason] of bad) assert.match(branchNameProblem(name) ?? '', reason, JSON.stringify(name))
+})
+
+const suggest = (text: string, ...branches: string[]): string | null => suggestBranchName(text, branches.map(name => ({ name })))
+
+test('a branch suggestion keeps the subject words and follows an established prefix', () => {
+  assert.equal(suggest('feat(git)!: Add branch name suggestions\r\n\r\nSome details', 'main', 'feat/other', 'fix/other'), 'feat/add-branch-name-suggestions')
+  assert.equal(suggest('Fix login', 'main', 'feature/other', 'desktop-session-abc123'), 'feature/fix-login')
+  assert.equal(suggest('fix: 修復 登入', 'main', 'feat/other', 'bug/other'), '修復-登入')
+  assert.equal(suggest('Update readme', 'main', 'desktop-worktree-abc123'), 'update-readme')
+  assert.equal(suggest('fix: !!\nMore details', 'fix/other'), null)
+  assert.equal(suggest('𐐨'.repeat(80)), '𐐨'.repeat(48))
+})
+
+test('every branch suggestion checks case variants and nested ref conflicts', () => {
+  assert.equal(suggest('Fix login', 'Feat/Fix-Login', 'Feat/fix-login-2/child'), 'Feat/fix-login-3')
+  assert.equal(suggest('Fix login', 'FEAT', 'feat/other', 'fix-login/old'), 'fix-login-2')
+  assert.equal(suggest('Cafe\u0301', 'Café'), 'café-2')
+  const occupied = ['fix-login', ...Array.from({ length: 19 }, (_, i) => `fix-login-${i + 2}`)]
+  assert.equal(suggest('Fix login', ...occupied), null)
 })
 
 test('a failed switch says when local changes were the reason, and that nothing changed', () => {

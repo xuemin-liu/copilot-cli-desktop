@@ -168,6 +168,9 @@ panel that destroys work, so it is built around three promises:
 The **Branches** tab lists the local branches of the selected repository, newest commit first: the current one is marked, and each
 shows its upstream (`↑` commits to push, `↓` to pull, "local only", or "upstream gone") and its last commit.
 
+- **Suggest name** fills the editable branch field from the first line of the repository's commit draft outside amend mode. If
+  the draft cannot supply a name, enter a short **Task title** and click **Suggest from title**. The suggestion uses an established
+  prefix when the local branches make it clear and checks for conflicts with local branch names. Draft names are kept per repository.
 - **Create and switch** makes a branch at the current commit, without tracking anything, and moves to it. No file changes, so
   nothing is asked. The name is checked by the panel and then by Git (`check-ref-format`); a name that starts with `-`, contains
   spaces or `~ ^ : ? * [ \ .. @{`, ends in `.lock` or `/`, or already exists creates nothing.
