@@ -1018,7 +1018,7 @@ export function GitPanel({ profileId, promptTarget, takeover = false, active = t
                   )}
 
                   {currentStatus && !(currentStatus.staged.length > 0 || message !== '' || visibleOperation?.kind === 'commit' || hooks !== null || amending) && amendState && (
-                    <button type="button" className="git-amend-open" onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
+                    <button type="button" className="git-amend-open" disabled={writesLocked} onClick={() => toggleAmend(true)} title="Fix the last commit: add staged files to it or change its message. Only for a commit that has not been pushed.">Amend last commit…</button>
                   )}
                   {currentStatus && (currentStatus.staged.length > 0 || message !== '' || visibleOperation?.kind === 'commit' || hooks !== null || amending) && (
                     <GitCommitBox stagedCount={currentStatus.staged.length} conflictCount={currentStatus.conflicted.length}
