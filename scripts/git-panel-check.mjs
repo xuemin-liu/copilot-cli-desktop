@@ -704,6 +704,67 @@ ${point.missing}`)
     service.requestRefresh(PROFILE)
     results.stagingCommentContinuity = true
 
+    const key = (keyCode, modifiers = []) => {
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+      window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+    }
+    const focusFilter = async () => {
+      await ui('document.querySelector(".git-path-filter").focus()')
+      await until('document.activeElement?.matches(".git-path-filter")', 'filter receives keyboard input')
+    }
+    await ui('document.querySelector(".git-tabs [aria-selected=true]").focus()')
+    key('Right')
+    await until('document.activeElement?.textContent === "History" && !!document.querySelector(".git-history")', 'Right selects History')
+    key('Home')
+    await until('document.activeElement?.textContent.startsWith("Changes") && !!document.querySelector(".git-path-filter")', 'Home returns to Changes')
+    await focusFilter()
+    window.webContents.insertText('NEW.TXT')
+    await until('document.querySelectorAll(".git-entry").length === 1 && document.querySelector(".git-entry-name")?.textContent === "new.txt"', 'case-insensitive path match')
+    key('Down')
+    await until('document.activeElement?.matches(".git-entry") && document.querySelector(".git-diff-path")?.textContent === "new.txt"', 'Down previews the first match')
+    await clickByText('.git-group-action', 'Stage shown')
+    await until('!!document.querySelector(".git-group[aria-label=Staged] .git-entry")', 'only the matching untracked file is staged')
+    assert.deepEqual(gitIn('diff', '--cached', '--name-only').trim().split(/\r?\n/).sort(), ['b.txt', 'new.txt'])
+    await clickByText('.git-group-action', 'Unstage shown')
+    await until('!!document.querySelector(".git-group[aria-label=Untracked] .git-entry")', 'filtered file unstaged')
+    await focusFilter()
+    window.webContents.insertText('missing')
+    await until('document.querySelectorAll(".git-entry").length === 0 && document.body.textContent.includes("No matching files.")', 'empty filter result')
+    key('Escape')
+    await until('document.querySelector(".git-path-filter")?.value === "" && document.querySelectorAll(".git-entry").length === 4', 'Escape restores all file rows')
+    key('Down')
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Staged"', 'first file focused')
+    key('Down')
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Changes"', 'Down crosses into changed files')
+    const keyboardModifier = process.platform === 'darwin' ? 'meta' : 'control'
+    key('Down', [keyboardModifier])
+    await until('document.activeElement?.closest(".git-group")?.ariaLabel === "Untracked"', 'modifier moves focus independently')
+    key('Down', [keyboardModifier])
+    await until('document.activeElement === [...document.querySelectorAll(".git-entry")].at(-1)', 'focus skips an untracked file without marking it')
+    key('Space')
+    await until('document.querySelector(".git-entry-selected")?.closest(".git-group")?.ariaLabel === "Untracked"', 'Space previews the focused file')
+    assert.equal(await ui('document.querySelectorAll(".git-entry-marked").length'), 2, 'Space toggled a second file without a system shortcut')
+    key('Up', [keyboardModifier])
+    await until('document.activeElement === document.querySelector(".git-group[aria-label=Untracked] .git-entry")', 'focus moves to the skipped file')
+    key('Space')
+    await until('document.querySelector(".git-marked-count")?.textContent === "3 selected"', 'third file marked')
+    key('Space')
+    await until('document.querySelector(".git-marked-count")?.textContent === "2 selected"', 'third file unmarked')
+    assert.deepEqual(await ui('({ pressed: document.querySelectorAll(".git-entry[aria-pressed=true]").length, focused: document.activeElement?.getAttribute("aria-pressed"), preview: document.activeElement?.getAttribute("aria-current") })'),
+      { pressed: 2, focused: 'false', preview: 'true' }, 'pressed rows match the toolbar even when the previewed file is unmarked')
+    key('Down', [keyboardModifier])
+    await until('document.activeElement?.getAttribute("aria-pressed") === "true"', 'focus moved to a marked file')
+    key('Space')
+    await until('document.querySelectorAll(".git-entry[aria-pressed=true]").length === 1 && !document.querySelector(".git-marked")', 'one file stays marked after the toolbar closes')
+    await focusFilter()
+    window.webContents.insertText('NEW.TXT')
+    await until('document.querySelectorAll(".git-entry").length === 1', 'filter narrowed for keyboard dismissal')
+    key('Down')
+    await until('document.activeElement?.matches(".git-entry")', 'focus moved to the matching file')
+    key('Escape')
+    await until('document.activeElement?.matches(".git-path-filter") && document.querySelector(".git-path-filter")?.value === "" && document.querySelectorAll(".git-entry").length === 4', 'Escape on a file clears the filter and returns focus to search')
+    results.keyboardAndFilter = true
+
     // 11b. Several files at once: Ctrl+click (Cmd on macOS) a changed and an untracked file, stage both, then unstage both.
     const pickKey = process.platform === 'darwin' ? 'meta' : 'control'
     const entryIn = (group, index) => `[...document.querySelectorAll(".git-group")].find(candidate => candidate.getAttribute("aria-label") === ${JSON.stringify(group)}).querySelectorAll(".git-entry")[${index}]`

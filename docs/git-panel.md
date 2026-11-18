@@ -21,6 +21,7 @@ Project switching retains the repository selection, commit draft, and diff selec
   and very large files show a notice instead of content. **Whole file** in the diff header switches between the changes
   with a few lines around them and the whole file with its changes in place; the choice is remembered. The panel still
   shows at most 4,000 lines.
+- **Keyboard and path filter.** Left and Right switch repository views. In Changes, filter by any part of a path, including the old name of a renamed file. Down from the filter opens the first match. Up, Down, Home and End move through files. Hold Ctrl (Cmd on macOS) to move focus without changing the selection, then release the modifier and press Space to toggle a file or Shift+Space to select a range in its group. Escape from the filter or a file clears the filter and returns focus to search. Group actions apply to the files shown in that group.
 - **History.** Select a commit to see its message and changed files, then select a file for its read-only patch. Merge commits show changes against their first parent. At a shallow boundary, the message stays available and the panel identifies the parent needed to show changes. The latest commits, 50 at a time. Every page starts from the same commit. When the panel detects a new branch tip, History reloads from that tip. If fetching more ancestry changes the order of an existing page in a shallow clone, History restarts at the first page. **Load more** waits for the page in flight, so a double click never lists a
   commit twice or skips one.
 
