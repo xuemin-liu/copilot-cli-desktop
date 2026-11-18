@@ -47,6 +47,8 @@ export interface GitStatusEntry {
    * file-list version covers, so re-staging different content under the same name is a different list.
    */
   indexOid: string | null
+  /** The staged Git mode, so a restage that only changes permissions also changes the file-list version. */
+  indexMode: string | null
 }
 
 export interface GitBranchInfo {
@@ -136,20 +138,20 @@ export function parseStatusV2(output: string, maxEntries = DEFAULT_MAX_STATUS_EN
       const parsed = leadingFields(record, 8)
       if (!parsed || parsed.rest === '') { malformed++; continue }
       const xy = parsed.fields[1] ?? '..'
-      add({ kind: 'changed', indexOid: indexOid(parsed.fields[7], xy[0]), path: parsed.rest, originalPath: null, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'changed', indexOid: indexOid(parsed.fields[7], xy[0]), indexMode: xy[0] === '.' ? null : parsed.fields[4] ?? null, path: parsed.rest, originalPath: null, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if (type === '2') {
       const parsed = leadingFields(record, 9)
       const original = records[++position]
       if (!parsed || parsed.rest === '' || original === undefined) { malformed++; continue }
       const xy = parsed.fields[1] ?? '..'
-      add({ kind: 'renamed', indexOid: indexOid(parsed.fields[7], xy[0]), path: parsed.rest, originalPath: original, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'renamed', indexOid: indexOid(parsed.fields[7], xy[0]), indexMode: xy[0] === '.' ? null : parsed.fields[4] ?? null, path: parsed.rest, originalPath: original, index: statusCode(xy[0]), worktree: statusCode(xy[1]), submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if (type === 'u') {
       const parsed = leadingFields(record, 10)
       if (!parsed || parsed.rest === '') { malformed++; continue }
-      add({ kind: 'unmerged', indexOid: null, path: parsed.rest, originalPath: null, index: 'U', worktree: 'U', submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
+      add({ kind: 'unmerged', indexOid: null, indexMode: null, path: parsed.rest, originalPath: null, index: 'U', worktree: 'U', submodule: parsed.fields[2]?.startsWith('S') ?? false, isDirectory: false })
     } else if ((type === '?' || type === '!') && record[1] === ' ' && record.length > 2) {
       const path = record.slice(2)
-      add({ kind: type === '?' ? 'untracked' : 'ignored', indexOid: null, path, originalPath: null, index: '.', worktree: type, submodule: false, isDirectory: path.endsWith('/') })
+      add({ kind: type === '?' ? 'untracked' : 'ignored', indexOid: null, indexMode: null, path, originalPath: null, index: '.', worktree: type, submodule: false, isDirectory: path.endsWith('/') })
     } else if (record !== '') malformed++
   }
   return { branch, entries, totalEntries, truncated: totalEntries > entries.length, malformed, lossyPaths: output.includes('�') }

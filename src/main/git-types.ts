@@ -83,6 +83,11 @@ export interface GitRepoStatusView {
   truncated: boolean
 }
 
+export interface GitCommitHead {
+  branch: string | null
+  headOid: string | null
+}
+
 export type GitDiffKind = 'text' | 'binary' | 'directory' | 'too-large' | 'empty'
 
 export interface GitDiffView {

@@ -2,7 +2,7 @@
 // Drives it with native mouse input against three throwaway repositories and saves a screenshot.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -35,11 +35,13 @@ if (!process.versions.electron) {
       const [target, setTarget] = useState('tab-1');
       const [terminal, setTerminal] = useState(false);
       const [availability, setAvailability] = useState('running');
+      const [sessionWorktree, setSessionWorktree] = useState(null);
       const [tool, setTool] = useState('git');
       const [profile, setProfile] = useState('${PROFILE}');
       window.__setProfile = setProfile;
       window.__setTarget = setTarget;
       window.__setAvailability = setAvailability;
+      window.__setWorktree = setSessionWorktree;
       window.__setTool = setTool;
       window.__showTerminal = () => setTerminal(true);
       if (${activeSession}) return <ToolPanelWorkspace
@@ -50,7 +52,7 @@ if (!process.versions.electron) {
           tabs:[{id:'git',kind:'git',title:'Git'},{id:'browser',kind:'browser',title:'Browser',resource:'tool:browser',pageId:1}]}],connections:[]}}
         obscured={false} act={()=>{}}><div data-active-session={target ?? ''} data-active-profile={profile}>CLI</div></ToolPanelWorkspace>;
       return open
-        ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} /></div>
+        ? <><div style={{ width: '100%', minWidth: 0, display: 'flex' }}><GitPanel profileId="${PROFILE}" promptTarget={{ id: target, title: 'Main session' }} onClose={() => setOpen(false)} sessionWorktreePath={sessionWorktree} /></div>
             {terminal && <div style={{ width: 480, flexShrink: 0, position: 'relative' }}><TerminalPane tabId={target} active sessionProcessId={1} /></div>}</>
         : <p id="closed">closed</p>;
     }
@@ -101,6 +103,7 @@ if (!process.versions.electron) {
       git(repo, 'commit', '-q', '-m', `init ${name}`)
     }
     const alpha = join(workspace, 'alpha')
+    git(alpha, 'config', 'core.filemode', 'false')
     await writeFile(join(alpha, 'a.txt'), 'one\ntwo\n')              // unstaged change
     await writeFile(join(alpha, 'b.txt'), `${await readFile(join(alpha, 'b.txt'), 'utf8')}buzz\n`); git(alpha, 'add', 'b.txt') // staged change
     await writeFile(join(alpha, 'new.txt'), 'hello\n')               // untracked
@@ -133,6 +136,7 @@ if (!process.versions.electron) {
     let window
     // A branch switch rewrites files: the check plays the session-activity gate and the native confirmation.
     let agentBusy = false
+    const reportedWorktrees = []
     let confirmAnswer = true
     const confirmations = []
     // Discard saves copies here and "trashes" into a folder (the check never touches the real Recycle Bin).
@@ -142,6 +146,7 @@ if (!process.versions.electron) {
     const { rename } = await import('node:fs/promises')
     const service = new GitService({
       sessionActivity: () => agentBusy ? { busy: true, detail: '"Main session" is working' } : { busy: false, detail: '' },
+      sessionWorktrees: () => reportedWorktrees,
       confirm: async (_profileId, request) => { confirmations.push(request); return confirmAnswer },
       snapshotDirectory: copies,
       trash: async absolute => { await rename(absolute, join(bin, `${Date.now()}-${absolute.split(/[\\\\/]/).pop()}`)) },
@@ -348,7 +353,7 @@ ${point.missing}`)
     await click('.git-diff-path')
     assert.equal(await ui('window.__cursorContext("tab-1")'), cursorContext, 'moving back out of the diff retains the line')
     await click('[aria-label="Clear cursor context"]')
-    assert.equal(await ui('window.__cursorContext("tab-1")'), undefined)
+    await until('window.__cursorContext("tab-1") === undefined', 'clearing the cursor removes its context')
     await click('.git-diff-add')
     results.cursorContext = true
 
@@ -601,12 +606,49 @@ ${point.missing}`)
     const forwardSlashes = path => path.split(slash).join('/')
     const groups = () => ui('[...document.querySelectorAll(".git-group h3")].map(element => element.textContent)')
     const gitIn = (...args) => git(alpha, ...args)
+    const addComment = async (selector, comment) => {
+      await click(selector)
+      await until('!!document.querySelector(".git-diff-comment-input")', 'diff comment editor opened')
+      window.webContents.insertText(comment)
+      await clickByText('.git-diff-comment-actions button', 'Save')
+      await until(`[...document.querySelectorAll(".git-diff-comment-text")].some(element => element.textContent === ${JSON.stringify(comment)})`, 'diff comment saved')
+    }
+    const sameFileAndComment = side => `document.querySelector(".git-diff-path")?.textContent === "a.txt" &&
+      document.querySelector(".git-diff-side")?.textContent === ${JSON.stringify(side)} &&
+      document.querySelector(".git-diff-comment-text")?.textContent === "Keep this addition"`
+    await addComment('.git-diff-add .git-diff-gutter', 'Keep this addition')
     await click('button[aria-label="Stage a.txt"]')
     await until('/Staged \\(2\\)/.test(document.body.textContent)', 'a.txt staged')
     assert.match(gitIn('status', '--porcelain'), /^M[ M] a\.txt$/m, 'the real index changed')
+    await until(sameFileAndComment('staged'), 'selection and comment follow a.txt when staged')
     await click('button[aria-label="Unstage a.txt"]')
     await until('/Staged \\(1\\)/.test(document.body.textContent) && /Changes \\(1\\)/.test(document.body.textContent)', 'a.txt unstaged again')
+    await until(sameFileAndComment('working tree'), 'selection and comment follow a.txt when unstaged')
     assert.equal(await ui('document.body.textContent.includes("Mark resolved")'), false)
+
+    gitIn('add', '--', 'a.txt')
+    service.requestRefresh(PROFILE)
+    await until(sameFileAndComment('staged'), 'selection and comment also follow external staging')
+    await writeFile(join(alpha, 'a.txt'), 'one\ntwo\nthree\n')
+    service.requestRefresh(PROFILE)
+    await until('!!document.querySelector("button[aria-label=\\"Stage a.txt\\"]")', 'a.txt is partially staged')
+    const clickWorkingFile = () => clickByText('.git-group[aria-label="Changes"] .git-entry', 'a.txt')
+    await clickWorkingFile()
+    await until('document.querySelector(".git-diff-add")?.textContent.endsWith("+three\\n")', 'working side shows only the remaining change')
+    await addComment('.git-diff-context button[aria-label="Comment on line 2"]', 'Review the context in the working diff')
+    await click('button[aria-label="Stage a.txt"]')
+    await until(sameFileAndComment('staged'), 'staging the rest keeps the staged comment')
+    await until('document.querySelector(".git-diff-unanchored li")?.textContent === "Review the context in the working diff"', 'a moved draft with different context is shown without an anchor')
+    const promptCount = await ui('window.__inserted.length')
+    await clickByText('.git-diff-comments-bar button', 'Add comments to prompt')
+    await until(`window.__inserted.length === ${promptCount + 1}`, 'the preserved comments go to the prompt')
+    assert.match((await ui('window.__inserted.at(-1)')).text, /Unanchored comment:\s+Review the context in the working diff/)
+    await click('button[aria-label="Unstage a.txt"]')
+    await until(sameFileAndComment('working tree'), 'selection follows the file back after unstaging')
+    assert.match(await text('.git-diff-unanchored'), /Review the context in the working diff/)
+    await writeFile(join(alpha, 'a.txt'), 'one\ntwo\n')
+    service.requestRefresh(PROFILE)
+    results.stagingCommentContinuity = true
 
     // 11b. Several files at once: Ctrl+click (Cmd on macOS) a changed and an untracked file, stage both, then unstage both.
     const pickKey = process.platform === 'darwin' ? 'meta' : 'control'
@@ -674,7 +716,70 @@ ${point.missing}`)
     await until('!!document.querySelector(".git-hooks")', 'hook approval requested')
     assert.match(await text('.git-hooks'), /pre-commit/)
     assert.equal(existsSync(marker), false, 'nothing ran before approval')
+    const beta = join(workspace, 'beta')
+    const linked = join(realpathSync.native(directory), 'approval-worktree')
+    git(beta, 'worktree', 'add', '-q', '-b', 'approval-worktree', linked)
+    await writeFile(join(linked, 'staged.txt'), 'unrelated\n')
+    git(linked, 'add', '.')
+    const otherHead = git(linked, 'rev-parse', 'HEAD')
+    reportedWorktrees.push(linked)
+    service.requestRefresh(PROFILE)
+    const linkedSelected = 'document.querySelector(".git-repo-selected")?.innerText.includes("approval-worktree")'
+    await until('[...document.querySelectorAll(".git-repo")].some(element => element.innerText.includes("approval-worktree"))', 'linked worktree is listed')
+    await clickByText('.git-repo', 'approval-worktree')
+    await until(`${linkedSelected} && !!document.querySelector(".git-commit textarea")`, 'manual switch loads the other staged file')
+    assert.equal(await ui('!!document.querySelector(".git-hooks")'), false, 'the other repository has no approval')
+    await clickByText('.git-repo', 'alpha')
+    await until('document.querySelector(".git-commit textarea")?.value === "chore: through a hook"', 'the original draft is preserved')
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'the original repository asks again')
+    await ui(`window.__setWorktree(${JSON.stringify(linked)})`)
+    await until(`${linkedSelected} && !!document.querySelector(".git-commit textarea")`, 'automatic switch loads the worktree')
+    assert.equal(await ui('!!document.querySelector(".git-hooks")'), false, 'automatic switching clears the pending approval too')
+    assert.equal(git(linked, 'rev-parse', 'HEAD'), otherHead, 'the other repository never committed')
+    assert.equal(existsSync(marker), false, 'the original hook never ran')
+    await ui('window.__setWorktree(null)')
+    await clickByText('.git-repo', 'alpha')
+    await until('document.querySelector(".git-commit textarea")?.value === "chore: through a hook"', 'the original draft is still present')
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'fresh approval requested in the original repository')
     await screenshot('hooks-approval.png')
+    // Simulate a terminal changing branches after the renderer sends its approval but before main checks it.
+    const originalCommit = service.commit.bind(service)
+    service.commit = async (...args) => {
+      if (args[5] !== null) gitIn('switch', '-q', '-c', 'approval-race')
+      return originalCommit(...args)
+    }
+    await clickByText('.git-hooks button', 'Allow these hooks')
+    await until('/changed after Git asked for hook approval/.test(document.querySelector(".git-message-error")?.textContent || "")', 'main refuses an approval for the previous branch')
+    service.commit = originalCommit
+    assert.equal(existsSync(marker), false, 'the stale approval did not run the hook')
+    gitIn('switch', '-q', 'main')
+    gitIn('branch', '-d', 'approval-race')
+    service.requestRefresh(PROFILE)
+    await until('document.querySelector(".git-branch-name")?.textContent === "main"', 'the original branch is shown again')
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'fresh approval requested on the original branch')
+    const beforeModeChange = gitIn('rev-parse', 'HEAD')
+    assert.match(gitIn('ls-files', '-s', '--', 'hooked.txt'), /^100644 /, 'initial approval is for a non-executable file')
+    service.commit = async (...args) => {
+      if (args[5] !== null) gitIn('update-index', '--chmod=+x', '--', 'hooked.txt')
+      return originalCommit(...args)
+    }
+    await clickByText('.git-hooks button', 'Allow these hooks')
+    await until('/staged files changed/i.test(document.querySelector(".git-message-error")?.textContent || "")', 'main refuses approval after a mode-only change')
+    service.commit = originalCommit
+    assert.equal(gitIn('rev-parse', 'HEAD'), beforeModeChange, 'changing the staged mode did not commit')
+    assert.equal(existsSync(marker), false, 'the hook did not run after a mode-only change')
+    assert.match(gitIn('ls-files', '-s', '--', 'hooked.txt'), /^100755 /)
+    await clickByText('.git-group[aria-label="Staged"] .git-entry', 'hooked.txt')
+    await until('/new file mode 100755/.test(document.querySelector(".git-diff-lines")?.textContent || "")', 'the new mode is shown')
+    gitIn('update-index', '--chmod=-x', '--', 'hooked.txt')
+    service.requestRefresh(PROFILE)
+    await until('/new file mode 100644/.test(document.querySelector(".git-diff-lines")?.textContent || "")', 'the original mode is restored')
+    // A new approval can use the now-current staged version.
+    await click('.git-commit-button')
+    await until('!!document.querySelector(".git-hooks")', 'fresh approval requested for the original mode')
     await clickByText('.git-hooks button', 'Allow these hooks')
     await until('/Committed/.test(document.querySelector(".git-message-info")?.innerText || "")', 'committed after approval')
     assert.equal(existsSync(marker), true, 'the approved hook ran')
@@ -699,14 +804,30 @@ ${point.missing}`)
     await clickByText('.git-repo', 'beta')
     await delay(150)
     assert.match(await text('.git-repo-selected'), /alpha/, 'a click on a locked repository does nothing')
+    await ui(`window.__setWorktree(${JSON.stringify(linked)})`)
+    await until('!!document.querySelector(".git-commit-row .git-commit-button:disabled")', 'the active commit still owns the operation')
+    assert.match(await text('.git-repo-selected'), /alpha/, 'automatic following also waits while Git is running')
     const headBeforeCancel = gitIn('rev-parse', 'HEAD').trim()
     await clickByText('.git-commit-row button', 'Cancel')
+    await until(`${linkedSelected} && !!document.querySelector(".git-commit textarea")`, 'automatic following resumes after the write')
+    assert.equal(await ui('!!document.querySelector(".git-message-error, .git-output, .git-hooks, .git-progress")'), false, 'worktree shows none of the original repository’s feedback')
+    await clickByText('.git-repo', 'alpha')
     await until('/Cancelled/.test(document.querySelector(".git-message-error")?.innerText || "")', 'cancelled')
+    assert.match(await text('.git-output'), /slow hook started/, 'the hook output belongs to the original repository')
+    await clickByText('.git-repo', 'beta')
+    await until('document.querySelector(".git-repo-selected")?.innerText.startsWith("beta")', 'manual switch after the failure')
+    assert.equal(await ui('!!document.querySelector(".git-message-error, .git-output")'), false, 'manual switching hides another repository’s errors and output')
+    await clickByText('.git-repo', 'alpha')
+    await until('document.querySelector(".git-commit textarea")?.value === "chore: never finishes"', 'back in the original repository')
     assert.equal(gitIn('rev-parse', 'HEAD').trim(), headBeforeCancel, 'no commit was made')
     assert.equal(existsSync(join(alpha, '.git', 'index.lock')), false, 'cancelling during a hook leaves no lock behind')
     assert.equal(await ui('!!document.querySelector(".git-commit textarea")?.value'), true, 'the message is kept for another try')
     await screenshot('cancelled.png')
     results.hooksAndCancel = true
+    results.repositoryScopedFeedback = true
+    await ui('window.__setWorktree(null)')
+    reportedWorktrees.length = 0
+    service.requestRefresh(PROFILE)
 
     // 14. Fetch, Pull and Push against a real (local) remote; a new branch is only published after the person confirms.
     const bare = join(directory, 'remote.git')

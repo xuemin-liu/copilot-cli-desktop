@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { JSX } from 'react'
 import type { GitDiffView as GitDiff } from '../../main/git-types.js'
 
-const MAX_RENDERED_LINES = 4_000
+export const MAX_RENDERED_LINES = 4_000
 
 export type DiffLineKind = 'meta' | 'hunk' | 'add' | 'del' | 'context'
 

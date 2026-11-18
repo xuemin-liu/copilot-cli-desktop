@@ -1,4 +1,5 @@
 import type { GitService } from './git-service.js'
+import type { GitCommitHead } from './git-types.js'
 
 /** The few `webContents` members the Git IPC needs, so the handlers can be tested without Electron. */
 export interface GitIpcSender {
@@ -41,11 +42,14 @@ function expectedBranchArg(value: unknown): { branch: string; headOid: string } 
 }
 
 /** The current branch (null while detached) and its commit, as the person saw them when they asked for a branch change. */
-function expectedHeadArg(value: unknown): { branch: string | null; headOid: string } {
+function expectedHeadArg(value: unknown): { branch: string | null; headOid: string }
+function expectedHeadArg(value: unknown, allowUnborn: true): GitCommitHead
+function expectedHeadArg(value: unknown, allowUnborn = false): GitCommitHead {
   const entry = value as { branch?: unknown; headOid?: unknown } | null
   if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error('Invalid branch')
   const { branch, headOid } = entry
   if (branch !== null && (typeof branch !== 'string' || branch.length < 1 || branch.length > 255 || [...branch].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))) throw new Error('Invalid branch')
+  if (allowUnborn && branch !== null && headOid === null) return { branch, headOid }
   if (typeof headOid !== 'string' || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(headOid)) throw new Error('Invalid commit')
   return { branch: branch as string | null, headOid }
 }
@@ -129,10 +133,12 @@ export function registerGitIpc(deps: GitIpcDeps): void {
       return service[operation](event.sender.id, profileIdArg(profileId), repoIdArg(repoId), ids, seen)
     })
   }
-  handle('desktop:git-commit', (service, event, profileId: unknown, repoId: unknown, message: unknown, generation: unknown, approvedHooksHash: unknown) => {
+  handle('desktop:git-commit', (service, event, profileId: unknown, repoId: unknown, message: unknown, generation: unknown, approvedHooksHash: unknown, expected: unknown) => {
     if (typeof message !== 'string' || message.trim() === '' || message.length > 100_000 || message.includes('\0')) throw new Error('Invalid commit message')
     if (approvedHooksHash !== null && (typeof approvedHooksHash !== 'string' || !CONFIG_HASH.test(approvedHooksHash))) throw new Error('Invalid hooks approval')
-    return service.commit(event.sender.id, profileIdArg(profileId), repoIdArg(repoId), message, boundedInteger(generation, 'file list version', 0, 1_000_000_000), approvedHooksHash)
+    const args = [event.sender.id, profileIdArg(profileId), repoIdArg(repoId), message, boundedInteger(generation, 'file list version', 0, 1_000_000_000), approvedHooksHash] as const
+    if (expected === undefined) return service.commit(...args)
+    return service.commit(...args, null, expectedHeadArg(expected, true))
   })
   handle('desktop:git-sync', (service, event, profileId: unknown, repoId: unknown, operation: unknown, remote: unknown, expected: unknown) => {
     if (operation !== 'fetch' && operation !== 'pull' && operation !== 'push') throw new Error('Invalid operation')

@@ -141,7 +141,11 @@ test('commit validates the message, the version and the hooks approval before th
   const { call, sender, calls } = setup()
   call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'feat: a thing', 3, null)
   call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'feat: a thing', 3, 'a'.repeat(64))
-  assert.deepEqual(calls.map(entry => entry.slice(4)), [['feat: a thing', 3, null], ['feat: a thing', 3, 'a'.repeat(64)]])
+  const unborn = { branch: 'main', headOid: null }
+  call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'feat: a thing', 3, 'a'.repeat(64), unborn)
+  assert.deepEqual(calls.map(entry => entry.slice(4)), [
+    ['feat: a thing', 3, null], ['feat: a thing', 3, 'a'.repeat(64)], ['feat: a thing', 3, 'a'.repeat(64), null, unborn],
+  ])
   calls.length = 0
   for (const bad of ['', '   \n', 'a\0b', 'x'.repeat(100_001), 5, null, undefined]) {
     assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', bad, 3, null), /Invalid commit message/, JSON.stringify(bad)?.slice(0, 30))
@@ -150,6 +154,7 @@ test('commit validates the message, the version and the hooks approval before th
     assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'ok', 3, bad), /Invalid hooks approval/, JSON.stringify(bad))
   }
   assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'ok', -2, null), /Invalid file list version/)
+  assert.throws(() => call('desktop:git-commit', sender(), PROFILE, 'repo-1', 'ok', 3, 'a'.repeat(64), { branch: 'main', headOid: 'bogus' }), /Invalid commit/)
   assert.equal(calls.length, 0)
 })
 

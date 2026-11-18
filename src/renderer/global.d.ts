@@ -14,7 +14,7 @@ import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState 
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
 import type { SessionTaskSend } from '../main/session-task.js'
-import type { GitBranchView, GitDiffView, GitHeadCommitView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
+import type { GitBranchView, GitCommitHead, GitDiffView, GitHeadCommitView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
@@ -59,7 +59,7 @@ export interface CopilotDesktopBridge {
   gitStatus(profileId: string, repoId: string): Promise<GitRepoStatusView>
   gitStage(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
   gitUnstage(profileId: string, repoId: string, entryIds: string[], generation: number): Promise<GitOperationResult>
-  gitCommit(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null): Promise<GitOperationResult>
+  gitCommit(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, expected?: GitCommitHead): Promise<GitOperationResult>
   gitSync(profileId: string, repoId: string, operation: 'fetch' | 'pull' | 'push', remote: string | null, expected: { branch: string; headOid: string } | null): Promise<GitOperationResult>
   gitHeadCommit(profileId: string, repoId: string): Promise<GitHeadCommitView>
   gitAmend(profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, expected: { branch: string | null; headOid: string }): Promise<GitOperationResult>

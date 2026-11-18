@@ -17,7 +17,7 @@ import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
-  GitBranchView, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
+  GitBranchView, GitCommitHead, GitConfirmRequest, GitDiffView, GitHeadCommitView, GitEntryView, GitLogEntry, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoState, GitRepoStatusView, GitRepoSummary, GitResolverView, GitWorktreeView,
 } from './git-types.js'
 import { ALLOWED_PROTOCOLS, checkFetchRefspecs, checkRemoteUrl, describeSyncFailure } from './git-sync.js'
 import type { SyncOperation } from './git-sync.js'
@@ -1417,7 +1417,7 @@ export class GitService {
     return { oid, isMerge: parentIds.length > 1, message: full, publishedTo: parsePublishedRefs(published.stdout.toString('utf8')) }
   }
 
-  async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, amend: ExpectedHead | null = null): Promise<GitOperationResult> {
+  async commit(subscriberId: number, profileId: string, repoId: string, message: string, generation: number, approvedHooksHash: string | null, amend: ExpectedHead | null = null, approvalHead: GitCommitHead | null = null): Promise<GitOperationResult> {
     if (typeof message !== 'string' || message.trim() === '') throw new Error('Write a commit message first')
     if (message.length > 100_000 || message.includes('\0')) throw new Error('That commit message is not valid')
     const project = this.projectFor(subscriberId, profileId)
@@ -1440,6 +1440,8 @@ export class GitService {
         this.outcome({ ok: false, reason, message: text, status: repo.statusView, ...extra })
       const status = repo.status
       if (!status || status.entries.some(entry => entry.kind === 'unmerged')) return refused('conflicts', 'Resolve the conflicts and stage the result before committing.')
+      const approvalStale = (): GitStaleError => new GitStaleError('The branch or commit changed after Git asked for hook approval. Review the staged files and commit again.')
+      if (approvalHead && (approvalHead.branch !== status.branch.head || approvalHead.headOid !== status.branch.oid)) throw approvalStale()
 
       // Amending rewrites the last commit, so it must be the one the person was looking at, it must be local, and it must be an
       // ordinary commit. Each of these is checked again before every attempt below.
@@ -1519,12 +1521,20 @@ export class GitService {
           // still be the one that was reviewed: the same staged contents, the same trusted settings and pointers, and hooks
           // that are still approved. Anything else ends the commit, or asks again, instead of running what changed meanwhile.
           await this.requireGate(project, repo, runtime, signal)
-          if (amend) {
-            // `commit --amend` rewrites whatever HEAD is when it runs, so it is checked right before each attempt.
+          const expected = amend ?? approvalHead
+          if (expected) {
+            // An amend or a confirmed hook retry belongs to the HEAD that the person reviewed.
             const headRef = await run(headRefArgs())
-            const head = headRef.exitCode === 0 ? headRef.stdout.toString('utf8').trim().replace(/^refs\/heads\//, '') : null
-            const oid = await run(['rev-parse', 'HEAD'])
-            if (head !== amend.branch || oid.stdout.toString('utf8').trim() !== amend.headOid) throw new GitStaleError('The last commit changed while the amend was waiting. Nothing was amended. Check it, then try again.')
+            const sameBranch = expected.branch === null ? headRef.exitCode === 1 && !headRef.cancelled && !headRef.timedOut
+              : gitSucceeded(headRef) && headRef.stdout.toString('utf8').trim() === `refs/heads/${expected.branch}`
+            const oid = await run(expected.headOid === null ? verifyRefArgs('HEAD') : ['rev-parse', 'HEAD'])
+            const sameCommit = expected.headOid === null ? oid.exitCode === 1 && !oid.cancelled && !oid.timedOut
+              : gitSucceeded(oid) && oid.stdout.toString('utf8').trim() === expected.headOid
+            if (!sameBranch || !sameCommit) throw amend
+              ? new GitStaleError('The last commit changed while the amend was waiting. Nothing was amended. Check it, then try again.')
+              : approvalStale()
+          }
+          if (amend) {
             const names = await publishedRefs()
             if (names === null) throw new WriteRefused(publicationUnknown())
             if (names.length > 0) throw new WriteRefused(publishedRefusal(names))
