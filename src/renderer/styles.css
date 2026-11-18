@@ -1540,6 +1540,11 @@ button:disabled {
 .git-log { list-style: none; margin: 0; padding: 6px 10px; display: flex; flex-direction: column; gap: 8px; }
 .git-log li { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px; border-bottom: 1px solid #1b2230; min-width: 0; }
 .git-log-subject { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.git-log-subject, .git-commit-file { min-width: 0; text-align: left; color: #a9c9ff; background: transparent; border: 0; padding: 3px 0; }
+button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underline; }
+.git-commit-details { min-width: 0; padding: 6px; background: #10151e; border-left: 2px solid #3a4a66; overflow-wrap: anywhere; }
+.git-commit-details p { margin: 4px 0; }
+.git-commit-file, .git-commit-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .git-log-refs { color: #91c8bc; font-size: 11px; overflow-wrap: anywhere; }
 .git-log-meta { color: #929baa; font-size: 11px; }
 .git-history > button { margin: 0 10px 10px; align-self: flex-start; }

@@ -14,7 +14,7 @@ import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState 
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
 import type { SessionTaskSend } from '../main/session-task.js'
-import type { GitBranchView, GitCommitHead, GitDiffView, GitHeadCommitView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
+import type { GitBranchView, GitCommitDetails, GitCommitHead, GitDiffView, GitHeadCommitView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
 export interface TabOutputPayload {
@@ -71,6 +71,8 @@ export interface CopilotDesktopBridge {
   gitCancel(profileId: string, repoId: string): Promise<void>
   onGitProgress(listener: (payload: { profileId: string; event: GitProgressEvent }) => void): () => void
   gitDiff(profileId: string, repoId: string, entryId: string, staged: boolean, wholeFile?: boolean): Promise<GitDiffView>
+  gitCommitDetails(profileId: string, repoId: string, oid: string): Promise<GitCommitDetails>
+  gitCommitDiff(profileId: string, repoId: string, oid: string, path: string): Promise<{ text: string; truncated: boolean }>
   gitLogPage(profileId: string, repoId: string, revision: string, limit: number, skip: number, cursor: string | null): Promise<GitLogPage>
   gitLog(profileId: string, repoId: string, limit: number, skip: number): Promise<GitLogEntry[]>
   onGitToggle(listener: () => void): () => void

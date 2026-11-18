@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { JSX } from 'react'
 import type { GitLogEntry } from '../../main/git-types.js'
+import { CommitDetails } from './GitCommitDetails.js'
 import { errorMessage } from '../errors.js'
 
 const PAGE_SIZE = 50
 
 /** The parent remounts History when the repository or its observed tip changes. */
 export function GitHistory({ profileId, repoId, headOid }: { profileId: string; repoId: string; headOid: string | null }): JSX.Element {
+  const [selected, setSelected] = useState<string | null>(null)
   const [entries, setEntries] = useState<GitLogEntry[]>([])
   const [cursor, setCursor] = useState<string | null>(null)
   const [request, setRequest] = useState<{ skip: number; cursor: string | null }>({ skip: 0, cursor: null })
@@ -22,6 +24,7 @@ export function GitHistory({ profileId, repoId, headOid }: { profileId: string; 
         if (stale) return
         if (page.headOid !== headOid) throw new Error('History changed. Reload this page.')
         setEntries(current => page.restart ? page.entries : [...current, ...page.entries])
+        if (page.restart) setSelected(null)
         setCursor(page.cursor)
         setDone(page.entries.length < PAGE_SIZE)
       })
@@ -42,9 +45,11 @@ export function GitHistory({ profileId, repoId, headOid }: { profileId: string; 
       {entries.length > 0 && <ol className="git-log">
         {entries.map(entry => (
           <li key={entry.hash}>
-            <span className="git-log-subject" title={entry.subject}>{entry.subject}</span>
+            <button type="button" className="git-log-subject" aria-expanded={selected === entry.hash} title={entry.subject}
+              onClick={() => setSelected(selected === entry.hash ? null : entry.hash)}>{entry.subject || '(no subject)'}</button>
             {entry.refs.length > 0 && <span className="git-log-refs">{entry.refs.join(', ')}</span>}
             <span className="git-log-meta"><code>{entry.hash.slice(0, 7)}</code> · {entry.author} · {new Date(entry.date).toLocaleDateString()}</span>
+            {selected === entry.hash && <CommitDetails profileId={profileId} repoId={repoId} entry={entry} />}
           </li>
         ))}
       </ol>}
