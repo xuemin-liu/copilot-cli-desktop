@@ -173,10 +173,15 @@ test('the helper sends the file and the uncommitted changes, and prints the desk
     const ended = await run('end')
     assert.equal(ended.code, 1)
     assert.match(ended.stdout, /does not host an open meeting/)
+    const joined = await run('join')
+    assert.equal(joined.code, 0, joined.stderr)
+    assert.deepEqual(calls.at(-1), {
+      tabId: 'tab-host', command: 'join', request: { topic: '', text: '', changes: null, sessionId: env.COPILOT_AGENT_SESSION_ID },
+    })
     const usage = await run('round')
     assert.equal(usage.code, 1)
     assert.match(usage.stderr, /Usage: meeting\.(ps1|sh) round -File/)
-    assert.equal(calls.length, 2, 'a usage error sends nothing')
+    assert.equal(calls.length, 3, 'a usage error sends nothing')
   } finally {
     await server.close()
     await rm(directory, { recursive: true, force: true })

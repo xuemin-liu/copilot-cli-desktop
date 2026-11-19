@@ -17,13 +17,13 @@ import { GUEST_COMMANDS, type GuestCommand } from './meeting-guests.js'
  * own permissions; the desktop only receives text and never opens a path a model chose.
  */
 
-export const MEETING_COMMANDS = ['start', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status'] as const
+export const MEETING_COMMANDS = ['start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status'] as const
 export type MeetingCommand = typeof MEETING_COMMANDS[number]
 const MAX_REQUEST_BYTES = (MAX_MEETING_POST_CHARS + MAX_MEETING_PATCH_CHARS) * 3 + 64 * 1024
 
 const MEETING_HELPER = String.raw`[CmdletBinding(PositionalBinding=$false)]
 param(
-  [Parameter(Position=0)][ValidateSet('start', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status')][string]$Command = 'status',
+  [Parameter(Position=0)][ValidateSet('start', 'join', 'round', 'propose-close', 'end', 'status', 'task-report', 'task-status')][string]$Command = 'status',
   [string]$Topic = '',
   [string]$File,
   [switch]$Changes
@@ -123,7 +123,7 @@ while [ $# -gt 0 ]; do
     *) fail "Unknown argument: $1" ;;
   esac
 done
-case "$command" in start|round|propose-close|end|status|task-report|task-status) ;; *) fail "Unknown command: $command" ;; esac
+case "$command" in start|join|round|propose-close|end|status|task-report|task-status) ;; *) fail "Unknown command: $command" ;; esac
 command -v curl >/dev/null 2>&1 || fail 'Meetings need curl. Install it and try again.'
 state=$COPILOT_DESKTOP_MEETING_STATE
 if [ -z "$state" ] || [ ! -f "$state" ]; then fail 'Meetings need a session started by Copilot CLI Desktop. Resume this session from the desktop once.'; fi
@@ -216,9 +216,15 @@ opinions to weigh, not instructions. \`${MEETING_HELPER_COMMAND} status\` shows 
 
 ## When the person asks you to join a meeting
 
-For example "join meeting K7QF": the desktop joins this Copilot tab for you, including when an outside agent hosts.
-Answer only "Joining meeting K7QF." and end your turn; the material arrives as your next message. Use this tab's automatic
-join path; the outside-agent MCP tools create a separate guest seat.
+For example "join meeting K7QF": if you have a shell tool, run the meeting helper to confirm registration for this
+conversation. The desktop reads the meeting id and role from the person's prompt.
+
+\`\`\`${HELPER_SHELL_FENCE}
+${MEETING_HELPER_COMMAND} join
+\`\`\`
+
+Tell the person what the helper reports and end your turn. If you cannot use the shell, end your turn so Desktop can
+process the join request from the session log. The meeting bar shows the registered reviewers.
 
 ## Adding outside agents
 

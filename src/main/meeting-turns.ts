@@ -157,7 +157,12 @@ export class MeetingTurnReader {
 
   /** Whether the prompt being answered now came from the person. */
   get answeringPerson(): boolean {
-    return this.current !== null && !this.current.desktop
+    return this.activePersonPrompt !== null
+  }
+
+  /** The live user prompt, for commands authorized by what the person asked. */
+  get activePersonPrompt(): string | null {
+    return this.current && !this.current.desktop ? this.current.content : null
   }
 
   /**

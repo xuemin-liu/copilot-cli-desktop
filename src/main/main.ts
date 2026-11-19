@@ -2591,6 +2591,7 @@ const MEETING_BEHIND_TURN_NOTICE_MS = 5 * 60_000
 const LOST_DELIVERY_REASON = 'A message to it may not have arrived. Choose Send again or Discard in Handoffs.'
 /** A recalled prompt is left alone this long, in case the person is still looking through their history. */
 const RECALLED_PROMPT_QUIET_MS = 5_000
+const MEETING_RETAINED_SESSIONS = 'Close the other running conversations in the Copilot CLI sidebar to receive meeting messages in this conversation.'
 
 /**
  * Why a session cannot take a meeting's message now, in words for the person. Every refusal on the way to typing ends up as
@@ -2609,7 +2610,7 @@ function meetingBlockReason(tabId: string): string | null {
   if (draft.typed) return 'Its prompt box may hold text. Send it, or clear it with Ctrl+C, and the message goes in.'
   if (session.activity !== 'idle' && session.activity !== null) return 'It is still working on another turn.'
   const binding = session.bindingDiagnostic
-  if (binding.kind === 'bound' && !binding.deliveryReady) return 'Its CLI holds more than one session, so the desktop cannot tell which would receive the message. Restart this session to continue.'
+  if (binding.kind === 'bound' && !binding.deliveryReady) return MEETING_RETAINED_SESSIONS
   if (session.sessionBindingPending) return 'Its session is changing.'
   if (workflowDestinationBlocked(tab.lastSessionId)) return tab.lastSessionId ? 'An earlier message to it may not have arrived. Choose Send again or Discard in Handoffs.' : 'Its session has not started yet. Send it a first prompt.'
   if (!session.bracketedPaste) return 'Its prompt is not ready for a message yet.'
@@ -3015,18 +3016,19 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
   const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
   if (!tab || tab.remote) return { ok: false, message: 'This session is not open in the desktop.' }
   const committedSessionId = tab.lastSessionId
+  const canRebind = command === 'start' || command === 'join'
   try {
-    if (request.sessionId !== undefined && command !== 'start' && request.sessionId !== tab.lastSessionId) {
+    if (request.sessionId !== undefined && !canRebind && request.sessionId !== tab.lastSessionId) {
       return { ok: command === 'status', message: 'This CLI session is not bound to an open meeting in this tab.' }
     }
     const callerSession = managedTabs.get(tabId)?.session
-    if (command === 'start' || request.sessionId !== undefined) await callerSession?.refreshSessionRecords(request.sessionId)
+    if (canRebind || request.sessionId !== undefined) await callerSession?.refreshSessionRecords(request.sessionId)
     // Session events can change the committed binding while a refresh awaits I/O. A control must never publish an old candidate.
     const currentTab = tabsState.tabs.find(candidate => candidate.id === tabId)
     if (!currentTab || currentTab.remote || managedTabs.get(tabId)?.session !== callerSession) {
       return { ok: false, message: 'This session is not open in the desktop.' }
     }
-    if (command !== 'start' && (currentTab.lastSessionId !== committedSessionId ||
+    if (!canRebind && (currentTab.lastSessionId !== committedSessionId ||
       (request.sessionId !== undefined && request.sessionId !== currentTab.lastSessionId))) {
       return { ok: command === 'status', message: 'This CLI session is not bound to an open meeting in this tab.' }
     }
@@ -3039,7 +3041,7 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
         void writeAppLog(`Meeting request binding rejected: ${diagnostic}`).catch(() => {})
         return { ok: false, message: `The meeting request could not be bound to this tab's CLI session. Ask again after the session has finished switching.\nDiagnostics: ${diagnostic}` }
       }
-      if (command !== 'start') session.commitSessionBinding()
+      if (!canRebind) session.commitSessionBinding()
     }
     switch (command) {
       case 'task-status':
@@ -3055,6 +3057,27 @@ async function runMeetingCommand(tabId: string, command: MeetingCommand, request
           broadcastState()
           return { ok: Boolean(task), message: task ? JSON.stringify({ version:1,taskId: task.id, assignmentId: task.assignmentId, scopeRevision: task.scopeRevision, outcome: task.outcome }) : 'No active task is tracked.' }
         } catch { return { ok: false, message: 'Invalid, stale, or foreign task report.' } }
+      }
+      case 'join': {
+        const session = callerSession
+        if (!session || currentTab.cli || session.status !== 'running') return { ok: false, message: 'This Copilot session is not running. Resume it from the desktop.' }
+        if (request.sessionId === undefined && !session.sessionBindingReady) {
+          return { ok: false, message: 'The helper could not identify this Copilot conversation. Close the other running conversations in the Copilot CLI sidebar, then ask to join again.' }
+        }
+        const reader = meetingReader(tabId)
+        const prompt = reader.activePersonPrompt
+        const join = prompt === null ? null : joinRequest(prompt)
+        if (!join) return { ok: false, message: 'Ask to join by meeting ID in a new message in this conversation.' }
+        const target = meetingHub.views().find(meeting => meeting.id === join.id && meeting.stage !== 'closed')
+        if (!target) return { ok: false, message: `There is no open meeting ${join.id}.` }
+        if (target.hostTabId === tabId) return { ok: false, message: `This tab hosts meeting ${join.id}.` }
+        // Reject a full meeting before publishing a switch that would remove the preceding conversation's seat.
+        if (target.participants.length >= MAX_MEETING_PARTICIPANTS && !target.participants.some(participant => participant.tabId === tabId)) {
+          return { ok: false, message: `Meeting ${join.id} already has ${MAX_MEETING_PARTICIPANTS} participants.` }
+        }
+        session.commitSessionBinding()
+        joinMeetingFromPrompt(tabId, join, reader.usage)
+        return { ok: true, message: `Joined meeting ${join.id} as a reviewer.${session.sessionBindingReady ? '' : ` ${MEETING_RETAINED_SESSIONS}`}` }
       }
       case 'start': {
         const session = callerSession
@@ -3100,6 +3123,11 @@ function meetingStatus(partyId: string): string {
   return `Meeting ${view.id}: you are the ${current!.role}; round ${view.round} of at most ${view.maxRounds}, ${view.stage}${view.vote ? ' (vote)' : ''}; ${view.participants.length} reviewer(s). ${meetingWaitingOn(view, partyId)}`
 }
 
+function joinMeetingFromPrompt(tabId: string, request: NonNullable<ReturnType<typeof joinRequest>>, usage: MeetingTurnReader['usage']): void {
+  meetingHub.join(meetingParty(tabId), request.id, { role: request.role, usage })
+  linkTaskContext(tabId, { meetingId: request.id })
+}
+
 /**
  * A record of a session's event log. Live ones may be a prompt the person typed asking to join a meeting, and usage totals
  * add to the session's meeting cost. History supplies usage and diagnostic metadata, never authorization or joins.
@@ -3136,7 +3164,7 @@ function onMeetingRecord(tabId: string, line: string, live: boolean): void {
   if (!request) return
   const { id } = request
   if (!meetingHub.isOpen(id)) { showNotification('Copilot CLI Desktop', `There is no open meeting ${id}.`); return }
-  try { meetingHub.join(meetingParty(tabId), id, { role: request.role, usage: reader.usage });linkTaskContext(tabId,{meetingId:id}) }
+  try { joinMeetingFromPrompt(tabId, request, reader.usage) }
   catch (error) {
     if (!(error instanceof MeetingError)) throw error
     showNotification('Copilot CLI Desktop', error.message)
