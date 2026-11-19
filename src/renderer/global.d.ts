@@ -14,6 +14,7 @@ import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState 
 import type { DesktopPreferences } from '../main/desktop-config.js'
 import type { CopilotAutoUpdateState, CopilotUpdateChannel } from '../main/copilot-auto-update.js'
 import type { SessionTaskSend } from '../main/session-task.js'
+import type { SessionNavigationDirection } from '../main/session-navigation.js'
 import type { GitBranchView, GitCommitDetails, GitCommitHead, GitDiffView, GitHeadCommitView, GitLogEntry, GitLogPage, GitOperationResult, GitProgressEvent, GitProjectView, GitRepoStatusView, GitWorktreeView } from '../main/git-types.js'
 import type { MigrationChoices, MigrationInventory, MigrationPreview, MigrationProgress, MigrationProject, MigrationResult, MigrationSelection, MigrationStatus } from '../main/migration-types.js'
 
@@ -102,6 +103,7 @@ export interface CopilotDesktopBridge {
   fanOut(profileId: string, label: string, count: number): Promise<FanOutResult>
   connectRemoteSession(sessionId: string): Promise<DesktopState>
   activateTab(tabId: string): Promise<DesktopState>
+  navigateSession(direction: SessionNavigationDirection): Promise<DesktopState>
   popOutTab(tabId: string): Promise<DesktopState>
   dockTab(tabId: string): Promise<DesktopState>
   /** Turn desktop control on or off for a session; only the person can, from this window. */

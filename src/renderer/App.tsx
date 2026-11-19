@@ -4,6 +4,7 @@ import type { FormEvent, JSX } from 'react'
 import type { DesktopState, FanOutResult, SessionHistoryEntry, SessionWorktreeInfo } from '../main/types.js'
 import { DiagnosticsView } from './components/DiagnosticsView.js'
 import { Sidebar } from './components/Sidebar.js'
+import { SessionArrowIcon } from './components/Icons.js'
 import { SessionWorkspace } from './components/SessionWorkspace.js'
 import { SessionWindow } from './components/SessionWindow.js'
 import { SessionHistoryDialog } from './components/SessionHistoryDialog.js'
@@ -379,6 +380,16 @@ export function App(): JSX.Element {
         activeTabId={state.activeTabId}
         canOpenTab={canOpenTab}
         collapsed={sidebarCollapsed}
+        sessionNavigation={<nav className="session-navigation" aria-label="Session navigation">
+          <button type="button" className="icon-button" aria-label="Back" title="Previous session"
+            disabled={!state.sessionNavigation?.back} onClick={() => handleOperation(window.copilotDesktop.navigateSession('back'))}>
+            <SessionArrowIcon direction="back" />
+          </button>
+          <button type="button" className="icon-button" aria-label="Forward" title="Next session"
+            disabled={!state.sessionNavigation?.forward} onClick={() => handleOperation(window.copilotDesktop.navigateSession('forward'))}>
+            <SessionArrowIcon direction="forward" />
+          </button>
+        </nav>}
         onProjectsOpenChange={setSidebarProjectsOpen}
         onToggleCollapsed={() => {
           setSidebarCollapsed((collapsed) => {

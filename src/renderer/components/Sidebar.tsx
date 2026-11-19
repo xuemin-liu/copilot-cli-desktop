@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { JSX, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react'
+import type { JSX, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from 'react'
 import type { DesktopSessionTab, SessionLifecycleStatus, WorkspaceProfile } from '../../main/types.js'
 import type { MeetingView } from '../../main/meeting.js'
 import { PERMISSION_PRESET_INFO } from '../../main/permission-presets.js'
@@ -104,6 +104,7 @@ export interface SidebarProps {
   activeTabId: string | null
   canOpenTab: boolean
   collapsed: boolean
+  sessionNavigation?: ReactNode
   onProjectsOpenChange?: (open: boolean) => void
   onToggleCollapsed: () => void
   onSelectWorkspace: () => void
@@ -137,6 +138,7 @@ export function Sidebar({
   activeTabId,
   canOpenTab,
   collapsed,
+  sessionNavigation,
   onProjectsOpenChange,
   onToggleCollapsed,
   onSelectWorkspace,
@@ -407,6 +409,7 @@ export function Sidebar({
         >
           {collapsed ? '›' : '‹'}
         </button>
+        {sessionNavigation}
       </div>
 
       <div className="sidebar-section-heading">

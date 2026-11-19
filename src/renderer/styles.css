@@ -59,6 +59,7 @@ body {
 .sidebar-collapse-button {
   width: 26px;
   height: 26px;
+  flex: none;
   margin-left: auto;
   padding: 0;
   border: 0;
@@ -167,6 +168,23 @@ button:disabled {
   color: white;
 }
 
+.session-navigation {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.session-navigation .icon-button {
+  width: 22px;
+  height: 24px;
+}
+
+.session-navigation .icon-button:disabled {
+  background: transparent;
+  color: #9ca4b3;
+  cursor: default;
+}
+
 .workspace-list {
   flex: 1;
   min-height: 0;
@@ -196,7 +214,11 @@ button:disabled {
 }
 
 .sidebar-collapsed .sidebar-brand {
+  height: 56px;
+  flex: none;
+  flex-direction: column;
   justify-content: center;
+  gap: 2px;
   padding-inline: 0;
 }
 
@@ -997,6 +1019,7 @@ button:disabled {
   .app-shell { grid-template-columns: 224px minmax(0, 1fr); }
   .app-shell.app-shell-sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
   .sidebar { padding-inline: 8px; }
+  .sidebar-brand { gap: 4px; padding-inline: 3px; }
   .sidebar-session-status { display: none; }
 }
 

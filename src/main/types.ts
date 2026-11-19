@@ -200,6 +200,7 @@ export interface DesktopState {
   activeProfileId: string | null
   tabs: DesktopSessionTab[]
   activeTabId: string | null
+  sessionNavigation?: { back: boolean; forward: boolean }
   maxSessionTabs: number
   recentLogs: string[]
   error: string | null
