@@ -579,6 +579,83 @@ test('meeting start safely follows A to B to A within the same tab and PTY, incl
   assert.equal((await harness.meetingCommand(tab.id, 'start', '../foreign')).ok, false)
 }))
 
+test('a live join after /resume registers the resumed conversation and delivers once it is alone in the same PTY', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory)
+  profile.defaultResumeMode = 'new'
+  const line = (type: string, data: object) => JSON.stringify({ type, data }) + '\n'
+  const sessionPath = (id: string) => join(directory, 'session-state', id, 'events.jsonl')
+  const lockPath = (id: string) => join(dirname(sessionPath(id)), 'inuse.11.lock')
+  async function writeSession(id: string, startTime: string, events = ''): Promise<void> {
+    await mkdir(dirname(sessionPath(id)), { recursive: true })
+    await writeFile(sessionPath(id), line('session.start', { sessionId: id, startTime }) + events)
+  }
+
+  const host = await harness.createMain()
+  const hostId = host.activeTabId!
+  const hostLog = host.tabs.find(tab => tab.id === hostId)!.lastSessionId!
+  await writeSession(hostLog, new Date().toISOString(), line('user.message', { content: 'Start a meeting about this plan' }))
+  assert.equal((await harness.meetingCommand(hostId, 'start', undefined, 'Review this proposal from the host')).ok, true)
+  const meetingId = (await harness.request('desktop:get-state')).meetings![0]!.id
+  const prompt = `join meeting ${meetingId} as correctness reviewer`
+
+  await writeSession(FORK, '2026-10-29T00:00:00Z', line('user.message', { content: prompt }))
+  const reviewer = await harness.request('desktop:create-tab', 'new', profile.id)
+  const tabId = reviewer.activeTabId!
+  const original = reviewer.tabs.find(tab => tab.id === tabId)!.lastSessionId!
+  const terminal = harness.spawns[1]!
+  await writeSession(original, new Date().toISOString())
+  await writeFile(lockPath(original), '')
+  harness.configureBinding(tabId, 10, [10, 11])
+  await harness.refreshRecords(tabId)
+  await writeFile(lockPath(FORK), '')
+  await appendFile(sessionPath(FORK), line('session.resume', { resumeTime: new Date().toISOString() }))
+
+  const { port, token } = JSON.parse(await readFile(terminal.env.COPILOT_DESKTOP_MEETING_STATE!, 'utf8'))
+  async function joinResumedConversation(): Promise<MeetingResponse> {
+    const response = await fetch(`http://127.0.0.1:${port}/join`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: FORK }),
+    })
+    assert.equal(response.status, 200)
+    return response.json() as Promise<MeetingResponse>
+  }
+
+  assert.equal((await joinResumedConversation()).ok, false, 'an old join request cannot register a reviewer')
+  await appendFile(sessionPath(FORK), line('user.message', { content: `[meeting ${meetingId} · round 1 · from the desktop]\n${prompt}` }))
+  assert.equal((await joinResumedConversation()).ok, false, 'a Desktop message cannot authorize a join')
+  const before = await harness.request('desktop:get-state')
+  assert.equal(before.tabs.find(tab => tab.id === tabId)?.lastSessionId, original)
+  assert.equal(before.meetings![0]!.participants.length, 0)
+
+  await appendFile(sessionPath(FORK), line('user.message', { content: prompt, interactionId: 'join' }))
+  const joined = await joinResumedConversation()
+  assert.equal(joined.ok, true, joined.message)
+  assert.match(joined.message, /Close the other running conversations/)
+  const joinedState = await harness.request('desktop:get-state')
+  assert.equal(joinedState.tabs.find(tab => tab.id === tabId)?.lastSessionId, FORK)
+  assert.deepEqual(joinedState.meetings![0]!.participants.map(({ tabId, role }) => ({ tabId, role })), [{ tabId, role: 'correctness reviewer' }])
+  assert.equal((await joinResumedConversation()).ok, true, 'a repeat confirms the same seat')
+  assert.equal((await harness.request('desktop:get-state')).meetings![0]!.participants.length, 1)
+
+  await appendFile(sessionPath(FORK), line('assistant.turn_start', { turnId: 'finish' })
+    + line('assistant.message', { interactionId: 'join', content: 'Joined.', phase: 'final_answer', toolRequests: [] })
+    + line('assistant.turn_end', { turnId: 'finish' }))
+  await harness.refreshRecords(tabId)
+  terminal.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  await pause(1600)
+  await harness.pumpMeetingDelivery()
+  assert.deepEqual(terminal.written, [], 'the earlier conversation could still receive terminal input')
+
+  await rm(lockPath(original))
+  await harness.refreshRecords(tabId)
+  await waitFor(async () => {
+    await harness.pumpMeetingDelivery()
+    return terminal.written
+  }, written => written.some(text => text.includes('Review this proposal from the host')), 'meeting material reaches the resumed conversation')
+  assert.equal(harness.spawns.length, 2, 'the host and reviewer still use their original PTY processes')
+  assert.equal(terminal.stopped, false)
+}))
+
 test('an overlapping stale control cannot close the meeting accepted by another retained session', async () => fixture(async (harness, directory) => {
   const { profile } = configure(harness, directory)
   profile.defaultResumeMode = 'new'
