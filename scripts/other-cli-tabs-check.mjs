@@ -2,12 +2,13 @@
 // Codex CLIs installed on this computer, each with an empty home of its own (CLAUDE_CONFIG_DIR, CODEX_HOME) so nothing of
 // the person's sign-in, settings or session lists is read or changed. Without a sign-in neither CLI can take a prompt, so
 // "the CLI stored the session" is staged by writing the file each one would write; what the desktop then starts is read
-// from the real processes' command lines. Skips, saying so, when either CLI is not installed.
+// from the real processes' command lines. Antigravity uses Node's REPL as a local agy executable fixture.
+// Skips when either Claude Code or Codex CLI is not installed.
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const artifacts = resolve('test-results/other-cli-tabs')
@@ -19,18 +20,26 @@ if (!process.versions.electron) {
   const base = process.env.CHECK_TMP ?? tmpdir()
   await mkdir(base, { recursive: true })
   const directory = await mkdtemp(join(base, 'other-cli-tabs-'))
-  const env = { ...process.env, CLI_DIR: directory, CLI_ARTIFACTS: artifacts }
-  delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
-  const timer = setTimeout(() => child.kill(), 240_000)
+  let timer
   try {
+    const bin = join(directory, 'bin')
+    await mkdir(bin)
+    const agy = join(bin, process.platform === 'win32' ? 'agy.exe' : 'agy')
+    const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH'
+    const env = { ...process.env, CLI_DIR: directory, CLI_ARTIFACTS: artifacts, [pathKey]: [bin, process.env[pathKey]].filter(Boolean).join(delimiter) }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.SHELL // Keep the fixture first when Electron constructs its POSIX PATH.
+    if (process.platform === 'win32') await copyFile(process.execPath, agy)
+    else await symlink(process.execPath, agy)
+    const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
+    timer = setTimeout(() => child.kill(), 240_000)
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Other CLI tabs check failed')
     const result = JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8'))
     assert.equal(result.passed, true)
     console.log(result.skipped
       ? `Skipped: ${result.skipped}`
-      : 'A new tab can run Claude Code or Codex CLI: the dialog offers the installed ones, each starts in the project folder as its own program, is saved with its CLI and session id, and restarts by resuming that session.')
+      : 'Claude Code, Codex CLI and the Antigravity fixture launch, save and restart in their own session tabs.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -66,7 +75,9 @@ if (!process.versions.electron) {
     git('commit', '-q', '-m', 'init')
 
     const { resolveAgentCli } = await import('../dist/src/main/agent-cli.js')
-    const installed = { claude: await resolveAgentCli('claude'), codex: await resolveAgentCli('codex') }
+    const installed = { claude: await resolveAgentCli('claude'), codex: await resolveAgentCli('codex'), antigravity: await resolveAgentCli('antigravity') }
+    assert.equal(installed.antigravity.error, null)
+    assert.equal(installed.antigravity.command, join(directory, 'bin', process.platform === 'win32' ? 'agy.exe' : 'agy'))
     const missing = Object.values(installed).filter(found => found.version === null).map(found => found.cli)
     if (missing.length > 0) {
       await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, skipped: `not installed: ${missing.join(', ')}` }))
@@ -74,7 +85,7 @@ if (!process.versions.electron) {
       return
     }
 
-    const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
+    const { createWorkspaceProfile, DEFAULT_DESKTOP_CONFIG, readDesktopConfig, writeDesktopConfig } = await import('../dist/src/main/desktop-config.js')
     const project = createWorkspaceProfile(repo)
     project.defaultResumeMode = 'new'
     await writeDesktopConfig(join(userData, 'desktop.json'), { ...DEFAULT_DESKTOP_CONFIG, profiles: [project], activeProfileId: project.id,
@@ -143,17 +154,17 @@ if (!process.versions.electron) {
       throw new Error(`Timed out: ${label}\n${JSON.stringify(await savedTabs(), null, 1)}`)
     }
     const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-    const results = { versions: { claude: installed.claude.version, codex: installed.codex.version } }
+    const results = { versions: { claude: installed.claude.version, codex: installed.codex.version, antigravityFixture: installed.antigravity.version } }
 
     await until('!!document.querySelector(".session-git-toggle") && !!document.querySelector(".xterm")', 'first session', 60_000)
 
-    // The dialog offers the three CLIs, with the versions found. Copilot stays the default.
+    // The dialog offers the installed CLI versions. Copilot stays the default.
     await click(`[aria-label="New session in ${project.name}"]`)
     await until('!!document.querySelector(".input-dialog select[name=\\"cli\\"]")', 'dialog with the CLI list')
     await until(`[...document.querySelectorAll('select[name="cli"] option')].some(option => /^Claude Code \\d/.test(option.innerText))`, 'the installed CLIs are listed with versions', 60_000)
     const offered = await ui(`({ value: document.querySelector('select[name="cli"]').value, options: [...document.querySelectorAll('select[name="cli"] option')].map(option => option.innerText.trim()) })`)
     assert.equal(offered.value, 'copilot')
-    assert.deepEqual(offered.options, ['Copilot CLI', `Claude Code ${installed.claude.version}`, `Codex CLI ${installed.codex.version}`])
+    assert.deepEqual(offered.options, ['Copilot CLI', `Claude Code ${installed.claude.version}`, `Codex CLI ${installed.codex.version}`, `Antigravity CLI ${installed.antigravity.version}`])
 
     // Claude Code: the dialog says what the tab is, and a new worktree is not offered for it.
     await chooseCli('claude')
@@ -212,11 +223,24 @@ if (!process.versions.electron) {
     codex = await tabWhere(tab => tab.cli === 'codex' && tab.lastSessionId === codexId, 'the Codex tab takes the id of the session Codex stored')
     results.codexSessionFound = codexId
 
-    // Both are saved with their CLI and session id, so a restart of the app lists them again.
-    const saved = await untilSaved(list => list.some(tab => tab.cli === 'codex' && tab.lastSessionId === codexId) && list.some(tab => tab.cli === 'claude'), 'both tabs are saved')
-    assert.deepEqual(saved.map(tab => [tab.cli ?? 'copilot', tab.title]), [['copilot', 'project'], ['claude', 'Claude Code'], ['codex', 'Codex work']])
+    await click(`[aria-label="New session in ${project.name}"]`)
+    await until('!!document.querySelector(".input-dialog select[name=\\"cli\\"]")', 'dialog for Antigravity')
+    await chooseCli('antigravity')
+    await until(`document.querySelector('.input-dialog .fork-hint code')?.innerText === '/resume'`, 'resume guidance for Antigravity')
+    press('Return')
+    let antigravity = await tabWhere(tab => tab.cli === 'antigravity' && tab.status === 'running' && tab.processId && tab.sessionCwd, 'the Antigravity tab runs')
+    assert.equal(antigravity.cliVersion, installed.antigravity.version)
+    assert.equal(antigravity.sessionCwd.toLowerCase(), repo.toLowerCase())
+    assert.equal(antigravity.lastSessionId, null)
+    line = commandLine(antigravity.processId)
+    assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without CLI arguments')
+    results.antigravityStarted = line
+
+    const saved = await untilSaved(list => list.some(tab => tab.cli === 'codex' && tab.lastSessionId === codexId) && list.some(tab => tab.cli === 'antigravity'), 'the CLI tabs are saved')
+    assert.deepEqual(saved.map(tab => [tab.cli ?? 'copilot', tab.title]), [['copilot', 'project'], ['claude', 'Claude Code'], ['codex', 'Codex work'], ['antigravity', 'Antigravity CLI']])
     assert.equal(saved.find(tab => tab.cli === 'claude').lastSessionId, claude.lastSessionId)
     assert.equal(saved.find(tab => tab.cli === 'claude').sessionPermissionPreset, undefined)
+    assert.equal((await readDesktopConfig(join(userData, 'desktop.json'))).profiles[0].tabs.find(tab => tab.cli === 'antigravity')?.lastSessionId, null)
 
     // A rename changes the tab's title and waits for nothing: there is no Copilot session to rename.
     await ui(`window.copilotDesktop.renameTab(${JSON.stringify(claude.id)}, 'Review with Claude')`)
@@ -272,9 +296,18 @@ if (!process.versions.electron) {
     assert.ok(resumed && new RegExp(`\\bresume ${codexId}`).test(resumed), `Codex resumes its session by id: ${resumed}`)
     results.codexResumed = resumed
 
+    const agyPid = antigravity.processId
+    await ui(`window.copilotDesktop.unloadTab(${JSON.stringify(antigravity.id)})`)
+    await tabWhere(tab => tab.id === antigravity.id && tab.status === 'dormant', 'Antigravity is unloaded')
+    await ui(`window.copilotDesktop.restartTab(${JSON.stringify(antigravity.id)})`)
+    antigravity = await tabWhere(tab => tab.id === antigravity.id && tab.status === 'running' && tab.processId && tab.processId !== agyPid, 'Antigravity is restarted')
+    line = commandLine(antigravity.processId)
+    assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without selecting a conversation')
+    results.antigravityRestarted = line
+
     // The Copilot tab is untouched by all this: still the only one with a permission preset.
     const all = await tabs()
-    assert.deepEqual(all.map(tab => [tab.cli ?? 'copilot', tab.sessionPermissionPreset !== null]), [['copilot', true], ['claude', false], ['codex', false]])
+    assert.deepEqual(all.map(tab => [tab.cli ?? 'copilot', tab.sessionPermissionPreset !== null]), [['copilot', true], ['claude', false], ['codex', false], ['antigravity', false]])
 
     for (const tab of all) await ui(`window.copilotDesktop.closeTab(${JSON.stringify(tab.id)})`).catch(() => {})
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, ...results }, null, 2))

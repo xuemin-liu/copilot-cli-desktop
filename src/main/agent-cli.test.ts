@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import { CodexSessionDiscovery, buildAgentCliArgs, claudeSessionStored, resolveAgentCli } from './agent-cli.js'
 import { newSessionOptions } from './session-name.js'
@@ -20,6 +20,11 @@ test('buildAgentCliArgs starts Codex bare and resumes only a stored session', ()
   assert.deepEqual(buildAgentCliArgs('codex', { id: null, stored: false }), [])
   assert.deepEqual(buildAgentCliArgs('codex', { id: ID, stored: false }), [])
   assert.deepEqual(buildAgentCliArgs('codex', { id: ID, stored: true }), ['resume', ID])
+})
+
+test('buildAgentCliArgs leaves Antigravity conversation selection to its own picker', () => {
+  assert.deepEqual(buildAgentCliArgs('antigravity', { id: null, stored: false }), [])
+  assert.deepEqual(buildAgentCliArgs('antigravity', { id: ID, stored: true }), [])
 })
 
 test('buildAgentCliArgs refuses an id that is not a UUID, so nothing else can become an argument', () => {
@@ -110,6 +115,61 @@ test('resolveAgentCli finds the program on PATH outside Windows', async () => {
   assert.equal(found.version, '2.1.206')
 })
 
+test('resolveAgentCli prefers agy.exe on Windows PATH and falls back to Google’s install location', async () => {
+  const pathExe = 'C:\\Tools\\Antigravity\\agy.exe'
+  const localAppData = 'C:\\Users\\me\\AppData\\Local'
+  const installedExe = `${localAppData}\\agy\\bin\\agy.exe`
+  for (const expected of [pathExe, installedExe]) {
+    const found = await resolveAgentCli('antigravity', {
+      platform: 'win32',
+      env: { LOCALAPPDATA: localAppData },
+      pathExists: (path) => path === installedExe,
+      readTextFile: async () => assert.fail('Antigravity uses a native binary'),
+      execFile: async (file, args) => {
+        if (file.toLowerCase().endsWith('where.exe')) {
+          assert.deepEqual(args, ['agy'])
+          const paths = ['C:\\Tools\\agy.cmd', ...(expected === pathExe ? [pathExe] : [])]
+          return { stdout: paths.join('\r\n'), stderr: '' }
+        }
+        assert.equal(file, expected)
+        assert.deepEqual(args, ['--version'])
+        return { stdout: 'agy version 1.5.0\n', stderr: '' }
+      },
+    })
+    assert.equal(found.command, expected)
+    assert.equal(found.version, '1.5.0')
+    assert.deepEqual(found.prefixArgs, [])
+  }
+})
+
+test('resolveAgentCli checks the Antigravity installer bin folder on POSIX', async () => {
+  const home = join(tmpdir(), 'agy-home')
+  const bin = join(home, '.local', 'bin')
+  const executable = join(bin, 'agy')
+  const found = await resolveAgentCli('antigravity', {
+    platform: 'linux',
+    env: { HOME: home, PATH: '/usr/local/bin' },
+    findExecutable: async (name, env) => {
+      assert.equal(name, 'agy')
+      assert.deepEqual(env.PATH?.split(delimiter), ['/usr/local/bin', bin])
+      return executable
+    },
+    execFile: async (file, args) => {
+      assert.equal(file, executable)
+      assert.deepEqual(args, ['--version'])
+      return { stdout: 'agy version 1.5.0\n', stderr: '' }
+    },
+  })
+  assert.equal(found.command, executable)
+  assert.equal(found.version, '1.5.0')
+})
+
+test('a missing Antigravity CLI points to the official download', async () => {
+  const found = await resolveAgentCli('antigravity', { platform: 'linux', findExecutable: async () => null })
+  assert.equal(found.version, null)
+  assert.match(found.error ?? '', /Antigravity CLI was not found.*https:\/\/antigravity\.google\/download/)
+})
+
 test('claudeSessionStored finds a session only once Claude Code has written it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-cli-claude-'))
   try {
@@ -188,9 +248,11 @@ test('CodexSessionDiscovery leaves a session another tab already has, and stops 
 test('newSessionOptions carries another CLI and refuses a new worktree for it', () => {
   assert.deepEqual(newSessionOptions({ cli: 'claude' }), { cli: 'claude' })
   assert.deepEqual(newSessionOptions({ cli: 'codex', worktreePath: 'D:\\repo.worktrees\\a' }), { cli: 'codex', worktreePath: 'D:\\repo.worktrees\\a' })
+  assert.deepEqual(newSessionOptions({ cli: 'antigravity', worktreePath: 'D:\\repo.worktrees\\a' }), { cli: 'antigravity', worktreePath: 'D:\\repo.worktrees\\a' })
   assert.deepEqual(newSessionOptions({ cli: 'copilot', worktree: true }), { worktree: true })
   assert.throws(() => newSessionOptions({ cli: 'bash' }), /Invalid session options/)
   assert.throws(() => newSessionOptions({ cli: 'claude', worktree: true }), /Invalid session options/)
+  assert.throws(() => newSessionOptions({ cli: 'antigravity', worktree: true }), /Invalid session options/)
 })
 
 test('a tab keeps the CLI it runs', () => {
