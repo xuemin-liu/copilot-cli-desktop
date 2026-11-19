@@ -968,7 +968,7 @@ function syncWorkspaceState(): void {
 function syncTabState(): void {
   state.tabs = tabsState.tabs.map((tab) => ({ ...tab }))
   state.activeTabId = tabsState.activeTabId
-  sessionNavigation.record(tabsState.activeTabId)
+  sessionNavigation.record(tabsState)
 }
 
 function broadcastState(): void {

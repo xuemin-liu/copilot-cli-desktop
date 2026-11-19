@@ -135,6 +135,7 @@ if (!process.versions.electron) {
     // Both arrows stay usable in the collapsed sidebar, and history follows the same project-switch path.
     await waitForNavigation(true, false)
     await click('[aria-label="Collapse sidebar"]')
+    await until('!!document.querySelector(".sidebar-collapsed")', 'sidebar collapsed')
     await click(back)
     await waitForProject(one)
     await waitForNavigation(false, true)
@@ -144,6 +145,7 @@ if (!process.versions.electron) {
     await waitForNavigation(true, false)
     await waitForRepos('two')
     await click('[aria-label="Expand sidebar"]')
+    await until('!document.querySelector(".sidebar-collapsed")', 'sidebar expanded')
     results.navigationSwitchesProject = true
 
     // Visit one again, go back to the beginning, then select two directly. The second visit to one is discarded.

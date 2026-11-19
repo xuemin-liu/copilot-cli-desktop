@@ -1,14 +1,17 @@
+import { visibleSessionTabs, type TabsState } from './session-tab-machine.js'
+
 export type SessionNavigationDirection = 'back' | 'forward'
 
 const MAX_VISITS = 100
 
-/** Visit order in the main window, including repeat visits to the same tab. */
+/** Visit order in the main window, with a linked side chat sharing its parent's entry. */
 export class SessionNavigation {
   private visits: string[] = []
   private position = -1
 
-  record(tabId: string | null): void {
-    if (tabId === null || this.visits[this.position] === tabId) return
+  record(state: TabsState): void {
+    const tabId = visibleSessionTabs(state).main?.id
+    if (tabId === undefined || this.visits[this.position] === tabId) return
     this.visits = [...this.visits.slice(0, this.position + 1), tabId].slice(-MAX_VISITS)
     this.position = this.visits.length - 1
   }
