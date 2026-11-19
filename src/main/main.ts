@@ -126,6 +126,7 @@ import {
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
 import { CodexSessionDiscovery, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
@@ -2018,6 +2019,22 @@ async function listSessionClis(): Promise<SessionCliChoice[]> {
 /** Codex session ids already given to a tab, so two new Codex tabs in one folder never take the same one. */
 const claimedCodexSessions = new Set<string>()
 
+let antigravityMcpSetup: Promise<void> | undefined
+
+async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResolution> {
+  const resolution = await otherCliResolution(cli)
+  if (cli === 'antigravity' && resolution.version !== null) {
+    const url = guestMcp.url()
+    if (url !== null) {
+      await (antigravityMcpSetup ??= configureAntigravityMeetingMcp(url).catch(async (error) => {
+        antigravityMcpSetup = undefined
+        await writeAppLog(`Could not configure Antigravity's meeting tools: ${String(error)}`).catch(() => {})
+      }))
+    }
+  }
+  return resolution
+}
+
 /**
  * The process for a tab that runs another CLI: its own terminal UI in `cwd`, with the desktop's own environment and none
  * of Copilot's credentials, helpers or flags. `sessionId` is the CLI's session id when the tab has one; `stored` says
@@ -2063,7 +2080,7 @@ async function startOtherCliTab(
   const label = sessionCliLabel(cli)
   pendingSessionCreations++
   let resolution: AgentCliResolution
-  try { resolution = await otherCliResolution(cli) }
+  try { resolution = await otherCliLaunchResolution(cli) }
   finally { pendingSessionCreations-- }
   if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
   // Recheck after the lookup: another creation or a shutdown may have completed during the await.
@@ -2892,7 +2909,7 @@ const meetingControl = new MeetingControlServer(handleMeetingCommand, {
   release: () => guestMailbox.release(),
 }, writeGuestEndpoint)
 
-// The meeting tools over MCP, on a fixed port the agent's configuration names; started once meetings are restored.
+// Start MCP before tabs can connect. The meeting hub tracks when restored meetings are ready to join.
 const guestMcp = new GuestMcpServer(guestMailbox, guestDeps, () => broadcastState())
 
 async function startGuestMcp(): Promise<void> {
@@ -2901,7 +2918,6 @@ async function startGuestMcp(): Promise<void> {
   if (await guestMcp.listen(port) === null) {
     await writeAppLog(`The meeting tools could not listen on port ${port}; outside agents can still use the helper.`).catch(() => {})
   }
-  broadcastState()
 }
 
 /** The hub's views, with what only main knows: which parties are guests, and who is invited but not connected yet. */
@@ -3423,7 +3439,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
     if (tab.cli) {
       // Another CLI: the same program in the same folder, resuming its own session when it stored one.
       const cli = tab.cli
-      const resolution = await otherCliResolution(cli)
+      const resolution = await otherCliLaunchResolution(cli)
       if (resolution.version === null) throw new Error(resolution.error ?? `${sessionCliLabel(cli)} is not available`)
       const linked = tab.launchWorktreePath ? await resolveLinkedWorktree(savedProfile.path, tab.launchWorktreePath) : null
       const gone = !linked && !!tab.launchWorktreePath
@@ -3893,7 +3909,7 @@ async function restoreMeetings(): Promise<void> {
     guestsReady = true
     guestsReadyAt = Date.now()
     guestMailbox.closeEnded((id) => meetingHub.isOpen(id))
-    await startGuestMcp()
+    broadcastState()
   }
 }
 
@@ -5905,6 +5921,7 @@ if (!app.requestSingleInstanceLock()) {
 
     credentialStore = new SecureCredentialStore(protectedCredentialPath(), protectedStorage(safeStorage), (message) => void writeAppLog(message))
 
+    await startGuestMcp()
     const startHidden = process.argv.includes(BACKGROUND_START_ARGUMENT)
     const packageSmokeTest = app.isPackaged && process.env[PACKAGE_SMOKE_ENVIRONMENT] === '1'
     mainWindow = createWindow(!startHidden, packageSmokeTest

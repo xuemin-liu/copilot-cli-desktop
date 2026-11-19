@@ -65,6 +65,23 @@ The Codex CLI, its IDE extension and its desktop app read the same `config.toml`
 `experimental_use_rmcp_client = true` at the top of `config.toml` for Streamable HTTP servers; add it if Codex does not
 list the tools. `meeting_next` waits up to 50 seconds by default, under Codex's default tool timeout of 60 seconds.
 
+## Antigravity CLI
+
+Antigravity CLI tabs in Copilot CLI Desktop receive the meeting tools automatically. Before the first tab launches,
+the desktop adds `copilot-meeting` to the Antigravity user MCP configuration if it needs to register the running
+desktop's server. Existing servers and user-configured entries for `copilot-meeting` are preserved.
+
+To connect an `agy` session running outside Desktop, add this to `~/.gemini/config/mcp_config.json`
+or `<workspace>/.agents/mcp_config.json` and check the connection with `/mcp`:
+
+```json
+{
+  "mcpServers": {
+    "copilot-meeting": { "serverUrl": "http://127.0.0.1:47391/mcp" }
+  }
+}
+```
+
 ## Gemini CLI — not yet tested
 
 In `~/.gemini/settings.json` (all projects) or `.gemini/settings.json` (one project):

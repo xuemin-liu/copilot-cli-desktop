@@ -26,7 +26,8 @@ if (!process.versions.electron) {
     await mkdir(bin)
     const agy = join(bin, process.platform === 'win32' ? 'agy.exe' : 'agy')
     const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH'
-    const env = { ...process.env, CLI_DIR: directory, CLI_ARTIFACTS: artifacts, [pathKey]: [bin, process.env[pathKey]].filter(Boolean).join(delimiter) }
+    const env = { ...process.env, CLI_DIR: directory, CLI_ARTIFACTS: artifacts, COPILOT_DESKTOP_MEETING_MCP_PORT: '0',
+      ANTIGRAVITY_GEMINI_DIR: join(directory, 'gemini-home'), [pathKey]: [bin, process.env[pathKey]].filter(Boolean).join(delimiter) }
     delete env.ELECTRON_RUN_AS_NODE
     delete env.SHELL // Keep the fixture first when Electron constructs its POSIX PATH.
     if (process.platform === 'win32') await copyFile(process.execPath, agy)
@@ -234,6 +235,12 @@ if (!process.versions.electron) {
     assert.equal(antigravity.lastSessionId, null)
     line = commandLine(antigravity.processId)
     assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without CLI arguments')
+    const mcpUrl = await ui('window.copilotDesktop.getState().then(state => state.meetingToolsUrl)')
+    assert.match(mcpUrl, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/)
+    const mcpConfig = join(process.env.ANTIGRAVITY_GEMINI_DIR, 'config', 'mcp_config.json')
+    const { mcpServers } = JSON.parse(await readFile(mcpConfig, 'utf8'))
+    const installedMcp = mcpServers['copilot-meeting'].serverUrl
+    assert.equal(installedMcp, `${mcpUrl}?source=copilot-cli-desktop`, 'The desktop registered its listening endpoint before launch')
     results.antigravityStarted = line
 
     const saved = await untilSaved(list => list.some(tab => tab.cli === 'codex' && tab.lastSessionId === codexId) && list.some(tab => tab.cli === 'antigravity'), 'the CLI tabs are saved')
@@ -303,6 +310,7 @@ if (!process.versions.electron) {
     antigravity = await tabWhere(tab => tab.id === antigravity.id && tab.status === 'running' && tab.processId && tab.processId !== agyPid, 'Antigravity is restarted')
     line = commandLine(antigravity.processId)
     assert.match(line ?? '', /[\\/]agy(?:\.exe)?"?\s*$/i, 'Antigravity starts without selecting a conversation')
+    assert.equal(JSON.parse(await readFile(mcpConfig, 'utf8')).mcpServers['copilot-meeting'].serverUrl, installedMcp)
     results.antigravityRestarted = line
 
     // The Copilot tab is untouched by all this: still the only one with a permission preset.
