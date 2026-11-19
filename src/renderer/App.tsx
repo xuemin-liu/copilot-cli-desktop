@@ -15,7 +15,7 @@ import { MeetingBar } from './components/MeetingBar.js'
 import { errorMessage } from './errors.js'
 import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
-import { sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
+import { OTHER_CLIS, sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
 
 const EMPTY_STATE: DesktopState = {
@@ -518,7 +518,7 @@ export function App(): JSX.Element {
                 <label htmlFor="new-session-cli">Run</label>
                 <select id="new-session-cli" name="cli" disabled={inputDialog.pending} value={inputDialog.cli}
                   onChange={(event) => setInputDialog({ ...inputDialog, cli: event.target.value as SessionCli, error: null })}>
-                  {(['copilot', 'claude', 'codex'] as const).map((cli) => {
+                  {(['copilot', ...OTHER_CLIS] as const).map((cli) => {
                     const choice = sessionClis?.find((candidate) => candidate.cli === cli)
                     return <option key={cli} value={cli}>
                       {sessionCliLabel(cli)}{choice?.error ? ' (not found)' : choice?.version && cli !== 'copilot' ? ` ${choice.version}` : ''}
@@ -572,6 +572,7 @@ export function App(): JSX.Element {
               <p className="fork-hint">
                 The tab is {sessionCliLabel(newSessionCli)} itself, in this project’s folder, with its own sign-in, settings and approvals.
                 Permission presets, side chats and tasks are for Copilot sessions; it can still join a meeting as an outside agent.
+                {newSessionCli === 'antigravity' && <> Use <code>/resume</code> in the terminal to reopen an Antigravity conversation.</>}
                 {newSessionExisting !== null && <> It starts in the existing worktree <code>{newSessionExisting}</code>, on whatever it has checked out.</>}
               </p>
             )}

@@ -2027,8 +2027,7 @@ function createOtherCliSession(cli: OtherCli, resolution: AgentCliResolution, cw
   dimensions?: { cols: number; rows: number }): PtySession {
   const env = withCopilotPathAdditions(process.env, resolution.pathAdditions)
   const resuming = sessionId !== null && stored
-  // Codex names its own sessions: an id it has not stored is dropped, and the new session's id is read from its store.
-  const knownId = cli === 'codex' && !resuming ? null : sessionId
+  const knownId = cli === 'claude' || resuming ? sessionId : null
   return new PtySession({
     file: resolution.command,
     args: [...resolution.prefixArgs, ...buildAgentCliArgs(cli, { id: knownId, stored: resuming })],
@@ -2075,7 +2074,7 @@ async function startOtherCliTab(
 
   const id = `tab-${nextTabSequence++}`
   const cwd = worktreeRoot ?? profile.path
-  // Claude Code takes the id of a new session; Codex picks its own, read from its store once it has stored the session.
+  // Claude Code takes the id of a new session. The other CLIs pick their own ids.
   const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false)
   managedTabs.set(id, { session })
   profilesWithSessionTabs.add(profile.id)
@@ -3435,7 +3434,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       if (managed) await managed.session.stop()
       const sessionId = managed?.session.lastSessionId ?? tab.lastSessionId ?? null
       // Codex ids are only ever read from its store. Claude Code stores a session with its first prompt.
-      const stored = sessionId !== null && (cli === 'codex' || await claudeSessionStored(sessionId))
+      const stored = sessionId !== null && (cli === 'codex' || (cli === 'claude' && await claudeSessionStored(sessionId)))
       managed?.session.removeAllListeners()
       const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
       let replacement: PtySession

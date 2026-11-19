@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { access, open, readdir, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, join, win32 } from 'node:path'
+import { basename, delimiter, join, win32 } from 'node:path'
 import { samePath } from './host-path.js'
 import { findPosixExecutable } from './posix-executables.js'
 import {
@@ -11,16 +11,16 @@ import {
 import { sessionCliLabel, type OtherCli } from './session-cli.js'
 
 /**
- * Session tabs for CLIs other than Copilot: Claude Code and Codex CLI. Such a tab is the CLI's own terminal UI, started in
- * the project folder and resumed by the CLI's own session id. Nothing here passes Copilot's credentials, permission
- * presets or helpers to it: the CLI keeps its own sign-in, settings and approvals.
+ * Session tabs for CLIs other than Copilot run the CLI's own terminal UI in the project folder.
+ * Each CLI keeps its own sign-in, settings and approvals.
  */
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const PACKAGES: Record<OtherCli, NpmCliPackage> = {
-  claude: { name: '@anthropic-ai/claude-code', bin: 'claude' },
-  codex: { name: '@openai/codex', bin: 'codex' },
+const CLI_INSTALLATIONS: Record<OtherCli, { bin: string; npmPackage?: string }> = {
+  claude: { bin: 'claude', npmPackage: '@anthropic-ai/claude-code' },
+  codex: { bin: 'codex', npmPackage: '@openai/codex' },
+  antigravity: { bin: 'agy' },
 }
 
 export interface AgentCliResolution {
@@ -48,7 +48,9 @@ function describe(error: unknown): string {
 
 /** How to get the CLI, for the message shown when it was not found. */
 export function agentCliInstallHint(cli: OtherCli): string {
-  return `Install it with \`npm install -g ${PACKAGES[cli].name}\`, make sure a terminal finds \`${PACKAGES[cli].bin}\`, then try again.`
+  const { bin, npmPackage } = CLI_INSTALLATIONS[cli]
+  if (!npmPackage) return 'Install agy from https://antigravity.google/download, then try again.'
+  return `Install it with \`npm install -g ${npmPackage}\`, make sure a terminal finds \`${bin}\`, then try again.`
 }
 
 /** Find the CLI without ever invoking a command shell: an executable on PATH, or a verified npm shim's target. */
@@ -59,7 +61,8 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
   const readTextFile = deps.readTextFile ?? ((path: string) => readFile(path, 'utf8'))
   const findExecutable = deps.findExecutable ?? findPosixExecutable
   const execFileFn = deps.execFile ?? defaultExecFile
-  const cliPackage = PACKAGES[cli]
+  const { bin, npmPackage } = CLI_INSTALLATIONS[cli]
+  const cliPackage: NpmCliPackage | null = npmPackage ? { name: npmPackage, bin } : null
   const attempts: string[] = []
 
   const probe = async (launch: Pick<AgentCliResolution, 'command' | 'prefixArgs' | 'resolvedPath' | 'pathAdditions'>): Promise<AgentCliResolution | null> => {
@@ -70,12 +73,14 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
   }
 
   if (platform === 'win32') {
-    const located = await resolveWindowsCommand(cliPackage.bin, env, execFileFn)
+    const located = await resolveWindowsCommand(bin, env, execFileFn)
     const candidates = [
-      ...located.paths,
-      // Claude Code's own installer puts it here, which may not be on the PATH the desktop started with.
+      ...located.paths.filter((path) => cliPackage || /\.exe$/i.test(path)),
+      // The native installers' default folders may be absent from the desktop's PATH.
       ...(cli === 'claude' && env.USERPROFILE ? [win32.join(env.USERPROFILE, '.local', 'bin', 'claude.exe')] : []),
-      ...(env.APPDATA ? [win32.join(env.APPDATA, 'npm', `${cliPackage.bin}.cmd`)] : []),
+      ...(cli === 'antigravity' && env.LOCALAPPDATA && win32.isAbsolute(env.LOCALAPPDATA)
+        ? [win32.join(env.LOCALAPPDATA, 'agy', 'bin', 'agy.exe')] : []),
+      ...(cliPackage && env.APPDATA ? [win32.join(env.APPDATA, 'npm', `${bin}.cmd`)] : []),
     ]
     const seen = new Set<string>()
     for (const path of candidates) {
@@ -84,13 +89,16 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
       seen.add(key)
       const launch = key.endsWith('.exe')
         ? { command: path, prefixArgs: [], resolvedPath: path, pathAdditions: [] }
-        : await unwrapNpmShim(path, cliPackage, env, execFileFn, pathExists, readTextFile)
+        : cliPackage && await unwrapNpmShim(path, cliPackage, env, execFileFn, pathExists, readTextFile)
       if (!launch) { attempts.push(`${path}: package-manager shim target could not be verified`); continue }
       const found = await probe(launch)
       if (found) return found
     }
   } else {
-    const located = await findExecutable(cliPackage.bin, env)
+    const searchEnv = cli === 'antigravity'
+      ? { ...env, PATH: [env.PATH, join(env.HOME || homedir(), '.local', 'bin')].filter(Boolean).join(delimiter) }
+      : env
+    const located = await findExecutable(bin, searchEnv)
     if (located) {
       const found = await probe({ command: located, prefixArgs: [], resolvedPath: located })
       if (found) return found
@@ -98,7 +106,7 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
   }
 
   return {
-    cli, command: cliPackage.bin, prefixArgs: [], resolvedPath: null, version: null,
+    cli, command: bin, prefixArgs: [], resolvedPath: null, version: null,
     error: [`${sessionCliLabel(cli)} was not found. ${agentCliInstallHint(cli)}`, ...attempts].join('\n'),
   }
 }
@@ -106,6 +114,7 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
 /**
  * The CLI's arguments for a tab. Claude Code takes the id of a new session and resumes by it; Codex names its own
  * sessions, so a new one gets no id (it is read from Codex's session store later) and a stored one is resumed by id.
+ * Antigravity uses its own /resume picker. Its workspace-scoped recent conversation cannot identify a tab's session.
  */
 export function buildAgentCliArgs(cli: OtherCli, session: { id: string | null; stored: boolean }): string[] {
   if (session.id !== null && !UUID.test(session.id)) throw new Error('Invalid session id')
@@ -113,7 +122,7 @@ export function buildAgentCliArgs(cli: OtherCli, session: { id: string | null; s
     if (session.id === null) return []
     return session.stored ? ['--resume', session.id] : ['--session-id', session.id]
   }
-  return session.id !== null && session.stored ? ['resume', session.id] : []
+  return cli === 'codex' && session.id !== null && session.stored ? ['resume', session.id] : []
 }
 
 function claudeConfigRoot(env: NodeJS.ProcessEnv): string {

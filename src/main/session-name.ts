@@ -1,4 +1,4 @@
-// No imports: the renderer bundles this file to preview a session's worktree name, so it must not reach Node modules.
+import { isOtherCli, type OtherCli } from './session-cli.js'
 
 export const MAX_SESSION_TITLE_CHARS = 120
 const MAX_SLUG_CHARS = 24
@@ -25,16 +25,17 @@ export interface NewSessionOptions {
   /** Use the DevTools settings and Local Overrides every session shares; absent means the Settings default. */
   sharedOverrides?: boolean
   /** Run this CLI in the tab instead of Copilot; absent means Copilot. */
-  cli?: 'claude' | 'codex'
+  cli?: OtherCli
 }
 
 export function newSessionOptions(value: unknown): NewSessionOptions {
   if (value === undefined || value === null) return {}
   if (typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session options')
   const { worktree, worktreePath, sharedOverrides, cli } = value as Record<string, unknown>
-  if (cli !== undefined && cli !== 'copilot' && cli !== 'claude' && cli !== 'codex') throw new Error('Invalid session options')
+  if (cli !== undefined && cli !== 'copilot' && !isOtherCli(cli)) throw new Error('Invalid session options')
   // Another CLI starts in the project folder or an existing worktree; the desktop makes new worktrees for Copilot only.
-  if ((cli === 'claude' || cli === 'codex') && worktree === true) throw new Error('Invalid session options')
+  const otherCli = isOtherCli(cli) ? cli : undefined
+  if (otherCli && worktree === true) throw new Error('Invalid session options')
   if (worktree !== undefined && typeof worktree !== 'boolean') throw new Error('Invalid session options')
   if (worktreePath !== undefined && (typeof worktreePath !== 'string' || worktreePath.length < 1 || worktreePath.length > 4_096
     || [...worktreePath].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127))) throw new Error('Invalid session options')
@@ -45,6 +46,6 @@ export function newSessionOptions(value: unknown): NewSessionOptions {
     ...(worktree === undefined ? {} : { worktree }),
     ...(worktreePath === undefined ? {} : { worktreePath }),
     ...(sharedOverrides === undefined ? {} : { sharedOverrides }),
-    ...(cli === 'claude' || cli === 'codex' ? { cli } : {}),
+    ...(otherCli ? { cli: otherCli } : {}),
   }
 }
