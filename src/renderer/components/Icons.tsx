@@ -6,6 +6,10 @@ function Icon({ children }: { children: JSX.Element[] | JSX.Element }): JSX.Elem
     strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{children}</svg>
 }
 
+export function SessionArrowIcon({ direction }: { direction: 'back' | 'forward' }): JSX.Element {
+  return <Icon><path d={direction === 'back' ? 'M13 8H3m4-4L3 8l4 4' : 'M3 8h10M9 4l4 4-4 4'} /></Icon>
+}
+
 /** Two speech bubbles, one answering the other: fork the conversation into a side chat. (Not a branching line, which is the Git panel's.) */
 export function SideChatIcon(): JSX.Element {
   return <Icon>

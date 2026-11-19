@@ -125,6 +125,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   fanOut: (profileId, label, count) => ipcRenderer.invoke('desktop:fan-out', profileId, label, count),
   connectRemoteSession: (sessionId) => ipcRenderer.invoke('desktop:connect-remote-session', sessionId),
   activateTab: (tabId) => ipcRenderer.invoke('desktop:activate-tab', tabId),
+  navigateSession: (direction) => ipcRenderer.invoke('desktop:navigate-session', direction),
   popOutTab: (tabId) => ipcRenderer.invoke('desktop:pop-out-tab', tabId),
   dockTab: (tabId) => ipcRenderer.invoke('desktop:dock-tab', tabId),
   desktopControlSet: (tabId, enabled) => ipcRenderer.invoke('desktop:desktop-control-set', tabId, enabled),

@@ -192,6 +192,7 @@ import {
   visibleSessionTabs,
   type TabsState,
 } from './session-tab-machine.js'
+import { SessionNavigation } from './session-navigation.js'
 import type { CopilotResolution, DesktopEvent, DesktopState, RestoredTab, RevealPathResult, SessionHistoryEntry, SidebarView, WorkspaceProfile } from './types.js'
 import { DesktopUpdateController, type DesktopUpdateState, type UpdateAdapter } from './update-controller.js'
 import { UsageService, UsageServiceUnavailableError } from './usage-service.js'
@@ -345,6 +346,7 @@ interface ManagedTab {
 }
 
 let tabsState: TabsState = EMPTY_TABS_STATE
+const sessionNavigation = new SessionNavigation()
 const managedTabs = new Map<string, ManagedTab>()
 // An unloaded profile is not an empty profile. Keep saved entries until their
 // replacement process starts successfully, including across failed attempts.
@@ -921,9 +923,18 @@ function workflowViews(): import('./workflow-types.js').WorkflowTask[] {
   catch { workflowError = 'Task tracking is unavailable. Your terminal sessions remain usable.'; return [] }
 }
 
+function navigableSessionIds(): ReadonlySet<string> {
+  return new Set(tabsState.tabs.filter(tab => !sessionWindows.has(tab.id)).map(tab => tab.id))
+}
+
 function snapshot(windowSessionId?: string): DesktopState {
+  const navigable = navigableSessionIds()
   return {
     ...state,
+    sessionNavigation: {
+      back: sessionNavigation.canMove('back', navigable),
+      forward: sessionNavigation.canMove('forward', navigable),
+    },
     poppedOutTabIds: [...sessionWindows.keys()],
     ...(windowSessionId ? { windowSessionId } : {}),
     profiles: state.profiles.map((profile) => ({ ...profile, tabs: profile.tabs.map((tab) => ({ ...tab })) })),
@@ -957,6 +968,7 @@ function syncWorkspaceState(): void {
 function syncTabState(): void {
   state.tabs = tabsState.tabs.map((tab) => ({ ...tab }))
   state.activeTabId = tabsState.activeTabId
+  sessionNavigation.record(tabsState)
 }
 
 function broadcastState(): void {
@@ -4952,6 +4964,14 @@ ipcMain.handle('desktop:activate-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return activateSessionTab(tabId)
+})
+ipcMain.handle('desktop:navigate-session', (event, direction: unknown) => {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents || (direction !== 'back' && direction !== 'forward')) {
+    throw new Error('Invalid session navigation request')
+  }
+  const tabId = sessionNavigation.move(direction, navigableSessionIds())
+  return tabId === null ? snapshot() : selectSessionInMain(tabId)
 })
 ipcMain.handle('desktop:rename-tab', (event, tabId: unknown, title: unknown) => {
   assertTrustedIpcSender(event)

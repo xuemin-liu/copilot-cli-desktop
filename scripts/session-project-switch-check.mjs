@@ -22,7 +22,7 @@ if (!process.versions.electron) {
     const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('exit', accept) })
     assert.equal(code, 0, 'Session project switch check failed')
     assert.equal(JSON.parse(await readFile(join(artifacts, 'result.json'), 'utf8')).passed, true)
-    console.log('Selecting a session switched the active project and the Git panel to that session\'s project, and closing it moved to the session left on screen.')
+    console.log('Selecting a session or using Back and Forward switched the active project and Git panel. New selections cleared forward history, and closed sessions were skipped.')
   } finally {
     clearTimeout(timer)
     await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }).catch(() => {})
@@ -95,11 +95,34 @@ if (!process.versions.electron) {
       main.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
     }
     const state = () => ui('window.copilotDesktop.getState()')
-    const repoNames = () => ui('[...document.querySelectorAll(".git-repo-name")].map(element => element.innerText)')
+    const visibleRepoNames = '[...document.querySelectorAll(".workspace-tools:not([hidden]) .tool-git-host:not([hidden]) .git-repo-name")].map(element => element.textContent)'
+    const waitForRepos = async (name) => {
+      const expected = [`${name}-a`, `${name}-b`]
+      await until(`${visibleRepoNames}.includes(${JSON.stringify(expected[0])})`, `Git panel shows project ${name}`)
+      assert.deepEqual(await ui(visibleRepoNames), expected)
+    }
+    const back = '.session-navigation [aria-label="Back"]'
+    const forward = '.session-navigation [aria-label="Forward"]'
+    const waitForNavigation = (canGoBack, canGoForward) => until(
+      `document.querySelector(${JSON.stringify(back)})?.disabled === ${!canGoBack} && document.querySelector(${JSON.stringify(forward)})?.disabled === ${!canGoForward}`,
+      `session navigation: Back ${canGoBack ? 'enabled' : 'disabled'}, Forward ${canGoForward ? 'enabled' : 'disabled'}`,
+    )
+    const waitForProject = async (profile) => {
+      const row = JSON.stringify(`.workspace-row[aria-label="${profile.name}"]`)
+      const compactTitle = JSON.stringify(`Projects — ${profile.name}`)
+      await until(`document.querySelector(${row})?.getAttribute('aria-current') === 'true' || document.querySelector('.sidebar-projects-button')?.title === ${compactTitle}`,
+        `${profile.name} active in the sidebar`)
+      const current = await state()
+      assert.equal(current.tabs.find(tab => tab.id === current.activeTabId)?.workspaceProfileId, profile.id)
+    }
     const results = {}
 
-    // A session starts in project one; a second one starts in project two from the sidebar, which makes two active.
+    // Open Git in each project's own tool panel before switching between them.
     await until('!!document.querySelector(".session-git-toggle") && !!document.querySelector(".xterm")', 'first session')
+    await waitForNavigation(false, false)
+    await click('.session-git-toggle')
+    await waitForRepos('one')
+    // A second session starts in project two from the sidebar, which makes two active.
     await click(`[aria-label="New session in ${two.name}"]`)
     // The new-session dialog: OK with the name left empty keeps the default.
     await until('!!document.querySelector(".input-dialog")', 'new-session dialog')
@@ -107,17 +130,45 @@ if (!process.versions.electron) {
     await until(`document.querySelectorAll(".sidebar-session").length === 2`, 'second session listed')
     assert.equal((await state()).activeProfileId, two.id, 'a new session in project two makes it active')
     await click('.session-git-toggle')
-    await until('[...document.querySelectorAll(".git-repo-name")].some(element => element.innerText === "two-a")', 'Git panel shows project two')
-    assert.deepEqual(await repoNames(), ['two-a', 'two-b'])
+    await waitForRepos('two')
+
+    // Both arrows stay usable in the collapsed sidebar, and history follows the same project-switch path.
+    await waitForNavigation(true, false)
+    await click('[aria-label="Collapse sidebar"]')
+    await until('!!document.querySelector(".sidebar-collapsed")', 'sidebar collapsed')
+    await click(back)
+    await waitForProject(one)
+    await waitForNavigation(false, true)
+    await waitForRepos('one')
+    await click(forward)
+    await waitForProject(two)
+    await waitForNavigation(true, false)
+    await waitForRepos('two')
+    await click('[aria-label="Expand sidebar"]')
+    await until('!document.querySelector(".sidebar-collapsed")', 'sidebar expanded')
+    results.navigationSwitchesProject = true
+
+    // Visit one again, go back to the beginning, then select two directly. The second visit to one is discarded.
+    await click(`[aria-label="${one.name} sessions"] .sidebar-session`)
+    await waitForProject(one)
+    await click(back)
+    await waitForProject(two)
+    await waitForNavigation(true, true)
+    await click(back)
+    await waitForProject(one)
+    await waitForNavigation(false, true)
+    await click(`[aria-label="${two.name} sessions"] .sidebar-session`)
+    await waitForProject(two)
+    await waitForNavigation(true, false)
+    results.newSelectionClearsForward = true
 
     // Selecting project one's session in the sidebar switches the project, the sidebar highlight and the Git panel.
     await click(`[aria-label="${one.name} sessions"] .sidebar-session`)
-    await until(`(() => { const row = document.querySelector('.workspace-row[aria-label="${one.name}"]'); return row?.getAttribute('aria-current') === 'true' })()`, 'project one highlighted')
+    await waitForProject(one)
     const selected = await state()
     assert.equal(selected.tabs.find(tab => tab.id === selected.activeTabId)?.workspaceProfileId, one.id, 'project one\'s session is active')
     assert.equal(selected.activeProfileId, one.id, 'selecting a session makes its project active')
-    await until('[...document.querySelectorAll(".git-repo-name")].some(element => element.innerText === "one-a")', 'Git panel shows project one')
-    assert.deepEqual(await repoNames(), ['one-a', 'one-b'])
+    await waitForRepos('one')
     await writeFile(join(out, 'selected-project-one.png'), (await main.webContents.capturePage()).toPNG())
     // The choice is saved, so a restart opens the same project.
     const end = Date.now() + 10_000
@@ -130,7 +181,8 @@ if (!process.versions.electron) {
     await ui(`window.copilotDesktop.closeTab(${JSON.stringify(selected.activeTabId)})`)
     await until(`document.querySelectorAll(".sidebar-session").length === 1`, 'session closed')
     assert.equal((await state()).activeProfileId, two.id, 'closing moves to the project of the session left on screen')
-    await until('[...document.querySelectorAll(".git-repo-name")].some(element => element.innerText === "two-a")', 'Git panel back on project two')
+    await waitForRepos('two')
+    await waitForNavigation(false, false)
     results.closeFollowsSession = true
 
     await writeFile(join(out, 'result.json'), JSON.stringify({ passed: true, ...results }, null, 2))
