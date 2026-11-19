@@ -204,6 +204,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       './migration-service.js': 'export class MigrationService {}',
       './migration-import.js': 'export async function recoverMigrationReport() { return { issues: [], journals: [] } }',
       './migration-writers.js': 'export async function assertMigrationWritersStopped() {}',
+      // The real launch and MCP config checks cover Antigravity without touching this harness's user settings.
+      './antigravity-mcp.js': 'export async function configureAntigravityMeetingMcp() {}',
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];
         export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
@@ -391,7 +393,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       // working when the lifecycle fixture bundles it into a temporary ESM entry.
       banner: { js: `import { createRequire as createFixtureRequire } from 'node:module'; const require = createFixtureRequire(${JSON.stringify(import.meta.url)});` },
       plugins: [{ name: 'inert-os-boundaries', setup(builder) {
-        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
+        builder.onResolve({ filter: /^(electron|electron-updater|\.\/(antigravity-mcp|browser-debug|node-pty-backend|resolve-copilot|copilot-maintenance|migration-service|migration-import|migration-writers|git-discovery)\.js)$/ }, (args) => ({ path: args.path, namespace: 'test-boundary' }))
         builder.onLoad({ filter: /.*/, namespace: 'test-boundary' }, (args) => ({ contents: mocks[args.path]!, loader: 'js', resolveDir: dirname(mainPath) }))
       } }],
     })
