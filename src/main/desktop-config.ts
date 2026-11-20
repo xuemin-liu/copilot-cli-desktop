@@ -5,7 +5,8 @@ import { basename, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { isPermissionPreset, type PermissionPreset } from './permission-presets.js'
 import { isSessionPermissionMode } from './permission-modes.js'
-import { isOtherCli } from './session-cli.js'
+import { isOtherCli, type OtherCli } from './session-cli.js'
+import { normalizeOtherCliConfig, normalizePerCliConfig } from './agent-cli-settings.js'
 import { isResumeMode, type ResumeMode } from './resume-args.js'
 import { DEFAULT_PROVIDER_CONFIG, normalizeProviderConfig, type CopilotProviderConfig } from './provider-config.js'
 import { DEFAULT_SESSION_LAUNCH_CONFIG, normalizeSessionLaunchConfig } from './session-launch.js'
@@ -231,6 +232,18 @@ function isMissingPath(error: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
+/** Omit the profile's otherCli field entirely when no non-Copilot CLI has any configured setting. */
+function otherCliProfileField(value: unknown): Pick<WorkspaceProfile, 'otherCli'> {
+  const otherCli = normalizeOtherCliConfig(value)
+  return Object.keys(otherCli).length > 0 ? { otherCli } : {}
+}
+
+/** A restored non-Copilot tab keeps its CLI and, when it had a saved permission/model snapshot, that snapshot. */
+function otherCliTabFields(cli: OtherCli, config: unknown): Pick<RestoredTab, 'cli' | 'otherCliConfig'> {
+  const otherCliConfig = normalizePerCliConfig(cli, config)
+  return { cli, ...(Object.keys(otherCliConfig).length > 0 ? { otherCliConfig } : {}) }
+}
+
 function readRestoredTabs(value: unknown): RestoredTab[] {
   if (!Array.isArray(value)) return []
   const tabs: RestoredTab[] = []
@@ -245,7 +258,7 @@ function readRestoredTabs(value: unknown): RestoredTab[] {
     tabs.push({
       title: tab.title,
       lastSessionId,
-      ...(isOtherCli(tab.cli) ? { cli: tab.cli } : {}),
+      ...(isOtherCli(tab.cli) ? otherCliTabFields(tab.cli, tab.otherCliConfig) : {}),
       ...(browserProfileId ? { browserProfileId } : {}),
       ...(isPermissionPreset(tab.sessionPermissionPreset)
         ? { sessionPermissionPreset: tab.sessionPermissionPreset }
@@ -319,6 +332,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
         permissionPreset,
         defaultResumeMode,
         launch: normalizeSessionLaunchConfig(profile.launch),
+        ...otherCliProfileField(profile.otherCli),
         tabs: readRestoredTabs(profile.tabs),
         ...(profile.general === true ? { general: true as const } : {}),
       })

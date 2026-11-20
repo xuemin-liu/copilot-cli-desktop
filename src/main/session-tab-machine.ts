@@ -2,6 +2,7 @@ import type { PermissionPreset } from './permission-presets.js'
 import type { SessionPermissionMode } from './permission-modes.js'
 import type { DesktopSessionTab, SessionLifecycleStatus } from './types.js'
 import type { OtherCli } from './session-cli.js'
+import type { PerCliConfig } from './agent-cli-settings.js'
 
 export const MAX_SESSION_TABS = 20
 
@@ -16,6 +17,7 @@ export interface NewTabInput {
   id: string
   title: string
   cli?: OtherCli
+  otherCliConfig?: PerCliConfig
   browserProfileId?: string
   workspaceProfileId: string
   cliVersion: string | null
@@ -57,6 +59,7 @@ function newTab(state: TabsState, input: NewTabInput, status: SessionLifecycleSt
     id: input.id,
     title: input.title,
     ...(input.cli ? { cli: input.cli } : {}),
+    ...(input.otherCliConfig ? { otherCliConfig: input.otherCliConfig } : {}),
     ...(input.browserProfileId ? { browserProfileId: input.browserProfileId } : {}),
     workspaceProfileId: input.workspaceProfileId,
     lastSessionId: input.lastSessionId ?? null,

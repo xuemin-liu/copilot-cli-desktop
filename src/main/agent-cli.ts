@@ -111,6 +111,29 @@ export async function resolveAgentCli(cli: OtherCli, deps: AgentCliResolveDeps =
   }
 }
 
+const HELP_TIMEOUT_MS = 15_000
+
+/**
+ * The resolved CLI's `--help` text, used to check that the launch flags a workspace configured are ones this installed
+ * build lists before a running tab is stopped for them. Null when nothing could be read. Some CLIs print help with a
+ * non-zero exit; their output still counts.
+ */
+export async function agentCliHelp(
+  resolution: Pick<AgentCliResolution, 'command' | 'prefixArgs' | 'pathAdditions'>,
+  deps: { env?: NodeJS.ProcessEnv; execFile?: ExecFileFn } = {},
+): Promise<string | null> {
+  const env = withCopilotPathAdditions(deps.env ?? process.env, resolution.pathAdditions)
+  const read = (output: { stdout?: unknown; stderr?: unknown }): string | null => {
+    const text = [output.stdout, output.stderr].filter((part): part is string => typeof part === 'string').join('\n').trim()
+    return text.length > 0 ? text : null
+  }
+  try {
+    return read(await (deps.execFile ?? defaultExecFile)(resolution.command, [...resolution.prefixArgs, '--help'], { env, timeout: HELP_TIMEOUT_MS, windowsHide: true }))
+  } catch (error) {
+    return error && typeof error === 'object' ? read(error as { stdout?: unknown; stderr?: unknown }) : null
+  }
+}
+
 /**
  * The CLI's arguments for a tab. Claude Code takes the id of a new session and resumes by it; Codex names its own
  * sessions, so a new one gets no id (it is read from Codex's session store later) and a stored one is resumed by id.

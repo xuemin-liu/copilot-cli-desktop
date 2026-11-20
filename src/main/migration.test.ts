@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import yazl from 'yazl'
 import { DEFAULT_DESKTOP_CONFIG, normalizeDesktopConfig, readDesktopConfig, workspaceProfileId, writeDesktopConfig } from './desktop-config.js'
 import { applyMigrationImport, planMigrationImport, recoverMigrationReport } from './migration-import.js'
-import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableSettings, safeRelative } from './migration-inventory.js'
+import { collectMigration, digest, fileEntry, jsonBytes, jsonObject, portableDesktop, portableSettings, safeRelative } from './migration-inventory.js'
 import { readMigrationArchive, writeMigrationArchive, type MigrationArchive } from './migration-archive.js'
 import { MigrationService } from './migration-service.js'
 import { listMigrationBackups } from './migration-backups.js'
@@ -694,7 +694,8 @@ test('permission opt-in controls CLI prompting settings and workspace execution 
   const workspace = join(root, 'repo'); await mkdir(workspace)
   const id = 'aaaaaaaaaaaaaaaa'
   const settings = { askUser: false, continueOnAutoMode: true, defaultPermissionMode: 'autopilot' }
-  const data = archive(fileEntry('copilot/settings.json', 'settings', jsonBytes(settings)), fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ profiles: [{ path: 'C:\\old', name: 'repo', permissionPreset: 'full-access', launch: { mode: 'autopilot', remoteControl: 'enable', remoteExport: 'enable' } }] })))
+  const otherCli = { claude: { approval: 'plan', model: 'claude-sonnet-5' }, codex: { approval: 'never', sandbox: 'workspace-write' }, antigravity: { model: 'agy-model' } }
+  const data = archive(fileEntry('copilot/settings.json', 'settings', jsonBytes(settings)), fileEntry('desktop/preferences.json', 'desktop', jsonBytes({ profiles: [{ path: 'C:\\old', name: 'repo', permissionPreset: 'full-access', launch: { mode: 'autopilot', remoteControl: 'enable', remoteExport: 'enable' }, otherCli }] })))
   data.manifest.projects = [{ id, sourcePath: 'C:\\old', name: 'repo' }]
   for (const allowPermissions of [false, true]) {
     const plan = await planMigrationImport(data, target, { [id]: workspace }, { ...choices, allowPermissions })
@@ -705,6 +706,9 @@ test('permission opt-in controls CLI prompting settings and workspace execution 
     assert.equal(desktop.profiles[0]!.launch.mode, allowPermissions ? 'autopilot' : 'interactive')
     assert.equal(desktop.profiles[0]!.launch.remoteControl, allowPermissions ? 'enable' : 'inherit')
     assert.equal(desktop.profiles[0]!.launch.remoteExport, allowPermissions ? 'enable' : 'inherit')
+    // Other CLIs: models always come across; approval and sandbox only with the permission opt-in.
+    assert.deepEqual(desktop.profiles[0]!.otherCli, allowPermissions ? otherCli
+      : { claude: { model: 'claude-sonnet-5' }, antigravity: { model: 'agy-model' } })
   }
 })
 
@@ -1071,4 +1075,18 @@ test('service binds preview to operation ID, honors writer checks, and keeps usa
   assert.equal(await readFile(join(target.copilot, 'copilot-instructions.md'), 'utf8'), 'transfer')
   assert.ok(result.warnings.some((warning) => warning.includes('usage merge did not complete')))
   await assert.rejects(receiver.apply(preview.id), /preview/)
+})
+
+nodeTest('the exported desktop preferences keep each workspace\'s settings for other CLIs', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'migration-other-cli-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'desktop.json')
+  const otherCli = { claude: { approval: 'plan', model: 'claude-sonnet-5' }, codex: { sandbox: 'read-only' } }
+  await writeDesktopConfig(path, { ...DEFAULT_DESKTOP_CONFIG, profiles: [
+    { ...normalizeDesktopConfig({ profiles: [{ path: join(root, 'a'), name: 'a' }] }).profiles[0]!, otherCli },
+    normalizeDesktopConfig({ profiles: [{ path: join(root, 'b'), name: 'b' }] }).profiles[0]!,
+  ] })
+  const exported = jsonObject(await portableDesktop(path)) as { profiles: Array<Record<string, unknown>> }
+  assert.deepEqual(exported.profiles[0]!.otherCli, otherCli)
+  assert.equal('otherCli' in exported.profiles[1]!, false)
 })

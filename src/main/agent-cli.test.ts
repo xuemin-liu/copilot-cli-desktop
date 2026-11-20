@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import test from 'node:test'
-import { CodexSessionDiscovery, buildAgentCliArgs, claudeSessionStored, resolveAgentCli } from './agent-cli.js'
+import { CodexSessionDiscovery, agentCliHelp, buildAgentCliArgs, claudeSessionStored, resolveAgentCli } from './agent-cli.js'
 import { newSessionOptions } from './session-name.js'
 import { createTab, EMPTY_TABS_STATE } from './session-tab-machine.js'
 
@@ -261,4 +261,15 @@ test('a tab keeps the CLI it runs', () => {
   assert.equal(state.tabs[0]?.cli, 'claude')
   const copilot = createTab(EMPTY_TABS_STATE, { id: 'tab-1', title: 'x', workspaceProfileId: 'p', cliVersion: null, sessionPermissionPreset: null, permissionWarning: null, remote: false })
   assert.equal('cli' in copilot.tabs[0]!, false)
+})
+
+test('agentCliHelp reads the resolved executable help, including output from a non-zero exit', async () => {
+  const calls: string[][] = []
+  const launch = { command: 'C:\tools\node.exe', prefixArgs: ['C:\pkg\cli.js'], pathAdditions: [] }
+  const ok = await agentCliHelp(launch, { env: {}, execFile: async (file, args) => { calls.push([file, ...args]); return { stdout: 'Options:\n  --model <m>', stderr: '' } } })
+  assert.equal(ok, 'Options:\n  --model <m>')
+  assert.deepEqual(calls, [['C:\tools\node.exe', 'C:\pkg\cli.js', '--help']])
+  const failedWithOutput = await agentCliHelp(launch, { env: {}, execFile: async () => { throw Object.assign(new Error('exit 1'), { stdout: '', stderr: 'Usage: x --sandbox' }) } })
+  assert.equal(failedWithOutput, 'Usage: x --sandbox')
+  assert.equal(await agentCliHelp(launch, { env: {}, execFile: async () => { throw new Error('ENOENT') } }), null)
 })

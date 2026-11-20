@@ -6,6 +6,7 @@ import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import type { MeetingView } from './meeting.js'
 import type { OtherCli } from './session-cli.js'
+import type { IncompatibleField, OtherCliConfig, PerCliConfig } from './agent-cli-settings.js'
 
 export type RevealPathResult =
   | { ok: true }
@@ -27,6 +28,9 @@ export interface RestoredTab {
   lastSessionId: string | null
   /** The CLI the tab runs when it is not Copilot; `lastSessionId` is then that CLI's own session id. */
   cli?: OtherCli
+  /** For a non-Copilot tab: the permission/model settings snapshotted from the profile when the tab was created, so a
+   * later profile edit never changes how this tab relaunches. Absent in older configs — those tabs stay CLI-managed. */
+  otherCliConfig?: PerCliConfig
   browserProfileId?: string
   /** Session-owned launch bundle. Missing in config files written by older releases. */
   sessionPermissionPreset?: PermissionPreset
@@ -54,6 +58,8 @@ export interface WorkspaceProfile {
   permissionPreset: PermissionPreset
   defaultResumeMode: ResumeMode
   launch: SessionLaunchConfig
+  /** Per-CLI permission/model settings for non-Copilot sessions. Absent = each other CLI uses its own defaults. */
+  otherCli?: OtherCliConfig
   tabs: RestoredTab[]
   /** For work with no project behind it, in a folder the desktop made. Saved. */
   general?: true
@@ -65,6 +71,12 @@ export interface DesktopSessionTab {
   /** Set when the tab runs another CLI (Claude Code, Codex CLI) instead of Copilot: a terminal for it in the project
    * folder, without the desktop's Copilot features (permission presets, meetings as a tab, side chats, tasks). Saved. */
   cli?: OtherCli
+  /** For a non-Copilot tab: the permission/model settings this session launches with, snapshotted from the profile
+   * at creation and reused verbatim on restart/restore. Absent for Copilot tabs and pre-feature saved tabs. */
+  otherCliConfig?: PerCliConfig
+  /** The saved settings this tab's last start or restart could not apply, so it did not launch with them. The tab keeps
+   * its old process, if any, until the user clears those fields. Runtime-only. */
+  otherCliBlocked?: IncompatibleField[]
   browserProfileId?: string
   workspaceProfileId: string
   lastSessionId: string | null

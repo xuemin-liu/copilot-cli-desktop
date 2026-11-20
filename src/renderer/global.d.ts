@@ -8,6 +8,7 @@ import type { CredentialName } from '../main/secure-credentials.js'
 import type { AccessStatus } from '../main/access-status.js'
 import type { CopilotProviderConfig } from '../main/provider-config.js'
 import type { SessionLaunchConfig } from '../main/session-launch.js'
+import type { OtherCliConfig } from '../main/agent-cli-settings.js'
 import type { CopilotCapabilities } from '../main/copilot-command.js'
 import type { CopilotMaintenanceState } from '../main/copilot-maintenance.js'
 import type { CopilotResourceAction, CopilotResourceKind, CopilotResourcesState } from '../main/copilot-resources.js'
@@ -116,6 +117,7 @@ export interface CopilotDesktopBridge {
   renameTab(tabId: string, title: string): Promise<DesktopState>
   closeTab(tabId: string): Promise<DesktopState>
   restartTab(tabId: string): Promise<DesktopState>
+  useCliSettings(tabId: string, keys: string[]): Promise<DesktopState>
   unloadTab(tabId: string): Promise<DesktopState>
   writeTab(tabId: string, data: string, gitCursorContext?: string): Promise<{ gitCursorContextAttached: boolean }>
   /** Give the session the task of resolving a pull in the repository, and claim the repository for it until it has finished.
@@ -218,6 +220,7 @@ export interface CopilotDesktopSettingsBridge {
     permissionPreset: PermissionPreset,
     defaultResumeMode: ResumeMode,
     launch: SessionLaunchConfig,
+    otherCli: OtherCliConfig | undefined,
   ): Promise<DesktopSettingsSnapshot>
   removeWorkspaceProfile(profileId: string): Promise<DesktopSettingsSnapshot>
   updateProvider(provider: CopilotProviderConfig): Promise<DesktopSettingsSnapshot>

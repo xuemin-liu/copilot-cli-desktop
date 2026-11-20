@@ -296,6 +296,42 @@ test('a saved tab keeps whether its title follows Copilot and whether a rename s
   ])
 })
 
+test('a profile keeps valid per-CLI permission/model settings and drops malformed ones', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project',
+    otherCli: {
+      claude: { approval: 'plan', model: 'claude-sonnet-5' },
+      codex: { approval: '--bogus', sandbox: 'read-only' },
+      junk: { model: 'x' },
+    },
+    tabs: [] }] })
+  assert.deepEqual(config.profiles[0]!.otherCli, {
+    claude: { approval: 'plan', model: 'claude-sonnet-5' },
+    codex: { sandbox: 'read-only' },
+  })
+})
+
+test('a profile with no usable per-CLI settings omits the otherCli field entirely', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project',
+    otherCli: { codex: { approval: 'not a level', model: '-x' } }, tabs: [] }] })
+  assert.equal('otherCli' in config.profiles[0]!, false)
+})
+
+test('a non-Copilot tab keeps its snapshotted per-CLI config; an older tab stays CLI-managed', () => {
+  const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project', tabs: [
+    { title: 'Claude', lastSessionId: 'a', cli: 'claude', otherCliConfig: { approval: 'acceptEdits', model: 'm', junk: 'x' } },
+    { title: 'Codex (unmanaged)', lastSessionId: 'b', cli: 'codex' },
+    { title: 'Codex bad snapshot', lastSessionId: 'c', cli: 'codex', otherCliConfig: { approval: 'bad value' } },
+    { title: 'Claude newer level', lastSessionId: 'd', cli: 'claude', otherCliConfig: { approval: 'dontAsk', model: 'm' } },
+  ] }] })
+  assert.deepEqual(config.profiles[0]!.tabs, [
+    { title: 'Claude', lastSessionId: 'a', cli: 'claude', otherCliConfig: { approval: 'acceptEdits', model: 'm' } },
+    { title: 'Codex (unmanaged)', lastSessionId: 'b', cli: 'codex' },
+    { title: 'Codex bad snapshot', lastSessionId: 'c', cli: 'codex' },
+    // Kept so launch validation can name it, rather than restoring as inherit and starting under the CLI's defaults.
+    { title: 'Claude newer level', lastSessionId: 'd', cli: 'claude', otherCliConfig: { approval: 'dontAsk', model: 'm' } },
+  ])
+})
+
 test('a saved tab keeps whether it was on screen, and a config from an older release loses its unloaded flag', () => {
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\project', tabs: [
     { title: 'Asleep', lastSessionId: 'a', unloaded: true },

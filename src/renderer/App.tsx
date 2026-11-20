@@ -465,6 +465,7 @@ export function App(): JSX.Element {
             onActivate={(tabId) => handleOperation(window.copilotDesktop.activateTab(tabId))}
             onClose={(tabId) => handleOperation(window.copilotDesktop.closeTab(tabId))}
             onRestart={(tabId) => handleOperation(window.copilotDesktop.restartTab(tabId))}
+            onUseCliSettings={(tabId, keys) => handleOperation(window.copilotDesktop.useCliSettings(tabId, keys))}
             onShowLog={(tabId) => showLog(tabId)}
             onCreate={() => openNewSession()}
             onFork={(tab) => setInputDialog({ kind: 'fork', tabId: tab.id, value: `Side: ${tab.title}`.slice(0, 120), sourceSessionId: tab.lastSessionId ?? '', pending: false, error: null })} />
