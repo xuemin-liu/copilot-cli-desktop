@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from 'node:fs'
-import { open, realpath, stat } from 'node:fs/promises'
-import { caseInsensitivePaths, hostPath, isSameOrInside, pathKey } from './host-path.js'
+import { lstat, open, realpath, stat, type FileHandle } from 'node:fs/promises'
+import { caseInsensitivePaths, hostPath, isSameOrInside, pathKey, samePath } from './host-path.js'
 import { isLocalFilesystemPath, isPathWithinRoot } from './external-targets.js'
 
 /** What a File tab shows. `other` is the card for files with no viewer. */
@@ -106,15 +106,15 @@ export function normalizeRelativePath(value: unknown): string | null {
 
 /** One key per file for finding its open tab: the root and the path, compared the way this platform compares names. */
 export function fileTabKey(root: string, path: string): string {
-  return `${pathKey(root)}
-${caseInsensitivePaths ? path.toLowerCase() : path}`
+  return JSON.stringify([pathKey(root), caseInsensitivePaths ? path.toLowerCase() : path])
 }
 
 export type ResolvedFile = { ok: true; absolute: string } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' }
 
 /**
  * The real file behind `relative` under `root`. Both are resolved through links first, so a link inside the root that
- * points outside it is refused, while a root that is itself reached through a link still works.
+ * points outside it is refused, while a root that is itself reached through a link still works. This answers "where does
+ * the path lead now"; reading goes through `openInRoot`, which ties the answer to the file that is actually read.
  */
 export async function resolveInRoot(root: string, relative: string): Promise<ResolvedFile> {
   const path = normalizeRelativePath(relative)
@@ -129,43 +129,101 @@ export async function resolveInRoot(root: string, relative: string): Promise<Res
   return { ok: true, absolute: lexical }
 }
 
-async function readBytes(path: string, limit: number): Promise<Uint8Array> {
-  const handle = await open(path, 'r')
+/** A file opened for reading whose place under its root was checked against the open file itself. */
+export interface OpenedFile { handle: FileHandle; absolute: string; size: number; mtimeMs: number }
+export type OpenResult = { ok: true; file: OpenedFile } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' | 'directory' }
+
+/**
+ * Open a file under `root` and prove that the open file is inside the root. Checking the path and then reading the path
+ * would be two separate lookups, and a link swapped between them would be read without ever being checked. So the file is
+ * opened first, and the check is made about that open file:
+ * - on Linux the system reports the real path of the open file, and that path must be inside the root;
+ * - elsewhere the path is resolved through links, must be inside the root, must not be a link itself, and must be the very
+ *   file that is open (same device and file number), and must still resolve to itself afterwards.
+ * Size, time and contents are then read from the open file only. The caller closes `handle`.
+ * `hooks` run just before opening and just after; tests use them to swap a link at those moments.
+ */
+export interface OpenHooks { beforeOpen?(): Promise<void>; afterOpen?(): Promise<void> }
+export async function openInRoot(root: string, relative: string, hooks?: OpenHooks): Promise<OpenResult> {
+  const first = await resolveInRoot(root, relative)
+  if (!first.ok) return first
+  await hooks?.beforeOpen?.()
+  let handle: FileHandle
+  try { handle = await open(first.absolute, 'r') } catch {
+    // A folder cannot be opened for reading on Windows; say what it is instead of calling it missing.
+    return { ok: false, reason: await stat(first.absolute).then(info => info.isDirectory() ? 'directory' as const : 'missing' as const, () => 'missing' as const) }
+  }
+  const refuse = async (reason: 'missing' | 'root-missing' | 'outside' | 'directory'): Promise<OpenResult> => { await handle.close().catch(() => undefined); return { ok: false, reason } }
   try {
-    // Read one byte past the limit: a file that grew after `stat` is caught here instead of being read whole.
-    const buffer = Buffer.allocUnsafe(limit + 1)
-    let length = 0
-    while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length)
-      if (bytesRead === 0) break
-      length += bytesRead
+    await hooks?.afterOpen?.()
+    const opened = await handle.stat({ bigint: true })
+    if (opened.isDirectory()) return await refuse('directory')
+    if (!opened.isFile()) return await refuse('missing')
+    const realRoot = await realpath(root)
+    if (process.platform === 'linux') {
+      const real = await realpath(`/proc/self/fd/${handle.fd}`)
+      if (!isSameOrInside(real, realRoot)) return await refuse('outside')
+    } else {
+      const real = await realpath(first.absolute)
+      if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot)) return await refuse('outside')
+      const there = await lstat(real, { bigint: true })
+      if (!there.isFile() || there.dev !== opened.dev || there.ino !== opened.ino || !samePath(await realpath(real), real)) return await refuse('outside')
     }
-    return buffer.subarray(0, length)
-  } finally { await handle.close() }
+    return { ok: true, file: { handle, absolute: first.absolute, size: Number(opened.size), mtimeMs: Number(opened.mtimeMs) } }
+  } catch { return refuse('missing') }
+}
+
+/** Read up to `limit` bytes of an open file, plus one: a result longer than `limit` means the file is over the limit. The
+ * buffer starts at the file's size and grows only if the file did, so a small file never costs a limit-sized buffer. */
+export async function readOpened(file: OpenedFile, limit: number): Promise<Uint8Array> {
+  const most = limit + 1
+  let buffer = Buffer.allocUnsafe(Math.max(1, Math.min(most, file.size + 1)))
+  let length = 0
+  for (;;) {
+    const { bytesRead } = await file.handle.read(buffer, length, buffer.length - length, length)
+    length += bytesRead
+    if (bytesRead === 0 || length >= most) break
+    if (length === buffer.length) {
+      const grown = Buffer.allocUnsafe(Math.min(most, buffer.length * 2))
+      buffer.copy(grown, 0, 0, length)
+      buffer = grown
+    }
+  }
+  return buffer.subarray(0, length)
 }
 
 /** Read a file for its tab. `known` is the copy the tab already shows: an unchanged file is not read again. */
-export async function readFileView(root: string, relative: string, known?: { mtimeMs: number; size: number } | null): Promise<FileViewResult> {
-  const resolved = await resolveInRoot(root, relative)
-  if (!resolved.ok) return { status: resolved.reason }
-  let info
-  try { info = await stat(resolved.absolute) } catch { return { status: 'missing' } }
-  if (info.isDirectory()) return { status: 'directory' }
-  if (!info.isFile()) return { status: 'missing' }
-  if (known && known.mtimeMs === info.mtimeMs && known.size === info.size) return { status: 'unchanged' }
-  const name = hostPath.basename(resolved.absolute)
-  const facts: FileFacts = { path: resolved.absolute, name, size: info.size, mtimeMs: info.mtimeMs, openable: canOpenWithDefaultApp(name) }
+export async function readFileView(root: string, relative: string, known?: { mtimeMs: number; size: number } | null, hooks?: OpenHooks): Promise<FileViewResult> {
+  const opened = await openInRoot(root, relative, hooks)
+  if (!opened.ok) return { status: opened.reason }
+  const file = opened.file
   try {
-    const head = await readBytes(resolved.absolute, SNIFF_BYTES)
+    if (known && known.mtimeMs === file.mtimeMs && known.size === file.size) return { status: 'unchanged' }
+    const name = hostPath.basename(file.absolute)
+    const head = await readOpened(file, SNIFF_BYTES - 1)
     const type = classifyFile(name, head)
+    // Open with default app is for files this panel can show. Anything else, and anything the system would run, is
+    // only ever revealed.
+    const facts: FileFacts = { path: file.absolute, name, size: file.size, mtimeMs: file.mtimeMs, openable: type.kind !== 'other' && canOpenWithDefaultApp(name) }
     if (type.kind === 'other') return { ...facts, status: 'ok', kind: 'other', reason: type.reason ?? 'unsupported' }
     const limit = type.kind === 'image' ? FILE_IMAGE_LIMIT : FILE_TEXT_LIMIT
-    if (info.size > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
-    const bytes = head.length <= SNIFF_BYTES ? head : await readBytes(resolved.absolute, limit)
+    if (file.size > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
+    const bytes = head.length < SNIFF_BYTES ? head : await readOpened(file, limit)
     if (bytes.length > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
     if (type.kind === 'image') return { ...facts, status: 'ok', kind: 'image', dataUrl: `data:${type.mime};base64,${Buffer.from(bytes).toString('base64')}` }
     return { ...facts, status: 'ok', kind: type.kind, text: decodeText(bytes), language: type.language }
-  } catch { return { status: 'missing' } }
+  } catch { return { status: 'missing' } } finally { await file.handle.close().catch(() => undefined) }
+}
+
+/** Whether Open with default app may start this file: the same answer the panel got when it read the file. */
+export async function fileOpenable(root: string, relative: string): Promise<string | null> {
+  const opened = await openInRoot(root, relative)
+  if (!opened.ok) return null
+  try {
+    const name = hostPath.basename(opened.file.absolute)
+    const type = classifyFile(name, await readOpened(opened.file, SNIFF_BYTES - 1))
+    return type.kind !== 'other' && canOpenWithDefaultApp(name) ? opened.file.absolute : null
+  } catch { return null } finally { await opened.file.handle.close().catch(() => undefined) }
 }
 
 /**
@@ -183,22 +241,23 @@ export async function readFileAsset(root: string, relative: string, href: string
   const joined = hostPath.posix.normalize(decoded.startsWith('/') ? decoded.slice(1) : hostPath.posix.join(folder, decoded.replaceAll('\\', '/')))
   const target = normalizeRelativePath(joined)
   if (!target) return null
-  const resolved = await resolveInRoot(root, target)
-  if (!resolved.ok) return null
+  const opened = await openInRoot(root, target)
+  if (!opened.ok) return null
   try {
-    const info = await stat(resolved.absolute)
-    if (!info.isFile() || info.size > FILE_ASSET_LIMIT) return null
-    const bytes = await readBytes(resolved.absolute, FILE_ASSET_LIMIT)
-    const type = classifyFile(hostPath.basename(resolved.absolute), bytes.subarray(0, SNIFF_BYTES))
+    if (opened.file.size > FILE_ASSET_LIMIT) return null
+    const bytes = await readOpened(opened.file, FILE_ASSET_LIMIT)
+    const type = classifyFile(hostPath.basename(opened.file.absolute), bytes.subarray(0, SNIFF_BYTES))
     if (type.kind !== 'image' || !type.mime || bytes.length > FILE_ASSET_LIMIT) return null
     return `data:${type.mime};base64,${Buffer.from(bytes).toString('base64')}`
-  } catch { return null }
+  } catch { return null } finally { await opened.file.handle.close().catch(() => undefined) }
 }
 
-/** Where a clicked path points: the root that holds it, and its path under that root. Null when no root holds it. */
+/** Where a clicked path points: the root that holds it, and its path under that root (empty for the root folder itself,
+ * which can be revealed but never opened). Null when no root holds it. */
 export function locateInRoots(roots: readonly string[], absolute: string): { root: string; path: string } | null {
   for (const root of roots) {
     if (!isPathWithinRoot(root, absolute) || !isSameOrInside(absolute, root)) continue
+    if (samePath(root, absolute)) return { root: hostPath.resolve(root), path: '' }
     const path = normalizeRelativePath(hostPath.relative(hostPath.resolve(root), hostPath.resolve(absolute)))
     if (path) return { root: hostPath.resolve(root), path }
   }

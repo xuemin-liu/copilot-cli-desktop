@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, realpath, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  canOpenWithDefaultApp, classifyFile, decodeText, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileTabKey, FileWatchers, locateInRoots, normalizeRelativePath,
-  readFileAsset, readFileView, resolveInRoot,
+  canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, locateInRoots,
+  normalizeRelativePath, openInRoot, readFileAsset, readFileView, readOpened, resolveInRoot,
 } from './file-view.js'
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
@@ -67,7 +67,8 @@ test('a clicked path belongs to the first root that holds it', async () => {
   try {
     assert.deepEqual(locateInRoots([root], join(root, 'docs', 'readme.md')), { root, path: 'docs/readme.md' })
     assert.equal(locateInRoots([root], join(outside, 'secret.txt')), null)
-    assert.equal(locateInRoots([root], root), null, 'the root itself is not a file')
+    assert.deepEqual(locateInRoots([root], root), { root, path: '' }, 'the root itself is found, with no path: it can be revealed')
+    assert.deepEqual(locateInRoots([root], join(root, 'docs', '..')), { root, path: '' })
     assert.equal(locateInRoots([root], `${root}-other${join('/', 'a.txt')}`), null, 'a folder whose name only starts like the root is outside it')
     const nested = join(root, 'docs')
     assert.deepEqual(locateInRoots([nested, root], join(root, 'docs', 'readme.md')), { root: nested, path: 'readme.md' })
@@ -89,6 +90,55 @@ test('a file is read only when it is really inside its root', async () => {
     // A root that is itself reached through a link still works.
     await symlink(root, join(base, 'linked-root'), 'junction')
     assert.deepEqual(await resolveInRoot(join(base, 'linked-root'), 'app.ts'), { ok: true, absolute: join(base, 'linked-root', 'app.ts') })
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+test('a link swapped while the file is being opened cannot get a file outside the root read', async () => {
+  const { base, root, outside } = await fixture()
+  try {
+    await mkdir(join(root, 'real'))
+    await writeFile(join(root, 'real', 'note.txt'), 'inside the workspace\n')
+    await writeFile(join(outside, 'note.txt'), 'outside the workspace\n')
+    const link = join(root, 'swap')
+    const point = async (target: string): Promise<void> => { await rm(link, { recursive: true, force: true }); await symlink(target, link, 'junction') }
+    await point(join(root, 'real'))
+    const still = await readFileView(root, 'swap/note.txt')
+    assert.ok(still.status === 'ok' && still.kind === 'text' && still.text === 'inside the workspace\n', 'a link that stays inside the root is read')
+
+    // The path is inside the root when it is checked, outside when it is opened, and inside again when it is checked
+    // once more. Only the open file can tell: it is not the file the path now names.
+    const swapped = await readFileView(root, 'swap/note.txt', null, { beforeOpen: () => point(outside), afterOpen: () => point(join(root, 'real')) })
+    assert.deepEqual(swapped, { status: 'outside' })
+    // Outside when opened and still outside afterwards.
+    await point(join(root, 'real'))
+    assert.deepEqual(await readFileView(root, 'swap/note.txt', null, { beforeOpen: () => point(outside) }), { status: 'outside' })
+    // Inside when opened, outside afterwards: the open file is the checked one no longer, so nothing is read.
+    await point(join(root, 'real'))
+    assert.deepEqual(await readFileView(root, 'swap/note.txt', null, { afterOpen: () => point(outside) }), { status: 'outside' })
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+test('a read takes memory for the file, not for the limit, and still sees a file that grew', async () => {
+  const { base, root } = await fixture()
+  try {
+    await writeFile(join(root, 'icon.png'), Buffer.concat([PNG, Buffer.alloc(12_000)]))
+    const opened = await openInRoot(root, 'icon.png')
+    assert.ok(opened.ok)
+    try {
+      const bytes = await readOpened(opened.file, FILE_ASSET_LIMIT)
+      assert.equal(bytes.length, PNG.length + 12_000)
+      assert.ok(bytes.buffer.byteLength <= bytes.length + 1, `a ${bytes.length}-byte file was read into a ${bytes.buffer.byteLength}-byte buffer`)
+    } finally { await opened.file.handle.close() }
+
+    await writeFile(join(root, 'grows.log'), 'a'.repeat(10_000))
+    const growing = await openInRoot(root, 'grows.log')
+    assert.ok(growing.ok)
+    try {
+      await appendFile(join(root, 'grows.log'), 'b'.repeat(50_000))
+      assert.equal((await readOpened(growing.file, 1_000_000)).length, 60_000, 'bytes written after the size was taken are read too')
+      assert.equal((await readOpened(growing.file, 20_000)).length, 20_001, 'and never more than one byte past the limit')
+    } finally { await growing.file.handle.close() }
+    assert.deepEqual(await openInRoot(root, 'docs'), { ok: false, reason: 'directory' })
   } finally { await rm(base, { recursive: true, force: true }) }
 })
 
@@ -116,6 +166,15 @@ test('reading a file gives its view, and nothing when it has not changed', async
     await writeFile(join(root, 'data.bin'), Buffer.from([1, 2, 0, 3]))
     const binary = await readFileView(root, 'data.bin')
     assert.ok(binary.status === 'ok' && binary.kind === 'other' && binary.reason === 'binary')
+    // A file with no viewer is only ever revealed, whatever its name says, on the card and in the main process alike.
+    await writeFile(join(root, 'archive.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0]))
+    const archive = await readFileView(root, 'archive.zip')
+    assert.ok(archive.status === 'ok' && archive.kind === 'other' && archive.openable === false)
+    assert.equal(binary.openable, false)
+    assert.equal(await fileOpenable(root, 'archive.zip'), null)
+    assert.equal(await fileOpenable(root, 'app.ts'), join(root, 'app.ts'))
+    assert.equal(await fileOpenable(root, 'docs/img/logo.png'), join(root, 'docs', 'img', 'logo.png'))
+    assert.equal(await fileOpenable(root, 'missing.txt'), null)
 
     await writeFile(join(root, 'big.log'), 'x')
     await truncate(join(root, 'big.log'), FILE_TEXT_LIMIT)
@@ -132,6 +191,7 @@ test('reading a file gives its view, and nothing when it has not changed', async
     await writeFile(join(root, 'run.ps1'), 'Write-Host hi\n')
     const script = await readFileView(root, 'run.ps1')
     assert.ok(script.status === 'ok' && script.kind === 'text' && script.openable === false)
+    assert.equal(await fileOpenable(root, 'run.ps1'), null, 'a script is shown as text but never started')
   } finally { await rm(base, { recursive: true, force: true }) }
 })
 

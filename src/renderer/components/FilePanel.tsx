@@ -16,6 +16,10 @@ function setWatching(profileId: string, tabId: string, on: boolean): void {
   void next.then(() => { if (watchQueue.get(tabId) === next) watchQueue.delete(tabId) })
 }
 
+/** Different pictures one Markdown file may load, and how many are read at the same time. */
+const MARKDOWN_PICTURES = 200
+const MARKDOWN_PICTURE_READS = 3
+
 const CARD_REASON = {
   unsupported: 'There is no viewer for this kind of file.',
   binary: 'This file is not text, so it is not shown.',
@@ -96,6 +100,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     const root = body.current
     if (markdownHtml === null || !root) return
     let current = true
+    const wanted = new Map<string, ((dataUrl: string | null) => void)[]>()
     for (const image of root.querySelectorAll<HTMLImageElement>('img[data-file-src]')) {
       const href = image.dataset.fileSrc ?? ''
       const remote = /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)
@@ -107,12 +112,29 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
         image.replaceWith(note)
       }
       if (remote) { replace('picture on the web, not loaded'); continue }
-      void window.copilotDesktop.fileAsset(profileId, tab.id, href).then(dataUrl => {
-        if (!current || !image.isConnected) return
+      const show = (dataUrl: string | null): void => {
+        if (!image.isConnected) return
         if (dataUrl) image.src = dataUrl
         else replace('picture not found')
-      }, () => { if (current && image.isConnected) replace('picture not found') })
+      }
+      const waiting = wanted.get(href)
+      if (waiting) waiting.push(show)
+      else if (wanted.size < MARKDOWN_PICTURES) wanted.set(href, [show])
+      else replace('picture not loaded: too many in this file')
     }
+    // Each picture is read once however often the file shows it, and only a few are read at a time: every read holds
+    // the whole picture in memory in both processes.
+    const queue = [...wanted]
+    const next = (): void => {
+      const entry = current ? queue.shift() : undefined
+      if (!entry) return
+      const [href, shows] = entry
+      void window.copilotDesktop.fileAsset(profileId, tab.id, href).catch(() => null).then(dataUrl => {
+        if (current) for (const show of shows) show(dataUrl)
+        next()
+      })
+    }
+    for (let reader = 0; reader < MARKDOWN_PICTURE_READS; reader++) next()
     return () => { current = false }
   }, [markdownHtml, profileId, tab.id])
 

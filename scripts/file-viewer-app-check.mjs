@@ -56,7 +56,7 @@ if (!process.versions.electron) {
         '# Guide title', '', 'Some **bold** text and a [relative link](other.md) and a [web link](https://example.com/page).', '',
         '## Second part', '', '| Name | Count |', '| :--- | ---: |', '| apples | 3 |', '',
         '- [x] done item', '- [ ] open item', '', '```ts', 'const greeting: string = "hi"', '```', '',
-        '![local dot](img/dot.png)', '', '![remote](https://example.com/tracker.png)', '', '![escape](../../outside/secret.png)', '',
+        '![local dot](img/dot.png)', '', '![the same dot again](img/dot.png)', '', '![remote](https://example.com/tracker.png)', '', '![escape](../../outside/secret.png)', '',
         '<script>window.pwned = 1</script>', '<img src="x" onerror="window.pwned = 2">', '<a href="javascript:window.pwned=3">bad link</a>',
         '<iframe src="https://example.com"></iframe>', '<form action="https://example.com"><input name="q"><button>send</button></form>',
         '<div style="position:fixed;inset:0;background:red" class="app-shell file-panel-header">styled</div>', '<h2 id="root">clobber</h2>', '',
@@ -178,7 +178,8 @@ if (!process.versions.electron) {
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('plain notes')`, 'path with spaces')
     assert.deepEqual(await open('folder with spaces'), { ok: true, revealed: true })
     assert.deepEqual(await open('src/app.ts', { reveal: true }), { ok: true, revealed: true })
-    assert.deepEqual(revealed.splice(0), [join(workspace, 'folder with spaces'), join(workspace, 'src', 'app.ts')])
+    assert.deepEqual(await open(workspace), { ok: true, revealed: true }, 'the workspace folder itself is revealed')
+    assert.deepEqual(revealed.splice(0), [join(workspace, 'folder with spaces'), join(workspace, 'src', 'app.ts'), workspace])
     assert.equal((await fileTabs()).length, 2)
 
     // --- Outside the workspace, through a link, or missing: refused quietly. ---
@@ -201,7 +202,8 @@ if (!process.versions.electron) {
     assert.equal(await md('element.querySelectorAll(".file-task").length'), 2)
     assert.equal(await md('element.querySelectorAll(".file-task-done").length'), 1)
     assert.equal(await md('element.querySelector("pre code .hljs-keyword") !== null'), true)
-    assert.equal(await md('element.querySelectorAll("img").length'), 1, 'only the local picture is an image')
+    await until(`document.querySelectorAll(${JSON.stringify(`${panel} .file-markdown img[src^="data:image/png"]`)}).length === 2`, 'a picture shown twice')
+    assert.equal(await md('element.querySelectorAll("img").length'), 2, 'only the local picture, shown twice, is an image')
     assert.match(await md('[...element.querySelectorAll(".file-image-note")].map(note => note.textContent).join("|")'), /remote \(picture on the web, not loaded\)\|escape \(picture not found\)/)
     assert.equal(await md('element.querySelectorAll("script, iframe, form, input, button, style, [onerror], [style]").length'), 0)
     assert.equal(await md('[...element.querySelectorAll("a")].some(link => /javascript:/i.test(link.getAttribute("href") ?? ""))'), false)
@@ -256,7 +258,13 @@ if (!process.versions.electron) {
     assert.equal(await clipboard.readText(), join(workspace, 'tool.exe'))
     assert.deepEqual(await open('archive.zip'), { ok: true })
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('archive.zip')`, 'card for an archive')
-    assert.ok((await buttons()).includes('Open with default app'))
+    assert.deepEqual(await buttons(), ['Reload', 'Copy path', 'Reveal in folder', 'Reveal in folder'], 'a file with no viewer is only revealed')
+    const zip = (await fileTabs()).find(tab => tab.file.path === 'archive.zip')
+    await assert.rejects(ui(`window.copilotDesktop.fileCommand(${JSON.stringify(profileId)}, ${JSON.stringify(zip.id)}, 'open')`), /not opened from here/)
+    assert.deepEqual(openedWithApp, [])
+    const picture = (await fileTabs()).find(tab => tab.file.path === 'pixel.png')
+    await ui(`window.copilotDesktop.fileCommand(${JSON.stringify(profileId)}, ${JSON.stringify(picture.id)}, 'open')`)
+    assert.deepEqual(openedWithApp.splice(0), [join(workspace, 'pixel.png')], 'a picture the panel shows can be opened with its app')
     await shot('fallback-card.png')
 
     // --- Live refresh: an edit, hide-edit-show, and a save by rename. ---

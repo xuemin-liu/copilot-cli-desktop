@@ -108,7 +108,7 @@ import {
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
-import { canOpenWithDefaultApp, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
+import { fileOpenable, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
@@ -5570,6 +5570,12 @@ ipcMain.handle('desktop:open-file', async (event, source: unknown, candidate: un
   }
   const located = locateInRoots(roots, hostPath.resolve(base, candidate))
   if (!located) return { ok: false, reason: 'outside-workspace' }
+  if (located.path === '') {
+    // The workspace folder or a worktree folder itself: a folder, so it is shown in the file manager.
+    if (!(await pathExists(located.root))) return { ok: false, reason: 'missing' }
+    shell.showItemInFolder(located.root)
+    return { ok: true, revealed: true }
+  }
   const resolved = await resolveInRoot(located.root, located.path)
   if (!resolved.ok) return { ok: false, reason: resolved.reason === 'outside' ? 'outside-workspace' : 'missing' }
   const info = await Promise.race([stat(resolved.absolute).catch(() => null), new Promise<null>(done => { setTimeout(() => done(null), 3_000).unref() })])
@@ -5617,9 +5623,10 @@ ipcMain.handle('desktop:file-command', async (event, profileId: unknown, toolTab
   if (command === 'reveal') shell.showItemInFolder(resolved.absolute)
   else if (command === 'copy-path') clipboard.writeText(resolved.absolute)
   else if (command === 'open') {
-    // Programs and scripts are never started from here; the panel offers Reveal in folder for them.
-    if (!canOpenWithDefaultApp(hostPath.basename(resolved.absolute))) throw new Error('This kind of file is not opened from here. Use Reveal in folder.')
-    const failure = await shell.openPath(resolved.absolute)
+    // Only files the panel can show are opened, and never programs or scripts; the panel offers Reveal in folder for the rest.
+    const openable = await fileOpenable(file.root, file.path)
+    if (!openable) throw new Error('This kind of file is not opened from here. Use Reveal in folder.')
+    const failure = await shell.openPath(openable)
     if (failure) throw new Error(failure)
   } else throw new Error('Unknown file command')
 })
