@@ -60,7 +60,6 @@ body {
   width: 26px;
   height: 26px;
   flex: none;
-  margin-left: auto;
   padding: 0;
   border: 0;
   background: transparent;
@@ -172,6 +171,7 @@ button:disabled {
   display: flex;
   flex: none;
   gap: 2px;
+  margin-left: auto;
 }
 
 .session-navigation .icon-button {
@@ -232,7 +232,7 @@ button:disabled {
   display: none;
 }
 
-.sidebar-collapsed .sidebar-collapse-button {
+.sidebar-collapsed .session-navigation {
   margin-left: 0;
 }
 
