@@ -302,6 +302,9 @@ function WorkspaceProfileEditor({
                 {selector.levels.map((level) => (
                   <option key={level.value} value={level.value}>{level.label}</option>
                 ))}
+                {activeConfig[selector.key] && !selector.levels.some((level) => level.value === activeConfig[selector.key]) && (
+                  <option value={activeConfig[selector.key]}>{activeConfig[selector.key]} (not supported — choose another)</option>
+                )}
               </select>
             </label>
           ))}

@@ -300,7 +300,7 @@ test('a profile keeps valid per-CLI permission/model settings and drops malforme
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project',
     otherCli: {
       claude: { approval: 'plan', model: 'claude-sonnet-5' },
-      codex: { approval: 'bogus', sandbox: 'read-only' },
+      codex: { approval: '--bogus', sandbox: 'read-only' },
       junk: { model: 'x' },
     },
     tabs: [] }] })
@@ -312,7 +312,7 @@ test('a profile keeps valid per-CLI permission/model settings and drops malforme
 
 test('a profile with no usable per-CLI settings omits the otherCli field entirely', () => {
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project',
-    otherCli: { codex: { approval: 'nope' } }, tabs: [] }] })
+    otherCli: { codex: { approval: 'not a level', model: '-x' } }, tabs: [] }] })
   assert.equal('otherCli' in config.profiles[0]!, false)
 })
 
@@ -320,12 +320,15 @@ test('a non-Copilot tab keeps its snapshotted per-CLI config; an older tab stays
   const config = normalizeDesktopConfig({ profiles: [{ id: 'p', name: 'project', path: 'D:\\project', tabs: [
     { title: 'Claude', lastSessionId: 'a', cli: 'claude', otherCliConfig: { approval: 'acceptEdits', model: 'm', junk: 'x' } },
     { title: 'Codex (unmanaged)', lastSessionId: 'b', cli: 'codex' },
-    { title: 'Codex bad snapshot', lastSessionId: 'c', cli: 'codex', otherCliConfig: { approval: 'bogus' } },
+    { title: 'Codex bad snapshot', lastSessionId: 'c', cli: 'codex', otherCliConfig: { approval: 'bad value' } },
+    { title: 'Claude newer level', lastSessionId: 'd', cli: 'claude', otherCliConfig: { approval: 'dontAsk', model: 'm' } },
   ] }] })
   assert.deepEqual(config.profiles[0]!.tabs, [
     { title: 'Claude', lastSessionId: 'a', cli: 'claude', otherCliConfig: { approval: 'acceptEdits', model: 'm' } },
     { title: 'Codex (unmanaged)', lastSessionId: 'b', cli: 'codex' },
     { title: 'Codex bad snapshot', lastSessionId: 'c', cli: 'codex' },
+    // Kept so launch validation can name it, rather than restoring as inherit and starting under the CLI's defaults.
+    { title: 'Claude newer level', lastSessionId: 'd', cli: 'claude', otherCliConfig: { approval: 'dontAsk', model: 'm' } },
   ])
 })
 

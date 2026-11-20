@@ -135,6 +135,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   renameTab: (tabId, title) => ipcRenderer.invoke('desktop:rename-tab', tabId, title),
   closeTab: (tabId) => ipcRenderer.invoke('desktop:close-tab', tabId),
   restartTab: (tabId) => ipcRenderer.invoke('desktop:restart-tab', tabId),
+  useCliSettings: (tabId, keys) => ipcRenderer.invoke('desktop:use-cli-settings', tabId, keys),
   unloadTab: (tabId) => ipcRenderer.invoke('desktop:unload-tab', tabId),
   forkSideChat: (tabId, sourceSessionId, title) => ipcRenderer.invoke('desktop:fork-side-chat', tabId, sourceSessionId, title),
   writeTab: (tabId, data, gitCursorContext) => ipcRenderer.invoke('desktop:write-tab', tabId, data, gitCursorContext),

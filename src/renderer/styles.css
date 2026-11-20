@@ -1268,6 +1268,24 @@ button:disabled {
   color: #fff;
 }
 
+.other-cli-blocked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid #5c4318;
+  background: rgb(214 158 46 / 12%);
+  color: #f3d79a;
+  font-size: 12px;
+}
+
+.other-cli-blocked p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
 .other-cli-tab-active {
   border-color: #4f88ff;
   background: rgb(79 136 255 / 14%);

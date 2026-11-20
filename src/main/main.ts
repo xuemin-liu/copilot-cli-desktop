@@ -125,10 +125,10 @@ import {
   type CopilotProviderConfig,
 } from './provider-config.js'
 import { PtySession, type PtySessionExit } from './pty-session.js'
-import { CodexSessionDiscovery, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
+import { CodexSessionDiscovery, agentCliHelp, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
-import { buildOtherCliLaunchArgs, normalizeOtherCliConfig } from './agent-cli-settings.js'
+import { buildOtherCliLaunchArgs, incompatibleOtherCliFields, validateOtherCliConfig, type IncompatibleField, type PerCliConfig } from './agent-cli-settings.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { readSessionStart, worktreeNameFor } from './session-store-discovery.js'
@@ -2049,6 +2049,50 @@ async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResoluti
   return resolution
 }
 
+/** Each resolved CLI's `--help`, read once per executable and version; a failed read is not kept, so the next launch tries again. */
+const otherCliHelps = new Map<string, Promise<string | null>>()
+
+function otherCliHelp(resolution: AgentCliResolution): Promise<string | null> {
+  const key = [resolution.command, ...resolution.prefixArgs, resolution.version ?? ''].join('\0')
+  const known = otherCliHelps.get(key)
+  if (known) return known
+  const help = agentCliHelp(resolution)
+  otherCliHelps.set(key, help)
+  void help.then((text) => { if (text === null && otherCliHelps.get(key) === help) otherCliHelps.delete(key) })
+  return help
+}
+
+/** Saved settings a launch could not apply; `fields` names each one so the user can clear just those. */
+class OtherCliSettingsError extends Error {
+  constructor(message: string, readonly fields: IncompatibleField[]) { super(message) }
+}
+
+/**
+ * The permission/model flags for a launch, checked against the resolved binary first: every configured field must be a
+ * level this build knows whose flags the installed CLI's help lists. Nothing configured means no flags and no check.
+ */
+async function otherCliLaunchArgs(cli: OtherCli, resolution: AgentCliResolution, config: PerCliConfig | undefined): Promise<string[]> {
+  if (!config || Object.keys(config).length === 0) return []
+  const fields = incompatibleOtherCliFields(cli, config, await otherCliHelp(resolution))
+  if (fields.length > 0) {
+    throw new OtherCliSettingsError(`${sessionCliLabel(cli)} cannot use ${fields.map((field) => `${field.label} "${field.value}" (${field.reason})`).join('; ')}.`, fields)
+  }
+  return buildOtherCliLaunchArgs(cli, config)
+}
+
+/** Record (or clear) which saved settings stopped a tab from launching, for its recovery notice. */
+function setOtherCliBlocked(tabId: string, fields: IncompatibleField[] | null): void {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab || (!fields && !tab.otherCliBlocked)) return
+  tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+    if (candidate.id !== tabId) return candidate
+    const { otherCliBlocked: _previous, ...rest } = candidate
+    return fields && fields.length > 0 ? { ...rest, otherCliBlocked: fields } : rest
+  }) }
+  syncTabState()
+  broadcastState()
+}
+
 /**
  * The process for a tab that runs another CLI: its own terminal UI in `cwd`, with the desktop's own environment and none
  * of Copilot's credentials, helpers or flags. `sessionId` is the CLI's session id when the tab has one; `stored` says
@@ -2094,11 +2138,19 @@ async function startOtherCliTab(
   onCreated: ((tabId: string) => void) | null,
 ): Promise<DesktopState> {
   const label = sessionCliLabel(cli)
+  // Snapshot the workspace's settings for this CLI now, so a later profile edit never changes how this tab relaunches.
+  const otherCliConfig = profile.otherCli?.[cli]
   pendingSessionCreations++
   let resolution: AgentCliResolution
-  try { resolution = await otherCliLaunchResolution(cli) }
-  finally { pendingSessionCreations-- }
-  if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
+  let configArgs: string[]
+  try {
+    resolution = await otherCliLaunchResolution(cli)
+    if (resolution.version === null) throw new Error(resolution.error ?? `${label} is not available`)
+    configArgs = await otherCliLaunchArgs(cli, resolution, otherCliConfig)
+  } catch (error) {
+    if (error instanceof OtherCliSettingsError) throw new Error(`${error.message} Change this workspace's ${label} settings in Settings, then try again.`)
+    throw error
+  } finally { pendingSessionCreations-- }
   // Recheck after the lookup: another creation or a shutdown may have completed during the await.
   if (shuttingDown()) throw new Error('The app is shutting down or updating')
   if (options.authorizeAutomatic && !options.authorizeAutomatic()) throw new Error('Automatic work was paused')
@@ -2107,9 +2159,6 @@ async function startOtherCliTab(
 
   const id = `tab-${nextTabSequence++}`
   const cwd = worktreeRoot ?? profile.path
-  // Snapshot the workspace's settings for this CLI now, so a later profile edit never changes how this tab relaunches.
-  const otherCliConfig = profile.otherCli?.[cli]
-  const configArgs = buildOtherCliLaunchArgs(cli, otherCliConfig)
   // Claude Code takes the id of a new session. The other CLIs pick their own ids.
   const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false, configArgs)
   managedTabs.set(id, { session })
@@ -3494,8 +3543,16 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       if (gone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
       const cwd = linked?.root ?? savedProfile.path
       // Build the permission/model args from the tab's own saved snapshot (never the profile's current settings) and
-      // validate them BEFORE stopping the live process, so an unsupported saved value cannot cost a usable session.
-      const configArgs = buildOtherCliLaunchArgs(cli, tab.otherCliConfig)
+      // check them against the resolved binary BEFORE stopping the live process, so a saved value this installation
+      // cannot apply leaves the session running and names the fields the user can clear.
+      let configArgs: string[]
+      try {
+        configArgs = await otherCliLaunchArgs(cli, resolution, tab.otherCliConfig)
+      } catch (error) {
+        if (error instanceof OtherCliSettingsError) setOtherCliBlocked(tabId, error.fields)
+        throw error
+      }
+      setOtherCliBlocked(tabId, null)
       stopRequested = true
       cancelHeldInput(tabId)
       if (managed) await managed.session.stop()
@@ -3763,6 +3820,27 @@ const wakingTabs = new Map<string, Promise<void>>()
 /** Starts a stopped tab's process without a click on Resume: the tab on screen at launch, a restored meeting's sessions,
  * and a session opened from History. It resumes the saved conversation the way Restart does. A failure leaves the tab
  * crashed, with its Restart button. Settles once the start is over. */
+/**
+ * The recovery for a tab whose saved settings could not be applied: drop just the named fields from this tab's own
+ * snapshot (not the workspace profile, which cannot unblock it, and not the whole snapshot, which would lose its other
+ * still-valid choices) so those fields fall back to the CLI's settings, then start the tab again.
+ */
+async function useCliSettingsForTab(tabId: string, keys: string[]): Promise<DesktopState> {
+  const tab = tabsState.tabs.find((candidate) => candidate.id === tabId)
+  if (!tab?.cli) throw new Error('This session tab does not run another CLI')
+  const remaining: PerCliConfig = { ...(tab.otherCliConfig ?? {}) }
+  for (const key of keys) delete remaining[key]
+  tabsState = { ...tabsState, tabs: tabsState.tabs.map((candidate) => {
+    if (candidate.id !== tabId) return candidate
+    const { otherCliConfig: _old, otherCliBlocked: _blocked, ...rest } = candidate
+    return Object.keys(remaining).length > 0 ? { ...rest, otherCliConfig: remaining } : rest
+  }) }
+  syncTabState()
+  broadcastState()
+  persistProfileTabs()
+  return restartSessionTab(tabId)
+}
+
 function startDormantTab(tabId: string): Promise<void> {
   const pending = wakingTabs.get(tabId)
   if (pending) return pending
@@ -3771,6 +3849,9 @@ function startDormantTab(tabId: string): Promise<void> {
   const waking = restartSessionTab(tabId).then(() => {}, (error) => {
     void writeAppLog(`Could not start restored session ${tabId}: ${String(error)}`).catch(() => {})
     if (tabsState.tabs.find((tab) => tab.id === tabId)?.status !== 'dormant') return
+    // Saved settings the installed CLI cannot apply stopped it before any process started: it stays Not running, with
+    // its notice naming the fields, rather than being shown as a session that stopped unexpectedly.
+    if (error instanceof OtherCliSettingsError) return
     tabsState = setTabStatus(tabsState, tabId, 'crashed')
     syncTabState()
     broadcastState()
@@ -4091,12 +4172,13 @@ async function updateWorkspaceProfile(
   if (!normalizedName || normalizedName.length > 100) throw new Error('Workspace name must contain 1–100 characters')
   if (!isPermissionPreset(permissionPreset)) throw new Error('Invalid permission preset')
   if (!isResumeMode(defaultResumeMode)) throw new Error('Invalid resume mode')
+  // Check the submitted settings before changing anything, so a malformed value fails the save instead of being dropped.
+  const validatedOtherCli = validateOtherCliConfig(otherCli, profile.otherCli)
   profile.name = normalizedName
   profile.permissionPreset = permissionPreset
   profile.defaultResumeMode = defaultResumeMode
   profile.launch = normalizeSessionLaunchConfig(launch)
-  const normalizedOtherCli = normalizeOtherCliConfig(otherCli)
-  if (Object.keys(normalizedOtherCli).length > 0) profile.otherCli = normalizedOtherCli
+  if (Object.keys(validatedOtherCli).length > 0) profile.otherCli = validatedOtherCli
   else delete profile.otherCli
   syncWorkspaceState()
   await persistConfig()
@@ -5017,6 +5099,13 @@ ipcMain.handle('desktop:restart-tab', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return restartSessionTab(tabId)
+})
+ipcMain.handle('desktop:use-cli-settings', (event, tabId: unknown, keys: unknown) => {
+  assertTrustedIpcSender(event)
+  if (typeof tabId !== 'string' || !Array.isArray(keys) || keys.length === 0 || keys.length > 16 || keys.some((key) => typeof key !== 'string')) {
+    throw new Error('Invalid session tab settings')
+  }
+  return useCliSettingsForTab(tabId, keys as string[])
 })
 ipcMain.handle('desktop:fork-side-chat', (event, tabId: unknown, sourceSessionId: unknown, title: unknown) => {
   assertTrustedIpcSender(event)

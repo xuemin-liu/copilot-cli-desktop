@@ -6,7 +6,7 @@ import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
 import type { MeetingView } from './meeting.js'
 import type { OtherCli } from './session-cli.js'
-import type { OtherCliConfig, PerCliConfig } from './agent-cli-settings.js'
+import type { IncompatibleField, OtherCliConfig, PerCliConfig } from './agent-cli-settings.js'
 
 export type RevealPathResult =
   | { ok: true }
@@ -74,6 +74,9 @@ export interface DesktopSessionTab {
   /** For a non-Copilot tab: the permission/model settings this session launches with, snapshotted from the profile
    * at creation and reused verbatim on restart/restore. Absent for Copilot tabs and pre-feature saved tabs. */
   otherCliConfig?: PerCliConfig
+  /** The saved settings this tab's last start or restart could not apply, so it did not launch with them. The tab keeps
+   * its old process, if any, until the user clears those fields. Runtime-only. */
+  otherCliBlocked?: IncompatibleField[]
   browserProfileId?: string
   workspaceProfileId: string
   lastSessionId: string | null

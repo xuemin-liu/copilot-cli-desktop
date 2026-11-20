@@ -17,6 +17,8 @@ interface SessionWorkspaceProps {
   onFork: (tab: DesktopSessionTab) => void
   onClose: (tabId: string) => void
   onRestart: (tabId: string) => void
+  /** Clear the named saved settings of a tab that could not launch with them, then start it again. */
+  onUseCliSettings?: (tabId: string, keys: string[]) => void
   onShowLog: (tabId: string) => void
   onCreate: () => void
   /** Project tools live in the existing session toolbar; also available with no sessions. */
@@ -42,7 +44,7 @@ function savedSplit(): number {
   } catch { return 55 }
 }
 
-export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
+export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, onFork, onClose, onRestart, onUseCliSettings, onShowLog, onCreate, toolsControl, poppedOutTabIds = [], onPopOut, browserOpenId = null, onOpenBrowser, gitOpen = false, onToggleGit, desktopControlAllowed = false, desktopControlReadyTabIds = [], desktopControl = {} }: SessionWorkspaceProps): JSX.Element {
   const { main, side } = visibleSessionTabs({ tabs, activeTabId })
   const [split, setSplit] = useState(savedSplit)
   const [desktopPanels, setDesktopPanels] = useState<ReadonlySet<string>>(new Set())
@@ -131,6 +133,21 @@ export function SessionWorkspace({ tabs, activeTabId, canOpenTab, onActivate, on
                 aria-label={`Close ${tab.sideChat ? 'side chat ' : ''}${tab.title}`}
                 title={tab.sideChat ? 'Close side chat — keep the main session running' : 'Close session'}>×</button>
             </header>
+            {tab.cli && tab.otherCliBlocked && tab.otherCliBlocked.length > 0 && (
+              <div className="other-cli-blocked" role="alert">
+                <p>
+                  {sessionCliLabel(tab.cli)} did not start with this tab&rsquo;s saved settings:{' '}
+                  {tab.otherCliBlocked.map((field) => `${field.label} “${field.value}” (${field.reason})`).join('; ')}.
+                  {tab.status !== 'dormant' && tab.status !== 'crashed' && tab.status !== 'completed' ? ' The current session keeps running.' : ''}
+                </p>
+                {onUseCliSettings && (
+                  <button type="button" disabled={busy}
+                    onClick={() => onUseCliSettings(tab.id, tab.otherCliBlocked!.map((field) => field.key))}>
+                    Use {sessionCliLabel(tab.cli)} settings for {tab.otherCliBlocked.length === 1 ? 'this' : 'these'} and start
+                  </button>
+                )}
+              </div>
+            )}
             {desktopPanels.has(tab.id) && !tab.sideChat && !tab.remote && !tab.cli && (desktopControlAllowed || desktopControl[tab.id]?.enabled) && (
               <DesktopControlPanel tab={tab} allowed={desktopControlAllowed} ready={desktopControlReadyTabIds.includes(tab.id)} view={desktopControl[tab.id]} />
             )}
