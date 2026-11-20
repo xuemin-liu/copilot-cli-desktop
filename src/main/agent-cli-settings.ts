@@ -254,3 +254,16 @@ export function buildOtherCliLaunchArgs(cli: OtherCli, config: PerCliConfig | un
   }
   return args
 }
+
+/**
+ * Only each CLI's model: what an import may bring across without the user opting in to imported permission settings,
+ * since an approval or sandbox choice (Codex "never", say) can loosen permissions the way a Copilot preset can.
+ */
+export function otherCliModelsOnly(config: OtherCliConfig): OtherCliConfig {
+  const result: OtherCliConfig = {}
+  for (const cli of OTHER_CLIS) {
+    const model = config[cli]?.[MODEL_FIELD]
+    if (model) result[cli] = { [MODEL_FIELD]: model }
+  }
+  return result
+}

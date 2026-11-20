@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import { writeFileAtomic } from './atomic-file.js'
 import { MAX_PROFILES, normalizeDesktopConfig, workspaceProfileId } from './desktop-config.js'
 import { normalizeSessionLaunchConfig } from './session-launch.js'
+import { normalizeOtherCliConfig, otherCliModelsOnly } from './agent-cli-settings.js'
 import { assertNoLinks, digest, executableSetting, isCliSettingsPath, isToolConfigPath, isToolJsonPath, jsonBytes, jsonObject, migrationAssetGroup, optionalRead, permissionSetting, portableSettings, PROJECT_FILES, safeRelative, sanitize, transformToolJson } from './migration-inventory.js'
 import type { MigrationArchive } from './migration-archive.js'
 import type { MigrationChange, MigrationChoices, MigrationPreview, MigrationRecoveryJournal, MigrationResult, MigrationRoots } from './migration-types.js'
@@ -159,7 +160,10 @@ export async function planMigrationImport(archive: MigrationArchive, roots: Migr
         const index = profiles.findIndex((candidate) => candidate.id === id)
         const launch = normalizeSessionLaunchConfig(profile.launch)
         if (!choices.allowPermissions) { launch.mode = 'interactive'; launch.remoteControl = 'inherit'; launch.remoteExport = 'inherit' }
-        const next = normalizeDesktopConfig({ profiles: [{ name: profile.name, path: mapped, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch, tabs: [], general: profile.general }] }).profiles[0]!
+        // Other CLIs' models always come across; their approval and sandbox choices only with the permission opt-in.
+        const otherCli = normalizeOtherCliConfig(profile.otherCli)
+        const next = normalizeDesktopConfig({ profiles: [{ name: profile.name, path: mapped, permissionPreset: choices.allowPermissions ? profile.permissionPreset : 'default', defaultResumeMode: 'new', launch,
+          otherCli: choices.allowPermissions ? otherCli : otherCliModelsOnly(otherCli), tabs: [], general: profile.general }] }).profiles[0]!
         if (addChange(`${file.path}#profile:${project!.id}`, mapped, 'desktop', index < 0 ? null : jsonBytes(profiles[index]), jsonBytes(next), `Incoming profile: ${JSON.stringify(next)}. History is unavailable; tabs are not restored.`, true)) {
           if (index < 0) { if (profiles.length >= MAX_PROFILES) throw new Error('Destination already has 20 workspace profiles'); profiles.push(next) } else profiles[index] = next
         }
