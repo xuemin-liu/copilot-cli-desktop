@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import test from 'node:test'
-import { appendFile, mkdir, mkdtemp, realpath, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readdir, realpath, rename, rm, symlink, truncate, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, locateInRoots,
+  canOpenWithDefaultApp, classifyFile, decodeText, FILE_ASSET_LIMIT, FILE_IMAGE_LIMIT, FILE_TEXT_LIMIT, fileOpenable, fileTabKey, FileWatchers, isInsideFolder, locateInRoots,
   normalizeRelativePath, openInRoot, readFileAsset, readFileView, readOpened, resolveInRoot,
 } from './file-view.js'
 
@@ -112,21 +113,57 @@ test('a link swapped while the file is being opened cannot get a file outside th
     // Outside when opened and still outside afterwards.
     await point(join(root, 'real'))
     assert.deepEqual(await readFileView(root, 'swap/note.txt', null, { beforeOpen: () => point(outside) }), { status: 'outside' })
-    // Inside when opened, outside afterwards: the open file is the checked one no longer, so nothing is read.
+    // Inside when opened, outside afterwards. The open file is still the one inside the root. Linux can see that from
+    // the open file itself and reads it; elsewhere the path no longer leads to the open file, so nothing is read.
+    // Either way no byte from outside the root is returned.
     await point(join(root, 'real'))
-    assert.deepEqual(await readFileView(root, 'swap/note.txt', null, { afterOpen: () => point(outside) }), { status: 'outside' })
+    const late = await readFileView(root, 'swap/note.txt', null, { afterOpen: () => point(outside) })
+    if (process.platform === 'linux') assert.ok(late.status === 'ok' && late.kind === 'text' && late.text === 'inside the workspace\n')
+    else assert.deepEqual(late, { status: 'outside' })
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+test('a folder is inside another by what it is, not by how its name is spelled', async () => {
+  const { base, root, outside } = await fixture()
+  try {
+    assert.equal(await isInsideFolder(join(root, 'docs', 'img', 'logo.png'), root), true)
+    assert.equal(await isInsideFolder(join(root, 'app.ts'), root), true)
+    assert.equal(await isInsideFolder(join(outside, 'secret.txt'), root), false)
+    assert.equal(await isInsideFolder(root, root), false, 'a folder is not inside itself')
+    assert.equal(await isInsideFolder(join(root, 'app.ts'), join(base, 'gone')), false)
+    await mkdir(`${root}-other`)
+    await writeFile(join(`${root}-other`, 'a.txt'), 'x')
+    assert.equal(await isInsideFolder(join(`${root}-other`, 'a.txt'), root), false)
+    // Where the file system tells names apart by case, "Workspace" is another folder than "workspace", even on a
+    // platform (macOS) where names are usually compared without case.
+    await mkdir(join(base, 'Workspace')).catch(() => undefined)
+    if ((await readdir(base)).includes('Workspace')) {
+      await writeFile(join(base, 'Workspace', 'app.ts'), 'the other folder\n')
+      assert.equal(await isInsideFolder(join(base, 'Workspace', 'app.ts'), root), false)
+      assert.deepEqual(await resolveInRoot(root, '../Workspace/app.ts'), { ok: false, reason: 'outside' })
+    }
+  } finally { await rm(base, { recursive: true, force: true }) }
+})
+
+test('a named pipe where the file was does not leave the read waiting', { skip: process.platform === 'win32' }, async () => {
+  const { base, root } = await fixture()
+  try {
+    execFileSync('mkfifo', [join(root, 'pipe.txt')])
+    const result = await Promise.race([readFileView(root, 'pipe.txt'), new Promise<'waiting'>(done => setTimeout(() => done('waiting'), 3_000).unref())])
+    assert.deepEqual(result, { status: 'missing' })
+    assert.equal(await Promise.race([readFileAsset(root, 'docs/readme.md', '../pipe.txt'), new Promise<'waiting'>(done => setTimeout(() => done('waiting'), 3_000).unref())]), null)
   } finally { await rm(base, { recursive: true, force: true }) }
 })
 
 test('a read takes memory for the file, not for the limit, and still sees a file that grew', async () => {
   const { base, root } = await fixture()
   try {
-    await writeFile(join(root, 'icon.png'), Buffer.concat([PNG, Buffer.alloc(12_000)]))
+    await writeFile(join(root, 'icon.png'), Buffer.concat([PNG, Buffer.alloc(200_000)]))
     const opened = await openInRoot(root, 'icon.png')
     assert.ok(opened.ok)
     try {
       const bytes = await readOpened(opened.file, FILE_ASSET_LIMIT)
-      assert.equal(bytes.length, PNG.length + 12_000)
+      assert.equal(bytes.length, PNG.length + 200_000)
       assert.ok(bytes.buffer.byteLength <= bytes.length + 1, `a ${bytes.length}-byte file was read into a ${bytes.buffer.byteLength}-byte buffer`)
     } finally { await opened.file.handle.close() }
 
@@ -151,8 +188,18 @@ test('reading a file gives its view, and nothing when it has not changed', async
     assert.equal(text.language, 'typescript')
     assert.equal(text.path, join(root, 'app.ts'))
     assert.equal(text.openable, true)
-    assert.deepEqual(await readFileView(root, 'app.ts', { mtimeMs: text.mtimeMs, size: text.size }), { status: 'unchanged' })
-    assert.equal((await readFileView(root, 'app.ts', { mtimeMs: text.mtimeMs, size: text.size + 1 })).status, 'ok')
+    assert.deepEqual(await readFileView(root, 'app.ts', text.revision), { status: 'unchanged' })
+    assert.equal((await readFileView(root, 'app.ts', 'another revision')).status, 'ok')
+    // Two versions of the same size saved inside one millisecond are still two versions.
+    await writeFile(join(root, 'quick.txt'), 'one')
+    await utimes(join(root, 'quick.txt'), 1_700_000_000.0002, 1_700_000_000.0002)
+    const one = await readFileView(root, 'quick.txt')
+    assert.ok(one.status === 'ok' && one.kind === 'text')
+    await writeFile(join(root, 'quick.txt'), 'two')
+    await utimes(join(root, 'quick.txt'), 1_700_000_000.0008, 1_700_000_000.0008)
+    const two = await readFileView(root, 'quick.txt', one.revision)
+    assert.ok(two.status === 'ok' && two.kind === 'text' && two.text === 'two', 'the second version is read, not taken for the first')
+    assert.equal(Math.trunc(one.mtimeMs), Math.trunc(two.mtimeMs), 'the two times differ by less than a millisecond')
 
     const markdown = await readFileView(root, 'docs/readme.md')
     assert.ok(markdown.status === 'ok' && markdown.kind === 'markdown')
@@ -226,9 +273,11 @@ test('a watched file reports edits, a save by rename, and coming back after its 
     await mkdir(join(root, 'notes'))
     const file = join(root, 'notes', 'plan.md')
     await writeFile(file, 'one\n')
+    // Some systems report changes made just before the watch began; let those pass before counting.
+    await new Promise(done => setTimeout(done, 1_200))
     watchers.watch('tab', file)
-    await new Promise(done => setTimeout(done, 100))
-    assert.deepEqual(seen, [], 'watching alone reports nothing')
+    await new Promise(done => setTimeout(done, 400))
+    seen.length = 0
 
     await writeFile(file, 'two\n')
     await settle(1, 'an edit in place')

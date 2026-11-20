@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from 'node:fs'
+import { constants, watch, type FSWatcher } from 'node:fs'
 import { lstat, open, realpath, stat, type FileHandle } from 'node:fs/promises'
 import { caseInsensitivePaths, hostPath, isSameOrInside, pathKey, samePath } from './host-path.js'
 import { isLocalFilesystemPath, isPathWithinRoot } from './external-targets.js'
@@ -14,6 +14,8 @@ interface FileFacts {
   name: string
   size: number
   mtimeMs: number
+  /** Names this version of the file. The panel sends it back so an unchanged file is not read again. */
+  revision: string
   /** Whether Open with default app is offered: never for programs and scripts the system would run. */
   openable: boolean
 }
@@ -109,6 +111,21 @@ export function fileTabKey(root: string, path: string): string {
   return JSON.stringify([pathKey(root), caseInsensitivePaths ? path.toLowerCase() : path])
 }
 
+/**
+ * Whether `folder` is one of the folders above `path`, told by what the folders are (device and file number), not by how
+ * their names are spelled. Both must already be resolved through links. Comparing names would call two folders the same
+ * when they differ only by case, which is wrong on a file system that tells such names apart.
+ */
+export async function isInsideFolder(path: string, folder: string): Promise<boolean> {
+  let wanted
+  try { wanted = await stat(folder, { bigint: true }) } catch { return false }
+  for (let above = hostPath.dirname(path); ; above = hostPath.dirname(above)) {
+    const info = await stat(above, { bigint: true }).catch(() => null)
+    if (info && info.dev === wanted.dev && info.ino === wanted.ino) return true
+    if (above === hostPath.dirname(above)) return false
+  }
+}
+
 export type ResolvedFile = { ok: true; absolute: string } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' }
 
 /**
@@ -125,12 +142,12 @@ export async function resolveInRoot(root: string, relative: string): Promise<Res
   try { realRoot = await realpath(root) } catch { return { ok: false, reason: 'root-missing' } }
   let real: string
   try { real = await realpath(lexical) } catch { return { ok: false, reason: 'missing' } }
-  if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot)) return { ok: false, reason: 'outside' }
+  if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot) || !(await isInsideFolder(real, realRoot))) return { ok: false, reason: 'outside' }
   return { ok: true, absolute: lexical }
 }
 
 /** A file opened for reading whose place under its root was checked against the open file itself. */
-export interface OpenedFile { handle: FileHandle; absolute: string; size: number; mtimeMs: number }
+export interface OpenedFile { handle: FileHandle; absolute: string; size: number; mtimeMs: number; revision: string }
 export type OpenResult = { ok: true; file: OpenedFile } | { ok: false; reason: 'missing' | 'root-missing' | 'outside' | 'directory' }
 
 /**
@@ -149,7 +166,9 @@ export async function openInRoot(root: string, relative: string, hooks?: OpenHoo
   if (!first.ok) return first
   await hooks?.beforeOpen?.()
   let handle: FileHandle
-  try { handle = await open(first.absolute, 'r') } catch {
+  // Without O_NONBLOCK, opening a named pipe waits for a writer and this request would never answer. It makes no
+  // difference to a regular file, and Windows has no such flag.
+  try { handle = await open(first.absolute, process.platform === 'win32' ? 'r' : constants.O_RDONLY | constants.O_NONBLOCK) } catch {
     // A folder cannot be opened for reading on Windows; say what it is instead of calling it missing.
     return { ok: false, reason: await stat(first.absolute).then(info => info.isDirectory() ? 'directory' as const : 'missing' as const, () => 'missing' as const) }
   }
@@ -162,14 +181,15 @@ export async function openInRoot(root: string, relative: string, hooks?: OpenHoo
     const realRoot = await realpath(root)
     if (process.platform === 'linux') {
       const real = await realpath(`/proc/self/fd/${handle.fd}`)
-      if (!isSameOrInside(real, realRoot)) return await refuse('outside')
+      if (!(await isInsideFolder(real, realRoot))) return await refuse('outside')
     } else {
       const real = await realpath(first.absolute)
-      if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot)) return await refuse('outside')
+      if (!isLocalFilesystemPath(real) || !isSameOrInside(real, realRoot) || !(await isInsideFolder(real, realRoot))) return await refuse('outside')
       const there = await lstat(real, { bigint: true })
       if (!there.isFile() || there.dev !== opened.dev || there.ino !== opened.ino || !samePath(await realpath(real), real)) return await refuse('outside')
     }
-    return { ok: true, file: { handle, absolute: first.absolute, size: Number(opened.size), mtimeMs: Number(opened.mtimeMs) } }
+    // The time in nanoseconds: two saves inside one millisecond are still two versions.
+    return { ok: true, file: { handle, absolute: first.absolute, size: Number(opened.size), mtimeMs: Number(opened.mtimeMs), revision: `${opened.mtimeNs}-${opened.size}` } }
   } catch { return refuse('missing') }
 }
 
@@ -177,14 +197,14 @@ export async function openInRoot(root: string, relative: string, hooks?: OpenHoo
  * buffer starts at the file's size and grows only if the file did, so a small file never costs a limit-sized buffer. */
 export async function readOpened(file: OpenedFile, limit: number): Promise<Uint8Array> {
   const most = limit + 1
-  let buffer = Buffer.allocUnsafe(Math.max(1, Math.min(most, file.size + 1)))
+  let buffer = Buffer.allocUnsafeSlow(Math.max(1, Math.min(most, file.size + 1)))
   let length = 0
   for (;;) {
     const { bytesRead } = await file.handle.read(buffer, length, buffer.length - length, length)
     length += bytesRead
     if (bytesRead === 0 || length >= most) break
     if (length === buffer.length) {
-      const grown = Buffer.allocUnsafe(Math.min(most, buffer.length * 2))
+      const grown = Buffer.allocUnsafeSlow(Math.min(most, buffer.length * 2))
       buffer.copy(grown, 0, 0, length)
       buffer = grown
     }
@@ -193,18 +213,18 @@ export async function readOpened(file: OpenedFile, limit: number): Promise<Uint8
 }
 
 /** Read a file for its tab. `known` is the copy the tab already shows: an unchanged file is not read again. */
-export async function readFileView(root: string, relative: string, known?: { mtimeMs: number; size: number } | null, hooks?: OpenHooks): Promise<FileViewResult> {
+export async function readFileView(root: string, relative: string, known?: string | null, hooks?: OpenHooks): Promise<FileViewResult> {
   const opened = await openInRoot(root, relative, hooks)
   if (!opened.ok) return { status: opened.reason }
   const file = opened.file
   try {
-    if (known && known.mtimeMs === file.mtimeMs && known.size === file.size) return { status: 'unchanged' }
+    if (known && known === file.revision) return { status: 'unchanged' }
     const name = hostPath.basename(file.absolute)
     const head = await readOpened(file, SNIFF_BYTES - 1)
     const type = classifyFile(name, head)
     // Open with default app is for files this panel can show. Anything else, and anything the system would run, is
     // only ever revealed.
-    const facts: FileFacts = { path: file.absolute, name, size: file.size, mtimeMs: file.mtimeMs, openable: type.kind !== 'other' && canOpenWithDefaultApp(name) }
+    const facts: FileFacts = { path: file.absolute, name, size: file.size, mtimeMs: file.mtimeMs, revision: file.revision, openable: type.kind !== 'other' && canOpenWithDefaultApp(name) }
     if (type.kind === 'other') return { ...facts, status: 'ok', kind: 'other', reason: type.reason ?? 'unsupported' }
     const limit = type.kind === 'image' ? FILE_IMAGE_LIMIT : FILE_TEXT_LIMIT
     if (file.size > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }

@@ -47,7 +47,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const [query, setQuery] = useState('')
   const [match, setMatch] = useState({ index: 0, count: 0 })
   const request = useRef(0)
-  const shown = useRef<{ mtimeMs: number; size: number } | null>(null)
+  const shown = useRef<string | null>(null)
   const body = useRef<HTMLDivElement>(null)
   const findInput = useRef<HTMLInputElement>(null)
   const ranges = useRef<Range[]>([])
@@ -59,7 +59,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       const result = await window.copilotDesktop.fileRead(profileId, tab.id, force ? null : shown.current)
       // A read that finishes after a newer one started would put old content back.
       if (current !== request.current || result.status === 'unchanged') return
-      shown.current = result.status === 'ok' ? { mtimeMs: result.mtimeMs, size: result.size } : null
+      shown.current = result.status === 'ok' ? result.revision : null
       setView(result); setFailure(null)
     } catch (error) { if (current === request.current) setFailure(errorMessage(error)) }
   }, [profileId, tab.id])

@@ -5599,8 +5599,7 @@ ipcMain.handle('desktop:file-read', async (event, profileId: unknown, toolTabId:
   assertMainWindowSender(event)
   const { file, trusted } = await trustedFile(profileId, toolTabId)
   if (!trusted) return { status: 'root-missing' }
-  const seen = known as { mtimeMs?: unknown; size?: unknown } | null | undefined
-  return readFileView(file.root, file.path, seen && typeof seen.mtimeMs === 'number' && typeof seen.size === 'number' ? { mtimeMs: seen.mtimeMs, size: seen.size } : null)
+  return readFileView(file.root, file.path, typeof known === 'string' && known.length <= 64 ? known : null)
 })
 ipcMain.handle('desktop:file-asset', async (event, profileId: unknown, toolTabId: unknown, href: unknown): Promise<string | null> => {
   assertMainWindowSender(event)
