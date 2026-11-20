@@ -1077,7 +1077,7 @@ test('service binds preview to operation ID, honors writer checks, and keeps usa
   await assert.rejects(receiver.apply(preview.id), /preview/)
 })
 
-nodeTest('the exported desktop preferences keep each workspace\'s settings for other CLIs', async (t) => {
+test('the exported desktop preferences keep each workspace\'s settings for other CLIs', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'migration-other-cli-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const path = join(root, 'desktop.json')
