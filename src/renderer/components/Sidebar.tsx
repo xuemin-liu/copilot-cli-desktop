@@ -400,6 +400,7 @@ export function Sidebar({
         <span className="brand-mark" aria-hidden="true">C</span>
         <span className="brand-name">copilot</span>
         <span className="brand-product">CLI</span>
+        {sessionNavigation}
         <button
           type="button"
           className="sidebar-collapse-button"
@@ -409,7 +410,6 @@ export function Sidebar({
         >
           {collapsed ? '›' : '‹'}
         </button>
-        {sessionNavigation}
       </div>
 
       <div className="sidebar-section-heading">
