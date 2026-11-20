@@ -7,6 +7,8 @@ import type { DesktopSettingsSnapshot } from '../global.js'
 import type { CopilotProviderConfig } from '../../main/provider-config.js'
 import type { WorkspaceProfile } from '../../main/types.js'
 import type { SessionLaunchConfig } from '../../main/session-launch.js'
+import { AGENT_CLI_SETTINGS, type OtherCliConfig } from '../../main/agent-cli-settings.js'
+import { OTHER_CLIS, sessionCliLabel, type OtherCli } from '../../main/session-cli.js'
 import type { CopilotResourceAction, CopilotResourceKind } from '../../main/copilot-resources.js'
 import type { CopilotUpdateChannel } from '../../main/copilot-auto-update.js'
 import { UsageSettings } from './UsageSettings.js'
@@ -88,8 +90,23 @@ function WorkspaceProfileEditor({
   const [permissionPreset, setPermissionPreset] = useState(profile.permissionPreset)
   const [defaultResumeMode, setDefaultResumeMode] = useState(profile.defaultResumeMode)
   const [launch, setLaunch] = useState<SessionLaunchConfig>(profile.launch)
+  const [otherCli, setOtherCli] = useState<OtherCliConfig>(profile.otherCli ?? {})
+  const [activeCli, setActiveCli] = useState<OtherCli>(OTHER_CLIS[0])
 
   const nullableNumber = (value: string): number | null => value === '' ? null : Number(value)
+
+  /** Set or clear one field of one CLI's config, dropping the CLI's entry entirely when it has no settings left. */
+  const setOtherCliField = (cli: OtherCli, key: string, value: string): void => setOtherCli((current) => {
+    const next = { ...current }
+    const perCli = { ...(next[cli] ?? {}) }
+    if (value) perCli[key] = value
+    else delete perCli[key]
+    if (Object.keys(perCli).length === 0) delete next[cli]
+    else next[cli] = perCli
+    return next
+  })
+  const activeDescriptor = AGENT_CLI_SETTINGS[activeCli]
+  const activeConfig = otherCli[activeCli] ?? {}
 
   return (
     <div className="settings-card">
@@ -251,6 +268,57 @@ function WorkspaceProfileEditor({
         />
         Enable Copilot screen-reader optimizations
       </label>
+      <div className="other-cli-settings">
+        <div className="other-cli-heading">
+          <strong>Other CLIs</strong>
+          <span>Permission and model for sessions this workspace starts with another CLI. Each setting defaults to the CLI&rsquo;s own; changes apply to new sessions.</span>
+        </div>
+        <div className="other-cli-tabs" role="tablist" aria-label="CLI">
+          {OTHER_CLIS.map((cli) => {
+            const configured = Object.keys(otherCli[cli] ?? {}).length > 0
+            return (
+              <button
+                key={cli}
+                type="button"
+                role="tab"
+                aria-selected={activeCli === cli}
+                className={`other-cli-tab${activeCli === cli ? ' other-cli-tab-active' : ''}`}
+                onClick={() => setActiveCli(cli)}
+              >
+                {sessionCliLabel(cli)}{configured ? ' •' : ''}
+              </button>
+            )
+          })}
+        </div>
+        <div className="settings-form-grid">
+          {activeDescriptor.selectors.map((selector) => (
+            <label key={selector.key}>
+              {selector.label}
+              <select
+                value={activeConfig[selector.key] ?? ''}
+                onChange={(event) => setOtherCliField(activeCli, selector.key, event.target.value)}
+              >
+                <option value="">{selector.inheritLabel}</option>
+                {selector.levels.map((level) => (
+                  <option key={level.value} value={level.value}>{level.label}</option>
+                ))}
+              </select>
+            </label>
+          ))}
+          {activeDescriptor.supportsModel && (
+            <label>
+              {activeDescriptor.modelLabel}
+              <input
+                type="text"
+                value={activeConfig.model ?? ''}
+                placeholder={activeDescriptor.modelPlaceholder}
+                onChange={(event) => setOtherCliField(activeCli, 'model', event.target.value)}
+              />
+            </label>
+          )}
+        </div>
+        {activeDescriptor.permissionNote && <p className="settings-disclaimer">{activeDescriptor.permissionNote}</p>}
+      </div>
       <div className="settings-actions">
         <button
           type="button"
@@ -258,7 +326,7 @@ function WorkspaceProfileEditor({
           onClick={() => {
             setSaving(true)
             void onSave(
-              window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch),
+              window.copilotDesktopSettings.updateWorkspaceProfile(profile.id, name, permissionPreset, defaultResumeMode, launch, Object.keys(otherCli).length > 0 ? otherCli : undefined),
               `Saved profile "${name.trim() || profile.name}".`,
               `Could not save profile "${profile.name}"`,
             ).finally(() => setSaving(false))

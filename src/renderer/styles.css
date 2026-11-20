@@ -1229,6 +1229,51 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+.other-cli-settings {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid #252a33;
+}
+
+.other-cli-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.other-cli-heading span {
+  color: #8992a1;
+  font-size: 11px;
+}
+
+.other-cli-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.other-cli-tab {
+  padding: 5px 11px;
+  border: 1px solid #2d323c;
+  border-radius: 7px;
+  background: transparent;
+  color: #aeb6c4;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.other-cli-tab:hover {
+  background: #22262e;
+  color: #fff;
+}
+
+.other-cli-tab-active {
+  border-color: #4f88ff;
+  background: rgb(79 136 255 / 14%);
+  color: #cfe0ff;
+}
+
 .settings-definition-list {
   margin: 0;
 }

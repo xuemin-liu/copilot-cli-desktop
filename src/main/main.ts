@@ -128,6 +128,7 @@ import { PtySession, type PtySessionExit } from './pty-session.js'
 import { CodexSessionDiscovery, claudeSessionStored, codexSessionsRoot, buildAgentCliArgs, resolveAgentCli, type AgentCliResolution } from './agent-cli.js'
 import { configureAntigravityMeetingMcp } from './antigravity-mcp.js'
 import { OTHER_CLIS, sessionCliLabel, type OtherCli, type SessionCliChoice } from './session-cli.js'
+import { buildOtherCliLaunchArgs, normalizeOtherCliConfig } from './agent-cli-settings.js'
 import { supportsSessionFork, isForkSessionId } from './copilot-rpc.js'
 import { copilotSessionRoot, forkSessionSnapshot } from './session-fork.js'
 import { readSessionStart, worktreeNameFor } from './session-store-discovery.js'
@@ -1097,6 +1098,7 @@ function persistProfileTabs(): void {
           title: tab.title,
           lastSessionId: tab.lastSessionId,
           ...(tab.cli ? { cli: tab.cli } : {}),
+          ...(tab.cli && tab.otherCliConfig && Object.keys(tab.otherCliConfig).length > 0 ? { otherCliConfig: tab.otherCliConfig } : {}),
           ...(tab.launchWorktree !== undefined ? { launchWorktree: tab.launchWorktree } : {}),
           ...(tab.launchWorktreePath ? { launchWorktreePath: tab.launchWorktreePath } : {}),
           ...(tab.privateOverrides ? { privateOverrides: true as const } : {}),
@@ -2053,13 +2055,15 @@ async function otherCliLaunchResolution(cli: OtherCli): Promise<AgentCliResoluti
  * whether the CLI can resume it.
  */
 function createOtherCliSession(cli: OtherCli, resolution: AgentCliResolution, cwd: string, sessionId: string | null, stored: boolean,
-  dimensions?: { cols: number; rows: number }): PtySession {
+  configArgs: string[], dimensions?: { cols: number; rows: number }): PtySession {
   const env = withCopilotPathAdditions(process.env, resolution.pathAdditions)
   const resuming = sessionId !== null && stored
   const knownId = cli === 'claude' || resuming ? sessionId : null
   return new PtySession({
     file: resolution.command,
-    args: [...resolution.prefixArgs, ...buildAgentCliArgs(cli, { id: knownId, stored: resuming })],
+    // The descriptor's permission/model flags are global options; the resume/session-id args (a bare Codex `resume`
+    // subcommand, Claude's --session-id/--resume) follow them.
+    args: [...resolution.prefixArgs, ...configArgs, ...buildAgentCliArgs(cli, { id: knownId, stored: resuming })],
     cwd,
     env,
     spawnPty: spawnNodePty,
@@ -2103,8 +2107,11 @@ async function startOtherCliTab(
 
   const id = `tab-${nextTabSequence++}`
   const cwd = worktreeRoot ?? profile.path
+  // Snapshot the workspace's settings for this CLI now, so a later profile edit never changes how this tab relaunches.
+  const otherCliConfig = profile.otherCli?.[cli]
+  const configArgs = buildOtherCliLaunchArgs(cli, otherCliConfig)
   // Claude Code takes the id of a new session. The other CLIs pick their own ids.
-  const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false)
+  const session = createOtherCliSession(cli, resolution, cwd, cli === 'claude' ? randomUUID() : null, false, configArgs)
   managedTabs.set(id, { session })
   profilesWithSessionTabs.add(profile.id)
   const previousProfileId = desktopConfig.activeProfileId
@@ -2113,6 +2120,7 @@ async function startOtherCliTab(
     id,
     title: titleOverride?.trim().slice(0, 120) || label,
     cli,
+    ...(otherCliConfig && Object.keys(otherCliConfig).length > 0 ? { otherCliConfig } : {}),
     browserProfileId: selectBrowserProfileId(undefined, tabsState.tabs.map(tab => tab.browserProfileId)),
     workspaceProfileId: profile.id,
     sessionPermissionPreset: null,
@@ -3485,6 +3493,9 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       const gone = !linked && !!tab.launchWorktreePath
       if (gone) void writeAppLog(`A session's worktree is no longer one of the project's; it restarts in the project folder: ${tab.launchWorktreePath}`).catch(() => {})
       const cwd = linked?.root ?? savedProfile.path
+      // Build the permission/model args from the tab's own saved snapshot (never the profile's current settings) and
+      // validate them BEFORE stopping the live process, so an unsupported saved value cannot cost a usable session.
+      const configArgs = buildOtherCliLaunchArgs(cli, tab.otherCliConfig)
       stopRequested = true
       cancelHeldInput(tabId)
       if (managed) await managed.session.stop()
@@ -3495,7 +3506,7 @@ async function restartSessionTab(tabId: string): Promise<DesktopState> {
       const dimensions = managed?.session.dimensions ?? terminalSizes.get(tabId)
       let replacement: PtySession
       try {
-        replacement = createOtherCliSession(cli, resolution, cwd, sessionId, stored, dimensions)
+        replacement = createOtherCliSession(cli, resolution, cwd, sessionId, stored, configArgs, dimensions)
       } catch (error) {
         managedTabs.delete(tabId)
         tabsState = setTabStatus(tabsState, tabId, 'crashed')
@@ -3698,6 +3709,7 @@ function addDormantSessionTab(profile: WorkspaceProfile, candidate: RestoredTab)
       id,
       title: candidate.title.trim().slice(0, 120) || sessionCliLabel(candidate.cli),
       cli: candidate.cli,
+      ...(candidate.otherCliConfig && Object.keys(candidate.otherCliConfig).length > 0 ? { otherCliConfig: candidate.otherCliConfig } : {}),
       browserProfileId: selectBrowserProfileId(candidate.browserProfileId, tabsState.tabs.map(tab => tab.browserProfileId)),
       workspaceProfileId: profile.id,
       lastSessionId: candidate.lastSessionId,
@@ -4071,6 +4083,7 @@ async function updateWorkspaceProfile(
   permissionPreset: PermissionPreset,
   defaultResumeMode: ResumeMode,
   launch: SessionLaunchConfig,
+  otherCli: unknown,
 ): Promise<void> {
   const profile = desktopConfig.profiles.find((candidate) => candidate.id === profileId)
   if (!profile) throw new Error('The selected workspace profile no longer exists')
@@ -4082,6 +4095,9 @@ async function updateWorkspaceProfile(
   profile.permissionPreset = permissionPreset
   profile.defaultResumeMode = defaultResumeMode
   profile.launch = normalizeSessionLaunchConfig(launch)
+  const normalizedOtherCli = normalizeOtherCliConfig(otherCli)
+  if (Object.keys(normalizedOtherCli).length > 0) profile.otherCli = normalizedOtherCli
+  else delete profile.otherCli
   syncWorkspaceState()
   await persistConfig()
   broadcastState()
@@ -5543,6 +5559,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
   permissionPreset: unknown,
   defaultResumeMode: unknown,
   launch: unknown,
+  otherCli: unknown,
 ) => {
   assertTrustedSettingsSender(event)
   if (
@@ -5553,6 +5570,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     || !launch
     || typeof launch !== 'object'
     || Array.isArray(launch)
+    || (otherCli !== undefined && (typeof otherCli !== 'object' || otherCli === null || Array.isArray(otherCli)))
   ) {
     throw new Error('Invalid workspace profile')
   }
@@ -5562,6 +5580,7 @@ ipcMain.handle('desktop-settings:update-workspace-profile', async (
     permissionPreset as PermissionPreset,
     defaultResumeMode as ResumeMode,
     launch as SessionLaunchConfig,
+    otherCli,
   )
   return settingsSnapshot()
 })
