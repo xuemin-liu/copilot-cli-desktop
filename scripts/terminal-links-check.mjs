@@ -54,13 +54,13 @@ if (!process.versions.electron) {
     let mode = 'missing'
     let rejectPending
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: [
-      'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`',
+      'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
     ].join('\r\n') }))
     ipcMain.handle('desktop:resize-tab', () => {})
     ipcMain.handle('desktop:write-tab', () => {})
     ipcMain.handle('desktop:open-external-url', (_event, url) => { calls.push({ type: 'url', text: url }) })
-    ipcMain.handle('desktop:reveal-path', async (_event, tabId, text) => {
-      calls.push({ type: 'path', tabId, text })
+    ipcMain.handle('desktop:open-file', async (_event, source, text, location) => {
+      calls.push({ type: 'path', tabId: source.tabId, text, ...(location && Object.keys(location).length ? { location } : {}) })
       if (mode === 'missing') return { ok: false, reason: 'missing' }
       if (mode === 'outside') return { ok: false, reason: 'outside-workspace' }
       if (mode === 'throw') throw new Error('Fixture reveal failure')
@@ -84,7 +84,7 @@ if (!process.versions.electron) {
       throw new Error('Timed out: ' + label)
     }
     const notice = () => ui('document.querySelector(".terminal-link-error")?.textContent ?? null')
-    const clickLink = async text => {
+    const clickLink = async (text, modifiers = []) => {
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 0, y: 0 })
       await delay(100)
       const point = await ui(`(() => {
@@ -110,8 +110,8 @@ if (!process.versions.electron) {
       await delay(50)
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
       await delay(150)
-      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
-      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
+      window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, modifiers, ...point })
+      window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, modifiers, ...point })
       await delay(100)
     }
     try {
@@ -143,16 +143,29 @@ if (!process.versions.electron) {
       assert.equal(await ui('document.querySelector(".terminal-link-error").getAttribute("role")'), 'alert')
       mode = 'throw'
       await clickLink('src/missing.txt')
-      assert.equal(await until(notice, 'IPC error'), 'Could not reveal file: Fixture reveal failure×')
+      assert.equal(await until(notice, 'IPC error'), 'Could not open file: Fixture reveal failure×')
       mode = 'success'
       await clickLink('./folder with spaces/example.txt')
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: './folder with spaces/example.txt' })
       assert.equal(await notice(), null)
       await clickLink('dist/src/cli/cli.js')
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'dist/src/cli/cli.js' })
+      // A plain click opens the file where the link points; with Ctrl it asks for the file manager instead.
+      await clickLink('src/app.ts')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7 } })
+      await clickLink('My Repo')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: String.raw`C:\My Repo\lib\file.ts`, location: { line: 9, column: 3 } })
+      await clickLink('src/app.ts', ['control'])
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7, reveal: true } })
+      mode = 'pending'
+      await clickLink('src/app.ts', ['control'])
+      assert.equal(await notice(), 'Revealing file…×', 'a Ctrl click says it reveals')
+      rejectPending(new Error('done'))
+      await delay(100)
+      await ui('document.querySelector(".terminal-link-error button")?.click()')
       mode = 'pending'
       await clickLink('src/missing.txt')
-      assert.equal(await notice(), 'Revealing file…×', 'pending click gives immediate feedback')
+      assert.equal(await notice(), 'Opening file…×', 'pending click gives immediate feedback')
       await clickLink('https://example.com/')
       rejectPending(new Error('stale file error'))
       await delay(100)
@@ -173,7 +186,7 @@ if (!process.versions.electron) {
       await delay(100)
       assert.equal(await notice(), null)
       assert.deepEqual(await ui('window.unhandled'), [])
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
     } catch (error) {
       console.error(error)

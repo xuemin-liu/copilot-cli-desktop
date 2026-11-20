@@ -3,6 +3,9 @@ export interface DetectedLink {
   text: string
   start: number
   end: number
+  /** Where in the file a path link points, from a `path:line:column` or `path(line,column)` suffix. */
+  line?: number
+  column?: number
 }
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'`]+/g
@@ -13,10 +16,11 @@ const BACKTICK_PATH_PATTERN = /`([^`\r\n]{1,4096})`/g
 // lone "/tmp" or the "/or" of "and/or"), or a bare relative path that has at
 // least one separator and a file extension (the common shape of paths CLI
 // tools print, e.g. "dist\app.js").
-const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}/g
+const PATH_PATTERN = /(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/])[^\s<>"'`|]+|(?<![\w.-])\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?(?::\d+(?::\d+)?)?|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9]{1,10}(?::\d+(?::\d+)?|\(\d+(?:,\d+)?\))?/g
 // Trailing "path:line" or "path:line:column" location suffix many CLIs print
-// (e.g. tsc, eslint) — the number(s) are not part of the filesystem path.
-const LOCATION_SUFFIX = /:\d+(?::\d+)?$/
+// (e.g. tsc, eslint) — the number(s) are not part of the filesystem path, but
+// say where in the file the link points. tsc also prints "path(line,column)".
+const LOCATION_SUFFIX = /(?::(\d+)(?::(\d+))?|\((\d+)(?:,(\d+))?\))$/
 const WHOLE_PATH_PATTERN = new RegExp(`^(?:${PATH_PATTERN.source})$`)
 const EXPLICIT_PATH_PREFIX = /^(?:[A-Za-z]:[\\/]|\\\\[\w.-]+[\\/]|\.{1,2}[\\/]|\/[^\s/])/
 
@@ -27,8 +31,11 @@ function isBacktickPath(text: string): boolean {
   return /\s/.test(text) ? EXPLICIT_PATH_PREFIX.test(text) : WHOLE_PATH_PATTERN.test(text)
 }
 
-function stripLocationSuffix(candidate: string): string {
-  return candidate.replace(LOCATION_SUFFIX, '')
+function splitLocation(candidate: string): { text: string; line?: number; column?: number } {
+  const match = LOCATION_SUFFIX.exec(candidate)
+  if (!match) return { text: candidate }
+  const line = Number(match[1] ?? match[3]), column = Number(match[2] ?? match[4])
+  return { text: candidate.slice(0, match.index), ...(line > 0 ? { line, ...(column > 0 ? { column } : {}) } : {}) }
 }
 
 function countChar(text: string, character: string): number {
@@ -82,18 +89,18 @@ export function scanLineForLinks(line: string): DetectedLink[] {
     for (const match of line.matchAll(pattern)) {
       const inner = match[1] ?? match[2] ?? ''
       if (!/[\\/]/.test(inner)) continue
-      const text = stripLocationSuffix(inner)
+      const { text, ...location } = splitLocation(inner)
       if (text.length < 3) continue
       if (pattern === BACKTICK_PATH_PATTERN && !isBacktickPath(text)) continue
-      pushIfClear(links, { type: 'path', text, start: match.index, end: match.index + match[0].length })
+      pushIfClear(links, { type: 'path', text, start: match.index, end: match.index + match[0].length, ...location })
     }
   }
   for (const match of line.matchAll(PATH_PATTERN)) {
-    const text = stripLocationSuffix(trimTrailingPunctuation(match[0]))
+    const { text, ...location } = splitLocation(trimTrailingPunctuation(match[0]))
     const start = match.index
     const end = start + text.length
     if (text.length < 3) continue
-    pushIfClear(links, { type: 'path', text, start, end })
+    pushIfClear(links, { type: 'path', text, start, end, ...location })
   }
   return links.sort((left, right) => left.start - right.start)
 }

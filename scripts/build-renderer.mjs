@@ -19,4 +19,23 @@ for (const entry of entries) {
   })
 }
 
+// File viewers are separate scripts the app loads when a file of that kind is first opened (src/renderer/file-viewers.ts).
+// Each registers itself on window.copilotFileViewers, so a plain script tag is enough and no module loader is needed.
+const viewers = [
+  { in: 'src/renderer/viewers/text-viewer.ts', out: 'dist/src/renderer/viewer-text.js' },
+]
+for (const viewer of viewers) {
+  await esbuild.build({
+    entryPoints: [viewer.in],
+    outfile: viewer.out,
+    bundle: true,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2022',
+    minify: true,
+    legalComments: 'none',
+    logLevel: 'info',
+  })
+}
+
 console.log('[build-renderer] Renderer bundles built.')

@@ -151,6 +151,16 @@ export interface CopilotDesktopBridge {
   showTerminalContextMenu(text: string): Promise<void>
   openExternalUrl(url: string): Promise<void>
   revealPath(tabId: string, path: string): Promise<RevealPathResult>
+  /** Show a clicked path in a File tab. `source` is where the click was: a session terminal, a File tab (a link in its
+   * Markdown) or a Git repository folder. `reveal` shows it in the file manager instead, as a folder always is. */
+  openFile(source: { tabId: string } | { profileId: string; fileTabId: string } | { profileId: string; folder: string }, path: string,
+    location?: { line?: number; column?: number; reveal?: boolean } | null): Promise<import('../main/file-view.js').OpenFileResult>
+  fileRead(profileId: string, tabId: string, known?: { mtimeMs: number; size: number } | null): Promise<import('../main/file-view.js').FileViewResult>
+  /** A picture a Markdown file refers to, as a data URL; null when it is not a local picture under the same root. */
+  fileAsset(profileId: string, tabId: string, href: string): Promise<string | null>
+  fileWatch(profileId: string, tabId: string, on: boolean): Promise<void>
+  fileCommand(profileId: string, tabId: string, command: 'reveal' | 'open' | 'copy-path'): Promise<void>
+  onFileChanged(listener: (tabId: string) => void): () => void
   copyDiagnostics(): Promise<void>
   retryResolution(): Promise<DesktopState>
   installCopilot(): Promise<DesktopState>

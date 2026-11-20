@@ -577,6 +577,14 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
   const baseline = activeComments?.diffText ?? null
   const baselineSignature = useMemo(() => baseline === null ? null : diffChangeSignature(baseline), [baseline])
   const commentsStale = baselineSignature !== null && diff?.key === diffKey && diffSignature !== baselineSignature
+  const openSelectedFile = (): void => {
+    if (!repo || !selection) return
+    const repoId = repo.id
+    void window.copilotDesktop.openFile({ profileId, folder: repo.folder }, selection.path).then(result => {
+      if (!result.ok) updateFeedback(repoId, { area: 'diff', error: result.reason === 'missing' ? 'This file is not on disk. It may have been deleted.'
+        : result.reason === 'limit' ? result.message ?? 'Too many files are open. Close a file tab first.' : 'Only files in the workspace can be opened.' })
+    }, (cause: unknown) => updateFeedback(repoId, { area: 'diff', error: errorMessage(cause) }))
+  }
   const toggleWholeFile = (): void => {
     const next = !wholeFile
     setWholeFile(next)
@@ -1112,6 +1120,7 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
                           title={wholeFile ? 'Show only the changes and the lines around them' : 'Show the whole file with the changes in place'}>
                           Whole file
                         </button>
+                        <button type="button" className="git-diff-open-file" onClick={openSelectedFile} title="Open this file in a File tab">Open file</button>
                         <button type="button" className="git-diff-add-prompt" disabled={!canInsert || !diff || diff.key !== diffKey} onClick={addToPrompt}
                           title={canInsert ? `Put this diff in the prompt box of “${promptTarget?.title}”` : 'Open a session in this window first'}>
                           Add to prompt

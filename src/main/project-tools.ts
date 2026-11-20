@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
-import { isAbsolute, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { BrowserDebug } from './browser-debug.js'
 import type { BrowserCursor } from './browser-reader.js'
@@ -13,7 +13,8 @@ import { prepareProjectDevtoolsSettings, completeProjectDevtoolsSharing } from '
 import { parseBrowserAddress } from './browser-url.js'
 import { restorableUrl } from './browser-privacy.js'
 import { constantTimeTokenEqual } from '../cli/runtime-core.js'
-import { dockedNeighbor, isTerminalKind, removeToolTab, panelTabs, type PanelLayout, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig } from './tool-tabs.js'
+import { dockedNeighbor, isTerminalKind, removeToolTab, panelTabs, type PanelLayout, type BrowserConnection, type ProjectTools, type ToolsAction, type ToolsState, type ToolTab, type TerminalConfig, type ToolFile } from './tool-tabs.js'
+import { FILE_TAB_LIMIT, FileWatchers, fileTabKey, normalizeRelativePath } from './file-view.js'
 import { ToolTerminals, terminalLaunch } from './tool-terminal.js'
 import { prepareToolTerminalEnvironment } from './browser-session.js'
 import { writeToBroadcastTargets } from '../../vendor/myterminal/channels.mjs'
@@ -120,6 +121,13 @@ export class ProjectToolService {
             let url: string | null = null
             try { url = typeof entry.url === 'string' ? restorableUrl(entry.url) : null } catch { /* Invalid saved URL. */ }
             tabs.push({ id: entry.id, kind: 'browser', title: 'Browser', ...(url ? { url } : {}) })
+          }
+          if (entry.kind === 'file') {
+            // Only the root and the path are saved. The root is checked against the project again before every read.
+            const path = normalizeRelativePath(entry.file?.path)
+            const root = entry.file?.root
+            if (path && typeof root === 'string' && root.length <= 4_096 && isAbsolute(root) && !ownerId
+              && tabs.filter(tab => tab.kind === 'file').length < FILE_TAB_LIMIT) tabs.push({ id: entry.id, kind: 'file', title: basename(path), file: { root, path } })
           }
           const tab = tabs[count]
           if (!tab) continue
@@ -261,7 +269,8 @@ export class ProjectToolService {
         let url: string | null = null
         try { url = tab.url ? restorableUrl(tab.url) : null } catch { /* Blank or invalid URL. */ }
         return { id: tab.id, kind: tab.kind, ownerId: tab.ownerId, localCwd: tab.localCwd, label: tab.label,
-          color: tab.color, url: url ?? undefined, terminal: tab.terminal, gitSelectionKey: tab.gitSelectionKey }
+          color: tab.color, url: url ?? undefined, terminal: tab.terminal, gitSelectionKey: tab.gitSelectionKey,
+          file: tab.file ? { root: tab.file.root, path: tab.file.path } : undefined }
       })
       const savedIds = new Set(tabs.map(tab => tab.id))
       for (const [key, layout] of Object.entries(layouts)) {
@@ -497,6 +506,7 @@ export class ProjectToolService {
       } else if (action.type === 'close') {
         this.closeSplit(profileId, tab.id)
         this.closeTerminal(profileId, tab.id)
+        this.fileWatchers.unwatch(tab.id)
         if (tab.pageId !== undefined) {
           const group = this.groups.get(profileId)
           if (group && !await group.browser.closePage(tab.pageId)) return this.state()
@@ -529,6 +539,51 @@ export class ProjectToolService {
     // Browser initialization must not block independent tools or prevent closing a failed page.
     // Keep failed browser navigation gated until its group is closed and explicitly reopened.
     if (action.type === 'add' && action.kind === 'browser') await group?.browser.ready
+    return this.state()
+  }
+  private readonly fileWatchers = new FileWatchers(id => {
+    const owner = this.options.owner()
+    if (owner && !owner.isDestroyed()) owner.webContents.send('desktop:file-changed', id)
+  })
+  /** The file behind a File tab, for the read, watch and reveal requests of its panel. */
+  fileTab(profileId: string, id: string): ToolFile {
+    const file = this.projects.get(profileId)?.tabs.find(tab => tab.id === id && tab.kind === 'file')?.file
+    if (!file) throw new Error('File tab closed')
+    return file
+  }
+  /** Watch a File tab's file while its panel shows it; `path` null stops watching. */
+  watchFile(profileId: string, id: string, path: string | null): void {
+    if (path === null || this.stopping) { this.fileWatchers.unwatch(id); return }
+    this.fileTab(profileId, id)
+    this.fileWatchers.watch(id, path)
+  }
+  /**
+   * Show a file in the panel: its open tab when it has one, otherwise a new workspace tab. `file.root` comes from the main
+   * process, never from a renderer. A new location moves an open tab to that line.
+   */
+  openFile(profileId: string, file: ToolFile): ToolsState {
+    if (this.stopping) throw new Error('App is closing')
+    const project = this.project(profileId)
+    const path = normalizeRelativePath(file.path)
+    if (!path || !isAbsolute(file.root)) throw new Error('Invalid file path')
+    const key = fileTabKey(file.root, path)
+    let tab = project.tabs.find(entry => entry.kind === 'file' && entry.file && fileTabKey(entry.file.root, entry.file.path) === key)
+    if (!tab) {
+      if (project.tabs.filter(entry => entry.kind === 'file').length >= FILE_TAB_LIMIT) throw new Error(`${FILE_TAB_LIMIT} files are already open in this workspace. Close a file tab first.`)
+      tab = { id: randomUUID(), kind: 'file', title: basename(path), file: { root: file.root, path } }
+      project.tabs.push(tab)
+    }
+    const shown = tab.file!
+    if (file.line !== undefined) {
+      shown.line = file.line
+      if (file.column !== undefined) shown.column = file.column
+      else delete shown.column
+      shown.jump = (shown.jump ?? 0) + 1
+    }
+    project.activeId = tab.id
+    project.visible = true
+    this.groups.get(profileId)?.browser.setBounds(null)
+    this.save()
     return this.state()
   }
   private terminalTitle(kind: string, config: TerminalConfig): string {
@@ -860,6 +915,7 @@ export class ProjectToolService {
   async removeProject(id: string): Promise<void> {
     // Revoke pending starts before the first await; helper setup can complete during bridge shutdown.
     const terminalIds = [...(this.projects.get(id)?.tabs ?? []), ...[...this.splits.values()].filter(child => child.profileId === id).map(child => child.tab)].map(tab => tab.id)
+    for (const tab of this.projects.get(id)?.tabs ?? []) this.fileWatchers.unwatch(tab.id)
     this.projects.delete(id)
     this.removedProjects.add(id)
     for (const [key, child] of this.splits) if (child.profileId === id) this.splits.delete(key)
@@ -882,6 +938,7 @@ export class ProjectToolService {
   }
   async dispose(): Promise<void> {
     this.stopping = true
+    this.fileWatchers.stop()
     for (const lifecycle of this.terminalLifecycles.values()) lifecycle.retry.dispose()
     this.terminalLifecycles.clear()
     this.terminals.dispose()

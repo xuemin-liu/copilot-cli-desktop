@@ -1,6 +1,9 @@
 /** Persistent panel IDs are independent of Chromium page IDs and CLI session IDs. */
 export type TerminalKind = 'local' | 'wsl' | 'ssh'
-export type ToolTabKind = 'new' | 'browser' | 'git' | TerminalKind
+export type ToolTabKind = 'new' | 'browser' | 'git' | 'file' | TerminalKind
+/** The file a File tab shows. `root` is the workspace folder or one worktree, chosen by the main process; `path` is under it.
+ * `line` and `column` are where the last click pointed, and `jump` counts those clicks so the same line can be shown again. */
+export interface ToolFile { root: string; path: string; line?: number; column?: number; jump?: number }
 export interface TerminalConfig { name?: string; host?: string; username?: string; port?: number; identityFile?: string; distro?: string; connectionId?: string; temporary?: boolean; transport?: 'native' | 'managed' }
 export const isTerminalKind = (kind: string): kind is TerminalKind => ['local', 'wsl', 'ssh'].includes(kind)
 export interface ToolTab {
@@ -21,6 +24,7 @@ export interface ToolTab {
   gitSelectionKey?: string
   localCwd?: string
   terminal?: TerminalConfig
+  file?: ToolFile
 }
 export interface PanelLayout { activeId: string | null; visible: boolean }
 export interface ProjectTools extends PanelLayout {

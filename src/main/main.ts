@@ -1,5 +1,5 @@
 import { ProjectToolService } from './project-tools.js'
-import type { ToolsAction } from './tool-tabs.js'
+import type { ToolFile, ToolsAction } from './tool-tabs.js'
 import { supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
@@ -108,6 +108,7 @@ import {
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
+import { canOpenWithDefaultApp, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
@@ -155,7 +156,7 @@ import { GitResolverClaims, type SessionState } from './git-resolver.js'
 import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
-import { isSameOrInside, samePath } from './host-path.js'
+import { hostPath, isSameOrInside, samePath } from './host-path.js'
 import { desktopPosixPath } from './posix-executables.js'
 import { linuxAutostartEnabled, setLinuxAutostart } from './linux-autostart.js'
 import { sideChatProfile, SIDE_CHAT_PERMISSION_WARNING } from './side-chat.js'
@@ -5504,6 +5505,123 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   if (!(await pathExists(resolved))) return { ok: false, reason: 'missing' }
   shell.showItemInFolder(resolved)
   return { ok: true }
+})
+
+// --- IPC: File tabs ----------------------------------------------------
+/** The folders a File tab may read from for a project: its own folder, and linked worktrees of its repository. `hints` are
+ * folders that may be such worktrees (a session's folder, a Git panel repository); each is checked before it is used. */
+async function fileRoots(profile: WorkspaceProfile, hints: readonly (string | null | undefined)[]): Promise<string[]> {
+  const roots: string[] = []
+  for (const hint of hints) {
+    if (typeof hint !== 'string' || hint.length === 0 || hint.length > 4_096 || !isLocalFilesystemPath(hint) || !hostPath.isAbsolute(hint)) continue
+    const worktree = await resolveLinkedWorktree(profile.path, hint).catch(() => null)
+    if (worktree && !roots.some(root => samePath(root, worktree.root))) roots.push(worktree.root)
+  }
+  // A worktree inside the project folder is its own root, so it is tried before the project.
+  return [...roots, profile.path]
+}
+async function trustedFile(profileId: unknown, toolTabId: unknown): Promise<{ file: ToolFile; trusted: boolean }> {
+  if (typeof profileId !== 'string' || typeof toolTabId !== 'string') throw new Error('Invalid file tab')
+  const profile = desktopConfig.profiles.find(item => item.id === profileId)
+  if (!profile) throw new Error('The workspace is unavailable')
+  const file = projectTools().fileTab(profileId, toolTabId)
+  const trusted = samePath(file.root, profile.path) || (await fileRoots(profile, [file.root])).some(root => root !== profile.path && samePath(root, file.root))
+  return { file, trusted }
+}
+function assertMainWindowSender(event: IpcMainInvokeEvent): void {
+  assertTrustedIpcSender(event)
+  if (event.sender !== mainWindow?.webContents) throw new Error('File tabs belong to the main window')
+}
+/**
+ * Open a clicked path in a File tab. `source` says where the click was: a session terminal (relative paths start at the
+ * session's folder), a File tab (a link in a Markdown file, relative to that file) or a Git panel repository folder.
+ * Folders, and clicks in a session's own window, are shown in the file manager as before.
+ */
+ipcMain.handle('desktop:open-file', async (event, source: unknown, candidate: unknown, location: unknown): Promise<OpenFileResult> => {
+  assertTrustedIpcSender(event)
+  const from = source as { tabId?: unknown; profileId?: unknown; fileTabId?: unknown; folder?: unknown } | null
+  if (!from || typeof from !== 'object' || typeof candidate !== 'string' || candidate.length === 0 || candidate.length > 4_096 || !isLocalFilesystemPath(candidate)) throw new Error('Invalid file path')
+  let profile: WorkspaceProfile | undefined
+  let base: string
+  let roots: string[]
+  if (from.tabId !== undefined) {
+    if (!isSessionTabId(from.tabId)) throw new Error('Invalid session tab')
+    const tab = tabsState.tabs.find(item => item.id === from.tabId)
+    if (!tab) throw new Error('Invalid session tab')
+    profile = desktopConfig.profiles.find(item => item.id === tab.workspaceProfileId)
+    if (!profile) throw new Error('The session workspace is unavailable')
+    roots = await fileRoots(profile, [tab.worktree?.path, tab.launchWorktreePath, tab.remote ? null : tab.sessionCwd])
+    // Relative paths start where the session runs, when that is a folder a File tab may read.
+    const cwd = tab.remote ? null : tab.sessionCwd ?? tab.worktree?.path ?? tab.launchWorktreePath
+    base = cwd && hostPath.isAbsolute(cwd) && roots.some(root => isSameOrInside(cwd, root)) ? cwd : roots[0]!
+  } else {
+    if (event.sender !== mainWindow?.webContents || typeof from.profileId !== 'string') throw new Error('Invalid file request')
+    profile = desktopConfig.profiles.find(item => item.id === from.profileId)
+    if (!profile) throw new Error('The workspace is unavailable')
+    if (typeof from.fileTabId === 'string') {
+      const opener = await trustedFile(profile.id, from.fileTabId)
+      if (!opener.trusted) return { ok: false, reason: 'outside-workspace' }
+      roots = await fileRoots(profile, [opener.file.root])
+      base = hostPath.dirname(hostPath.resolve(opener.file.root, opener.file.path))
+    } else if (typeof from.folder === 'string' && hostPath.isAbsolute(from.folder)) {
+      roots = await fileRoots(profile, [from.folder])
+      base = from.folder
+    } else throw new Error('Invalid file request')
+  }
+  const located = locateInRoots(roots, hostPath.resolve(base, candidate))
+  if (!located) return { ok: false, reason: 'outside-workspace' }
+  const resolved = await resolveInRoot(located.root, located.path)
+  if (!resolved.ok) return { ok: false, reason: resolved.reason === 'outside' ? 'outside-workspace' : 'missing' }
+  const info = await Promise.race([stat(resolved.absolute).catch(() => null), new Promise<null>(done => { setTimeout(() => done(null), 3_000).unref() })])
+  if (!info) return { ok: false, reason: 'missing' }
+  const where = location as { line?: unknown; column?: unknown; reveal?: unknown } | null | undefined
+  if (!info.isFile() || where?.reveal === true || event.sender !== mainWindow?.webContents || profile.id !== desktopConfig.activeProfileId) {
+    shell.showItemInFolder(resolved.absolute)
+    return { ok: true, revealed: true }
+  }
+  const position = (value: unknown): number | undefined => typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 10_000_000 ? value : undefined
+  const line = position(where?.line), column = position(where?.column)
+  try {
+    projectTools().openFile(profile.id, { ...located, ...(line === undefined ? {} : { line, ...(column === undefined ? {} : { column }) }) })
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('files are already open')) return { ok: false, reason: 'limit', message: error.message }
+    throw error
+  }
+  return { ok: true }
+})
+ipcMain.handle('desktop:file-read', async (event, profileId: unknown, toolTabId: unknown, known: unknown): Promise<FileViewResult> => {
+  assertMainWindowSender(event)
+  const { file, trusted } = await trustedFile(profileId, toolTabId)
+  if (!trusted) return { status: 'root-missing' }
+  const seen = known as { mtimeMs?: unknown; size?: unknown } | null | undefined
+  return readFileView(file.root, file.path, seen && typeof seen.mtimeMs === 'number' && typeof seen.size === 'number' ? { mtimeMs: seen.mtimeMs, size: seen.size } : null)
+})
+ipcMain.handle('desktop:file-asset', async (event, profileId: unknown, toolTabId: unknown, href: unknown): Promise<string | null> => {
+  assertMainWindowSender(event)
+  const { file, trusted } = await trustedFile(profileId, toolTabId)
+  return trusted && typeof href === 'string' ? readFileAsset(file.root, file.path, href) : null
+})
+ipcMain.handle('desktop:file-watch', async (event, profileId: unknown, toolTabId: unknown, on: unknown): Promise<void> => {
+  assertMainWindowSender(event)
+  if (typeof profileId !== 'string' || typeof toolTabId !== 'string') throw new Error('Invalid file tab')
+  // Stopping never fails: the panel stops watching as it goes away, which can be after its tab closed.
+  if (on !== true) { projectTools().watchFile(profileId, toolTabId, null); return }
+  const { file, trusted } = await trustedFile(profileId, toolTabId)
+  projectTools().watchFile(profileId, toolTabId, trusted ? hostPath.resolve(file.root, file.path) : null)
+})
+ipcMain.handle('desktop:file-command', async (event, profileId: unknown, toolTabId: unknown, command: unknown): Promise<void> => {
+  assertMainWindowSender(event)
+  const { file, trusted } = await trustedFile(profileId, toolTabId)
+  const resolved = trusted ? await resolveInRoot(file.root, file.path) : null
+  if (!resolved?.ok) throw new Error('The file is no longer available')
+  if (command === 'reveal') shell.showItemInFolder(resolved.absolute)
+  else if (command === 'copy-path') clipboard.writeText(resolved.absolute)
+  else if (command === 'open') {
+    // Programs and scripts are never started from here; the panel offers Reveal in folder for them.
+    if (!canOpenWithDefaultApp(hostPath.basename(resolved.absolute))) throw new Error('This kind of file is not opened from here. Use Reveal in folder.')
+    const failure = await shell.openPath(resolved.absolute)
+    if (failure) throw new Error(failure)
+  } else throw new Error('Unknown file command')
 })
 
 // --- IPC: settings window ----------------------------------------------

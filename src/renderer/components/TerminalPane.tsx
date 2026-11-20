@@ -221,22 +221,24 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       })
     }
 
-    const openLink = async (link: DetectedLink): Promise<void> => {
+    // A plain click on a path opens the file in a File tab; with Ctrl (Cmd on macOS) it is shown in the file manager.
+    const openLink = async (link: DetectedLink, reveal: boolean): Promise<void> => {
       const request = ++linkRequestRef.current
-      setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : 'Revealing file…', tone: 'info' })
+      setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : reveal ? 'Revealing file…' : 'Opening file…', tone: 'info' })
       try {
         const result = link.type === 'url'
           ? await window.copilotDesktop.openExternalUrl(link.text)
-          : await window.copilotDesktop.revealPath(tabId, link.text)
+          : await window.copilotDesktop.openFile({ tabId }, link.text, { ...(link.line ? { line: link.line } : {}), ...(link.column ? { column: link.column } : {}), ...(reveal ? { reveal } : {}) })
         if (request !== linkRequestRef.current) return
         if (result && !result.ok) {
           setLinkNotice(result.reason === 'missing'
             ? { message: `File or folder not found or inaccessible: ${link.text}`, tone: 'info' }
-            : { message: `Only paths within the session workspace can be revealed: ${link.text}`, tone: 'error' })
+            : result.reason === 'limit' ? { message: result.message ?? 'Too many files are open. Close a file tab first.', tone: 'error' }
+            : { message: `Only paths within the session workspace can be opened: ${link.text}`, tone: 'error' })
         } else setLinkNotice(null)
       } catch (error) {
         if (request === linkRequestRef.current) {
-          setLinkNotice({ message: `Could not ${link.type === 'url' ? 'open link' : 'reveal file'}: ${errorMessage(error)}`, tone: 'error' })
+          setLinkNotice({ message: `Could not ${link.type === 'url' ? 'open link' : reveal ? 'reveal file' : 'open file'}: ${errorMessage(error)}`, tone: 'error' })
         }
       }
     }
@@ -257,7 +259,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: () => { void openLink(link) },
+            activate: (event: MouseEvent) => { void openLink(link, event.ctrlKey || event.metaKey) },
           }]
         })
         callback(links.length > 0 ? links : undefined)
