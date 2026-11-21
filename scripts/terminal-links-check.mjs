@@ -53,11 +53,14 @@ if (!process.versions.electron) {
     const calls = []
     let mode = 'missing'
     let rejectPending
-    ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: [
+    // What the terminal sent to the session process. The history turns mouse reporting on, as Copilot does.
+    const written = []
+    const leftButton = data => { const report = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data); return Boolean(report) && (Number(report[1]) & 99) === 0 }
+    ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\u001b[?1003h\u001b[?1006h' + [
       'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
     ].join('\r\n') }))
     ipcMain.handle('desktop:resize-tab', () => {})
-    ipcMain.handle('desktop:write-tab', () => {})
+    ipcMain.handle('desktop:write-tab', (_event, _tabId, data) => { written.push(data); return { gitCursorContextAttached: false } })
     ipcMain.handle('desktop:open-external-url', (_event, url) => { calls.push({ type: 'url', text: url }) })
     ipcMain.handle('desktop:open-file', async (_event, source, text, location) => {
       calls.push({ type: 'path', tabId: source.tabId, text, ...(location && Object.keys(location).length ? { location } : {}) })
@@ -84,7 +87,7 @@ if (!process.versions.electron) {
       throw new Error('Timed out: ' + label)
     }
     const notice = () => ui('document.querySelector(".terminal-link-error")?.textContent ?? null')
-    const clickLink = async (text, modifiers = []) => {
+    const locate = async text => {
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 0, y: 0 })
       await delay(100)
       const point = await ui(`(() => {
@@ -110,6 +113,10 @@ if (!process.versions.electron) {
       await delay(50)
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
       await delay(150)
+      return point
+    }
+    const clickLink = async (text, modifiers = []) => {
+      const point = await locate(text)
       window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, modifiers, ...point })
       window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, modifiers, ...point })
       await delay(100)
@@ -185,6 +192,48 @@ if (!process.versions.electron) {
       await ui('window.setActive(true)')
       await delay(100)
       assert.equal(await notice(), null)
+      // The click that opens a link is not also reported to the session process; a click beside the link is.
+      mode = 'ok'; calls.length = 0; written.length = 0
+      await clickLink('src/app.ts:42:7')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7 } })
+      await delay(150)
+      assert.deepEqual(written.filter(leftButton), [], 'a link click reaches the session process as a mouse click too')
+      await clickLink('- error')
+      await delay(150)
+      assert.equal(written.filter(leftButton).length, 2, 'a click away from a link is still reported: press and release')
+      assert.equal(calls.length, 0)
+      // Press, move and release all inside one link: a drag. It is the session's alone and does not open the link.
+      {
+        written.length = 0
+        const point = await locate('src/app.ts:42:7')
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        await delay(50)
+        window.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', modifiers: ['leftButtonDown'], x: point.x + 16, y: point.y })
+        await delay(50)
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: point.x + 16, y: point.y })
+        await delay(250)
+        assert.equal(calls.length, 0, 'a drag inside a link does not open it')
+        const reports = written.filter(data => /^\u001b\[<\d+;\d+;\d+[Mm]$/.test(data))
+        const pressAt = reports.findIndex(data => /^\u001b\[<0;\d+;\d+M$/.test(data))
+        assert.ok(pressAt >= 0 && /^\u001b\[<32;/.test(reports[pressAt + 1]) && /^\u001b\[<0;\d+;\d+m$/.test(reports.at(-1)), `press, drag, release reach the session in order: ${JSON.stringify(reports)}`)
+      }
+      // A press on a link whose release never comes (the tab is switched away) is not sent with a later hover.
+      {
+        const point = await locate('src/app.ts:42:7')
+        written.length = 0
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        await delay(50)
+        await ui('window.setActive(false)'); await delay(100)
+        await ui('window.setActive(true)'); await delay(100)
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x + 200, y: point.y })
+        await delay(200)
+        assert.deepEqual(written.filter(leftButton), [], 'a press held across a tab switch is not sent later')
+        assert.ok(written.some(data => /^\u001b\[<35;/.test(data)), 'the hover itself is reported')
+        assert.equal(calls.length, 0)
+        // Leave the fixture with no button down.
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: point.x + 200, y: point.y })
+        await delay(100)
+      }
       assert.deepEqual(await ui('window.unhandled'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
