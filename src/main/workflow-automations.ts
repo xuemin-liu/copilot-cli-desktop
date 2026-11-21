@@ -7,7 +7,9 @@ import { readAutomationEvents,resolveAutomationActors,type AutomationActor,type 
 export class AutomationLaunchRefused extends Error {}
 
 export interface AutomationRule {id:string;revision:string;projectId:string;scopeKey:string;repository:string;template:AutomationTemplate;actors:AutomationActor[];mode:'off'|'preview'|'automatic';seen:Record<string,string>;activatedAt:number;health:string;launches:number;day:number;dayLaunches:number}
-export interface AutomationPreview {id:string;ruleId:string;revision:string;key:string;version:string;title:string;summary:string;createdAt:number;state:'preview'|'launching'|'started'|'uncertain'|'stale'|'overlap'|'limit';refusal?:string;sessionId?:string;taskId?:string}
+export interface AutomationPreview {id:string;ruleId:string;revision:string;key:string;version:string;title:string;summary:string;createdAt:number;state:'preview'|'launching'|'started'|'uncertain'|'stale'|'overlap'|'limit';refusal?:string;sessionId?:string;taskId?:string;
+  /** The rule had used its starts for the day: this one waits until then, and its evidence is read again before it starts. */
+  waitUntil?:number}
 export interface AutomationHost {api:GithubApi;changed():void;interrupt(projectId?:string):void;ready(projectId:string):boolean;
   scopeKey(projectId:string):string|null;
   launch(rule:AutomationRule,event:AutomationEvent,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}>;now?:()=>number}
@@ -18,6 +20,9 @@ const clean=(value:string,max:number):string=>{
   return result
 }
 const terminalPreview=(state:string):boolean=>!['launching','uncertain'].includes(state)
+const DAY=86400000
+/** Starts a rule may make in one UTC day, and in all. Only the second is final: see `dispatch`. */
+export const AUTOMATION_DAILY_STARTS=3,AUTOMATION_RULE_STARTS=10
 
 /** Person-owned rules. Source payloads cannot enable rules or change the fixed investigation launch profile. */
 export class WorkflowAutomations {
@@ -91,6 +96,25 @@ export class WorkflowAutomations {
     this.saveRule({...current,mode,revision:randomUUID(),seen:Object.fromEntries(events.map(e=>[e.key,e.version])),activatedAt:this.now(),health:mode})
     if(mode!=='automatic')this.host.interrupt(rule.projectId)
   }
+  /**
+   * Deletes a rule and its previews. What it started stays: sessions and tasks are not touched, and the record of which
+   * events were handled is kept, so no other rule starts the same event again.
+   */
+  async remove(id:string):Promise<void>{
+    if(this.busy)throw new Error('Automation is checking sources; try again shortly')
+    const rule=this.rules().find(r=>r.id===id);if(!rule)throw new Error('Unknown rule')
+    if(this.previews().some(p=>p.ruleId===id&&p.state==='launching'))throw new Error('This rule is starting a session; delete it when that has finished')
+    this.host.interrupt(rule.projectId)
+    this.db.exec('BEGIN IMMEDIATE')
+    try{
+      for(const preview of this.previews().filter(p=>p.ruleId===id))this.nextLaunch.delete(preview.id)
+      this.db.prepare('DELETE FROM previews WHERE rule=?').run(id)
+      this.db.prepare('DELETE FROM rules WHERE id=?').run(id)
+      this.db.exec('COMMIT')
+    }catch(error){this.db.exec('ROLLBACK');throw error}
+    this.next.delete(id);this.failures.delete(id);this.sourceRetryAt.delete(id)
+    this.host.changed()
+  }
   async startPreview(id:string):Promise<void>{
     if(this.busy)throw new Error('Automation is checking sources; try again shortly')
     this.busy=true
@@ -146,8 +170,19 @@ export class WorkflowAutomations {
     if(!this.permitted(rule,manual)||!this.host.ready(rule.projectId))return
     if((this.sourceRetryAt.get(rule.id)??0)>this.now())return
     if(!manual&&(this.nextLaunch.get(preview.id)??0)>this.now())return
-    const day=Math.floor(this.now()/86400000),count=rule.day===day?rule.dayLaunches:0
-    if(rule.launches>=10||count>=3){this.savePreview({...preview,state:'limit'});return}
+    const day=Math.floor(this.now()/DAY),count=rule.day===day?rule.dayLaunches:0
+    // The rule's lifetime budget is spent: this is final, until the person deletes the rule and makes a new one.
+    if(rule.launches>=AUTOMATION_RULE_STARTS){this.savePreview({...preview,state:'limit'});return}
+    // The day's budget is a rate, not a verdict on the event. It waits for the next day, where everything below runs
+    // again: the event must still be there, unchanged, from an allowed actor, or the preview goes stale.
+    if(count>=AUTOMATION_DAILY_STARTS){
+      const waitUntil=(day+1)*DAY
+      this.nextLaunch.set(preview.id,waitUntil)
+      if(preview.waitUntil!==waitUntil)this.savePreview({...preview,waitUntil})
+      if(manual)throw new Error(`This rule has started ${AUTOMATION_DAILY_STARTS} sessions today, its limit for a day. It can start this one tomorrow.`)
+      return
+    }
+    if(preview.waitUntil!==undefined){const {waitUntil:_waited,...rest}=preview;preview=rest}
     let events:AutomationEvent[]
     try{events=await this.read(rule)}catch{return}
     if(!this.permitted(rule,manual))return
@@ -233,6 +268,7 @@ export class WorkflowAutomations {
     if(!p||!/^[-a-f0-9]{36}$/.test(p.id)||!/^[-a-f0-9]{36}$/.test(p.ruleId)||!/^[-a-f0-9]{36}$/.test(p.revision)||typeof p.key!=='string'||!p.key.startsWith('github/')||p.key.length>300||!/^[a-f0-9]{64}$/.test(p.version)
       ||typeof p.title!=='string'||p.title!==clean(p.title,120)||typeof p.summary!=='string'||p.summary!==clean(p.summary,2000)||!Number.isFinite(p.createdAt)
       ||(p.refusal!==undefined&&(typeof p.refusal!=='string'||p.refusal!==clean(p.refusal,300)))
+      ||(p.waitUntil!==undefined&&!Number.isSafeInteger(p.waitUntil))
       ||!['preview','launching','started','uncertain','stale','overlap','limit'].includes(p.state))throw new Error('Invalid preview record')
     return p
   }
