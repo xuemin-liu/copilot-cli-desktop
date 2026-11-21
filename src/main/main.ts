@@ -1,6 +1,6 @@
 import { ProjectToolService } from './project-tools.js'
 import type { ToolFile, ToolsAction } from './tool-tabs.js'
-import { isWorkflowCliVersion, supportsTaskReporting, workflowCliVersionNotice } from './workflow-capabilities.js'
+import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReporting } from './workflow-capabilities.js'
 import { randomUUID, createHash } from 'node:crypto'
 import { WorkflowFollowups, type FollowupGrant } from './workflow-followups.js'
 import { githubCliApi,parseGithubPullUrl } from './workflow-github.js'
@@ -737,8 +737,8 @@ function openAutomations():WorkflowAutomations {
 }
 async function launchAutomationTask(rule:AutomationRule,event:AutomationEvent,authorized:()=>boolean):Promise<{sessionId:string;taskId:string}> {
   const profile=desktopConfig.profiles.find(p=>p.id===rule.projectId),runner=await meetingGitRunner()
-  const versionNotice=workflowCliVersionNotice(state.resolution?.version)
-  if(versionNotice)throw new AutomationLaunchRefused(versionNotice)
+  const versionRefusal=automaticWorkVersionRefusal(state.resolution?.version)
+  if(versionRefusal)throw new AutomationLaunchRefused(versionRefusal)
   if(!profile||!runner||!authorized()||!automaticProjectReady(rule.projectId))throw new AutomationLaunchRefused('Project is unavailable for automatic work; open its settings before retrying')
   const snapshot={repository:rule.repository,headRepository:rule.repository,branch:event.branch,head:event.head,base:event.head,open:true,checks:'absent' as const,feedback:[]}
   try{await verifyWorkflowCheckout(profile.path,snapshot,runner,gitTrustStore())}

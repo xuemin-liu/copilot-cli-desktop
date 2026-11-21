@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isWorkflowCliVersion, supportsTaskReporting, WORKFLOW_CLI_VERSION, workflowCliVersionNotice } from './workflow-capabilities.js'
+import { automaticWorkVersionRefusal, isWorkflowCliVersion, supportsTaskReporting, WORKFLOW_CLI_VERSION, workflowCliVersionNotice } from './workflow-capabilities.js'
 
 test('only the verified CLI version turns the workflow features on, and the match is exact', () => {
   assert.equal(isWorkflowCliVersion(WORKFLOW_CLI_VERSION), true)
@@ -24,5 +24,14 @@ test('another installed version is explained by name, with what it turns off; th
   const notice = workflowCliVersionNotice('1.0.114')!
   assert.ok(notice.includes(`Copilot CLI ${WORKFLOW_CLI_VERSION} only`))
   assert.ok(notice.includes('Version 1.0.114 is installed'))
-  assert.ok(notice.includes('Task reports and automatic work'))
+  assert.ok(notice.includes('automatic work is off and new sessions cannot report'))
+  assert.ok(notice.endsWith('Task outcomes can still be set by hand.'))
+  // A session still running the verified version keeps reporting, and the notice says so instead of denying it.
+  const mixed = workflowCliVersionNotice('1.0.114', true)!
+  assert.ok(mixed.endsWith(`Sessions still running ${WORKFLOW_CLI_VERSION} keep reporting.`))
+  assert.ok(!mixed.includes('by hand'))
+  assert.equal(workflowCliVersionNotice(WORKFLOW_CLI_VERSION, true), null)
+  assert.equal(automaticWorkVersionRefusal(WORKFLOW_CLI_VERSION), null)
+  assert.equal(automaticWorkVersionRefusal(null), null)
+  assert.equal(automaticWorkVersionRefusal('1.0.114'), `Automatic work is verified with Copilot CLI ${WORKFLOW_CLI_VERSION} only, and version 1.0.114 is installed`)
 })

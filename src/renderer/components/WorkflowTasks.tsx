@@ -23,7 +23,9 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
     setFailure(null);setPending(true)
     void window.copilotDesktop.createTask(tabId,title.trim(),replace).then(()=>setTitle('')).catch(error=>setFailure(error instanceof Error?error.message:'The task could not be created.')).finally(()=>setPending(false))
   }
-  const versionNotice = workflowCliVersionNotice(installedCliVersion)
+  // A session started on the verified CLI keeps reporting after a newer one is installed; the notice must not deny that.
+  const sessionsReporting = known.some(tab => supportsTaskReporting({ version: tab.cliVersion, sideChat: Boolean(tab.sideChat), remote: tab.remote, preset: tab.sessionPermissionPreset }))
+  const versionNotice = workflowCliVersionNotice(installedCliVersion, sessionsReporting)
   const active = tasks.filter(task => task.outcome !== 'completed' && task.outcome !== 'cancelled')
   const history = tasks.filter(task => task.outcome === 'completed' || task.outcome === 'cancelled')
   const renderArtifacts=(artifacts:readonly TaskArtifact[]=[]):JSX.Element[]=>artifacts.map((artifact,index)=><p key={index}>{artifact.kind==='url'
@@ -73,7 +75,7 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
       </>}
       {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>{if(window.confirm(`Delete local task history for "${task.title}"? Its request copy and report history will be removed. Sessions, files, worktrees and handoff evidence are kept.`))finish(task.id,'delete')}}>Delete task history</button>}
     </li>)}</ul>
-  return <details className="needs-you workflow-tasks"><summary>Tasks · {tasks.length}{versionNotice ? ' · reports off' : ''}</summary>
+  return <details className="needs-you workflow-tasks"><summary>Tasks · {tasks.length}{versionNotice ? (sessionsReporting ? ' · new sessions cannot report' : ' · reports off') : ''}</summary>
     {(error || failure) && <p role="status">{error || failure}</p>}
     {versionNotice && <p role="note">{versionNotice}</p>}
     {known.length>0&&<form onSubmit={event=>{

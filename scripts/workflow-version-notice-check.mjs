@@ -53,7 +53,7 @@ if (!process.versions.electron) {
       assert.equal(note, null, 'the verified version needs no explanation')
       console.log(`PASS: CLI ${installed} is the verified version; no notice`)
     } else {
-      assert.equal(note, `Task reports and automatic work are verified with Copilot CLI ${WORKFLOW_CLI_VERSION} only. Version ${installed} is installed, so both are off. Task outcomes can still be set by hand.`)
+      assert.equal(note, `Task reports and automatic work are verified with Copilot CLI ${WORKFLOW_CLI_VERSION} only. Version ${installed} is installed, so automatic work is off and new sessions cannot report. Task outcomes can still be set by hand.`)
       assert.match(await ui('document.querySelector(".workflow-tasks summary").textContent'), / · reports off$/, 'the closed panel says so too')
       console.log(`PASS: CLI ${installed} is installed; the Tasks panel says task reports and automatic work are off`)
     }
