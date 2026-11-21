@@ -155,6 +155,30 @@ async function alternatesIssue(roots: readonly string[]): Promise<string | null>
   return null
 }
 
+/**
+ * Where a repository keeps its own config, found from the filesystem alone: `local` is the shared `config`, `worktree`
+ * is this working tree's `config.worktree` (which Git reads only when `extensions.worktreeConfig` is on). Null when
+ * there is no usable `.git` here. Nothing is checked for safety; that is `inspectGitEntry`.
+ */
+export async function repoConfigFiles(folder: string): Promise<{ local: string; worktree: string } | null> {
+  const entry = hostPath.join(folder, '.git')
+  let info
+  try { info = await lstat(entry) } catch { return null }
+  let gitDir: string | null = null
+  if (info.isDirectory()) gitDir = entry
+  else if (info.isFile()) {
+    const pointer = await readPointerFile(entry, GIT_POINTER_MAX_BYTES)
+    const match = pointer.kind === 'text' ? /^gitdir:\s*(.+?)\s*$/m.exec(pointer.text) : null
+    gitDir = match?.[1] ? localAbsolute(folder, match[1]) : null
+  }
+  if (!gitDir) return null
+  const common = await readPointerFile(hostPath.join(gitDir, 'commondir'), GIT_POINTER_MAX_BYTES)
+  if (common.kind === 'unsafe') return null
+  const commonDir = common.kind === 'absent' ? gitDir : localAbsolute(gitDir, common.text)
+  if (!commonDir) return null
+  return { local: hostPath.join(commonDir, 'config'), worktree: hostPath.join(gitDir, 'config.worktree') }
+}
+
 /** What lives at `<folder>\.git`: `null` when absent, otherwise whether git may be pointed at it. */
 export async function inspectGitEntry(folder: string): Promise<{ issue: string | null } | null> {
   const entry = hostPath.join(folder, '.git')

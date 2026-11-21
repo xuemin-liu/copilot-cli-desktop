@@ -17,7 +17,7 @@ import { TRASH_NAME } from './host-path.js'
 import type { GitFixture } from './fixtures/git-fixture.js'
 import { GitCancelledError, GitService, GitStaleError, STATUS_TOO_LARGE_MESSAGE, isIndexLockFailure } from './git-service.js'
 import type { GitServiceOptions } from './git-service.js'
-import { GitTrustStore } from './git-trust.js'
+import { GitTrustStore, scanRepoConfig } from './git-trust.js'
 import type { GitConfirmRequest, GitProjectView, GitRepoStatusView } from './git-types.js'
 import type { GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 
@@ -606,6 +606,47 @@ shardedTest('the status summary follows a branch change even when the file list 
   const after = await h.service.getStatus(SUBSCRIBER, PROFILE, repo.id)
   assert.equal(after.summary.branch, 'second-branch')
   assert.equal(after.generation, before.generation, 'entry ids stay valid when the file list is unchanged')
+})
+
+shardedTest('a repository with an include is asked about its include line first, then about what the file brings in', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'shared.gitconfig'), '[user]\n\tname = harmless\n')
+    f.plain(project, 'config', 'include.path', '../shared.gitconfig')
+  })
+  const root = realpathSync.native(h.project)
+  // Trusted before includes were followed: that answer no longer covers it.
+  const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(first.state, 'needs-review')
+  assert.deepEqual(first.reviewItems.map(item => item.key), ['include.path'])
+  assert.equal(h.calls.includes('status'), false)
+
+  // The file brings in nothing to review, so accepting the line is the whole question.
+  const ready = repoAt(await h.service.trust(SUBSCRIBER, PROFILE, first.id, first.configHash!), '.')!
+  assert.equal(ready.state, 'ready')
+  assert.equal(await h.trustStore.areIncludesApproved(root, (await scanRepoConfig(h.fixture.runner, root)).ownHash), true)
+
+  // The included file changes under an unchanged include line: Git is held again, with the new setting listed.
+  writeFileSync(join(h.project, 'shared.gitconfig'), '[core]\n\tsshCommand = evil\n')
+  const asked = repoAt(await h.service.rescan(SUBSCRIBER, PROFILE), '.')!
+  assert.equal(asked.state, 'needs-review')
+  assert.deepEqual(asked.reviewItems.map(item => item.key).sort(), ['core.sshcommand', 'include.path'])
+  assert.equal(repoAt(await h.service.trust(SUBSCRIBER, PROFILE, asked.id, asked.configHash!), '.')?.state, 'ready')
+})
+
+shardedTest('an include whose file names a program is asked about twice: the line, then the program', { skip }, async (t) => {
+  const h = await harness(t, (f, project) => {
+    f.plain(project, 'init', '-q')
+    writeFileSync(join(project, 'shared.gitconfig'), '[core]\n\tsshCommand = evil\n')
+    f.plain(project, 'config', 'include.path', '../shared.gitconfig')
+  })
+  const first = repoAt(await h.service.subscribe(SUBSCRIBER, PROFILE), '.')!
+  assert.deepEqual(first.reviewItems.map(item => item.key), ['include.path'], 'the file is not read before its line is accepted')
+  const second = repoAt(await h.service.trust(SUBSCRIBER, PROFILE, first.id, first.configHash!), '.')!
+  assert.equal(second.state, 'needs-review')
+  assert.deepEqual(second.reviewItems.map(item => item.key).sort(), ['core.sshcommand', 'include.path'])
+  assert.equal(h.calls.includes('status'), false)
+  assert.equal(repoAt(await h.service.trust(SUBSCRIBER, PROFILE, second.id, second.configHash!), '.')?.state, 'ready')
 })
 
 shardedTest('a setting too long to have been shown in full cannot be trusted, even if asked directly', { skip }, async (t) => {
