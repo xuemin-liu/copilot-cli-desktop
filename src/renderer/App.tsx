@@ -288,6 +288,22 @@ export function App(): JSX.Element {
   }
   useEffect(() => window.copilotDesktop.onSessionHistoryRequest(openHistory), [openHistory])
 
+  // Escape closes the open dialog wherever the focus is, a click on the backdrop included, and goes no further: the
+  // terminal behind the dialog must not receive it.
+  const dialogOpen = inputDialog !== null
+  const dialogPending = inputDialog?.pending === true
+  useEffect(() => {
+    if (!dialogOpen) return
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      if (!dialogPending) setInputDialog(null)
+    }
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => document.removeEventListener('keydown', handleKeyDown, true)
+  }, [dialogOpen, dialogPending])
+
   const sessionShortcut = (key: 'w' | 't'): void => {
     if (key === 't') { if (canOpenTab) openNewSession(); return }
     if (state.activeTabId) window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
@@ -498,8 +514,7 @@ export function App(): JSX.Element {
       )}
       {inputDialog && (
         <div className="dialog-backdrop" role="presentation">
-          <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}
-            onKeyDown={(event) => { if (event.key === 'Escape' && !inputDialog.pending) { event.preventDefault(); setInputDialog(null) } }}>
+          <form className="input-dialog" role="dialog" aria-modal="true" aria-labelledby="input-dialog-title" onSubmit={submitInputDialog}>
             <h2 id="input-dialog-title">
               {inputDialog.kind === 'add-workspace' ? 'Add workspace' : inputDialog.kind === 'remote' ? 'Connect to remote session' : inputDialog.kind === 'fork' ? 'Fork into side chat' : inputDialog.kind === 'fan-out' ? 'Fan out into several sessions' : inputDialog.kind === 'new-session' ? (inputDialog.attachments ? 'New session with attachments' : 'New session') : 'Rename session'}
             </h2>
@@ -527,7 +542,8 @@ export function App(): JSX.Element {
             {inputDialog.kind === 'add-workspace' && (
               <div className="input-dialog-choices" role="radiogroup" aria-label="Workspace type">
                 <label className="input-dialog-check">
-                  <input type="radio" name="workspace-type" checked={!inputDialog.general} disabled={inputDialog.pending}
+                  {/* This dialog opens without its text field, so the choice takes the focus: otherwise it stays in the terminal. */}
+                  <input type="radio" name="workspace-type" autoFocus checked={!inputDialog.general} disabled={inputDialog.pending}
                     onChange={() => setInputDialog({ ...inputDialog, general: false, error: null })} />
                   <span><strong>Project folder</strong><small>A folder on this computer that you choose next.</small></span>
                 </label>

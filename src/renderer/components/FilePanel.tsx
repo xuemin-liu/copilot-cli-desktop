@@ -257,9 +257,12 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
     // A PDF marks its own matches, in its text layer.
     if (!registry || pdfRevision) return
+    // Every File tab draws with the same two names, so only the tab that is shown may touch them: a hidden tab with its
+    // own find open would otherwise wipe the marks the shown tab has just drawn.
+    if (!active) { ranges.current = []; setMatch({ index: 0, count: 0 }); return }
     registry.delete('file-find'); registry.delete('file-find-current')
     ranges.current = []
-    if (!root || !active || !finding || !query || !content) { setMatch({ index: 0, count: 0 }); return }
+    if (!root || !finding || !query || !content) { setMatch({ index: 0, count: 0 }); return }
     const found = findRanges(richView ? [root] : root.querySelectorAll('.file-lc'), query, '.file-ln, .file-row-number')
     ranges.current = found
     if (found.length) registry.set('file-find', new Highlight(...found))
@@ -274,12 +277,12 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   useEffect(() => {
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
     const range = ranges.current[match.index]
-    if (!registry || pdfRevision) return
+    if (!registry || pdfRevision || !active) return
     registry.delete('file-find-current')
     if (!range || !finding) return
     registry.set('file-find-current', new Highlight(range))
     range.startContainer.parentElement?.scrollIntoView({ block: 'center', inline: 'nearest' })
-  }, [match, finding, pdfRevision])
+  }, [match, finding, pdfRevision, active])
   const step = (by: number): void => pdfRevision ? pdfView.current?.find(query, by < 0) : setMatch(current => current.count ? { ...current, index: (current.index + by + current.count) % current.count } : current)
   const openFind = (): void => { setFinding(true); requestAnimationFrame(() => { findInput.current?.focus(); findInput.current?.select() }) }
   const onKeyDown = (event: KeyboardEvent): void => {
