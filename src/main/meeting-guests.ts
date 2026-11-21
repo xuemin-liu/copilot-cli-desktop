@@ -503,6 +503,11 @@ export interface GuestDeps {
   approveChanges?(seat: GuestSeat): Promise<boolean>
   /** Asks the person whether a reviewer that joined with only the meeting's id may read the changes it shares. */
   approveMaterial?(seat: GuestSeat): Promise<boolean>
+  /**
+   * The folder as the system names it, with every link followed. A folder an agent named is kept in this form, so what
+   * the person is shown and allows is what is read, now and in every later round, however a link is pointed afterwards.
+   */
+  canonicalFolder?(path: string): Promise<string>
   /** A folder an agent names as its project, as a host without an invitation: why it cannot be used, or null. */
   checkFolder(path: string): Promise<string | null>
 }
@@ -594,14 +599,15 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       if (!Number.isInteger(round) || round < 1 || round > 1000 || !Number.isInteger(offset) || offset < 0) return { ok: false, message: 'The round and offset take whole numbers.' }
       // The changes are someone's uncommitted work. A seat taken with only the meeting's id reads them once the person
       // has said so; the post, the replies and the transcript are what the meeting is for.
+      const text = await deps.material(seat.meetingId, name, round)
+      // Whether a round has changes is in its message already, so saying there are none tells nothing, and asks nobody.
+      if (text === null) return { ok: false, message: name === 'transcript' ? 'There is no transcript yet.' : `Round ${round} has no ${name}.` }
       if (name === 'changes' && seat.kind === 'reviewer' && !seat.granted) {
         if (!(await deps.approveMaterial?.(seat) ?? false)) {
           return { ok: false, message: 'The person has not allowed you to read the changes this meeting shares. Review the post, or ask the person to allow it in Copilot CLI Desktop and try again.' }
         }
         mailbox.grant(seat)
       }
-      const text = await deps.material(seat.meetingId, name, round)
-      if (text === null) return { ok: false, message: name === 'transcript' ? 'There is no transcript yet.' : `Round ${round} has no ${name}.` }
       const page = text.slice(offset, offset + GUEST_PAGE_CHARS)
       const end = offset + page.length
       const more = end < text.length ? `\n[${text.length - end} more characters: ${guestMaterialCall(via, name, round, end)}]` : '\n[end]'

@@ -643,3 +643,48 @@ test('a seat saved before grants were recorded is asked about, not taken as allo
   again.restore(JSON.parse(mailbox.serialize()))
   assert.equal(again.seat(seat.id)?.granted, true)
 })
+
+test('a folder an agent named is kept as the system names it, so a link pointed elsewhere later changes nothing', async () => {
+  const { hub, mailbox, deps, rpc, tool } = meeting()
+  // D:\\link is a link the caller controls. It points at D:\\public when the meeting starts.
+  let target = 'D:\\public'
+  deps.canonicalFolder = async (folder) => folder === 'D:\\link' ? target : folder
+  const shown: Array<string | null> = []
+  deps.approveChanges = async (seat) => { shown.push(seat.folder); return true }
+  const read: Array<string | null> = []
+  deps.changes = async (seat) => { read.push(seat.folder); return 'diff --git a/a b/a\n+x\n' }
+  const host = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
+  assert.equal((await tool(host, 'meeting_start', { topic: 't', post: 'Plan', folder: 'D:\\link', changes: true })).isError, false)
+  assert.deepEqual(shown, ['D:\\public'], 'the person is asked about the folder it really is')
+  assert.equal(mailbox.seat(hub.views()[0]!.hostTabId)?.folder, 'D:\\public')
+  // The caller points its link at another folder and attaches changes again.
+  target = 'D:\\secret'
+  const reviewer = (await rpc(undefined, 'initialize', { clientInfo: { name: 'codex' } })).sessionId!
+  await tool(reviewer, 'meeting_join', { meeting: hub.views()[0]!.id })
+  await tool(reviewer, 'meeting_next', { wait_seconds: 5 })
+  await tool(reviewer, 'meeting_reply', { text: 'Fine.' })
+  await tool(host, 'meeting_next', { wait_seconds: 5 })
+  assert.equal((await tool(host, 'meeting_round', { post: 'v2', changes: true })).isError, false)
+  assert.deepEqual(read, ['D:\\public', 'D:\\public'], 'the folder that was allowed is the one that is read')
+  // A link to somewhere that is not a usable folder is refused at the start.
+  deps.canonicalFolder = async () => 'Z:\\elsewhere'
+  const other = (await rpc(undefined, 'initialize', { clientInfo: { name: 'gemini' } })).sessionId!
+  assert.deepEqual(await tool(other, 'meeting_start', { topic: 't', post: 'p', folder: 'D:\\link2' }), { text: 'Z:\\elsewhere is not a folder.', isError: true })
+})
+
+test('asking for changes a round does not have asks nobody and grants nothing', async () => {
+  const { hub, mailbox, deps, rpc, tool } = meeting()
+  let asked = 0
+  deps.approveMaterial = async () => { asked++; return true }
+  const host = (await rpc(undefined, 'initialize', { clientInfo: { name: 'claude-code' } })).sessionId!
+  await tool(host, 'meeting_start', { topic: 't', post: 'Plan only' })
+  const byId = (await rpc(undefined, 'initialize', { clientInfo: { name: 'codex' } })).sessionId!
+  await tool(byId, 'meeting_join', { meeting: hub.views()[0]!.id })
+  await tool(byId, 'meeting_next', { wait_seconds: 5 })
+  assert.deepEqual(await tool(byId, 'meeting_show', { name: 'changes', round: 1 }), { text: 'Round 1 has no changes.', isError: true })
+  assert.equal(asked, 0)
+  assert.equal(mailbox.views().some((seat) => seat.name === 'Codex'), true)
+  assert.equal([...hub.views()[0]!.participants].length, 1)
+  const seat = mailbox.seat(hub.views()[0]!.participants[0]!.tabId)
+  assert.equal(seat?.granted, false)
+})

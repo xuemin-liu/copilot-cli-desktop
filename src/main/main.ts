@@ -3013,7 +3013,8 @@ const guestDeps: GuestDeps = {
     return folderChanges(seat.folder!, { runner, trust: gitTrustStore() })
   },
   approveChanges: (seat) => seat.folder === null ? Promise.resolve(false) : meetingGrants().attachChanges(seat.name, seat.folder),
-  approveMaterial: (seat) => meetingGrants().readChanges(seat.name, seat.id, seat.meetingId),
+  approveMaterial: (seat) => meetingGrants().readChanges(seat.name, seat.meetingId),
+  canonicalFolder: (folder) => realPathNative(folder),
   checkFolder: async (folder) => {
     if (!isAbsolute(folder) || folder.length > 4096) return 'Pass your project folder as an absolute path.'
     // Checked before anything touches it: a network path would be opened by the stat below.

@@ -89,8 +89,10 @@ export class MeetingGrants {
   }
 
   /** May this agent, which joined with only the meeting's id, read the changes the meeting shares? */
-  async readChanges(agent: string, seatId: string, meetingId: string): Promise<boolean> {
-    const answer = await this.put(`read\0${seatId}`, { kind: 'read-changes', agent, folder: null, meetingId })
+  async readChanges(agent: string, meetingId: string): Promise<boolean> {
+    // A "no" is remembered for the meeting, not the seat: a seat costs a caller nothing to take again, and a new one
+    // must not bring the question back.
+    const answer = await this.put(`read\0${meetingId}`, { kind: 'read-changes', agent, folder: null, meetingId })
     return answer !== 'deny'
   }
 

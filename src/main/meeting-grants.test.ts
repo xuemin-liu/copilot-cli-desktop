@@ -67,13 +67,13 @@ test('only one question is on screen at a time; a second request is refused, not
   const first = h.grants.attachChanges('Agent', PROJECT)
   await new Promise((resolveTurn) => setImmediate(resolveTurn))
   assert.equal(await h.grants.attachChanges('Other agent', resolve('/work/other')), false)
-  assert.equal(await h.grants.readChanges('Reviewer', 'guest:1', 'K7QF'), false)
+  assert.equal(await h.grants.readChanges('Reviewer', 'K7QF'), false)
   assert.equal(h.asked.length, 1)
   answer('once')
   assert.equal(await first, true)
   // The one that was turned away while the dialog was open was not answered "no" by the person, so it can ask now.
   h.answers.push('once')
-  assert.equal(await h.grants.readChanges('Reviewer', 'guest:1', 'K7QF'), true)
+  assert.equal(await h.grants.readChanges('Reviewer', 'K7QF'), true)
 })
 
 test('nobody to ask, a dialog that fails, a folder that is gone and a damaged file are all "no"', async (t) => {
@@ -89,12 +89,20 @@ test('nobody to ask, a dialog that fails, a folder that is gone and a damaged fi
   assert.deepEqual(await h.make().rememberedFolders(), [])
 })
 
-test('reading a meeting\'s changes is asked for each seat, and never remembered', async (t) => {
+test('reading a meeting\'s changes is asked for each request and never remembered; a "no" stands for the meeting', async (t) => {
   const h = await setup(t)
-  h.answers.push('once', 'deny')
-  assert.equal(await h.grants.readChanges('Codex', 'guest:aa', 'K7QF'), true)
+  h.answers.push('once', 'deny', 'once')
+  assert.equal(await h.grants.readChanges('Codex', 'K7QF'), true)
   assert.deepEqual(h.asked[0], { kind: 'read-changes', agent: 'Codex', folder: null, meetingId: 'K7QF' })
-  assert.equal(await h.grants.readChanges('Codex', 'guest:bb', 'K7QF'), false, 'another seat is another question')
+  // A yes is for the seat that asked (the caller records it there): the next request is asked again.
+  assert.equal(await h.grants.readChanges('Gemini', 'K7QF'), false)
   assert.equal(h.asked.length, 2)
+  // After that "no", nobody is asked about this meeting for a while, whatever seat or name the request comes under:
+  // taking a new seat costs a caller nothing.
+  for (const name of ['Gemini', 'Gemini 2', 'Someone new']) assert.equal(await h.grants.readChanges(name, 'K7QF'), false)
+  assert.equal(h.asked.length, 2)
+  // Another meeting is another question.
+  assert.equal(await h.grants.readChanges('Gemini', 'M2NB'), true)
+  assert.equal(h.asked.length, 3)
   assert.deepEqual(await h.grants.rememberedFolders(), [])
 })

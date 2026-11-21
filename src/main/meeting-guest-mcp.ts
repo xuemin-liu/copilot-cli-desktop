@@ -297,10 +297,17 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
   if (!deps.ready()) return toolText('The desktop is starting. Call meeting_start again in a minute.', true)
   const occupied = busy(mailbox, deps, session)
   if (occupied) return toolText(occupied, true)
-  const folder = typeof args.folder === 'string' && args.folder.trim() ? args.folder.trim() : null
+  let folder = typeof args.folder === 'string' && args.folder.trim() ? args.folder.trim() : null
   if (folder !== null) {
     const failure = await deps.checkFolder(folder)
     if (failure) return toolText(failure, true)
+    // Kept as the system names it. The person is asked about this folder, and a link the caller points somewhere else
+    // afterwards must not change which folder that was.
+    if (deps.canonicalFolder) {
+      try { folder = await deps.canonicalFolder(folder) } catch { return toolText(`${folder} is not a folder.`, true) }
+      const moved = await deps.checkFolder(folder)
+      if (moved) return toolText(moved, true)
+    }
   }
   // The agent named this folder, not the person: its changes are attached only once the person allows it.
   const { seat, token } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder, granted: false })
