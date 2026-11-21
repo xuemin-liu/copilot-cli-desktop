@@ -7,7 +7,7 @@ import { validateBrowserScreenshotPath } from '../cli/browser-control.js'
 import { writeFileAtomic } from './atomic-file.js'
 import {
   appDisplayName, canStartPrograms, DESKTOP_BLOCK_MESSAGES, DESKTOP_FRAME_MAX_AGE_MS, desktopBlockReason, desktopFrameSize,
-  DesktopRateLimiter, framePointToScreen, identityKey, isFrameId, isWindowId, parseDesktopChord, patchesMatch, patchRect,
+  DesktopRateLimiter, framePointToScreen, identityKey, isFrameId, isWindowId, maskInPatch, parseDesktopChord, patchesMatch, patchRect, screenMaskRects, screenRectToFrame,
   rectContains, sameRect, validateDesktopText,
   type DesktopAppIdentity, type DesktopBlockReason, type DesktopRect,
 } from './desktop-control-rules.js'
@@ -40,6 +40,8 @@ export interface DesktopDisplay { id: number; bounds: DesktopRect; scaleFactor: 
 export interface DesktopControlHost {
   /** This app's own program, whose windows are never controlled. */
   ownProgramPath: string
+  /** This app's own process: a second way to know its windows, for when the path is spelled differently. */
+  ownPid?: number | undefined
   /** Accelerators the app registers globally; `key` refuses them. */
   reservedAccelerators(): string[]
   stopKeyLabel: string
@@ -434,7 +436,7 @@ export class DesktopControl {
   }
 
   private blockReason(window: DesktopNativeWindow): DesktopBlockReason | null {
-    return desktopBlockReason({ identity: this.identityOf(window), className: window.className, elevated: window.elevated }, this.host.ownProgramPath)
+    return desktopBlockReason({ identity: this.identityOf(window), className: window.className, elevated: window.elevated, pid: window.pid }, this.host.ownProgramPath, this.host.ownPid)
   }
 
   private target(window: DesktopNativeWindow): Target | { blocked: DesktopBlockReason; window: DesktopNativeWindow } {
@@ -516,7 +518,7 @@ export class DesktopControl {
         .filter(window => !window.clickThrough && !window.minimized && (() => { const t = this.target(window); return 'blocked' in t || t.key !== targetKey })())
         .map(window => window.bounds)
     }
-    return windows.filter(window => !window.clickThrough && !window.minimized && this.blockReason(window) !== null).map(window => window.bounds)
+    return screenMaskRects(windows, window => this.blockReason(window) !== null)
   }
 
   private async screenshot(tabId: string, control: TabControl, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -630,7 +632,7 @@ export class DesktopControl {
   }
 
   /** The window under a point must be an approved app that the frame showed; returns it, approving it if needed. */
-  private async pointTarget(tabId: string, control: TabControl, command: string, frame: Frame, windows: DesktopNativeWindow[], point: { x: number; y: number }): Promise<Target> {
+  private async pointTarget(tabId: string, control: TabControl, command: string, frame: Frame, windows: DesktopNativeWindow[], point: { x: number; y: number }, framePoint: { x: number; y: number }): Promise<Target> {
     if (frame.kind === 'window') {
       const framed = windows.find(window => window.id === frame.windowId)
       if (!framed || !sameRect(framed.bounds, frame.bounds)) throw this.refuse(tabId, command, undefined, 'The window moved, resized or closed; take a new screenshot.', 409)
@@ -643,6 +645,9 @@ export class DesktopControl {
       throw this.refuse(tabId, command, target.name, `The point is on another app’s window (${target.name}); take a screenshot of that window first.`, 409)
     }
     if (!this.sameWindowAt(frame, hit, point)) throw this.refuse(tabId, command, target.name, 'A different window is at that point now; take a new screenshot.', 409)
+    // Before the person is asked about the app: a point that will be refused anyway must not cost them a prompt, or
+    // leave a grant behind.
+    this.refuseHidden(tabId, command, frame, point, framePoint, target.name)
     await this.approveApp(tabId, control, command, target)
     return target
   }
@@ -651,8 +656,22 @@ export class DesktopControl {
   private async patchUnchanged(frame: Frame, windows: DesktopNativeWindow[], x: number, y: number): Promise<boolean> {
     const framed = frame.kind === 'window' ? windows.find(window => window.id === frame.windowId) ?? null : null
     const blank = this.blankFor(frame.kind, windows, framed, frame.identity)
+    const patch = patchRect(frame, x, y)
+    // Painted-over pixels are the same grey in both captures whatever is under them. So the paint itself has to be in
+    // the same place: if it is not, a blocked window moved, opened or was uncovered near the point.
+    if (maskInPatch(frame, frame.blank, patch) !== maskInPatch(frame, blank, patch)) return false
     const now = await this.host.capture(frame.bounds, { width: frame.width, height: frame.height }, blank)
-    return patchesMatch(frame.bitmap, now, frame, patchRect(frame, x, y))
+    return patchesMatch(frame.bitmap, now, frame, patch)
+  }
+
+  /** A point the screenshot showed as paint: the session could not see what is there, so it may not act on it. */
+  private refuseHidden(tabId: string, command: string, frame: Frame, point: { x: number; y: number }, framePoint: { x: number; y: number }, app: string | undefined, what = 'That point'): void {
+    // The paint is drawn in the screenshot's own pixels, rounded outwards, so on a scaled-down screenshot a painted
+    // pixel at the edge can stand for a screen point just outside the rectangle. Both are checked.
+    const pixel = { x: Math.floor(framePoint.x), y: Math.floor(framePoint.y) }
+    if (frame.blank.some(rect => rectContains(rect, point) || rectContains(screenRectToFrame(frame, rect), pixel))) {
+      throw this.refuse(tabId, command, app, `${what} is painted over in the screenshot, so what is there was not shown. Take a screenshot of the window itself.`, 403)
+    }
   }
 
   /**
@@ -748,7 +767,7 @@ export class DesktopControl {
         : async () => { await ready(); await this.native.key(chord!.vks) }
     } else {
       const point = checked(() => framePointToScreen(frame, body.x, body.y))
-      target = await this.pointTarget(tabId, control, command, frame, windows, point)
+      target = await this.pointTarget(tabId, control, command, frame, windows, point, { x: body.x as number, y: body.y as number })
       if (command === 'click' || command === 'scroll' || command === 'drag') {
         windows = await this.native.windows()
         this.alive(tabId, control)
@@ -796,8 +815,23 @@ export class DesktopControl {
         const end = this.hitTest(windows, to)
         const endTarget = end ? this.target(end) : null
         if (!endTarget || 'blocked' in endTarget) throw this.refuse(tabId, command, target.name, 'The drag would end on a blocked window or on no window.', 403)
+        // The end is checked like the start: the same app for a window screenshot, a point that was shown, unchanged pixels.
+        if (frame.kind === 'window' && endTarget.key !== frame.identity) {
+          throw this.refuse(tabId, command, endTarget.name, `The drag would end on another app’s window (${endTarget.name}); take a screenshot of that window first.`, 409)
+        }
         if (!this.sameWindowAt(frame, endTarget.window, to)) throw this.refuse(tabId, command, endTarget.name, 'A different window is where the drag ends now; take a new screenshot.', 409)
+        this.refuseHidden(tabId, command, frame, to, { x: body.toX as number, y: body.toY as number }, endTarget.name, 'The point where the drag ends')
         await this.approveApp(tabId, control, command, endTarget)
+        // After the approval, which may have waited for the person: a dialog can have opened inside either window in
+        // the meantime without moving it, so the pixels at both ends are compared now.
+        windows = await this.native.windows()
+        this.alive(tabId, control)
+        if (!await this.patchUnchanged(frame, windows, body.x as number, body.y as number)) {
+          throw this.refuse(tabId, command, target.name, 'The screen changed around that point; take a new screenshot.', 409)
+        }
+        if (!await this.patchUnchanged(frame, windows, body.toX as number, body.toY as number)) {
+          throw this.refuse(tabId, command, endTarget.name, 'The screen changed where the drag ends; take a new screenshot.', 409)
+        }
         summary = `Dragged from ${body.x},${body.y} to ${body.toX},${body.toY}.`
         perform = async () => { await settled([...start, { at: to, windowId: endTarget.window.id }]); await this.native.drag(point, to) }
       }

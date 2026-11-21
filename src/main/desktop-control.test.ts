@@ -583,6 +583,109 @@ test('a full-screen capture paints over blocked windows that opened while the pe
   assert.deepEqual(blanked, [{ x: 50, y: 50, width: 200, height: 150 }])
 })
 
+const EXPLORER = 'C:\\Windows\\explorer.exe'
+const SCREEN = { x: 0, y: 0, width: 1000, height: 800 }
+
+test('a full-screen capture shows an opaque app in front of the desktop, and keeps the desktop painted', async t => {
+  const h = await harness(t)
+  let blanked: DesktopRect[] = []
+  h.host.capture = async (_bounds, size, blank) => { blanked = blank; return Buffer.alloc(size.width * size.height * 4) }
+  const inPaint = (x: number, y: number): boolean => blanked.some(rect => x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height)
+  // Explorer owns the desktop window, which is as large as the screen and behind everything.
+  h.native.list = [window('4', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { opaque: true }), window('1', EXPLORER, SCREEN, { className: 'Progman', opaque: true })]
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+  await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  assert.equal(inPaint(300, 250), false, 'Notepad is shown')
+  assert.equal(inPaint(50, 50), true, 'the desktop is not')
+  assert.equal(inPaint(100, 100), true, 'nor what shows through a rounded corner')
+
+  // The same app, not proven opaque (translucent, shaped, or unknown): the desktop behind it stays painted, over it too.
+  for (const extra of [{ opaque: false }, {}]) {
+    h.native.list[0] = window('4', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, extra)
+    await h.control.handle('tab', 'screenshot', { target: 'screen' })
+    assert.deepEqual(blanked, [SCREEN])
+  }
+})
+
+test('a point that the screenshot painted over cannot be clicked, even on an allowed window', async t => {
+  const h = await harness(t)
+  // A translucent app over the desktop: its window is hit, but the screenshot showed paint there.
+  h.native.list = [window('4', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { opaque: false }), window('1', EXPLORER, SCREEN, { className: 'Progman', opaque: true })]
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+  const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  h.asked.length = 0
+  await refused(h.control.handle('tab', 'click', { frameId: shot.frameId, x: 300, y: 250 }), /painted over in the screenshot/)
+  await refused(h.control.handle('tab', 'move', { frameId: shot.frameId, x: 300, y: 250 }), /painted over in the screenshot/)
+  assert.deepEqual(h.asked, [], 'the person is not asked about an app for an action that is refused anyway')
+  assert.deepEqual(h.control.view('tab').approvedApps, [], 'and no grant is left behind')
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
+})
+
+test('paint that moved near the point is a changed screen, though painted pixels always look the same', async t => {
+  const h = await harness(t)
+  const notepad = window('4', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { opaque: true })
+  h.native.list = [notepad, window('1', EXPLORER, SCREEN, { className: 'Progman', opaque: true })]
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+  h.answers.push('session')
+  const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  // Near Notepad's left edge the patch reaches the painted desktop. Clicking there is fine while nothing moved.
+  await h.control.handle('tab', 'click', { frameId: shot.frameId, x: 110, y: 250 })
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), ['click 110,250 left 1'])
+  h.native.actions.length = 0
+  // The desktop window goes (Explorer restarts): what was paint beside the point is now live pixels. The capture
+  // returns the same bytes either way, so only the paint tells.
+  h.native.list = [notepad]
+  await refused(h.control.handle('tab', 'click', { frameId: shot.frameId, x: 110, y: 250 }), /screen changed around that point/)
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
+})
+
+test('a drag from a window screenshot cannot end on another app’s window that the screenshot painted over', async t => {
+  const h = await harness(t)
+  const paint = window('20', 'C:\\Program Files\\Paint\\paint.exe', { x: 300, y: 200, width: 150, height: 150 }, { opaque: true })
+  h.native.list = [paint, window('11', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { className: 'Notepad', opaque: true })]
+  h.native.front = '11'
+  await h.control.enable('tab')
+  h.answers.push('session', 'session')
+  const shot = await h.control.handle('tab', 'screenshot', { target: '11' })
+  h.native.actions.length = 0
+  await refused(h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 50, y: 50, toX: 250, toY: 150 }), /would end on another app’s window \(Paint\)|would end on another app’s window/)
+  assert.deepEqual(h.asked.filter(app => /paint/i.test(app)), [], 'Paint is not even asked about')
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
+  // The same drag ending on Notepad itself goes through.
+  await h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 50, y: 50, toX: 100, toY: 250 })
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), ['drag 150,150 200,350'])
+})
+
+test('a dialog that opens while the person is asked about the app a drag ends on stops the drag', async t => {
+  const h = await harness(t)
+  const notepad = window('4', NOTEPAD, { x: 100, y: 100, width: 300, height: 300 }, { opaque: true })
+  const paint = window('20', 'C:\\Program Files\\Paint\\paint.exe', { x: 500, y: 100, width: 300, height: 300 }, { opaque: true })
+  h.native.list = [notepad, paint]
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+  const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  // Notepad is approved for the session; Paint is asked about when the drag is sent. While the person answers, the
+  // pixels change (a dialog inside a window that did not move).
+  h.answers.push('session')
+  await h.control.handle('tab', 'move', { frameId: shot.frameId, x: 200, y: 200 })
+  h.native.actions.length = 0
+  h.host.approve = async () => { h.paint(40); return 'once' }
+  await refused(h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 200, y: 200, toX: 600, toY: 200 }), /screen changed/)
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
+})
+
+test('this app’s own windows are blocked by process, not only by path', async t => {
+  const h = await harness(t)
+  h.host.ownPid = 77
+  h.native.list = [window('30', 'X:\\linked\\Copilot CLI Desktop.exe', { x: 0, y: 0, width: 400, height: 300 }, { pid: 77 })]
+  await h.control.enable('tab')
+  await refused(h.control.handle('tab', 'screenshot', { target: '30' }), /Copilot CLI Desktop|this app|blocked/i)
+  assert.deepEqual(h.asked, [])
+})
+
 function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, path, method: 'POST', headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', ...headers } }, response => {
