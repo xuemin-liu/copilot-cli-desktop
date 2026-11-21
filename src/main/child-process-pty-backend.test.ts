@@ -72,3 +72,26 @@ test('exit is still reported when a grandchild keeps the output pipes open', asy
   assert.ok(Date.now() - started < 2000, 'exit must not wait for the grandchild to release the pipes')
   pty.dispose?.()
 })
+
+test('a program that has already ended when its exit is asked for is still reported, after its last output', async () => {
+  const pty = spawnChildProcessPty(process.execPath, ['-e', 'process.stdout.write("last words"); process.exitCode = 3'], {
+    cwd: process.cwd(), env: process.env, cols: 80, rows: 24,
+  })
+  await pty.ready
+  // Long enough for it to have run and gone before anyone listens.
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const seen: string[] = []
+  pty.onData((data) => seen.push(`data:${data}`))
+  const exit = await new Promise<{ exitCode: number }>((resolve) => pty.onExit((event) => { seen.push('exit'); resolve(event) }))
+  assert.equal(exit.exitCode, 3)
+  assert.deepEqual(seen, ['data:last words', 'exit'])
+})
+
+test('ready settles once the program has started, and rejects with the reason when it cannot', async () => {
+  const started = spawnChildProcessPty(process.execPath, ['-e', '0'], { cwd: process.cwd(), env: process.env, cols: 80, rows: 24 })
+  await started.ready
+  assert.ok((started.pid ?? 0) > 0)
+  const missing = spawnChildProcessPty('definitely-not-a-real-binary-xyz', [], { cwd: process.cwd(), env: process.env, cols: 80, rows: 24 })
+  await assert.rejects(missing.ready!, /ENOENT/)
+  assert.equal(missing.pid, undefined)
+})

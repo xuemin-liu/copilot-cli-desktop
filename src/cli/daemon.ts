@@ -134,6 +134,11 @@ async function startSession(status: 'starting' | 'restarting', instance: PtySess
   try {
     await instance.start()
     if (session !== instance || stoppingRequested) return
+    // "Started" means there is a process. One that ended already has been, or is about to be, recorded by its exit.
+    if (instance.processId === null) {
+      if (instance.status === 'running') throw new Error('copilot did not start')
+      return
+    }
     await updateState({ status: 'running', processId: instance.processId, error: null })
     await log(`copilot started for ${workspace} (pid ${String(instance.processId)})`)
   } catch (error) {
