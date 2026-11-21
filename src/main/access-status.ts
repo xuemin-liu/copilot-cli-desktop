@@ -48,7 +48,7 @@ function cachedElevation(): Promise<ElevationStatus> {
 
 export async function readAccessStatus(
   profilePreset: PermissionPreset,
-  capabilities: { toolAllowlist: boolean },
+  capabilities: { toolAllowlist: boolean; probeFailed?: boolean | undefined },
 ): Promise<AccessStatus> {
   // This surface reports the workspace's configured startup preset. Ambient
   // environment variables can alter individual Copilot permission dimensions,

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { lstat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { redactDiagnosticText } from './desktop-diagnostics.js'
 import { branchListArgs, commitArgs, commitOid, commitDiffTreeArgs, configGetArgs, headMessageArgs, headParentsArgs, headTreesArgs, publishedRefsArgs, createBranchArgs, diffArgs, fastForwardArgs, fetchArgs, fetchRefspecsArgs, headRefArgs, logArgs, pushArgs, refFormatArgs, remoteListArgs, remoteUrlArgs, restoreArgs, stageArgs, stagedRawArgs, statusArgs, switchArgs, unstageArgs, upstreamConfigArgs, upstreamRefArgs, worktreeListArgs, defaultBranchRefArgs, isAncestorArgs, verifyRefArgs, worktreeRemoveArgs } from './git-commands.js'
 import { branchNameProblem, describeSwitchFailure } from './git-branch.js'
@@ -14,7 +16,7 @@ import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 import { isReviewable } from './git-review-format.js'
-import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
+import { GitTrustStore, configItemsHash, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
@@ -118,6 +120,8 @@ interface RepoRuntime {
   worktreeOfId: string | null
   /** A merge is in progress (`MERGE_HEAD` exists). Read only while there are conflicts, the one time the panel needs it. */
   merging: boolean
+  /** See `worktreeContentStamp`. */
+  contentStamp: string
 }
 
 interface ProjectRuntime {
@@ -145,6 +149,22 @@ const MAX_DIFF_BYTES = 512 * 1024
 /** Session folders examined per refresh; the app allows 20 tabs. */
 const MAX_SESSION_WORKTREES = 24
 const STATUS_TIMEOUT_MS = 30_000
+/** Shown in place of the file list. Nothing is listed, so nothing can be staged or discarded by mistake. */
+export const STATUS_TOO_LARGE_MESSAGE = 'This repository has too many changed files to list here (the list is over 4 MB). Use a terminal for it, or commit, stash or ignore some of the changes first.'
+/** How many changed files are checked for a newer edit. Past this, the selected diff refreshes as it did before: on focus. */
+const CONTENT_STAMP_FILES = 400
+
+/**
+ * Changes when a file with unstaged changes is edited again. The status list cannot show that: the file was "modified"
+ * before and is "modified" after, so nothing in the list changes and a diff that is open stays as it was.
+ */
+export async function worktreeContentStamp(root: string, entries: readonly GitStatusEntry[]): Promise<string> {
+  const hash = createHash('sha256')
+  const changed = entries.filter(entry => !entry.isDirectory && !entry.submodule && (entry.kind === 'untracked' || entry.kind === 'unmerged' || entry.worktree !== '.')).slice(0, CONTENT_STAMP_FILES)
+  const facts = await Promise.all(changed.map(entry => lstat(join(root, entry.path)).then(info => `${info.mtimeMs}:${info.size}`, () => 'gone')))
+  changed.forEach((entry, index) => hash.update(`${entry.path}\0${facts[index]}\0`))
+  return hash.digest('hex').slice(0, 16)
+}
 const UNAVAILABLE_MESSAGE = 'Git was not found. Install Git for Windows to use the Git panel.'
 
 function firstLine(text: string): string {
@@ -421,7 +441,7 @@ export class GitService {
       project.repos.set(key, {
         id: `repo-${this.nextRepoNumber++}`, discovered: found, state: 'ready', error: null, scan: null, worktreeOfId: null,
         generation: 0, signature: '', status: null, entries: new Map(), statusView: null,
-        writeQueue: Promise.resolve(), writeAbort: null, merging: false,
+        writeQueue: Promise.resolve(), writeAbort: null, merging: false, contentStamp: '',
       })
     }
     for (const key of [...project.repos.keys()]) if (!seen.has(key)) project.repos.delete(key)
@@ -482,7 +502,7 @@ export class GitService {
     }
     if (!runtime.executable.supported) { this.markError(repo, `${runtime.executable.version.text} is older than the supported minimum (2.30)`); return false }
     try {
-      const scan = await scanRepoConfig(runtime.runner, root, signal)
+      const scan = await scanRepoConfig(runtime.runner, root, signal, this.options.trustStore)
       if (signal.aborted) return false
       repo.scan = scan
       if (scan.items.length > 0 && !(await this.options.trustStore.isTrusted(root, scan.hash))) {
@@ -510,6 +530,8 @@ export class GitService {
         cwd: root, args: statusArgs(repo.discovered.kind === 'parent' ? 'no' : 'normal'), signal, timeoutMs: STATUS_TIMEOUT_MS,
       })
       if (result.cancelled || signal.aborted) return
+      // Checked before success: a list cut off mid-record cannot be parsed, and the runner stops Git when it passes the limit.
+      if (result.stdoutTruncated) return fail(STATUS_TOO_LARGE_MESSAGE)
       if (!gitSucceeded(result)) return fail(describeFailure(result, 'git status', root))
       const status = parseStatusV2(result.stdout.toString('utf8'))
       // Conflicts also come from a cherry-pick, a revert or a rebase; only a merge may be finished with "commit the merge".
@@ -520,6 +542,9 @@ export class GitService {
         merging = gitSucceeded(head) && head.stdout.toString('utf8').trim() !== ''
       }
       repo.merging = merging
+      const contentStamp = await worktreeContentStamp(root, status.entries)
+      if (signal.aborted) return
+      repo.contentStamp = contentStamp
       this.applyStatus(repo, status)
     } catch (error) {
       if (signal.aborted) return
@@ -579,6 +604,7 @@ export class GitService {
       ahead: branch?.ahead ?? null,
       behind: branch?.behind ?? null,
       generation: repo.generation,
+      contentStamp: repo.contentStamp,
       headOid: branch?.oid ?? null,
       changeCount: repo.status ? repo.status.entries.filter(entry => entry.kind !== 'ignored').length + Math.max(0, repo.status.totalEntries - repo.status.entries.length) : 0,
       error: repo.error,
@@ -781,7 +807,18 @@ export class GitService {
     }
     // What is trusted is the hash of the complete values, so every value must be short enough to have been shown in full.
     if (!isReviewable(repo.scan.items)) throw new Error('A setting in this repository is too long to review, so it cannot be trusted from the panel')
-    await this.options.trustStore.trust(repo.discovered.root, configHash)
+    const root = repo.discovered.root
+    if (repo.scan.includes === 'held') {
+      // Accepting the include lines lets Git read the files they name. If those files bring in nothing more to
+      // review, this was the whole question; otherwise the refresh below asks again, with their settings listed.
+      await this.options.trustStore.approveIncludes(root, repo.scan.ownHash)
+      const runtime = await this.options.getRuntime()
+      const followed = runtime ? await scanRepoConfig(runtime.runner, root, undefined, this.options.trustStore) : null
+      const same = followed?.includes === 'followed' && configItemsHash(followed.items) === configItemsHash(repo.scan.items)
+      if (same) await this.options.trustStore.trust(root, followed.hash)
+    } else {
+      await this.options.trustStore.trust(root, configHash)
+    }
     await this.refreshProject(project, true)
     return this.viewOf(project)
   }
@@ -932,6 +969,15 @@ export class GitService {
         remoteBranch = upstreamMerge.slice('refs/heads/'.length)
         if (operation === 'push' && remoteBranch !== head) {
           return refused('failed', `This branch tracks "${remoteBranch}" on ${remote}, a differently named branch. Push from a terminal, where you can see exactly what goes where.`)
+        }
+        if (operation === 'push') {
+          // `git push` sends a branch to its push remote, which these two settings can make a different remote from the one
+          // it pulls from (a fork). Pushing to the upstream here would send the commit somewhere a terminal would not.
+          const branchPushRemote = await read(configGetArgs(`branch.${head}.pushRemote`))
+          const pushRemote = branchPushRemote || await read(configGetArgs('remote.pushDefault'))
+          if (pushRemote && pushRemote !== remote) {
+            return refused('failed', `This branch pulls from "${remote}" but is set to push to "${pushRemote}" (${branchPushRemote ? `branch.${head}.pushRemote` : 'remote.pushDefault'}). Push from a terminal, which sends it to "${pushRemote}".`)
+          }
         }
       } else if (operation === 'pull') {
         return refused('no-remote', upstreamRemote === '.' ? 'This branch tracks a local branch, so there is nothing to pull from a remote.' : 'This branch has no upstream to pull from.')

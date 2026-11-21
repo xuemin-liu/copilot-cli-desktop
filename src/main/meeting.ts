@@ -368,6 +368,9 @@ export class MeetingHub {
     if (meeting.stage === 'waiting') {
       if (kind === 'propose-close') throw new MeetingError('Nobody has joined yet, so there is nobody to agree.')
       meeting.post = post
+      // A proposal to close that everyone left is waiting here too. What replaces it is a post to review: without this,
+      // the next reviewer would be asked to vote on it, and one AGREE would close the meeting.
+      meeting.vote = false
       this.writePost(meeting, 'Opening post (revised before anyone joined)', changes)
       this.changed(meeting)
       return `Nobody has joined meeting ${meeting.id} yet; the revised post will be the first thing they see. End your turn.`
@@ -377,6 +380,12 @@ export class MeetingHub {
       meeting.held = { kind, text: post, changes: changes === null ? null : sharedChanges(changes) }
       this.pause(meeting, 'round-limit')
       return `Meeting ${meeting.id} reached its limit of ${meeting.maxRounds} rounds. The person decides whether it continues; end your turn.`
+    }
+    if (meeting.participants.size === 0) {
+      // The last reviewer left after its round ended. A round opened now would wait its whole timeout for nobody.
+      if (kind === 'propose-close') throw new MeetingError('Nobody is in the meeting now, so there is nobody to agree. Post a round; whoever joins next reviews it.')
+      this.keepForNextReviewer(meeting, kind, post, changes)
+      return `Nobody is in meeting ${meeting.id} now. Your post is kept as round ${meeting.round} and is the first thing the next reviewer sees. End your turn.`
     }
     this.nextRound(meeting, kind, post, changes)
     return `Sent round ${meeting.round} to ${meeting.participants.size} reviewer${meeting.participants.size === 1 ? '' : 's'}. Their replies arrive as your next message; end your turn now.`
@@ -404,6 +413,8 @@ export class MeetingHub {
       const held = meeting.held
       meeting.held = null
       if (held && meeting.participants.size) { this.nextRound(meeting, held.kind, held.text, held.changes); return }
+      // Everyone left during the pause. The host was told its post is waiting, so it is what the next reviewer gets.
+      if (held) { this.keepForNextReviewer(meeting, held.kind, held.text, held.changes); return }
       meeting.stage = meeting.participants.size ? 'host' : 'waiting'
     } else {
       meeting.stage = 'host'
@@ -783,9 +794,22 @@ export class MeetingHub {
     this.changed(meeting)
   }
 
+  /** The host's next post when nobody is in the meeting: it becomes the next round, opened when someone joins. */
+  private keepForNextReviewer(meeting: Meeting, kind: 'round' | 'propose-close', post: string, changes: string | null): void {
+    meeting.round++
+    meeting.vote = kind === 'propose-close'
+    meeting.post = post
+    meeting.remindedHost = false
+    this.writePost(meeting, meeting.vote ? `Round ${meeting.round}: the host proposes to close (nobody was in the meeting)` : `Round ${meeting.round}: host (nobody was in the meeting)`, meeting.vote ? null : changes)
+    this.backToWaiting(meeting)
+    this.changed(meeting)
+  }
+
   /**
    * Nobody is left to answer the round: it starts over for whoever joins next. A discussion in progress is abandoned with
    * it; otherwise the next review would be taken for a discussion answer, and the old reviews would reach the host with it.
+   * Whether the round is a vote stays as it is: a proposal nobody answered is still the host's proposal. A post the host
+   * then makes while waiting is a new post to review, and clears it (see `post`).
    */
   private backToWaiting(meeting: Meeting): void {
     meeting.cancelTimer?.()

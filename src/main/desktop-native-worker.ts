@@ -30,6 +30,7 @@ const EnumChildWindows = user32.func('bool __stdcall EnumChildWindows(intptr par
 const IsWindow = user32.func('bool __stdcall IsWindow(intptr hwnd)')
 const IsWindowVisible = user32.func('bool __stdcall IsWindowVisible(intptr hwnd)')
 const IsIconic = user32.func('bool __stdcall IsIconic(intptr hwnd)')
+const GetWindowRgnBox = user32.func('int __stdcall GetWindowRgnBox(intptr hwnd, _Out_ DC_RECT *box)')
 const GetWindowTextW = user32.func('int __stdcall GetWindowTextW(intptr hwnd, _Out_ uint16_t *text, int max)')
 const GetClassNameW = user32.func('int __stdcall GetClassNameW(intptr hwnd, _Out_ uint16_t *text, int max)')
 const GetWindowThreadProcessId = user32.func('uint32 __stdcall GetWindowThreadProcessId(intptr hwnd, _Out_ uint32_t *pid)')
@@ -73,6 +74,8 @@ const Release = koffi.proto('uint32 __stdcall DC_Release(void *self)')
 const GWL_EXSTYLE = -20
 const WS_EX_TRANSPARENT = 0x20
 const WS_EX_LAYERED = 0x80000
+/** Drawn straight to the compositor (WinUI, XAML): it can blend with what is behind it. */
+const WS_EX_NOREDIRECTIONBITMAP = 0x200000
 const WS_EX_TOOLWINDOW = 0x80
 const GW_OWNER = 4
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9
@@ -176,6 +179,9 @@ function listWindows(): DesktopNativeWindow[] {
       bounds,
       minimized: IsIconic(hwnd),
       clickThrough: (exStyle & WS_EX_TRANSPARENT) !== 0 && (exStyle & WS_EX_LAYERED) !== 0,
+      // GetWindowRgnBox answers 0 (ERROR) for a window without a region, which is the only answer that proves a full rectangle.
+      opaque: (exStyle & (WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP)) === 0
+        && GetWindowRgnBox(hwnd, { left: 0, top: 0, right: 0, bottom: 0 }) === 0,
       toolWindow: (exStyle & WS_EX_TOOLWINDOW) !== 0,
       owner: String(Number(GetWindow(hwnd, GW_OWNER)) || '') || null,
       programPath: packaged ? null : process.path,

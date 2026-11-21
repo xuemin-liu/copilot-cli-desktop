@@ -60,6 +60,24 @@ export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
   return preset === 'read-only'
 }
 
+/** What a launch knows about the CLI. `probeFailed` means its help could not be read, so nothing is known. */
+export interface PermissionCapabilities {
+  toolAllowlist: boolean
+  probeFailed?: boolean | undefined
+}
+
+export const PERMISSION_PROBE_FAILED_MESSAGE =
+  'Restricted mode was not started: Copilot CLI did not answer when asked which options it supports, so the '
+  + 'read/search-only restriction could not be confirmed. Try again, or retry CLI detection from Settings.'
+
+/**
+ * Refuses a preset whose guarantee depends on a capability nobody could read. Without this, a probe that timed out
+ * looks like an old CLI, and Restricted mode would start with only shell and write denied.
+ */
+export function assertPermissionPresetSupported(preset: PermissionPreset, capabilities: PermissionCapabilities): void {
+  if (preset === 'read-only' && capabilities.probeFailed === true) throw new Error(PERMISSION_PROBE_FAILED_MESSAGE)
+}
+
 /**
  * Build the `copilot` CLI launch flags for a permission preset. `workspacePath`
  * must be an absolute, already-resolved path — this function does not resolve
@@ -69,8 +87,9 @@ export function needsToolAllowlistProbe(preset: PermissionPreset): boolean {
 export function buildPermissionArgs(
   preset: PermissionPreset,
   workspacePath: string,
-  capabilities: { toolAllowlist: boolean },
+  capabilities: PermissionCapabilities,
 ): string[] {
+  assertPermissionPresetSupported(preset, capabilities)
   switch (preset) {
     case 'default':
       return []
@@ -93,9 +112,14 @@ export function buildPermissionArgs(
 
 export function permissionCompatibilityWarning(
   preset: PermissionPreset,
-  capabilities: { toolAllowlist: boolean },
+  capabilities: PermissionCapabilities,
 ): string | null {
   if (preset !== 'read-only' || capabilities.toolAllowlist) return null
+  // Not an old CLI: an unknown one. Its launch is refused, so there is no weaker session to describe.
+  if (capabilities.probeFailed === true) {
+    return 'Copilot CLI did not answer when asked which options it supports. Restricted mode will not start until CLI '
+      + 'detection succeeds; retry it from Settings.'
+  }
   return 'Restricted mode is using legacy compatibility flags because this Copilot CLI does not support tool allowlists. '
     + 'Only shell and write tools are denied; web, MCP, skills, memory, and delegated-agent tools may remain available. '
     + 'Update Copilot CLI for the full read/search-only restriction.'

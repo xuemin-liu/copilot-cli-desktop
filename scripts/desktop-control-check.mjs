@@ -192,6 +192,21 @@ function save() { var fso = new ActiveXObject("Scripting.FileSystemObject"); var
       await refusedWith(/own windows/, 'screenshot', ownWindow.id)
       own.destroy()
 
+      // A full-screen screenshot shows the approved window, and paints over the taskbar (File Explorer). The desktop
+      // itself is a File Explorer window as large as the screen, behind everything: painting all of it, whatever is
+      // in front, would leave nothing to see.
+      control.setFullScreen('tab-1', true)
+      assert.equal((await ok('focus', window.id)).focused, true)
+      await delay(400)
+      const listed = (await native.windows()).find(entry => entry.id === window.id)
+      assert.equal(listed?.opaque, true, 'an ordinary window is reported as hiding what is behind it')
+      const screenShot = await ok('screenshot', 'screen')
+      assert.equal(screenShot.kind, 'screen')
+      find(screenShot.path, [0x44, 0xaa, 0x88])
+      find(screenShot.path, [0x11, 0x11, 0x11])
+      const [sx, sy] = find(screenShot.path, [0x44, 0xaa, 0x88])
+      await ok('move', screenShot.frameId, String(sx), String(sy))
+
       // Frames from before a screen change are not used.
       shot = await ok('screenshot', window.id)
       control.invalidateFrames()

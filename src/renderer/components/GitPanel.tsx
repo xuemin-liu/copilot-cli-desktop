@@ -191,8 +191,14 @@ function useGitProject(profileId: string): { view: GitProjectView | null; error:
   return { view, error, busy, rescan, replace: setView }
 }
 
-function pickRepo(view: GitProjectView, stored: string | null): GitRepoSummary | null {
+/**
+ * The repository the panel shows. `stored` is what the person chose; `shown` is what the panel last showed when they
+ * have not chosen. Without `shown`, "the first repository with changes" is asked again on every update, so committing
+ * the last change in one repository would put the Commit and Discard buttons under the pointer onto another.
+ */
+export function pickRepo(view: GitProjectView, stored: string | null, shown: string | null = null): GitRepoSummary | null {
   return view.repos.find(repo => repo.relativePath === stored)
+    ?? (shown === null ? undefined : view.repos.find(repo => repo.relativePath === shown))
     ?? view.repos.find(repo => repo.state === 'ready' && repo.changeCount > 0)
     ?? view.repos[0] ?? null
 }
@@ -458,7 +464,11 @@ export function GitPanel({ profileId, selectionKey = profileId, promptTarget, ta
   const resolveInFlight = useRef(false)
   const [resolveSending, setResolveSending] = useState(false)
 
-  const repo = view ? pickRepo(view, storedRepo) : null
+  // Kept for this view of this project only: another tab's Git view, or another project, picks afresh.
+  const shownScope = `${profileId}\0${selectionKey}`
+  const shownRepo = useRef<{ scope: string; relativePath: string } | null>(null)
+  const repo = view ? pickRepo(view, storedRepo, shownRepo.current?.scope === shownScope ? shownRepo.current.relativePath : null) : null
+  shownRepo.current = repo ? { scope: shownScope, relativePath: repo.relativePath } : shownRepo.current?.scope === shownScope ? shownRepo.current : null
   const repoId = repo?.id ?? null
   const pathFilter = filter && filter.repoId === repoId ? filter.value : ''
   const visibleRepo = useRef(repoId)
