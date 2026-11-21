@@ -1,4 +1,5 @@
 import * as esbuild from 'esbuild'
+import { resolve } from 'node:path'
 import { cp, readFile, rm, writeFile } from 'node:fs/promises'
 
 const entries = [
@@ -27,9 +28,20 @@ const viewers = [
   { in: 'src/renderer/viewers/pdf-viewer.ts', out: 'dist/src/renderer/viewer-pdf.js' },
   // PDF.js parses documents in this worker, which has no DOM, no access to the app's API and no network.
   { in: 'src/renderer/viewers/pdf-worker.ts', out: 'dist/src/renderer/viewer-pdf-worker.js' },
+  // Word and Excel files are read in this worker, started once for each file.
+  { in: 'src/renderer/viewers/office-worker.ts', out: 'dist/src/renderer/viewer-office-worker.js' },
 ]
+// Mammoth opens a .docx with its own ZIP reader, which unpacks whatever a part claims to hold. Swap that one module for
+// the app's reader, so every part Mammoth reads is unpacked under the app's limits (src/renderer/viewers/mammoth-unzip.ts).
+const checkedDocxArchive = {
+  name: 'checked-docx-archive',
+  setup(build) {
+    build.onResolve({ filter: /^\.\/unzip(?:\.js)?$/ }, args => /[\\/]mammoth[\\/]lib$/.test(args.resolveDir) ? { path: resolve('src/renderer/viewers/mammoth-unzip.ts') } : null)
+  },
+}
 for (const viewer of viewers) {
   await esbuild.build({
+    plugins: [checkedDocxArchive],
     entryPoints: [viewer.in],
     outfile: viewer.out,
     bundle: true,

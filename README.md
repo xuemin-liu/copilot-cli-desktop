@@ -69,7 +69,9 @@ handle, only input/output/resize events.
 - **File tabs**: click a file path printed in a session and the file opens in a tab in the right panel, at the line the
   path points to (`src/app.ts:42:7`). Markdown is shown rendered, with a **Source** switch; code and text get line
   numbers, colors and **Find** (Ctrl+F); PDFs are shown page by page, with text you can select and find, and zoom;
-  pictures are shown; other files get a card with **Reveal in folder**. The tab
+  Word documents (.docx) are shown with their headings, lists, tables and pictures; CSV files and Excel workbooks (.xlsx)
+  are shown as tables, one tab for each sheet, with the values Excel saved; Jupyter notebooks are shown rendered, with
+  their saved text and picture outputs; pictures are shown; other files get a card with **Reveal in folder**. The tab
   follows the file as the agent edits it. Ctrl+click (Cmd+click on macOS) on a path shows it in the file manager
   instead, as does a click on a folder. Only files in the workspace folder or one of its worktrees are opened, and
   nothing in a file can run or reach the network. The Git panel's diff has **Open file**.

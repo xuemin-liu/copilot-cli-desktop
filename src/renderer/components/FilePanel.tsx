@@ -4,6 +4,7 @@ import type { FileViewResult } from '../../main/file-view.js'
 import type { ToolTab } from '../../main/tool-tabs.js'
 import { errorMessage } from '../errors.js'
 import { findRanges, formatFileSize, loadViewer, type PdfHandle, type TextViewer } from '../file-viewers.js'
+import { convertOffice, guessDelimiter, parseDelimited, sheetHtml, type OfficeProblem, type SheetData } from '../file-documents.js'
 
 type Shown = Extract<FileViewResult, { status: 'ok' }>
 const escapeHtml = (text: string): string => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -27,6 +28,14 @@ const PDF_PROBLEM = {
   failed: 'This document could not be shown.',
 } as const
 const NO_BYTES = new Uint8Array(0)
+const OFFICE_PROBLEM: Record<OfficeProblem, string> = {
+  invalid: 'This file could not be read as a document of its kind.',
+  'too-large': 'This document is too large, or took too long, to show here.',
+  protected: 'This document is protected with a password, so it is not shown here.',
+  failed: 'This document could not be shown.',
+}
+/** What a Word or Excel file became: HTML for a document, sheets for a workbook, or why it could not be read. */
+type OfficeView = { html: string } | { sheets: SheetData[] } | { problem: OfficeProblem }
 
 const CARD_REASON = {
   unsupported: 'There is no viewer for this kind of file.',
@@ -68,6 +77,8 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const [pdfRead, setPdfRead] = useState(0)
   // Counts views that became ready. An open find is run again in each new view, which starts with no matches.
   const [pdfReady, setPdfReady] = useState(0)
+  const [office, setOffice] = useState<OfficeView | null>(null)
+  const [sheet, setSheet] = useState(0)
   const pdfBox = useRef<HTMLDivElement>(null)
   const pdfView = useRef<PdfHandle | null>(null)
   const jumped = useRef(0)
@@ -79,7 +90,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       // A read that finishes after a newer one started would put old content back.
       if (current !== request.current || result.status === 'unchanged') return
       shown.current = result.status === 'ok' ? result.revision : null
-      if (result.status === 'ok' && result.kind === 'pdf') { pdfBytes.current = result.bytes; setPdfRead(count => count + 1); setView({ ...result, bytes: NO_BYTES }) }
+      if (result.status === 'ok' && (result.kind === 'pdf' || result.kind === 'docx' || result.kind === 'xlsx')) { pdfBytes.current = result.bytes; setPdfRead(count => count + 1); setView({ ...result, bytes: NO_BYTES }) }
       else { pdfBytes.current = null; setView(result) }
       setFailure(null)
     } catch (error) { if (current === request.current) setFailure(errorMessage(error)) }
@@ -95,8 +106,29 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   }, [active, load, profileId, tab.id])
 
   const file = view?.status === 'ok' ? view : null
-  const text = file && (file.kind === 'text' || file.kind === 'markdown') ? file : null
-  const rendered = text?.kind === 'markdown' && !source
+  const text = file && (file.kind === 'text' || file.kind === 'markdown' || file.kind === 'csv' || file.kind === 'notebook') ? file : null
+  // Markdown, CSV and notebooks have a rendered view and their text as the Source view.
+  const rendered = text !== null && text.kind !== 'text' && !source
+  const binary = file && (file.kind === 'docx' || file.kind === 'xlsx') ? file : null
+  const officeRevision = binary?.revision ?? null
+  const officeKind = binary?.kind ?? null
+
+  // Word and Excel files are read in a worker, once for each read of the file. Leaving the tab, or a newer read, ends
+  // the worker whatever it is doing.
+  useEffect(() => {
+    const bytes = pdfBytes.current
+    if (!officeRevision || !officeKind) { setOffice(null); return }
+    if (!bytes) return
+    pdfBytes.current = null
+    let current = true
+    const job = convertOffice(officeKind, bytes)
+    void job.result.then(reply => {
+      if (!current) return
+      setOffice(reply.ok ? reply.kind === 'docx' ? { html: reply.html } : { sheets: reply.sheets } : { problem: reply.problem })
+      if (reply.ok && reply.kind === 'xlsx') setSheet(shown => Math.min(shown, Math.max(0, reply.sheets.length - 1)))
+    })
+    return () => { current = false; job.cancel() }
+  }, [officeRevision, officeKind, pdfRead])
   const pdf = file?.kind === 'pdf' ? file : null
   const pdfRevision = pdf?.revision ?? null
 
@@ -127,11 +159,11 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   // Pages cannot be laid out while the tab is hidden; do it when the tab is shown.
   useEffect(() => { if (active) pdfView.current?.shown() }, [active])
   useEffect(() => {
-    if (!text || viewer) return
+    if ((!text && officeKind !== 'docx') || viewer) return
     let current = true
     loadViewer('text').then(loaded => { if (current) setViewer(loaded) }, error => { if (current) setNotice(errorMessage(error)) })
     return () => { current = false }
-  }, [text, viewer])
+  }, [text, officeKind, viewer])
 
   // A click on a path with a line shows that line, in the source view; clicking the same line again shows it again.
   const jump = tab.file?.jump ?? 0, line = tab.file?.line
@@ -143,7 +175,27 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     // The line a click pointed at is marked in the HTML itself, so it is still marked after the file is read again.
     return lines.map((line, index) => `<div class="file-line${index + 1 === target ? ' file-line-target' : ''}"><span class="file-ln">${index + 1}</span><span class="file-lc">${line || ' '}</span></div>`).join('')
   }, [text, rendered, viewer, target])
-  const markdownHtml = useMemo(() => rendered && viewer && text ? viewer.markdown(text.text) : null, [rendered, viewer, text])
+  // The rendered view as HTML; null while it is not ready. A notebook that cannot be rendered is shown as its source.
+  const [renderProblem, setRenderProblem] = useState<string | null>(null)
+  const sheets = office && 'sheets' in office ? office.sheets : null
+  // A notebook is rendered once for each read of its text: its HTML, or why it could not be rendered.
+  const notebookView = useMemo(() => {
+    if (!viewer || text?.kind !== 'notebook') return null
+    try { return { html: viewer.notebook(text.text), problem: null } } catch (error) { return { html: null, problem: errorMessage(error) } }
+  }, [viewer, text])
+  const markdownHtml = useMemo(() => {
+    if (office && !('problem' in office)) return 'html' in office ? viewer ? viewer.document(office.html) : null : sheetHtml(office.sheets[sheet] ?? office.sheets[0]!, false)
+    if (!rendered || !text) return null
+    if (text.kind === 'csv') return sheetHtml(parseDelimited(text.text, /\.(?:tsv|tab)$/i.test(text.name) ? '\t' : guessDelimiter(text.text)), true)
+    if (text.kind === 'notebook') return notebookView?.html ?? null
+    return viewer ? viewer.markdown(text.text) : null
+  }, [rendered, viewer, text, office, sheet, notebookView])
+  // A notebook that cannot be rendered (not JSON, not a notebook, too large) is shown as its text, with the reason.
+  useEffect(() => {
+    const problem = notebookView?.problem ?? null
+    setRenderProblem(problem ? `${problem} Showing its source.` : null)
+    if (problem) setSource(true)
+  }, [notebookView])
 
   // Pictures in Markdown: local ones come through the main process; remote ones are never fetched.
   useEffect(() => {
@@ -198,7 +250,8 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   }, [codeHtml, jump, active])
 
   // Find: marks are drawn with the CSS highlight registry, so the file's own HTML is never changed.
-  const content = rendered ? markdownHtml : codeHtml
+  const richView = rendered || (office !== null && !('problem' in office))
+  const content = richView ? markdownHtml : codeHtml
   useEffect(() => {
     const root = body.current
     const registry = typeof CSS === 'undefined' ? undefined : CSS.highlights
@@ -207,12 +260,12 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     registry.delete('file-find'); registry.delete('file-find-current')
     ranges.current = []
     if (!root || !active || !finding || !query || !content) { setMatch({ index: 0, count: 0 }); return }
-    const found = findRanges(rendered ? [root] : root.querySelectorAll('.file-lc'), query, '.file-ln')
+    const found = findRanges(richView ? [root] : root.querySelectorAll('.file-lc'), query, '.file-ln, .file-row-number')
     ranges.current = found
     if (found.length) registry.set('file-find', new Highlight(...found))
     setMatch({ index: 0, count: found.length })
     return () => { registry.delete('file-find'); registry.delete('file-find-current') }
-  }, [active, finding, query, content, rendered, pdfRevision])
+  }, [active, finding, query, content, richView, pdfRevision])
   useEffect(() => {
     if (!pdfRevision || pdfProblem) return
     const timer = setTimeout(() => pdfView.current?.find(finding ? query : ''), 150)
@@ -230,7 +283,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const step = (by: number): void => pdfRevision ? pdfView.current?.find(query, by < 0) : setMatch(current => current.count ? { ...current, index: (current.index + by + current.count) % current.count } : current)
   const openFind = (): void => { setFinding(true); requestAnimationFrame(() => { findInput.current?.focus(); findInput.current?.select() }) }
   const onKeyDown = (event: KeyboardEvent): void => {
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f' && (text || pdf || finding)) { event.preventDefault(); event.stopPropagation(); openFind() }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'f' && (text || pdf || richView || finding)) { event.preventDefault(); event.stopPropagation(); openFind() }
     else if (event.key === 'Escape' && finding) { event.preventDefault(); setFinding(false); (pdf ? pdfBox : body).current?.focus() }
   }
 
@@ -268,7 +321,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
         <span>{path}{file ? ` · ${formatFileSize(file.size)}` : ''}{pdf && pdfPage ? ` · page ${pdfPage.current} of ${pdfPage.total}` : ''}</span>
       </div>
       <div className="file-panel-actions">
-        {text?.kind === 'markdown' && <button type="button" aria-pressed={source} title={source ? 'Show the rendered document' : 'Show the Markdown source'} onClick={() => setSource(value => !value)}>{source ? 'Rendered' : 'Source'}</button>}
+        {text && text.kind !== 'text' && !renderProblem && <button type="button" aria-pressed={source} title={source ? 'Show the rendered view' : 'Show the text of the file'} onClick={() => setSource(value => !value)}>{source ? text.kind === 'csv' ? 'Table' : 'Rendered' : 'Source'}</button>}
         {text && !rendered && <button type="button" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap(value => !value)}>Wrap</button>}
         {file?.kind === 'image' && <button type="button" aria-pressed={actualSize} title={actualSize ? 'Fit the picture to the panel' : 'Show the picture at its own size'} onClick={() => setActualSize(value => !value)}>{actualSize ? 'Fit' : 'Actual size'}</button>}
         {pdf && !pdfProblem && <>
@@ -276,14 +329,14 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
           <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => pdfView.current?.zoom(1)}>+</button>
           <button type="button" title="Fit the page to the panel's width" onClick={() => pdfView.current?.zoom(0)}>Fit width</button>
         </>}
-        {(text || (pdf && !pdfProblem)) && <button type="button" title="Find in this file (Ctrl+F)" onClick={openFind}>Find</button>}
+        {(text || richView || (pdf && !pdfProblem)) && <button type="button" title="Find in this file (Ctrl+F)" onClick={openFind}>Find</button>}
         <button type="button" title="Read the file again" onClick={() => { setNotice(null); void load(true) }}>Reload</button>
         {file && <button type="button" title={file.path} onClick={() => command('copy-path')}>Copy path</button>}
         {file && <button type="button" onClick={() => command('reveal')}>Reveal in folder</button>}
         {file?.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}
       </div>
     </div>
-    {finding && (text || (pdf && !pdfProblem)) && <div className="file-find" role="search">
+    {finding && (text || richView || (pdf && !pdfProblem)) && <div className="file-find" role="search">
       <input ref={findInput} aria-label="Find in file" placeholder="Find" value={query} onChange={event => setQuery(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); step(event.shiftKey ? -1 : 1) } }} />
       <span role="status">{query ? match.count ? `${match.index + 1} of ${match.count}${match.count >= 2_000 ? '+' : ''}` : 'No results' : ''}</span>
@@ -291,7 +344,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       <button type="button" aria-label="Next match" title="Next (Enter)" disabled={!match.count} onClick={() => step(1)}>↓</button>
       <button type="button" aria-label="Close find" onClick={() => setFinding(false)}>×</button>
     </div>}
-    {(notice || failure) && <div className="file-panel-notice" role="status">{failure ?? notice}</div>}
+    {(notice || failure || renderProblem) && <div className="file-panel-notice" role="status">{failure ?? notice ?? renderProblem}</div>}
     {view === null && !failure && <div className="file-panel-status" role="status">Opening…</div>}
     {view && view.status !== 'ok' && view.status !== 'unchanged' && <div className="file-panel-status" role="status">
       <p>{GONE[view.status]}</p><p className="file-panel-path">{path}</p>
@@ -304,6 +357,19 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       <div><button type="button" onClick={() => command('reveal')}>Reveal in folder</button>
         {file.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}</div>
     </div>}
+    {binary && office === null && <div className="file-panel-status" role="status">Opening…</div>}
+    {binary && office && 'problem' in office && <div className="file-card">
+      <strong>{binary.name}</strong>
+      <p>{OFFICE_PROBLEM[office.problem]}</p>
+      <div><button type="button" onClick={() => command('reveal')}>Reveal in folder</button>
+        {binary.openable && <button type="button" onClick={() => command('open')}>Open with default app</button>}</div>
+    </div>}
+    {sheets && sheets.length > 1 && <div className="file-sheet-tabs" role="tablist" aria-label="Sheets">
+      {sheets.map((entry, index) => <button type="button" role="tab" key={index} aria-selected={index === sheet} onClick={() => setSheet(index)}>{entry.name}</button>)}
+    </div>}
+    {binary && office && !('problem' in office) && (markdownHtml === null
+      ? <div className="file-panel-status" role="status">Opening…</div>
+      : <div className={`file-markdown ${sheets ? 'file-table-view' : 'file-document'}`} tabIndex={0} ref={body} onClick={onLink} onAuxClick={onLink} dangerouslySetInnerHTML={{ __html: markdownHtml }} />)}
     {pdf && pdfProblem && <div className="file-card">
       <strong>{pdf.name}</strong>
       <p>{PDF_PROBLEM[pdfProblem]}</p>
@@ -318,7 +384,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     </div>}
     {text && rendered && (markdownHtml === null
       ? <div className="file-panel-status" role="status">Opening…</div>
-      : <div className="file-markdown" tabIndex={0} ref={body} onClick={onLink} onAuxClick={onLink} dangerouslySetInnerHTML={{ __html: markdownHtml }} />)}
+      : <div className={`file-markdown${text.kind === 'csv' ? ' file-table-view' : text.kind === 'notebook' ? ' file-notebook' : ''}`} tabIndex={0} ref={body} onClick={onLink} onAuxClick={onLink} dangerouslySetInnerHTML={{ __html: markdownHtml }} />)}
     {text && !rendered && <div className={`file-code${wrap ? ' file-code-wrap' : ''}`} tabIndex={0} ref={body} role="region" aria-label={`Contents of ${tab.title}`}
       dangerouslySetInnerHTML={{ __html: codeHtml }} />}
   </div>

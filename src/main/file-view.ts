@@ -4,7 +4,7 @@ import { caseInsensitivePaths, hostPath, isSameOrInside, pathKey, samePath } fro
 import { isLocalFilesystemPath, isPathWithinRoot } from './external-targets.js'
 
 /** What a File tab shows. `other` is the card for files with no viewer. */
-export type FileViewKind = 'text' | 'markdown' | 'image' | 'pdf' | 'other'
+export type FileViewKind = 'text' | 'markdown' | 'csv' | 'notebook' | 'image' | 'pdf' | 'docx' | 'xlsx' | 'other'
 /** Why a file gets the card instead of a view. */
 export type FileCardReason = 'unsupported' | 'too-large' | 'binary'
 
@@ -20,7 +20,10 @@ interface FileFacts {
   openable: boolean
 }
 export type FileViewResult =
-  | (FileFacts & { status: 'ok'; kind: 'text' | 'markdown'; text: string; language: string | null })
+  /** Text kinds. A CSV is shown as a table and a notebook rendered, each with its text as the Source view. */
+  | (FileFacts & { status: 'ok'; kind: 'text' | 'markdown' | 'csv' | 'notebook'; text: string; language: string | null })
+  /** Word and Excel files. The panel hands these bytes to a worker that reads them. */
+  | (FileFacts & { status: 'ok'; kind: 'docx' | 'xlsx'; bytes: Uint8Array })
   /** The whole document. The panel hands these bytes to the PDF viewer, which parses them in a worker. */
   | (FileFacts & { status: 'ok'; kind: 'pdf'; bytes: Uint8Array })
   | (FileFacts & { status: 'ok'; kind: 'image'; dataUrl: string })
@@ -36,6 +39,14 @@ export type OpenFileResult =
 export const FILE_TEXT_LIMIT = 2 * 1024 * 1024
 export const FILE_IMAGE_LIMIT = 25 * 1024 * 1024
 export const FILE_PDF_LIMIT = 50 * 1024 * 1024
+export const FILE_OFFICE_LIMIT = 50 * 1024 * 1024
+export const FILE_CSV_LIMIT = 10 * 1024 * 1024
+/** Notebooks hold their pictures as text, so they are larger than other text files. */
+export const FILE_NOTEBOOK_LIMIT = 20 * 1024 * 1024
+const LIMITS: Record<Exclude<FileViewKind, 'other'>, number> = {
+  text: FILE_TEXT_LIMIT, markdown: FILE_TEXT_LIMIT, csv: FILE_CSV_LIMIT, notebook: FILE_NOTEBOOK_LIMIT, image: FILE_IMAGE_LIMIT,
+  pdf: FILE_PDF_LIMIT, docx: FILE_OFFICE_LIMIT, xlsx: FILE_OFFICE_LIMIT,
+}
 export const FILE_ASSET_LIMIT = 10 * 1024 * 1024
 export const FILE_TAB_LIMIT = 20
 const SNIFF_BYTES = 8_192
@@ -58,7 +69,9 @@ const MARKDOWN = new Set(['md', 'markdown', 'mdx', 'mdown', 'mkd'])
 /** Files the system runs when opened. Open with default app is never offered for these, only Reveal in folder. */
 const RUNNABLE = new Set(['exe', 'com', 'scr', 'pif', 'msi', 'msix', 'appx', 'msp', 'bat', 'cmd', 'ps1', 'psm1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh',
   'hta', 'cpl', 'lnk', 'url', 'reg', 'jar', 'sh', 'bash', 'zsh', 'command', 'app', 'dmg', 'pkg', 'deb', 'rpm', 'appimage', 'run', 'py', 'pyw', 'rb', 'pl',
-  'php', 'dll', 'sys', 'scf', 'inf', 'gadget', 'application', 'desktop', 'mjs', 'cjs', 'chm', 'html', 'htm', 'svg', 'xht', 'xhtml', 'mht', 'mhtml'])
+  'php', 'dll', 'sys', 'scf', 'inf', 'gadget', 'application', 'desktop', 'mjs', 'cjs', 'chm', 'html', 'htm', 'svg', 'xht', 'xhtml', 'mht', 'mhtml',
+  // Office files that carry macros.
+  'docm', 'dotm', 'xlsm', 'xltm', 'xlam', 'pptm', 'potm', 'ppsm'])
 
 function extensionOf(name: string): string {
   const lower = name.toLowerCase()
@@ -105,8 +118,16 @@ export function classifyFile(name: string, head: Uint8Array): { kind: FileViewKi
   // SVG is text; show it as an image only when it really looks like one.
   if (mime === 'image/svg+xml') return text ? { kind: 'image', language: 'xml', mime } : { kind: 'other', language: null, mime: null, reason: 'binary' }
   if (mime) return { kind: 'image', language: null, mime }
+  // Word and Excel files are ZIP archives; which of the two is said by the name. Other archives have no viewer.
+  if (!text && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04) {
+    if (extension === 'docx') return { kind: 'docx', language: null, mime: null }
+    if (extension === 'xlsx' || extension === 'xlsm') return { kind: 'xlsx', language: null, mime: null }
+    return { kind: 'other', language: null, mime: null, reason: 'unsupported' }
+  }
   if (!text) return { kind: 'other', language: null, mime: null, reason: 'binary' }
   if (MARKDOWN.has(extension)) return { kind: 'markdown', language: 'markdown', mime: null }
+  if (extension === 'csv' || extension === 'tsv' || extension === 'tab') return { kind: 'csv', language: null, mime: null }
+  if (extension === 'ipynb') return { kind: 'notebook', language: 'json', mime: null }
   return { kind: 'text', language: LANGUAGES[extension] ?? null, mime: null }
 }
 
@@ -258,11 +279,11 @@ export async function readFileView(root: string, relative: string, known?: strin
     // only ever revealed.
     const facts: FileFacts = { path: file.absolute, name, size: file.size, mtimeMs: file.mtimeMs, revision: file.revision, openable: type.kind !== 'other' && canOpenWithDefaultApp(name) }
     if (type.kind === 'other') return { ...facts, status: 'ok', kind: 'other', reason: type.reason ?? 'unsupported' }
-    const limit = type.kind === 'image' ? FILE_IMAGE_LIMIT : type.kind === 'pdf' ? FILE_PDF_LIMIT : FILE_TEXT_LIMIT
+    const limit = LIMITS[type.kind]
     if (file.size > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
     const bytes = head.length < SNIFF_BYTES ? head : await readOpened(file, limit)
     if (bytes.length > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
-    if (type.kind === 'pdf') return { ...facts, status: 'ok', kind: 'pdf', bytes }
+    if (type.kind === 'pdf' || type.kind === 'docx' || type.kind === 'xlsx') return { ...facts, status: 'ok', kind: type.kind, bytes }
     if (type.kind === 'image') return { ...facts, status: 'ok', kind: 'image', dataUrl: `data:${type.mime};base64,${Buffer.from(bytes).toString('base64')}` }
     return { ...facts, status: 'ok', kind: type.kind, text: decodeText(bytes), language: type.language }
   } catch { return { status: 'missing' } } finally { await file.handle.close().catch(() => undefined) }

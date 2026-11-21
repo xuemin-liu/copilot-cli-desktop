@@ -4,6 +4,12 @@ export interface TextViewer {
   highlight(text: string, language: string | null): string[]
   /** Markdown as sanitized HTML: no scripts, forms, styles or frames; pictures carry `data-file-src` and no `src`. */
   markdown(text: string): string
+  /** A Jupyter notebook (the text of an .ipynb file) as sanitized HTML: Markdown cells rendered, code colored, saved text
+   * and picture outputs shown. HTML and script outputs are never shown. Throws when the text is not a notebook or the
+   * result would be too large. */
+  notebook(text: string): string
+  /** HTML made from a Word document, sanitized like Markdown, keeping only pictures that are embedded as data. */
+  document(html: string): string
 }
 /** What the PDF view reports back: the page in view, find results, and why a document could not be shown. */
 export interface PdfViewerEvents {
