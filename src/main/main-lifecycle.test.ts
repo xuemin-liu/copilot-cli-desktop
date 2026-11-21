@@ -32,6 +32,11 @@ interface Harness {
   /** Settles once every worktree cleanup started by a tab close has finished. */
   worktreeCleanups(): Promise<void>
   refreshAppMenu(): void
+  /** Make the next Settings page loads fail, or succeed again. */
+  failSettingsLoad(fail: boolean): void
+  settingsWindow(): { destroyed: boolean } | null
+  /** Which window the system reports as focused: the main one, or none. */
+  focusMainWindow(focused: boolean): void
   quitCalls(): number
   windowFor(tabId?: string): { destroyed: boolean; focused: number; title: string; menu: unknown; messages: { channel: string; payload: any }[]; close(): void; webContents: { emit(name: string): void } }
   requestIn(tabId: string, name: string, ...args: unknown[]): Promise<any>
@@ -159,7 +164,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         export const BrowserWindow = class extends EventEmitter {
           destroyed = false; focused = 0; title = ''; messages = [];
           constructor(options = {}) { super(); this.title = options.title || ''; allWindows.push(this); }
-          static getFocusedWindow() { return null; }
+          static focusedWindow = null; static failLoad = null;
+          static getFocusedWindow() { return this.focusedWindow; }
           static fromWebContents(contents) { return allWindows.find(window => window.webContents === contents && !window.destroyed) || null; }
           webContents = Object.assign(new EventEmitter(), {
             getURL: () => this.url || '',
@@ -171,6 +177,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           isDestroyed() { return this.destroyed; } isMinimized() { return false; } isFocused() { return false; } isVisible() { return true; }
           show() {} focus() { this.focused++; this.emit('focus'); } restore() {} flashFrame() {}
           async loadFile(path) {
+            if (BrowserWindow.failLoad?.(path)) throw new Error('page load failed');
             this.url = (await import('node:url')).pathToFileURL(path).href;
             let prevented = false;
             this.emit('page-title-updated', { preventDefault() { prevented = true; } }, 'Copilot CLI Desktop');
@@ -282,6 +289,9 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           },
           async flushToolPersistence() { await projectToolService?.writing; return projectToolService?.profileRecoveryRequired; },
           refreshAppMenu: installApplicationMenu,
+          failSettingsLoad(fail) { BrowserWindow.failLoad = fail ? path => path.endsWith('settings.html') : null; },
+          settingsWindow: () => settingsWindow,
+          focusMainWindow(focused) { BrowserWindow.focusedWindow = focused ? mainWindow : null; },
           quitCalls: () => app.quitCalls,
           windowFor: (tabId) => tabId ? sessionWindows.get(tabId) : mainWindow,
           requestIn: (tabId, name, ...args) => ipcMain.invoke(name, { senderFrame: { url: shellUrl() }, sender: sessionWindows.get(tabId).webContents }, ...args),
@@ -1314,6 +1324,43 @@ test('browser profile identity persists with restored tabs, CLI restarts, and le
   await harness.flushConfig()
   const saved = JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')) as DesktopConfig
   assert.deepEqual(saved.profiles[0]!.tabs.map(tab => tab.browserProfileId), opened.tabs.map(tab => tab.browserProfileId))
+}))
+
+test('a Settings window whose page fails to load is destroyed, so the next open starts again', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  harness.failSettingsLoad(true)
+  await assert.rejects(async () => harness.request('desktop:open-settings'), /page load failed/)
+  assert.equal(harness.settingsWindow(), null, 'no hidden blank window is kept for the next open to show')
+  harness.failSettingsLoad(false)
+  await harness.request('desktop:open-settings')
+  assert.equal(harness.settingsWindow()?.destroyed, false)
+}))
+
+test('Ctrl/Cmd+W and +T as menu accelerators in the main window are handed to the page, which knows what has focus', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const tab = (await harness.createMain()).activeTabId!
+  harness.refreshAppMenu()
+  const window = harness.windowFor()
+  const file = (window.menu as { label?: string; submenu?: { label?: string; click?: (...args: unknown[]) => void }[] }[]).find(item => item.label === 'File')!.submenu!
+  const item = (label: string) => file.find(entry => entry.label === label)!
+  const requests = () => window.messages.filter(message => message.channel === 'desktop:tab-shortcut-request').map(message => message.payload)
+  const newSessions = () => window.messages.filter(message => message.channel === 'desktop:new-session-request').length
+  harness.focusMainWindow(true)
+  item('Close Session Tab').click!({}, undefined, { triggeredByAccelerator: true })
+  item('New Session Tab').click!({}, undefined, { triggeredByAccelerator: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(requests(), ['w', 't'])
+  assert.equal(newSessions(), 0)
+  assert.ok((await harness.request('desktop:get-state') as DesktopState).tabs.some(entry => entry.id === tab), 'the accelerator did not close the session by itself')
+  // Chosen with the mouse, or with another window focused, the items act on the session as they are labelled.
+  item('New Session Tab').click!({}, undefined, { triggeredByAccelerator: false })
+  assert.equal(newSessions(), 1)
+  harness.focusMainWindow(false)
+  item('New Session Tab').click!({}, undefined, { triggeredByAccelerator: true })
+  assert.equal(newSessions(), 2)
+  assert.deepEqual(requests(), ['w', 't'])
 }))
 
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {

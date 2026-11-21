@@ -392,6 +392,17 @@ function requestSessionHistory(): void {
   window.webContents.send('desktop:session-history-request')
 }
 
+/**
+ * Ctrl/Cmd+W and Ctrl/Cmd+T pressed in the main window belong to whatever has focus there: a session, or a tool tab.
+ * Only the page knows which, so a menu accelerator hands the key to it. Answers false when there is no page to ask.
+ */
+function forwardTabShortcut(key: 'w' | 't', triggeredByAccelerator: boolean | undefined): boolean {
+  const window = mainWindow
+  if (!triggeredByAccelerator || !window || window.isDestroyed() || BrowserWindow.getFocusedWindow() !== window) return false
+  window.webContents.send('desktop:tab-shortcut-request', key)
+  return true
+}
+
 function requestNewSession(attachments: boolean): void {
   const window = mainWindow
   if (!window || window.isDestroyed()) return
@@ -4418,7 +4429,7 @@ function installApplicationMenu(): void {
           label: 'New Session Tab',
           accelerator: 'CmdOrCtrl+T',
           enabled: !installInProgress && desktopConfig.activeProfileId !== null && tabsState.tabs.length < MAX_SESSION_TABS,
-          click: () => requestNewSession(false),
+          click: (_item: unknown, _window: unknown, event?: { triggeredByAccelerator?: boolean }) => { if (!forwardTabShortcut('t', event?.triggeredByAccelerator)) requestNewSession(false) },
         },
         {
           label: 'Host a Meeting from an Outside Agent…',
@@ -4428,7 +4439,8 @@ function installApplicationMenu(): void {
           label: 'Close Session Tab',
           accelerator: 'CmdOrCtrl+W',
           enabled: tabsState.activeTabId !== null,
-          click: () => {
+          click: (_item: unknown, _window: unknown, event?: { triggeredByAccelerator?: boolean }) => {
+            if (forwardTabShortcut('w', event?.triggeredByAccelerator)) return
             const focused = BrowserWindow.getFocusedWindow()
             const poppedOut = focused ? sessionWindowId(focused.webContents) : undefined
             if (poppedOut) dockSessionTab(poppedOut)
@@ -4626,7 +4638,13 @@ async function showSettingsWindow(): Promise<void> {
   window.on('closed', () => {
     if (settingsWindow === window) { migrationService?.cancel(); settingsWindow = null }
   })
-  await window.loadFile(rendererPath('settings.html'))
+  try {
+    await window.loadFile(rendererPath('settings.html'))
+  } catch (error) {
+    // A window whose page did not load would stay hidden and be shown, blank, by the next Open Settings.
+    if (!window.isDestroyed()) window.destroy()
+    throw error
+  }
 }
 
 interface DesktopSettingsSnapshot extends DesktopPreferences {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX, ReactNode } from 'react'
 import type { DesktopState } from '../../main/types.js'
 import type { ProjectTools, ToolsAction, ToolsState, ToolTabKind } from '../../main/tool-tabs.js'
@@ -10,6 +10,7 @@ import { BrowserPanel } from './BrowserPanel.js'
 import { GitPanel } from './GitPanel.js'
 import { FilePanel } from './FilePanel.js'
 import { isShortcutModifier, isWindows } from '../platform.js'
+import { tabShortcutOwner } from '../tab-shortcuts.js'
 import { ToolTerminalPanel } from './ToolTerminalPanel.js'
 import { projectTerminal, WorkspaceTabBar } from '../../../vendor/myterminal/desktop-renderer.mjs'
 import { MyTerminalConnections } from './MyTerminalConnections.js'
@@ -74,11 +75,24 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
     reorderTabs: (from: number, to: number) => { const move = dockedReorder(strip, from, to); if (move) action({ type: 'reorder', ...move }) },
     toggleBroadcast: () => action({ type: 'broadcast', enabled: !project.broadcast }),
   }
-  return <aside className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
-    if (!(event.target instanceof Element && event.target.closest('.tool-terminal-panel, input, textarea, [contenteditable="true"]')) && isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
+  const toolShortcut = (key: string): void => {
+    if (key === 't') action({ type: 'add', kind: 'new' })
+    else if (project.activeId) action({ type: 'close', id: project.activeId })
+  }
+  const root = useRef<HTMLElement>(null)
+  const shortcut = useRef(toolShortcut)
+  shortcut.current = toolShortcut
+  // The same keys as a menu accelerator: they act here only while the focus is in these tools.
+  useEffect(() => window.copilotDesktop.onTabShortcutRequest((key) => {
+    const focused = document.activeElement
+    if (focused && root.current?.contains(focused) && tabShortcutOwner(focused) === 'tools') shortcut.current(key)
+  }), [])
+  return <aside ref={root} className="workspace-tools" aria-label="Workspace tools" hidden={!shown} onKeyDown={event => {
+    // A text field here (the commit message, the browser's address) is still part of the tools: the key closes or opens a
+    // tool tab, and must not fall through to the session shortcut on the window.
+    if (tabShortcutOwner(event.target) === 'tools' && isShortcutModifier(event) && ['w', 't'].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation()
-      if (event.key.toLowerCase() === 't') action({ type: 'add', kind: 'new' })
-      else if (project.activeId) action({ type: 'close', id: project.activeId })
+      toolShortcut(event.key.toLowerCase())
     }
   }}>
     <div className="myterminal-embedded workspace-tabbar-host">

@@ -109,6 +109,11 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
     ipcRenderer.on('desktop:new-session-request', handler)
     return () => ipcRenderer.removeListener('desktop:new-session-request', handler)
   },
+  onTabShortcutRequest: (listener) => {
+    const handler = (_event, key) => { if (key === 'w' || key === 't') listener(key) }
+    ipcRenderer.on('desktop:tab-shortcut-request', handler)
+    return () => ipcRenderer.removeListener('desktop:tab-shortcut-request', handler)
+  },
   listSessionHistory: () => ipcRenderer.invoke('desktop:list-session-history'),
   openSessionHistory: (sessionId) => ipcRenderer.invoke('desktop:open-session-history', sessionId),
   onSessionHistoryRequest: (listener) => {

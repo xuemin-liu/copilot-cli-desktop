@@ -36,3 +36,21 @@ test('a terminal closed before its snapshot arrives cannot write to the disposed
   replay.push({ data: 'late live output', sequence: 3 })
   assert.deepEqual(output, [])
 })
+
+test('a snapshot request that fails still releases the live output queued behind it', async () => {
+  const output: string[] = []
+  const replay = new TerminalReplay(data => output.push(`history:${data}`), data => output.push(data))
+  replay.push({ data: 'queued', sequence: 7 })
+  await replay.join(Promise.reject(new Error('IPC failed')))
+  replay.push({ data: 'later', sequence: 8 })
+  assert.deepEqual(output, ['queued', 'later'])
+})
+
+test('a snapshot that arrives joins as before', async () => {
+  const output: string[] = []
+  const replay = new TerminalReplay(data => output.push(`history:${data}`), data => output.push(data))
+  replay.push({ data: 'old', sequence: 2 })
+  await replay.join(Promise.resolve({ data: 'saved', sequence: 2 }))
+  replay.push({ data: 'new', sequence: 3 })
+  assert.deepEqual(output, ['history:saved', 'new'])
+})

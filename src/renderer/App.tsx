@@ -18,6 +18,7 @@ import { canOpenSessionTab, desktopViewMode } from './desktop-view-state.js'
 import { MAX_SESSION_TITLE_CHARS, worktreeNamePrefix } from '../main/session-name.js'
 import { OTHER_CLIS, sessionCliLabel, type SessionCli, type SessionCliChoice } from '../main/session-cli.js'
 import { isShortcutModifier } from './platform.js'
+import { tabShortcutOwner } from './tab-shortcuts.js'
 
 const EMPTY_STATE: DesktopState = {
   desktopVersion: 'unknown',
@@ -287,6 +288,17 @@ export function App(): JSX.Element {
   }
   useEffect(() => window.copilotDesktop.onSessionHistoryRequest(openHistory), [openHistory])
 
+  const sessionShortcut = (key: 'w' | 't'): void => {
+    if (key === 't') { if (canOpenTab) openNewSession(); return }
+    if (state.activeTabId) window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
+      console.error('Failed to close session tab', error)
+    })
+  }
+  // The same keys as a menu accelerator, which reaches the page as a request, not a key event.
+  useEffect(() => window.copilotDesktop.onTabShortcutRequest((key) => {
+    if (tabShortcutOwner(document.activeElement) === 'session') sessionShortcut(key)
+  }), [canOpenTab, state.activeTabId])
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const modifier = isShortcutModifier(event)
@@ -299,14 +311,15 @@ export function App(): JSX.Element {
         }
         return
       }
-      if (event.key.toLowerCase() === 't') {
+      const key = event.key.toLowerCase()
+      // The workspace tools answer these two keys themselves (ToolPanelWorkspace).
+      if ((key === 't' || key === 'w') && tabShortcutOwner(event.target) !== 'session') return
+      if (key === 't') {
         event.preventDefault()
-        if (canOpenTab) openNewSession()
-      } else if (event.key.toLowerCase() === 'w' && state.activeTabId) {
+        sessionShortcut('t')
+      } else if (key === 'w' && state.activeTabId) {
         event.preventDefault()
-        window.copilotDesktop.closeTab(state.activeTabId).catch((error: unknown) => {
-          console.error('Failed to close session tab', error)
-        })
+        sessionShortcut('w')
       } else if (event.key === ',') {
         event.preventDefault()
         void window.copilotDesktop.openSettings()

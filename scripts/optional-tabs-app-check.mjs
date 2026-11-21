@@ -371,6 +371,30 @@ if (!process.versions.electron) {
     await writeFile(join(out, 'terminal-panel.png'), (await win.webContents.capturePage()).toPNG())
     await click(`[data-tab-id="${terminalTab.id}"] + .tool-tab-close`)
     await until('!document.querySelector(".tool-terminal-panel")', 'terminal tab disposed')
+    // Ctrl/Cmd+T and Ctrl/Cmd+W typed in a text field of the tools open and close tool tabs. They used to fall through to
+    // the window and open or close the Copilot session beside them.
+    {
+      const modifier = process.platform === 'darwin' ? 'meta' : 'control'
+      const press = key => { for (const type of ['keyDown', 'keyUp']) win.webContents.sendInputEvent({ type, keyCode: key, modifiers: [modifier] }) }
+      const sessions = async () => (await ui('window.copilotDesktop.getState()')).tabs.map(tab => tab.id)
+      const toolTabs = async count => { for (let attempt = 0; attempt < 200; attempt++) { if ((await current()).tabs.length === count) return; await delay(30) } throw new Error(`Expected ${count} tool tabs, found ${(await current()).tabs.length}`) }
+      const focusUrl = async () => {
+        const id = (await current()).activeId
+        await until(`document.querySelector('#tool-content-${id} [aria-label="New browser URL"]')`, 'launcher URL field')
+        await ui(`document.querySelector('#tool-content-${id} [aria-label="New browser URL"]').focus()`)
+        assert.equal(await ui('document.activeElement?.getAttribute("aria-label")'), 'New browser URL')
+      }
+      const before = await sessions(); assert.ok(before.length > 0, 'a session exists to lose')
+      const start = (await current()).tabs.length
+      await ui(`window.copilotDesktop.toolsAction(${JSON.stringify(p1.id)}, {type:'add',kind:'new'})`)
+      await toolTabs(start + 1)
+      win.focus(); win.webContents.focus()
+      await focusUrl(); press('t'); await toolTabs(start + 2)
+      await focusUrl(); press('w'); await toolTabs(start + 1)
+      await focusUrl(); press('w'); await toolTabs(start)
+      await delay(300)
+      assert.deepEqual(await sessions(), before, 'the session tabs are untouched by shortcuts typed in the tools')
+    }
     await ui('(async()=>{for(const tab of (await window.copilotDesktop.getState()).tabs) await window.copilotDesktop.closeTab(tab.id)})()')
     await until('document.querySelector(".empty-state > .session-tools-toggle")', 'tools remain available without sessions')
     await click('.empty-state > .session-tools-toggle')

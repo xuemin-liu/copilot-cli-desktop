@@ -358,7 +358,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     const unsubscribe = window.copilotDesktop.onTabOutput((payload) => {
       if (payload.tabId === tabId) replay.push(payload)
     })
-    void window.copilotDesktop.getTabSnapshot(tabId).then(snapshot => replay.restore(snapshot))
+    void replay.join(window.copilotDesktop.getTabSnapshot(tabId))
 
     let fitFrame = 0
     const fitTerminal = (): void => {
