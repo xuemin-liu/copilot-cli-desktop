@@ -1479,7 +1479,7 @@ async function buildSessionSpawnPlan(
   sessionTitle: string,
 ): Promise<SessionSpawnPlan> {
   // The program is being replaced: a session started now would run a half-written install, or keep its files in use.
-  if (copilotMaintenance.status === 'running') throw new Error(COPILOT_MAINTENANCE_BLOCKS_SESSIONS)
+  if (copilotBeingReplaced) throw new Error(COPILOT_MAINTENANCE_BLOCKS_SESSIONS)
   await refreshCopilotResolutionIfChanged()
   // A tab started right after launch would otherwise be validated against empty capabilities while the startup
   // probe is still running, and be refused for a launch option the CLI does support.
@@ -4324,6 +4324,11 @@ async function saveSettingsAtStartup(migrated: boolean): Promise<void> {
 }
 
 const COPILOT_MAINTENANCE_BLOCKS_SESSIONS = 'Copilot CLI is being installed or updated. Start the session when that has finished.'
+/**
+ * True only while the install or update command itself runs. The maintenance operation goes on after it, to find the new
+ * program and open the selected workspace's sessions again, and those starts must be let through.
+ */
+let copilotBeingReplaced = false
 
 async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void> {
   if (copilotMaintenance.status === 'running') throw new Error('A Copilot CLI maintenance operation is already running')
@@ -4343,9 +4348,13 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
   }
   try {
     await bestEffortUsage(usageService?.flush())
-    const output = operation === 'install'
-      ? await installCopilotCli()
-      : await updateCopilotCli(current!)
+    let output: string
+    copilotBeingReplaced = true
+    try {
+      output = operation === 'install'
+        ? await installCopilotCli()
+        : await updateCopilotCli(current!)
+    } finally { copilotBeingReplaced = false }
     await bestEffortUsage(usageService?.collect())
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {

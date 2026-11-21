@@ -156,7 +156,7 @@ test('activateWorkspaceProfile refuses a new profile when every retained profile
   const protectedIds = new Set(config.profiles.map((profile) => profile.id))
   assert.throws(
     () => activateWorkspaceProfile(config, 'C:\\work\\overflow', protectedIds),
-    /Close a workspace session/,
+    /All \d+ workspaces are in use/,
   )
   assert.equal(config.profiles.length, MAX_PROFILES)
 })

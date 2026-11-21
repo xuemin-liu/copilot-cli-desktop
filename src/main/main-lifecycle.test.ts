@@ -48,7 +48,7 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
-  /** Keep a CLI install or update running until `work` settles. */
+  /** Keep the next CLI install or update command running until `work` settles. */
   holdMaintenance(work: Promise<void>): void
   /** Run the startup settings save with every save failing; resolves with what was written to the app log. */
   startupSaveWithFailingDisk(): Promise<string[]>
@@ -233,8 +233,10 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       './copilot-maintenance.js': `
         export const maintenanceCalls = [];
         export const DEFAULT_COPILOT_MAINTENANCE_STATE = { status: 'idle', operation: null, message: '' };
-        export async function installCopilotCli() { maintenanceCalls.push('install'); return ''; }
-        export async function updateCopilotCli() { maintenanceCalls.push('update'); return ''; }
+        let held = null;
+        export function holdCopilotCommand(work) { held = work; }
+        export async function installCopilotCli() { maintenanceCalls.push('install'); const work = held; held = null; await work; return ''; }
+        export async function updateCopilotCli() { maintenanceCalls.push('update'); const work = held; held = null; await work; return ''; }
       `,
       './node-pty-backend.js': `
         export const spawns = [];
@@ -287,7 +289,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
       stdin: { contents: testSource + `
         let quitCleanupForTest, quitWorkForTest, deferredTaskEnter;
         import { spawns, setNextSpawn } from './node-pty-backend.js';
-        import { maintenanceCalls } from './copilot-maintenance.js';
+        import { maintenanceCalls, holdCopilotCommand } from './copilot-maintenance.js';
         import { lastBounds, blockBrowserDispose, browserConfigs } from './browser-debug.js';
         import { blockWorktreeLookups } from './git-discovery.js';
         import { browserStorageClears } from 'electron';
@@ -317,7 +319,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
-          holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; const original = retryResolution; retryResolution = async () => { await work; return original(); }; },
+          holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; holdCopilotCommand(work); },
           async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
             try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
           chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
@@ -1308,7 +1310,8 @@ test('installing or updating the CLI and starting a Copilot session keep each ot
   // No session is running, so the update is admitted. A session started while it runs would launch the program that is
   // being replaced.
   const updating = harness.maintain('update')
-  await new Promise((resolve) => setImmediate(resolve))
+  for (let turn = 0; turn < 20 && !harness.maintenanceCalls.includes('update'); turn++) await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(harness.maintenanceCalls.includes('update'), 'the update command is running')
   assert.equal(harness.maintenanceStatus(), 'running')
   await assert.rejects(harness.createMain(), /Copilot CLI is being installed or updated/)
   assert.equal(harness.spawns.length, 0)
