@@ -668,11 +668,22 @@ button:disabled {
   flex-direction: column;
 }
 
+/* A notice about a clicked link lies over the top of the terminal. It must never take space from it: a terminal that
+   changes size makes the CLI redraw its whole screen, which showed as a jump on every click. */
 .terminal-link-error {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
   max-height: 40%;
   overflow: auto;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 35%);
+  /* Only its dismiss button takes the pointer: a link in the rows under the notice can still be clicked. */
+  pointer-events: none;
 }
+
+.terminal-link-error button { pointer-events: auto; }
 
 .terminal-viewport {
   position: relative;
