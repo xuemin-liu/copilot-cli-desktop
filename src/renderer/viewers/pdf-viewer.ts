@@ -32,13 +32,17 @@ function open(container: HTMLDivElement, bytes: Uint8Array, events: PdfViewerEve
   const eventBus = new EventBus()
   const linkService = new PDFLinkService({ eventBus })
   const findController = new PDFFindController({ eventBus, linkService })
+  // Everything PDF.js attaches to the container (its scroll listener, its resize observer, selection listeners) is tied
+  // to this signal, so closing the view takes all of it away. A refresh closes one view and opens another on the same
+  // container; without this each refresh would leave a set of listeners behind.
+  const teardown = new AbortController()
   const viewer = new PDFViewer({
-    container, viewer: pages, eventBus, linkService, findController,
+    container, viewer: pages, eventBus, linkService, findController, abortSignal: teardown.signal,
     // Text layer on, so text can be selected and searched. No annotation layer: links, forms and scripts in a document
     // are never made live.
     textLayerMode: 1, annotationMode: AnnotationMode.DISABLE, enableAutoLinking: false,
     maxCanvasPixels: MAX_CANVAS_PIXELS,
-  })
+  } as ConstructorParameters<typeof PDFViewer>[0])
   linkService.setViewer(viewer)
   let closed = false
   let fitted = true
@@ -93,6 +97,9 @@ function open(container: HTMLDivElement, bytes: Uint8Array, events: PdfViewerEve
       if (closed) return
       closed = true
       resized.disconnect()
+      teardown.abort()
+      // Let go of the pages and their canvases before the document itself is destroyed.
+      try { viewer.setDocument(null as never); linkService.setDocument(null, null) } catch { /* Already torn down. */ }
       void task.destroy().catch(() => undefined).finally(() => { worker.destroy(); thread.terminate() })
       container.replaceChildren()
     },

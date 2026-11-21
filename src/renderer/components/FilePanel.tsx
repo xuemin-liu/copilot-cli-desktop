@@ -63,6 +63,9 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const [pdfProblem, setPdfProblem] = useState<keyof typeof PDF_PROBLEM | null>(null)
   // A PDF's bytes are kept out of React state: they are handed to the viewer once and not held twice.
   const pdfBytes = useRef<Uint8Array | null>(null)
+  // Counts accepted reads of a PDF. The view is opened once for each, so Reload opens the fresh bytes even when the
+  // file's time and size are what they were, and a view that failed to open is tried again.
+  const [pdfRead, setPdfRead] = useState(0)
   const pdfBox = useRef<HTMLDivElement>(null)
   const pdfView = useRef<PdfHandle | null>(null)
   const jumped = useRef(0)
@@ -74,8 +77,8 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       // A read that finishes after a newer one started would put old content back.
       if (current !== request.current || result.status === 'unchanged') return
       shown.current = result.status === 'ok' ? result.revision : null
-      if (result.status === 'ok' && result.kind === 'pdf') { pdfBytes.current = result.bytes; setView({ ...result, bytes: NO_BYTES }) }
-      else setView(result)
+      if (result.status === 'ok' && result.kind === 'pdf') { pdfBytes.current = result.bytes; setPdfRead(count => count + 1); setView({ ...result, bytes: NO_BYTES }) }
+      else { pdfBytes.current = null; setView(result) }
       setFailure(null)
     } catch (error) { if (current === request.current) setFailure(errorMessage(error)) }
   }, [profileId, tab.id])
@@ -114,7 +117,7 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
       }, page)
     }, error => { if (current) { setPdfProblem('failed'); setNotice(errorMessage(error)) } })
     return () => { current = false }
-  }, [pdfRevision])
+  }, [pdfRevision, pdfRead])
   useEffect(() => () => { pdfView.current?.close(); pdfView.current = null }, [])
   // Pages cannot be laid out while the tab is hidden; do it when the tab is shown.
   useEffect(() => { if (active) pdfView.current?.shown() }, [active])

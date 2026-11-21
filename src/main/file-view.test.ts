@@ -41,8 +41,18 @@ test('the view is chosen from the name and then from the first bytes', () => {
 
 test('a PDF is known by its header and read whole; viewer data files are served by plain name only', async () => {
   assert.equal(classifyFile('report.pdf', bytes('%PDF-1.7\n')).kind, 'pdf')
-  assert.equal(classifyFile('renamed.txt', bytes('junk\n%PDF-1.4\n')).kind, 'pdf', 'a little leading junk is allowed')
+  assert.equal(classifyFile('renamed.txt', bytes('%PDF-1.4\n')).kind, 'pdf')
+  assert.equal(classifyFile('renamed.png', bytes('%PDF-1.4\n')).kind, 'pdf', 'the header counts for more than the name')
+  assert.equal(classifyFile('bom.pdf', new Uint8Array([0xef, 0xbb, 0xbf, ...bytes('  %PDF-2.0\n')])).kind, 'pdf')
+  assert.equal(classifyFile('scan.pdf', bytes('junk before\n%PDF-1.4\n')).kind, 'pdf', 'a little leading junk is allowed in a file named .pdf')
   assert.equal(classifyFile('notes.pdf', bytes('just text')).kind, 'text', 'the name alone does not make a PDF')
+  // Text that mentions the header is still text.
+  assert.equal(classifyFile('about.md', bytes('A PDF starts with %PDF-1.7 and then...')).kind, 'markdown')
+  assert.equal(classifyFile('about.md', bytes('Headers:\n%PDF-1.7 is one\n')).kind, 'markdown')
+  assert.equal(classifyFile('sniff.ts', bytes("const magic = '%PDF-'\nexport const version = '%PDF-1.7'\n")).kind, 'text')
+  assert.equal(classifyFile('notes.pdf', bytes('see %PDF-1.7 here')).kind, 'text')
+  assert.equal(classifyFile('odd.txt', bytes('%PDF-x')).kind, 'text', 'no version, no PDF')
+  assert.equal(classifyFile('photo.pdf', PNG).kind, 'image', 'a picture named .pdf is a picture')
   const { base, root } = await fixture()
   try {
     const body = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from([0, 1, 2, 255]), Buffer.alloc(20_000, 7)])

@@ -332,6 +332,38 @@ if (!process.versions.electron) {
     await writeFile(report, makePdf([['Quarterly report alpha'], ['Second page delta'], ['Third page gamma'], ['Fourth page']]))
     await until(`(${pdfText}).includes('Second page delta')`, 'an edited PDF is shown again')
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-panel-title span`)})?.textContent.includes('page 2 of 4')`, 'still on page 2')
+    // Reload opens what is on disk now, even when the file's size and time are what they were.
+    const { utimes, stat: statFile } = await import('node:fs/promises')
+    const before = await statFile(report)
+    const same = makePdf([['Quarterly report alpha'], ['Second page sigma'], ['Third page gamma'], ['Fourth page']])
+    assert.equal(same.length, before.size)
+    await ui(`window.copilotDesktop.fileWatch(${JSON.stringify(profileId)}, ${JSON.stringify((await fileTabs()).find(tab => tab.file.path === 'docs/report.pdf').id)}, false)`)
+    // A whole-second time can be set again exactly, down to the nanosecond.
+    const stamp = new Date('2026-01-01T00:00:00Z')
+    await utimes(report, stamp, stamp)
+    const revisionOf = async () => (await ui(`window.copilotDesktop.fileRead(${JSON.stringify(profileId)}, ${JSON.stringify((await fileTabs()).find(tab => tab.file.path === 'docs/report.pdf').id)}, null).then(result => result.revision)`))
+    const stamped = await revisionOf()
+    await click('Reload')
+    await delay(800)
+    await until(`(${pdfText}).includes('Second page delta')`, 'reloaded at the stamped time')
+    await writeFile(report, same)
+    await utimes(report, stamp, stamp)
+    assert.equal(await revisionOf(), stamped, 'new bytes, same size and time: the same revision')
+    await click('Reload')
+    await until(`(${pdfText}).includes('Second page sigma')`, 'Reload opens the fresh bytes')
+    // A refresh replaces the view; it does not pile listeners and pages on top of the old one.
+    for (const word of ['one', 'two', 'three']) {
+      await writeFile(report, makePdf([['Quarterly report alpha'], [`Second page ${word}`], ['Third page gamma'], ['Fourth page']]))
+      await click('Reload')
+      await until(`(${pdfText}).includes('Second page ${word}')`, `refresh ${word}`)
+    }
+    assert.equal(await q('.file-pdf-pages', 'element.querySelectorAll(".pdfViewer").length'), 1)
+    assert.equal(await q('.file-pdf-pages', 'element.querySelectorAll(".page").length'), 4)
+    win.webContents.debugger.attach('1.3')
+    const node = await win.webContents.debugger.sendCommand('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(`${panel} .file-pdf-pages`)})` })
+    const { listeners } = await win.webContents.debugger.sendCommand('DOMDebugger.getEventListeners', { objectId: node.result.objectId })
+    win.webContents.debugger.detach()
+    assert.equal(listeners.filter(listener => listener.type === 'scroll').length, 1, 'one scroll listener after several refreshes')
     // Hidden and shown again, it is laid out for the panel.
     await action({ type: 'visible', visible: false })
     await until(`!document.querySelector(${JSON.stringify(panel)})`, 'panel hidden')
