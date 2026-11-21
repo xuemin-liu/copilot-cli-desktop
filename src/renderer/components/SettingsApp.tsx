@@ -694,7 +694,7 @@ export function SettingsApp(): JSX.Element | null {
   const updatePreference = (
     patch: Partial<Pick<
       DesktopSettingsSnapshot,
-      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl'
+      'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl' | 'openFilesOutsideWorkspace'
     >>,
   ): void => {
     setSnapshot((previous) => (previous ? { ...previous, ...patch } : previous))
@@ -917,6 +917,23 @@ export function SettingsApp(): JSX.Element | null {
           File Explorer, Start, sign-in or password windows, or administrator windows, and it never types into password fields.
           A banner shows while it is on, and Ctrl+Alt+Shift+X stops it anywhere. Turning this off turns desktop control off in
           every session. Off by default.
+        </p>
+      </section>
+
+      <section>
+        <h2>File links</h2>
+        <label className="settings-row">
+          <input
+            type="checkbox"
+            checked={snapshot.openFilesOutsideWorkspace}
+            onChange={(event) => updatePreference({ openFilesOutsideWorkspace: event.target.checked })}
+          />
+          Open files outside the workspace
+        </label>
+        <p className="settings-disclaimer">
+          A file path you click in a session terminal, a File tab or the Git panel opens in a File tab only when it is inside
+          that workspace or one of its worktrees. Turn this on to open any file on this computer the same way, read only. Turning
+          it off again also stops File tabs already showing such files from reading them. Off by default.
         </p>
       </section>
 

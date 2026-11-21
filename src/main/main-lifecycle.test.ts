@@ -1440,6 +1440,25 @@ test('session output is written to that session\'s log in order, and is all ther
   assert.ok(!(await readFile(join(sessions, launch!, `${first}.log`), 'utf8')).includes('other session'))
 }))
 
+test('the Settings page turns opening files outside the workspace on and off, saved, and accepts only true or false', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory, 'default')
+  // The tray off, as the other preference tests: the harness has no tray to create when a save refreshes it.
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  const get = async (): Promise<boolean> => (await harness.requestSettings('desktop-settings:get') as { openFilesOutsideWorkspace: boolean }).openFilesOutsideWorkspace
+  assert.equal(await get(), false, 'off by default')
+  for (const value of ['true', 1, null]) {
+    await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: value }), /Invalid desktop preferences/)
+  }
+  assert.equal(await get(), false)
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: true })
+  assert.equal(await get(), true)
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).openFilesOutsideWorkspace, true)
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false })
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).openFilesOutsideWorkspace, false)
+}))
+
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {
   configure(harness, directory)
   harness.createTestWindow()

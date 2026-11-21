@@ -215,6 +215,45 @@ if (!process.versions.electron) {
     assert.deepEqual(await open('src/missing.ts'), { ok: false, reason: 'missing' })
     assert.equal((await fileTabs()).length, 2)
 
+    // --- Settings > File links: "Open files outside the workspace". Off by default; on, outside paths open read-only. ---
+    {
+      await ui('window.copilotDesktop.openSettings()')
+      let settings
+      for (let attempt = 0; attempt < 200 && !settings; attempt++) { settings = BrowserWindow.getAllWindows().find(window => window.webContents.getURL().endsWith('/settings.html')); if (!settings) await delay(50) }
+      assert.ok(settings, 'Settings window')
+      const inSettings = code => settings.webContents.executeJavaScript(code)
+      for (let attempt = 0; attempt < 200 && !(await inSettings('Boolean(window.copilotDesktopSettings)').catch(() => false)); attempt++) await delay(50)
+      assert.equal((await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace, false, 'off by default')
+      // The checkbox is on the page, under its own heading, unticked.
+      for (let attempt = 0; attempt < 200 && !(await inSettings('[...document.querySelectorAll("h2")].some(h => h.textContent === "File links")').catch(() => false)); attempt++) await delay(50)
+      const box = '[...document.querySelectorAll("label.settings-row")].find(label => label.textContent.includes("Open files outside the workspace"))?.querySelector("input")'
+      assert.equal(await inSettings(`${box}?.checked`), false)
+      // Ticked as a person does: the click goes through the page, which saves the preference.
+      await inSettings(`${box}.click()`)
+      for (let attempt = 0; attempt < 100 && !(await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace; attempt++) await delay(50)
+      assert.equal((await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace, true, 'the click saved the setting')
+      const tabsBefore = (await fileTabs()).length
+      assert.deepEqual(await open(join(outside, 'secret.txt')), { ok: true }, 'an absolute path outside the workspace opens')
+      await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('outside secret')`, 'the outside file is shown')
+      assert.equal((await fileTabs()).length, tabsBefore + 1)
+      assert.deepEqual(await open('../outside/secret.txt'), { ok: true }, 'a relative path to the same file finds the same tab')
+      assert.equal((await fileTabs()).length, tabsBefore + 1)
+      assert.deepEqual(await open('escape/secret.txt'), { ok: true }, 'a link that leaves the workspace lands on the real file, the same tab')
+      assert.equal((await fileTabs()).length, tabsBefore + 1)
+      assert.deepEqual(await open(join(outside, 'nothing-here.txt')), { ok: false, reason: 'missing' }, 'a missing outside file is reported as missing')
+      assert.deepEqual(await open(outside), { ok: true, revealed: true }, 'an outside folder is shown in the file manager')
+      assert.deepEqual(revealed.splice(0), [outside])
+      // Off again: new outside paths are refused, and the tab already open stops reading its file.
+      await inSettings(`${box}.click()`)
+      for (let attempt = 0; attempt < 100 && (await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace; attempt++) await delay(50)
+      assert.deepEqual(await open(join(outside, 'secret.txt')), { ok: false, reason: 'outside-workspace' }, 'refused again once off')
+      const outsideTab = (await fileTabs()).find(tab => tab.file.path === 'secret.txt')
+      assert.deepEqual(await ui(`window.copilotDesktop.fileRead(${JSON.stringify(profileId)}, ${JSON.stringify(outsideTab.id)}, null)`), { status: 'root-missing' }, 'an open outside tab no longer reads')
+      await action({ type: 'close', id: outsideTab.id })
+      assert.equal((await fileTabs()).length, tabsBefore)
+      settings.close()
+    }
+
     // --- Markdown: rendered, safe, with local pictures only. ---
     assert.deepEqual(await open('docs/guide.md'), { ok: true })
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-markdown h1`)})`, 'rendered Markdown')
