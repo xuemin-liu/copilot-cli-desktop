@@ -94,6 +94,8 @@ export interface CopilotDesktopBridge {
   listSessionClis(): Promise<SessionCliChoice[]>
   /** The menu or tray asked for a new session; the renderer names it in its dialog first. */
   onNewSessionRequest(listener: (attachments: boolean) => void): () => void
+  /** Ctrl/Cmd+W or Ctrl/Cmd+T arrived as a menu accelerator; the page decides what has focus. */
+  onTabShortcutRequest(listener: (key: 'w' | 't') => void): () => void
   listSessionHistory(): Promise<SessionHistoryEntry[]>
   openSessionHistory(sessionId: string): Promise<DesktopState>
   onSessionHistoryRequest(listener: () => void): () => void

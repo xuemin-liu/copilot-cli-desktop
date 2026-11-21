@@ -25,5 +25,13 @@ export class TerminalReplay {
     for (const chunk of pending) this.push(chunk)
   }
 
+  /**
+   * Join the history a request answers. A request that fails has no history to show, but the live output queued while it
+   * was pending, and everything after it, must still reach the terminal.
+   */
+  join(snapshot: Promise<TerminalOutputChunk>): Promise<void> {
+    return snapshot.then(value => this.restore(value), () => this.restore({ data: '', sequence: 0 }))
+  }
+
   dispose(): void { this.disposed = true; this.pending = [] }
 }
