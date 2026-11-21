@@ -12,7 +12,7 @@ import { WorkflowStore, WorkflowTaskLimitError } from './workflow-store.js'
 import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliveries.js'
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
-import { access, appendFile, mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises'
+import { access, appendFile, mkdir, readdir, readFile, realpath, rm, rmdir, stat } from 'node:fs/promises'
 import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
 import { existsSync } from 'node:fs'
@@ -4701,6 +4701,7 @@ function settingsPreferences(): DesktopPreferences {
     meetingRoundTimeoutMinutes: desktopConfig.meetingRoundTimeoutMinutes,
     meetingDiscussion: desktopConfig.meetingDiscussion,
     desktopControl: desktopConfig.desktopControl,
+    openFilesOutsideWorkspace: desktopConfig.openFilesOutsideWorkspace,
   }
 }
 
@@ -5539,7 +5540,7 @@ ipcMain.handle('desktop:reveal-path', async (event, tabId: unknown, candidate: u
   if (!owningProfile) throw new Error('The session workspace is unavailable')
   const baseDirectory = owningProfile.path
   const resolved = resolve(baseDirectory, candidate)
-  if (!isPathWithinRoot(baseDirectory, resolved)) return { ok: false, reason: 'outside-workspace' }
+  if (!desktopConfig.openFilesOutsideWorkspace && !isPathWithinRoot(baseDirectory, resolved)) return { ok: false, reason: 'outside-workspace' }
   // A path-shaped token is not necessarily a real file (e.g. a diff header).
   // Report ordinary misses as a result so the renderer can give quiet feedback.
   if (!(await pathExists(resolved))) return { ok: false, reason: 'missing' }
@@ -5571,7 +5572,66 @@ async function trustedFile(profileId: unknown, toolTabId: unknown): Promise<{ fi
   for (const root of await fileRoots(profile, [saved.root])) {
     if (await isSameFolder(saved.root, root)) return { file: { ...saved, root }, trusted: true }
   }
+  // A file opened from outside the workspace keeps its own folder as its root. It is read only while the setting that
+  // allowed it is still on: turning the setting off closes that door for tabs already open too.
+  if (desktopConfig.openFilesOutsideWorkspace && isLocalFilesystemPath(saved.root) && hostPath.isAbsolute(saved.root)) return { file: saved, trusted: true }
   return { file: saved, trusted: false }
+}
+/**
+ * Where a path outside every workspace folder is read from, when the setting allows it: the folder that, on disk, holds
+ * the file. The link is resolved first, so the root is the real folder and the file's name is its real name. A path that
+ * names no file is reported as missing by the caller; a folder is shown in the file manager.
+ */
+async function outsideLocation(target: string, roots: readonly string[]): Promise<{ root: string; path: string } | null> {
+  if (!isLocalFilesystemPath(target) || !hostPath.isAbsolute(target)) return null
+  const real = await realpath(target).catch(() => null)
+  if (!real) {
+    // Missing: keep the spelling, so the caller reports it as missing rather than as outside the workspace.
+    return { root: hostPath.dirname(target), path: hostPath.basename(target) }
+  }
+  // A link can lead to a network share or a device. Only a folder on this computer is read, and nothing is asked of the
+  // target before that is known.
+  if (!isLocalFilesystemPath(real) || !hostPath.isAbsolute(real)) return null
+  // A link that leads back into the workspace or one of its worktrees opens the file there, in the tab it already has,
+  // and keeps working when this setting is turned off.
+  const inside = await locateInRealRoots(roots, real)
+  if (inside) return inside
+  const info = await stat(real).catch(() => null)
+  if (info?.isDirectory()) return { root: real, path: '' }
+  return { root: hostPath.dirname(real), path: hostPath.basename(real) }
+}
+/**
+ * After "Open files outside the workspace" changes: a tab whose folder is no longer allowed stops being watched, so no
+ * folder outside the workspace stays watched, and every File tab reads again, so the one on screen clears at once.
+ * Hidden tabs read again when they are next shown.
+ */
+async function revalidateFileTabs(): Promise<void> {
+  // With no tools started there is no File tab to recheck; this must not start them.
+  const tools = projectToolService
+  if (!tools) return
+  const tabs = tools.state().projects.flatMap(project => project.tabs.filter(tab => tab.kind === 'file').map(tab => ({ profileId: project.profileId, id: tab.id })))
+  for (const tab of tabs) {
+    const { trusted } = await trustedFile(tab.profileId, tab.id).catch(() => ({ trusted: false }))
+    if (!trusted) tools.watchFile(tab.profileId, tab.id, null)
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  for (const tab of tabs) mainWindow.webContents.send('desktop:file-changed', tab.id)
+}
+/**
+ * Which workspace root holds a real (link-resolved) path. A root can be known by a path that is not its real one (a
+ * temp folder on macOS lives under /private/var but is named /var; Windows can give a short 8.3 name), so each root is
+ * compared by its real path. The answer keeps the root as written, so the file gets the tab it has when opened directly.
+ */
+async function locateInRealRoots(roots: readonly string[], real: string): Promise<{ root: string; path: string } | null> {
+  const direct = locateInRoots(roots, real)
+  if (direct) return direct
+  for (const root of roots) {
+    const realRoot = await realpath(root).catch(() => null)
+    if (!realRoot) continue
+    const found = locateInRoots([realRoot], real)
+    if (found) return { root: hostPath.resolve(root), path: found.path }
+  }
+  return null
 }
 function assertMainWindowSender(event: IpcMainInvokeEvent): void {
   assertTrustedIpcSender(event)
@@ -5613,8 +5673,14 @@ ipcMain.handle('desktop:open-file', async (event, source: unknown, candidate: un
       base = from.folder
     } else throw new Error('Invalid file request')
   }
-  const located = locateInRoots(roots, hostPath.resolve(base, candidate))
+  const target = hostPath.resolve(base, candidate)
+  let located = locateInRoots(roots, target) ?? (desktopConfig.openFilesOutsideWorkspace ? await outsideLocation(target, roots) : null)
   if (!located) return { ok: false, reason: 'outside-workspace' }
+  // A path inside the workspace can lead out of it through a link. With the setting on, it is read where it really is.
+  if (located.path !== '' && desktopConfig.openFilesOutsideWorkspace && (await resolveInRoot(located.root, located.path)).ok === false) {
+    const outside = await outsideLocation(target, roots)
+    if (outside) located = outside
+  }
   if (located.path === '') {
     // The workspace folder or a worktree folder itself: a folder, so it is shown in the file manager.
     if (!(await pathExists(located.root))) return { ok: false, reason: 'missing' }
@@ -5705,6 +5771,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     'meetingRoundTimeoutMinutes',
     'meetingDiscussion',
     'desktopControl',
+    'openFilesOutsideWorkspace',
   ])
   const keys = Object.keys(values)
   if (keys.length === 0 || keys.some((key) => !allowedKeys.has(key as keyof DesktopPreferences))) {
@@ -5724,6 +5791,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     || ('meetingRoundTimeoutMinutes' in values && !isMeetingRoundTimeoutMinutes(values.meetingRoundTimeoutMinutes))
     || ('meetingDiscussion' in values && typeof values.meetingDiscussion !== 'boolean')
     || ('desktopControl' in values && typeof values.desktopControl !== 'boolean')
+    || ('openFilesOutsideWorkspace' in values && typeof values.openFilesOutsideWorkspace !== 'boolean')
   ) {
     throw new Error('Invalid desktop preferences')
   }
@@ -5734,6 +5802,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
   let shortcutChanged = false
   let overridesChanged = false
   let desktopControlChanged = false
+  let outsideFilesChanged = false
   // The change is made when this save's turn in the write queue comes, not now, so no
   // other write can carry it to disk unless this save's own write succeeds.
   await persistConfig(() => {
@@ -5766,6 +5835,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     // Sessions started from now on get the helper; turning it off also turns control off everywhere at once.
     desktopControlChanged = typeof values.desktopControl === 'boolean' && desktopConfig.desktopControl !== values.desktopControl
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
+    outsideFilesChanged = typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace
+    if (typeof values.openFilesOutsideWorkspace === 'boolean') desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {
@@ -5790,6 +5861,8 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (!desktopConfig.desktopControl) await desktopControl?.disableAll('Turned off: desktop control was turned off in Settings.')
     broadcastState()
   }
+  // Only once the change is saved: a save that failed was rolled back, and the tabs keep what they show.
+  if (outsideFilesChanged) await revalidateFileTabs()
   if (updateChecksChanged) scheduleAutomaticUpdateCheck(1_000)
   return settingsSnapshot()
 })

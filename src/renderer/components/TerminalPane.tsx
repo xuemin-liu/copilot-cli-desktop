@@ -246,7 +246,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
           setLinkNotice(result.reason === 'missing'
             ? { message: `File or folder not found or inaccessible: ${link.text}`, tone: 'info' }
             : result.reason === 'limit' ? { message: result.message ?? 'Too many files are open. Close a file tab first.', tone: 'error' }
-            : { message: `Only paths within the session workspace can be opened: ${link.text}`, tone: 'error' })
+            : { message: `Only paths within the session workspace can be opened: ${link.text}. Settings > File links can allow others.`, tone: 'error' })
         } else setLinkNotice(null)
       } catch (error) {
         if (request === linkRequestRef.current) {

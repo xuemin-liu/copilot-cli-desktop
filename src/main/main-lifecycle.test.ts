@@ -32,6 +32,8 @@ interface Harness {
   /** Settles once every worktree cleanup started by a tab close has finished. */
   worktreeCleanups(): Promise<void>
   refreshAppMenu(): void
+  /** The folder path a File tab is watched for, or null. */
+  watchedFile(id: string): string | null
   /** Make the next Settings page loads fail, or succeed again. */
   failSettingsLoad(fail: boolean): void
   settingsWindow(): { destroyed: boolean } | null
@@ -284,6 +286,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
         writeAppLog = (...args) => { const work = originalWriteAppLog(...args); diagnosticWrites.push(work); return work; };
         export const lifecycleTest = {
           shellCalls: shell.calls,
+          watchedFile: (id) => projectTools().watchedFile(id),
           createTestWindow() { mainWindow = createWindow(false); mainWindow.url = shellUrl(); },
           async flushAppLog() { await Promise.allSettled(diagnosticWrites); await appLogWriteQueue; },
           async startTestDesktopControl() {
@@ -1438,6 +1441,97 @@ test('session output is written to that session\'s log in order, and is all ther
   assert.ok((await readFile(join(sessions, launch!, `${first}.log`), 'utf8')).includes('one two three'))
   assert.ok((await readFile(join(sessions, launch!, `${second}.log`), 'utf8')).includes('other session'))
   assert.ok(!(await readFile(join(sessions, launch!, `${first}.log`), 'utf8')).includes('other session'))
+}))
+
+test('the Settings page turns opening files outside the workspace on and off, saved, and accepts only true or false', async () => fixture(async (harness, directory) => {
+  const profile = createWorkspaceProfile(directory, 'default')
+  // The tray off, as the other preference tests: the harness has no tray to create when a save refreshes it.
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  const get = async (): Promise<boolean> => (await harness.requestSettings('desktop-settings:get') as { openFilesOutsideWorkspace: boolean }).openFilesOutsideWorkspace
+  assert.equal(await get(), false, 'off by default')
+  for (const value of ['true', 1, null]) {
+    await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: value }), /Invalid desktop preferences/)
+  }
+  assert.equal(await get(), false)
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: true })
+  assert.equal(await get(), true)
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).openFilesOutsideWorkspace, true)
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false })
+  await harness.flushConfig()
+  assert.equal(JSON.parse(await readFile(join(directory, 'desktop.json'), 'utf8')).openFilesOutsideWorkspace, false)
+}))
+
+test('outside files: a link back into the workspace uses its tab, turning the setting off stops watching outside folders, and a link to a share is refused', async () => fixture(async (harness, directory) => {
+  const workspace = join(directory, 'workspace'), outside = join(directory, 'outside')
+  await mkdir(join(workspace, 'src'), { recursive: true }); await mkdir(outside)
+  await writeFile(join(workspace, 'src', 'inside.txt'), 'inside\n'); await writeFile(join(outside, 'secret.txt'), 'outside\n')
+  // From outside, a link back into the workspace's src folder.
+  await symlink(join(workspace, 'src'), join(outside, 'back'), process.platform === 'win32' ? 'junction' : 'dir')
+  // The workspace is known by a path that is not its real one, as a temp folder is on macOS (/var is /private/var) and
+  // on Windows runners (a short 8.3 name): resolving the link above gives the real path, which must still match it.
+  const alias = join(directory, 'workspace-alias')
+  await symlink(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const profile = createWorkspaceProfile(alias, 'default')
+  harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
+  harness.createTestWindow()
+  const open = (path: string) => harness.request('desktop:open-file', { profileId: profile.id, folder: alias }, path, null) as Promise<{ ok: boolean; reason?: string; revealed?: boolean }>
+  const fileTabs = async () => (await harness.request('desktop:tools-state', 800) as { projects: { profileId: string; tabs: { id: string; kind: string; file?: { root: string; path: string } }[] }[] }).projects.find(p => p.profileId === profile.id)!.tabs.filter(tab => tab.kind === 'file')
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: true })
+
+  // A link from outside that leads back into the workspace opens the workspace file in the tab it already has.
+  assert.deepEqual(await open('src/inside.txt'), { ok: true })
+  assert.deepEqual(await open(join(outside, 'back', 'inside.txt')), { ok: true })
+  const inside = await fileTabs()
+  assert.equal(inside.length, 1, 'one tab for the workspace file, however it was reached')
+  assert.equal(inside[0]!.file!.path, 'src/inside.txt')
+
+  // An outside file, watched while it is shown; turning the setting off stops that watch, the workspace one stays.
+  assert.deepEqual(await open(join(outside, 'secret.txt')), { ok: true })
+  const outsideTab = (await fileTabs()).find(tab => tab.file!.path === 'secret.txt')!
+  await harness.request('desktop:file-watch', profile.id, outsideTab.id, true)
+  await harness.request('desktop:file-watch', profile.id, inside[0]!.id, true)
+  assert.ok(harness.watchedFile(outsideTab.id)?.endsWith('secret.txt'))
+  assert.ok(harness.watchedFile(inside[0]!.id)?.endsWith('inside.txt'))
+  const fileChanges = (from: number) => harness.windowFor().messages.slice(from).filter(message => message.channel === 'desktop:file-changed').map(message => message.payload)
+  // A save that fails is rolled back: the setting stays on, the outside tab stays watched and is not told to clear.
+  await harness.flushConfig()
+  const config = join(directory, 'desktop.json')
+  const saved = await readFile(config, 'utf8')
+  await rm(config); await mkdir(config)
+  const beforeFailure = harness.windowFor().messages.length
+  await assert.rejects(async () => harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false }))
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal((await harness.requestSettings('desktop-settings:get') as { openFilesOutsideWorkspace: boolean }).openFilesOutsideWorkspace, true, 'rolled back')
+  assert.ok(harness.watchedFile(outsideTab.id)?.endsWith('secret.txt'), 'a failed save leaves the watch alone')
+  assert.deepEqual(fileChanges(beforeFailure), [], 'a failed save tells no tab to read again')
+  await rm(config, { recursive: true }); await writeFile(config, saved)
+  const changed = harness.windowFor().messages.length
+  await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: false })
+  // Rechecked once the save is done, before the request answers.
+  assert.equal(harness.watchedFile(outsideTab.id), null, 'no folder outside the workspace stays watched')
+  assert.ok(harness.watchedFile(inside[0]!.id)?.endsWith('inside.txt'), 'the workspace file is still watched')
+  const told = harness.windowFor().messages.slice(changed).filter(message => message.channel === 'desktop:file-changed').map(message => message.payload)
+  assert.ok(told.includes(outsideTab.id), 'the outside tab is told to read again, so it clears')
+  // The workspace tab, reached through the outside link, still reads with the setting off.
+  const read = await harness.request('desktop:file-read', profile.id, inside[0]!.id, null) as { status: string }
+  assert.equal(read.status, 'ok')
+
+  // A link that resolves to a network path is refused, even with the setting on, and nothing is shown in the file
+  // manager. This computer's own admin share stands in for a network share; the case runs only where it resolves.
+  if (process.platform === 'win32') {
+    await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: true })
+    const share = '\\\\localhost\\c$\\Windows'
+    const { realpath, readlink } = await import('node:fs/promises')
+    const reachable = await realpath(share).then(real => real.startsWith('\\\\'), () => false)
+    await symlink(share, join(outside, 'share'), 'dir').catch(() => undefined)
+    const linked = await readlink(join(outside, 'share')).catch(() => null)
+    if (reachable && linked) {
+      const reveals = harness.shellCalls.length
+      assert.deepEqual(await open(join(outside, 'share')), { ok: false, reason: 'outside-workspace' }, 'a folder behind a link to a network path')
+      assert.equal(harness.shellCalls.length, reveals, 'nothing was shown in the file manager')
+    } else console.log(`# network-path link case not run: share reachable ${reachable}, link made ${Boolean(linked)}`)
+  }
 }))
 
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {

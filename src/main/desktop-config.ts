@@ -40,12 +40,14 @@ export interface DesktopConfig {
   meetingDiscussion: boolean
   /** Lets a session that starts while this is on use desktop control, which the person still turns on per session (Windows only). */
   desktopControl: boolean
+  /** A clicked path outside the session's workspace opens in a File tab too. Off: such paths are refused, as before. */
+  openFilesOutsideWorkspace: boolean
   provider: CopilotProviderConfig
 }
 
 export type DesktopPreferences = Pick<
   DesktopConfig,
-  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl'
+  'closeBehavior' | 'trayEnabled' | 'notifications' | 'automaticUpdateChecks' | 'globalShortcutEnabled' | 'browserProfile' | 'browserOverrides' | 'worktreeTimeoutMinutes' | 'worktreeCleanup' | 'meetingMaxRounds' | 'meetingRoundTimeoutMinutes' | 'meetingDiscussion' | 'desktopControl' | 'openFilesOutsideWorkspace'
 >
 
 /**
@@ -120,6 +122,7 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfig = {
   meetingRoundTimeoutMinutes: DEFAULT_MEETING_ROUND_TIMEOUT_MINUTES,
   meetingDiscussion: false,
   desktopControl: false,
+  openFilesOutsideWorkspace: false,
   provider: { ...DEFAULT_PROVIDER_CONFIG },
 }
 
@@ -369,6 +372,7 @@ export function normalizeDesktopConfig(parsed: unknown, reportMigration?: (messa
     meetingRoundTimeoutMinutes: normalizeMeetingRoundTimeoutMinutes(value.meetingRoundTimeoutMinutes),
     meetingDiscussion: value.meetingDiscussion === true,
     desktopControl: value.desktopControl === true,
+    openFilesOutsideWorkspace: value.openFilesOutsideWorkspace === true,
     provider: normalizeProviderConfig(value.provider, reportMigration),
   }
 }

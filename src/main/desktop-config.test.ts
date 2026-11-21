@@ -55,6 +55,14 @@ test('readDesktopConfig returns defaults when the file does not exist', async ()
   })
 })
 
+test('opening files outside the workspace is off by default and turns on only for an explicit true', () => {
+  assert.equal(DEFAULT_DESKTOP_CONFIG.openFilesOutsideWorkspace, false)
+  assert.equal(normalizeDesktopConfig({}).openFilesOutsideWorkspace, false)
+  for (const value of ['true', 1, 'yes', null, {}]) assert.equal(normalizeDesktopConfig({ openFilesOutsideWorkspace: value }).openFilesOutsideWorkspace, false, String(value))
+  assert.equal(normalizeDesktopConfig({ openFilesOutsideWorkspace: true }).openFilesOutsideWorkspace, true)
+  assert.equal(normalizeDesktopConfig(JSON.parse(JSON.stringify(normalizeDesktopConfig({ openFilesOutsideWorkspace: true })))).openFilesOutsideWorkspace, true, 'kept across a save and reload')
+})
+
 test('worktree timeout defaults to ten minutes, validates saved values and persists changes', async () => {
   assert.equal(normalizeDesktopConfig({}).worktreeTimeoutMinutes, 10)
   for (const value of [null, '20', 0, -1, 1.5, 1441, NaN, Infinity]) {
@@ -402,6 +410,7 @@ test('a failed preference save restores the values it changed but not a newer ch
     meetingRoundTimeoutMinutes: config.meetingRoundTimeoutMinutes,
     meetingDiscussion: config.meetingDiscussion,
     desktopControl: config.desktopControl,
+    openFilesOutsideWorkspace: config.openFilesOutsideWorkspace,
   })
   const before = preferences({ ...DEFAULT_DESKTOP_CONFIG, closeBehavior: 'tray', trayEnabled: true, notifications: true })
   // Turning the tray off also moved close behavior back to asking.
