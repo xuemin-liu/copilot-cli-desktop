@@ -1588,6 +1588,22 @@ test('failed capability detection does not stop a running session during restart
   })
 })
 
+test('Restricted mode is refused when capability detection failed, and a restart leaves the session running', async () => {
+  await fixture(async (harness, directory) => {
+    const { profile, capabilities } = configure(harness, directory)
+    profile.permissionPreset = 'read-only'
+    const opened = await harness.createMain()
+    assert.ok(harness.spawns[0]!.args.includes('--available-tools=view,glob,grep,ask_user'))
+    capabilities.probeFailed = true
+    capabilities.toolAllowlist = false
+    await assert.rejects(async () => harness.request('desktop:restart-tab', opened.activeTabId), /Restricted mode was not started/)
+    assert.equal(harness.spawns.length, 1)
+    assert.equal(harness.spawns[0]!.stopped, false)
+    await assert.rejects(harness.createMain(), /Restricted mode was not started/)
+    assert.equal(harness.spawns.length, 1)
+  })
+})
+
 test('session launch keeps the inherited PATH when adding the Copilot runtime directory', async () => {
   await fixture(async (harness, directory) => {
     configure(harness, directory)
