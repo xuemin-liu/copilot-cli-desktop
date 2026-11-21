@@ -28,7 +28,7 @@ typing into the positively verified recipient's idle, empty, quiet prompt. The d
 Source text is untrusted context, not authority to change rules or scope. Restricted launches require tested CLI 1.0.105
 and its explicit tool allowlist; missing capabilities fail closed.
 
-Rules allow at most three starts per day and ten total each; editing a rule preserves its consumed budget. At most two
+Rules allow at most three starts per day and ten total each; editing a rule preserves its consumed budget. An event over the daily limit waits for the next UTC day and is checked again before it starts; only the total is final. A rule can be deleted, which removes its previews and keeps the sessions it started and the record of handled events. At most two
 automatic workers per project share slots with task follow-ups. Each active turn has a ten-minute interrupt deadline.
 The app does not claim a token/credit cost cap. Pausing requests interruption only for matching automatic work and
 retains uncertain delivery evidence until reconciled. Manual sessions and drafts keep their normal behavior.

@@ -34,6 +34,7 @@ async function setup(){
     advance:(milliseconds=120001)=>{now+=milliseconds},launches:()=>launches,interrupts:()=>interrupts,reads:()=>reads,revoke:()=>{scope='b'.repeat(64)},
     block:(fn:()=>Promise<void>)=>{wait=fn},
     fail:(id:number,actor=9)=>{checks.push({id,name:`unit-${id} token=fixture-secret`,app:{id:actor},status:'completed',conclusion:'failure',completed_at:new Date(now+1).toISOString()})},
+    pass:(id:number)=>{const index=checks.findIndex(check=>(check as {id:number}).id===id);if(index>=0)checks.splice(index,1)},
     assign:()=>{assignments.push({id:1,event:'assigned',actor:{id:7},assignee:{id:8},issue:{number:1},created_at:new Date(now+1).toISOString()})},
   }
 }
@@ -89,7 +90,61 @@ test('three daily starts bound automatic work and an ambiguous launch never retr
   h.host.launch=async()=>({sessionId:'session',taskId:'task'})
   for(let i=2;i<=5;i++){h.advance();h.fail(i);await h.store.tick()}
   assert.equal(h.store.rules()[0]?.launches,3)
-  assert.ok(h.store.previews().some(p=>p.state==='limit'))
+  // The fourth and fifth events of the day are not dropped: they wait for the next day.
+  const waiting=h.store.previews().filter(p=>p.state==='preview')
+  assert.equal(waiting.length,2)
+  assert.ok(waiting.every(p=>p.waitUntil===Date.parse('2026-11-03T00:00:00Z')))
+  assert.equal(h.store.previews().some(p=>p.state==='limit'),false)
+}))
+test('an event over the daily limit waits for the next day, is read again, and starts; only the rule total is final',async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions']);const rule=h.store.rules()[0]!.id;await h.store.setMode(rule,'automatic')
+  for(let i=1;i<=5;i++){h.advance();h.fail(i);await h.store.tick()}
+  assert.equal(h.launches(),3)
+  const held=h.store.previews().filter(p=>p.state==='preview')
+  assert.equal(held.length,2)
+  // Asked for by hand the same day: refused with the reason, and still waiting.
+  await assert.rejects(h.store.startPreview(held[0]!.id),/started 3 sessions today.*tomorrow/)
+  assert.equal(h.store.previews().find(p=>p.id===held[0]!.id)?.state,'preview')
+  // More ticks the same day start nothing, also after a restart.
+  h.advance();await h.store.tick();h.reopen();h.advance();await h.store.tick()
+  assert.equal(h.launches(),3)
+  // The next day both start, and no longer say they are waiting.
+  h.advance(86400000);await h.store.tick()
+  assert.equal(h.launches(),5)
+  assert.deepEqual(h.store.previews().filter(p=>held.some(w=>w.id===p.id)).map(p=>[p.state,p.waitUntil]),[['started',undefined],['started',undefined]])
+  assert.equal(h.store.rules()[0]?.launches,5)
+}))
+test('an event that waited for the next day and is gone by then goes stale instead of starting',async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions']);await h.store.setMode(h.store.rules()[0]!.id,'automatic')
+  for(let i=1;i<=4;i++){h.advance();h.fail(i);await h.store.tick()}
+  const held=h.store.previews().find(p=>p.state==='preview')!
+  assert.ok(held.waitUntil)
+  // Overnight the failing check was rerun and passed.
+  h.pass(4)
+  h.advance(86400000);await h.store.tick()
+  assert.equal(h.launches(),3)
+  assert.equal(h.store.previews().find(p=>p.id===held.id)?.state,'stale')
+}))
+test('a rule can be deleted: its previews go, the sessions it started and its handled events stay, and a slot is free',async()=>fixture(async h=>{
+  await h.store.configure('project','owner/repo','default-ci',['actions']);const first=h.store.rules()[0]!.id;await h.store.setMode(first,'automatic')
+  h.advance();h.fail(1);await h.store.tick()
+  assert.equal(h.launches(),1)
+  for(let i=0;i<4;i++)await h.store.configure('project','owner/repo','default-ci',['actions'])
+  await assert.rejects(h.store.configure('project','owner/repo','default-ci',['actions']),/Five rules maximum/)
+  const interrupts=h.interrupts()
+  await h.store.remove(first)
+  assert.equal(h.interrupts(),interrupts+1)
+  assert.equal(h.store.rules().some(r=>r.id===first),false)
+  assert.equal(h.store.previews().some(p=>p.ruleId===first),false)
+  await assert.rejects(h.store.remove(first),/Unknown rule/)
+  // The slot is free, and the new rule starts with a full budget.
+  await h.store.configure('project','owner/repo','default-ci',['actions'])
+  assert.equal(h.store.rules().length,5)
+  assert.equal(h.store.rules().at(-1)?.launches,0)
+  // The event the deleted rule handled is not started again by another rule.
+  const again=h.store.rules().at(-1)!.id;await h.store.setMode(again,'automatic')
+  h.reopen();h.advance();await h.store.tick()
+  assert.equal(h.launches(),1)
 }))
 test('assignment source requires current open assignment and default-branch reads are consistent',async()=>fixture(async h=>{
   h.assign();assert.equal((await readAutomationEvents(h.host.api,'owner/repo','assigned-issue')).length,1)
