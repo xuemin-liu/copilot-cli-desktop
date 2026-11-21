@@ -154,7 +154,7 @@ export function activateWorkspaceProfile(
   config: DesktopConfig,
   path: string,
   protectedProfileIds: ReadonlySet<string> = new Set(),
-  options: { general?: boolean } = {},
+  options: { general?: boolean; onEvicted?: ((profile: WorkspaceProfile) => void) | undefined } = {},
 ): WorkspaceProfile {
   const normalized = resolve(path)
   const id = workspaceProfileId(normalized)
@@ -168,10 +168,11 @@ export function activateWorkspaceProfile(
     if (evictionIndex < 0 && !profile.general) evictionIndex = ordered.findLastIndex(evictable)
     if (evictionIndex < 0) {
       throw new Error(profile.general
-        ? `All ${MAX_PROFILES} workspaces are projects or have open sessions. Remove one before adding a general workspace.`
-        : `Close a workspace session before adding more than ${MAX_PROFILES} workspace profiles`)
+        ? `All ${MAX_PROFILES} workspaces are projects or are in use. Remove one before adding a general workspace.`
+        : `All ${MAX_PROFILES} workspaces are in use: each has a session, a saved session or open tools. Remove one you no longer need before adding another.`)
     }
-    ordered.splice(evictionIndex, 1)
+    const [evicted] = ordered.splice(evictionIndex, 1)
+    if (evicted) options.onEvicted?.(evicted)
   }
   config.profiles = ordered
   config.activeProfileId = profile.id
