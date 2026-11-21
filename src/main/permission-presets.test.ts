@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  assertPermissionPresetSupported,
   buildPermissionArgs,
   isPermissionPreset,
   needsToolAllowlistProbe,
@@ -33,6 +34,20 @@ test('buildPermissionArgs: read-only falls back to legacy deny flags without all
     buildPermissionArgs('read-only', 'C:\\work\\project', LEGACY_CAPABILITIES),
     ['--deny-tool=write', '--deny-tool=shell'],
   )
+})
+
+test('read-only is refused, not weakened, when the CLI could not be asked what it supports', () => {
+  const unknown = { toolAllowlist: false, probeFailed: true }
+  assert.throws(() => buildPermissionArgs('read-only', 'C:\\work\\project', unknown), /Restricted mode was not started/)
+  assert.throws(() => assertPermissionPresetSupported('read-only', unknown), /could not be confirmed/)
+  // A CLI that answered and has no allowlist is an old CLI: the labelled fallback stays.
+  assert.doesNotThrow(() => assertPermissionPresetSupported('read-only', { toolAllowlist: false, probeFailed: false }))
+  for (const preset of ['default', 'trusted-directory', 'full-auto', 'full-access'] as const) {
+    assert.doesNotThrow(() => buildPermissionArgs(preset, 'C:\\work\\project', unknown))
+  }
+  const warning = permissionCompatibilityWarning('read-only', unknown) ?? ''
+  assert.match(warning, /will not start until CLI detection succeeds/)
+  assert.doesNotMatch(warning, /legacy compatibility flags/)
 })
 
 test('buildPermissionArgs: full-auto adds --allow-all-tools', () => {
