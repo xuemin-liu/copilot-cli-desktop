@@ -153,7 +153,7 @@ import { guestWakeText, queueCodexWake } from './meeting-guest-wake.js'
 import { folderChanges } from './meeting-folder-changes.js'
 import { MeetingControlServer, prepareMeetingSessionEnvironment, pruneMeetingFolders, writeMeetingFile, type MeetingCommand, type MeetingRequest, type MeetingResponse } from './meeting-session.js'
 import { GitResolverClaims, type SessionState } from './git-resolver.js'
-import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
+import { inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree, resolveProjectWorktree } from './git-discovery.js'
 import type { DesktopSessionTab, FanOutResult, SessionWorktreeInfo } from './types.js'
 import { realPathNative } from './real-path.js'
 import { hostPath, isSameOrInside, samePath } from './host-path.js'
@@ -5514,7 +5514,7 @@ async function fileRoots(profile: WorkspaceProfile, hints: readonly (string | nu
   const roots: string[] = []
   for (const hint of hints) {
     if (typeof hint !== 'string' || hint.length === 0 || hint.length > 4_096 || !isLocalFilesystemPath(hint) || !hostPath.isAbsolute(hint)) continue
-    const worktree = await resolveLinkedWorktree(profile.path, hint).catch(() => null)
+    const worktree = await resolveProjectWorktree(profile.path, hint).catch(() => null)
     if (worktree && !roots.some(root => samePath(root, worktree.root))) roots.push(worktree.root)
   }
   // A worktree inside the project folder is its own root, so it is tried before the project.

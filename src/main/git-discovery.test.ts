@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import test from 'node:test'
 import { createGitFixture } from './fixtures/git-fixture.js'
-import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree } from './git-discovery.js'
+import { decodeGitQuoted, discoverRepos, inspectGitEntry, inspectSessionWorktree, listLinkedWorktrees, readWorktreeBranch, resolveLinkedWorktree, resolveProjectWorktree, sameFolderOnDisk } from './git-discovery.js'
 import { realPathNative } from './real-path.js'
 import { caseInsensitivePaths, samePath } from './host-path.js'
 
@@ -454,6 +454,19 @@ test('a project\'s linked worktrees are listed from the filesystem, from the mai
   assert.equal(await resolveLinkedWorktree(one, one), null, 'nor the project folder itself')
   assert.equal(await resolveLinkedWorktree(repo, join(fixture.root, 'nowhere')), null)
   assert.equal(await resolveLinkedWorktree(repo, '\\\\server\\share\\one'), null, 'a share is never inspected')
+  // For reading files, the repository a worktree names must also be the project's repository on disk, not only by name.
+  assert.equal((await resolveProjectWorktree(repo, one))?.root.toLowerCase(), one.toLowerCase())
+  assert.equal((await resolveProjectWorktree(join(repo, 'sub'), one))?.root.toLowerCase(), one.toLowerCase(), 'from a folder in the repository')
+  assert.equal((await resolveProjectWorktree(one, two))?.root.toLowerCase(), two.toLowerCase(), 'from a project that is itself a worktree')
+  assert.equal(await resolveProjectWorktree(repo, repo), null)
+  assert.equal(await resolveProjectWorktree(repo, join(fixture.root, 'nowhere')), null)
+  const compared: string[][] = []
+  assert.equal(await resolveProjectWorktree(repo, one, async (left, right) => { compared.push([left, right]); return false }), null,
+    'a worktree whose repository is another folder on disk is refused, whatever the names say')
+  assert.equal(compared[0]?.[1]?.toLowerCase(), repo.toLowerCase(), 'the named repository is compared with the project\'s')
+  assert.equal(await sameFolderOnDisk(repo, join(repo, 'sub', '..')), true)
+  assert.equal(await sameFolderOnDisk(repo, one), false)
+  assert.equal(await sameFolderOnDisk(repo, join(fixture.root, 'nowhere')), false)
   // A worktree whose folder is gone, and an entry whose backpointer names another folder, are not offered.
   rmSync(two, { recursive: true, force: true })
   const stray = join(repo, '.git', 'worktrees', 'stray')

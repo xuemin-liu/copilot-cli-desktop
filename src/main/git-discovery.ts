@@ -1,4 +1,4 @@
-import { lstat, open, readdir } from 'node:fs/promises'
+import { lstat, open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { hostPath, samePath } from './host-path.js'
 import { isLocalFilesystemPath } from './external-targets.js'
@@ -397,6 +397,31 @@ export async function resolveLinkedWorktree(projectPath: string, path: string): 
   if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || !isLocalFilesystemPath(path)) return null
   const repository = await projectRepository(projectPath)
   return repository ? linkedWorktreeOf(path, repository.mainRoot, repository.project) : null
+}
+
+/** Whether two paths are the same folder on disk, told by device and file number, not by how the names are spelled. */
+export async function sameFolderOnDisk(left: string, right: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([stat(left, { bigint: true }), stat(right, { bigint: true })])
+    return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino
+  } catch { return false }
+}
+
+/**
+ * `resolveLinkedWorktree`, for callers that go on to read files from the worktree. The lookup above matches the
+ * repository a worktree names against the project's repository by name, which on a file system that tells names apart by
+ * case could accept a worktree of another repository whose path differs only by case. Here the repository the worktree
+ * names must also be, on disk, the project's repository (whether the project is the main checkout, a folder in it, or
+ * itself a worktree). `same` is replaceable for tests.
+ */
+export async function resolveProjectWorktree(projectPath: string, path: string,
+  same: (left: string, right: string) => Promise<boolean> = sameFolderOnDisk): Promise<SessionWorktree | null> {
+  if (typeof path !== 'string' || path.length === 0 || path.length > 4_096 || !isLocalFilesystemPath(path)) return null
+  const repository = await projectRepository(projectPath)
+  if (!repository) return null
+  const worktree = await linkedWorktreeOf(path, repository.mainRoot, repository.project)
+  if (!worktree) return null
+  return await same(worktree.mainRoot, repository.mainRoot) && await same(hostPath.join(worktree.gitDir, '..', '..'), hostPath.join(repository.mainRoot, '.git')) ? worktree : null
 }
 
 /** The branch a worktree has checked out, from its HEAD file (no git): null when detached, missing or unreadable. */
