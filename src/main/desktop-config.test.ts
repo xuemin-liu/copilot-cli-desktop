@@ -530,3 +530,20 @@ test('a workspace whose removal failed to save comes back in its place', () => {
   restoreWorkspaceProfile(config, third)
   assert.equal(config.profiles.filter((profile) => profile.id === ids[1]).length, 1)
 })
+
+test('a workspace dropped at the limit is reported, and the limit names what keeps the others', () => {
+  const config: DesktopConfig = structuredClone(DEFAULT_DESKTOP_CONFIG)
+  for (let index = 0; index < MAX_PROFILES; index += 1) activateWorkspaceProfile(config, fixturePath('work', `project-${index}`))
+  const oldest = config.profiles.at(-1)!
+  const evicted: string[] = []
+  activateWorkspaceProfile(config, fixturePath('work', 'one-more'), new Set(), { onEvicted: (profile) => evicted.push(profile.id) })
+  assert.deepEqual(evicted, [oldest.id])
+  // Re-selecting a workspace that is already listed drops nothing.
+  activateWorkspaceProfile(config, fixturePath('work', 'project-5'), new Set(), { onEvicted: (profile) => evicted.push(profile.id) })
+  assert.equal(evicted.length, 1)
+  const everyone = new Set(config.profiles.map((profile) => profile.id))
+  assert.throws(() => activateWorkspaceProfile(config, fixturePath('work', 'another'), everyone, { onEvicted: (profile) => evicted.push(profile.id) }),
+    /All \d+ workspaces are in use: each has a session, a saved session or open tools\. Remove one/)
+  assert.equal(evicted.length, 1)
+  assert.equal(config.profiles.length, MAX_PROFILES)
+})

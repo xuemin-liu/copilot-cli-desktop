@@ -48,6 +48,16 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  /** Keep a CLI install or update running until `work` settles. */
+  holdMaintenance(work: Promise<void>): void
+  /** Run the startup settings save with every save failing; resolves with what was written to the app log. */
+  startupSaveWithFailingDisk(): Promise<string[]>
+  /** The folder the next "choose a workspace" dialog answers with. */
+  chooseFolder(path: string): void
+  /** The projects whose tools were cleaned up, as they happen. */
+  watchProjectRemovals(): string[]
+  /** How many times the browser state of a tool tab is copied from here on. */
+  countBrowserSnapshots(resource: string): { count: number }
   blockSessionStop(tabId:string,work:Promise<void>,started:()=>void):void
   /** Like blockSpawnPlan, but only plans for a profile the predicate accepts wait; the others run at once. */
   blockSpawnPlanWhen(accept: (profile: WorkspaceProfile) => boolean, work: Promise<void>): void
@@ -305,6 +315,12 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigration(busy, exclusive) { migrationService = { busy, exclusive }; },
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
+          holdMaintenance(work) { const original = retryResolution; retryResolution = async () => { await work; return original(); }; },
+          async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
+            try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
+          chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
+          watchProjectRemovals() { const service = projectTools(), original = service.removeProject.bind(service), seen = []; service.removeProject = async (id) => { seen.push(id); return original(id); }; return seen; },
+          countBrowserSnapshots(resource) { const browser = projectTools().resource(resource).browser, read = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(browser), 'snapshot').get, calls = { count: 0 }; Object.defineProperty(browser, 'snapshot', { configurable: true, get() { calls.count++; return read.call(browser); } }); return calls; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSessionStop(tabId,work,started) { const session=managedTabs.get(tabId).session; const original=session.stop.bind(session);session.stop=async()=>{started();await work;return original()}; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
@@ -1279,6 +1295,102 @@ test('usage failures neither block CLI maintenance nor misreport a successful CL
   await harness.maintain('update')
   assert.equal(harness.maintenanceStatus(), 'succeeded')
   assert.deepEqual(harness.maintenanceCalls, ['install', 'retry-resolution', 'update', 'retry-resolution'])
+}))
+
+test('installing or updating the CLI and starting a Copilot session keep each other out', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.configureMaintenance()
+  let finish!: () => void
+  harness.holdMaintenance(new Promise<void>((resolve) => { finish = resolve }))
+  // No session is running, so the update is admitted. A session started while it runs would launch the program that is
+  // being replaced.
+  const updating = harness.maintain('update')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(harness.maintenanceStatus(), 'running')
+  await assert.rejects(harness.createMain(), /Copilot CLI is being installed or updated/)
+  assert.equal(harness.spawns.length, 0)
+  finish()
+  await updating
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+
+  // The other way round: a session that is still being prepared is not in the list of running tabs yet.
+  let prepared!: () => void
+  harness.blockSpawnPlan(new Promise<void>((resolve) => { prepared = resolve }))
+  const starting = harness.createMain()
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(harness.maintain('update'), /A session is starting or stopping/)
+  prepared()
+  const opened = await starting
+  assert.equal(harness.spawns.length, 1)
+  await assert.rejects(harness.maintain('update'), /Close all running Copilot sessions/)
+  await harness.request('desktop:close-tab', opened.activeTabId)
+  await harness.maintain('update')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+}))
+
+test('a settings save that fails at startup is logged and does not stop the app from starting', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  const logged = await harness.startupSaveWithFailingDisk()
+  assert.equal(logged.length, 1)
+  assert.match(logged[0]!, /Could not save the settings at startup.*ENOSPC/)
+}))
+
+test('at the workspace limit a workspace with saved sessions or open tools is never dropped; an idle one is, with its cleanup', async () => fixture(async (harness, directory) => {
+  const { profile, capabilities } = configure(harness, directory)
+  harness.createTestWindow()
+  const others: WorkspaceProfile[] = []
+  for (let index = 1; index < 20; index++) {
+    const path = join(directory, `workspace-${index}`); await mkdir(path)
+    const other = createWorkspaceProfile(path)
+    other.tabs = [{ title: `Saved ${index}`, lastSessionId: SOURCE }]
+    others.push(other)
+  }
+  profile.tabs = [{ title: 'Saved', lastSessionId: FORK }]
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, ...others], activeProfileId: profile.id }, capabilities)
+  const removals = harness.watchProjectRemovals()
+  const added = join(directory, 'one-more'); await mkdir(added)
+  harness.chooseFolder(added)
+
+  // Every workspace has a session saved to open again. Adding one more used to drop the last of them, silently.
+  const asked = harness.answerMessageBoxes(0)
+  let state = await harness.request('desktop:select-workspace')
+  assert.equal(asked.length, 1)
+  assert.match(asked[0]!.message, /All 20 workspaces are in use/)
+  assert.equal(state.profiles.length, 20)
+  assert.ok(state.profiles.every((candidate) => candidate.path !== added))
+  assert.deepEqual(removals, [])
+
+  // Tools open in a workspace with no sessions keep it too.
+  const last = others.at(-1)!
+  last.tabs = []
+  harness.configure({ ...structuredClone(DEFAULT_DESKTOP_CONFIG), profiles: [profile, ...others], activeProfileId: profile.id }, capabilities)
+  await harness.request<unknown>('desktop:tools-action', last.id, { type: 'add', kind: 'browser' })
+  state = await harness.request('desktop:select-workspace')
+  assert.equal(asked.length, 2)
+  assert.ok(state.profiles.some((candidate) => candidate.id === last.id))
+
+  // With nothing in it, it makes room, and is cleaned up like a workspace removed by hand.
+  const tools = await harness.request<any>('desktop:tools-state')
+  for (const tab of tools.projects.find((project: any) => project.id === last.id)?.tabs ?? []) await harness.request('desktop:tools-action', last.id, { type: 'close', id: tab.id })
+  state = await harness.request('desktop:select-workspace')
+  assert.equal(asked.length, 2, 'no refusal this time')
+  assert.equal(state.profiles.length, 20)
+  assert.ok(state.profiles.some((candidate) => candidate.path === added))
+  assert.ok(state.profiles.every((candidate) => candidate.id !== last.id))
+  assert.deepEqual(removals, [last.id])
+}))
+
+test('saving a captured browser log copies the browser state once, however long the log is', async () => fixture(async (harness, directory) => {
+  const { profile } = configure(harness, directory); harness.createTestWindow()
+  const tools = await harness.request<any>('desktop:tools-action', profile.id, { type: 'add', kind: 'browser' })
+  const tab = tools.projects[0].tabs[0].resource
+  const browser = await harness.request<any>('desktop:browser-open', tab)
+  for (let index = 0; index < 300; index++) browser.console.push({ pageId: 12, message: `line ${index}` })
+  harness.configureBrowserExportDialog({ canceled: false, filePath: join(directory, 'log.json') })
+  const copies = harness.countBrowserSnapshots(tab)
+  await harness.request('desktop:browser-export', tab, 'console')
+  assert.equal(copies.count, 1)
+  assert.equal(JSON.parse(await readFile(join(directory, 'log.json'), 'utf8')).length, 300)
 }))
 
 test('overall quit deadline releases repeated exit requests despite a stuck config write', async (t) => fixture(async (harness) => {
