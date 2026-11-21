@@ -896,6 +896,8 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   await waitFor(() => hookStarted > 0, 30_000)
   h.service.cancel(SUBSCRIBER, PROFILE, repoId)
   const result = await pending
+  // Measured here, before anything else: the diagnostics below take time of their own and are not part of the cancel.
+  const returnedAfter = Date.now() - hookStarted
   // This test has failed on macOS with the hook left running, and the cause is not known. Should it fail again, the
   // message says how the kill went and what was still running right after it: the hook's processes with their parent
   // and process group.
@@ -910,7 +912,6 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   }
   assert.deepEqual([result.ok, result.reason], [false, 'cancelled'])
   assert.match(result.message, /index\.lock/)
-  const returnedAfter = Date.now() - hookStarted
   assert.ok(returnedAfter < 10_000, `it returned well before the hook would have finished (${returnedAfter} ms after the hook started)`)
   // Wait past the moment the hook would have written its marker had it been left running.
   await new Promise(resolve => setTimeout(resolve, hookStarted + hookSleepMs + 2_500 - Date.now()))
