@@ -1890,3 +1890,26 @@ button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underlin
 .file-pdf-pages { position:absolute; inset:0; overflow:auto; }
 .file-pdf-pages:focus-visible { outline:2px solid #58a6ff; outline-offset:-2px; }
 .file-pdf .pdfViewer .page { margin:10px auto; border:0; box-shadow:0 1px 6px rgb(0 0 0 / 50%); }
+/* Tables (CSV, spreadsheets), Word documents and notebooks share the Markdown view's container. */
+.file-table-view { padding:0 0 24px; font-size:12px; line-height:1.4; overflow-wrap:normal; }
+.file-sheet { display:table; border-collapse:separate; border-spacing:0; margin:0; max-width:none; }
+.file-markdown .file-sheet th, .file-markdown .file-sheet td { border:0; border-right:1px solid #262d38; border-bottom:1px solid #262d38; padding:3px 8px; white-space:pre; max-width:420px; overflow:hidden; text-overflow:ellipsis; text-align:left; }
+.file-markdown .file-sheet thead th { position:sticky; top:0; z-index:2; background:#1a2130; color:#c9d4e3; font-weight:600; }
+.file-markdown .file-sheet th.file-row-number { position:sticky; left:0; z-index:1; background:#141a24; color:#6e7b8f; font-weight:400; text-align:right; user-select:none; min-width:40px; }
+.file-markdown .file-sheet thead th.file-row-number { z-index:3; }
+.file-markdown .file-sheet tr:nth-child(even) td { background:#0f141c; }
+.file-markdown .file-sheet td.file-cell-number { text-align:right; font-variant-numeric:tabular-nums; }
+.file-sheet-note { margin:0; padding:8px 12px; color:#a9b2c0; font-size:12px; }
+.file-sheet-tabs { display:flex; gap:2px; padding:4px 8px 0; border-bottom:1px solid #303640; background:#10151e; overflow-x:auto; }
+.file-panel .file-sheet-tabs button { border-radius:4px 4px 0 0; border-bottom:0; white-space:nowrap; }
+.file-panel .file-sheet-tabs button[aria-selected="true"] { background:#263b5b; border-color:#4f88ff; }
+.file-notebook { padding:12px 16px 40px; }
+.file-nb-cell { margin:0 0 14px; }
+.file-nb-code { border-left:3px solid #364153; padding-left:10px; }
+.file-nb-prompt { color:#6e7b8f; font-family:Consolas, 'Cascadia Mono', monospace; font-size:11px; margin-bottom:2px; user-select:none; }
+.file-markdown .file-nb-code > pre { margin:0 0 6px; }
+.file-nb-output { margin-top:4px; }
+.file-markdown pre.file-nb-stream { background:none; border:0; border-radius:0; padding:2px 0; margin:0 0 6px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; color:#d8e2f0; }
+.file-markdown pre.file-nb-stderr { background:#2a1517; padding:4px 8px; color:#ffb4ab; }
+.file-nb-picture { display:block; background:#fff; margin:4px 0; }
+.file-nb-note { color:#8b98ab; font-style:italic; font-size:12px; }

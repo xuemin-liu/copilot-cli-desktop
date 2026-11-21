@@ -412,6 +412,119 @@ if (!process.versions.electron) {
     assert.deepEqual(requests, [], 'no PDF caused a network request')
     assert.deepEqual(await ui('window.copilotDesktop.viewerAsset("cMapUrl", "../../app.js").then(() => "served", () => "refused")'), 'refused')
 
+    // --- Tables, Word documents and notebooks. ---
+    const { makeDocx, makeXlsx, makeZip } = await import('../dist/src/main/fixtures/office-fixture.js')
+    const closeTab = async name => action({ type: 'close', id: (await fileTabs()).find(tab => tab.file.path === name).id })
+    const view = `document.querySelector(${JSON.stringify(`${panel} .file-markdown`)})`
+    const cells = `[...(${view}?.querySelectorAll('tbody tr') ?? [])].map(row => [...row.querySelectorAll('td')].map(cell => cell.textContent).join('|')).join(';')`
+
+    // CSV: a table with the first row as its head; cells are text, whatever they hold.
+    await writeFile(join(workspace, 'people.csv'), 'name,note,amount\n"Smith, J","said ""hi""",12.5\n"<img src=x onerror=""window.pwned=5"">",<script>window.pwned=6</script>,-3\n')
+    assert.deepEqual(await open('people.csv'), { ok: true })
+    await until(`${view}?.querySelector('table.file-sheet')`, 'CSV table')
+    assert.equal(await ui(`[...${view}.querySelectorAll('thead th')].map(cell => cell.textContent).join('|')`), '|name|note|amount')
+    assert.equal(await ui(cells), 'Smith, J|said "hi"|12.5;<img src=x onerror="window.pwned=5">|<script>window.pwned=6</script>|-3')
+    assert.equal(await ui(`${view}.querySelectorAll('img, script').length`), 0)
+    assert.equal(await ui(`getComputedStyle(${view}.querySelector('td.file-cell-number')).textAlign`), 'right')
+    await click('Source')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('"Smith, J"')`, 'CSV source')
+    await click('Table')
+    await until(`${view}?.querySelector('table.file-sheet')`, 'CSV table again')
+    await writeFile(join(workspace, 'people.csv'), 'name;city\nAda;London\n')
+    await until(`(${cells}) === 'Ada|London'`, 'an edited CSV, now separated by semicolons')
+    await writeFile(join(workspace, 'tabs.tsv'), 'a\tb,c\n1\t2\n')
+    assert.deepEqual(await open('tabs.tsv'), { ok: true })
+    await until(`(${cells}) === '1|2'`, 'TSV table')
+    assert.equal(await ui(`[...${view}.querySelectorAll('thead th')].map(cell => cell.textContent).join('|')`), '|a|b,c')
+
+    // Excel: every sheet, values only, dates as dates.
+    await writeFile(join(workspace, 'budget.xlsx'), await makeXlsx([
+      { name: 'Sales', rows: [['Region', 'Amount', 'When'], ['North <b>bold</b>', 1200.5, { date: 45292 }], ['South', { formula: 'B2*2', value: 2401 }, null]] },
+      { name: 'Notes', rows: [['Second sheet text']] }]))
+    assert.deepEqual(await open('budget.xlsx'), { ok: true })
+    await until(`(${cells}).includes('1200.5')`, 'Excel sheet')
+    assert.equal(await ui(cells), 'Region|Amount|When;North <b>bold</b>|1200.5|2024-01-01;South|2401|')
+    assert.equal(await ui(`[...${view}.querySelectorAll('thead th')].map(cell => cell.textContent).join('|')`), '|A|B|C')
+    assert.equal(await ui(`${view}.querySelectorAll('b').length`), 0)
+    assert.equal(await ui(`[...document.querySelectorAll(${JSON.stringify(`${panel} .file-sheet-tabs [role=tab]`)})].map(tab => tab.textContent).join('|')`), 'Sales|Notes')
+    await click('Notes')
+    await until(`(${cells}) === 'Second sheet text'`, 'second sheet')
+    await click('Sales')
+    await click('Find')
+    await findFor('north')
+    await until(findStatus('1 of 1'), 'find in a sheet')
+    await click('×')
+    assert.ok((await buttons()).includes('Open with default app'))
+    await shot('excel-view.png')
+    await writeFile(join(workspace, 'broken.xlsx'), await makeZip({ 'readme.txt': 'no workbook here' }))
+    assert.deepEqual(await open('broken.xlsx'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('could not be read')`, 'card for a ZIP that is not a workbook')
+
+    // Word: headings, bold, a table, a picture; links are never made dangerous.
+    await writeFile(join(workspace, 'letter.docx'), await makeDocx([{ heading: 'Project letter' }, { text: 'Plain and ' }, { text: 'bold words', bold: true },
+      { table: [['Item', 'Cost'], ['Paper', '12']] }, { link: 'our site', to: 'https://example.com/docs' }, { link: 'bad link', to: 'javascript:window.pwned=7' }, { picture: true }]))
+    assert.deepEqual(await open('letter.docx'), { ok: true })
+    await until(`${view}?.querySelector('h1')?.textContent === 'Project letter'`, 'Word document')
+    assert.equal(await ui(`${view}.querySelector('strong').textContent`), 'bold words')
+    assert.equal(await ui(`[...${view}.querySelectorAll('table td')].map(cell => cell.textContent).join('|')`), 'Item|Cost|Paper|12')
+    await until(`${view}.querySelector('img')?.naturalWidth === 2`, 'the picture inside the document')
+    assert.match(await ui(`${view}.querySelector('img').getAttribute('src')`), /^data:image\/png;base64,/)
+    assert.equal(await ui(`[...${view}.querySelectorAll('a')].some(link => /javascript:/i.test(link.getAttribute('href') ?? ''))`), false)
+    assert.equal(await ui(`${view}.querySelectorAll('script, iframe, [style], [onclick]').length`), 0)
+    external.length = 0
+    await ui(`${view}.querySelector('a[href="https://example.com/docs"]').click()`)
+    for (let index = 0; index < 50 && !external.length; index++) await delay(20)
+    assert.deepEqual(external, ['https://example.com/docs'])
+    await ui(`[...${view}.querySelectorAll('a')].find(link => link.textContent === 'bad link').click()`)
+    await delay(200)
+    assert.ok(win.webContents.getURL().endsWith('index.html'))
+    await shot('word-view.png')
+    await writeFile(join(workspace, 'letter.docx'), await makeDocx([{ heading: 'Second draft' }]))
+    await until(`${view}?.querySelector('h1')?.textContent === 'Second draft'`, 'an edited Word document')
+    await writeFile(join(workspace, 'notword.docx'), await makeZip({ 'xl/workbook.xml': '<workbook/>' }))
+    assert.deepEqual(await open('notword.docx'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('could not be read')`, 'card for a ZIP that is not a Word document')
+    // A document whose main part unpacks to far more than the limit is refused before the converter sees it.
+    await writeFile(join(workspace, 'bomb.docx'), await makeZip({ 'word/document.xml': Buffer.alloc(120 * 1024 * 1024, 0x20) }))
+    assert.deepEqual(await open('bomb.docx'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('too large')`, 'card for a document that unpacks too large')
+    // A tab closed while its document is still being read ends the work.
+    await writeFile(join(workspace, 'slow.docx'), await makeDocx(Array.from({ length: 4000 }, (_, index) => ({ text: `Paragraph ${index}` }))))
+    assert.deepEqual(await open('slow.docx'), { ok: true })
+    await closeTab('slow.docx')
+
+    // Notebook: cells rendered, saved outputs shown, nothing a notebook saved as HTML or script is put in the page.
+    const pngBase64 = (await readFile(join(workspace, 'pixel.png'))).toString('base64')
+    await writeFile(join(workspace, 'analysis.ipynb'), JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: { language_info: { name: 'python' } }, cells: [
+      { cell_type: 'markdown', source: ['# Analysis title\n', '\n', 'Some *notes*.<script>window.pwned = 8</script>'] },
+      { cell_type: 'code', execution_count: 3, source: 'import math\nprint(math.pi)', outputs: [
+        { output_type: 'stream', name: 'stdout', text: ['3.141592653589793\n'] },
+        { output_type: 'display_data', data: { 'image/png': pngBase64, 'text/plain': ['<Figure>'] } },
+        { output_type: 'execute_result', data: { 'text/html': '<script>window.pwned = 9</script><b>html table</b>', 'text/plain': 'plain form of the table' } },
+        { output_type: 'display_data', data: { 'text/html': '<img src=x onerror="window.pwned = 10">' } },
+        { output_type: 'error', ename: 'ZeroDivisionError', evalue: 'division by zero', traceback: ['\u001b[0;31mZeroDivisionError\u001b[0m: division by zero'] }] },
+    ] }))
+    assert.deepEqual(await open('analysis.ipynb'), { ok: true })
+    await until(`${view}?.querySelector('h1')?.textContent === 'Analysis title'`, 'notebook rendered')
+    assert.equal(await ui(`${view}.classList.contains('file-notebook')`), true)
+    assert.equal(await ui(`${view}.querySelector('.file-nb-prompt').textContent`), 'In [3]:')
+    assert.equal(await ui(`${view}.querySelector('.file-nb-code pre.hljs .hljs-keyword').textContent`), 'import')
+    const streams = await ui(`[...${view}.querySelectorAll('.file-nb-stream')].map(node => node.textContent.trim())`)
+    assert.deepEqual(streams, ['3.141592653589793', 'plain form of the table', 'ZeroDivisionError: division by zero'])
+    await until(`${view}.querySelector('img.file-nb-picture')?.naturalWidth === 2`, 'saved picture output')
+    assert.match(await ui(`${view}.querySelector('.file-nb-note').textContent`), /saved as HTML or a widget/)
+    assert.equal(await ui(`${view}.querySelectorAll('script, b, img:not(.file-nb-picture), [onerror]').length`), 0)
+    assert.equal(await ui('window.pwned'), undefined, 'nothing from a table, document or notebook ran')
+    await shot('notebook-view.png')
+    await click('Source')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('"nbformat"')`, 'notebook source')
+    await writeFile(join(workspace, 'broken.ipynb'), '{ "cells": [ this is not JSON')
+    assert.deepEqual(await open('broken.ipynb'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-panel-notice`)})?.textContent.includes('Showing its source')`, 'a notebook that is not JSON says so')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('this is not JSON')`, 'and shows its text')
+    for (const name of ['people.csv', 'tabs.tsv', 'budget.xlsx', 'broken.xlsx', 'letter.docx', 'notword.docx', 'bomb.docx', 'analysis.ipynb', 'broken.ipynb']) await closeTab(name)
+    assert.deepEqual(requests, [], 'no table, document or notebook caused a network request')
+
     // --- Live refresh: an edit, hide-edit-show, and a save by rename. ---
     const notes = join(workspace, 'folder with spaces', 'notes.txt')
     const notesTab = (await fileTabs()).find(tab => tab.file.path === 'folder with spaces/notes.txt')

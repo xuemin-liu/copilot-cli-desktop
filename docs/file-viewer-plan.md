@@ -1,6 +1,6 @@
 # File tab and rendered file views
 
-Status: agreed in meeting QHV2 (2026-11-20, two rounds, reviewer Codex). Phases 1 and 2 are implemented; phase 3 is not.
+Status: agreed in meeting QHV2 (2026-11-20, two rounds, reviewer Codex). All three phases are implemented.
 
 Revision after phase 1:
 
@@ -17,6 +17,16 @@ Revision after phase 2 (PDF):
 - PDF.js needs data files for some documents: character maps, standard fonts and WebAssembly image decoders. They ship under `dist/src/renderer/pdf` and are served by the main process by plain file name (`desktop:viewer-asset`), so nothing is fetched.
 - PDF.js's stylesheet is kept inside the PDF view at build time (`@scope`), because it sets variables on the page root and uses class names the app also uses.
 - Limits: 50 MB per file, 5,000 pages, 16 million pixels per page canvas, 64 million pixels per image inside a document.
+
+Revision after phase 3 (Word, CSV, Excel, notebooks):
+
+- Word: Mammoth, in a worker started for each read of the file and ended when it answers, after 30 seconds, or when the tab closes or the file changes. Before Mammoth sees the file, the app's own ZIP reader checks what the archive claims and unpacks the main part under the same limit. The HTML is sanitized in the window like Markdown; only pictures embedded as PNG, JPEG, GIF, BMP or WebP data are kept.
+- Excel: the app's own reader, not a library. It reads the ZIP and the XML parts it needs with limits enforced while unpacking (64 MB for a sheet, 256 MB for a workbook), and shows cell values as text: the result saved with a formula, dates as dates, at most 5,000 rows and 200 columns of each sheet. Charts, pictures, merged cells, number formats other than dates, and macros are not shown. This was chosen over ExcelJS and SheetJS to keep the limits real and the package small.
+- CSV and TSV: the app's own parser, in the window. The separator of a .csv is guessed from its first lines (comma, semicolon, tab or bar). The first row is the table head. 10 MB, 5,000 rows, 200 columns.
+- Notebooks: rendered in the window with the Markdown and code views. Saved text, error and PNG or JPEG outputs are shown. Output saved as HTML, SVG, script or a widget is never put in the page; its plain-text form is shown when it has one. A notebook that is not valid JSON, or too large to render (8 MB of HTML), is shown as its source with the reason. 20 MB.
+- CSV and notebooks keep a **Source** view, as Markdown does.
+- The workers' lock-down is shared (`worker-lockdown.ts`). `importScripts` is kept as a function that throws, because a library bundled with Mammoth looks for it to tell a worker from a window.
+- Not done: PowerPoint, the old binary Office formats (.doc, .xls), OpenDocument files. They get the card.
 
 ## Problem
 
@@ -65,7 +75,7 @@ A new main-process IPC reads a file for a tab:
 | PDF | Page scroll, zoom, selectable and searchable text | PDF.js, loaded on first use |
 | Word (.docx) | Headings, lists, tables, images | Mammoth, DOMPurify |
 | CSV, TSV | Table with a sticky header | own parser |
-| Excel (.xlsx) | Sheet tabs and cell values, read-only | chosen in phase 3 |
+| Excel (.xlsx) | Sheet tabs and cell values, read-only | own reader |
 | Notebook (.ipynb) | Markdown and code cells with saved outputs | the Markdown and code views |
 | Anything else | Card with name, size and modified time | none |
 

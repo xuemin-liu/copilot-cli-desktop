@@ -27,6 +27,8 @@ const viewers = [
   { in: 'src/renderer/viewers/pdf-viewer.ts', out: 'dist/src/renderer/viewer-pdf.js' },
   // PDF.js parses documents in this worker, which has no DOM, no access to the app's API and no network.
   { in: 'src/renderer/viewers/pdf-worker.ts', out: 'dist/src/renderer/viewer-pdf-worker.js' },
+  // Word and Excel files are read in this worker, started once for each file.
+  { in: 'src/renderer/viewers/office-worker.ts', out: 'dist/src/renderer/viewer-office-worker.js' },
 ]
 for (const viewer of viewers) {
   await esbuild.build({
