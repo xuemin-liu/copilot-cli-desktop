@@ -1847,6 +1847,7 @@ button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underlin
 .file-code-wrap .file-lc { white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; }
 .file-line-target, .file-line-target .file-ln { background:#3a3310; }
 .file-line-target { box-shadow:inset 3px 0 #d29922; }
+.file-line-note { position:sticky; left:0; padding:6px 10px; color:#d29922; background:#161b22; font-family:inherit; white-space:normal; }
 ::highlight(file-find) { background-color:rgb(210 153 34 / 40%); color:#fff; }
 ::highlight(file-find-current) { background-color:#f2cc60; color:#0d1117; }
 .file-image { flex:1; min-height:0; overflow:auto; display:flex; padding:16px;

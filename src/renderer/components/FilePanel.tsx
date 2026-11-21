@@ -5,6 +5,7 @@ import type { ToolTab } from '../../main/tool-tabs.js'
 import { errorMessage } from '../errors.js'
 import { findRanges, formatFileSize, loadViewer, type PdfHandle, type TextViewer } from '../file-viewers.js'
 import { convertOffice, guessDelimiter, parseDelimited, sheetHtml, type OfficeProblem, type SheetData } from '../file-documents.js'
+import { sourceWindow } from '../file-source-lines.js'
 
 type Shown = Extract<FileViewResult, { status: 'ok' }>
 const escapeHtml = (text: string): string => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -174,8 +175,14 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
   const codeHtml = useMemo(() => {
     if (!text || rendered) return ''
     const lines = viewer ? viewer.highlight(text.text, text.language) : text.text.replace(/\r\n?/g, '\n').split('\n').map(escapeHtml)
+    // A very long file is drawn in part: see `sourceWindow`. Line numbers stay the file's own.
+    const shown = sourceWindow(lines.length, target)
+    const note = shown.note ? `<div class="file-line-note" role="status">${escapeHtml(shown.note)}</div>` : ''
     // The line a click pointed at is marked in the HTML itself, so it is still marked after the file is read again.
-    return lines.map((line, index) => `<div class="file-line${index + 1 === target ? ' file-line-target' : ''}"><span class="file-ln">${index + 1}</span><span class="file-lc">${line || ' '}</span></div>`).join('')
+    return note + lines.slice(shown.start, shown.end).map((line, offset) => {
+      const number = shown.start + offset + 1
+      return `<div class="file-line${number === target ? ' file-line-target' : ''}"><span class="file-ln">${number}</span><span class="file-lc">${line || ' '}</span></div>`
+    }).join('') + note
   }, [text, rendered, viewer, target])
   // The rendered view as HTML; null while it is not ready. A notebook that cannot be rendered is shown as its source.
   const [renderProblem, setRenderProblem] = useState<string | null>(null)
