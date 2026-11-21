@@ -177,11 +177,31 @@ if (!process.versions.electron) {
     await ui(`(() => { const input = document.querySelector(${JSON.stringify(`${panel} .file-find input`)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'const value'); input.dispatchEvent(new Event('input',{bubbles:true})) })()`)
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-find [role=status]`)})?.textContent === '1 of 1'`, 'find result')
     assert.equal(await ui('CSS.highlights.get("file-find").size'), 1)
-    await click('×')
 
     // --- A quoted path with spaces; a folder and Ctrl+click go to the file manager. ---
     assert.deepEqual(await open('folder with spaces/notes.txt'), { ok: true })
     await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('plain notes')`, 'path with spaces')
+
+    // --- Find left open in two File tabs: the hidden tab must not wipe the marks of the one shown. ---
+    {
+      const status = text => `document.querySelector(${JSON.stringify(`${panel} .file-find [role=status]`)})?.textContent === ${JSON.stringify(text)}`
+      const marks = () => ui('[CSS.highlights.get("file-find")?.size ?? 0, CSS.highlights.get("file-find-current")?.size ?? 0]')
+      await click('Find')
+      await ui(`(() => { const input = document.querySelector(${JSON.stringify(`${panel} .file-find input`)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'plain'); input.dispatchEvent(new Event('input',{bubbles:true})) })()`)
+      await until(status('1 of 1'), 'find in the second file')
+      assert.deepEqual(await marks(), [1, 1])
+      const [first, second] = await fileTabs()
+      for (const [tab, text] of [[first, 'const value'], [second, 'plain'], [first, 'const value']]) {
+        await action({ type: 'select', id: tab.id })
+        await until(`${status('1 of 1')} && document.querySelector(${JSON.stringify(`${panel} .file-find input`)}).value === ${JSON.stringify(text)}`, `find shown again for ${text}`)
+        await delay(200)
+        assert.deepEqual(await marks(), [1, 1], `the marks for "${text}" are drawn when its tab is shown again`)
+      }
+      await click('×')
+      await action({ type: 'select', id: second.id })
+      await until(`document.querySelector(${JSON.stringify(`${panel} .file-find`)})`, 'second find still open')
+      await click('×')
+    }
     assert.deepEqual(await open('folder with spaces'), { ok: true, revealed: true })
     assert.deepEqual(await open('src/app.ts', { reveal: true }), { ok: true, revealed: true })
     assert.deepEqual(await open(workspace), { ok: true, revealed: true }, 'the workspace folder itself is revealed')
