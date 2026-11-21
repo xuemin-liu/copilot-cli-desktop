@@ -91,12 +91,29 @@ export function browserTestScript(operation: string, args: Record<string, any>):
   }
   try {
     if (operation === 'invalidate') { delete scope.__desktopTestDiscovery; return { passed: true } }
-    const scalarScope = globalThis as typeof globalThis & { __desktopTestScalars?: { run: string; values: Map<string, { value: string; element: Element; attribute: string; step: number }> } }
+    const scalarScope = globalThis as typeof globalThis & { __desktopTestScalars?: { run: string; values: Map<string, { value: string; element: Element; attribute: string; step: number }>; filled: WeakSet<Element> } }
     if (operation === 'clearCaptures') { delete scalarScope.__desktopTestScalars; return { passed: true } }
     const scalarState = (): NonNullable<typeof scalarScope.__desktopTestScalars> => {
-      if (!scalarScope.__desktopTestScalars || scalarScope.__desktopTestScalars.run !== args.runScope) scalarScope.__desktopTestScalars = { run: args.runScope, values: new Map() }
+      if (!scalarScope.__desktopTestScalars || scalarScope.__desktopTestScalars.run !== args.runScope) scalarScope.__desktopTestScalars = { run: args.runScope, values: new Map(), filled: new WeakSet() }
       return scalarScope.__desktopTestScalars
     }
+    // What a person typed into a field is theirs, whatever the field is called: a name or an autocomplete hint cannot
+    // prove a plain text box holds nothing private. So the live value of a field a person can type in is compared only
+    // when this run filled it, or when the application itself marks the field `data-public` (its author's statement
+    // that the field holds nothing private, as `data-private` is the opposite one). A read-only or disabled field
+    // shows the application's own state, like text does, and a list offers the page's own options.
+    // An editor made with contenteditable is such a field too. The run fills the editor itself, and what is asserted may
+    // be an element inside it, so the editor and every editable element around the target are looked at.
+    const editorCleared = (element: Element): boolean => {
+      for (let node: Element | null = element; node; node = parent(node)) {
+        if (node instanceof HTMLElement && node.isContentEditable && (node.hasAttribute('data-public') || scalarState().filled.has(node))) return true
+      }
+      return false
+    }
+    const typedByPerson = (element: Element): boolean =>
+      (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement && !/^(checkbox|radio|button|submit|reset|image|file|hidden|range|color)$/.test(element.type))
+        ? !element.readOnly && !element.disabled && !element.hasAttribute('data-public') && !scalarState().filled.has(element)
+        : element instanceof HTMLElement && element.isContentEditable && !editorCleared(element)
     const publicScalar = (element: Element, attribute: string): string => {
       if (!element.isConnected || element.ownerDocument !== document || !visible(element)) throw new Error('Scalar source is hidden, removed, replaced or in another document.')
       if (privateContent(element)) throw new Error('Scalar values are unavailable for private regions or sensitive fields.')
@@ -298,6 +315,10 @@ export function browserTestScript(operation: string, args: Record<string, any>):
         && privateContent(target)) {
         return { passed: false, reason: 'Content assertions are unavailable for private regions or sensitive password, one-time-code and payment fields. Select a public application-state indicator instead.' }
       }
+      // For an editor, its text is its value.
+      if ((args.condition === 'value' || args.condition === 'numericValue' || args.condition === 'text' && target instanceof HTMLElement && target.isContentEditable) && typedByPerson(target)) {
+        return { passed: false, reason: 'The value of a field this test did not fill is private, so it is not compared. Fill the field in this test first, assert a read-only field or text that shows the application state, or have the application mark the field data-public.' }
+      }
       switch (args.condition) {
         case 'visible': return { passed: true }
         case 'enabled': return { passed: !disabled(target), reason: disabled(target) ? 'Control is disabled or inert.' : undefined }
@@ -391,6 +412,7 @@ export function browserTestScript(operation: string, args: Record<string, any>):
     if (operation === 'scroll') { target.scrollBy({ top: args.pixels, behavior: 'instant' }); return { passed: true } }
     if (operation === 'select') {
       if (!(target instanceof HTMLSelectElement) || target.multiple || ![...target.options].some(option => option.value === args.value && !option.disabled && !(option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled))) return { error: 'Select option is unavailable.' }
+      scalarState().filled.add(target)
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(target, args.value)
       target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true }))
       return { passed: true }
@@ -401,6 +423,8 @@ export function browserTestScript(operation: string, args: Record<string, any>):
       } else if (!(target instanceof HTMLElement) || !target.isContentEditable) return { error: 'Target is not an editable text field.' }
     }
     if (!(target instanceof HTMLElement)) return { error: 'Target is not an HTML control.' }
+    // From here on the field holds what this run puts in it, so this run may compare its value.
+    if (operation === 'fill') scalarState().filled.add(target)
     target.focus()
     if (operation === 'fill' && target.isContentEditable) { const range = document.createRange(); range.selectNodeContents(target); const selection = getSelection(); selection?.removeAllRanges(); selection?.addRange(range) }
     return { passed: true }
