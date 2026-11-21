@@ -145,6 +145,8 @@ export interface CopilotDesktopBridge {
   meetingHostInvite(folder: string | null, short?: boolean): Promise<string>
   resizeTab(tabId: string, cols: number, rows: number): Promise<void>
   getTabBacklog(tabId: string): Promise<string>
+  /** Whether a fan-out session can take the task in its prompt box yet. */
+  fanOutReadiness(tabId: string): Promise<import('../main/fan-out-readiness.js').FanOutReadiness>
   getTabSnapshot(tabId: string): Promise<{ data: string; sequence: number }>
   openSettings(): Promise<void>
   showSessionLog(tabId: string): Promise<void>

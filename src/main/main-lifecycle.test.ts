@@ -1409,6 +1409,21 @@ test('a main window whose page process died loads the page again, a bounded numb
   assert.match(log, /Main window is responding again/)
 }))
 
+test('fan-out readiness answers one word per session: waiting, ready, in its own window, or gone', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const tab = (await harness.createMain()).activeTabId!
+  const readiness = (id: unknown): Promise<unknown> => Promise.resolve(harness.request('desktop:fan-out-readiness', id))
+  assert.equal(await readiness(tab), 'waiting')
+  harness.spawns[0]!.emitData('\x1b[?2004h> \r\n <- open sidebar | / commands\r\n')
+  assert.equal(await readiness(tab), 'ready')
+  await harness.request('desktop:pop-out-tab', tab)
+  assert.equal(await readiness(tab), 'elsewhere')
+  assert.equal(await readiness('tab-99'), 'gone')
+  await assert.rejects(async () => readiness('../etc'), /Invalid session tab/)
+  await assert.rejects(async () => readiness(7), /Invalid session tab/)
+}))
+
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {
   configure(harness, directory)
   harness.createTestWindow()
