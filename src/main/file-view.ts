@@ -4,7 +4,7 @@ import { caseInsensitivePaths, hostPath, isSameOrInside, pathKey, samePath } fro
 import { isLocalFilesystemPath, isPathWithinRoot } from './external-targets.js'
 
 /** What a File tab shows. `other` is the card for files with no viewer. */
-export type FileViewKind = 'text' | 'markdown' | 'image' | 'other'
+export type FileViewKind = 'text' | 'markdown' | 'image' | 'pdf' | 'other'
 /** Why a file gets the card instead of a view. */
 export type FileCardReason = 'unsupported' | 'too-large' | 'binary'
 
@@ -21,6 +21,8 @@ interface FileFacts {
 }
 export type FileViewResult =
   | (FileFacts & { status: 'ok'; kind: 'text' | 'markdown'; text: string; language: string | null })
+  /** The whole document. The panel hands these bytes to the PDF viewer, which parses them in a worker. */
+  | (FileFacts & { status: 'ok'; kind: 'pdf'; bytes: Uint8Array })
   | (FileFacts & { status: 'ok'; kind: 'image'; dataUrl: string })
   | (FileFacts & { status: 'ok'; kind: 'other'; reason: FileCardReason })
   /** The file is the same as the copy the tab already shows. */
@@ -33,6 +35,7 @@ export type OpenFileResult =
 
 export const FILE_TEXT_LIMIT = 2 * 1024 * 1024
 export const FILE_IMAGE_LIMIT = 25 * 1024 * 1024
+export const FILE_PDF_LIMIT = 50 * 1024 * 1024
 export const FILE_ASSET_LIMIT = 10 * 1024 * 1024
 export const FILE_TAB_LIMIT = 20
 const SNIFF_BYTES = 8_192
@@ -77,13 +80,27 @@ function textEncoding(head: Uint8Array): 'utf-8' | 'utf-16le' | 'utf-16be' | nul
   return head.includes(0) ? null : 'utf-8'
 }
 
+/**
+ * Whether a file starts as a PDF does: `%PDF-` and a version such as `1.7`, at the very start (after a byte order mark or
+ * blank space at most). Text that merely mentions `%PDF-1.7` is not a PDF. Real documents sometimes carry a little junk
+ * before the header; that is accepted only for a file named .pdf, and only with the header at the start of a line.
+ */
+function isPdfHeader(head: Uint8Array, namedPdf: boolean): boolean {
+  const start = Buffer.from(head.subarray(0, 1_024)).toString('latin1')
+  if (/^(?:\xef\xbb\xbf)?\s*%PDF-\d\.\d/.test(start)) return true
+  return namedPdf && /[\r\n]%PDF-\d\.\d/.test(start)
+}
+
 /** Choose the view from the name first, then from the first bytes: a `.md` holding binary data is not shown as text. */
 export function classifyFile(name: string, head: Uint8Array): { kind: FileViewKind; language: string | null; mime: string | null; reason?: FileCardReason } {
   const extension = extensionOf(name)
   const png = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47
   const jpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff
   const gif = head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x38
-  const mime = png ? 'image/png' : jpeg ? 'image/jpeg' : gif ? 'image/gif' : IMAGE_TYPES[extension] ?? null
+  // What the bytes say comes before what the name says: a PNG called .txt is a picture, a PDF called .png is a PDF.
+  const signed = png ? 'image/png' : jpeg ? 'image/jpeg' : gif ? 'image/gif' : null
+  if (!signed && isPdfHeader(head, extension === 'pdf')) return { kind: 'pdf', language: null, mime: 'application/pdf' }
+  const mime = signed ?? IMAGE_TYPES[extension] ?? null
   const text = textEncoding(head) !== null
   // SVG is text; show it as an image only when it really looks like one.
   if (mime === 'image/svg+xml') return text ? { kind: 'image', language: 'xml', mime } : { kind: 'other', language: null, mime: null, reason: 'binary' }
@@ -241,10 +258,11 @@ export async function readFileView(root: string, relative: string, known?: strin
     // only ever revealed.
     const facts: FileFacts = { path: file.absolute, name, size: file.size, mtimeMs: file.mtimeMs, revision: file.revision, openable: type.kind !== 'other' && canOpenWithDefaultApp(name) }
     if (type.kind === 'other') return { ...facts, status: 'ok', kind: 'other', reason: type.reason ?? 'unsupported' }
-    const limit = type.kind === 'image' ? FILE_IMAGE_LIMIT : FILE_TEXT_LIMIT
+    const limit = type.kind === 'image' ? FILE_IMAGE_LIMIT : type.kind === 'pdf' ? FILE_PDF_LIMIT : FILE_TEXT_LIMIT
     if (file.size > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
     const bytes = head.length < SNIFF_BYTES ? head : await readOpened(file, limit)
     if (bytes.length > limit) return { ...facts, status: 'ok', kind: 'other', reason: 'too-large' }
+    if (type.kind === 'pdf') return { ...facts, status: 'ok', kind: 'pdf', bytes }
     if (type.kind === 'image') return { ...facts, status: 'ok', kind: 'image', dataUrl: `data:${type.mime};base64,${Buffer.from(bytes).toString('base64')}` }
     return { ...facts, status: 'ok', kind: type.kind, text: decodeText(bytes), language: type.language }
   } catch { return { status: 'missing' } } finally { await file.handle.close().catch(() => undefined) }
@@ -285,6 +303,33 @@ export async function readFileAsset(root: string, relative: string, href: string
     if (type.kind !== 'image' || !type.mime || bytes.length > FILE_ASSET_LIMIT) return null
     return `data:${type.mime};base64,${Buffer.from(bytes).toString('base64')}`
   } catch { return null } finally { await opened.file.handle.close().catch(() => undefined) }
+}
+
+/** The data files a viewer may ask for, by the kind of request and the folder they are shipped in. */
+const VIEWER_ASSET_FOLDERS: Record<string, string> = { cMapUrl: 'cmaps', standardFontDataUrl: 'standard_fonts', wasmUrl: 'wasm' }
+const VIEWER_ASSET_LIMIT = 8 * 1024 * 1024
+
+/**
+ * A data file the PDF viewer needs to show some documents: a character map, a standard font, or an image decoder. They
+ * ship with the app under `folder` and are read here, so the window never needs permission to fetch anything. Only a plain
+ * file name in one of the known folders is served.
+ */
+export async function readViewerAsset(folder: string, kind: unknown, filename: unknown): Promise<Uint8Array> {
+  const place = typeof kind === 'string' && Object.hasOwn(VIEWER_ASSET_FOLDERS, kind) ? VIEWER_ASSET_FOLDERS[kind] : undefined
+  if (!place || typeof filename !== 'string' || !/^[A-Za-z0-9][\w.-]{0,79}$/.test(filename) || filename.includes('..')) throw new Error('Unknown viewer data file')
+  const handle = await open(hostPath.join(folder, place, filename), 'r')
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > VIEWER_ASSET_LIMIT) throw new Error('Unknown viewer data file')
+    const buffer = Buffer.allocUnsafeSlow(info.size)
+    let length = 0
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length)
+      if (bytesRead === 0) break
+      length += bytesRead
+    }
+    return buffer.subarray(0, length)
+  } finally { await handle.close() }
 }
 
 /** Where a clicked path points: the root that holds it, and its path under that root (empty for the root folder itself,

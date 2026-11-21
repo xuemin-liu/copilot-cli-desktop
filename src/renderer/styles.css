@@ -1884,3 +1884,9 @@ button.git-log-subject:hover, .git-commit-file:hover { text-decoration: underlin
 .file-panel .hljs-strong { font-weight:bold; }
 .file-panel .hljs-addition { color:#aff5b4; background-color:#033a16; }
 .file-panel .hljs-deletion { color:#ffdcd7; background-color:#67060c; }
+.file-pdf { position:relative; flex:1; min-height:0; min-width:0; background:#1a1f27; }
+.file-pdf[hidden] { display:none; }
+/* PDF.js lays pages out in a container that is positioned and scrolls. */
+.file-pdf-pages { position:absolute; inset:0; overflow:auto; }
+.file-pdf-pages:focus-visible { outline:2px solid #58a6ff; outline-offset:-2px; }
+.file-pdf .pdfViewer .page { margin:10px auto; border:0; box-shadow:0 1px 6px rgb(0 0 0 / 50%); }

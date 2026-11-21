@@ -108,7 +108,7 @@ import {
 } from './copilot-resources.js'
 import { isLauncherShellUrl } from './renderer-trust.js'
 import { isLocalFilesystemPath, isPathWithinRoot, isSessionTabId, parseSafeHttpUrl } from './external-targets.js'
-import { fileOpenable, isSameFolder, locateInRoots, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
+import { fileOpenable, isSameFolder, locateInRoots, readViewerAsset, readFileAsset, readFileView, resolveInRoot, type FileViewResult, type OpenFileResult } from './file-view.js'
 import { spawnNodePty } from './node-pty-backend.js'
 import { GitService } from './git-service.js'
 import { projectActivity } from './git-branch.js'
@@ -5611,6 +5611,10 @@ ipcMain.handle('desktop:file-asset', async (event, profileId: unknown, toolTabId
   assertMainWindowSender(event)
   const { file, trusted } = await trustedFile(profileId, toolTabId)
   return trusted && typeof href === 'string' ? readFileAsset(file.root, file.path, href) : null
+})
+ipcMain.handle('desktop:viewer-asset', async (event, kind: unknown, filename: unknown): Promise<Uint8Array> => {
+  assertMainWindowSender(event)
+  return readViewerAsset(rendererPath('pdf'), kind, filename)
 })
 ipcMain.handle('desktop:file-watch', async (event, profileId: unknown, toolTabId: unknown, on: unknown): Promise<void> => {
   assertMainWindowSender(event)

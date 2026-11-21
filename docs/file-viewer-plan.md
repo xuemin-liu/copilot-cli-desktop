@@ -1,6 +1,6 @@
 # File tab and rendered file views
 
-Status: agreed in meeting QHV2 (2026-11-20, two rounds, reviewer Codex). Phase 1 is implemented; phases 2 and 3 are not.
+Status: agreed in meeting QHV2 (2026-11-20, two rounds, reviewer Codex). Phases 1 and 2 are implemented; phase 3 is not.
 
 Revision after phase 1:
 
@@ -9,6 +9,14 @@ Revision after phase 1:
 - A worktree root is trusted when the project's repository lists it as a linked worktree, checked before every read. A tab whose worktree was removed shows the missing state.
 - While the sanitizer parses a Markdown file, Chromium logs each inline event handler in it as blocked by the content security policy. Nothing runs and the handler is not in the output.
 - A path may also carry its location as `path(line,column)`, the form `tsc` prints.
+
+Revision after phase 2 (PDF):
+
+- The viewer is PDF.js with its own page view, text layer and find. Links, forms and scripts in a document are never made live (no annotation layer), and a document protected with a password gets the card.
+- Each open document has a parser worker of its own, ended when the tab closes or the file changes. A worker started from a local file is not covered by the window's content security policy, so the worker script removes its network APIs before PDF.js loads. The content security policy itself did not need to change.
+- PDF.js needs data files for some documents: character maps, standard fonts and WebAssembly image decoders. They ship under `dist/src/renderer/pdf` and are served by the main process by plain file name (`desktop:viewer-asset`), so nothing is fetched.
+- PDF.js's stylesheet is kept inside the PDF view at build time (`@scope`), because it sets variables on the page root and uses class names the app also uses.
+- Limits: 50 MB per file, 5,000 pages, 16 million pixels per page canvas, 64 million pixels per image inside a document.
 
 ## Problem
 

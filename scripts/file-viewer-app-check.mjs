@@ -5,9 +5,10 @@
 // archive: this proves the viewer script that is loaded on first use is found in a packaged build, with no network.
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { makePdf } from './pdf-fixture.mjs'
 
 const out = resolve('test-results/file-viewer-app')
 const delay = ms => new Promise(done => setTimeout(done, ms))
@@ -271,6 +272,145 @@ if (!process.versions.electron) {
     await ui(`window.copilotDesktop.fileCommand(${JSON.stringify(profileId)}, ${JSON.stringify(picture.id)}, 'open')`)
     assert.deepEqual(openedWithApp.splice(0), [join(workspace, 'pixel.png')], 'a picture the panel shows can be opened with its app')
     await shot('fallback-card.png')
+
+    // --- PDF: pages drawn, text that can be selected and found, nothing fetched. ---
+    assert.equal(await ui('typeof window.copilotFileViewers.pdf'), 'undefined', 'no PDF code is loaded before the first PDF')
+    const report = join(workspace, 'docs', 'report.pdf')
+    await writeFile(report, makePdf([['Quarterly report alpha', 'Revenue went up'], ['Second page beta', { gbk: 'D6D0CEC4B1A8B8E6' /* 中文报告 */ }], ['Third page gamma']]))
+    assert.deepEqual(await open('docs/report.pdf'), { ok: true })
+    const pdfText = '[...document.querySelectorAll(' + JSON.stringify(`${panel} .file-pdf .textLayer`) + ')].map(layer => layer.textContent).join("|")'
+    await until(`(${pdfText}).includes('Quarterly report alpha')`, 'PDF text layer')
+    assert.equal(await ui('typeof window.copilotFileViewers.pdf.open'), 'function')
+    const pdfScripts = await ui(`[...document.querySelectorAll('script[src*="viewer-pdf"], link[href*="viewer-pdf"]')].map(element => element.src || element.href)`)
+    assert.equal(pdfScripts.length, 2, 'the PDF script and its stylesheet')
+    if (asar) assert.ok(pdfScripts.every(url => url.includes('app.asar')), `the PDF viewer came from the packaged archive: ${pdfScripts}`)
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-panel-title span`)})?.textContent.includes('page 1 of 3')`, 'page count')
+    // The page is really drawn: its canvas holds dark pixels where the text is.
+    const inked = `(() => { const canvas = document.querySelector(${JSON.stringify(`${panel} .file-pdf .page canvas`)}); if (!canvas || !canvas.width) return 0;
+      const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, Math.min(canvas.height, 400)).data; let dark = 0;
+      for (let index = 0; index < data.length; index += 4) if (data[index + 3] > 0 && data[index] < 90 && data[index + 1] < 90 && data[index + 2] < 90) dark++; return dark })()`
+    await until(`${inked} > 200`, 'PDF page drawn with its text')
+    assert.equal(await q('.file-pdf .page', 'getComputedStyle(element).position !== "static" && element.getBoundingClientRect().width > 200'), true)
+    assert.equal(await ui('getComputedStyle(document.querySelector(".app-shell")).display'), 'grid', 'the PDF stylesheet does not restyle the app')
+    // Text can be selected and copied.
+    assert.match(await ui(`(() => { const layer = document.querySelector(${JSON.stringify(`${panel} .file-pdf .textLayer`)}); getSelection().selectAllChildren(layer); const text = getSelection().toString(); getSelection().removeAllRanges(); return text })()`), /Quarterly report alpha/)
+    // Find goes to the page with the match; Chinese text read through a shipped character map is found too.
+    await click('Find')
+    const findFor = text => ui(`(() => { const input = document.querySelector(${JSON.stringify(`${panel} .file-find input`)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(text)}); input.dispatchEvent(new Event('input',{bubbles:true})) })()`)
+    const findStatus = text => `document.querySelector(${JSON.stringify(`${panel} .file-find [role=status]`)})?.textContent === ${JSON.stringify(text)}`
+    await findFor('beta')
+    await until(findStatus('1 of 1'), 'PDF find result')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-panel-title span`)})?.textContent.includes('page 2 of 3')`, 'find went to page 2')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-pdf .textLayer .highlight`)})`, 'the match is marked')
+    await findFor('no such words')
+    await until(findStatus('No results'), 'no result')
+    await findFor('中文')
+    await until(findStatus('1 of 1'), 'Chinese text is found')
+    assert.equal(await ui(`(${pdfText}).includes('中文报告')`), true, 'text stored in a non-Unicode encoding is read through a shipped character map')
+    await click('×')
+    // Zoom changes the page size; Fit width brings it back.
+    const pageWidth = () => q('.file-pdf .page', 'Math.round(element.getBoundingClientRect().width)')
+    const fitted = await pageWidth()
+    await click('+')
+    await until(`Math.round(document.querySelector(${JSON.stringify(`${panel} .file-pdf .page`)}).getBoundingClientRect().width) > ${fitted + 20}`, 'zoomed in')
+    await click('Fit width')
+    await until(`Math.abs(Math.round(document.querySelector(${JSON.stringify(`${panel} .file-pdf .page`)}).getBoundingClientRect().width) - ${fitted}) <= 2`, 'fitted again')
+    assert.ok((await buttons()).includes('Open with default app'))
+    await shot('pdf-view.png')
+    // A fax-compressed picture is decoded by the shipped WebAssembly decoder, in the worker: a large black square.
+    await writeFile(join(workspace, 'scan.pdf'), makePdf([['Scanned page', { fax: true }]]))
+    assert.deepEqual(await open('scan.pdf'), { ok: true })
+    await until(`(${pdfText}).includes('Scanned page')`, 'scan text layer')
+    const blackArea = `(() => { const canvas = document.querySelector(${JSON.stringify(`${panel} .file-pdf .page canvas`)}); if (!canvas || !canvas.width) return 0;
+      const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let dark = 0;
+      for (let index = 0; index < data.length; index += 4) if (data[index + 3] > 0 && data[index] < 40 && data[index + 1] < 40 && data[index + 2] < 40) dark++; return dark / (canvas.width * canvas.height) })()`
+    await until(`${blackArea} > 0.15`, 'fax image decoded and drawn')
+    await action({ type: 'close', id: (await fileTabs()).find(tab => tab.file.path === 'scan.pdf').id })
+    await action({ type: 'select', id: (await fileTabs()).find(tab => tab.file.path === 'docs/report.pdf').id })
+    await until(`(${pdfText}).length > 0`, 'back on the report')
+    // The tab follows the file, and stays on its page.
+    await writeFile(report, makePdf([['Quarterly report alpha'], ['Second page delta'], ['Third page gamma'], ['Fourth page']]))
+    await until(`(${pdfText}).includes('Second page delta')`, 'an edited PDF is shown again')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-panel-title span`)})?.textContent.includes('page 2 of 4')`, 'still on page 2')
+    // Reload opens what is on disk now, even when the file's size and time are what they were.
+    const { utimes, stat: statFile } = await import('node:fs/promises')
+    const before = await statFile(report)
+    const same = makePdf([['Quarterly report alpha'], ['Second page sigma'], ['Third page gamma'], ['Fourth page']])
+    assert.equal(same.length, before.size)
+    await ui(`window.copilotDesktop.fileWatch(${JSON.stringify(profileId)}, ${JSON.stringify((await fileTabs()).find(tab => tab.file.path === 'docs/report.pdf').id)}, false)`)
+    // A whole-second time can be set again exactly, down to the nanosecond.
+    const stamp = new Date('2026-01-01T00:00:00Z')
+    await utimes(report, stamp, stamp)
+    const revisionOf = async () => (await ui(`window.copilotDesktop.fileRead(${JSON.stringify(profileId)}, ${JSON.stringify((await fileTabs()).find(tab => tab.file.path === 'docs/report.pdf').id)}, null).then(result => result.revision)`))
+    const stamped = await revisionOf()
+    await click('Reload')
+    await delay(800)
+    await until(`(${pdfText}).includes('Second page delta')`, 'reloaded at the stamped time')
+    await writeFile(report, same)
+    await utimes(report, stamp, stamp)
+    assert.equal(await revisionOf(), stamped, 'new bytes, same size and time: the same revision')
+    // An open find is run again in the reloaded document: "delta" is gone from it.
+    await click('Find')
+    await findFor('delta')
+    await until(findStatus('1 of 1'), 'find in the old document')
+    await click('Reload')
+    await until(`(${pdfText}).includes('Second page sigma')`, 'Reload opens the fresh bytes')
+    await until(findStatus('No results'), 'the open find is run again in the reloaded document')
+    // And a query the next version still holds is found again there, without typing it again.
+    await findFor('Second page')
+    await until(findStatus('1 of 1'), 'find before the second reload')
+    await writeFile(report, makePdf([['Quarterly report alpha'], ['Second page omega'], ['Third page gamma'], ['Fourth page']]))
+    await utimes(report, stamp, stamp)
+    await click('Reload')
+    await until(`(${pdfText}).includes('Second page omega')`, 'second reload')
+    await delay(600)
+    await until(findStatus('1 of 1'), 'the open find is run again and finds its match in the new document')
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-pdf .textLayer .highlight`)})`, 'the match is marked in the new document')
+    await click('×')
+    // A refresh replaces the view; it does not pile listeners and pages on top of the old one.
+    for (const word of ['one', 'two', 'three']) {
+      await writeFile(report, makePdf([['Quarterly report alpha'], [`Second page ${word}`], ['Third page gamma'], ['Fourth page']]))
+      await click('Reload')
+      await until(`(${pdfText}).includes('Second page ${word}')`, `refresh ${word}`)
+    }
+    assert.equal(await q('.file-pdf-pages', 'element.querySelectorAll(".pdfViewer").length'), 1)
+    assert.equal(await q('.file-pdf-pages', 'element.querySelectorAll(".page").length'), 4)
+    win.webContents.debugger.attach('1.3')
+    const node = await win.webContents.debugger.sendCommand('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(`${panel} .file-pdf-pages`)})` })
+    const { listeners } = await win.webContents.debugger.sendCommand('DOMDebugger.getEventListeners', { objectId: node.result.objectId })
+    win.webContents.debugger.detach()
+    assert.equal(listeners.filter(listener => listener.type === 'scroll').length, 1, 'one scroll listener after several refreshes')
+    // Hidden and shown again, it is laid out for the panel.
+    await action({ type: 'visible', visible: false })
+    await until(`!document.querySelector(${JSON.stringify(panel)})`, 'panel hidden')
+    await action({ type: 'visible', visible: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-pdf .page`)})?.getBoundingClientRect().width > 200`, 'PDF laid out after showing')
+    // Documents that cannot be shown get the card: not a PDF inside, protected, or over the size limit.
+    await writeFile(join(workspace, 'broken.pdf'), '%PDF-1.7\nthis is not a document\n')
+    assert.deepEqual(await open('broken.pdf'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('not a readable PDF')`, 'card for a broken PDF')
+    assert.equal(await q('.file-pdf', 'element.hidden'), true)
+    await writeFile(join(workspace, 'locked.pdf'), makePdf([['secret']], { encrypt: true }))
+    assert.deepEqual(await open('locked.pdf'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('protected with a password')`, 'card for a protected PDF')
+    assert.equal(await ui(`(${pdfText}).includes('secret')`), false)
+    await writeFile(join(workspace, 'huge.pdf'), makePdf([['big']]))
+    await truncate(join(workspace, 'huge.pdf'), 50 * 1024 * 1024 + 1)
+    assert.deepEqual(await open('huge.pdf'), { ok: true })
+    await until(`document.querySelector(${JSON.stringify(`${panel} .file-card`)})?.textContent.includes('too large')`, 'card for an oversized PDF')
+    // A broken file that is repaired shows up; a tab closed while its document is still loading leaves nothing behind.
+    await writeFile(join(workspace, 'broken.pdf'), makePdf([['Repaired document']]))
+    const brokenTab = (await fileTabs()).find(tab => tab.file.path === 'broken.pdf')
+    await action({ type: 'select', id: brokenTab.id })
+    await until(`(${pdfText}).includes('Repaired document')`, 'a repaired PDF is shown')
+    await writeFile(join(workspace, 'closing.pdf'), makePdf(Array.from({ length: 300 }, (_, index) => [`Page ${index + 1}`])))
+    assert.deepEqual(await open('closing.pdf'), { ok: true })
+    const closing = (await fileTabs()).find(tab => tab.file.path === 'closing.pdf')
+    await action({ type: 'close', id: closing.id })
+    await delay(600)
+    for (const name of ['docs/report.pdf', 'broken.pdf', 'locked.pdf', 'huge.pdf']) await action({ type: 'close', id: (await fileTabs()).find(tab => tab.file.path === name).id })
+    assert.deepEqual(requests, [], 'no PDF caused a network request')
+    assert.deepEqual(await ui('window.copilotDesktop.viewerAsset("cMapUrl", "../../app.js").then(() => "served", () => "refused")'), 'refused')
 
     // --- Live refresh: an edit, hide-edit-show, and a save by rename. ---
     const notes = join(workspace, 'folder with spaces', 'notes.txt')
