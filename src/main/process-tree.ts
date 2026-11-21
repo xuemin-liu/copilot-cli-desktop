@@ -63,6 +63,20 @@ export function processGroupMembers(snapshot: string, group: number): number[] {
   return members
 }
 
+/**
+ * The rows of a "pid ppid pgid state" listing for the given processes, as "pid ppid pgid state". Only numbers and the
+ * state are read and returned: a command line is never looked at, so nothing of another process is ever reported.
+ */
+export function processRows(snapshot: string, pids: readonly number[]): string[] {
+  const wanted = new Set(pids.filter(pid => Number.isSafeInteger(pid) && pid > 1))
+  const rows: string[] = []
+  for (const line of snapshot.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/.exec(line)
+    if (match && wanted.has(Number(match[1]))) rows.push(`${match[1]} ${match[2]} ${match[3]} ${match[4]}`)
+  }
+  return rows
+}
+
 /** Kill a process and its descendants at once. Resolves when the kill has been sent (Windows: when taskkill finished). */
 export function killProcessTree(pid: number, platform: NodeJS.Platform = process.platform, system: ProcessGroupSystem = posixSystem): Promise<void> {
   if (platform === 'win32') {

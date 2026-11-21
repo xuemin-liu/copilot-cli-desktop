@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
-import { groupKillLog, killProcessTree, processDescendants, processGroupMembers, type ProcessGroupSystem } from './process-tree.js'
+import { groupKillLog, killProcessTree, processDescendants, processGroupMembers, processRows, type ProcessGroupSystem } from './process-tree.js'
 
 test('the members of a process group are read from a pid and group listing', () => {
   const listing = '  100   100\n  101   100\n  102   200\n    1     1\n  103   100 \nnot a line\n 104 1000\n'
@@ -10,6 +10,15 @@ test('the members of a process group are read from a pid and group listing', () 
   assert.deepEqual(processGroupMembers(listing, 10), [], 'a group number is matched whole, not as a prefix')
   assert.deepEqual(processGroupMembers(listing, 1), [], 'process 1 is never a target')
   assert.deepEqual([...processDescendants('10 1\n11 10\n12 11\n13 1\n', 10)].sort(), [10, 11, 12])
+})
+
+test('processes are reported by number only, never by what their command line says', () => {
+  const listing = [' 4001  4000  4000 S    sh .git/hooks/pre-commit', ' 4002  4001  4000 S    sleep 15', ' 5001     1  5001 S    git diff -- pre-commit-notes.txt',
+    ' 5002     1  5002 S    sleep 150', '40010     1 40010 R    sleep 15', 'not a row'].join('\n')
+  assert.deepEqual(processRows(listing, [4001, 4002]), ['4001 4000 4000 S', '4002 4001 4000 S'], 'the two wanted processes, without their commands')
+  assert.deepEqual(processRows(listing, [4001, 9999]), ['4001 4000 4000 S'], 'a process that has ended is simply absent')
+  assert.deepEqual(processRows(listing, []), [])
+  assert.deepEqual(processRows(listing, [1, 0, Number.NaN]), [])
 })
 
 function fakeSystem(groupSignal: 'accepted' | 'EPERM' | 'ESRCH', listing: string | Error): { system: ProcessGroupSystem; killed: number[]; listed: number; killedBeforeListing: number[] } {
