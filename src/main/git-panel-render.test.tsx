@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { GitDiffView, diffChangeSignature, diffCommentKey, diffLineKind, numberDiffLines } from '../renderer/components/GitDiffView.js'
-import { GitMarkedBar, GitPanel, RepoRow, canDiscard, draftOf } from '../renderer/components/GitPanel.js'
+import { GitMarkedBar, GitPanel, RepoRow, canDiscard, draftOf, pickRepo } from '../renderer/components/GitPanel.js'
 import type { GitMarkedBarProps } from '../renderer/components/GitPanel.js'
 import { markedEntries, nextMarks } from '../renderer/git-marks.js'
 import { GitCommitBox, commitBlocker } from '../renderer/components/GitCommitBox.js'
@@ -19,6 +19,22 @@ import { GIT_PANEL_MIN_WIDTH, ProjectDock, SESSION_MIN_WIDTH, dockLayout } from 
 import type { GitBranchView, GitDiffView as GitDiff, GitRepoSummary, GitWorktreeView } from './git-types.js'
 
 const diff = (text: string, extra: Partial<GitDiff> = {}): GitDiff => ({ entryId: 'e1-0', path: 'a.ts', kind: 'text', text, truncated: false, added: 1, deleted: 1, ...extra })
+
+test('the panel keeps showing the repository it showed, until that one goes or the person chooses another', () => {
+  const repo = (relativePath: string, changeCount: number): GitRepoSummary => ({ relativePath, changeCount, state: 'ready', id: relativePath } as GitRepoSummary)
+  const view = (...repos: GitRepoSummary[]): Parameters<typeof pickRepo>[0] => ({ repos } as Parameters<typeof pickRepo>[0])
+  const both = view(repo('a', 1), repo('b', 3))
+  assert.equal(pickRepo(both, null)?.relativePath, 'a', 'with no choice and nothing shown yet: the first with changes')
+  // The last change in "a" is committed. It is still the one shown, so Commit and Discard do not move onto "b".
+  const committed = view(repo('a', 0), repo('b', 3))
+  assert.equal(pickRepo(committed, null, 'a')?.relativePath, 'a')
+  assert.equal(pickRepo(committed, null)?.relativePath, 'b', 'what it did before, and still does with nothing shown')
+  // Changes appearing in another repository do not pull the panel away from a clean one either.
+  assert.equal(pickRepo(view(repo('a', 2), repo('b', 0)), null, 'b')?.relativePath, 'b')
+  assert.equal(pickRepo(committed, 'b', 'a')?.relativePath, 'b', 'the person\'s own choice comes first')
+  assert.equal(pickRepo(view(repo('b', 3)), null, 'a')?.relativePath, 'b', 'a repository that is gone is not kept')
+  assert.equal(pickRepo(view(), null, 'a'), null)
+})
 
 test('the panel never squeezes the session area below its minimum', () => {
   assert.deepEqual(dockLayout(1400, 420), { panelWidth: 420, takeover: false })
