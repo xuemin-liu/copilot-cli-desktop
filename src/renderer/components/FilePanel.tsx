@@ -101,7 +101,9 @@ export function FilePanel({ profileId, tab, active, onClose }: Props): JSX.Eleme
     if (!active) return
     void load(false)
     setWatching(profileId, tab.id, true)
-    const stop = window.copilotDesktop.onFileChanged(id => { if (id === tab.id) void load(false) })
+    // Told to read again: also ask to be watched again. A change of Settings > File links can have stopped the watch of
+    // this tab while it stayed on screen; the main process watches only a file it allows, and the same path is kept as is.
+    const stop = window.copilotDesktop.onFileChanged(id => { if (id === tab.id) { void load(false); setWatching(profileId, tab.id, true) } })
     return () => { stop(); setWatching(profileId, tab.id, false) }
   }, [active, load, profileId, tab.id])
 

@@ -251,6 +251,17 @@ if (!process.versions.electron) {
       assert.deepEqual(await ui(`window.copilotDesktop.fileRead(${JSON.stringify(profileId)}, ${JSON.stringify(outsideTab.id)}, null)`), { status: 'root-missing' }, 'an open outside tab no longer reads')
       // The tab was on screen when the setting went off: what it showed is gone from the page, not only from new reads.
       await until(`!document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('outside secret') && !document.body.innerText.includes('outside secret')`, 'the visible outside file is cleared')
+      // On again with the same tab still on screen: the file comes back, and an edit on disk shows without switching tabs.
+      await inSettings(`${box}.click()`)
+      for (let attempt = 0; attempt < 100 && !(await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace; attempt++) await delay(50)
+      await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('outside secret')`, 'the outside file is shown again')
+      await delay(500)
+      await writeFile(join(outside, 'secret.txt'), 'outside secret, edited after it came back\n')
+      await until(`document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('edited after it came back')`, 'an edit after the setting came back on is shown')
+      // Off once more, so the rest of the check runs with the default.
+      await inSettings(`${box}.click()`)
+      for (let attempt = 0; attempt < 100 && (await inSettings('window.copilotDesktopSettings.get()')).openFilesOutsideWorkspace; attempt++) await delay(50)
+      await writeFile(join(outside, 'secret.txt'), 'outside secret\n')
       await action({ type: 'close', id: outsideTab.id })
       assert.equal((await fileTabs()).length, tabsBefore)
       settings.close()

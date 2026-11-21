@@ -551,9 +551,9 @@ export class ProjectToolService {
     if (!file) throw new Error('File tab closed')
     return file
   }
-  /** Watch a File tab's file while its panel shows it; `path` null stops watching. */
   /** What a File tab is watched for, or null. */
   watchedFile(id: string): string | null { return this.fileWatchers.watched(id) }
+  /** Watch a File tab's file while its panel shows it; `path` null stops watching. */
   watchFile(profileId: string, id: string, path: string | null): void {
     if (path === null || this.stopping) { this.fileWatchers.unwatch(id); return }
     this.fileTab(profileId, id)
