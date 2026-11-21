@@ -326,6 +326,27 @@ if (!process.versions.electron) {
         step('assert', 'Input replaced', { selector: '#search', condition: 'value', expected: 'replacement 中文' }),
         step('fill', 'Clear input', { selector: '#search', value: '' }), step('assert', 'Input cleared', { selector: '#search', condition: 'value', expected: '' })])
       assert.equal(replacement.status, 'passed', JSON.stringify(replacement))
+      // A field holding what a person typed, with nothing that marks it as sensitive. A test that did not fill it may not
+      // compare its value: a few ordered or toleranced comparisons would otherwise read it out.
+      await browser.view.webContents.executeJavaScript(`(() => { const field = document.createElement('input'); field.id = 'typed-by-person'; field.value = '482913'; document.body.append(field) })()`)
+      for (const probe of [{ condition: 'numericValue', expected: 500000, tolerance: 100000 }, { condition: 'numericValue', expected: 482913 }, { condition: 'value', expected: '482913' }]) {
+        const peeked = await execute([step('assert', 'Read what a person typed', { selector: '#typed-by-person', ...probe })])
+        assert.equal(peeked.status, 'failed', JSON.stringify(peeked))
+        assert.match(JSON.stringify(peeked), /this test did not fill is private/)
+        assert.ok(!JSON.stringify(peeked).includes('482913') || probe.expected === 482913 || probe.expected === '482913', 'the value is not reported')
+      }
+      // The same field once this run has filled it, and a read-only field that shows application state.
+      const own = await execute([step('fill', 'Fill it', { selector: '#typed-by-person', value: '77' }),
+        step('assert', 'Compare what the test filled', { selector: '#typed-by-person', condition: 'numericValue', expected: 77 }),
+        step('assert', 'As text too', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(own.status, 'passed', JSON.stringify(own))
+      // A later run did not fill it, so it is private again.
+      const later = await execute([step('assert', 'A later run', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(later.status, 'failed', JSON.stringify(later))
+      await browser.view.webContents.executeJavaScript(`document.querySelector('#typed-by-person').readOnly = true`)
+      const shown = await execute([step('assert', 'Read-only state', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(shown.status, 'passed', JSON.stringify(shown))
+      await browser.view.webContents.executeJavaScript(`document.querySelector('#typed-by-person').remove()`)
       const shell = await execute([visible('#title'), step('screenshot', 'Shell evidence', {})], true)
       assert.equal(shell.status, 'passed', JSON.stringify(shell))
       assert.ok(shell.description.includes('用户测试'), 'PowerShell reports preserve UTF-8 descriptions')
@@ -337,6 +358,12 @@ if (!process.versions.electron) {
         step('assert', 'Shadow value', { selector: '#shadow-field', condition: 'value', expected: 'shadow value' }),
         step('click', 'Shadow click', { selector: '#shadow-button' }), step('assert', 'Shadow result', { selector: '#shadow-result', condition: 'text', expected: 'Shadow passed' })])
       assert.equal(shadow.status, 'passed', JSON.stringify(shadow))
+      // An editor holds what a person typed as well: its text is not compared before the run has filled it.
+      for (const probe of [{ condition: 'text', expected: 'private-editor-value' }, { condition: 'numericValue', expected: 1, tolerance: 1e9 }]) {
+        const peeked = await execute([step('assert', 'Read an editor a person typed in', { selector: '#editor', ...probe })])
+        assert.equal(peeked.status, 'failed', JSON.stringify(peeked))
+        assert.match(JSON.stringify(peeked), /this test did not fill is private/)
+      }
       const editable = await execute([step('fill', 'Edit rich text', { selector: '#editor', value: 'edited content' }),
         step('assert', 'Rich text updated', { selector: '#editor', condition: 'text', expected: 'edited content' })])
       assert.equal(editable.status, 'passed', JSON.stringify(editable))
@@ -939,7 +966,7 @@ if (!process.versions.electron) {
       pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for hide'); browser.setBounds(null)
       assert.equal((await (await pending).json()).status, 'cancelled'); assert.equal(browser.snapshot.testing.enabled, false)
-      await assert.rejects(execute([visible('#title')]), /Show the selected browser page/)
+      await assert.rejects(execute([visible('#title')]), /Show browser page \d+ before starting a test/)
       browser.setBounds({ x: 0, y: 0, width: 1000, height: 700 })
       pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for switch'); const oldPage = browser.snapshot.activePageId; browser.action('new-page')

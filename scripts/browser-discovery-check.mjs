@@ -32,7 +32,7 @@ if (!process.versions.electron) {
       <button id="direct" data-private title="${confidential[0]}" aria-label="${confidential[0]}">${confidential[0]}</button>
       <div data-private><button id="nested" title="${confidential[1]}" aria-label="${confidential[1]}">${confidential[1]}</button></div>
       <div id="shadow" data-private></div><script>shadow.attachShadow({mode:'open'}).innerHTML='<button id="shadow-button" title="${confidential[2]}">${confidential[2]}</button>'</script>`
-    const numeric = `<input id="public-number" type="number" value="42.5">
+    const numeric = `<input id="public-number" type="number" value="42.5" data-public><input id="unmarked-number" type="number" value="42.5">
       <input id="password" type="password" value="123456">
       <input id="otp" autocomplete="section-login one-time-code" value="123456">
       <input id="card" autocomplete="billing cc-number" value="123456">
@@ -125,6 +125,9 @@ if (!process.versions.electron) {
         passed(await execute([{ action: 'assert', selector: '#public-text', text: 'Public', condition: 'visible' },
           { action: 'assert', selector: '#public-text', text: 'Public', condition: 'count', expected: 1 }]))
         passed(await execute([{ action: 'assert', selector: '#public-number', condition: 'numericValue', expected: 42.5, tolerance: 0.01 }]))
+        // The same field without the application's word that it is public: a field a person can type in.
+        const unmarked = await execute([{ action: 'assert', selector: '#unmarked-number', condition: 'numericValue', expected: 42.5, tolerance: 0.01, timeoutMs: 100 }])
+        assert.equal(unmarked.status, 'failed', JSON.stringify(unmarked)); assert.match(JSON.stringify(unmarked), /did not fill is private/)
         for (const id of ['password', 'otp', 'card', 'new-password', 'direct', 'nested', 'shadow-number']) for (const condition of ['numericValue', 'value', 'text']) {
           const report = await execute([{ action: 'assert', selector: '#' + id, condition, expected: condition === 'numericValue' ? 123456 : '123456', timeoutMs: 100,
             ...(condition === 'numericValue' ? { tolerance: 999999 } : {}) }])
