@@ -1478,6 +1478,8 @@ async function buildSessionSpawnPlan(
   connectSessionId: string | null,
   sessionTitle: string,
 ): Promise<SessionSpawnPlan> {
+  // The program is being replaced: a session started now would run a half-written install, or keep its files in use.
+  if (copilotBeingReplaced) throw new Error(COPILOT_MAINTENANCE_BLOCKS_SESSIONS)
   await refreshCopilotResolutionIfChanged()
   // A tab started right after launch would otherwise be validated against empty capabilities while the startup
   // probe is still running, and be refused for a launch option the CLI does support.
@@ -1826,9 +1828,33 @@ function assertWorkspaceListed(profile: WorkspaceProfile): void {
   }
 }
 
-/** Workspaces a session uses or is starting in, which the profile limit must not drop. */
+/**
+ * Workspaces the profile limit must not drop: a session uses or is starting in it, it has sessions saved to open again,
+ * or tools are open in it. Making room is then the person's choice (Remove workspace), not a side effect of adding one.
+ */
 function workspacesInUse(): Set<string> {
-  return new Set([...tabsState.tabs.map((tab) => tab.workspaceProfileId), ...startingWorkspaceSessions.keys()])
+  return new Set([
+    ...tabsState.tabs.map((tab) => tab.workspaceProfileId), ...startingWorkspaceSessions.keys(),
+    ...desktopConfig.profiles.filter((profile) => profile.tabs.length > 0).map((profile) => profile.id),
+    ...unrestoredProfileTabs.keys(),
+    ...(projectToolService?.projectsWithTools() ?? []),
+  ])
+}
+
+/**
+ * Adds or selects a workspace. At the limit the least recently used idle workspace makes room, and gets the same
+ * cleanup as one removed by hand, so nothing of it keeps running or is offered again under a project that is gone.
+ */
+function activateWorkspace(folder: string, options: { general?: boolean } = {}): WorkspaceProfile {
+  return activateWorkspaceProfile(desktopConfig, folder, workspacesInUse(), {
+    ...options,
+    onEvicted: (evicted) => {
+      profilesWithSessionTabs.delete(evicted.id)
+      unrestoredProfileTabs.delete(evicted.id)
+      observe(projectToolService?.removeProject(evicted.id) ?? Promise.resolve(), `Could not clean up the workspace ${evicted.name}`)
+      void writeAppLog(`The workspace ${evicted.name} (${evicted.path}) was dropped to make room for ${folder}; it had no sessions or tools.`).catch(() => {})
+    },
+  })
 }
 
 async function createSessionTab(...args: Parameters<typeof startSessionTab>): Promise<DesktopState> {
@@ -3902,7 +3928,7 @@ async function openSessionFromHistory(sessionId: string): Promise<DesktopState> 
   if (!target) {
     const folder = session.gitRoot && sameOrInside(session.cwd, session.gitRoot) ? session.gitRoot : session.cwd
     if (!await stat(folder).then((info) => info.isDirectory(), () => false)) throw new Error(`The folder that session ran in no longer exists: ${folder}`)
-    target = { profile: activateWorkspaceProfile(desktopConfig, folder, workspacesInUse()) }
+    target = { profile: activateWorkspace(folder) }
     syncWorkspaceState()
     await persistConfig()
   }
@@ -4059,11 +4085,7 @@ async function selectWorkspace(): Promise<DesktopState> {
   if (selection.canceled || !workspace) return snapshot()
   let profile: WorkspaceProfile
   try {
-    profile = activateWorkspaceProfile(
-      desktopConfig,
-      workspace,
-      workspacesInUse(),
-    )
+    profile = activateWorkspace(workspace)
   } catch (error) {
     await dialog.showMessageBox(mainWindow, {
       type: 'warning',
@@ -4080,7 +4102,7 @@ async function createGeneralWorkspace(name: string): Promise<DesktopState> {
   const folder = await createGeneralWorkspaceFolder(join(app.getPath('documents'), GENERAL_WORKSPACES_FOLDER), name)
   let profile: WorkspaceProfile
   try {
-    profile = activateWorkspaceProfile(desktopConfig, folder, workspacesInUse(), { general: true })
+    profile = activateWorkspace(folder, { general: true })
   } catch (error) {
     await rmdir(folder).catch(() => {})
     throw error
@@ -4289,9 +4311,32 @@ async function recheckCopilotCapabilities(): Promise<void> {
   }
 }
 
+/**
+ * Records this version in the settings, and saves a migrated file. This is bookkeeping: if the settings cannot be saved
+ * now (a full disk, a file another program holds), the app still starts with the settings it read, and the next save
+ * writes them. Without the catch, that failure ended the whole startup with "failed to start".
+ */
+async function saveSettingsAtStartup(migrated: boolean): Promise<void> {
+  if (!recordDesktopVersion(desktopConfig, app.getVersion()) && !migrated) return
+  try { await persistConfig() } catch (error) {
+    void writeAppLog(`Could not save the settings at startup; continuing with the ones that were read: ${String(error)}`).catch(() => {})
+  }
+}
+
+const COPILOT_MAINTENANCE_BLOCKS_SESSIONS = 'Copilot CLI is being installed or updated. Start the session when that has finished.'
+/**
+ * True only while the install or update command itself runs. The maintenance operation goes on after it, to find the new
+ * program and open the selected workspace's sessions again, and those starts must be let through.
+ */
+let copilotBeingReplaced = false
+
 async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void> {
   if (copilotMaintenance.status === 'running') throw new Error('A Copilot CLI maintenance operation is already running')
-  if (managedTabs.size > 0) throw new Error('Close all running Copilot sessions before installing or updating the CLI')
+  // Only Copilot's own sessions run the program being replaced; a Claude Code or Codex tab is no reason to refuse.
+  const copilotTabs = tabsState.tabs.filter((tab) => managedTabs.has(tab.id) && (tab.cli ?? 'copilot') === 'copilot').length
+  if (copilotTabs > 0) throw new Error('Close all running Copilot sessions before installing or updating the CLI')
+  // A session that is being prepared, restarted or stopped is not in that list yet, or is about to be again.
+  if (tabTransitionQueue.size > 0 || pendingSessionCreations > 0) throw new Error('A session is starting or stopping. Install or update the CLI when it has finished.')
   const current = state.resolution
   if (operation === 'update' && (!current || current.version === null)) {
     throw new Error('Copilot CLI is not installed; use Install first')
@@ -4301,11 +4346,17 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
     operation,
     message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
   }
+  // Set in the same turn as the checks above, before the first await: a session admitted while usage is being flushed
+  // would otherwise start, and the command below would then replace the program under it.
+  copilotBeingReplaced = true
   try {
-    await bestEffortUsage(usageService?.flush())
-    const output = operation === 'install'
-      ? await installCopilotCli()
-      : await updateCopilotCli(current!)
+    let output: string
+    try {
+      await bestEffortUsage(usageService?.flush())
+      output = operation === 'install'
+        ? await installCopilotCli()
+        : await updateCopilotCli(current!)
+    } finally { copilotBeingReplaced = false }
     await bestEffortUsage(usageService?.collect())
     await retryResolution()
     if (!state.resolution || state.resolution.version === null) {
@@ -4892,7 +4943,9 @@ ipcMain.handle('desktop:browser-pick-cancel', (event, tabId: unknown) => { brows
 ipcMain.handle('desktop:browser-export', async (event, tabId: unknown, kind: unknown) => {
   const browser = browserForSender(event, tabId)
   if (kind !== 'console' && kind !== 'network') throw new Error('Invalid browser export')
-  const data = JSON.stringify(browser.snapshot[kind].filter(entry => entry.pageId === browser.snapshot.activePageId), null, 2)
+  // One copy of the state: `snapshot` copies all of it each time it is read, and this used to read it once per entry.
+  const captured = browser.snapshot
+  const data = JSON.stringify(captured[kind].filter(entry => entry.pageId === captured.activePageId), null, 2)
   const owner = BrowserWindow.fromWebContents(event.sender)
   if (!owner || owner.isDestroyed()) throw new Error('Browser window has closed')
   const result = await dialog.showSaveDialog(owner, { title: `Save captured ${kind} log`,
@@ -6302,7 +6355,7 @@ if (!app.requestSingleInstanceLock()) {
         `Browser data is kept while ${basename(recoveryHold)} exists. Restore or delete it when you are done.`,
       )
     }
-    if (recordDesktopVersion(desktopConfig, app.getVersion()) || desktopConfigMigrated) await persistConfig()
+    await saveSettingsAtStartup(desktopConfigMigrated)
     // Keep DevTools settings from sessions closed last launch before their partitions are pruned.
     try { shareDevtoolsSettings(app.getPath('userData')) }
     catch (error) { void writeAppLog(`Could not share DevTools settings: ${String(error)}`).catch(() => {}) }

@@ -914,6 +914,16 @@ export class ProjectToolService {
       this.save()
     }
   }
+  /**
+   * Projects with a tool tab open (a terminal, a browser page, a file), docked or in a session's own window. The empty
+   * "new tab" page is not a tool: it is what an empty panel shows.
+   */
+  projectsWithTools(): string[] {
+    const ids = new Set<string>()
+    for (const [id, project] of this.projects) if (project.tabs.some(tab => tab.kind !== 'new')) ids.add(id)
+    for (const child of this.splits.values()) ids.add(child.profileId)
+    return [...ids]
+  }
   async removeProject(id: string): Promise<void> {
     // Revoke pending starts before the first await; helper setup can complete during bridge shutdown.
     const terminalIds = [...(this.projects.get(id)?.tabs ?? []), ...[...this.splits.values()].filter(child => child.profileId === id).map(child => child.tab)].map(tab => tab.id)
