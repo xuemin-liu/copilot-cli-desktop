@@ -150,6 +150,7 @@ contextBridge.exposeInMainWorld('copilotDesktop', {
   meetingHostInvite: (folder, short) => ipcRenderer.invoke('desktop:meeting-host-invite', folder, short),
   resizeTab: (tabId, cols, rows) => ipcRenderer.invoke('desktop:resize-tab', tabId, cols, rows),
   getTabBacklog: (tabId) => ipcRenderer.invoke('desktop:get-tab-backlog', tabId),
+  fanOutReadiness: (tabId) => ipcRenderer.invoke('desktop:fan-out-readiness', tabId),
   getTabSnapshot: (tabId) => ipcRenderer.invoke('desktop:get-tab-snapshot', tabId),
   openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
   showSessionLog: (tabId) => ipcRenderer.invoke('desktop:show-session-log', tabId),

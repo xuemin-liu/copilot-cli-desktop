@@ -118,6 +118,7 @@ import { registerGitIpc } from './git-ipc.js'
 import type { GitIpcEvent } from './git-ipc.js'
 import { configureWindowsProcessWatchdogReporter } from './windows-process-watchdog.js'
 import { describeProcessExit, observeProcessFailures, ReloadBudget } from './process-diagnostics.js'
+import { fanOutReadiness } from './fan-out-readiness.js'
 import { PERMISSION_PRESET_INFO, buildPermissionArgs, isPermissionPreset, permissionCompatibilityWarning, type PermissionPreset } from './permission-presets.js'
 import { describeSessionPermission, type SessionPermissionMode } from './permission-modes.js'
 import {
@@ -5471,6 +5472,13 @@ ipcMain.handle('desktop:get-tab-backlog', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)
   if (typeof tabId !== 'string') throw new Error('Invalid session tab')
   return managedTabs.get(tabId)?.session.recentOutputText ?? ''
+})
+// One small answer per poll: the page used to fetch the whole application state and the session's whole output for it.
+ipcMain.handle('desktop:fan-out-readiness', (event, tabId: unknown) => {
+  assertTrustedIpcSender(event)
+  if (!isSessionTabId(tabId)) throw new Error('Invalid session tab')
+  const managed = managedTabs.get(tabId)
+  return fanOutReadiness(managed ? { poppedOut: sessionWindows.has(tabId), recentOutput: managed.session.recentOutputText } : null)
 })
 ipcMain.handle('desktop:get-tab-snapshot', (event, tabId: unknown) => {
   assertTrustedIpcSender(event)

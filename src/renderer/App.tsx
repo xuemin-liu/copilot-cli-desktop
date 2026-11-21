@@ -160,15 +160,12 @@ export function App(): JSX.Element {
     await Promise.all(result.tabIds.map(async (tabId) => {
       const deadline = Date.now() + 120_000
       while (Date.now() < deadline) {
-        let backlog = ''
-        let poppedOut = false
-        try {
-          poppedOut = ((await window.copilotDesktop.getState()).poppedOutTabIds ?? []).includes(tabId)
-          backlog = await window.copilotDesktop.getTabBacklog(tabId)
-        } catch { break }
+        let readiness: Awaited<ReturnType<typeof window.copilotDesktop.fanOutReadiness>>
+        try { readiness = await window.copilotDesktop.fanOutReadiness(tabId) } catch { break }
+        if (readiness === 'gone') break
         // A session opened in its own window owns its terminal there; a paste from this window cannot reach it.
-        if (poppedOut) { elsewhere.push(tabId); return }
-        if (backlog.includes('open sidebar')) {
+        if (readiness === 'elsewhere') { elsewhere.push(tabId); return }
+        if (readiness === 'ready') {
           // Delivery is the pane's acknowledgement, not the dispatch.
           if (!insertIntoPrompt(tabId, prompt)) elsewhere.push(tabId)
           return
