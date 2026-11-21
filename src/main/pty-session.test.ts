@@ -381,6 +381,16 @@ test('a program that could not be started fails the start, and the session is ne
   await ok.stop()
 })
 
+test('a program that starts and ends at once is completed, not left running', async () => {
+  const session = new PtySession({ file: process.execPath, args: ['-e', '0'], cwd: tmpdir(), spawnPty: spawnChildProcessPty })
+  const exited = once(session, 'exit')
+  await session.start()
+  // However the start and the exit fall, the exit is reported and is the last word.
+  await exited
+  assert.equal(session.status, 'completed')
+  assert.equal(session.processId, null)
+})
+
 test('a process that exits while it is being started is not reported as running afterwards', async () => {
   const pty = new FakePty()
   // It reports its exit as soon as the session listens for it, as a backend does for a process that is already gone.

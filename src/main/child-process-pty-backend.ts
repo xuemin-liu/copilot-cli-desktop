@@ -41,15 +41,49 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
 
   // Spawn failures (ENOENT/EACCES) emit `error` and never `exit`; without a
   // listener they would crash the daemon, and with one alone the session would
-  // wait forever. Remember the failure so onExit can report it. `error` is also
-  // emitted when a kill or IPC send fails while the process is still alive;
-  // those must not be reported as an exit (the pid is only unset on spawn failure).
-  let spawnError: Error | null = null
+  // wait forever. `error` is also emitted when a kill or IPC send fails while
+  // the process is still alive; those must not be reported as an exit (the pid
+  // is only unset on spawn failure).
+  //
+  // How the process ended is recorded here, from the moment it exists, and
+  // handed to `onExit` whenever that is called. The caller waits for `ready`
+  // before it asks, and a program can start and be gone again by then: an exit
+  // listened for only from `onExit` would be missed, and the session would
+  // stay "running" for good.
+  type ExitEvent = { exitCode: number; signal?: number | undefined }
+  let ended: ExitEvent | null = null
+  let spawnFailed = false
+  const exitListeners = new Set<(event: ExitEvent) => void>()
   const errorListeners = new Set<(error: Error) => void>()
+  const end = (event: ExitEvent): void => {
+    if (ended) return
+    ended = event
+    for (const listener of exitListeners) listener(event)
+    exitListeners.clear()
+  }
   child.on('error', (error) => {
     if (child.pid !== undefined) return
-    spawnError = error
+    spawnFailed = true
     for (const listener of errorListeners) listener(error)
+    end({ exitCode: 1 })
+  })
+  child.once('exit', (code, signal) => {
+    // Node reports `code === null` precisely when the process was
+    // terminated by a signal rather than exiting normally. Treating
+    // that as exitCode 0 (as a naive `code ?? 0` would) reports an
+    // unexpected kill — e.g. an OOM killer or an external `kill -9` — as
+    // a clean, successful completion instead of a crash. Preserve a
+    // conventional nonzero (128+signal) sentinel and the real signal
+    // number so PtySession's exitCode === 0 check still works correctly.
+    const signalNumber = signal ? constants.signals[signal] : undefined
+    const exitCode = code ?? (signalNumber !== undefined ? 128 + signalNumber : 1)
+    // 'exit' can precede the last buffered stdout/stderr (typically the
+    // crash message), and PtySession disposes the streams on exit. Wait
+    // for 'close' so output is delivered first, but only briefly: a
+    // grandchild that inherited the pipes would otherwise hold it open.
+    const finish = (): void => end({ exitCode, signal: signalNumber })
+    const timer = setTimeout(finish, 250)
+    child.once('close', () => { clearTimeout(timer); finish() })
   })
   // Node reports a missing program or working folder a moment after `spawn()` returns, with no process id. Until then the
   // caller cannot tell a starting process from one that will never exist.
@@ -74,40 +108,33 @@ export function spawnChildProcessPty(file: string, args: string[], options: Spaw
     })
   }
 
+  // Output is read from the start and kept until someone asks for it. Node throws away what a finished process
+  // printed if nobody was listening, and the caller listens only once it knows the program started.
+  const EARLY_OUTPUT_CHARS = 1_000_000
+  const early: string[] = []
+  let earlyChars = 0
+  const dataListeners = new Set<(data: string) => void>()
+  const deliver = (text: string): void => {
+    if (dataListeners.size > 0) { for (const listener of dataListeners) listener(text); return }
+    early.push(text)
+    earlyChars += text.length
+    while (earlyChars > EARLY_OUTPUT_CHARS && early.length > 1) earlyChars -= early.shift()!.length
+  }
+  forward(child.stdout, deliver)
+  forward(child.stderr, deliver)
+
   return {
     get pid() { return child.pid },
     ready,
     onData: (listener) => {
-      forward(child.stdout, listener)
-      forward(child.stderr, listener)
+      dataListeners.add(listener)
+      // What it printed before anyone listened, in order, then whatever comes.
+      for (const text of early.splice(0)) listener(text)
     },
     onExit: (listener) => {
-      let reported = false
-      const report = (event: { exitCode: number; signal?: number | undefined }): void => {
-        if (reported) return
-        reported = true
-        listener(event)
-      }
-      errorListeners.add(() => report({ exitCode: 1 }))
-      if (spawnError) report({ exitCode: 1 })
-      child.once('exit', (code, signal) => {
-        // Node reports `code === null` precisely when the process was
-        // terminated by a signal rather than exiting normally. Treating
-        // that as exitCode 0 (as a naive `code ?? 0` would) reports an
-        // unexpected kill — e.g. an OOM killer or an external `kill -9` — as
-        // a clean, successful completion instead of a crash. Preserve a
-        // conventional nonzero (128+signal) sentinel and the real signal
-        // number so PtySession's exitCode === 0 check still works correctly.
-        const signalNumber = signal ? constants.signals[signal] : undefined
-        const exitCode = code ?? (signalNumber !== undefined ? 128 + signalNumber : 1)
-        // 'exit' can precede the last buffered stdout/stderr (typically the
-        // crash message), and PtySession disposes the streams on exit. Wait
-        // for 'close' so output is delivered first, but only briefly: a
-        // grandchild that inherited the pipes would otherwise hold it open.
-        const finish = (): void => report({ exitCode, signal: signalNumber })
-        const timer = setTimeout(finish, 250)
-        child.once('close', () => { clearTimeout(timer); finish() })
-      })
+      // It may have ended before anyone asked; its output was kept and handed over by `onData` above.
+      if (ended) listener(ended)
+      else exitListeners.add(listener)
     },
     write: (data) => {
       if (!child.stdin || child.stdin.destroyed || !child.stdin.writable) return

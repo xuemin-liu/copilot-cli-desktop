@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -159,4 +159,20 @@ test('claiming the startup lock stamps it with the claimant\'s own time', async 
     assert.equal(claimed.pid, process.pid)
     assert.ok(Date.parse(claimed.createdAt) >= before - 1_000)
   })
+})
+
+test('the start time is asked of the system\'s own program, not one of that name in the current folder', { skip: process.platform === 'win32' ? false : 'the current folder is searched first only on Windows' }, async () => {
+  // A program named powershell.exe in the folder the command is run from, as a repository could plant one. It is Node
+  // here, which does not understand the arguments and prints no date.
+  const planted = await mkdtemp(join(tmpdir(), 'copilot-desktop-planted-'))
+  const before = process.cwd()
+  try {
+    await copyFile(process.execPath, join(planted, 'powershell.exe'))
+    process.chdir(planted)
+    const started = await readProcessStartTime(process.pid)
+    assert.ok(started !== null && Math.abs(Date.now() - process.uptime() * 1000 - started) < 5_000, `the real start time, not the planted program's answer (${started})`)
+  } finally {
+    process.chdir(before)
+    await rm(planted, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
 })
