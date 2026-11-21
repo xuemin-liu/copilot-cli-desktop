@@ -35,6 +35,11 @@ export interface TerminalPaneProps {
 }
 
 /** Whether anything is on screen or in the scrollback. Reads the buffer itself: a stopped session has no snapshot. */
+/** How long an open may take before the pane says it is still working. Most answer well inside this. */
+const LINK_PROGRESS_DELAY_MS = 300
+/** A notice about a clicked link lies over the terminal's first rows, so it leaves by itself. */
+const LINK_NOTICE_SHOWN_MS = 8000
+
 function terminalHasText(terminal: Terminal): boolean {
   const buffer = terminal.buffer.active
   if (buffer.baseY > 0) return true
@@ -58,7 +63,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
-  const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info' } | null>(null)
+  // `pending`: the open it describes has not answered yet. Only an answered one leaves by itself.
+  const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info'; pending?: true } | null>(null)
   const linkRequestRef = useRef(0)
   const linkClickRef = useRef<LinkClickGate | null>(null)
 
@@ -226,7 +232,11 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // A plain click on a path opens the file in a File tab; with Ctrl (Cmd on macOS) it is shown in the file manager.
     const openLink = async (link: DetectedLink, reveal: boolean): Promise<void> => {
       const request = ++linkRequestRef.current
-      setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : reveal ? 'Revealing file…' : 'Opening file…', tone: 'info' })
+      setLinkNotice(null)
+      // An open that answers at once shows nothing; only one that takes a while says it is still working.
+      const slow = setTimeout(() => {
+        if (request === linkRequestRef.current) setLinkNotice({ message: link.type === 'url' ? 'Opening link…' : reveal ? 'Revealing file…' : 'Opening file…', tone: 'info', pending: true })
+      }, LINK_PROGRESS_DELAY_MS)
       try {
         const result = link.type === 'url'
           ? await window.copilotDesktop.openExternalUrl(link.text)
@@ -242,6 +252,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         if (request === linkRequestRef.current) {
           setLinkNotice({ message: `Could not ${link.type === 'url' ? 'open link' : reveal ? 'reveal file' : 'open file'}: ${errorMessage(error)}`, tone: 'error' })
         }
+      } finally {
+        clearTimeout(slow)
       }
     }
     // The click that opens a link is not also Copilot's: see LinkClickGate.
@@ -442,6 +454,13 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // A link press held when the tab was switched away has lost its release; it must not reach the CLI later.
     linkClickRef.current?.reset()
   }, [active, tabId])
+
+  useEffect(() => {
+    // "Opening…" stays for as long as the open is pending; what it ends in is shown for a while, then removed.
+    if (!linkNotice || linkNotice.pending) return
+    const timer = setTimeout(() => setLinkNotice(current => current === linkNotice ? null : current), LINK_NOTICE_SHOWN_MS)
+    return () => clearTimeout(timer)
+  }, [linkNotice])
 
   useEffect(() => {
     if (!active) return

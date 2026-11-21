@@ -39,7 +39,7 @@ if (!process.versions.electron) {
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   const child = spawn((await import('electron')).default, [fileURLToPath(import.meta.url)], { env, stdio: 'inherit', windowsHide: true })
-  const timeout = setTimeout(() => child.kill(), 60_000)
+  const timeout = setTimeout(() => child.kill(), 120_000)
   try {
     const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', resolveExit) })
     assert.equal(code, 0, 'Electron link check failed')
@@ -59,7 +59,9 @@ if (!process.versions.electron) {
     ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\u001b[?1003h\u001b[?1006h' + [
       'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
     ].join('\r\n') }))
-    ipcMain.handle('desktop:resize-tab', () => {})
+    // Every size the terminal reported to the session process. A size change makes the CLI redraw its whole screen.
+    const sizes = []
+    ipcMain.handle('desktop:resize-tab', (_event, _tabId, cols, rows) => { sizes.push(`${cols}x${rows}`) })
     ipcMain.handle('desktop:write-tab', (_event, _tabId, data) => { written.push(data); return { gitCursorContextAttached: false } })
     ipcMain.handle('desktop:open-external-url', (_event, url) => { calls.push({ type: 'url', text: url }) })
     ipcMain.handle('desktop:open-file', async (_event, source, text, location) => {
@@ -67,6 +69,8 @@ if (!process.versions.electron) {
       if (mode === 'missing') return { ok: false, reason: 'missing' }
       if (mode === 'outside') return { ok: false, reason: 'outside-workspace' }
       if (mode === 'throw') throw new Error('Fixture reveal failure')
+      // An answered error whose text happens to end the way a progress notice does.
+      if (mode === 'throw-ellipsis') throw new Error('Still waiting…')
       if (mode === 'pending') await new Promise((_, reject) => { rejectPending = reject })
       return { ok: true }
     })
@@ -125,6 +129,13 @@ if (!process.versions.electron) {
       window.showInactive()
       await window.loadFile(join(artifacts, 'index.html'))
       await until(() => ui('document.querySelector(".xterm-rows")?.textContent.includes("folder with spaces")'), 'terminal output')
+      await delay(300)
+      // From here on nothing changes the window, so nothing may change the terminal's size: not a click, not a notice.
+      const size = sizes.at(-1)
+      assert.ok(size, 'the terminal reported its size once it was laid out')
+      const terminalBox = () => ui('(() => { const r = document.querySelector(".terminal-viewport").getBoundingClientRect(); return [Math.round(r.top), Math.round(r.height), Math.round(r.width)].join() })()')
+      const box = await terminalBox()
+      sizes.length = 0
       await clickLink('https://example.com/')
       assert.deepEqual(calls.pop(), { type: 'url', text: 'https://example.com/' })
       await clickLink('src/missing.txt')
@@ -136,10 +147,13 @@ if (!process.versions.electron) {
         const terminal = document.querySelector('.terminal-viewport').getBoundingClientRect();
         const restart = document.querySelector('.session-stopped-actions .primary-button');
         const button = restart.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= terminal.top && terminal.height > 0
-          && element.contains(document.elementFromPoint(rect.x + 5, rect.y + 5))
+        const dismiss = element.querySelector('button').getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && Math.abs(rect.top - terminal.top) <= 1 && rect.bottom < terminal.bottom && terminal.height > 0
+          && element.contains(document.elementFromPoint(dismiss.x + dismiss.width / 2, dismiss.y + dismiss.height / 2))
+          && !element.contains(document.elementFromPoint(rect.x + 5, rect.y + 5))
           && restart.contains(document.elementFromPoint(button.x + 5, button.y + 5));
-      })()`), true, 'notice must reserve space above the terminal and leave restart clickable')
+      })()`), true, 'notice must lie over the top of the terminal, take the pointer only on its dismiss button, and leave restart clickable')
+      assert.equal(await terminalBox(), box, 'a notice takes no space from the terminal')
       await delay(250)
       await writeFile(join(artifacts, 'missing-file-error.png'), (await window.webContents.capturePage()).toPNG())
       await ui('document.querySelector(".terminal-link-error button").click()')
@@ -148,9 +162,19 @@ if (!process.versions.electron) {
       await clickLink('src/missing.txt')
       assert.match(await until(notice, 'workspace error'), /within the session workspace/)
       assert.equal(await ui('document.querySelector(".terminal-link-error").getAttribute("role")'), 'alert')
+      // The notice lies over the first rows, so it leaves by itself: the link under it can be clicked again.
+      await delay(6500)
+      assert.match(await notice(), /within the session workspace/, 'still shown after a few seconds')
+      await until(async () => (await notice()) === null, 'the notice leaves by itself')
       mode = 'throw'
       await clickLink('src/missing.txt')
       assert.equal(await until(notice, 'IPC error'), 'Could not open file: Fixture reveal failure×')
+      // An answered error leaves by itself whatever its text ends with; only a pending open stays.
+      mode = 'throw-ellipsis'
+      await clickLink('src/missing.txt')
+      assert.equal(await until(notice, 'IPC error ending in an ellipsis'), 'Could not open file: Still waiting…×')
+      await delay(6500)
+      await until(async () => (await notice()) === null, 'an answered error ending in an ellipsis still leaves by itself')
       mode = 'success'
       await clickLink('./folder with spaces/example.txt')
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: './folder with spaces/example.txt' })
@@ -166,13 +190,15 @@ if (!process.versions.electron) {
       assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7, reveal: true } })
       mode = 'pending'
       await clickLink('src/app.ts', ['control'])
-      assert.equal(await notice(), 'Revealing file…×', 'a Ctrl click says it reveals')
+      assert.equal(await notice(), null, 'nothing is shown for an open that may answer at once')
+      assert.equal(await until(notice, 'slow reveal notice'), 'Revealing file…×', 'a Ctrl click that takes a while says it reveals')
       rejectPending(new Error('done'))
       await delay(100)
       await ui('document.querySelector(".terminal-link-error button")?.click()')
       mode = 'pending'
       await clickLink('src/missing.txt')
-      assert.equal(await notice(), 'Opening file…×', 'pending click gives immediate feedback')
+      assert.equal(await until(notice, 'slow open notice'), 'Opening file…×', 'a click that takes a while says it is opening')
+      assert.equal(await terminalBox(), box, 'the progress notice takes no space from the terminal either')
       await clickLink('https://example.com/')
       rejectPending(new Error('stale file error'))
       await delay(100)
@@ -235,7 +261,10 @@ if (!process.versions.electron) {
         await delay(100)
       }
       assert.deepEqual(await ui('window.unhandled'), [])
-      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
+      // Through every click, notice, dismissal and tab switch above, the session process was never told a new size.
+      assert.equal(await terminalBox(), box)
+      assert.deepEqual([...new Set(sizes)].filter(reported => reported !== size), [], `the terminal changed size: ${sizes.join(' ')}`)
+      await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'notice over the terminal without resizing it', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
     } catch (error) {
       console.error(error)
