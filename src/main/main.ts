@@ -5582,16 +5582,37 @@ async function trustedFile(profileId: unknown, toolTabId: unknown): Promise<{ fi
  * the file. The link is resolved first, so the root is the real folder and the file's name is its real name. A path that
  * names no file is reported as missing by the caller; a folder is shown in the file manager.
  */
-async function outsideLocation(target: string): Promise<{ root: string; path: string } | null> {
+async function outsideLocation(target: string, roots: readonly string[]): Promise<{ root: string; path: string } | null> {
   if (!isLocalFilesystemPath(target) || !hostPath.isAbsolute(target)) return null
   const real = await realpath(target).catch(() => null)
   if (!real) {
     // Missing: keep the spelling, so the caller reports it as missing rather than as outside the workspace.
     return { root: hostPath.dirname(target), path: hostPath.basename(target) }
   }
+  // A link can lead to a network share or a device. Only a folder on this computer is read, and nothing is asked of the
+  // target before that is known.
+  if (!isLocalFilesystemPath(real) || !hostPath.isAbsolute(real)) return null
+  // A link that leads back into the workspace or one of its worktrees opens the file there, in the tab it already has,
+  // and keeps working when this setting is turned off.
+  const inside = locateInRoots(roots, real)
+  if (inside) return inside
   const info = await stat(real).catch(() => null)
   if (info?.isDirectory()) return { root: real, path: '' }
   return { root: hostPath.dirname(real), path: hostPath.basename(real) }
+}
+/**
+ * After "Open files outside the workspace" changes: a tab whose folder is no longer allowed stops being watched, so no
+ * folder outside the workspace stays watched, and every File tab reads again, so the one on screen clears at once.
+ * Hidden tabs read again when they are next shown.
+ */
+async function revalidateFileTabs(): Promise<void> {
+  const tabs = projectTools().state().projects.flatMap(project => project.tabs.filter(tab => tab.kind === 'file').map(tab => ({ profileId: project.profileId, id: tab.id })))
+  for (const tab of tabs) {
+    const { trusted } = await trustedFile(tab.profileId, tab.id).catch(() => ({ trusted: false }))
+    if (!trusted) projectTools().watchFile(tab.profileId, tab.id, null)
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  for (const tab of tabs) mainWindow.webContents.send('desktop:file-changed', tab.id)
 }
 function assertMainWindowSender(event: IpcMainInvokeEvent): void {
   assertTrustedIpcSender(event)
@@ -5634,11 +5655,11 @@ ipcMain.handle('desktop:open-file', async (event, source: unknown, candidate: un
     } else throw new Error('Invalid file request')
   }
   const target = hostPath.resolve(base, candidate)
-  let located = locateInRoots(roots, target) ?? (desktopConfig.openFilesOutsideWorkspace ? await outsideLocation(target) : null)
+  let located = locateInRoots(roots, target) ?? (desktopConfig.openFilesOutsideWorkspace ? await outsideLocation(target, roots) : null)
   if (!located) return { ok: false, reason: 'outside-workspace' }
   // A path inside the workspace can lead out of it through a link. With the setting on, it is read where it really is.
   if (located.path !== '' && desktopConfig.openFilesOutsideWorkspace && (await resolveInRoot(located.root, located.path)).ok === false) {
-    const outside = await outsideLocation(target)
+    const outside = await outsideLocation(target, roots)
     if (outside) located = outside
   }
   if (located.path === '') {
@@ -5796,11 +5817,7 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
     if (typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace) {
       desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
-      // A File tab on screen reads its file again now, so one showing an outside file clears when this is turned off.
-      // Hidden tabs read again when they are next shown.
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        for (const project of projectTools().state().projects) for (const tab of project.tabs) if (tab.kind === 'file') mainWindow.webContents.send('desktop:file-changed', tab.id)
-      }
+      observe(revalidateFileTabs(), 'Could not recheck File tabs')
     }
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.

@@ -375,6 +375,9 @@ export class FileWatchers {
   private readonly entries = new Map<string, Watch>()
   constructor(private readonly changed: (id: string) => void, private readonly debounceMs = 300, private readonly retryMs = 2_000) {}
 
+  /** The path a tab's folder watch was asked for, or null when it is not watched. */
+  watched(id: string): string | null { return this.entries.get(id)?.path ?? null }
+
   watch(id: string, path: string): void {
     if (this.entries.get(id)?.path === path) return
     this.unwatch(id)

@@ -552,6 +552,8 @@ export class ProjectToolService {
     return file
   }
   /** Watch a File tab's file while its panel shows it; `path` null stops watching. */
+  /** What a File tab is watched for, or null. */
+  watchedFile(id: string): string | null { return this.fileWatchers.watched(id) }
   watchFile(profileId: string, id: string, path: string | null): void {
     if (path === null || this.stopping) { this.fileWatchers.unwatch(id); return }
     this.fileTab(profileId, id)
