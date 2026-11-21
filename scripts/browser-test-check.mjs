@@ -960,7 +960,7 @@ if (!process.versions.electron) {
       pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for hide'); browser.setBounds(null)
       assert.equal((await (await pending).json()).status, 'cancelled'); assert.equal(browser.snapshot.testing.enabled, false)
-      await assert.rejects(execute([visible('#title')]), /Show the selected browser page/)
+      await assert.rejects(execute([visible('#title')]), /Show browser page \d+ before starting a test/)
       browser.setBounds({ x: 0, y: 0, width: 1000, height: 700 })
       pending = request(waiting)
       await until(() => browser.snapshot.testing.running, 'test started for switch'); const oldPage = browser.snapshot.activePageId; browser.action('new-page')
