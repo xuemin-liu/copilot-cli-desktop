@@ -5794,7 +5794,14 @@ ipcMain.handle('desktop-settings:update-preferences', async (event, preferences:
     // Sessions started from now on get the helper; turning it off also turns control off everywhere at once.
     desktopControlChanged = typeof values.desktopControl === 'boolean' && desktopConfig.desktopControl !== values.desktopControl
     if (typeof values.desktopControl === 'boolean') desktopConfig.desktopControl = values.desktopControl
-    if (typeof values.openFilesOutsideWorkspace === 'boolean') desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
+    if (typeof values.openFilesOutsideWorkspace === 'boolean' && values.openFilesOutsideWorkspace !== desktopConfig.openFilesOutsideWorkspace) {
+      desktopConfig.openFilesOutsideWorkspace = values.openFilesOutsideWorkspace
+      // A File tab on screen reads its file again now, so one showing an outside file clears when this is turned off.
+      // Hidden tabs read again when they are next shown.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        for (const project of projectTools().state().projects) for (const tab of project.tabs) if (tab.kind === 'file') mainWindow.webContents.send('desktop:file-changed', tab.id)
+      }
+    }
     // A remembered tray action is unusable without a tray icon. Move back to
     // the explicit prompt and restore a hidden window before persisting.
     if (!desktopConfig.trayEnabled && desktopConfig.closeBehavior === 'tray') {

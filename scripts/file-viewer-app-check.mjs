@@ -249,6 +249,8 @@ if (!process.versions.electron) {
       assert.deepEqual(await open(join(outside, 'secret.txt')), { ok: false, reason: 'outside-workspace' }, 'refused again once off')
       const outsideTab = (await fileTabs()).find(tab => tab.file.path === 'secret.txt')
       assert.deepEqual(await ui(`window.copilotDesktop.fileRead(${JSON.stringify(profileId)}, ${JSON.stringify(outsideTab.id)}, null)`), { status: 'root-missing' }, 'an open outside tab no longer reads')
+      // The tab was on screen when the setting went off: what it showed is gone from the page, not only from new reads.
+      await until(`!document.querySelector(${JSON.stringify(`${panel} .file-code`)})?.textContent.includes('outside secret') && !document.body.innerText.includes('outside secret')`, 'the visible outside file is cleared')
       await action({ type: 'close', id: outsideTab.id })
       assert.equal((await fileTabs()).length, tabsBefore)
       settings.close()
