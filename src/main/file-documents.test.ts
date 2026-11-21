@@ -147,7 +147,7 @@ test('separated text becomes rows of cells, with quotes, separators and line end
   assert.deepEqual(rows('a,b\r\n1,2'), [['a', 'b'], ['1', '2']], 'Windows line ends, no line end at the end')
   assert.deepEqual(rows('name,note\n"Smith, J","said ""hi""\nand left"\n'), [['name', 'note'], ['Smith, J', 'said "hi"\nand left']])
   assert.deepEqual(rows('a,,c\n,,\n'), [['a', '', 'c'], ['', '', '']])
-  assert.deepEqual(rows('﻿a;b\n1;2\n', ';'), [['a', 'b'], ['1', '2']], 'a byte order mark is not part of the first cell')
+  assert.deepEqual(rows('\ufeffa;b\n1;2\n', ';'), [['a', 'b'], ['1', '2']], 'a byte order mark is not part of the first cell')
   assert.deepEqual(rows('a\tb c\n', '\t'), [['a', 'b c']])
   assert.deepEqual(rows(''), [])
   assert.deepEqual(rows('"open quote, never closed\nstill the same cell'), [['open quote, never closed\nstill the same cell']])
