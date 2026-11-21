@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { access, appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -1422,6 +1422,22 @@ test('fan-out readiness answers one word per session: waiting, ready, in its own
   assert.equal(await readiness('tab-99'), 'gone')
   await assert.rejects(async () => readiness('../etc'), /Invalid session tab/)
   await assert.rejects(async () => readiness(7), /Invalid session tab/)
+}))
+
+test('session output is written to that session\'s log in order, and is all there once its tab has closed', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.createTestWindow()
+  const first = (await harness.createMain()).activeTabId!
+  const second = (await harness.createMain()).activeTabId!
+  for (const chunk of ['one ', 'two ', 'three']) harness.spawns[0]!.emitData(chunk)
+  harness.spawns[1]!.emitData('other session')
+  await harness.request('desktop:close-tab', first)
+  await harness.request('desktop:close-tab', second)
+  const sessions = join(directory, 'logs', 'sessions')
+  const [launch] = await readdir(sessions)
+  assert.ok((await readFile(join(sessions, launch!, `${first}.log`), 'utf8')).includes('one two three'))
+  assert.ok((await readFile(join(sessions, launch!, `${second}.log`), 'utf8')).includes('other session'))
+  assert.ok(!(await readFile(join(sessions, launch!, `${first}.log`), 'utf8')).includes('other session'))
 }))
 
 test('explicit CLI close removes legacy profile settings and helper files', async () => fixture(async (harness, directory) => {

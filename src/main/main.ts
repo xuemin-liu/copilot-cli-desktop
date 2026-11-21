@@ -13,7 +13,7 @@ import { WorkflowDeliveries, WorkflowDeliveryRejected } from './workflow-deliver
 import { writeFileAtomic } from './atomic-file.js'
 import { resolveConfigRecovery } from './config-recovery.js'
 import { access, appendFile, mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises'
-import { LogAppender } from './log-appender.js'
+import { SessionLogs } from './session-logs.js'
 import { createGeneralWorkspaceFolder, GENERAL_WORKSPACES_FOLDER } from './general-workspace.js'
 import { existsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -248,7 +248,6 @@ async function bestEffortUsage(work: Promise<unknown> | undefined): Promise<void
   try { await withShutdownDeadline(work ?? Promise.resolve(), 15_000) }
   catch (error) { void writeAppLog(`Usage maintenance failed: ${String(error)}`).catch(() => {}) }
 }
-import { truncateUtf8 } from './utf8.js'
 
 const { autoUpdater } = electronUpdater
 const BACKGROUND_START_ARGUMENT = '--background'
@@ -643,38 +642,9 @@ function writeAppLog(line: string): Promise<void> {
   return appLogWriteQueue
 }
 
-const MAX_SESSION_LOG_BYTES = 5 * 1024 * 1024
-const sessionLogBytesWritten = new Map<string, number>()
-const sessionLogWriteQueues = new Map<string, Promise<void>>()
-const sessionLogAppender = new LogAppender()
-
-async function appendSessionLog(tabId: string, chunk: string): Promise<void> {
-  const written = sessionLogBytesWritten.get(tabId) ?? 0
-  if (written >= MAX_SESSION_LOG_BYTES) return
-  const filename = sessionLogPath(tabId)
-  const chunkBytes = Buffer.byteLength(chunk, 'utf8')
-  if (written + chunkBytes <= MAX_SESSION_LOG_BYTES) {
-    await sessionLogAppender.append(filename, chunk)
-    sessionLogBytesWritten.set(tabId, written + chunkBytes)
-    return
-  }
-  const truncated = truncateUtf8(chunk, MAX_SESSION_LOG_BYTES - written)
-  await sessionLogAppender.append(filename, `${truncated}\n[log truncated at ${MAX_SESSION_LOG_BYTES} bytes]\n`)
-  sessionLogBytesWritten.set(tabId, MAX_SESSION_LOG_BYTES)
-}
+const sessionLogs = new SessionLogs(sessionLogPath)
 
 configureWindowsProcessWatchdogReporter((message) => void writeAppLog(message))
-
-function writeSessionLog(tabId: string, chunk: string): Promise<void> {
-  const previous = sessionLogWriteQueues.get(tabId) ?? Promise.resolve()
-  const operation = previous.then(() => appendSessionLog(tabId, chunk))
-  const tracked = operation.catch(() => undefined)
-  sessionLogWriteQueues.set(tabId, tracked)
-  void tracked.finally(() => {
-    if (sessionLogWriteQueues.get(tabId) === tracked) sessionLogWriteQueues.delete(tabId)
-  })
-  return operation
-}
 
 let deliveryJournal: WorkflowDeliveries | null = null
 let deliveryError: string | null = null
@@ -1778,7 +1748,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     sessionOutputSequences.set(id, sequence)
     tabsState = touchTab(tabsState, id)
     scheduleActivityBroadcast(id)
-    observe(writeSessionLog(id, chunk), 'Could not write session log')
+    observe(sessionLogs.write(id, chunk), 'Could not write session log')
     const window = sessionWindows.get(id) ?? mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk, sequence })
   })
@@ -3435,8 +3405,8 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
       sessionWindows.delete(tabId)
       popout?.destroy()
       persistProfileTabs()
-      await sessionLogWriteQueues.get(tabId)
-      sessionLogBytesWritten.delete(tabId)
+      await sessionLogs.settled(tabId)
+      sessionLogs.forget(tabId)
       sessionOutputSequences.delete(tabId)
       broadcastState()
       refreshMenus()
