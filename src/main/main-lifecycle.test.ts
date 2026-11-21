@@ -1468,10 +1468,14 @@ test('outside files: a link back into the workspace uses its tab, turning the se
   await writeFile(join(workspace, 'src', 'inside.txt'), 'inside\n'); await writeFile(join(outside, 'secret.txt'), 'outside\n')
   // From outside, a link back into the workspace's src folder.
   await symlink(join(workspace, 'src'), join(outside, 'back'), process.platform === 'win32' ? 'junction' : 'dir')
-  const profile = createWorkspaceProfile(workspace, 'default')
+  // The workspace is known by a path that is not its real one, as a temp folder is on macOS (/var is /private/var) and
+  // on Windows runners (a short 8.3 name): resolving the link above gives the real path, which must still match it.
+  const alias = join(directory, 'workspace-alias')
+  await symlink(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const profile = createWorkspaceProfile(alias, 'default')
   harness.configure({ ...DEFAULT_DESKTOP_CONFIG, trayEnabled: false, profiles: [profile], activeProfileId: profile.id }, EMPTY_COPILOT_CAPABILITIES)
   harness.createTestWindow()
-  const open = (path: string) => harness.request('desktop:open-file', { profileId: profile.id, folder: workspace }, path, null) as Promise<{ ok: boolean; reason?: string; revealed?: boolean }>
+  const open = (path: string) => harness.request('desktop:open-file', { profileId: profile.id, folder: alias }, path, null) as Promise<{ ok: boolean; reason?: string; revealed?: boolean }>
   const fileTabs = async () => (await harness.request('desktop:tools-state', 800) as { projects: { profileId: string; tabs: { id: string; kind: string; file?: { root: string; path: string } }[] }[] }).projects.find(p => p.profileId === profile.id)!.tabs.filter(tab => tab.kind === 'file')
   await harness.requestSettings('desktop-settings:update-preferences', { openFilesOutsideWorkspace: true })
 

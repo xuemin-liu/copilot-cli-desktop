@@ -5594,7 +5594,7 @@ async function outsideLocation(target: string, roots: readonly string[]): Promis
   if (!isLocalFilesystemPath(real) || !hostPath.isAbsolute(real)) return null
   // A link that leads back into the workspace or one of its worktrees opens the file there, in the tab it already has,
   // and keeps working when this setting is turned off.
-  const inside = locateInRoots(roots, real)
+  const inside = await locateInRealRoots(roots, real)
   if (inside) return inside
   const info = await stat(real).catch(() => null)
   if (info?.isDirectory()) return { root: real, path: '' }
@@ -5616,6 +5616,22 @@ async function revalidateFileTabs(): Promise<void> {
   }
   if (!mainWindow || mainWindow.isDestroyed()) return
   for (const tab of tabs) mainWindow.webContents.send('desktop:file-changed', tab.id)
+}
+/**
+ * Which workspace root holds a real (link-resolved) path. A root can be known by a path that is not its real one (a
+ * temp folder on macOS lives under /private/var but is named /var; Windows can give a short 8.3 name), so each root is
+ * compared by its real path. The answer keeps the root as written, so the file gets the tab it has when opened directly.
+ */
+async function locateInRealRoots(roots: readonly string[], real: string): Promise<{ root: string; path: string } | null> {
+  const direct = locateInRoots(roots, real)
+  if (direct) return direct
+  for (const root of roots) {
+    const realRoot = await realpath(root).catch(() => null)
+    if (!realRoot) continue
+    const found = locateInRoots([realRoot], real)
+    if (found) return { root: hostPath.resolve(root), path: found.path }
+  }
+  return null
 }
 function assertMainWindowSender(event: IpcMainInvokeEvent): void {
   assertTrustedIpcSender(event)
