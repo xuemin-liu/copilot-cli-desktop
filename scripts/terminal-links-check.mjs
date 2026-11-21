@@ -53,11 +53,14 @@ if (!process.versions.electron) {
     const calls = []
     let mode = 'missing'
     let rejectPending
-    ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: [
+    // What the terminal sent to the session process. The history turns mouse reporting on, as Copilot does.
+    const written = []
+    const leftButton = data => { const report = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data); return Boolean(report) && (Number(report[1]) & 99) === 0 }
+    ipcMain.handle('desktop:get-tab-snapshot', () => ({ sequence: 0, data: '\u001b[?1003h\u001b[?1006h' + [
       'https://example.com/', 'src/missing.txt', '`./folder with spaces/example.txt`', '`node dist/src/cli/cli.js`', 'src/app.ts:42:7 - error', String.raw`"C:\My Repo\lib\file.ts:9:3" failed`,
     ].join('\r\n') }))
     ipcMain.handle('desktop:resize-tab', () => {})
-    ipcMain.handle('desktop:write-tab', () => {})
+    ipcMain.handle('desktop:write-tab', (_event, _tabId, data) => { written.push(data); return { gitCursorContextAttached: false } })
     ipcMain.handle('desktop:open-external-url', (_event, url) => { calls.push({ type: 'url', text: url }) })
     ipcMain.handle('desktop:open-file', async (_event, source, text, location) => {
       calls.push({ type: 'path', tabId: source.tabId, text, ...(location && Object.keys(location).length ? { location } : {}) })
@@ -185,6 +188,16 @@ if (!process.versions.electron) {
       await ui('window.setActive(true)')
       await delay(100)
       assert.equal(await notice(), null)
+      // The click that opens a link is not also reported to the session process; a click beside the link is.
+      mode = 'ok'; calls.length = 0; written.length = 0
+      await clickLink('src/app.ts:42:7')
+      assert.deepEqual(calls.pop(), { type: 'path', tabId: 'tab-1', text: 'src/app.ts', location: { line: 42, column: 7 } })
+      await delay(150)
+      assert.deepEqual(written.filter(leftButton), [], 'a link click reaches the session process as a mouse click too')
+      await clickLink('- error')
+      await delay(150)
+      assert.equal(written.filter(leftButton).length, 2, 'a click away from a link is still reported: press and release')
+      assert.equal(calls.length, 0)
       assert.deepEqual(await ui('window.unhandled'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')

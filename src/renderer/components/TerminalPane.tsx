@@ -11,6 +11,7 @@ import { isMac } from '../platform.js'
 import { INSERT_PROMPT_EVENT, promptInsertText } from '../prompt-insert.js'
 import { requestGitCursorContext } from '../git-cursor-context.js'
 import { buildLogicalLine, scanLineForLinks, type DetectedLink } from '../terminal-links.js'
+import { LinkClickGate } from '../terminal-link-click.js'
 import { ClipboardWriteGate, decodeOsc52ClipboardWrite, stripOsc52Commands } from '../osc52-clipboard.js'
 import {
   ClipboardRedrawRecovery,
@@ -242,6 +243,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
         }
       }
     }
+    // The click that opens a link is not also Copilot's: see LinkClickGate.
+    const linkClick = new LinkClickGate()
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
     // input unchanged while printed URLs and paths remain clickable.
@@ -260,6 +263,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               end: { x: last.column + last.width, y: last.row + 1 },
             },
             activate: (event: MouseEvent) => { void openLink(link, event.ctrlKey || event.metaKey) },
+            hover: () => linkClick.hover(true),
+            leave: () => linkClick.hover(false),
           }]
         })
         callback(links.length > 0 ? links : undefined)
@@ -305,6 +310,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       void window.copilotDesktop.showTerminalContextMenu(terminal.getSelection())
     }
     const handleMouseDown = (event: MouseEvent): void => {
+      linkClick.press(event.button, event.shiftKey)
       nativeCopyGesture.onMouseDown(event.button, event.shiftKey, event.clientX, event.clientY, event.detail)
       if (event.button === 2 && !terminal.hasSelection()) {
         // Right-click is Copilot's explicit native copy command, unlike the
@@ -342,13 +348,16 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     container.addEventListener('mouseup', handleMouseUp, true)
     container.addEventListener('contextmenu', handleContextMenu, true)
 
-    terminal.onData((data) => {
+    const sendInput = (data: string): void => {
       if (!data || data === '\u001b[200~\u001b[201~') return
       const context = data === '\r' ? requestGitCursorContext(tabId) : undefined
       void window.copilotDesktop.writeTab(tabId, data, context?.text).then(
         result => context?.complete?.(result.gitCursorContextAttached),
         () => context?.complete?.(false),
       )
+    }
+    terminal.onData((produced) => {
+      for (const data of linkClick.filter(produced)) sendInput(data)
     })
 
     // Subscribe before fetching the backlog so startup output cannot fall in
