@@ -73,21 +73,32 @@ export function killProcessTree(pid: number, platform: NodeJS.Platform = process
   return killProcessGroup(pid, system)
 }
 
+/** How the last few tree kills outside Windows went, newest last. Read by tests to explain a process that survived one. */
+export const groupKillLog: { pid: number; outcome: string; members?: number[] }[] = []
+function logged(entry: { pid: number; outcome: string; members?: number[] }): void {
+  groupKillLog.push(entry)
+  if (groupKillLog.length > 20) groupKillLog.shift()
+}
+
 /**
- * Kill a whole process group. One signal to the group does it, when the system accepts it. It does not always: macOS
- * refuses to signal a group that holds a process which has exited and not been collected yet, and then nothing in the
- * group is signalled. Killing only the leader, as before, left the rest running (a cancelled `git commit` left its hook
- * running to the end). So when the group signal is refused, list the group's processes and kill each one.
+ * Kill a whole process group. One signal to the group does it, when the system accepts it. When the system says the
+ * group does not exist, there is nothing left to kill. When it refuses for another reason (a group can hold a process
+ * this user may not signal), killing only the leader, as before, would leave the rest running: so the leader is killed
+ * at once, then the group's processes are listed and each one found in this group is killed.
  */
 async function killProcessGroup(pid: number, system: ProcessGroupSystem): Promise<void> {
   // -1 would mean every process this user may signal, and 0 this process's own group.
   if (!Number.isSafeInteger(pid) || pid <= 1) return
-  try { system.kill(-pid, 'SIGKILL'); return } catch { /* Refused, or there is no such group. */ }
-  // List before killing the leader: the listing still finds the others afterwards (they keep their group), but doing it
-  // first means a failed listing has cost nothing.
-  const members = await system.listGroups().then(snapshot => processGroupMembers(snapshot, pid), () => [])
-  for (const member of members) if (member !== pid) { try { system.kill(member, 'SIGKILL') } catch { /* already gone */ } }
+  let refusal: string
+  try { system.kill(-pid, 'SIGKILL'); logged({ pid, outcome: 'group signalled' }); return } catch (error) { refusal = String((error as NodeJS.ErrnoException).code ?? error) }
+  // No such group: it has ended. Its number may already belong to another process, so nothing more is signalled.
+  if (refusal === 'ESRCH') { logged({ pid, outcome: 'no such group' }); return }
+  // The group exists, so its number is still its leader's and cannot have gone to another process: the leader is killed
+  // now, in the same turn. Listing takes time, and after it only processes the listing shows in this group are killed.
   try { system.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  const members = await system.listGroups().then(snapshot => processGroupMembers(snapshot, pid), () => null)
+  logged({ pid, outcome: `group signal refused (${refusal})${members ? '' : ', listing failed'}`, ...(members ? { members } : {}) })
+  for (const member of members ?? []) if (member !== pid) { try { system.kill(member, 'SIGKILL') } catch { /* already gone */ } }
 }
 
 /** Send a signal to a process group outside Windows, falling back to the process alone when it leads no group. */

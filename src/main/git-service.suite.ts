@@ -1,6 +1,7 @@
 // The git service tests. Split across git-service.shard-*.test.ts so they run in parallel; see fixtures/sharded-test.ts.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { groupKillLog } from './process-tree.js'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
@@ -893,13 +894,19 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   await waitFor(() => hookStarted > 0, 30_000)
   h.service.cancel(SUBSCRIBER, PROFILE, repoId)
   const result = await pending
+  // This test has failed on macOS with the hook left running, and the cause is not known. Should it fail again, the
+  // message says how the kill went and what was still running right after it: the hook's processes with their parent
+  // and process group.
+  const afterKill = process.platform === 'win32' ? '' : `kill: ${JSON.stringify(groupKillLog.at(-1))}; still running right after it: ${
+    execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,stat=,command='], { encoding: 'utf8' }).split('\n')
+      .filter(line => line.includes(`sleep ${hookSleepMs / 1_000}`) || line.includes('pre-commit')).map(line => line.trim()).join(' | ') || 'nothing'}`
   assert.deepEqual([result.ok, result.reason], [false, 'cancelled'])
   assert.match(result.message, /index\.lock/)
   const returnedAfter = Date.now() - hookStarted
   assert.ok(returnedAfter < 10_000, `it returned well before the hook would have finished (${returnedAfter} ms after the hook started)`)
   // Wait past the moment the hook would have written its marker had it been left running.
   await new Promise(resolve => setTimeout(resolve, hookStarted + hookSleepMs + 2_500 - Date.now()))
-  assert.equal(existsSync(marker), false, 'the hook was stopped, not left running')
+  assert.equal(existsSync(marker), false, `the hook was stopped, not left running (${afterKill})`)
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 
