@@ -25,6 +25,10 @@ tested CLI version; version parsing alone cannot grant permissions. Unknown even
 and show an unknown task outcome. These checks do not establish task-report helper support, a structured question API,
 or safe automatic resubmission after a crash. Each requires its own implementation evidence before enabling it.
 
+The verified version is the constant `WORKFLOW_CLI_VERSION` in `src/main/workflow-capabilities.ts`, the only place it is
+written. When another version is installed, the Tasks panel and a refused automatic launch name the installed version and say
+that task reports and automatic work are off. To support a newer CLI, pass `npm run workflow:check` on it, then change the constant.
+
 This implements the repeatable evidence collection for Phase 0 of the [workflow plan](task-workflows-plan.md).
 The result is a verification artifact, not a configuration file that enables automation.
 

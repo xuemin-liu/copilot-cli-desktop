@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { JSX } from 'react'
 import type { WorkflowTask, TaskAction, TaskArtifact } from '../../main/workflow-types.js'
 import type { DesktopSessionTab } from '../../main/types.js'
-import { supportsTaskReporting } from '../../main/workflow-capabilities.js'
+import { isWorkflowCliVersion, supportsTaskReporting, WORKFLOW_CLI_VERSION, workflowCliVersionNotice } from '../../main/workflow-capabilities.js'
 import type { FollowupGrant,FollowupDefault } from '../../main/workflow-followups.js'
 import { TaskFollowups } from './WorkflowFollowups.js'
 
@@ -23,6 +23,7 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
     setFailure(null);setPending(true)
     void window.copilotDesktop.createTask(tabId,title.trim(),replace).then(()=>setTitle('')).catch(error=>setFailure(error instanceof Error?error.message:'The task could not be created.')).finally(()=>setPending(false))
   }
+  const versionNotice = workflowCliVersionNotice(installedCliVersion)
   const active = tasks.filter(task => task.outcome !== 'completed' && task.outcome !== 'cancelled')
   const history = tasks.filter(task => task.outcome === 'completed' || task.outcome === 'cancelled')
   const renderArtifacts=(artifacts:readonly TaskArtifact[]=[]):JSX.Element[]=>artifacts.map((artifact,index)=><p key={index}>{artifact.kind==='url'
@@ -60,7 +61,9 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
           if(!tab)return <p>The session is not open. Open it from History to continue.</p>
           const capability={version:tab.cliVersion,sideChat:Boolean(tab.sideChat),remote:tab.remote,preset:tab.sessionPermissionPreset}
           if(supportsTaskReporting(capability))return null
-          return <p>Structured reports are unavailable; set outcomes manually.
+          return <p>{isWorkflowCliVersion(tab.cliVersion)
+            ? 'Structured reports are unavailable; set outcomes manually.'
+            : `Structured reports need Copilot CLI ${WORKFLOW_CLI_VERSION}; this session runs ${tab.cliVersion ?? 'an unknown version'}. Set outcomes manually.`}
             {onRestart&&supportsTaskReporting({...capability,version:installedCliVersion})&&<button type="button" onClick={()=>onRestart(tab.id)}>Resume with task support</button>}
           </p>
         })()}
@@ -70,8 +73,9 @@ export function WorkflowTasks({ tasks, error,followups=[],defaults=[],tabs=[],in
       </>}
       {['completed','cancelled'].includes(task.outcome)&&<button type="button" title="Deletes only this local task record; sessions, files, worktrees and handoff evidence are kept" onClick={()=>{if(window.confirm(`Delete local task history for "${task.title}"? Its request copy and report history will be removed. Sessions, files, worktrees and handoff evidence are kept.`))finish(task.id,'delete')}}>Delete task history</button>}
     </li>)}</ul>
-  return <details className="needs-you workflow-tasks"><summary>Tasks · {tasks.length}</summary>
+  return <details className="needs-you workflow-tasks"><summary>Tasks · {tasks.length}{versionNotice ? ' · reports off' : ''}</summary>
     {(error || failure) && <p role="status">{error || failure}</p>}
+    {versionNotice && <p role="note">{versionNotice}</p>}
     {known.length>0&&<form onSubmit={event=>{
       event.preventDefault();const tab=selected;if(tab)chooseTask(tab.id,tasks.some(task=>task.sessionId===tab.lastSessionId&&!['completed','cancelled'].includes(task.outcome)))
     }}>
