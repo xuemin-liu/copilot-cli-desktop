@@ -356,7 +356,8 @@ const managedTabs = new Map<string, ManagedTab>()
 // replacement process starts successfully, including across failed attempts.
 const profilesWithSessionTabs = new Set<string>()
 const unrestoredProfileTabs = new Map<string, RestoredTab[]>()
-const activityBroadcastTimers = new Map<string, NodeJS.Timeout>()
+/** The one pending activity broadcast, for every tab: see `scheduleActivityBroadcast`. */
+let activityBroadcastTimer: NodeJS.Timeout | null = null
 /** Per dormant tab: the read of the folder its saved session started in, until it settles. Until then the tab may still
  * resume in any worktree, so nothing may treat that worktree as unused. */
 const dormantFolderReads = new Map<string, Promise<void>>()
@@ -542,13 +543,20 @@ const pendingRestarts = new Map<string, Promise<DesktopState>>()
 const pendingProfileRestores = new Map<string, Promise<void>>()
 const pendingForks = new Map<string, Promise<DesktopState>>()
 
-function scheduleActivityBroadcast(tabId: string): void {
-  if (activityBroadcastTimers.has(tabId)) return
-  activityBroadcastTimers.set(tabId, setTimeout(() => {
-    activityBroadcastTimers.delete(tabId)
+/**
+ * Tool starts and completions change a tab's activity line many times a second. They are shown at most a second late,
+ * by one broadcast for all tabs. A timer per tab sent the whole state once a second for every busy tab: five sessions
+ * working meant five full snapshots a second, each built and sent to every window.
+ */
+function scheduleActivityBroadcast(): void {
+  if (activityBroadcastTimer) return
+  activityBroadcastTimer = setTimeout(() => {
+    activityBroadcastTimer = null
+    // Nothing is left to show it to once the app is closing.
+    if (shuttingDown()) return
     syncTabState()
     broadcastState()
-  }, 1_000))
+  }, 1_000)
 }
 
 const state: DesktopState = {
@@ -1732,7 +1740,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     if (managedTabs.get(id)?.session !== session) return
     tabsState = { ...tabsState, tabs: tabsState.tabs.map((tab) => tab.id === id ? { ...tab, activityDetail: session.activityDetail } : tab) }
     // Tool starts and completions are frequent; ride the debounced broadcast and skip the Git refresh.
-    scheduleActivityBroadcast(id)
+    scheduleActivityBroadcast()
   })
   session.on('session-cwd', (cwd: string | null) => {
     if (managedTabs.get(id)?.session !== session) return
@@ -1760,7 +1768,7 @@ function wireSessionEvents(id: string, session: PtySession): void {
     const sequence = (sessionOutputSequences.get(id) ?? 0) + 1
     sessionOutputSequences.set(id, sequence)
     tabsState = touchTab(tabsState, id)
-    scheduleActivityBroadcast(id)
+    scheduleActivityBroadcast()
     observe(sessionLogs.write(id, chunk), 'Could not write session log')
     const window = sessionWindows.get(id) ?? mainWindow
     if (window && !window.isDestroyed()) window.webContents.send('desktop:tab-output', { tabId: id, data: chunk, sequence })
@@ -3357,9 +3365,6 @@ async function unloadSessionTab(tabId: string): Promise<DesktopState> {
     if (!finishTools) return snapshot()
     try {
       cancelHeldInput(tabId)
-      const activityTimer = activityBroadcastTimers.get(tabId)
-      if (activityTimer) clearTimeout(activityTimer)
-      activityBroadcastTimers.delete(tabId)
       const managed = managedTabs.get(tabId)
       if (managed) {
         await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before unloading: ${String(error)}`))
@@ -3403,9 +3408,6 @@ async function closeSessionTab(tabId: string): Promise<DesktopState> {
     try {
       cancelHeldInput(tabId)
       await projectToolService?.stopBridge(tabId)
-      const activityTimer = activityBroadcastTimers.get(tabId)
-      if (activityTimer) clearTimeout(activityTimer)
-      activityBroadcastTimers.delete(tabId)
       const managed = managedTabs.get(tabId)
       if (managed) {
         await flushSessionName(tabId).catch((error) => void writeAppLog(`Could not rename session ${tabId} before closing: ${String(error)}`))
@@ -6485,6 +6487,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (updateCheckTimer) clearTimeout(updateCheckTimer)
   if (copilotResolutionRefreshTimer) clearTimeout(copilotResolutionRefreshTimer)
+  if (activityBroadcastTimer) { clearTimeout(activityBroadcastTimer); activityBroadcastTimer = null }
   globalShortcut.unregisterAll()
 })
 
