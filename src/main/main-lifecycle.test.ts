@@ -48,6 +48,8 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  /** Keep the usage flush that comes before a CLI install or update waiting until `work` settles. */
+  holdUsageFlush(work: Promise<void>): void
   /** Keep the next CLI install or update command running until `work` settles. */
   holdMaintenance(work: Promise<void>): void
   /** Run the startup settings save with every save failing; resolves with what was written to the app log. */
@@ -320,6 +322,7 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           configureMigrationExport(service, path, senderDestroyed = false) { migrationService = service; settingsSenderDestroyed = senderDestroyed; dialog.showSaveDialog = async () => ({ canceled: false, filePath: path }); dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
           configureBrowserExportDialog(result) { dialog.showSaveDialog = async (owner) => { if (!owner || owner.isDestroyed()) throw new Error('Missing live export owner'); return result; }; },
           holdMaintenance(work) { usageService.noteSourceChanged ??= () => {}; holdCopilotCommand(work); },
+          holdUsageFlush(work) { usageService.noteSourceChanged ??= () => {}; usageService.flush = async () => { await work; }; },
           async startupSaveWithFailingDisk() { const logged = []; const save = persistConfig, log = writeAppLog; persistConfig = async () => { throw new Error('ENOSPC: no space left on device'); }; writeAppLog = async (message) => { logged.push(message); };
             try { await saveSettingsAtStartup(true); await Promise.resolve(); } finally { persistConfig = save; writeAppLog = log; } return logged; },
           chooseFolder(path) { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); },
@@ -1331,6 +1334,22 @@ test('installing or updating the CLI and starting a Copilot session keep each ot
   await assert.rejects(harness.maintain('update'), /Close all running Copilot sessions/)
   await harness.request('desktop:close-tab', opened.activeTabId)
   await harness.maintain('update')
+  assert.equal(harness.maintenanceStatus(), 'succeeded')
+}))
+
+test('a session cannot slip in between the checks of a CLI update and the update itself', async () => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  harness.configureMaintenance()
+  // The update is admitted, then waits for usage to be written before it runs the command.
+  let flushed!: () => void
+  harness.holdUsageFlush(new Promise<void>((resolve) => { flushed = resolve }))
+  const updating = harness.maintain('update')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(harness.maintenanceCalls.includes('update'), false, 'the command has not started yet')
+  await assert.rejects(harness.createMain(), /Copilot CLI is being installed or updated/)
+  assert.equal(harness.spawns.length, 0)
+  flushed()
+  await updating
   assert.equal(harness.maintenanceStatus(), 'succeeded')
 }))
 

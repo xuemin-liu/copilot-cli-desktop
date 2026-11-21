@@ -4346,11 +4346,13 @@ async function maintainCopilotCli(operation: 'install' | 'update'): Promise<void
     operation,
     message: operation === 'install' ? 'Installing @github/copilot…' : 'Updating Copilot CLI…',
   }
+  // Set in the same turn as the checks above, before the first await: a session admitted while usage is being flushed
+  // would otherwise start, and the command below would then replace the program under it.
+  copilotBeingReplaced = true
   try {
-    await bestEffortUsage(usageService?.flush())
     let output: string
-    copilotBeingReplaced = true
     try {
+      await bestEffortUsage(usageService?.flush())
       output = operation === 'install'
         ? await installCopilotCli()
         : await updateCopilotCli(current!)
