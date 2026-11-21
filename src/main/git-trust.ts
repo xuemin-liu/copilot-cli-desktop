@@ -12,8 +12,11 @@ import type { GitReviewItem } from './git-types.js'
  * whose own config names a program is held at "needs review" until the user accepts that exact config.
  */
 
-/** POSIX ERE over lower-cased config keys. Only settings that can start a program or redirect git. */
-export const REVIEW_KEY_PATTERN = '^(core\\.(fsmonitor|sshcommand|hookspath|worktree|askpass|gitproxy|excludesfile|attributesfile)|filter\\..+|diff\\.external|diff\\..+\\.(command|textconv)|merge\\..+\\.driver|credential\\..+|gpg\\..+|include\\..+|includeif\\..+|url\\..+|remote\\..+\\.(vcs|proxy|receivepack|uploadpack|uploadarchive)|protocol\\..+)$'
+/**
+ * POSIX ERE over lower-cased config keys. Only settings that can start a program or redirect git: `http.*` is here
+ * because a repository's own proxy, certificate or header settings decide where the user's credentials are sent.
+ */
+export const REVIEW_KEY_PATTERN = '^(core\\.(fsmonitor|sshcommand|hookspath|worktree|askpass|gitproxy|excludesfile|attributesfile|alternaterefscommand)|filter\\..+|diff\\.external|diff\\..+\\.(command|textconv)|merge\\..+\\.driver|credential\\..+|gpg\\..+|include\\..+|includeif\\..+|url\\..+|remote\\..+\\.(vcs|proxy|receivepack|uploadpack|uploadarchive)|protocol\\..+|http\\..+)$'
 
 /** The three values Git LFS writes for `git lfs install`; a repository cannot make them run anything else. */
 const LFS_STANDARD: Readonly<Record<string, string>> = {
@@ -33,7 +36,22 @@ export interface RepoConfigScan {
   items: GitReviewItem[]
   /** Stable over order; changes when any reviewed setting changes. */
   hash: string
+  /**
+   * What was done about `include` and `includeIf`: `none` when the config has neither; `held` when it has them and
+   * the user has not accepted these exact lines, so the files they name were not read; `followed` when the settings
+   * those files bring in are part of `items`.
+   */
+  includes: 'none' | 'held' | 'followed'
+  /** The hash of the config's own settings, includes not followed: what accepting the include lines is recorded under. */
+  ownHash: string
 }
+
+/** Tells the scan whether the user accepted a repository's include lines; without it, includes are never followed. */
+export interface IncludeApprovals {
+  areIncludesApproved(root: string, ownHash: string): Promise<boolean>
+}
+
+const isInclude = (item: GitReviewItem): boolean => item.key.startsWith('include.') || item.key.startsWith('includeif.')
 
 /** Parse `git config --show-origin -z --get-regexp`: records of `origin NUL key NL value NUL`. */
 export function parseConfigScan(output: string): GitReviewItem[] {
@@ -57,26 +75,45 @@ export function configItemsHash(items: readonly GitReviewItem[]): string {
   return createHash('sha256').update(JSON.stringify(tuples)).digest('hex')
 }
 
-/** Read only the repository's own config (local and worktree scope), never global or system. */
-export async function scanRepoConfig(runner: GitRunner, repoRoot: string, signal?: AbortSignal): Promise<RepoConfigScan> {
+/** One pass over the repository's own config (local and worktree scope), never global or system. */
+async function readReviewItems(runner: GitRunner, repoRoot: string, followIncludes: boolean, signal?: AbortSignal): Promise<GitReviewItem[]> {
   const found: GitReviewItem[] = []
   for (const scope of ['--local', '--worktree']) {
     const result = await runner.run({
       cwd: repoRoot, signal,
-      args: ['config', scope, '--show-origin', '-z', '--get-regexp', REVIEW_KEY_PATTERN],
+      args: ['config', scope, ...(followIncludes ? ['--includes'] : []), '--show-origin', '-z', '--get-regexp', REVIEW_KEY_PATTERN],
     })
     // Exit 1 means no match. A failure in `--worktree` is expected when worktree config is not in use.
     if (result.exitCode === 0) found.push(...parseConfigScan(result.stdout.toString('utf8')))
     else if (scope === '--local' && result.exitCode !== 1) throw new Error(result.cancelled ? 'cancelled' : result.stderr.trim().split(/\r?\n/, 1)[0] || 'Could not read the repository config')
   }
   const seen = new Set<string>()
-  const items = found.filter(item => {
+  return found.filter(item => {
     const id = `${item.key}\0${item.value}`
     if (seen.has(id)) return false
     seen.add(id)
     return true
   }).filter(item => !isBenignConfigItem(item.key, item.value))
-  return { items, hash: configItemsHash(items) }
+}
+
+/**
+ * What in a repository's config needs the user's review.
+ *
+ * `git config --local` does not read the files an `include.path` names, but every other git command does. So the
+ * settings those files bring in are part of what is reviewed and hashed: a change to an included file is a new
+ * question. An include can also name a file on another computer, and reading it is itself a network request, so the
+ * files are read only after the user has accepted those exact include lines. Until then the scan is `held`, and its
+ * hash matches nothing that was trusted before.
+ */
+export async function scanRepoConfig(runner: GitRunner, repoRoot: string, signal?: AbortSignal, approvals?: IncludeApprovals): Promise<RepoConfigScan> {
+  const own = await readReviewItems(runner, repoRoot, false, signal)
+  const ownHash = configItemsHash(own)
+  if (!own.some(isInclude)) return { items: own, hash: ownHash, includes: 'none', ownHash }
+  if (!approvals || !(await approvals.areIncludesApproved(repoRoot, ownHash))) {
+    return { items: own, hash: createHash('sha256').update(`includes-held\0${ownHash}`).digest('hex'), includes: 'held', ownHash }
+  }
+  const items = await readReviewItems(runner, repoRoot, true, signal)
+  return { items, hash: configItemsHash(items), includes: 'followed', ownHash }
 }
 
 /** Canonical map key for a repository root. */
@@ -89,6 +126,8 @@ interface TrustFile {
   repos: Record<string, string>
   /** Repository hooks the user has approved, by canonical path and the hash of their names and contents. */
   hooks?: Record<string, string>
+  /** Include lines the user has accepted, by canonical path and the hash of the config's own settings. */
+  includes?: Record<string, string>
 }
 
 const MAX_TRUSTED_REPOS = 500
@@ -101,6 +140,7 @@ const HASH = /^[0-9a-f]{64}$/
 export class GitTrustStore {
   private repos = new Map<string, string>()
   private hooks = new Map<string, string>()
+  private includes = new Map<string, string>()
   private loaded: Promise<void> | null = null
   private writes: Promise<void> = Promise.resolve()
 
@@ -110,7 +150,7 @@ export class GitTrustStore {
     this.loaded ??= readFile(this.file, 'utf8').then(text => {
       const parsed = JSON.parse(text) as Partial<TrustFile>
       if (parsed.version !== 1) return
-      for (const [target, source] of [[this.repos, parsed.repos], [this.hooks, parsed.hooks]] as const) {
+      for (const [target, source] of [[this.repos, parsed.repos], [this.hooks, parsed.hooks], [this.includes, parsed.includes]] as const) {
         if (!source || typeof source !== 'object') continue
         for (const [key, hash] of Object.entries(source)) if (typeof hash === 'string' && HASH.test(hash)) target.set(key, hash)
       }
@@ -119,7 +159,7 @@ export class GitTrustStore {
   }
 
   private save(): Promise<void> {
-    const body: TrustFile = { version: 1, repos: Object.fromEntries(this.repos), hooks: Object.fromEntries(this.hooks) }
+    const body: TrustFile = { version: 1, repos: Object.fromEntries(this.repos), hooks: Object.fromEntries(this.hooks), includes: Object.fromEntries(this.includes) }
     this.writes = this.writes.then(() => writeFileAtomic(this.file, JSON.stringify(body, null, 2)))
     return this.writes
   }
@@ -139,6 +179,17 @@ export class GitTrustStore {
   async trust(root: string, hash: string): Promise<void> {
     await this.load()
     this.remember(this.repos, root, hash)
+    await this.save()
+  }
+
+  async areIncludesApproved(root: string, ownHash: string): Promise<boolean> {
+    await this.load()
+    return this.includes.get(repoTrustKey(root)) === ownHash
+  }
+
+  async approveIncludes(root: string, ownHash: string): Promise<void> {
+    await this.load()
+    this.remember(this.includes, root, ownHash)
     await this.save()
   }
 

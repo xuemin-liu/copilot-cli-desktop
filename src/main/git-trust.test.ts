@@ -69,7 +69,63 @@ test('scanRepoConfig lists only settings that can run a program', { skip }, asyn
   })
   const scan = await scanRepoConfig(fixture.runner, risky)
   assert.deepEqual(scan.items.map(item => item.key).sort(), ['core.sshcommand', 'credential.helper', 'diff.x.textconv', 'filter.evil.clean', 'include.path'])
-  assert.equal(scan.hash, configItemsHash(scan.items))
+  // It has an include line nobody accepted, so the scan is held and its hash is not the plain hash of the items.
+  assert.equal(scan.includes, 'held')
+  assert.equal(scan.ownHash, configItemsHash(scan.items))
+  assert.notEqual(scan.hash, scan.ownHash)
+})
+
+test('settings that redirect a fetch are reviewed: alternate refs and the repository\'s own http settings', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const repo = fixture.repo('redirect', (d) => {
+    fixture.plain(d, 'config', 'core.alternateRefsCommand', 'sh -c evil')
+    fixture.plain(d, 'config', 'http.proxy', 'http://proxy.invalid:8080')
+    fixture.plain(d, 'config', 'http.sslVerify', 'false')
+    fixture.plain(d, 'config', 'http.https://example.invalid/.extraHeader', 'X: y')
+  })
+  const scan = await scanRepoConfig(fixture.runner, repo)
+  assert.deepEqual(scan.items.map(item => item.key).sort(), ['core.alternaterefscommand', 'http.https://example.invalid/.extraheader', 'http.proxy', 'http.sslverify'])
+  assert.equal(scan.includes, 'none')
+})
+
+test('an included file is read only after its include line is accepted, and its settings are then part of the review', { skip }, async (t) => {
+  const fixture = (await createGitFixture())!
+  t.after(() => fixture.cleanup())
+  const included = (d: string): string => join(d, 'shared.gitconfig')
+  const repo = fixture.repo('includes', (d) => {
+    writeFileSync(included(d), '[user]\n\tname = harmless\n')
+    fixture.plain(d, 'config', 'include.path', '../shared.gitconfig')
+  })
+  const store = new GitTrustStore(join(fixture.root, 'includes-trust.json'))
+
+  const held = await scanRepoConfig(fixture.runner, repo, undefined, store)
+  assert.equal(held.includes, 'held')
+  assert.deepEqual(held.items.map(item => item.key), ['include.path'])
+  assert.notEqual(held.hash, configItemsHash(held.items), 'a held scan matches nothing trusted before includes were followed')
+  assert.equal(held.ownHash, configItemsHash(held.items))
+  assert.equal((await scanRepoConfig(fixture.runner, repo)).includes, 'held', 'no approvals means never followed')
+
+  await store.approveIncludes(repo, held.ownHash)
+  const followed = await scanRepoConfig(fixture.runner, repo, undefined, store)
+  assert.equal(followed.includes, 'followed')
+  assert.deepEqual(followed.items.map(item => item.key), ['include.path'])
+  assert.equal(followed.hash, configItemsHash(followed.items))
+
+  // The include line is unchanged; what it brings in is not. That is a new question.
+  writeFileSync(included(repo), '[core]\n\tsshCommand = evil\n[http]\n\tproxy = http://proxy.invalid\n')
+  const changed = await scanRepoConfig(fixture.runner, repo, undefined, store)
+  assert.deepEqual(changed.items.map(item => item.key).sort(), ['core.sshcommand', 'http.proxy', 'include.path'])
+  assert.notEqual(changed.hash, followed.hash)
+
+  // A different include line has not been accepted: its file is not read.
+  fixture.plain(repo, 'config', 'include.path', '../shared.gitconfig')
+  fixture.plain(repo, 'config', '--add', 'include.path', '../other.gitconfig')
+  writeFileSync(join(repo, 'other.gitconfig'), '[core]\n\tfsmonitor = evil\n')
+  const again = await scanRepoConfig(fixture.runner, repo, undefined, store)
+  assert.equal(again.includes, 'held')
+  assert.deepEqual([...new Set(again.items.map(item => item.key))], ['include.path'])
+  assert.equal(await new GitTrustStore(join(fixture.root, 'includes-trust.json')).areIncludesApproved(repo, held.ownHash), true, 'survives a restart')
 })
 
 test('the scan ignores the user\'s own global config', { skip }, async (t) => {

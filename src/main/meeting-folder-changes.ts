@@ -70,7 +70,7 @@ export async function folderChanges(folder: string, deps: FolderChangesDeps): Pr
     return result.stdout.toString('utf8')
   }
 
-  const scan = await scanRepoConfig(deps.runner, root)
+  const scan = await scanRepoConfig(deps.runner, root, undefined, deps.trust)
   if (scan.items.length > 0 && !(await deps.trust.isTrusted(root, scan.hash))) {
     throw new FolderChangesError(`The Git settings of ${root} name programs Git could run (${scan.items.map((item) => item.key).join(', ')}). The person has to review them in the Git panel first; then the changes can be attached.`)
   }

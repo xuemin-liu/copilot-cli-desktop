@@ -14,7 +14,7 @@ import type { GitStatus, GitStatusEntry } from './git-parse.js'
 import { gitSucceeded } from './git-runner.js'
 import type { GitExecutable, GitRunOptions, GitRunResult, GitRunner } from './git-runner.js'
 import { isReviewable } from './git-review-format.js'
-import { GitTrustStore, repoTrustKey, scanRepoConfig } from './git-trust.js'
+import { GitTrustStore, configItemsHash, repoTrustKey, scanRepoConfig } from './git-trust.js'
 import type { RepoConfigScan } from './git-trust.js'
 import { readUntrackedFile } from './git-untracked.js'
 import type {
@@ -482,7 +482,7 @@ export class GitService {
     }
     if (!runtime.executable.supported) { this.markError(repo, `${runtime.executable.version.text} is older than the supported minimum (2.30)`); return false }
     try {
-      const scan = await scanRepoConfig(runtime.runner, root, signal)
+      const scan = await scanRepoConfig(runtime.runner, root, signal, this.options.trustStore)
       if (signal.aborted) return false
       repo.scan = scan
       if (scan.items.length > 0 && !(await this.options.trustStore.isTrusted(root, scan.hash))) {
@@ -781,7 +781,18 @@ export class GitService {
     }
     // What is trusted is the hash of the complete values, so every value must be short enough to have been shown in full.
     if (!isReviewable(repo.scan.items)) throw new Error('A setting in this repository is too long to review, so it cannot be trusted from the panel')
-    await this.options.trustStore.trust(repo.discovered.root, configHash)
+    const root = repo.discovered.root
+    if (repo.scan.includes === 'held') {
+      // Accepting the include lines lets Git read the files they name. If those files bring in nothing more to
+      // review, this was the whole question; otherwise the refresh below asks again, with their settings listed.
+      await this.options.trustStore.approveIncludes(root, repo.scan.ownHash)
+      const runtime = await this.options.getRuntime()
+      const followed = runtime ? await scanRepoConfig(runtime.runner, root, undefined, this.options.trustStore) : null
+      const same = followed?.includes === 'followed' && configItemsHash(followed.items) === configItemsHash(repo.scan.items)
+      if (same) await this.options.trustStore.trust(root, followed.hash)
+    } else {
+      await this.options.trustStore.trust(root, configHash)
+    }
     await this.refreshProject(project, true)
     return this.viewOf(project)
   }

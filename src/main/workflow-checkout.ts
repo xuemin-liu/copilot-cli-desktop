@@ -8,7 +8,7 @@ import { githubRemoteRepository, type GithubSnapshot } from './workflow-github.j
 export async function verifyWorkflowCheckout(folder:string, snapshot:GithubSnapshot, runner:GitRunner, trust:GitTrustStore):Promise<void> {
   const repo=await enclosingRepository(folder)
   if(repo.kind!=='found'||repo.issue)throw new Error('Open a local Git checkout before enabling follow-ups')
-  const scan=await scanRepoConfig(runner,repo.root)
+  const scan=await scanRepoConfig(runner,repo.root,undefined,trust)
   if(scan.items.length&&!await trust.isTrusted(repo.root,scan.hash))throw new Error('Review this repository’s settings in the Git panel first')
   const ceiling=ceilingDirectories(repo.root)
   const read=async(args:readonly string[]):Promise<string>=>{
