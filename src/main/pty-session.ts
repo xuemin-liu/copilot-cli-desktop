@@ -13,7 +13,7 @@ import type { PtyLike, SpawnPtyFn } from './pty-backend.js'
 import type { SessionLifecycleStatus } from './types.js'
 import type { SessionActivity } from './session-activity.js'
 import type { ActivityDetail } from './activity-label.js'
-import { BracketedPasteTracker, isTerminalReply } from './session-task.js'
+import { BracketedPasteTracker, isPassiveTerminalInput, isTerminalReply } from './session-task.js'
 import { SessionBindingReader, sessionResumeOffset, type SessionBinding } from './session-binding.js'
 import { stat } from 'node:fs/promises'
 
@@ -405,6 +405,19 @@ export class PtySession extends EventEmitter {
         pty.dispose?.()
         throw new Error('Session startup cancelled')
       }
+      if (pty.ready) {
+        // A program that never started has no process and no exit. Without waiting here the session would be
+        // "running" with no process id, and whoever started it would report success.
+        try { await pty.ready } catch (error) {
+          pty.dispose?.()
+          throw new Error(`${this.options.processLabel ?? 'copilot'} could not be started: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (this.stopping) {
+          pty.kill()
+          pty.dispose?.()
+          throw new Error('Session startup cancelled')
+        }
+      }
     } catch (error) {
       this.storeDiscovery?.cancel()
       await this.drainPermissionMonitor()
@@ -494,7 +507,8 @@ export class PtySession extends EventEmitter {
       })
     })
 
-    this.setStatus('running')
+    // A process that has already exited reported it above; "running" here would hide that until the exit was handled.
+    if (!this.exitHandled) this.setStatus('running')
   }
 
   /** Terminal replies and known non-switching commands preserve the initial recipient. Prompts and all other input revoke
@@ -503,7 +517,8 @@ export class PtySession extends EventEmitter {
     if (!this.pty || !data || data === '\u001b[200~\u001b[201~') return
     this.deliveryRevision++
     if (source === undefined && !isTerminalReply(data)) this.initialDeliverySessionId = null
-    if (data !== '\u001bv' && data !== '\u0016') {
+    // What the terminal sends by itself, and a pointer that only moves or scrolls, answers nothing: the badge stays.
+    if (data !== '\u001bv' && data !== '\u0016' && !isPassiveTerminalInput(data)) {
       if (this.statusValue === 'approval-needed') this.setStatus('running')
       this.heuristicBuffer = ''
     }
