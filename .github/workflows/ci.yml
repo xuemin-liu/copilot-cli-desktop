@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -9,6 +10,9 @@ permissions:
 
 jobs:
   test:
+    # A branch of this repository is tested by its push. The pull_request run is for pull requests from forks, which no
+    # push here covers; without this condition every pull request from a branch here would be tested twice.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +35,13 @@ jobs:
         run: corepack pnpm typecheck
       - name: Unit tests
         run: corepack pnpm test
+      # A pilot: one real-app check, on Windows only, that cannot fail the run. If it proves stable on hosted runners,
+      # more of the checks under scripts/ can follow and this one can become required.
+      - name: Terminal links in the real app (pilot, not required)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: corepack pnpm links:check
       - name: Package (unsigned)
         if: runner.os != 'Windows'
         env:
