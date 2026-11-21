@@ -605,7 +605,12 @@ comparison or a screenshot when the app has no ready signal of its own.
   animation that returns to exactly the same pixels between two captures can look
   still, because captures are a few hundred milliseconds apart.
 Numeric checks read visible field values or numeric element text without exporting
-the value. Content assertions (`numericValue`, `value`, `text`, `attribute`) refuse
+the value. `value` and `numericValue` compare the live value of a field a person can
+type in only when the same run filled that field, or when the application marks the
+field with a `data-public` attribute; otherwise the step fails and says so, because
+nothing else about a plain text field proves that what was typed into it is not
+private. Read-only and disabled fields, lists, checkboxes and element text are
+compared as before. Content assertions (`numericValue`, `value`, `text`, `attribute`) refuse
 private regions, aggregates containing private content, password fields, and
 autocomplete fields for passwords, one-time codes or payment details. This also
 prevents repeated numeric-range assertions from disclosing protected values.

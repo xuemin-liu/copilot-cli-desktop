@@ -326,6 +326,27 @@ if (!process.versions.electron) {
         step('assert', 'Input replaced', { selector: '#search', condition: 'value', expected: 'replacement 中文' }),
         step('fill', 'Clear input', { selector: '#search', value: '' }), step('assert', 'Input cleared', { selector: '#search', condition: 'value', expected: '' })])
       assert.equal(replacement.status, 'passed', JSON.stringify(replacement))
+      // A field holding what a person typed, with nothing that marks it as sensitive. A test that did not fill it may not
+      // compare its value: a few ordered or toleranced comparisons would otherwise read it out.
+      await browser.view.webContents.executeJavaScript(`(() => { const field = document.createElement('input'); field.id = 'typed-by-person'; field.value = '482913'; document.body.append(field) })()`)
+      for (const probe of [{ condition: 'numericValue', expected: 500000, tolerance: 100000 }, { condition: 'numericValue', expected: 482913 }, { condition: 'value', expected: '482913' }]) {
+        const peeked = await execute([step('assert', 'Read what a person typed', { selector: '#typed-by-person', ...probe })])
+        assert.equal(peeked.status, 'failed', JSON.stringify(peeked))
+        assert.match(JSON.stringify(peeked), /this test did not fill is private/)
+        assert.ok(!JSON.stringify(peeked).includes('482913') || probe.expected === 482913 || probe.expected === '482913', 'the value is not reported')
+      }
+      // The same field once this run has filled it, and a read-only field that shows application state.
+      const own = await execute([step('fill', 'Fill it', { selector: '#typed-by-person', value: '77' }),
+        step('assert', 'Compare what the test filled', { selector: '#typed-by-person', condition: 'numericValue', expected: 77 }),
+        step('assert', 'As text too', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(own.status, 'passed', JSON.stringify(own))
+      // A later run did not fill it, so it is private again.
+      const later = await execute([step('assert', 'A later run', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(later.status, 'failed', JSON.stringify(later))
+      await browser.view.webContents.executeJavaScript(`document.querySelector('#typed-by-person').readOnly = true`)
+      const shown = await execute([step('assert', 'Read-only state', { selector: '#typed-by-person', condition: 'value', expected: '77' })])
+      assert.equal(shown.status, 'passed', JSON.stringify(shown))
+      await browser.view.webContents.executeJavaScript(`document.querySelector('#typed-by-person').remove()`)
       const shell = await execute([visible('#title'), step('screenshot', 'Shell evidence', {})], true)
       assert.equal(shell.status, 'passed', JSON.stringify(shell))
       assert.ok(shell.description.includes('用户测试'), 'PowerShell reports preserve UTF-8 descriptions')
