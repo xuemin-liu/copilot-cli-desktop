@@ -20,6 +20,11 @@ test('programmatic run arguments parse a complete request', () => {
     buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project', { toolAllowlist: false }).slice(-2),
     ['--deny-tool=write', '--deny-tool=shell'],
   )
+  // `run --preset read-only` never starts on a failed probe.
+  assert.throws(
+    () => buildProgrammaticCopilotArgs(parsed, 'D:\\work\\project', { toolAllowlist: false, probeFailed: true }),
+    /Restricted mode was not started/,
+  )
 })
 
 test('programmatic run requires a prompt and rejects unknown options', () => {
