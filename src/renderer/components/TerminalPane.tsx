@@ -60,6 +60,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
   const clipboardRedrawRef = useRef<ClipboardRedrawRecovery | null>(null)
   const [linkNotice, setLinkNotice] = useState<{ message: string; tone: 'error' | 'info' } | null>(null)
   const linkRequestRef = useRef(0)
+  const linkClickRef = useRef<LinkClickGate | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -245,6 +246,10 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     }
     // The click that opens a link is not also Copilot's: see LinkClickGate.
     const linkClick = new LinkClickGate()
+    linkClickRef.current = linkClick
+    // A release that happens in another window never arrives here: forget the press it would have answered.
+    const forgetLinkPress = (): void => linkClick.reset()
+    window.addEventListener('blur', forgetLinkPress)
     // Use xterm's link provider instead of capturing and replaying left-mouse
     // gestures. Copilot therefore receives native mouse selection and scroll
     // input unchanged while printed URLs and paths remain clickable.
@@ -262,7 +267,7 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
               start: { x: first.column + 1, y: first.row + 1 },
               end: { x: last.column + last.width, y: last.row + 1 },
             },
-            activate: (event: MouseEvent) => { void openLink(link, event.ctrlKey || event.metaKey) },
+            activate: (event: MouseEvent) => { if (linkClick.opens()) void openLink(link, event.ctrlKey || event.metaKey) },
             hover: () => linkClick.hover(true),
             leave: () => linkClick.hover(false),
           }]
@@ -400,6 +405,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
       resizeObserver.disconnect()
       container.removeEventListener('paste', handlePaste, true)
       window.removeEventListener(INSERT_PROMPT_EVENT, handleInsertPrompt)
+      window.removeEventListener('blur', forgetLinkPress)
+      linkClickRef.current = null
       container.removeEventListener('mousedown', handleMouseDown, true)
       container.removeEventListener('mousemove', handleMouseMove, true)
       container.removeEventListener('mouseup', handleMouseUp, true)
@@ -432,6 +439,8 @@ export function TerminalPane({ tabId, active, focused = active, sessionProcessId
     // tabs; a late filesystem response must not resurrect the old message.
     linkRequestRef.current++
     setLinkNotice(null)
+    // A link press held when the tab was switched away has lost its release; it must not reach the CLI later.
+    linkClickRef.current?.reset()
   }, [active, tabId])
 
   useEffect(() => {

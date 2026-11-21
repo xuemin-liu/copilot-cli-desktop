@@ -14,12 +14,24 @@ export class LinkClickGate {
   private overLink = false
   private armed = false
   private held: string | null = null
+  private dragged = false
 
   /** The pointer entered or left a link. */
   hover(over: boolean): void { this.overLink = over }
 
   /** A mouse button went down on the terminal. Shift belongs to the terminal's own selection and sends no report. */
-  press(button: number, shiftKey: boolean): void { this.armed = button === 0 && !shiftKey && this.overLink }
+  press(button: number, shiftKey: boolean): void {
+    // A press still held from a gesture that never finished here belongs to nothing now.
+    this.reset()
+    this.dragged = false
+    this.armed = button === 0 && !shiftKey && this.overLink
+  }
+
+  /**
+   * Whether the gesture that just ended opens the link. A press that was passed on to the CLI as the start of a drag does
+   * not: a gesture goes to the link or to the CLI, never to both, even when the drag ends on the link it began on.
+   */
+  opens(): boolean { return !this.dragged }
 
   /** What to send to the CLI for input the terminal produced. */
   filter(data: string): string[] {
@@ -35,7 +47,9 @@ export class LinkClickGate {
     if (this.held === null) return [data]
     const held = this.held
     this.held = null
-    return left && release ? [] : [held, data]
+    if (left && release) return []
+    this.dragged = true
+    return [held, data]
   }
 
   /** Forget a gesture that never finished, such as a press whose release happened outside the window. */

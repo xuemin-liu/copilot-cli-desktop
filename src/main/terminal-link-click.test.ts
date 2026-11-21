@@ -28,6 +28,36 @@ test('Ctrl+click on a link, which reveals the file, is not reported either', () 
   assert.deepEqual([...gate.filter('\u001b[<16;12;53M'), ...gate.filter('\u001b[<16;12;53m')], [])
 })
 
+test('a drag that began on a link is the CLI\'s alone: it does not also open the link', () => {
+  const gate = new LinkClickGate()
+  gate.hover(true)
+  gate.press(0, false)
+  assert.equal(gate.opens(), true)
+  assert.deepEqual(gate.filter(press), [])
+  assert.deepEqual(gate.filter('\u001b[<32;13;53M'), [press, '\u001b[<32;13;53M'])
+  assert.equal(gate.opens(), false, 'the release on the same link must not open it')
+  assert.deepEqual(gate.filter(release), [release])
+  // The next plain click on the link opens it again.
+  gate.press(0, false)
+  assert.deepEqual(gate.filter(press), [])
+  assert.deepEqual(gate.filter(release), [])
+  assert.equal(gate.opens(), true)
+})
+
+test('a press whose release never came is forgotten by a reset or by the next press, not sent later', () => {
+  const gate = new LinkClickGate()
+  gate.hover(true)
+  gate.press(0, false)
+  assert.deepEqual(gate.filter(press), [])
+  gate.reset()
+  assert.deepEqual(gate.filter('\u001b[<35;28;5M'), ['\u001b[<35;28;5M'], 'a later hover does not carry the old press')
+  gate.press(0, false)
+  assert.deepEqual(gate.filter(press), [])
+  gate.hover(false)
+  gate.press(0, false)
+  assert.deepEqual(gate.filter(press), [press], 'a new press away from the link is sent, alone')
+})
+
 test('a drag that starts on a link is the CLI\'s text selection: the press is sent after all, in order', () => {
   const gate = clicked()
   assert.deepEqual(gate.filter(press), [])

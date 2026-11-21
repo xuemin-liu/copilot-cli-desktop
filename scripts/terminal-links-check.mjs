@@ -87,7 +87,7 @@ if (!process.versions.electron) {
       throw new Error('Timed out: ' + label)
     }
     const notice = () => ui('document.querySelector(".terminal-link-error")?.textContent ?? null')
-    const clickLink = async (text, modifiers = []) => {
+    const locate = async text => {
       window.webContents.sendInputEvent({ type: 'mouseMove', x: 0, y: 0 })
       await delay(100)
       const point = await ui(`(() => {
@@ -113,6 +113,10 @@ if (!process.versions.electron) {
       await delay(50)
       window.webContents.sendInputEvent({ type: 'mouseMove', ...point })
       await delay(150)
+      return point
+    }
+    const clickLink = async (text, modifiers = []) => {
+      const point = await locate(text)
       window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, modifiers, ...point })
       window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, modifiers, ...point })
       await delay(100)
@@ -198,6 +202,38 @@ if (!process.versions.electron) {
       await delay(150)
       assert.equal(written.filter(leftButton).length, 2, 'a click away from a link is still reported: press and release')
       assert.equal(calls.length, 0)
+      // Press, move and release all inside one link: a drag. It is the session's alone and does not open the link.
+      {
+        written.length = 0
+        const point = await locate('src/app.ts:42:7')
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        await delay(50)
+        window.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', modifiers: ['leftButtonDown'], x: point.x + 16, y: point.y })
+        await delay(50)
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: point.x + 16, y: point.y })
+        await delay(250)
+        assert.equal(calls.length, 0, 'a drag inside a link does not open it')
+        const reports = written.filter(data => /^\u001b\[<\d+;\d+;\d+[Mm]$/.test(data))
+        const pressAt = reports.findIndex(data => /^\u001b\[<0;\d+;\d+M$/.test(data))
+        assert.ok(pressAt >= 0 && /^\u001b\[<32;/.test(reports[pressAt + 1]) && /^\u001b\[<0;\d+;\d+m$/.test(reports.at(-1)), `press, drag, release reach the session in order: ${JSON.stringify(reports)}`)
+      }
+      // A press on a link whose release never comes (the tab is switched away) is not sent with a later hover.
+      {
+        const point = await locate('src/app.ts:42:7')
+        written.length = 0
+        window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
+        await delay(50)
+        await ui('window.setActive(false)'); await delay(100)
+        await ui('window.setActive(true)'); await delay(100)
+        window.webContents.sendInputEvent({ type: 'mouseMove', x: point.x + 200, y: point.y })
+        await delay(200)
+        assert.deepEqual(written.filter(leftButton), [], 'a press held across a tab switch is not sent later')
+        assert.ok(written.some(data => /^\u001b\[<35;/.test(data)), 'the hover itself is reported')
+        assert.equal(calls.length, 0)
+        // Leave the fixture with no button down.
+        window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: point.x + 200, y: point.y })
+        await delay(100)
+      }
       assert.deepEqual(await ui('window.unhandled'), [])
       await writeFile(join(artifacts, 'result.json'), JSON.stringify({ passed: true, checks: ['URL click', 'neutral missing file notice', 'non-overlapping terminal/restart layout', 'dismiss notice', 'workspace rejection alert', 'real IPC error formatting', 'backtick path with spaces', 'path inside inline-code command', 'line and column passed on', 'Ctrl click reveals', 'success clears notice', 'pending feedback', 'stale rejection ignored', 'deactivation clears pending and completed notices', 'no unhandled rejections', 'React StrictMode cleanup'] }, null, 2))
       console.log('PASS: Electron terminal link clicks and error feedback')
