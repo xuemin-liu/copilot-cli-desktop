@@ -51,9 +51,11 @@ export function formatSerialDate(serial: number, date1904 = false, kind?: TimeKi
   const clock = `${pad(Math.floor(seconds / 3_600))}:${pad(Math.floor(seconds % 3_600 / 60))}${seconds % 60 ? `:${pad(seconds % 60)}` : ''}`
   if (kind === 'elapsed') return `${days * 24 + Math.floor(seconds / 3_600)}:${pad(Math.floor(seconds % 3_600 / 60))}:${pad(seconds % 60)}`
   if (kind === 'time') return clock
-  // Day 0 of the 1900 system is 30 December 1899 (Excel counts a 29 February 1900 that never was; this matches from March 1900 on).
-  const date = new Date(Date.UTC(1899, 11, 30) + (days + (date1904 ? 1_462 : 0)) * 86_400_000)
-  const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+  // Excel's 1900 system counts a 29 February 1900 that never was. Day 1 is 1 January 1900, day 60 is that 29 February,
+  // and from day 61 (1 March) on every day is one further from the start than the calendar says.
+  const offset = date1904 ? 1_462 : days < 60 ? 1 : 0
+  const date = new Date(Date.UTC(1899, 11, 30) + (days + offset) * 86_400_000)
+  const day = !date1904 && days === 60 ? '1900-02-29' : `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
   if (kind === 'date') return day
   if (kind === 'datetime') return `${day} ${clock}`
   return days === 0 && !date1904 ? clock : seconds === 0 ? day : `${day} ${clock}`

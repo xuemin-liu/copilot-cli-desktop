@@ -64,10 +64,15 @@ export class ZipReader {
     const start = header + 30 + this.view.getUint16(header + 26, true) + this.view.getUint16(header + 28, true)
     if (start + entry.compressedSize > this.bytes.length) throw new ZipError('invalid', 'The archive is damaged')
     const packed = this.bytes.subarray(start, start + entry.compressedSize)
-    const allowed = Math.min(maxBytes, this.limits.totalBytes - this.unpacked)
+    // Bytes are charged to the archive's total as they are produced, not when an entry is finished: several entries
+    // may be unpacked at the same time, and none of them may spend what another has already taken.
+    const charge = (count: number): void => {
+      this.unpacked += count
+      if (this.unpacked > this.limits.totalBytes) throw new ZipError('too-large', 'The archive unpacks to too much')
+    }
     if (entry.method === 0) {
-      if (packed.length > allowed) throw new ZipError('too-large', `${name} is too large`)
-      this.unpacked += packed.length
+      if (packed.length > maxBytes) throw new ZipError('too-large', `${name} is too large`)
+      charge(packed.length)
       return packed
     }
     if (entry.method !== 8) throw new ZipError('invalid', `${name} uses a compression this viewer cannot read`)
@@ -80,14 +85,14 @@ export class ZipReader {
         const { done, value } = await reader.read()
         if (done) break
         length += value.length
-        if (length > allowed) throw new ZipError('too-large', `${name} is too large`)
+        if (length > maxBytes) throw new ZipError('too-large', `${name} is too large`)
+        charge(value.length)
         chunks.push(value)
       }
     } catch (error) {
       await reader.cancel().catch(() => undefined)
       throw error instanceof ZipError ? error : new ZipError('invalid', `${name} is damaged`)
     }
-    this.unpacked += length
     // The claimed size is never used as a limit, but an entry that unpacks to another size is damaged or lying.
     if (length !== entry.size) throw new ZipError('invalid', `${name} is damaged`)
     const out = new Uint8Array(length)

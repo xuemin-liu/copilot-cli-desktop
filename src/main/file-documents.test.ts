@@ -72,6 +72,12 @@ test('an archive that lies about its sizes is stopped while it is unpacked', asy
   const several = new ZipReader(await makeZip({ 'one.bin': Buffer.alloc(600_000), 'two.bin': Buffer.alloc(600_000) }), { entries: 10, totalBytes: 1_000_000 })
   assert.equal((await several.read('one.bin', 700_000)).length, 600_000)
   await assert.rejects(several.read('two.bin', 700_000), refused('too-large'))
+  // Entries unpacked at the same time share the one total: neither may spend what the other has taken.
+  const together = new ZipReader(await makeZip({ 'one.bin': Buffer.alloc(600_000, 1), 'two.bin': Buffer.alloc(600_000, 2), 'three.bin': Buffer.alloc(600_000, 3) }), { entries: 10, totalBytes: 1_000_000 })
+  const outcomes = await Promise.allSettled(['one.bin', 'two.bin', 'three.bin'].map(name => together.read(name, 700_000)))
+  const unpacked = outcomes.reduce((sum, outcome) => sum + (outcome.status === 'fulfilled' ? outcome.value.length : 0), 0)
+  assert.ok(unpacked <= 1_000_000, `${unpacked} bytes were handed out under a limit of 1,000,000`)
+  assert.ok(outcomes.some(outcome => outcome.status === 'rejected' && refused('too-large')(outcome.reason)))
   // A damaged stream is "invalid", not a crash.
   const damaged = Buffer.from(await makeZip({ 'a.txt': 'alpha '.repeat(500) }))
   damaged.fill(0xff, 40, 60)
@@ -114,6 +120,10 @@ test('cell references, date formats and Excel date numbers', () => {
   assert.equal(formatSerialDate(45_292.000_011_574), '2024-01-01 00:00:01')
   assert.equal(formatSerialDate(43_830, true), '2024-01-01', 'a workbook that counts from 1904')
   assert.equal(formatSerialDate(-5), '-5')
+  // Excel's 1900 system, as Excel shows it: day 1 is 1 January, day 60 the 29 February it invented, day 61 the 1 March.
+  assert.deepEqual([1, 59, 60, 61, 62].map(serial => formatSerialDate(serial, false, 'date')), ['1900-01-01', '1900-02-28', '1900-02-29', '1900-03-01', '1900-03-02'])
+  assert.equal(formatSerialDate(60.5, false, 'datetime'), '1900-02-29 12:00')
+  assert.deepEqual([0, 1, 60].map(serial => formatSerialDate(serial, true, 'date')), ['1904-01-01', '1904-01-02', '1904-03-01'], 'the 1904 system has no such day')
 })
 
 test('a workbook is read sheet by sheet as text cells', async () => {
