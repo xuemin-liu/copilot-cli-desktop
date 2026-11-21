@@ -66,6 +66,12 @@ handle, only input/output/resize events.
   Terminal tabs also reuse MyTerminal's snippets, split panes, settings, backup/import and disk logging. The current Copilot
   session and local/WSL shells can list terminals, read output, and send input through the project terminal helper.
   **Add to prompt** always targets the current session. See [workspace terminals](docs/workspace-terminals.md).
+- **File tabs**: click a file path printed in a session and the file opens in a tab in the right panel, at the line the
+  path points to (`src/app.ts:42:7`). Markdown is shown rendered, with a **Source** switch; code and text get line
+  numbers, colors and **Find** (Ctrl+F); pictures are shown; other files get a card with **Reveal in folder**. The tab
+  follows the file as the agent edits it. Ctrl+click (Cmd+click on macOS) on a path shows it in the file manager
+  instead, as does a click on a folder. Only files in the workspace folder or one of its worktrees are opened, and
+  nothing in a file can run or reach the network. The Git panel's diff has **Open file**.
 - **Desktop control** (Windows, off by default) lets a session see the screen and use the mouse
   and keyboard in other apps, for tasks files, shell commands and the browser can't do. Eligible sessions ask
   on first use. You can approve one action or grant session access, with approval for each app. It can never control this app, terminals, File Explorer,

@@ -57,8 +57,21 @@ test('scanLineForLinks preserves spaces in backtick-delimited file links', () =>
   const path = String.raw`C:\repo\folder with spaces\file.txt`
   const line = 'See `' + path + ':42:7` for details'
   const links = scanLineForLinks(line)
-  assert.deepEqual(links, [{ type: 'path', text: path, start: 4, end: line.indexOf(' for details') }])
+  assert.deepEqual(links, [{ type: 'path', text: path, start: 4, end: line.indexOf(' for details'), line: 42, column: 7 }])
   assert.deepEqual(scanLineForLinks('`./folder with spaces/file.txt`').map(link => link.text), ['./folder with spaces/file.txt'])
+})
+
+test('a path link keeps the line and column it points at', () => {
+  const where = (line: string): unknown => scanLineForLinks(line).map(({ text, line, column }) => ({ text, line, column }))
+  assert.deepEqual(where('src/app.ts:42:7 - error TS2322'), [{ text: 'src/app.ts', line: 42, column: 7 }], 'a bare relative path')
+  assert.deepEqual(where('at src/app.ts:42.'), [{ text: 'src/app.ts', line: 42, column: undefined }])
+  assert.deepEqual(where('src/app.ts(12,5): error TS1005'), [{ text: 'src/app.ts', line: 12, column: 5 }], 'the compiler form')
+  assert.deepEqual(where(String.raw`"C:\My Repo\src\app.ts:9:3" failed`), [{ text: String.raw`C:\My Repo\src\app.ts`, line: 9, column: 3 }], 'a quoted Windows path with spaces')
+  assert.deepEqual(where(String.raw`C:\repo\src\main.ts:42:7`), [{ text: String.raw`C:\repo\src\main.ts`, line: 42, column: 7 }])
+  assert.deepEqual(where('/home/me/app/src/main.ts:12:4'), [{ text: '/home/me/app/src/main.ts', line: 12, column: 4 }])
+  assert.deepEqual(where('see src/app.ts for details'), [{ text: 'src/app.ts', line: undefined, column: undefined }])
+  const bare = scanLineForLinks('src/app.ts:42:7')[0]!
+  assert.equal(bare.end - bare.start, 'src/app.ts'.length, 'the underline covers the path, not its location')
 })
 
 test('scanLineForLinks keeps a backtick-delimited URL on the URL handler', () => {

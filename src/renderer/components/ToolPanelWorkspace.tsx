@@ -8,13 +8,14 @@ import { sessionTaskBlocker } from '../../main/session-task.js'
 import { ProjectDock } from './ProjectDock.js'
 import { BrowserPanel } from './BrowserPanel.js'
 import { GitPanel } from './GitPanel.js'
+import { FilePanel } from './FilePanel.js'
 import { isShortcutModifier, isWindows } from '../platform.js'
 import { ToolTerminalPanel } from './ToolTerminalPanel.js'
 import { projectTerminal, WorkspaceTabBar } from '../../../vendor/myterminal/desktop-renderer.mjs'
 import { MyTerminalConnections } from './MyTerminalConnections.js'
 
 /** Adding another tool requires an adapter here, not a permanent slot in the layout. */
-export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new'>; label: string; description: string }[] = [
+export const TOOL_TYPES: readonly { kind: Exclude<ToolTabKind, 'new' | 'file'>; label: string; description: string }[] = [
   { kind: 'browser', label: 'Browser', description: 'Open a web page in a new tab' },
   { kind: 'git', label: 'Git', description: 'Changes, commits, branches and worktrees' },
   { kind: 'local', label: 'Local terminal', description: 'Open a shell in the session or workspace folder' },
@@ -117,6 +118,9 @@ function ProjectToolsHost({ project, desktop, tools, shown, obscured, takeover, 
           onClose={() => { if (view.tabId) action({ type: 'close', id: view.tabId }) }} />
       </div>
     })}
+    {project.tabs.filter(tab => tab.kind === 'file').map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-file-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
+      <FilePanel profileId={project.profileId} tab={tab} active={shown && selected?.id === tab.id} onClose={() => action({ type: 'close', id: tab.id })} />
+    </div>)}
     {project.tabs.filter(tab => isTerminalKind(tab.kind)).map(tab => <div key={tab.id} id={`tool-content-${tab.id}`} className="tool-terminal-host" hidden={!shown || selected?.id !== tab.id} role="tabpanel">
       <ToolTerminalPanel profileId={project.profileId} tab={tab} active={shown && selected?.id === tab.id} promptTargetId={prompt?.id ?? null} />
     </div>)}
