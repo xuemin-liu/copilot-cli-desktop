@@ -614,10 +614,12 @@ test('a point that the screenshot painted over cannot be clicked, even on an all
   h.native.list = [window('4', NOTEPAD, { x: 100, y: 100, width: 400, height: 300 }, { opaque: false }), window('1', EXPLORER, SCREEN, { className: 'Progman', opaque: true })]
   await h.control.enable('tab')
   h.control.setFullScreen('tab', true)
-  h.answers.push('session')
   const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  h.asked.length = 0
   await refused(h.control.handle('tab', 'click', { frameId: shot.frameId, x: 300, y: 250 }), /painted over in the screenshot/)
   await refused(h.control.handle('tab', 'move', { frameId: shot.frameId, x: 300, y: 250 }), /painted over in the screenshot/)
+  assert.deepEqual(h.asked, [], 'the person is not asked about an app for an action that is refused anyway')
+  assert.deepEqual(h.control.view('tab').approvedApps, [], 'and no grant is left behind')
   assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
 })
 
@@ -655,6 +657,24 @@ test('a drag from a window screenshot cannot end on another app’s window that 
   // The same drag ending on Notepad itself goes through.
   await h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 50, y: 50, toX: 100, toY: 250 })
   assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), ['drag 150,150 200,350'])
+})
+
+test('a dialog that opens while the person is asked about the app a drag ends on stops the drag', async t => {
+  const h = await harness(t)
+  const notepad = window('4', NOTEPAD, { x: 100, y: 100, width: 300, height: 300 }, { opaque: true })
+  const paint = window('20', 'C:\\Program Files\\Paint\\paint.exe', { x: 500, y: 100, width: 300, height: 300 }, { opaque: true })
+  h.native.list = [notepad, paint]
+  await h.control.enable('tab')
+  h.control.setFullScreen('tab', true)
+  const shot = await h.control.handle('tab', 'screenshot', { target: 'screen' })
+  // Notepad is approved for the session; Paint is asked about when the drag is sent. While the person answers, the
+  // pixels change (a dialog inside a window that did not move).
+  h.answers.push('session')
+  await h.control.handle('tab', 'move', { frameId: shot.frameId, x: 200, y: 200 })
+  h.native.actions.length = 0
+  h.host.approve = async () => { h.paint(40); return 'once' }
+  await refused(h.control.handle('tab', 'drag', { frameId: shot.frameId, x: 200, y: 200, toX: 600, toY: 200 }), /screen changed/)
+  assert.deepEqual(h.native.actions.filter(action => !action.startsWith('focus')), [])
 })
 
 test('this app’s own windows are blocked by process, not only by path', async t => {
