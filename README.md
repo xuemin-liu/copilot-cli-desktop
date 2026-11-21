@@ -686,7 +686,7 @@ pnpm dist:mac     # dmg and zip, arm64 and x64 (on a Mac)
 pnpm dist:linux   # AppImage and deb, x64 (on Linux)
 ```
 
-Both run the same package audit as Windows. CI builds both, unsigned, on every push.
+Both run the same package audit as Windows. CI builds both, unsigned, on every push, and on pull requests from forks.
 
 ## Releases
 
