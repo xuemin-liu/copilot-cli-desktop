@@ -4957,6 +4957,7 @@ async function startDesktopControl(): Promise<void> {
   desktopOverlay = overlay
   desktopControl = new DesktopControl({
     ownProgramPath: process.execPath,
+    ownPid: process.pid,
     reservedAccelerators: () => [GLOBAL_TOGGLE_SHORTCUT, DESKTOP_STOP_SHORTCUT],
     stopKeyLabel: DESKTOP_STOP_SHORTCUT_LABEL,
     sessionFolder: tabId => browserSessionPaths(browserSessionRoot(), tabId).directory,

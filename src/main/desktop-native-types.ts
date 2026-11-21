@@ -17,6 +17,12 @@ export interface DesktopNativeWindow {
   /** A packaged app's AppUserModelID, read from the process behind ApplicationFrameHost. */
   aumid: string | null
   elevated: boolean | null
+  /**
+   * True only when the window is known to hide everything behind its frame: it is not layered, not click-through,
+   * not drawn straight to the compositor (which may blend with what is behind) and has no window region (a shaped
+   * window). Missing or false means "may show what is behind it", which is how every unknown case is treated.
+   */
+  opaque?: boolean | undefined
 }
 
 /** The focused control: its process, whether it is a password field, and its UI Automation runtime id. */
