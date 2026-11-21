@@ -567,6 +567,87 @@ test('a post before anyone joined replaces the opening post; a vote needs someon
   assert.equal(h.hub.views()[0]!.round, 1)
 })
 
+test('a post made when the last reviewer has left waits for the next one instead of opening a round nobody can answer', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'v1', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'B: fix the race')
+  assert.equal(h.hub.views()[0]!.stage, 'host')
+  h.hub.leave('tab-b')
+  const hostMessages = h.to('tab-host').length
+
+  assert.throws(() => h.hub.post('tab-host', 'propose-close', '- done', null), /Nobody is in the meeting now/)
+  const answer = h.hub.post('tab-host', 'round', 'v2: race fixed', '--- a/x\n+++ b/x')
+  assert.match(answer, /Nobody is in meeting K7QF now\. Your post is kept as round 2/)
+  assert.doesNotMatch(answer, /Sent round/)
+  const view = h.hub.views()[0]!
+  assert.deepEqual([view.stage, view.round], ['waiting', 2])
+  // No round is open, so nothing times out and the host is not sent a digest of nobody's replies.
+  h.advance(60 * 60_000)
+  assert.equal(h.to('tab-host').length, hostMessages)
+  assert.equal(h.hub.views()[0]!.stage, 'waiting')
+
+  h.hub.join(reviewerC, 'K7QF')
+  const post = h.last('tab-c')
+  assert.equal(post.kind, 'post')
+  assert.match(post.text, /round 2/)
+  assert.equal(h.files.get(at('K7QF', 'round-2', 'post.md')), 'v2: race fixed')
+  assert.equal(h.files.get(at('K7QF', 'round-1', 'post.md')), 'v1', 'the round that was reviewed keeps its post')
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'C: looks right')
+  assert.match(h.to('tab-host').at(-1)!.text, /1 of 1 reviewers? replied/)
+})
+
+test('a proposal to close that everyone left does not turn the host\'s revised post into a vote', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'v1', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'ok')
+  h.hub.post('tab-host', 'propose-close', '- ship v1', null)
+  assert.equal(h.last('tab-b').kind, 'vote')
+  h.hub.leave('tab-b')
+  assert.equal(h.hub.views()[0]!.stage, 'waiting')
+
+  // The host changes its mind and posts something to review.
+  h.hub.post('tab-host', 'round', 'v2: one more change, please review', null)
+  h.hub.join(reviewerC, 'K7QF')
+  const asked = h.last('tab-c')
+  assert.equal(asked.kind, 'post', 'a review, not a vote')
+  assert.doesNotMatch(asked.text, /Start your reply with AGREE/)
+  h.hub.turnCompleted('tab-c', h.last('tab-c'), 'AGREE, but check the retry count')
+  assert.equal(h.hub.views()[0]!.stage, 'host', 'a reply that happens to say AGREE closes nothing')
+  assert.equal(h.hub.views()[0]!.outcome, null)
+  assert.equal(h.to('tab-host').at(-1)!.kind, 'digest')
+})
+
+test('a proposal to close that everyone left is still put to whoever joins next, when the host did not replace it', () => {
+  const h = harness()
+  h.hub.start(host, { topic: 'plan', post: 'v1', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'ok')
+  h.hub.post('tab-host', 'propose-close', '- ship v1', null)
+  h.hub.leave('tab-b')
+  h.hub.join(reviewerC, 'K7QF')
+  assert.equal(h.last('tab-c').kind, 'vote')
+})
+
+test('a post held at the round limit is kept for the next reviewer when everyone left during the pause', () => {
+  const h = harness({ maxRounds: 2, roundTimeoutMinutes: 10 })
+  h.hub.start(host, { topic: 'plan', post: 'v1', changes: null })
+  h.hub.join(reviewerB, 'K7QF')
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r1')
+  h.hub.post('tab-host', 'round', 'v2', null)
+  h.hub.turnCompleted('tab-b', h.last('tab-b'), 'r2')
+  assert.match(h.hub.post('tab-host', 'round', 'v3 held', null), /reached its limit/)
+  h.hub.leave('tab-b')
+  h.hub.resume('K7QF')
+  const view = h.hub.views()[0]!
+  assert.deepEqual([view.stage, view.round], ['waiting', 3])
+  h.hub.join(reviewerC, 'K7QF')
+  assert.match(h.last('tab-c').text, /v3 held/)
+  assert.doesNotMatch(h.last('tab-c').text, /\bv2\b/, 'not the round that was already reviewed')
+  assert.equal(h.files.get(at('K7QF', 'round-3', 'post.md')), 'v3 held')
+})
+
 test('a large post is referenced by its path instead of being typed', () => {
   const h = harness()
   h.hub.start(host, { topic: 'plan', post: 'x'.repeat(20_000), changes: null })

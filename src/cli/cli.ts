@@ -24,7 +24,7 @@ import { buildProgrammaticCopilotArgs, parseProgrammaticRunArguments } from './r
 import { resolveCopilotBinary, withCopilotPathAdditions } from '../main/resolve-copilot.js'
 import { secretEnvArgs } from '../main/secure-credentials.js'
 import { discoverCopilotCapabilities, EMPTY_COPILOT_CAPABILITIES } from '../main/copilot-command.js'
-import { needsToolAllowlistProbe, permissionCompatibilityWarning } from '../main/permission-presets.js'
+import { assertPermissionPresetSupported, needsToolAllowlistProbe, permissionCompatibilityWarning } from '../main/permission-presets.js'
 import { startProcessWatchdog } from '../main/process-tree.js'
 
 const paths = getCliPaths()
@@ -217,6 +217,7 @@ async function runProgrammatic(rawArgs: string[]): Promise<void> {
   const capabilities = needsToolAllowlistProbe(options.preset)
     ? await discoverCopilotCapabilities(resolution)
     : EMPTY_COPILOT_CAPABILITIES
+  assertPermissionPresetSupported(options.preset, capabilities)
   const compatibilityWarning = permissionCompatibilityWarning(options.preset, capabilities)
   if (compatibilityWarning) console.warn(`Warning: ${compatibilityWarning}`)
   const environment = withCopilotPathAdditions(process.env, resolution.pathAdditions)
