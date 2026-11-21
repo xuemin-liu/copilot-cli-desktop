@@ -1,6 +1,7 @@
 // The git service tests. Split across git-service.shard-*.test.ts so they run in parallel; see fixtures/sharded-test.ts.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { groupKillLog, processRows } from './process-tree.js'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
@@ -874,8 +875,10 @@ shardedTest('a failing hook blocks the commit, its output is shown and streamed,
 
 shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what to check', { skip }, async (t) => {
   const marker = join(tmpdir(), `git-hook-cancel-${process.pid}.marker`)
-  rmSync(marker, { force: true })
-  t.after(() => rmSync(marker, { force: true }))
+  // The hook writes its shell's process number and its sleep's, so a failure can report on exactly those two.
+  const hookPids = `${marker}.pids`
+  for (const file of [marker, hookPids]) rmSync(file, { force: true })
+  t.after(() => { for (const file of [marker, hookPids]) rmSync(file, { force: true }) })
   // The hook sleeps far longer than a cancel can take under full-suite load, so "returned before the hook finished"
   // and "the hook never wrote its marker" stay meaningful without racing process start-up.
   const hookSleepMs = 15_000
@@ -883,7 +886,7 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   const h = await harness(t, (f, project) => {
     committed(f, project, { 'a.txt': 'one\n' })
     writeFileSync(join(project, 'a.txt'), 'two\n'); f.plain(project, 'add', '.')
-    hookFile(project, 'pre-commit', `echo started\nsleep ${hookSleepMs / 1_000}\necho finished > "${shellPath(marker)}"`)
+    hookFile(project, 'pre-commit', `echo $$ > "${shellPath(hookPids)}"\nsleep ${hookSleepMs / 1_000} &\necho $! >> "${shellPath(hookPids)}"\necho started\nwait $!\necho finished > "${shellPath(marker)}"`)
   }, { onProgress: (_subscriber, _profile, event) => { if (!hookStarted && event.text.includes('started')) hookStarted = Date.now() } })
   const { repoId, status } = await open(h)
   const current = await status()
@@ -893,13 +896,26 @@ shardedTest('Cancel stops a commit that is waiting on a slow hook, and says what
   await waitFor(() => hookStarted > 0, 30_000)
   h.service.cancel(SUBSCRIBER, PROFILE, repoId)
   const result = await pending
+  // Measured here, before anything else: the diagnostics below take time of their own and are not part of the cancel.
+  const returnedAfter = Date.now() - hookStarted
+  // This test has failed on macOS with the hook left running, and the cause is not known. Should it fail again, the
+  // message says how the kill went and what was still running right after it: the hook's processes with their parent
+  // and process group.
+  let afterKill = ''
+  if (process.platform !== 'win32') {
+    // Best effort: whatever goes wrong here must not hide how the cancel itself went.
+    try {
+      const pids = readFileSync(hookPids, 'utf8').split(/\s+/).map(Number).filter(pid => pid > 1)
+      const rows = processRows(execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,stat='], { encoding: 'utf8', timeout: 5_000 }), pids)
+      afterKill = `kill: ${JSON.stringify(groupKillLog.at(-1))}; hook shell and sleep ${pids.join(', ')} right after it (pid ppid pgid state): ${rows.join(' | ') || 'both gone'}`
+    } catch (error) { afterKill = `kill: ${JSON.stringify(groupKillLog.at(-1))}; the hook's processes could not be listed (${String(error)})` }
+  }
   assert.deepEqual([result.ok, result.reason], [false, 'cancelled'])
   assert.match(result.message, /index\.lock/)
-  const returnedAfter = Date.now() - hookStarted
   assert.ok(returnedAfter < 10_000, `it returned well before the hook would have finished (${returnedAfter} ms after the hook started)`)
   // Wait past the moment the hook would have written its marker had it been left running.
   await new Promise(resolve => setTimeout(resolve, hookStarted + hookSleepMs + 2_500 - Date.now()))
-  assert.equal(existsSync(marker), false, 'the hook was stopped, not left running')
+  assert.equal(existsSync(marker), false, `the hook was stopped, not left running (${afterKill})`)
   assert.equal(h.fixture.plain(h.project, 'rev-list', '--count', 'HEAD').trim(), '1')
 })
 

@@ -500,12 +500,19 @@ test('a stop while typing waits for the focus to move after a Tab ends the reque
   let tabSent!: () => void
   const waiting = new Promise<void>(resolve => { tabSent = resolve })
   h.native.onType = () => { if (h.native.actions.at(-1) === 'type \t') tabSent() }
-  const typing = h.control.handle('tab', 'type', { frameId, text: 'alice\thunter2' })
+  let looks = 0
+  const focused = h.native.focused.bind(h.native)
+  h.native.focused = () => { looks++; return focused() }
+  // The request ends by being refused while control is being turned off, which can be before the turn-off below has
+  // returned. So the refusal is awaited from the start: a rejection nobody is waiting for yet fails the test by itself.
+  const ended = refused(h.control.handle('tab', 'type', { frameId, text: 'alice\thunter2' }), /turned off/)
   await waiting
-  const stoppedAt = Date.now()
   await h.control.disableAll('Stopped with the stop key.')
-  await refused(typing, /turned off/)
-  assert.ok(Date.now() - stoppedAt < 500, 'the request ends within a poll or two, not after the whole wait')
+  // Counted, not timed: once control is off, the request must end at its next look at the focus without looking again,
+  // however slow the machine is. Left to run, it would look every few milliseconds for the rest of the second.
+  const looksWhenOff = looks
+  await ended
+  assert.equal(looks, looksWhenOff, 'the request did not look at the focus again after control was turned off')
   assert.deepEqual(h.native.actions, ['type alice', 'type \t'])
 })
 
