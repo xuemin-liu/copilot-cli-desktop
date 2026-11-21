@@ -48,6 +48,10 @@ interface Harness {
   configureMigrationExport(service: MigrationService, path: string, senderDestroyed?: boolean): void
   configureBrowserExportDialog(result: { canceled: boolean; filePath?: string }): void
   blockSpawnPlan(work: Promise<void>): void
+  /** Report a change of a tab's activity line, as its session does when a tool starts or finishes. */
+  activityChanged(tabId: string): void
+  /** How many times the whole state is sent to the windows from here on. */
+  countBroadcasts(): { count: number }
   /** Keep the usage flush that comes before a CLI install or update waiting until `work` settles. */
   holdUsageFlush(work: Promise<void>): void
   /** Keep the next CLI install or update command running until `work` settles. */
@@ -329,6 +333,8 @@ async function fixture(action: (harness: Harness, directory: string) => Promise<
           watchProjectRemovals() { const service = projectTools(), original = service.removeProject.bind(service), seen = []; service.removeProject = async (id) => { seen.push(id); return original(id); }; return seen; },
           countBrowserSnapshots(resource) { const browser = projectTools().resource(resource).browser, state = browser.snapshot, calls = { count: 0 }; Object.defineProperty(browser, 'snapshot', { configurable: true, get() { calls.count++; return state; } }); return calls; },
           recheckFinds(capabilities) { const calls = { count: 0 }; recheckCopilotCapabilities = async () => { calls.count++; copilotCapabilities = capabilities; }; return calls; },
+          activityChanged(tabId) { managedTabs.get(tabId).session.emit('activity-detail', null); },
+          countBroadcasts() { const original = broadcastState, calls = { count: 0 }; broadcastState = (...args) => { calls.count++; return original(...args); }; return calls; },
           blockSpawnPlan(work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { await work; return original(...args); }; },
           blockSessionStop(tabId,work,started) { const session=managedTabs.get(tabId).session; const original=session.stop.bind(session);session.stop=async()=>{started();await work;return original()}; },
           blockSpawnPlanWhen(accept, work) { const original = buildSessionSpawnPlan; buildSessionSpawnPlan = async (...args) => { if (accept(args[0])) await work; return original(...args); }; },
@@ -1419,6 +1425,28 @@ test('saving a captured browser log copies the browser state once, however long 
   // One to check that this tab is the one shown, one for the log. It was one more for every entry in the log.
   assert.equal(copies.count, 2)
   assert.equal(JSON.parse(await readFile(join(directory, 'log.json'), 'utf8')).length, 300)
+}))
+
+test('activity in several sessions is shown by one broadcast a second, not one for each session', async (t) => fixture(async (harness, directory) => {
+  configure(harness, directory)
+  const tabs: string[] = []
+  for (let index = 0; index < 5; index++) tabs.push((await harness.createMain()).activeTabId!)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const sent = harness.countBroadcasts()
+  // Five sessions working at once, their tools starting a fifth of a second apart, for three seconds.
+  for (let tick = 0; tick < 15; tick++) {
+    harness.activityChanged(tabs[tick % 5]!)
+    t.mock.timers.tick(200)
+  }
+  t.mock.timers.tick(1_000)
+  // Three seconds of activity and the second after it: one broadcast a second. It was one a second for each session.
+  assert.ok(sent.count >= 3 && sent.count <= 4, `${sent.count} broadcasts`)
+  // Nothing more is sent once the sessions are quiet.
+  const quiet = sent.count
+  t.mock.timers.tick(5_000)
+  assert.equal(sent.count, quiet)
+  // And a tab that closes takes nothing away from the others: their next change is still shown.
+  t.mock.timers.reset()
 }))
 
 test('overall quit deadline releases repeated exit requests despite a stuck config write', async (t) => fixture(async (harness) => {
