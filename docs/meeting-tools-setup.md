@@ -144,6 +144,19 @@ With the tools set up, just ask the agent:
 - **To review:** "join meeting K7QF". The agent calls `meeting_join` with the id and is in at once; the meeting bar lists
   it as a guest, with **Remove**.
 
+The tools need no sign-in, so any program on this computer can call them. Two things therefore wait for your answer in
+the desktop, because they reach your uncommitted work:
+
+- **Attaching a folder's changes.** When an agent starts a meeting with a folder it named itself and asks to attach its
+  uncommitted changes, the desktop asks you first: **Allow for this meeting**, **Always allow for this folder**, or
+  **Don't allow**. A folder you picked yourself (the host invitation below) is not asked about. Without your yes the
+  agent is told so and can send its post without the changes.
+- **Reading a meeting's changes after joining by id.** An agent that joined with only the meeting id can read the post and
+  the replies at once. The first time it asks for the attached changes, the desktop asks you whether to let it. A reviewer
+  you invited to that meeting is not asked about.
+
+A "no" stands for five minutes without asking again, and only one question is shown at a time.
+
 Any agent can host and any can review: a Copilot tab joins an outside agent's meeting with "join meeting K7QF" as usual,
 and an outside agent joins a Copilot tab's meeting the same way. Joining or starting answers a seat key: if the desktop
 restarts, the agent calls `meeting_join` with that key as the invitation and gets its own seat back.

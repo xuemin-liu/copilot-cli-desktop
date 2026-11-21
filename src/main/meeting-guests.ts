@@ -50,8 +50,15 @@ export interface GuestSeat {
   /** A host seat has none ('') until its agent starts the meeting. */
   meetingId: string
   kind: GuestKind
-  /** A host's project folder, which the person picked: the desktop attaches its uncommitted changes. */
+  /** A host's project folder: the desktop attaches its uncommitted changes, once the person has allowed that. */
   folder: string | null
+  /**
+   * The person allowed this seat what it could not be given on an agent's word alone. For a host: attaching the
+   * uncommitted changes of `folder` (true when the person picked the folder for the invitation; asked for when the
+   * agent named the folder itself). For a reviewer: reading the changes a meeting shares (true for an invitation the
+   * person made for that meeting; asked for when the agent took its seat with only the meeting's id).
+   */
+  granted: boolean
   /** The message a host gets once after its meeting closed by agreement, before "The meeting is closed.". */
   farewell: string | null
   name: string
@@ -139,19 +146,26 @@ export class GuestMailbox {
   ) {}
 
   /** A reviewer seat for a meeting, or (`kind: 'host'`, no meeting id) a seat whose agent may start one. */
-  invite(meetingId: string, name: string, role: string | null, options: { kind?: GuestKind; folder?: string | null } = {}): { seat: GuestSeat; token: string } {
+  invite(meetingId: string, name: string, role: string | null, options: { kind?: GuestKind; folder?: string | null; granted?: boolean } = {}): { seat: GuestSeat; token: string } {
     const token = randomBytes(32).toString('hex')
     let id: string
     do id = `guest:${randomBytes(8).toString('hex')}`; while (this.seats.has(id))
     const kind = options.kind ?? 'reviewer'
     const seat: GuestSeat = {
-      id, meetingId: kind === 'host' ? '' : meetingId, kind, folder: kind === 'host' ? options.folder ?? null : null, farewell: null,
+      id, meetingId: kind === 'host' ? '' : meetingId, kind, folder: kind === 'host' ? options.folder ?? null : null, granted: options.granted ?? true, farewell: null,
       name: cleanGuestName(name) || 'Outside agent', role: kind === 'host' ? null : role ? cleanRole(role) || null : null,
       tokenHash: hashGuestToken(token), createdAt: this.timers.now(), joined: false, lastSeenAt: null, closed: null, closedAt: null, via: null, codexThread: null,
     }
     this.seats.set(id, seat)
     this.changed()
     return { seat, token }
+  }
+
+  /** The person answered yes when asked about this seat. */
+  grant(seat: GuestSeat): void {
+    if (seat.granted) return
+    seat.granted = true
+    this.changed()
   }
 
   /** A host seat's agent started its meeting. */
@@ -433,6 +447,8 @@ export class GuestMailbox {
         meetingId: value.meetingId,
         kind,
         folder: kind === 'host' && typeof value.folder === 'string' ? value.folder.slice(0, 4096) : null,
+        // A seat saved before this was recorded is asked about once, not taken to have been allowed.
+        granted: value.granted === true,
         farewell: kind === 'host' && typeof value.farewell === 'string' ? value.farewell.slice(0, MAX_MEETING_POST_CHARS) : null,
         name: cleanGuestName(typeof value.name === 'string' ? value.name : '') || 'Outside agent',
         role: typeof value.role === 'string' ? cleanRole(value.role) || null : null,
@@ -480,6 +496,13 @@ export interface GuestDeps {
   waitingOn(seat: GuestSeat): string | null
   /** The uncommitted changes of the host's folder (`seat.folder`). Throws with a message to show. */
   changes(seat: GuestSeat): Promise<string>
+  /**
+   * Asks the person whether a host that named its own folder may attach that folder's uncommitted changes. Left out,
+   * the answer is no.
+   */
+  approveChanges?(seat: GuestSeat): Promise<boolean>
+  /** Asks the person whether a reviewer that joined with only the meeting's id may read the changes it shares. */
+  approveMaterial?(seat: GuestSeat): Promise<boolean>
   /** A folder an agent names as its project, as a host without an invitation: why it cannot be used, or null. */
   checkFolder(path: string): Promise<string | null>
 }
@@ -569,6 +592,14 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
       const round = Number(fields.round ?? 1)
       const offset = Number(fields.offset ?? 0)
       if (!Number.isInteger(round) || round < 1 || round > 1000 || !Number.isInteger(offset) || offset < 0) return { ok: false, message: 'The round and offset take whole numbers.' }
+      // The changes are someone's uncommitted work. A seat taken with only the meeting's id reads them once the person
+      // has said so; the post, the replies and the transcript are what the meeting is for.
+      if (name === 'changes' && seat.kind === 'reviewer' && !seat.granted) {
+        if (!(await deps.approveMaterial?.(seat) ?? false)) {
+          return { ok: false, message: 'The person has not allowed you to read the changes this meeting shares. Review the post, or ask the person to allow it in Copilot CLI Desktop and try again.' }
+        }
+        mailbox.grant(seat)
+      }
       const text = await deps.material(seat.meetingId, name, round)
       if (text === null) return { ok: false, message: name === 'transcript' ? 'There is no transcript yet.' : `Round ${round} has no ${name}.` }
       const page = text.slice(offset, offset + GUEST_PAGE_CHARS)
@@ -584,7 +615,7 @@ export async function handleGuestRequest(mailbox: GuestMailbox, deps: GuestDeps,
     case 'propose-close': {
       const text = postText(fields)
       if (typeof text !== 'string') return text
-      const changes = command === 'round' ? await hostChanges(deps, seat, fields) : null
+      const changes = command === 'round' ? await hostChanges(mailbox, deps, seat, fields) : null
       if (changes !== null && typeof changes !== 'string') return changes
       const answer = deps.post(seat, command, text, changes)
       if (!answer.ok) return { ok: false, message: outsideHostWords(answer.message, via) }
@@ -621,16 +652,23 @@ function postText(fields: Record<string, unknown>): string | GuestResponse {
 }
 
 /** The host's changes when it asked for them, from the folder the person picked; null when it did not ask. */
-async function hostChanges(deps: GuestDeps, seat: GuestSeat, fields: Record<string, unknown>): Promise<string | null | GuestResponse> {
+async function hostChanges(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat, fields: Record<string, unknown>): Promise<string | null | GuestResponse> {
   if (!wantsChanges(fields.changes)) return null
   if (seat.folder === null) return { ok: false, message: 'This meeting has no project folder, so no changes can be attached. Describe them in your post, or start the meeting with your project folder.' }
+  // A folder is the person's to share. One an agent named is read only after the person says so, in the desktop.
+  if (!seat.granted) {
+    if (!(await deps.approveChanges?.(seat) ?? false)) {
+      return { ok: false, message: `The person has not allowed attaching the uncommitted changes of ${seat.folder}. Send your post without changes and describe them in it, or ask the person to allow it in Copilot CLI Desktop and try again.` }
+    }
+    mailbox.grant(seat)
+  }
   try { return await deps.changes(seat) } catch (error) { return { ok: false, message: error instanceof Error ? error.message : String(error) } }
 }
 
 async function hostStart(mailbox: GuestMailbox, deps: GuestDeps, seat: GuestSeat, fields: Record<string, unknown>, via: GuestChannel): Promise<GuestResponse> {
   const text = postText(fields)
   if (typeof text !== 'string') return text
-  const changes = await hostChanges(deps, seat, fields)
+  const changes = await hostChanges(mailbox, deps, seat, fields)
   if (changes !== null && typeof changes !== 'string') return changes
   const started = deps.start(seat, typeof fields.topic === 'string' ? fields.topic : '', text, changes)
   if ('error' in started) return { ok: false, message: started.error }

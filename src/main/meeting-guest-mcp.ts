@@ -282,7 +282,8 @@ function joinById(sessions: GuestMcpSessions, session: Session, mailbox: GuestMa
   const base = name.slice(0, MAX_GUEST_NAME_CHARS - 3).trim()
   let unique = name
   for (let count = 2; taken.has(unique); count++) unique = `${base} ${count}`
-  const { seat, token } = mailbox.invite(meetingId, unique, typeof args.role === 'string' ? args.role : null)
+  // Taken on the agent's word that the person told it the id: what the person has to allow is asked for when it is used.
+  const { seat, token } = mailbox.invite(meetingId, unique, typeof args.role === 'string' ? args.role : null, { granted: false })
   mailbox.seen(seat, 'mcp')
   const failure = deps.join(seat)
   if (failure) { mailbox.close(seat.id, failure); return toolText(failure, true) }
@@ -301,7 +302,8 @@ async function startOpen(session: Session, mailbox: GuestMailbox, deps: GuestDep
     const failure = await deps.checkFolder(folder)
     if (failure) return toolText(failure, true)
   }
-  const { seat, token } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder })
+  // The agent named this folder, not the person: its changes are attached only once the person allows it.
+  const { seat, token } = mailbox.invite('', agentName(args.name, session.client), null, { kind: 'host', folder, granted: false })
   session.seatId = seat.id
   const answer = await handleGuestRequest(mailbox, deps, seat, 'start', { topic: args.topic, text: args.post, changes: args.changes }, signal, 'mcp')
   if (!answer.ok) { mailbox.close(seat.id, answer.message); session.seatId = null; return toolText(answer.message, true) }

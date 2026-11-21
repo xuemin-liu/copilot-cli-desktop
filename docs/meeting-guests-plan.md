@@ -460,3 +460,20 @@ to programs that can open a connection but not read the person's files: for them
 patch, and a way to steer the host. The throttle keeps them from guessing an id, not from using one they learn. So joining
 by id trusts every local account, and on a shared computer the person should use invitations. The person telling their
 agent to join is the consent the token stood for.
+
+## Revision: consent for an agent-named folder and for id-only seats
+
+Phase 4 let an agent start a meeting with a folder it named and attach that folder's changes, and let a seat taken with
+only a meeting id read them. That broke the phase 3 rule above ("only because the person named the folder, never a folder
+a model named"): the tools take no sign-in, so the "agent" can be any program on this computer. Since the audit fixes plan
+(`audit-fixes-plan.md`, phase 8):
+
+- a seat records `granted`: true for a seat the person made (a reviewer or host invitation), false for one an agent took
+  on its own word (`meeting_start` with its own folder, `meeting_join` with an id);
+- a host seat that is not granted asks the person before the folder's changes are read (`MeetingGrants.attachChanges`),
+  and a reviewer seat that is not granted asks before the shared changes are returned (`MeetingGrants.readChanges`);
+- the person's "always" is kept per canonical folder in `meeting-change-grants.json`; a "no" is not asked again for five
+  minutes; one question at a time; nobody to ask is a "no".
+
+Not done: a per-install secret for the tools endpoint. It would tell the person's own agents from other local programs,
+but every agent's MCP registration would have to be made again, so it is the person's decision.
